@@ -54,6 +54,8 @@ pub async fn connect_google_account(
             },
             continuation: AuthContinuationRef::SetupOnly,
             update_binding: None,
+            // User-driven OAuth setup: no extension owns this flow.
+            requester_extension: None,
             opaque_state_hash: Some(state_hash.clone()),
             pkce_verifier_hash: Some(pkce_hash.clone()),
             expires_at,

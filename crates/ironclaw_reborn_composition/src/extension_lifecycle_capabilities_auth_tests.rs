@@ -3,10 +3,18 @@ use ironclaw_auth::{
     CredentialAccountLookupRequest, CredentialAccountSelectionRequest,
 };
 use ironclaw_host_api::{
-    CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
-    ExtensionId, GrantConstraints, InvocationId, MountView, NetworkPolicy, NetworkTargetPattern,
-    Principal, ResourceScope, RunId, RuntimeCredentialAccountSetup, RuntimeKind, TenantId,
-    ThreadId, TrustClass, UserId,
+    action::{NetworkPolicy, NetworkTargetPattern},
+    capability::{
+        CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints, RuntimeCredentialAccountSetup,
+    },
+    ids::{
+        CapabilityGrantId, CapabilityId, ExtensionId, InvocationId, RunId, TenantId, ThreadId,
+        UserId,
+    },
+    mount::MountView,
+    resource::ResourceScope,
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::RuntimeCapabilityOutcome;
 use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef};
@@ -15,17 +23,17 @@ use crate::factory::{RebornRuntimeStores, build_runtime_substrate};
 use ironclaw_auth::RuntimeCredentialAccountSelectionRequest;
 use ironclaw_auth::{RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest};
 use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
-use ironclaw_extension_host::extension_lifecycle_capabilities::EXTENSION_ACTIVATE_CAPABILITY_ID;
+use ironclaw_extension_manager::extension_lifecycle_capabilities::EXTENSION_ACTIVATE_CAPABILITY_ID;
 
 #[tokio::test]
-async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope() {
+async fn standalone_extension_activate_accepts_manual_token_from_webui_gate_scope() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+    let services = build_runtime_substrate(crate::deployment::local_filesystem_build_input(
         "3eee560a-7fe5-474c-965a-67cb69df3d04",
-        dir.path().join("local-dev"),
+        dir.path().join("standalone"),
     ))
     .await
-    .expect("local-dev services build");
+    .expect("standalone services build");
     let extension_management = services
         .local_runtime_for_test()
         .expect("local runtime substrate")
@@ -118,8 +126,8 @@ async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope
 /// one instead of transparently sharing the host-managed key.
 ///
 /// Drives ONLY the composition's public surface: `build_runtime_substrate` (the
-/// local-dev path always derives `nearai_mcp_host_managed_scope` from the
-/// boot owner — see `local_dev_nearai_mcp_owner_scope` in `factory.rs` — so no
+/// standalone path always derives `nearai_mcp_host_managed_scope` from the
+/// boot owner — see `standalone_nearai_mcp_owner_scope` in `factory.rs` — so no
 /// live NEAR AI config injection is needed to prove the wiring) and
 /// `RebornProductAuthServices`'s existing `pub(crate)`
 /// `runtime_credential_account_selection_service()` accessor (this test file
@@ -127,7 +135,7 @@ async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope
 /// drives). Two arms on the SAME composed `services`, discriminating the
 /// fallback's scope match rather than asserting vacuous success:
 /// - an SSO user in the SAME tenant/agent as the boot owner (a different
-///   project — local-dev's host scope is project-*unscoped*, so it is
+///   project — standalone's host scope is project-*unscoped*, so it is
 ///   reusable across projects under that agent by design, see
 ///   `HostManagedCredentialFallbackRule::scope_matches`'s doc) resolves the
 ///   owner's NEAR AI account via fallback (the #5439 fix);
@@ -136,15 +144,15 @@ async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope
 ///   match; it is not a global bypass) -- proves the positive arm is a real
 ///   scope match, not the selector silently always succeeding.
 #[tokio::test]
-async fn local_dev_nearai_runtime_selection_falls_back_to_host_managed_account_for_sso_user() {
+async fn standalone_nearai_runtime_selection_falls_back_to_host_managed_account_for_sso_user() {
     let dir = tempfile::tempdir().expect("tempdir");
     let owner_id = "3eee560a-7fe5-474c-965a-67cb69df3d04";
-    let services = build_runtime_substrate(crate::deployment::local_dev_build_input(
+    let services = build_runtime_substrate(crate::deployment::local_filesystem_build_input(
         owner_id,
-        dir.path().join("local-dev"),
+        dir.path().join("standalone"),
     ))
     .await
-    .expect("local-dev services build");
+    .expect("standalone services build");
     let product_auth = services.product_auth.as_ref();
     let nearai_provider = AuthProviderId::new("nearai").expect("provider"); // safety: static test provider id is valid.
     let nearai_extension = ExtensionId::new("nearai").expect("extension"); // safety: static test extension id is valid.
@@ -178,12 +186,12 @@ async fn local_dev_nearai_runtime_selection_falls_back_to_host_managed_account_f
 
     // Arm 1: an SSO user in the SAME tenant/agent as the boot owner but a
     // DIFFERENT project, with NO NEAR AI account of their own, resolves via
-    // the host-managed fallback -- the local-dev host scope is
+    // the host-managed fallback -- the standalone host scope is
     // project-unscoped, so it is reusable across projects under the same
     // agent by design (the #5439 fix).
     let sso_other_project_scope = ResourceScope {
         user_id: UserId::new("sso-user-other-project").expect("user"), // safety: static test user id is valid.
-        project_id: Some(ironclaw_host_api::ProjectId::new("other-project").expect("project")), // safety: static test project id is valid.
+        project_id: Some(ironclaw_host_api::ids::ProjectId::new("other-project").expect("project")), // safety: static test project id is valid.
         thread_id: None,
         ..owner_scope.clone()
     };
@@ -252,7 +260,7 @@ async fn invoke_outcome_with_context(
     context: ExecutionContext,
     input: serde_json::Value,
 ) -> RuntimeCapabilityOutcome {
-    crate::approval_test_support::invoke_with_local_dev_approval(
+    crate::approval_test_support::invoke_with_standalone_approval(
         services,
         capability_id,
         context,
@@ -277,7 +285,7 @@ async fn install_inactive_for_user(
     services: &RebornRuntimeStores,
     extension_id: &str,
     caller: &UserId,
-) -> Result<(), ironclaw_product::ProductSurfaceFailure> {
+) -> Result<(), ironclaw_product_contracts::error::ProductOperationFailure> {
     let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
         .expect("valid extension package ref"); // safety: test helper callers pass static extension ids.
     services
@@ -298,7 +306,7 @@ fn execution_context_for_scope<'a>(
         run_id: Some(RunId::new()),
         origin: None,
         invocation_id: resource_scope.invocation_id,
-        correlation_id: ironclaw_host_api::CorrelationId::new(),
+        correlation_id: ironclaw_host_api::ids::CorrelationId::new(),
         process_id: None,
         parent_process_id: None,
         tenant_id: resource_scope.tenant_id.clone(),
@@ -328,7 +336,7 @@ fn webui_gate_resource_scope() -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new("reborn-cli").expect("tenant"), // safety: static test tenant id is valid.
         user_id: UserId::new("3eee560a-7fe5-474c-965a-67cb69df3d04").expect("user"), // safety: static test user id is valid.
-        agent_id: Some(ironclaw_host_api::AgentId::new("reborn-cli-agent").expect("agent")), // safety: static test agent id is valid.
+        agent_id: Some(ironclaw_host_api::ids::AgentId::new("reborn-cli-agent").expect("agent")), // safety: static test agent id is valid.
         project_id: None,
         mission_id: None,
         thread_id: Some(ThreadId::new("80aa051d-7670-5534-a2c5-2c14339e8af7").expect("thread")), // safety: static test thread id is valid.

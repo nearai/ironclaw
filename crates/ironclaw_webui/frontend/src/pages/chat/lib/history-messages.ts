@@ -9,6 +9,7 @@
 import { attachmentKindFromMime, formatBytes } from "./attachments";
 import { ATTACHMENTS_ONLY_CONTENT } from "./attachment-sentinel";
 import { attachmentUrl } from "../../../lib/api";
+import { workspaceFilePathFromHref } from "../../../lib/workspace-file-links";
 
 // Project a stored `AttachmentRef` (snake_case wire shape) into the
 // render shape `MessageBubble` consumes. The timeline never carries bytes,
@@ -34,6 +35,8 @@ function attachmentsFromRecord(record, threadId) {
             attachmentId: ref.id,
           })
         : null;
+    const workspace_path =
+      workspaceFilePathFromHref(ref.storage_key) || undefined;
     return {
       id: ref.id,
       filename: ref.filename || "attachment",
@@ -42,6 +45,7 @@ function attachmentsFromRecord(record, threadId) {
       size_label: Number.isFinite(ref.size_bytes) ? formatBytes(ref.size_bytes) : "",
       preview_url: null,
       fetch_url,
+      ...(workspace_path && { workspace_path }),
     };
   });
 }
@@ -85,7 +89,7 @@ export function messagesFromTimeline(records, pendingMessages = [], threadId = n
       role === "user" &&
       (record.status === "rejected_busy" || record.status === "deferred_busy");
     const attachments = attachmentsFromRecord(record, threadId);
-    const content =
+    const storedContent =
       role === "user" &&
       attachments?.length > 0 &&
       record.content === ATTACHMENTS_ONLY_CONTENT
@@ -94,7 +98,7 @@ export function messagesFromTimeline(records, pendingMessages = [], threadId = n
     messages.push({
       id,
       role,
-      content,
+      content: storedContent,
       attachments,
       timestamp: timestampForRecord(record),
       kind: record.kind,

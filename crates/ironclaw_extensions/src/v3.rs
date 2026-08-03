@@ -20,21 +20,34 @@
 use std::collections::BTreeMap;
 
 use ironclaw_host_api::{
-    ChannelDescriptor, ChannelDescriptorError, EffectKind, ExtensionId,
-    HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostApiError, HostPortCatalog, MemoryDescriptor,
-    MemoryOperationKind, NetworkScheme, NetworkTargetPattern, OriginGateMatrix, PermissionMode,
-    RecipeValidationError, RequestedTrustClass, RuntimeCredentialAccountSetup,
-    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, VendorAuthRecipe, VendorId,
+    action::{NetworkScheme, NetworkTargetPattern},
+    capability::{
+        EffectKind, OriginGateMatrix, PermissionMode, RuntimeCredentialAccountSetup,
+        RuntimeCredentialRequirementSource,
+    },
+    error::HostApiError,
+    host_port::{HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog},
+    http::RuntimeCredentialTarget,
+    ids::{ExtensionId, VendorId},
+    trust::RequestedTrustClass,
+};
+
+use ironclaw_extension_contracts::{
+    channel::{ChannelDescriptor, ChannelDescriptorError},
+    memory::MemoryDescriptor,
+    recipe::{RecipeValidationError, VendorAuthRecipe},
 };
 use serde::Deserialize;
 use thiserror::Error;
 
 use crate::ExtensionAdminConfigurationDescriptor;
-use crate::resolved::{ResolvedAuthSurface, ResolvedExtensionManifest, ResolvedMcpDeclaration};
+use crate::resolved::{
+    PackageRootBinding, ResolvedAuthSurface, ResolvedExtensionManifest, ResolvedMcpDeclaration,
+};
 use crate::v2::{
     CapabilityDeclV2, CapabilitySurfaceDeclV2, ExtensionManifestV2, ExtensionRuntimeV2,
-    MAX_MANIFEST_BYTES, ManifestSource, RESERVED_HOST_BUNDLED_ID_PREFIX, RawCapabilityV2,
-    RawRuntimeCredentialV2, requested_trust_to_descriptor_trust,
+    MAX_MANIFEST_BYTES, ManifestSource, RawCapabilityV2, RawRuntimeCredentialV2,
+    requested_trust_to_descriptor_trust,
 };
 
 /// Required value of the `schema_version` field for v3 manifests.
@@ -147,14 +160,14 @@ struct RawToolV3 {
     /// capability's egress allowlist directly; v2's network-effect validation
     /// still applies.
     #[serde(default)]
-    network_targets: Vec<ironclaw_host_api::NetworkTargetPattern>,
+    network_targets: Vec<ironclaw_host_api::action::NetworkTargetPattern>,
     /// Optional per-tool egress cap (bytes). `#[serde(default)]` so tools
     /// without the key parse to `None` (no cap). Threads to the capability's
     /// `NetworkPolicy.max_egress_bytes` at grant issuance.
     #[serde(default)]
     max_egress_bytes: Option<u64>,
     #[serde(default)]
-    resource_profile: Option<ironclaw_host_api::ResourceProfile>,
+    resource_profile: Option<ironclaw_host_api::resource::ResourceProfile>,
 }
 
 fn default_tool_visibility() -> crate::v2::CapabilityVisibility {
@@ -190,7 +203,7 @@ struct RawAudienceV3 {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawMcpV3 {
-    server: ironclaw_host_api::HttpsEndpoint,
+    server: ironclaw_extension_contracts::recipe::HttpsEndpoint,
     #[serde(default)]
     origin_gate_matrix: Option<OriginGateMatrix>,
     namespace: String,
@@ -253,11 +266,15 @@ pub(crate) fn parse_v3(
     }
 
     let id = ExtensionId::new(raw.id)?;
-    if !source.allows_first_party() && id.as_str().starts_with(RESERVED_HOST_BUNDLED_ID_PREFIX) {
+    // Both reserved-prefix rules (`ironclaw.` = host-bundled only, `mcp-` =
+    // user-registered only) are enforced by one shared table
+    // (`crate::v2::check_reserved_id_prefix`) so v2's `from_raw` and this
+    // parser can never drift apart on the reservation.
+    if let Err(violation) = crate::v2::check_reserved_id_prefix(&id, source) {
         return Err(ManifestV3Error::Invalid {
             reason: format!(
-                "extension id `{id}` uses the reserved `{RESERVED_HOST_BUNDLED_ID_PREFIX}` \
-                 prefix, which is host-bundled only"
+                "extension id `{}` uses the reserved `{}` prefix, which is {}",
+                violation.id, violation.prefix, violation.permitted_description
             ),
         });
     }
@@ -312,25 +329,15 @@ pub(crate) fn parse_v3(
         });
     }
     // A `[memory]` surface declares the extension a backend for the host memory
-    // adapter. It is host-bundled + first_party only (the host owns the memory
-    // tool surface and the compose-time provider binding), and must back the
-    // mandatory document-store family.
-    if let Some(memory) = &raw.memory {
-        if !matches!(runtime, ExtensionRuntimeV2::FirstParty { .. }) {
-            return Err(ManifestV3Error::InvalidMemory {
-                reason: "[memory] requires a first_party runtime".to_string(),
-            });
-        }
-        if memory.operations.is_empty() {
-            return Err(ManifestV3Error::InvalidMemory {
-                reason: "[memory].operations must not be empty".to_string(),
-            });
-        }
-        if !memory.backs(MemoryOperationKind::DocumentStore) {
-            return Err(ManifestV3Error::InvalidMemory {
-                reason: "[memory].operations must include \"document_store\"".to_string(),
-            });
-        }
+    // adapter. It is host-bundled + first_party only (the host owns the
+    // compose-time provider binding). The manifest's `[[tools]]` array is the
+    // provider's tool surface and `lifecycle` — any subset, including empty —
+    // declares the host-initiated hooks it participates in, so no further
+    // shape constraint applies here.
+    if raw.memory.is_some() && !matches!(runtime, ExtensionRuntimeV2::FirstParty { .. }) {
+        return Err(ManifestV3Error::InvalidMemory {
+            reason: "[memory] requires a first_party runtime".to_string(),
+        });
     }
     let sandboxed_runtime = matches!(
         runtime,
@@ -385,6 +392,13 @@ pub(crate) fn parse_v3(
 
     // Normalize tools (or the synthesized MCP connection template) into the
     // internal capability model, reusing the v2 validated construction path.
+    // A `[memory]`-declaring manifest (host-bundled only — checked above) may
+    // declare tools under the reserved stable memory namespace, with its
+    // requested gating clamped below.
+    let memory_tool_namespace = raw
+        .memory
+        .is_some()
+        .then_some(ironclaw_extension_contracts::memory::MEMORY_TOOL_ID_NAMESPACE);
     let mut referenced_vendors: BTreeMap<VendorId, ()> = BTreeMap::new();
     let mut capabilities = Vec::new();
     let mut mcp_template_credentials = None;
@@ -429,7 +443,7 @@ pub(crate) fn parse_v3(
             origin_gate_matrix: mcp.origin_gate_matrix.clone(),
         };
         capabilities.push(
-            CapabilityDeclV2::from_raw(raw_capability, &id, host_port_catalog).map_err(
+            CapabilityDeclV2::from_raw(raw_capability, &id, host_port_catalog, None).map_err(
                 |error| ManifestV3Error::Invalid {
                     reason: error.to_string(),
                 },
@@ -513,12 +527,27 @@ pub(crate) fn parse_v3(
                 origin_gate_matrix: tool.origin_gate_matrix,
             },
         };
+        // Requested, not granted: a memory provider's declared tool gating is
+        // clamped by the host — `ungated` survives only where the reviewed
+        // allowlist grants it, exactly as host trust policy already clamps
+        // `trust = "first_party_requested"`.
+        let mut raw_capability = raw_capability;
+        if memory_tool_namespace.is_some()
+            && let Some(matrix) = raw_capability.origin_gate_matrix.take()
+        {
+            raw_capability.origin_gate_matrix =
+                Some(matrix.clamp_requested_for_memory_tool(&raw_capability.id));
+        }
         capabilities.push(
-            CapabilityDeclV2::from_raw(raw_capability, &id, host_port_catalog).map_err(
-                |error| ManifestV3Error::Invalid {
-                    reason: error.to_string(),
-                },
-            )?,
+            CapabilityDeclV2::from_raw(
+                raw_capability,
+                &id,
+                host_port_catalog,
+                memory_tool_namespace,
+            )
+            .map_err(|error| ManifestV3Error::Invalid {
+                reason: error.to_string(),
+            })?,
         );
     }
 
@@ -568,6 +597,7 @@ pub(crate) fn parse_v3(
                 vendor,
                 setup,
                 recipe: Some(recipe),
+                protected_resource_metadata_url: None,
             }
         })
         .collect();
@@ -579,6 +609,9 @@ pub(crate) fn parse_v3(
         description: manifest.description.clone(),
         requested_trust: manifest.requested_trust,
         runtime: manifest.runtime.clone(),
+        // Parsing precedes package materialization. The manifest-record
+        // boundary replaces this for materialized and remote-only packages.
+        root_binding: PackageRootBinding::FabricateOnLoad,
         mcp: mcp.map(|mcp| ResolvedMcpDeclaration {
             server: mcp.server.as_str().to_string(),
             namespace: mcp.namespace,
@@ -596,6 +629,9 @@ pub(crate) fn parse_v3(
                         .collect()
                 })
                 .unwrap_or_default(),
+            dynamic_input_schemas: std::collections::BTreeMap::new(),
+            registration_auth:
+                ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::NoAuth,
         }),
         tools: manifest.capabilities.clone(),
         channel: raw.channel,
@@ -618,7 +654,7 @@ fn validate_channel_admin_configuration(
     channel: &ChannelDescriptor,
     descriptor: Option<&ExtensionAdminConfigurationDescriptor>,
 ) -> Result<(), ManifestV3Error> {
-    let require_field = |handle: &ironclaw_host_api::SecretHandle,
+    let require_field = |handle: &ironclaw_host_api::ids::SecretHandle,
                          secret: bool,
                          usage: &str|
      -> Result<(), ManifestV3Error> {
@@ -676,7 +712,7 @@ fn validate_channel_admin_configuration(
                 break;
             };
             if placeholder != "code" {
-                let handle = ironclaw_host_api::SecretHandle::new(placeholder).map_err(
+                let handle = ironclaw_host_api::ids::SecretHandle::new(placeholder).map_err(
                     |error| ManifestV3Error::Invalid {
                         reason: format!(
                             "channel connection placeholder `{{{placeholder}}}` is invalid: {error}"
@@ -764,4 +800,72 @@ fn credential_from_v3(
         target: injection,
         required,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_host_api::host_port::{HostPortCatalog, HostPortCatalogEntry, HostPortId};
+
+    use super::*;
+
+    fn catalog() -> HostPortCatalog {
+        HostPortCatalog::new(vec![HostPortCatalogEntry::new(
+            HostPortId::new(HOST_RUNTIME_HTTP_EGRESS_PORT_ID).expect("host port id"),
+        )])
+        .expect("host port catalog")
+    }
+
+    /// Minimal `[mcp]` manifest with a parameterized id/namespace, for
+    /// exercising the reserved `mcp-` id namespace directly through
+    /// `parse_v3` — the second of the two import paths the single arm must
+    /// cover (the other is `ExtensionManifestRecord::from_toml`, exercised
+    /// in `tests/manifest_v3_contract.rs`).
+    fn mcp_manifest_with_id(id: &str) -> String {
+        format!(
+            r#"
+schema_version = "{MANIFEST_SCHEMA_VERSION_V3}"
+id = "{id}"
+name = "Zeta"
+version = "0.1.0"
+description = "Hosted MCP fixture"
+trust = "third_party"
+
+[mcp]
+server = "https://mcp.zeta.example/mcp"
+namespace = "{id}"
+max_tools = 64
+default_permission = "ask"
+effects = ["network", "use_secret"]
+"#
+        )
+    }
+
+    #[test]
+    fn reserved_mcp_namespace_rejects_non_user_registered_source_via_direct_parse_v3() {
+        let catalog = catalog();
+        for source in [
+            ManifestSource::HostBundled,
+            ManifestSource::InstalledLocal,
+            ManifestSource::RegistryInstalled,
+        ] {
+            let error = parse_v3(&mcp_manifest_with_id("mcp-foo"), source, &catalog)
+                .expect_err("non-user-registered source must not claim the mcp- namespace");
+            assert!(
+                error.to_string().contains("mcp-"),
+                "error should name the reserved prefix, got: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_mcp_namespace_allows_user_registered_source_via_direct_parse_v3() {
+        let catalog = catalog();
+        let (manifest, _resolved) = parse_v3(
+            &mcp_manifest_with_id("mcp-foo"),
+            ManifestSource::UserRegistered,
+            &catalog,
+        )
+        .expect("user-registered source may declare an mcp- id");
+        assert_eq!(manifest.id.as_str(), "mcp-foo");
+    }
 }

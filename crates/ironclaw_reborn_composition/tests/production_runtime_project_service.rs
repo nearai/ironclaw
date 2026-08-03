@@ -20,9 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_host_api::ProductSurfaceCaller;
 use ironclaw_host_api::{
-    AgentId, TenantId, UserId,
+    ids::{AgentId, TenantId, UserId},
     runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -35,8 +34,9 @@ use ironclaw_host_runtime::{
 use ironclaw_product::{
     PROJECT_CREATE_COMMAND, PROJECTS_VIEW, RebornCreateProjectRequest, RebornListProjectsRequest,
 };
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_reborn_composition::{
-    RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProcessBinding, build_reborn_runtime,
 };
 
@@ -92,14 +92,15 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
     );
 
     let input = RebornRuntimeInput::from_build_input(
-        RebornHostBindings::libsql(
+        ironclaw_reborn_composition::test_support::libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             OWNER,
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_first_party_bundles(first_party_support::test_first_party_bundles())
         .with_runtime_policy(EffectiveRuntimePolicy {
             deployment: DeploymentMode::HostedMultiTenant,
@@ -141,12 +142,15 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
     // the `ProductSurface` default and this returned
     // `service_unavailable`. A successful create proves `with_project_service`
     // was wired from the production store graph.
-    let owner_surface = ironclaw_host_api::BoundProductSurface::new(bundle.clone(), owner.clone());
+    let owner_surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
+        bundle.clone(),
+        owner.clone(),
+    );
     let created = PROJECT_CREATE_COMMAND
         .invoke_on(
             &owner_surface,
             create_request("Prod Project"),
-            ironclaw_host_api::ActivityId::new(),
+            ironclaw_host_api::ids::ActivityId::new(),
         )
         .await
         .expect("production project service must be reachable (not service_unavailable)");
@@ -176,7 +180,8 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
         Some(AgentId::new(RUNTIME_AGENT).unwrap()),
         None,
     );
-    let other_surface = ironclaw_host_api::BoundProductSurface::new(bundle.clone(), other_tenant);
+    let other_surface =
+        ironclaw_product_contracts::surface::BoundProductSurface::new(bundle.clone(), other_tenant);
     let other_listed = PROJECTS_VIEW
         .query_on(
             &other_surface,

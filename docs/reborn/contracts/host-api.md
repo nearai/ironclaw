@@ -126,6 +126,44 @@ pub type Timestamp = chrono::DateTime<chrono::Utc>;
 
 If the implementation prefers `time::OffsetDateTime`, choose it once in PR 1 and use it everywhere in `ironclaw_host_api`.
 
+### 4.1 Model-visible failure diagnostics
+
+`ModelFailureDiagnostic::Diagnostic` is the narrow exception to the
+single-line `SafeSummary` contract. It carries a producer-scrubbed failure cause
+directly to the model. There is no diagnostic-reference store or deferred
+lookup path; every new recoverable-failure producer must supply the bounded
+inline diagnostic. Both the host-api verdict and the loop's reconstructed
+`CapabilityFailure` require that diagnostic structurally. Legacy payloads that
+omit it deserialize to the explicit unavailable-detail sentence and write the
+field on their next serialization.
+
+Owning regression coverage:
+
+- `crates/ironclaw_host_api/src/resolution.rs` test
+  `resolution::tests::recoverable_failure_carries_its_model_visible_diagnostic`
+  pins the structurally required inline diagnostic and the legacy host-api
+  verdict fallback. Run:
+
+  ```bash
+  cargo test -p ironclaw_host_api --lib resolution::tests::recoverable_failure_carries_its_model_visible_diagnostic -- --exact
+  ```
+
+- `crates/ironclaw_loop_contracts/src/host/capability.rs` test
+  `host::capability::tests::legacy_capability_failure_without_detail_rehydrates_explicit_fallback`
+  pins the reconstructed loop failure fallback and next-write upgrade. Run:
+
+  ```bash
+  cargo test -p ironclaw_loop_contracts --lib host::capability::tests::legacy_capability_failure_without_detail_rehydrates_explicit_fallback -- --exact
+  ```
+
+The diagnostic value is bounded to 4096 bytes, rejects empty text, disallowed
+control characters, and known credential-token shapes, and revalidates on
+deserialize. It intentionally allows paths, URLs, payload delimiters, and
+credential vocabulary such as “password field” because those can be necessary
+recovery context. Producers remain responsible for applying the canonical
+secret-value scrubber and injection fence before construction. Public summaries,
+events, logs, and projections continue to use their stricter redacted contracts.
+
 ---
 
 ## 5. ID and name contracts
@@ -231,6 +269,7 @@ pub enum RuntimeKind {
     Wasm,
     Mcp,
     Script,
+    Sandbox,
     FirstParty,
     System,
 }
@@ -250,6 +289,7 @@ Rules:
 - `RuntimeKind::FirstParty` and `RuntimeKind::System` are concrete host-lane markers for host-policy-selected services in the broader `Host | WASM | Script Runner` model.
 - `RuntimeKind::Mcp` is a capability adapter lane; local stdio MCP servers may still be process/sandbox-backed internally.
 - `RuntimeKind::Script` is the native CLI/script lane. Docker/container is the V1 backend selected by policy, not a distinct public host API runtime kind.
+- `RuntimeKind::Sandbox` is the sandboxed shell/process lane: a persistent, per-tenant OS-process sandbox. One invocation makes many outbound calls, so it shares the multi-call credential-reuse set with `Mcp`/`Wasm`.
 - `TrustClass` is an authority ceiling, not a permission grant and not a kernel bypass.
 - Shipped first-party code and bundled reference loops still need explicit grants, scoped mounts, resource reservations, leases, and obligation handling for privileged effects.
 - User-installed packages cannot self-declare `TrustClass::FirstParty` or `TrustClass::System`; those ceilings are assigned only by host policy, signed/bundled package metadata, or admin configuration.

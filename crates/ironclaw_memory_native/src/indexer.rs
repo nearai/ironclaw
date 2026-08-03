@@ -5,17 +5,17 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 
-use crate::chunking::{ChunkConfig, MemoryChunkWrite, chunk_document, content_sha256};
-use crate::embedding::{
-    EmbeddingProvider, embedding_filesystem_error, validate_embedding_dimension,
-};
-use crate::events::{
-    MemoryAuditContext, MemorySignificantEvent, MemorySignificantEventSink,
-    MemorySignificantEventSource, record_memory_significant_event,
-};
+use crate::chunking::{ChunkConfig, MemoryChunkWrite, chunk_document};
+use crate::events::record_memory_significant_event;
 use crate::metadata::resolve_document_metadata;
-use crate::path::{MemoryDocumentPath, memory_error, valid_memory_path};
+use crate::path::{memory_error, valid_memory_path};
 use crate::repo::MemoryDocumentRepository;
+use ironclaw_memory::MemoryDocumentPath;
+use ironclaw_memory::content_sha256;
+use ironclaw_memory::{
+    MemoryAuditContext, MemorySignificantEvent, MemorySignificantEventSink,
+    MemorySignificantEventSource,
+};
 
 /// Hook invoked after successful memory document writes so derived state can be refreshed.
 #[async_trait]
@@ -68,7 +68,6 @@ pub trait MemoryDocumentIndexRepository: Send + Sync {
 pub struct ChunkingMemoryDocumentIndexer<R> {
     repository: Arc<R>,
     chunk_config: ChunkConfig,
-    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     memory_event_sink: Option<Arc<dyn MemorySignificantEventSink>>,
 }
 
@@ -80,21 +79,12 @@ where
         Self {
             repository,
             chunk_config: ChunkConfig::default(),
-            embedding_provider: None,
             memory_event_sink: None,
         }
     }
 
     pub fn with_chunk_config(mut self, chunk_config: ChunkConfig) -> Self {
         self.chunk_config = chunk_config;
-        self
-    }
-
-    pub fn with_embedding_provider<P>(mut self, provider: Arc<P>) -> Self
-    where
-        P: EmbeddingProvider + 'static,
-    {
-        self.embedding_provider = Some(provider);
         self
     }
 
@@ -189,44 +179,12 @@ where
             .await?;
             return Ok(());
         }
-        let chunks = match build_chunk_writes(
-            path,
-            chunk_texts.clone(),
-            self.embedding_provider.as_deref(),
-        )
-        .await
-        {
-            Ok(chunks) => chunks,
-            Err(error) => {
-                // **Embedding-generation outage degrades to text-only
-                // indexing, not loss of search.** Previous behavior
-                // hash-cleared the chunk rows on provider failure;
-                // backend writes intentionally swallow indexer errors
-                // after persistence, so the durable document landed
-                // correctly but full-text searchability for the new
-                // content was wiped. We now persist text-only chunks
-                // (embedding = NULL) using the same hash guard so FTS
-                // stays current while vector search degrades. The
-                // embedding error is still returned so callers/log
-                // surfaces can report the provider outage (zmanian
-                // #3180 MED `indexer.rs:117`).
-                let text_only: Vec<MemoryChunkWrite> = chunk_texts
-                    .into_iter()
-                    .map(|content| MemoryChunkWrite {
-                        content,
-                        embedding: None,
-                    })
-                    .collect();
-                self.replace_document_chunks_and_record(
-                    path,
-                    &content_hash_at_read,
-                    &text_only,
-                    audit_context,
-                )
-                .await?;
-                return Err(error);
-            }
-        };
+        // Text-only chunks: with the never-implemented embedding port gone
+        // (WS0), indexing has no vector lane to fail — chunk rows are always
+        // persisted with `embedding = NULL` under the content-hash guard, so
+        // full-text search stays current. Restoring generated vectors is
+        // PROPOSAL §12.10.
+        let chunks = build_chunk_writes(chunk_texts);
         // **Re-resolve metadata immediately before the final replace.**
         // A concurrent metadata write that flips `skip_indexing=true`
         // (and runs the matching parent-config chunk-clear) between our
@@ -267,54 +225,12 @@ where
     }
 }
 
-async fn build_chunk_writes(
-    path: &MemoryDocumentPath,
-    chunk_texts: Vec<String>,
-    embedding_provider: Option<&dyn EmbeddingProvider>,
-) -> Result<Vec<MemoryChunkWrite>, FilesystemError> {
-    let Some(provider) = embedding_provider else {
-        return Ok(chunk_texts
-            .into_iter()
-            .map(|content| MemoryChunkWrite {
-                content,
-                embedding: None,
-            })
-            .collect());
-    };
-    let embeddings = provider.embed_batch(&chunk_texts).await.map_err(|error| {
-        embedding_filesystem_error(
-            path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
-            FilesystemOperation::WriteFile,
-            error,
-        )
-    })?;
-    if embeddings.len() != chunk_texts.len() {
-        return Err(memory_error(
-            path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
-            FilesystemOperation::WriteFile,
-            format!(
-                "embedding provider returned {} embeddings for {} chunks",
-                embeddings.len(),
-                chunk_texts.len()
-            ),
-        ));
-    }
-    let expected_dimension = provider.dimension();
+fn build_chunk_writes(chunk_texts: Vec<String>) -> Vec<MemoryChunkWrite> {
     chunk_texts
         .into_iter()
-        .zip(embeddings)
-        .map(|(content, embedding)| {
-            validate_embedding_dimension(expected_dimension, embedding.len()).map_err(|error| {
-                embedding_filesystem_error(
-                    path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
-                    FilesystemOperation::WriteFile,
-                    error,
-                )
-            })?;
-            Ok(MemoryChunkWrite {
-                content,
-                embedding: Some(embedding),
-            })
+        .map(|content| MemoryChunkWrite {
+            content,
+            embedding: None,
         })
         .collect()
 }
@@ -324,33 +240,13 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::embedding::EmbeddingError;
-    use crate::events::MemoryEventSinkError;
-    use crate::path::MemoryDocumentScope;
     use crate::search::{MemorySearchRequest, MemorySearchResult};
+    use ironclaw_memory::MemoryDocumentScope;
+    use ironclaw_memory::MemoryEventSinkError;
 
     #[derive(Debug, PartialEq, Eq)]
     enum IndexerCall {
         Replace { chunks: usize, hash: String },
-    }
-
-    struct RejectingEmbeddingProvider;
-
-    #[async_trait]
-    impl EmbeddingProvider for RejectingEmbeddingProvider {
-        fn dimension(&self) -> usize {
-            3
-        }
-
-        fn model_name(&self) -> &str {
-            "rejecting"
-        }
-
-        async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbeddingError> {
-            Err(EmbeddingError::ProviderUnavailable {
-                reason: "synthetic failure".to_string(),
-            })
-        }
     }
 
     struct RecordingRepo {
@@ -542,11 +438,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_chunks_do_not_call_embedding_provider_before_clearing() {
+    async fn empty_chunks_clear_rows_under_the_content_hash_guard() {
         let content = "   \n\t  ";
         let repo = Arc::new(RecordingRepo::new(content));
-        let indexer = ChunkingMemoryDocumentIndexer::new(repo.clone())
-            .with_embedding_provider(Arc::new(RejectingEmbeddingProvider));
+        let indexer = ChunkingMemoryDocumentIndexer::new(repo.clone());
         indexer.reindex_document(&doc_path()).await.unwrap();
         let calls = repo.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -668,44 +563,5 @@ mod tests {
             "concurrent skip_indexing=true write must short-circuit the reindex to an empty chunk set"
         );
         assert_eq!(*hash, content_sha256(content));
-    }
-
-    #[tokio::test]
-    async fn embedding_failure_persists_text_only_chunks_with_hash_guard() {
-        // zmanian #3180 MED `indexer.rs:117`: an embedding-generation
-        // outage must not wipe full-text searchability. Previous
-        // behavior cleared chunks (count = 0) and returned the error;
-        // backend writes intentionally swallow indexer errors after
-        // persistence, so a successfully overwritten document
-        // disappeared from FTS too. New contract: text-only chunks
-        // (embedding = None) are persisted via the hash-guarded
-        // replace, FTS stays current, vector search degrades, and the
-        // embedding error is still returned for observability.
-        let content = "alpha beta gamma delta epsilon";
-        let repo = Arc::new(RecordingRepo::new(content));
-        let indexer = ChunkingMemoryDocumentIndexer::new(repo.clone())
-            .with_embedding_provider(Arc::new(RejectingEmbeddingProvider));
-        let err = indexer.reindex_document(&doc_path()).await.unwrap_err();
-        let displayed = err.to_string();
-        assert!(
-            displayed.contains("embedding provider unavailable"),
-            "embedding error category must still surface to callers for observability; got: {err}"
-        );
-        assert!(
-            !displayed.contains("synthetic failure"),
-            "embedding backend details must not leak through public filesystem errors; got: {err}"
-        );
-        let calls = repo.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1, "expected exactly one indexer call");
-        let IndexerCall::Replace { chunks, hash } = &calls[0];
-        assert!(
-            *chunks > 0,
-            "embedding failure must NOT wipe chunks; expected text-only chunks, got {chunks}"
-        );
-        assert_eq!(
-            *hash,
-            content_sha256(content),
-            "the hash guard must reflect the read-time content so a concurrent writer's fresh chunks aren't clobbered"
-        );
     }
 }

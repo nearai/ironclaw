@@ -2,18 +2,32 @@ import { Icon } from "../../../design-system/icons";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { summarizeActivity } from "../lib/activity-summary";
+import {
+  messageBelongsToActiveRun,
+  type ChatMessage,
+} from "../lib/message-types";
 import { MarkdownRenderer } from "./markdown-renderer";
 import { ToolActivity } from "./tool-activity";
 
-export function ActivityRun({ activity }) {
+type ActivityRunProps = {
+  activity: ChatMessage[];
+  activeRunId?: string | null;
+};
+
+type ActivityItemProps = {
+  item: ChatMessage;
+  activeRunId: string | null;
+};
+
+type ReasoningItemProps = {
+  content?: string;
+  streaming?: boolean;
+};
+
+export function ActivityRun({ activity, activeRunId = null }: ActivityRunProps) {
   const t = useT();
   const summary = React.useMemo(() => summarizeActivity(activity, t), [activity, t]);
-  const shouldAutoExpand = shouldExpandActivityRun(activity);
-  const [expanded, setExpanded] = React.useState(shouldAutoExpand);
-
-  React.useEffect(() => {
-    if (shouldAutoExpand) setExpanded(true);
-  }, [shouldAutoExpand]);
+  const [expanded, setExpanded] = React.useState(false);
 
   return (
     <div className="mr-auto flex w-full min-w-0 flex-col v2-chat-readable-width" data-testid="activity-run">
@@ -44,6 +58,7 @@ export function ActivityRun({ activity }) {
             <ActivityItem
               key={item.id || `${item.role || "activity"}-${index}`}
               item={item}
+              activeRunId={activeRunId}
             />
           ))}
         </div>
@@ -52,9 +67,16 @@ export function ActivityRun({ activity }) {
   );
 }
 
-function ActivityItem({ item }) {
+function ActivityItem({ item, activeRunId }: ActivityItemProps) {
   if (item.role === "thinking") {
-    return (<ReasoningItem content={item.content} />);
+    const isStreaming =
+      messageBelongsToActiveRun(item, activeRunId);
+    return (
+      <ReasoningItem
+        content={item.content}
+        streaming={isStreaming}
+      />
+    );
   }
 
   if (item.role === "tool_activity" || hasToolCalls(item)) {
@@ -67,7 +89,7 @@ function ActivityItem({ item }) {
   return null;
 }
 
-function ReasoningItem({ content }) {
+function ReasoningItem({ content, streaming = false }: ReasoningItemProps) {
   if (!content) return null;
   return (
     <div className="flex min-w-0 gap-3">
@@ -77,7 +99,11 @@ function ReasoningItem({ content }) {
         <Icon name="spark" className="h-4 w-4" />
       </div>
       <div className="min-w-0 flex-1 border-l-2 border-white/10 pl-3 text-iron-300 v2-chat-readable-width">
-        <MarkdownRenderer content={content} className="text-[13px]" />
+        <MarkdownRenderer
+          content={content}
+          className="text-[13px]"
+          streaming={streaming}
+        />
       </div>
     </div>
   );
@@ -85,22 +111,4 @@ function ReasoningItem({ content }) {
 
 function hasToolCalls(item) {
   return item?.toolCalls && item.toolCalls.length > 0;
-}
-
-function shouldExpandActivityRun(activity) {
-  return (activity || []).some((item) => {
-    if (item?.role === "thinking") return true;
-    if (
-      item?.toolStatus === "error" ||
-      item?.toolStatus === "declined"
-    ) {
-      return true;
-    }
-    if (!hasToolCalls(item)) return false;
-    return item.toolCalls.some(
-      (tool) =>
-        tool?.toolStatus === "error" ||
-        tool?.toolStatus === "declined",
-    );
-  });
 }

@@ -17,7 +17,7 @@ function logsPageSourceForTest() {
   return `${lines.join("\n")}\nglobalThis.__testExports = { LogsPage, LogEntry };`;
 }
 
-function renderLogsPage(overrides = {}) {
+function createLogsPageHarness(overrides = {}) {
   const logs = {
     entries: [],
     totalCount: 0,
@@ -36,22 +36,68 @@ function renderLogsPage(overrides = {}) {
     isLoading: false,
     error: null,
     needsThreadScope: false,
+    nextCursor: null,
+    retentionLimitReached: false,
+    maxRetainedEntries: 2000,
+    isLoadingMore: false,
+    loadMoreError: null,
+    loadOlder: () => {},
     ...overrides,
   };
+  const hookValues = [];
+  let hookCursor = 0;
+  function ConfirmDialog() {}
   const context = {
+    ConfirmDialog,
     globalThis: {},
     React: {
-      useRef: (initial) => ({ current: initial }),
+      useRef: (initial) => {
+        const index = hookCursor;
+        hookCursor += 1;
+        if (!(index in hookValues)) hookValues[index] = { current: initial };
+        return hookValues[index];
+      },
       useEffect: () => {},
       useCallback: (fn) => fn,
-      useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
+      useState: (initial) => {
+        const index = hookCursor;
+        hookCursor += 1;
+        if (!(index in hookValues)) {
+          hookValues[index] = typeof initial === "function" ? initial() : initial;
+        }
+        return [
+          hookValues[index],
+          (next) => {
+            hookValues[index] =
+              typeof next === "function" ? next(hookValues[index]) : next;
+          },
+        ];
+      },
     },
-    useT: () => (key) => key,
+    useT: () => (key, params) => {
+      if (key === "error.loadFailed") {
+        return `Failed to load ${params.what}: ${params.message}`;
+      }
+      if (key === "logs.retentionLimitReached") {
+        return `Showing ${params.count} entries`;
+      }
+      return key;
+    },
     useOutletContext: () => ({ isAdmin: true, threadsState: null }),
     useLogs: () => logs,
   };
   vm.runInNewContext(logsPageSourceForTest(), context);
-  return context.globalThis.__testExports.LogsPage();
+  return {
+    ConfirmDialog,
+    render() {
+      hookCursor = 0;
+      return context.globalThis.__testExports.LogsPage();
+    },
+  };
+}
+
+function renderLogsPage(overrides = {}) {
+  return createLogsPageHarness(overrides).render();
 }
 
 // Render a single LogEntry with a mocked React context. Returns the captured
@@ -119,6 +165,44 @@ function firstValueMatching(node, predicate) {
   return undefined;
 }
 
+function visit(node, fn, visited = new WeakSet()) {
+  if (!node || typeof node !== "object" || visited.has(node)) return;
+  visited.add(node);
+  if (Array.isArray(node)) {
+    for (const item of node) visit(item, fn, visited);
+    return;
+  }
+  fn(node);
+  visit(node.values, fn, visited);
+}
+
+function componentProps(root, component) {
+  const props = [];
+  visit(root, (node) => {
+    if (!Array.isArray(node.values)) return;
+    for (let index = 0; index < node.values.length; index += 1) {
+      if (node.values[index] !== component) continue;
+      const current = {};
+      for (let propIndex = index + 1; propIndex < node.values.length; propIndex += 1) {
+        const name = node.strings[propIndex]?.match(/([A-Za-z][A-Za-z0-9-]*)=\s*$/)?.[1];
+        if (name) current[name] = node.values[propIndex];
+      }
+      props.push(current);
+    }
+  });
+  return props;
+}
+
+function nativeNodeByText(root, tagName, text) {
+  let match;
+  visit(root, (node) => {
+    if (!match && node.type === tagName && flattenMarkup(node).includes(text)) {
+      match = node;
+    }
+  });
+  return match;
+}
+
 // Build a window stub whose getSelection() reports a selection rooted at the
 // given node (or no selection when `node` is null/omitted).
 function selectionWindow(node) {
@@ -151,6 +235,18 @@ const SAMPLE_ENTRY = {
   message: "selectable log message body",
   threadId: "thread-1",
 };
+
+test("template visitor ignores circular references", () => {
+  const node = { values: [] };
+  node.values.push(node);
+  let visits = 0;
+
+  visit(node, () => {
+    visits += 1;
+  });
+
+  assert.equal(visits, 1);
+});
 
 // A log line's text must be user-selectable so it can be copied. The clickable
 // row previously carried Tailwind's `select-none` (→ user-select: none), which
@@ -224,4 +320,107 @@ test("LogsPage keeps the scrollable log output container", () => {
   const markup = flattenMarkup(renderLogsPage());
   // The inner output region is the actual scroll surface.
   assert.match(markup, /min-h-0 flex-1 overflow-y-auto/);
+});
+
+test("LogsPage renders the load-older action while a cursor is available", () => {
+  let loadCount = 0;
+  const rendered = renderLogsPage({
+    entries: [SAMPLE_ENTRY],
+    totalCount: 1,
+    nextCursor: "cursor-1",
+    loadOlder: () => {
+      loadCount += 1;
+    },
+  });
+
+  const button = nativeNodeByText(rendered, "button", "logs.loadOlder");
+  assert.ok(button, "expected a load-older button while another page is available");
+  assert.equal(button.props.disabled, false);
+  button.props.onClick();
+  assert.equal(loadCount, 1);
+});
+
+test("LogsPage disables pagination while loading and hides it after the final page", () => {
+  const loading = renderLogsPage({
+    entries: [SAMPLE_ENTRY],
+    totalCount: 1,
+    nextCursor: "cursor-1",
+    isLoadingMore: true,
+  });
+  const loadingButton = nativeNodeByText(loading, "button", "common.loading");
+  assert.ok(loadingButton);
+  assert.equal(loadingButton.props.disabled, true);
+
+  const complete = renderLogsPage({
+    entries: [SAMPLE_ENTRY],
+    totalCount: 1,
+    nextCursor: null,
+  });
+  assert.equal(nativeNodeByText(complete, "button", "logs.loadOlder"), undefined);
+});
+
+test("LogsPage shows a retry action when loading older logs fails", () => {
+  let retryCount = 0;
+  const rendered = renderLogsPage({
+    entries: [SAMPLE_ENTRY],
+    totalCount: 1,
+    nextCursor: "cursor-1",
+    loadMoreError: new Error("older logs unavailable"),
+    loadOlder: () => {
+      retryCount += 1;
+    },
+  });
+
+  const markup = flattenMarkup(rendered);
+  assert.match(markup, /Failed to load nav\.logs: older logs unavailable/);
+  assert.doesNotMatch(markup, /Failed to load logs\.loadOlder/);
+  const retry = nativeNodeByText(rendered, "button", "ext.catalog.retry");
+  assert.ok(retry, "expected a retry button after pagination fails");
+  retry.props.onClick();
+  assert.equal(retryCount, 1);
+});
+
+test("LogsPage explains the retention cap instead of offering another page", () => {
+  const rendered = renderLogsPage({
+    entries: [SAMPLE_ENTRY],
+    totalCount: 2000,
+    nextCursor: "cursor-beyond-cap",
+    retentionLimitReached: true,
+    maxRetainedEntries: 2000,
+  });
+
+  assert.match(flattenMarkup(rendered), /Showing 2000 entries/);
+  assert.equal(nativeNodeByText(rendered, "button", "logs.loadOlder"), undefined);
+});
+
+test("LogsPage clears entries only after confirming the shared dialog", () => {
+  let clearCount = 0;
+  const harness = createLogsPageHarness({
+    clearEntries: () => {
+      clearCount += 1;
+    },
+  });
+
+  let rendered = harness.render();
+  const clearButton = nativeNodeByText(rendered, "button", "logs.clear");
+  assert.ok(clearButton, "expected the clear logs button");
+  clearButton.props.onClick();
+  assert.equal(clearCount, 0);
+
+  rendered = harness.render();
+  let [dialog] = componentProps(rendered, harness.ConfirmDialog);
+  assert.equal(dialog.open, true);
+  assert.equal(dialog.title, "logs.confirmClear");
+
+  dialog.onCancel();
+  rendered = harness.render();
+  [dialog] = componentProps(rendered, harness.ConfirmDialog);
+  assert.equal(dialog.open, false);
+  assert.equal(clearCount, 0);
+
+  nativeNodeByText(rendered, "button", "logs.clear").props.onClick();
+  rendered = harness.render();
+  [dialog] = componentProps(rendered, harness.ConfirmDialog);
+  dialog.onConfirm();
+  assert.equal(clearCount, 1);
 });

@@ -9,31 +9,40 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, SecretCleanupAction, SecretCleanupReport,
     SecretCleanupRequest,
 };
+use ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest;
+use ironclaw_extension_contracts::lifecycle_id::LifecycleBlockerRef;
+use ironclaw_extension_contracts::{state::InstallationState, surface::CapabilitySurfaceKind};
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionError, ExtensionInstallation, ExtensionInstallationError,
     ExtensionInstallationId, ExtensionLifecycleService, ExtensionManifestRecord, ExtensionPackage,
-    InstallationOwner, canonicalize_installation_rows,
+    InstallationOwner, MembershipDeactivation, canonicalize_installation_rows,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilitySurfaceKind, ExtensionId, InstallationState, ProductSurfaceCaller,
-    ProductSurfaceError, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
-    UserId, VendorId, VirtualPath,
+    decision::RuntimeCredentialAuthRequirement,
+    ids::{ExtensionId, UserId, VendorId},
+    resource::ResourceScope,
 };
 use ironclaw_product::{
-    ChannelConnectionService, ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
-    ExtensionAccountSetupRegistry, LifecycleBlockerRef, LifecycleExtensionSummary,
-    LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleReadinessBlocker,
-    LifecycleSearchExtensionSummary, ProductSurfaceFailure, RebornChannelConnectStrategy,
+    ChannelConnectionService, ExtensionAccountSetupRegistry, RebornChannelConnectStrategy,
 };
-use tokio::sync::{Mutex, RwLock, Semaphore};
+use ironclaw_product_contracts::account_setup::{
+    ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
+};
+use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::package_lifecycle::{
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+    LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary,
+};
+use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
+use tokio::sync::{AcquireError, Mutex, RwLock, Semaphore};
 
 fn unzip_extension_bundle_for_product(
     bundle: &[u8],
-) -> Result<Vec<(String, Vec<u8>)>, ProductSurfaceFailure> {
+) -> Result<Vec<(String, Vec<u8>)>, ProductOperationFailure> {
     crate::unzip_extension_bundle(bundle).map_err(|error| {
-        ProductSurfaceFailure::InvalidBindingRequest {
+        ProductOperationFailure::InvalidBindingRequest {
             reason: error.reason().to_string(),
         }
     })
@@ -57,9 +66,8 @@ pub trait ExtensionCredentialCleanup: Send + Sync {
 
 use crate::{
     ActiveExtensionCapability, AvailableExtensionCatalog, AvailableExtensionPackage,
-    ExtensionActivationMode, ExtensionInstallPlan, imported_extension_package,
-    materialize_available_extension, package_visible_capability_ids, prepare_install,
-    visible_capability_ids,
+    ExtensionInstallPlan, imported_extension_package, materialize_available_extension,
+    package_visible_capability_ids, prepare_install, visible_capability_ids,
 };
 use crate::{
     ExtensionActivationCredentialGate, ExtensionActivationCredentialReadiness,
@@ -67,16 +75,15 @@ use crate::{
 };
 use crate::{ExtensionRemovalCleanupContext, ExtensionRemovalCleanupRegistry};
 use crate::{
-    HostedMcpDiscoveryError, channel_connect_strategy, channel_connection_requirement,
-    discover_hosted_mcp_package, is_hosted_http_mcp_package,
+    channel_connect_strategy, channel_connection_requirement,
     manifest_runtime_credential_auth_requirements, package_declares_inbound_product_adapter,
     package_runtime_credential_auth_requirements,
 };
 
 use crate::ActiveExtensionPublisher;
 use crate::{
-    RemoveDecision, decide_install_on_existing, decide_remove, derive_owner,
-    ensure_caller_may_operate, install_scope_for_owner,
+    decide_install_on_existing, decide_remove, derive_owner, ensure_caller_may_operate,
+    install_scope_for_owner,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,7 +130,7 @@ where
 // lifecycle service models the installed extension set, while active_registry
 // is the model-visible capability surface read by host runtime dispatch.
 // install/remove keep the lifecycle set durable; activate/remove are the only
-// local-dev writers that should mirror lifecycle-managed packages into or out
+// standalone writers that should mirror lifecycle-managed packages into or out
 // of active_registry. Production and multi-tenant reuse require scoped storage
 // and registry ownership first; tracked in #4091.
 pub struct ExtensionLifecycleManager {
@@ -133,6 +140,7 @@ pub struct ExtensionLifecycleManager {
     lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
     active_extensions: ActiveExtensionPublisher,
     operation_lock: Arc<Mutex<()>>,
+    hosted_mcp_preparation: Arc<crate::hosted_mcp_preparation::HostedMcpPreparationService>,
     // Genuinely optional (not an `optional_arc` smell): a composition without
     // product auth cannot have minted a reusable OAuth credential, so there is
     // nothing to revoke on removal.
@@ -146,21 +154,18 @@ pub struct ExtensionLifecycleManager {
     /// resolver. Weak ownership avoids the cycle created by that resolver's
     /// reactivation port pointing back to this lifecycle service.
     channel_config: std::sync::OnceLock<Weak<crate::ChannelConfigService>>,
-    // Late-attached with `generic_host` (both need the fully wired host
-    // runtime): stages hosted-MCP discovery authority — the connection
-    // credential and the server network policy — under the discovery scope.
-    // Discovery runs at activation, outside the dispatch obligation
-    // pipeline, so nothing else stages these (the pre-P2 gap that made
-    // live `tools/list` always fail transient and fall back).
-    discovery_runtime_ports:
-        std::sync::OnceLock<ironclaw_host_runtime::ProductAuthProviderRuntimePorts>,
     /// Bounds concurrent zip decode/validation in `import_bundle`. Each decode
     /// may expand up to [`crate::MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES`] into
     /// memory, so without a bound N concurrent operator uploads turn the
     /// per-request cap into N x 64 MiB of pressure before any lifecycle lock
     /// applies (#5499 review finding #3).
     import_decode_semaphore: Arc<Semaphore>,
-    /// The tenant operator identity (#5459 P1). In local-dev this is the base
+    /// Serializes registry package publication with the lifecycle operations
+    /// it coordinates. The ordinary lifecycle lock remains the state writer;
+    /// this outer lock only prevents two catalog clients from replacing the
+    /// same package between catalog publication and install.
+    registry_install_lock: Arc<Mutex<()>>,
+    /// The tenant operator identity (#5459 P1). In standalone this is the base
     /// owner user (`IRONCLAW_REBORN_WEBUI_USER_ID` semantics). Lifecycle
     /// installs by every caller, including this user, make or join the member
     /// set [`InstallationOwner::Users`]. Tenant-wide deployment state belongs
@@ -210,78 +215,84 @@ pub struct ExtensionLifecycleManager {
 /// the right trade against unbounded memory.
 const MAX_CONCURRENT_IMPORT_DECODES: usize = 2;
 
+/// Constructor dependency bundle for [`ExtensionLifecycleManager::new`].
+///
+/// One field per prior constructor argument, in the same order — this is a
+/// pure aggregation to stay under clippy's `too_many_arguments` threshold, not
+/// a behavior change. `hosted_mcp_dependencies` stays a single nested field
+/// (its own [`crate::HostedMcpPreparationDependencies`] bundle), not folded in.
+pub struct ExtensionLifecycleManagerDependencies {
+    pub filesystem: Arc<dyn RootFilesystem>,
+    pub catalog: AvailableExtensionCatalog,
+    pub installation_store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
+    pub lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
+    pub active_extensions: ActiveExtensionPublisher,
+    pub credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
+    pub tenant_operator_user_id: UserId,
+    pub hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies,
+}
+
 impl ExtensionLifecycleManager {
-    pub fn new(
-        filesystem: Arc<dyn RootFilesystem>,
-        catalog: AvailableExtensionCatalog,
-        installation_store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
-        lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
-        active_extensions: ActiveExtensionPublisher,
-        credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
-        tenant_operator_user_id: UserId,
-    ) -> Self {
-        Self {
+    pub async fn register_hosted_mcp(
+        &self,
+        request: RegisterHostedMcpRequest,
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
+        self.hosted_mcp_preparation.register(request).await
+    }
+
+    /// Run the composed preparation strategy, if this installation's generic
+    /// definition declared that preparation is required.
+    pub async fn prepare_if_pending(
+        &self,
+        package_ref: &LifecyclePackageRef,
+        scope: ResourceScope,
+        credential_gate: &dyn ExtensionActivationCredentialGate,
+        caller: &UserId,
+    ) -> Result<Option<LifecycleProductResponse>, ProductOperationFailure> {
+        self.hosted_mcp_preparation
+            .prepare_if_pending(package_ref, scope, credential_gate, caller)
+            .await
+    }
+    pub fn new(dependencies: ExtensionLifecycleManagerDependencies) -> Self {
+        let ExtensionLifecycleManagerDependencies {
             filesystem,
-            catalog: Arc::new(RwLock::new(catalog)),
+            catalog,
             installation_store,
             lifecycle_service,
             active_extensions,
-            operation_lock: Arc::new(Mutex::new(())),
+            credential_cleanup,
+            tenant_operator_user_id,
+            hosted_mcp_dependencies,
+        } = dependencies;
+        let catalog = Arc::new(RwLock::new(catalog));
+        let operation_lock = Arc::new(Mutex::new(()));
+        let hosted_mcp_preparation = Arc::new(
+            crate::hosted_mcp_preparation::HostedMcpPreparationService::new(
+                Arc::clone(&installation_store),
+                Arc::clone(&catalog),
+                Arc::clone(&lifecycle_service),
+                Arc::clone(&operation_lock),
+                hosted_mcp_dependencies,
+            ),
+        );
+        Self {
+            filesystem,
+            catalog,
+            installation_store,
+            lifecycle_service,
+            active_extensions,
+            operation_lock,
+            hosted_mcp_preparation,
             credential_cleanup,
             generic_host: std::sync::OnceLock::new(),
             channel_config: std::sync::OnceLock::new(),
-            discovery_runtime_ports: std::sync::OnceLock::new(),
             import_decode_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES)),
+            registry_install_lock: Arc::new(Mutex::new(())),
             tenant_operator_user_id,
             removal_cleanup: Arc::new(ExtensionRemovalCleanupRegistry::empty()),
             account_setups: ExtensionAccountSetupRegistry::default(),
             channel_disconnect_slot: Arc::new(std::sync::OnceLock::new()),
             provider_instance_readiness: std::collections::BTreeMap::new(),
-        }
-    }
-
-    /// Attach the staging ports hosted-MCP discovery uses to make its
-    /// authority available under the discovery scope.
-    pub fn attach_discovery_runtime_ports(
-        &self,
-        ports: ironclaw_host_runtime::ProductAuthProviderRuntimePorts,
-    ) {
-        let _ = self.discovery_runtime_ports.set(ports);
-    }
-
-    /// Stage the hosted-MCP connection credential and server network policy
-    /// for the discovery call. Best-effort by design: a staging failure
-    /// leaves discovery to fail transient; activation may use a real declared
-    /// static tool as fallback, but never the host-internal connection
-    /// template alone. A successful stage lets live `tools/list` run with the
-    /// same injected authority a dispatched invocation would carry.
-    async fn stage_hosted_mcp_discovery_authority(
-        &self,
-        scope: &ResourceScope,
-        package: &ExtensionPackage,
-    ) {
-        let Some(ports) = self.discovery_runtime_ports.get() else {
-            return;
-        };
-        let Some(descriptor) = package.capabilities.first() else {
-            return;
-        };
-        if let Some(policy) = hosted_mcp_discovery_network_policy(package) {
-            ports.stage_network_policy_once(scope, &descriptor.id, policy);
-        }
-        for requirement in &descriptor.runtime_credentials {
-            if let Err(error) = ports
-                .stage_credential_requirement_once(scope, &descriptor.id, requirement, &package.id)
-                .await
-            {
-                tracing::debug!(
-                    extension_id = package.id.as_str(),
-                    capability_id = descriptor.id.as_str(),
-                    required = requirement.required,
-                    error = ?error,
-                    "hosted MCP discovery credential staging failed; discovery will fail or use a declared static fallback"
-                );
-            }
         }
     }
 
@@ -291,6 +302,10 @@ impl ExtensionLifecycleManager {
         &self,
     ) -> Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort> {
         Arc::clone(&self.installation_store)
+    }
+
+    pub async fn reserved_bundled_extension_ids(&self) -> Vec<String> {
+        self.catalog.read().await.reserved_bundled_ids().to_vec()
     }
 
     /// Attach the generic extension host so lifecycle mutations publish the
@@ -318,7 +333,7 @@ impl ExtensionLifecycleManager {
         extension_id: &ExtensionId,
         installation_id: &ExtensionInstallationId,
         active_package: &ExtensionPackage,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         let Some(host) = self.generic_host.get() else {
             return Ok(());
         };
@@ -327,7 +342,7 @@ impl ExtensionLifecycleManager {
             .get_manifest(extension_id)
             .await
             .map_err(map_extension_installation_error)?
-            .ok_or_else(|| ProductSurfaceFailure::InvalidBindingRequest {
+            .ok_or_else(|| ProductOperationFailure::InvalidBindingRequest {
                 reason: format!(
                     "extension {} manifest is not installed",
                     extension_id.as_str()
@@ -346,7 +361,7 @@ impl ExtensionLifecycleManager {
         let record = crate::InstallationRecord {
             extension_id: extension_id.as_str().to_string(),
             installation_id: installation_id.as_str().to_string(),
-            state: crate::InstallationState::Installed,
+            state: ironclaw_extension_contracts::state::InstallationState::Installed,
             resolved: Arc::new(effective),
             config,
             last_error: None,
@@ -371,7 +386,7 @@ impl ExtensionLifecycleManager {
         &self,
         package: &ExtensionPackage,
         resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         self.active_extensions.publish(package)?;
         let Some(host) = self.generic_host.get() else {
             return Ok(());
@@ -386,7 +401,7 @@ impl ExtensionLifecycleManager {
                 let available = self.catalog.read().await.resolve(&package_ref)?;
                 let host_ports =
                     ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-                        ProductSurfaceFailure::InvalidBindingRequest {
+                        ProductOperationFailure::InvalidBindingRequest {
                             reason: format!(
                                 "host port catalog rejected bundled extension: {error}"
                             ),
@@ -394,20 +409,21 @@ impl ExtensionLifecycleManager {
                     })?;
                 let contracts =
                     crate::product_extension_host_api_contract_registry().map_err(|error| {
-                        ProductSurfaceFailure::InvalidBindingRequest {
+                        ProductOperationFailure::InvalidBindingRequest {
                             reason: format!(
                                 "host API contracts rejected bundled extension: {error}"
                             ),
                         }
                     })?;
-                ironclaw_extensions::ExtensionManifestRecord::from_toml(
+                ironclaw_extensions::ExtensionManifestRecord::from_toml_with_root_binding(
                     available.manifest_toml.clone(),
                     ironclaw_extensions::ManifestSource::HostBundled,
                     &host_ports,
                     None,
                     &contracts,
+                    package.root_binding.clone(),
                 )
-                .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
+                .map_err(|error| ProductOperationFailure::InvalidBindingRequest {
                     reason: format!("bundled extension manifest is invalid: {error}"),
                 })?
                 .resolved()
@@ -434,7 +450,7 @@ impl ExtensionLifecycleManager {
         host.install(crate::InstallationRecord {
             extension_id: package.id.as_str().to_string(),
             installation_id: format!("{}-test-install", package.id.as_str()),
-            state: crate::InstallationState::Installed,
+            state: ironclaw_extension_contracts::state::InstallationState::Installed,
             resolved: Arc::new(effective),
             config,
             last_error: None,
@@ -550,7 +566,7 @@ impl ExtensionLifecycleManager {
         query: &str,
         credential_gate: Option<&dyn ExtensionActivationCredentialGate>,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let extensions = {
             let catalog = self.catalog.read().await;
             catalog.search(query).collect::<Vec<_>>()
@@ -596,7 +612,7 @@ impl ExtensionLifecycleManager {
     pub async fn list_installed(
         &self,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let summaries = self.installed_summaries(caller).await?;
         let count = summaries.len();
         Ok(response_with_payload(
@@ -613,7 +629,7 @@ impl ExtensionLifecycleManager {
         &self,
         package_ref: LifecyclePackageRef,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let (_, installation_id) = extension_ids_from_package_ref(&package_ref)?;
         let installation = self
             .installation_store
@@ -624,14 +640,20 @@ impl ExtensionLifecycleManager {
             // this caller — same masking as search/list (#5459 P1).
             .filter(|installation| installation.owner().visible_to(caller));
         let activation_errors = self.installation_activation_errors().await?;
+        let available = {
+            let catalog = self.catalog.read().await;
+            catalog.resolve(&package_ref)?
+        };
+        let has_activatable_surface = package_has_activatable_surface(&available.package);
         // A not-installed package has no installation state; `install_scope`
         // (`None` below) is the not-installed signal, so the neutral `Installed`
         // here is never read as a resting state for an uninstalled package.
         let phase = installation
             .as_ref()
             .map(|installation| {
-                installation_state_for_activation(
-                    installation.activation_state(),
+                installation_state_for_installation(
+                    installation,
+                    has_activatable_surface,
                     activation_errors.contains_key(installation.extension_id().as_str()),
                 )
             })
@@ -639,10 +661,7 @@ impl ExtensionLifecycleManager {
         let install_scope = installation
             .as_ref()
             .map(|installation| install_scope_for_owner(installation.owner()));
-        let summary = {
-            let catalog = self.catalog.read().await;
-            catalog.resolve(&package_ref)?.summary()
-        };
+        let summary = available.summary();
         Ok(response_with_payload(
             Some(package_ref),
             phase,
@@ -659,9 +678,9 @@ impl ExtensionLifecycleManager {
 
     pub async fn active_model_visible_capabilities(
         &self,
-    ) -> Result<Vec<ActiveExtensionCapability>, ProductSurfaceFailure> {
+    ) -> Result<Vec<ActiveExtensionCapability>, ProductOperationFailure> {
         // #5459 P1: carry each enabled installation's owner onto its
-        // capabilities so the per-request grant minting in the local-dev
+        // capabilities so the per-request grant minting in the standalone
         // capability surface can filter user-private extensions to their
         // owner. The registry itself stays global; owner is joined here.
         let owner_by_extension = project_installation_owners(
@@ -693,7 +712,7 @@ impl ExtensionLifecycleManager {
     /// regardless of activation state.
     pub async fn installation_owners(
         &self,
-    ) -> Result<std::collections::BTreeMap<ExtensionId, InstallationOwner>, ProductSurfaceFailure>
+    ) -> Result<std::collections::BTreeMap<ExtensionId, InstallationOwner>, ProductOperationFailure>
     {
         project_installation_owners(
             self.installation_store
@@ -707,7 +726,7 @@ impl ExtensionLifecycleManager {
         &self,
         package_ref: &LifecyclePackageRef,
         caller: &UserId,
-    ) -> Result<Vec<RuntimeCredentialAuthRequirement>, ProductSurfaceFailure> {
+    ) -> Result<Vec<RuntimeCredentialAuthRequirement>, ProductOperationFailure> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(package_ref)?;
         let _operation_guard = self.operation_lock.lock().await;
         let installation = self
@@ -745,7 +764,7 @@ impl ExtensionLifecycleManager {
                 .get(&requirement.provider)
                 .cloned()
         }) {
-            return Err(ProductSurfaceFailure::ProviderInstanceNotConfigured { reason });
+            return Err(ProductOperationFailure::ProviderInstanceNotConfigured { reason });
         }
         Ok(requirements)
     }
@@ -758,15 +777,13 @@ impl ExtensionLifecycleManager {
     /// `activation_error` are driven from this one source.
     pub async fn installation_activation_errors(
         &self,
-    ) -> Result<std::collections::HashMap<String, String>, ProductSurfaceFailure> {
+    ) -> Result<std::collections::HashMap<String, String>, ProductOperationFailure> {
         match self.generic_host.get() {
-            Some(host) => {
-                host.installation_errors()
-                    .await
-                    .map_err(|error| ProductSurfaceFailure::Transient {
-                        reason: format!("extension activation errors could not be read: {error}"),
-                    })
-            }
+            Some(host) => host.installation_errors().await.map_err(|error| {
+                ProductOperationFailure::Transient {
+                    reason: format!("extension activation errors could not be read: {error}"),
+                }
+            }),
             None => Ok(std::collections::HashMap::new()),
         }
     }
@@ -774,7 +791,7 @@ impl ExtensionLifecycleManager {
     async fn installed_summaries(
         &self,
         caller: &UserId,
-    ) -> Result<Vec<LifecycleInstalledExtensionSummary>, ProductSurfaceFailure> {
+    ) -> Result<Vec<LifecycleInstalledExtensionSummary>, ProductOperationFailure> {
         let installations = self
             .installation_store
             .list_installations()
@@ -804,8 +821,9 @@ impl ExtensionLifecycleManager {
             };
             summaries.push(LifecycleInstalledExtensionSummary {
                 summary: available.summary(),
-                phase: installation_state_for_activation(
-                    installation.activation_state(),
+                phase: installation_state_for_installation(
+                    &installation,
+                    package_has_activatable_surface(&available.package),
                     activation_errors.contains_key(installation.extension_id().as_str()),
                 ),
                 install_scope: Some(install_scope_for_owner(installation.owner())),
@@ -820,7 +838,7 @@ impl ExtensionLifecycleManager {
         credential_gate: Option<&dyn ExtensionActivationCredentialGate>,
         caller: &UserId,
         activation_errors: &std::collections::HashMap<String, String>,
-    ) -> Result<LifecycleSearchExtensionSummary, ProductSurfaceFailure> {
+    ) -> Result<LifecycleSearchExtensionSummary, ProductOperationFailure> {
         let mut summary = extension.summary();
         suppress_search_credential_onboarding(&mut summary);
         let installation = self
@@ -848,7 +866,7 @@ impl ExtensionLifecycleManager {
     async fn search_installation(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<Option<ExtensionInstallation>, ProductSurfaceFailure> {
+    ) -> Result<Option<ExtensionInstallation>, ProductOperationFailure> {
         let installation_id = ExtensionInstallationId::new(extension_id.as_str().to_string())
             .map_err(map_extension_installation_error)?;
         let installation = self
@@ -860,7 +878,7 @@ impl ExtensionLifecycleManager {
             .as_ref()
             .is_some_and(|installation| installation.extension_id() != extension_id)
         {
-            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
                 reason: format!(
                     "installation {} does not belong to extension {}",
                     installation_id.as_str(),
@@ -897,23 +915,23 @@ impl ExtensionLifecycleManager {
     pub async fn import_bundle(
         &self,
         bundle: Vec<u8>,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         // Hold the permit until the package has passed duplicate checks,
         // materialization, and catalog insertion. This bounds the number of
         // fully expanded packages retained by an import in addition to the
         // decode work itself.
-        let _decode_permit = self.import_decode_semaphore.acquire().await.map_err(|_| {
-            ProductSurfaceFailure::Transient {
-                reason: "import decode limiter is closed".to_string(),
-            }
-        })?;
+        let _decode_permit = self
+            .import_decode_semaphore
+            .acquire()
+            .await
+            .map_err(map_import_decode_acquire_error)?;
         let reserved_bundled_ids = self.catalog.read().await.reserved_bundled_ids().to_vec();
         let package = tokio::task::spawn_blocking(move || {
             let files = unzip_extension_bundle_for_product(&bundle)?;
             imported_extension_package(files, &reserved_bundled_ids)
         })
         .await
-        .map_err(|error| ProductSurfaceFailure::Transient {
+        .map_err(|error| ProductOperationFailure::Transient {
             reason: format!("import decode task failed: {error}"),
         })??;
         let package_ref = package.package_ref.clone();
@@ -921,7 +939,7 @@ impl ExtensionLifecycleManager {
         let mut catalog = self.catalog.write().await;
         let _operation_guard = self.operation_lock.lock().await;
         if catalog.resolve(&package_ref).is_ok() {
-            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
                 reason: format!(
                     "extension {} already exists in the catalog; remove it before importing a replacement",
                     package_ref.id.as_str()
@@ -948,11 +966,165 @@ impl ExtensionLifecycleManager {
         ))
     }
 
+    /// Publish and install a package whose registry client has already
+    /// verified signature, provenance, size, and artifact digests.
+    ///
+    /// The package still enters through the extension-host validation
+    /// boundary before this method. A forced replacement uses the ordinary
+    /// removal/install convergence points and restores the previous inline
+    /// catalog package if the replacement install fails.
+    pub async fn install_registry_package(
+        &self,
+        package: AvailableExtensionPackage,
+        force: bool,
+        caller: &UserId,
+        scope: &ResourceScope,
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
+        if package.source != ironclaw_extensions::ManifestSource::RegistryInstalled {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
+                reason: "registry install requires a registry-validated package".to_string(),
+            });
+        }
+        let _registry_guard = self.registry_install_lock.lock().await;
+        let package_ref = package.package_ref.clone();
+        let extension_id = package.package.id.clone();
+        let previous = {
+            let catalog = self.catalog.read().await;
+            catalog.resolve(&package_ref).ok()
+        };
+        if let Some(previous) = &previous {
+            let matches = previous.manifest_toml == package.manifest_toml
+                && previous.assets == package.assets;
+            if matches {
+                return self
+                    .install_and_activate_registry_package(package_ref, caller)
+                    .await;
+            }
+            if !force {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
+                    reason: format!(
+                        "extension {} already exists in the catalog; retry with force to replace it",
+                        extension_id.as_str()
+                    ),
+                });
+            }
+            if previous.source == ironclaw_extensions::ManifestSource::HostBundled {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
+                    reason: format!(
+                        "extension {} is host-bundled and cannot be replaced by a registry package",
+                        extension_id.as_str()
+                    ),
+                });
+            }
+        }
+
+        let previous_installation = self.search_installation(&extension_id).await?;
+        let had_installation = previous_installation.is_some()
+            || self
+                .installation_store
+                .get_manifest(&extension_id)
+                .await
+                .map_err(map_extension_installation_error)?
+                .is_some();
+        if had_installation && previous.is_none() {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} has installed state but no restorable catalog package",
+                    extension_id.as_str()
+                ),
+            });
+        }
+        let was_active = self
+            .active_extensions
+            .snapshot()
+            .get_extension(&extension_id)
+            .is_some();
+        if had_installation {
+            if !force {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
+                    reason: format!(
+                        "extension {} is already installed; retry with force to replace it",
+                        extension_id.as_str()
+                    ),
+                });
+            }
+            self.remove(package_ref.clone(), scope, Some(caller))
+                .await?;
+        }
+
+        {
+            let mut catalog = self.catalog.write().await;
+            catalog.extend(AvailableExtensionCatalog::from_packages(vec![package]));
+        }
+        match self
+            .install_and_activate_registry_package(package_ref.clone(), caller)
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(original_error) => {
+                if let Err(cleanup_error) =
+                    self.remove(package_ref.clone(), scope, Some(caller)).await
+                {
+                    return Err(compensation_failure(
+                        "registry install failed and replacement cleanup also failed",
+                        original_error,
+                        cleanup_error,
+                    ));
+                }
+                {
+                    let mut catalog = self.catalog.write().await;
+                    catalog.remove(&package_ref);
+                    if let Some(previous) = previous {
+                        catalog.restore(previous);
+                    }
+                }
+                if had_installation {
+                    let restore = self.install(package_ref.clone(), caller).await;
+                    if let Err(restore_error) = restore {
+                        return Err(compensation_failure(
+                            "registry replacement failed and the previous install could not be restored",
+                            original_error,
+                            restore_error,
+                        ));
+                    }
+                    if let Some(installation) = &previous_installation
+                        && let Err(restore_error) = self.restore_installation(installation).await
+                    {
+                        return Err(compensation_failure(
+                            "registry replacement failed and the previous installation scope could not be restored",
+                            original_error,
+                            restore_error,
+                        ));
+                    }
+                    if was_active
+                        && let Err(restore_error) = self.activate(package_ref, caller).await
+                    {
+                        return Err(compensation_failure(
+                            "registry replacement failed and the previous activation could not be restored",
+                            original_error,
+                            restore_error,
+                        ));
+                    }
+                }
+                Err(original_error)
+            }
+        }
+    }
+
+    async fn install_and_activate_registry_package(
+        &self,
+        package_ref: LifecyclePackageRef,
+        caller: &UserId,
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
+        self.install(package_ref.clone(), caller).await?;
+        self.activate(package_ref, caller).await
+    }
+
     pub async fn install(
         &self,
         package_ref: LifecyclePackageRef,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         // Snapshot the package before taking `operation_lock`. The catalog
         // lock must not be held across installation-store, filesystem, or
         // credential awaits. Acquiring the read lock first preserves the
@@ -972,20 +1144,24 @@ impl ExtensionLifecycleManager {
             .await
             .map_err(map_extension_installation_error)?;
         match existing {
-            // The id is already installed: membership decides whether the
-            // caller JOINS the member set or the operator EVICTS it to
-            // `Tenant` — either way a single row rewrite; the bundle is
+            // The id is already installed: the policy decision authorizes the
+            // caller (tenant rows and non-member shapes error here), and the
+            // store's membership operation performs the single-row join —
+            // never an aggregate rewrite, which would reintroduce the
+            // lost-update race between independent users. The bundle is
             // already registered, materialized, and (if enabled) published,
             // so there is nothing to compensate.
             Some(existing) => {
-                let new_owner = decide_install_on_existing(
+                decide_install_on_existing(
                     &available.package.id,
                     existing.owner(),
                     caller,
                     &self.tenant_operator_user_id,
                 )?;
+                self.ensure_lifecycle_package_registered_from_aggregate(&available.package.id)
+                    .await?;
                 self.installation_store
-                    .upsert_installation(existing.with_owner(new_owner))
+                    .activate_membership(&installation_id, caller)
                     .await
                     .map_err(map_extension_installation_error)?;
             }
@@ -994,14 +1170,22 @@ impl ExtensionLifecycleManager {
             }
         }
 
+        // A package whose capabilities have not been discovered yet declares
+        // none, so this is already empty for it — no separate readiness flag
+        // is needed to suppress "placeholder" tools, because there are none
+        // to suppress. Discovery, where a package's runtime declares it,
+        // runs later from `activate_with_credential_gate` and republishes
+        // the package with its live capability set.
+        let visible_capability_ids = visible_capability_ids(&available)
+            .map(|id| id.as_str().to_string())
+            .collect();
+
         Ok(response_with_payload(
             Some(package_ref.clone()),
             InstallationState::Installed,
             LifecycleProductPayload::ExtensionInstall {
                 installed: true,
-                visible_capability_ids: visible_capability_ids(&available)
-                    .map(|id| id.as_str().to_string())
-                    .collect(),
+                visible_capability_ids,
                 next_step: format!(
                     "Installation will attempt activation for extension_id \"{}\". If credentials are missing, the install response opens the auth gate; otherwise the tools are published.",
                     package_ref.id.as_str()
@@ -1018,25 +1202,14 @@ impl ExtensionLifecycleManager {
         &self,
         available: &AvailableExtensionPackage,
         caller: &UserId,
-    ) -> Result<(), ProductSurfaceFailure> {
-        // An orphaned manifest row without an installation still counts as
-        // occupied (pre-#5459 behavior, kept fail-closed).
-        if self
+    ) -> Result<(), ProductOperationFailure> {
+        let owner = derive_owner(caller, &self.tenant_operator_user_id);
+        let retained_definition = self
             .installation_store
             .get_manifest(&available.package.id)
             .await
-            .map_err(map_extension_installation_error)?
-            .is_some()
-        {
-            return Err(ProductSurfaceFailure::InvalidBindingRequest {
-                reason: format!(
-                    "extension {} is already installed; if a previous removal was interrupted, run remove again to finish its cleanup, then retry the install",
-                    available.package.id.as_str()
-                ),
-            });
-        }
-        let owner = derive_owner(caller, &self.tenant_operator_user_id);
-        let plan = prepare_install(available, owner)?;
+            .map_err(map_extension_installation_error)?;
+        let plan = prepare_install(available, owner, retained_definition)?;
         self.register_lifecycle_package(&available.package).await?;
 
         if let Err(error) =
@@ -1055,7 +1228,7 @@ impl ExtensionLifecycleManager {
         }
         if let Err(error) = self.persist_install_plan(plan).await {
             if let Err(cleanup_error) = self
-                .delete_materialized_extension_files(&available.package.id)
+                .delete_materialized_extension_files(&available.package)
                 .await
             {
                 tracing::debug!(
@@ -1080,188 +1253,94 @@ impl ExtensionLifecycleManager {
     pub async fn activate(
         &self,
         package_ref: LifecyclePackageRef,
-        mode: ExtensionActivationMode,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let credential_gate = UnavailableExtensionActivationCredentialGate;
-        self.activate_inner(package_ref, mode, &credential_gate, caller)
+        self.activate_inner(package_ref, &credential_gate, caller)
             .await
     }
 
     pub async fn activate_with_credential_gate(
         &self,
         package_ref: LifecyclePackageRef,
-        mode: ExtensionActivationMode,
-        credential_gate: impl ExtensionActivationCredentialGate,
+        scope: ResourceScope,
+        credential_gate: &dyn ExtensionActivationCredentialGate,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
-        self.activate_inner(package_ref, mode, &credential_gate, caller)
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
+        if let Some(response) = self
+            .prepare_if_pending(&package_ref, scope, credential_gate, caller)
+            .await?
+        {
+            return Ok(response);
+        }
+        self.activate_inner(package_ref, credential_gate, caller)
             .await
     }
 
     pub async fn activate_with_prechecked_credentials_for_test(
         &self,
         package_ref: LifecyclePackageRef,
-        mode: ExtensionActivationMode,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let caller = self.tenant_operator_user_id.clone();
-        self.activate_with_prechecked_credentials_for_user_for_test(package_ref, mode, &caller)
+        self.activate_with_prechecked_credentials_for_user_for_test(package_ref, &caller)
             .await
     }
 
     pub async fn activate_with_prechecked_credentials_for_user_for_test(
         &self,
         package_ref: LifecyclePackageRef,
-        mode: ExtensionActivationMode,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let credential_gate = crate::PrecheckedExtensionActivationCredentialGate;
-        self.activate_inner(package_ref, mode, &credential_gate, caller)
+        self.activate_inner(package_ref, &credential_gate, caller)
             .await
     }
 
     async fn activate_inner(
         &self,
         package_ref: LifecyclePackageRef,
-        mode: ExtensionActivationMode,
         credential_gate: &dyn ExtensionActivationCredentialGate,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
-
-        let discovery = {
-            let _operation_guard = self.operation_lock.lock().await;
-            let installation = self
-                .load_installation(&extension_id, &installation_id)
-                .await?;
-            ensure_caller_may_operate(&installation, caller)?;
-            ensure_caller_may_mutate_tenant_installation(
-                &installation,
-                caller,
-                &self.tenant_operator_user_id,
-                "activate",
-            )?;
-            let package = self.lifecycle_package(&extension_id).await?;
-            if let ExtensionActivationCredentialReadiness::Missing(missing) =
-                credential_gate.credential_readiness(&package).await?
-            {
-                return activation_credentials_incomplete_response(package_ref, missing);
-            }
-            match mode {
-                ExtensionActivationMode::HostedMcpDiscovery {
-                    scope,
-                    runtime_http_egress,
-                } if is_hosted_http_mcp_package(&package) => HostedMcpDiscoveryRequest {
-                    base_package: package,
-                    scope,
-                    runtime_http_egress,
-                },
-                _ => {
-                    return self
-                        .commit_activation(
-                            package_ref,
-                            &extension_id,
-                            &installation_id,
-                            installation.activation_state(),
-                            package,
-                        )
-                        .await;
-                }
-            }
-        };
-
-        self.stage_hosted_mcp_discovery_authority(&discovery.scope, &discovery.base_package)
-            .await;
-        let active_package = match discover_hosted_mcp_package(
-            &discovery.base_package,
-            discovery.scope,
-            discovery.runtime_http_egress,
-        )
-        .await
-        {
-            Ok(active_package) => active_package,
-            Err(HostedMcpDiscoveryError::Transient(reason)) => {
-                if package_visible_capability_ids(&discovery.base_package).is_empty() {
-                    // The bundled hosted-MCP declaration may contain only the
-                    // host-internal connection template. That template is
-                    // discovery authority, not a callable fallback surface;
-                    // reporting activation success here would publish no
-                    // model-usable tools. Keep the install retryable instead.
-                    return Err(hosted_mcp_discovery_error(
-                        HostedMcpDiscoveryError::Transient(reason),
-                    ));
-                }
-                tracing::debug!(
-                    extension_id = %extension_id.as_str(),
-                    reason,
-                    "hosted MCP discovery failed during activation; falling back to bundled manifest"
-                );
-                discovery.base_package.clone()
-            }
-            Err(error @ HostedMcpDiscoveryError::Permanent(_)) => {
-                return Err(hosted_mcp_discovery_error(error));
-            }
-        };
 
         let _operation_guard = self.operation_lock.lock().await;
         let installation = self
             .load_installation(&extension_id, &installation_id)
-            .await
-            .map_err(|error| {
-                tracing::debug!(
-                    %error,
-                    extension_id = %extension_id.as_str(),
-                    installation_id = %installation_id.as_str(),
-                    "hosted MCP activation could not recheck the installation after discovery"
-                );
-                hosted_mcp_changed_during_discovery_error()
-            })?;
-        // #5459 P1: the installation's owner or member set may have changed
-        // while the lock was dropped for discovery (eviction+reinstall /
-        // remove+reinstall reuse the same installation id), so re-check
-        // ownership before committing — phase 1's check is stale. A foreign
-        // row must not be flipped to Enabled under this caller's action.
-        ensure_caller_may_operate(&installation, caller).map_err(|error| {
-            tracing::debug!(
-                %error,
-                extension_id = %extension_id.as_str(),
-                installation_id = %installation_id.as_str(),
-                "hosted MCP activation caller ownership changed during discovery"
-            );
-            hosted_mcp_changed_during_discovery_error()
-        })?;
+            .await?;
+        ensure_caller_may_operate(&installation, caller)?;
         ensure_caller_may_mutate_tenant_installation(
             &installation,
             caller,
             &self.tenant_operator_user_id,
             "activate",
-        )
-        .map_err(|error| {
-            tracing::debug!(
-                %error,
-                extension_id = %extension_id.as_str(),
-                installation_id = %installation_id.as_str(),
-                "hosted MCP activation caller is not the tenant operator after discovery"
-            );
-            hosted_mcp_changed_during_discovery_error()
-        })?;
-        let current_package = self
-            .lifecycle_package(&extension_id)
-            .await
-            .map_err(|error| {
-                tracing::debug!(
-                    %error,
-                    extension_id = %extension_id.as_str(),
-                    "hosted MCP activation could not recheck the lifecycle package after discovery"
-                );
-                hosted_mcp_changed_during_discovery_error()
-            })?;
-        if current_package != discovery.base_package {
-            return Err(hosted_mcp_changed_during_discovery_error());
-        };
-        if let ExtensionActivationCredentialReadiness::Missing(missing) = credential_gate
-            .credential_readiness(&active_package)
-            .await?
+        )?;
+        let package = self.lifecycle_package(&extension_id).await?;
+        // A package with nothing to serve cannot activate. Callers that route
+        // through `activate_with_credential_gate` have already had a chance to
+        // resolve the package's capabilities; callers that reach here directly
+        // have not, and binding a package with no operational surface fails
+        // closed further down anyway. Report the installed checkpoint instead
+        // of surfacing that bind error to the caller.
+        //
+        // "Nothing to serve" is derived from the package: no model-visible
+        // capability, no channel, no hooks. A channel-only extension declares
+        // no tools and must still activate, which is why this is not a tool
+        // count alone.
+        let has_activatable_surface = package_has_activatable_surface(&package);
+        if !has_activatable_surface {
+            return Ok(response_with_payload(
+                Some(package_ref),
+                InstallationState::Installed,
+                LifecycleProductPayload::ExtensionActivate {
+                    activated: false,
+                    visible_capability_ids: Vec::new(),
+                    connection_required: None,
+                },
+            ));
+        }
+        if let ExtensionActivationCredentialReadiness::Missing(missing) =
+            credential_gate.credential_readiness(&package).await?
         {
             return activation_credentials_incomplete_response(package_ref, missing);
         }
@@ -1270,7 +1349,7 @@ impl ExtensionLifecycleManager {
             &extension_id,
             &installation_id,
             installation.activation_state(),
-            active_package,
+            package,
         )
         .await
     }
@@ -1282,7 +1361,7 @@ impl ExtensionLifecycleManager {
         installation_id: &ExtensionInstallationId,
         previous_state: ExtensionActivationState,
         active_package: ExtensionPackage,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         if previous_state == ExtensionActivationState::Enabled
             && self
                 .active_extensions
@@ -1379,7 +1458,7 @@ impl ExtensionLifecycleManager {
         }
 
         let visible_capability_ids = package_visible_capability_ids(&active_package);
-        let account_setup = ironclaw_host_api::ExtensionId::new(package_ref.id.as_str())
+        let account_setup = ironclaw_host_api::ids::ExtensionId::new(package_ref.id.as_str())
             .ok()
             .and_then(|id| self.account_setups.descriptor(&id));
         let message = activation_success_message(
@@ -1415,16 +1494,6 @@ impl ExtensionLifecycleManager {
         Ok(response)
     }
 
-    pub async fn package_requires_hosted_mcp_discovery(
-        &self,
-        package_ref: &LifecyclePackageRef,
-    ) -> Result<bool, ProductSurfaceFailure> {
-        let (extension_id, _) = extension_ids_from_package_ref(package_ref)?;
-        let _operation_guard = self.operation_lock.lock().await;
-        let package = self.lifecycle_package(&extension_id).await?;
-        Ok(is_hosted_http_mcp_package(&package))
-    }
-
     /// Remove an installed extension. This is the single convergence point both
     /// removal entrypoints call — the WebUI service
     /// ([`LifecycleProductAction::ExtensionRemove`]) and the
@@ -1438,8 +1507,8 @@ impl ExtensionLifecycleManager {
         &self,
         package_ref: LifecyclePackageRef,
         scope: &ResourceScope,
-        authenticated_actor_user_id: Option<&ironclaw_host_api::UserId>,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+        authenticated_actor_user_id: Option<&ironclaw_host_api::ids::UserId>,
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let (removed_extension_id, _) = extension_ids_from_package_ref(&package_ref)?;
         // Record only whether this invocation began while local removal state
         // existed. Authority is re-checked under `operation_lock`; this bit is
@@ -1487,12 +1556,12 @@ impl ExtensionLifecycleManager {
                 .await
                 .map_err(map_extension_installation_error)?;
             if installation.is_none() && installed_manifest.is_none() && began_with_local_state {
-                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
                     reason: format!("extension {} is not installed", extension_id.as_str()),
                 });
             }
             if installation.is_some() && installed_manifest.is_none() {
-                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
                     reason: format!(
                         "extension {} manifest is not installed",
                         extension_id.as_str()
@@ -1506,9 +1575,12 @@ impl ExtensionLifecycleManager {
                 prepare_install(
                     &available,
                     derive_owner(caller, &self.tenant_operator_user_id),
+                    None,
                 )?
                 .manifest_record
             };
+            let retain_definition = removal_manifest.definition_retention()
+                == ironclaw_extensions::PackageDefinitionRetention::RetainInCatalog;
             let removed_providers =
                 Self::removed_extension_providers_from_manifest(&removal_manifest)?;
             let cleanup_requirements = removal_manifest.removal_cleanup_requirements().to_vec();
@@ -1529,19 +1601,22 @@ impl ExtensionLifecycleManager {
             if (!cleanup_requirements.is_empty() || removes_connectable_channel)
                 && authenticated_actor_user_id.is_none()
             {
-                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
                     reason: "extension removal cleanup requires an authenticated actor".to_string(),
                 });
             }
             if !removed_providers.is_empty() && authenticated_actor_user_id.is_none() {
-                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
                     reason: "extension credential cleanup requires an authenticated actor"
                         .to_string(),
                 });
             }
             if installed_manifest.is_none() {
+                // Durable cleanup tombstone: retain the definition so an
+                // interrupted cleanup stays retryable without the catalog and
+                // fresh imports stay blocked until removal converges.
                 self.installation_store
-                    .upsert_manifest(removal_manifest)
+                    .persist_removal_tombstone(removal_manifest)
                     .await
                     .map_err(map_extension_installation_error)?;
             }
@@ -1573,7 +1648,7 @@ impl ExtensionLifecycleManager {
                 // extensions fill the slot (runtime composition in
                 // `build_reborn_runtime`, the channel-connection test bundle).
                 let Some(channel_connection) = self.channel_disconnect_slot.get() else {
-                    return Err(ProductSurfaceFailure::Transient {
+                    return Err(ProductOperationFailure::Transient {
                         reason: format!(
                             "channel connection cleanup is unavailable for extension {}: no \
                              channel connection service is composed; retry removal once the \
@@ -1593,7 +1668,7 @@ impl ExtensionLifecycleManager {
                         extension_id.as_str(),
                     )
                     .await
-                    .map_err(|error| ProductSurfaceFailure::Transient {
+                    .map_err(|error| ProductOperationFailure::Transient {
                         reason: format!(
                             "channel connection cleanup did not complete for extension {}: {:?}; retry removal",
                             extension_id.as_str(),
@@ -1649,7 +1724,7 @@ impl ExtensionLifecycleManager {
             // `remove_locked` retains the manifest as a cleanup tombstone. A
             // membership-only removal leaves the shared installation in place,
             // so its manifest remains too.
-            if self.search_installation(&extension_id).await?.is_none() {
+            if !retain_definition && self.search_installation(&extension_id).await?.is_none() {
                 match self.installation_store.delete_manifest(&extension_id).await {
                     Ok(()) | Err(ExtensionInstallationError::ManifestNotFound { .. }) => {}
                     Err(error) => return Err(map_extension_installation_error(error)),
@@ -1675,7 +1750,7 @@ impl ExtensionLifecycleManager {
     /// credential cleanup.
     fn removed_extension_providers_from_manifest(
         manifest_record: &ExtensionManifestRecord,
-    ) -> Result<Vec<AuthProviderId>, ProductSurfaceFailure> {
+    ) -> Result<Vec<AuthProviderId>, ProductOperationFailure> {
         let manifest = manifest_record
             .manifest()
             .clone()
@@ -1687,11 +1762,11 @@ impl ExtensionLifecycleManager {
 
     fn removed_extension_providers_from_requirements(
         requirements: Vec<RuntimeCredentialAuthRequirement>,
-    ) -> Result<Vec<AuthProviderId>, ProductSurfaceFailure> {
+    ) -> Result<Vec<AuthProviderId>, ProductOperationFailure> {
         let mut providers = Vec::new();
         for requirement in requirements {
             let provider = AuthProviderId::new(requirement.provider.as_str()).map_err(|_| {
-                ProductSurfaceFailure::InvalidBindingRequest {
+                ProductOperationFailure::InvalidBindingRequest {
                     reason: "extension credential provider is invalid for cleanup".to_string(),
                 }
             })?;
@@ -1713,7 +1788,7 @@ impl ExtensionLifecycleManager {
         removed_extension_id: &ExtensionId,
         removed_providers: &[AuthProviderId],
         caller: &UserId,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         let Some(cleanup) = self.credential_cleanup.as_ref() else {
             return Ok(());
         };
@@ -1734,7 +1809,7 @@ impl ExtensionLifecycleManager {
                 extension_id = %removed_extension_id,
                 "removed extension id could not form an auth lifecycle package ref"
             );
-            ProductSurfaceFailure::InvalidBindingRequest {
+            ProductOperationFailure::InvalidBindingRequest {
                 reason: "extension id is not a valid lifecycle package ref for cleanup".to_string(),
             }
         })?;
@@ -1754,7 +1829,7 @@ impl ExtensionLifecycleManager {
                     extension_id = %removed_extension_id,
                     "extension removal extension-keyed cleanup failed"
                 );
-                ProductSurfaceFailure::Transient {
+                ProductOperationFailure::Transient {
                     reason: "extension credential cleanup did not complete; retry removal"
                         .to_string(),
                 }
@@ -1765,7 +1840,7 @@ impl ExtensionLifecycleManager {
                 quarantined_accounts = report.quarantined_accounts.len(),
                 "extension removal extension-keyed cleanup was incomplete"
             );
-            return Err(ProductSurfaceFailure::Transient {
+            return Err(ProductOperationFailure::Transient {
                 reason: "extension credential cleanup was incomplete; retry removal".to_string(),
             });
         }
@@ -1775,7 +1850,7 @@ impl ExtensionLifecycleManager {
         let providers_still_in_use = self
             .providers_still_in_use(removed_extension_id, caller)
                 .await
-                .ok_or_else(|| ProductSurfaceFailure::Transient {
+                .ok_or_else(|| ProductOperationFailure::Transient {
                     reason: "extension credential cleanup could not determine whether credentials are shared; retry removal"
                         .to_string(),
                 })?;
@@ -1797,7 +1872,7 @@ impl ExtensionLifecycleManager {
                     %provider,
                     "extension removal credential cleanup failed"
                 );
-                ProductSurfaceFailure::Transient {
+                ProductOperationFailure::Transient {
                     reason: format!(
                         "extension credential cleanup did not complete for provider {provider}; retry removal"
                     ),
@@ -1809,7 +1884,7 @@ impl ExtensionLifecycleManager {
                     quarantined_accounts = report.quarantined_accounts.len(),
                     "extension removal credential cleanup was incomplete"
                 );
-                return Err(ProductSurfaceFailure::Transient {
+                return Err(ProductOperationFailure::Transient {
                     reason: format!(
                         "extension credential cleanup was incomplete for provider {provider}; retry removal"
                     ),
@@ -1896,7 +1971,7 @@ impl ExtensionLifecycleManager {
     async fn remove_orphaned_runtime_state(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         let lifecycle_package = {
             self.lifecycle_service
                 .lock()
@@ -1927,7 +2002,10 @@ impl ExtensionLifecycleManager {
             }
             return Err(error);
         }
-        if let Err(error) = self.delete_materialized_extension_files(extension_id).await {
+        let package_for_cleanup = lifecycle_package.as_ref().or(active_package.as_ref());
+        if let Some(package) = package_for_cleanup
+            && let Err(error) = self.delete_materialized_extension_files(package).await
+        {
             let restore_package = lifecycle_package.as_ref().or(active_package.as_ref());
             if let Some(package) = restore_package {
                 let previous_state = if active_package.is_some() {
@@ -1960,11 +2038,28 @@ impl ExtensionLifecycleManager {
         Ok(())
     }
 
+    /// Release a held final-member reservation by restoring the pre-remove
+    /// installation aggregate; a no-op when no reservation was taken (tenant
+    /// rows have no membership lease).
+    async fn restore_reserved_membership(
+        &self,
+        reserved: bool,
+        installation: &ExtensionInstallation,
+    ) -> Result<(), ProductOperationFailure> {
+        if !reserved {
+            return Ok(());
+        }
+        self.installation_store
+            .upsert_installation(installation.clone())
+            .await
+            .map_err(map_extension_installation_error)
+    }
+
     async fn remove_locked(
         &self,
         package_ref: LifecyclePackageRef,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
         let installation = self
             .load_installation(&extension_id, &installation_id)
@@ -1977,24 +2072,61 @@ impl ExtensionLifecycleManager {
             "remove",
         )?;
         // Membership remove (#5459 P1 pivot): while other members still hold
-        // the tool, the caller just LEAVES the member set — a single row
-        // rewrite, no teardown. Only the last holder's remove (or the
-        // operator removing a tenant-shared tool) tears the install down.
-        if let RemoveDecision::LeaveMembers(remaining) =
-            decide_remove(installation.owner(), caller)?
-        {
-            self.installation_store
-                .upsert_installation(installation.with_owner(remaining))
+        // the tool, the caller just LEAVES the member set — a single-row
+        // membership tombstone, no teardown. Only the last holder's remove
+        // (or the operator removing a tenant-shared tool) tears the install
+        // down. The store decides final-vs-not atomically under its mutation
+        // lease; `decide_remove` stays as the pure policy pre-check.
+        decide_remove(installation.owner(), caller)?;
+        let mut membership_reserved = false;
+        if !installation.owner().is_tenant() {
+            match self
+                .installation_store
+                .deactivate_membership(&installation_id, caller)
                 .await
-                .map_err(map_extension_installation_error)?;
-            return Ok(response_with_payload(
-                Some(package_ref),
-                InstallationState::Removed,
-                LifecycleProductPayload::ExtensionRemove { removed: true },
-            ));
+                .map_err(map_extension_installation_error)?
+            {
+                MembershipDeactivation::MembershipRemoved(updated) => {
+                    if updated
+                        .owner()
+                        .members()
+                        .is_some_and(|members| members.contains(caller))
+                    {
+                        return Err(ProductOperationFailure::Transient {
+                            reason: format!(
+                                "extension {} membership store returned an invalid owner projection",
+                                extension_id.as_str()
+                            ),
+                        });
+                    }
+                    return Ok(response_with_payload(
+                        Some(package_ref),
+                        InstallationState::Removed,
+                        LifecycleProductPayload::ExtensionRemove { removed: true },
+                    ));
+                }
+                MembershipDeactivation::FinalMemberReserved => {
+                    membership_reserved = true;
+                }
+            }
         }
         let previous_state = installation.activation_state();
-        let lifecycle_package = self.lifecycle_package(&extension_id).await?;
+        let lifecycle_package = match self.lifecycle_package(&extension_id).await {
+            Ok(package) => package,
+            Err(error) => {
+                if let Err(restore_error) = self
+                    .restore_reserved_membership(membership_reserved, &installation)
+                    .await
+                {
+                    return Err(compensation_failure(
+                        "extension remove could not load the lifecycle package and membership reservation restore failed",
+                        error,
+                        restore_error,
+                    ));
+                }
+                return Err(error);
+            }
+        };
         // Hosted-MCP discovery can republish a package that differs from the
         // lifecycle-registered package; unpublish the active-registry package
         // and fall back only when nothing is currently active.
@@ -2009,9 +2141,30 @@ impl ExtensionLifecycleManager {
             .set_activation_state(&installation_id, ExtensionActivationState::Disabled)
             .await
         {
-            return Err(map_extension_installation_error(error));
+            let original_error = map_extension_installation_error(error);
+            if let Err(restore_error) = self
+                .restore_reserved_membership(membership_reserved, &installation)
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to disable activation and membership reservation restore failed",
+                    original_error,
+                    restore_error,
+                ));
+            }
+            return Err(original_error);
         }
         if let Err(error) = self.remove_lifecycle_package(&extension_id).await {
+            if let Err(restore_error) = self
+                .restore_reserved_membership(membership_reserved, &installation)
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to remove lifecycle package and membership reservation restore failed",
+                    error,
+                    restore_error,
+                ));
+            }
             if let Err(cleanup_error) = self
                 .installation_store
                 .set_activation_state(&installation_id, previous_state)
@@ -2030,6 +2183,16 @@ impl ExtensionLifecycleManager {
             .active_extensions
             .unpublish(&active_package_for_unpublish)
         {
+            if let Err(restore_error) = self
+                .restore_reserved_membership(membership_reserved, &installation)
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to unpublish active package and membership reservation restore failed",
+                    error,
+                    restore_error,
+                ));
+            }
             if let Err(restore_error) = self
                 .restore_lifecycle_package(&lifecycle_package, previous_state)
                 .await
@@ -2060,6 +2223,16 @@ impl ExtensionLifecycleManager {
             .await
         {
             let original_error = map_extension_installation_error(error);
+            if let Err(restore_error) = self
+                .restore_reserved_membership(membership_reserved, &installation)
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to delete installation and membership reservation restore failed",
+                    original_error,
+                    restore_error,
+                ));
+            }
             if let Err(restore_error) = self
                 .restore_lifecycle_package(&lifecycle_package, previous_state)
                 .await
@@ -2094,7 +2267,7 @@ impl ExtensionLifecycleManager {
             return Err(original_error);
         }
         if let Err(error) = self
-            .delete_materialized_extension_files(&extension_id)
+            .delete_materialized_extension_files(&lifecycle_package)
             .await
         {
             if let Err(restore_error) = self
@@ -2136,10 +2309,10 @@ impl ExtensionLifecycleManager {
     async fn register_lifecycle_package(
         &self,
         package: &ExtensionPackage,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         let mut lifecycle = self.lifecycle_service.lock().await;
         if lifecycle.registry().get_extension(&package.id).is_some() {
-            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
                 reason: format!("extension {} is already installed", package.id.as_str()),
             });
         }
@@ -2148,6 +2321,21 @@ impl ExtensionLifecycleManager {
             .await
             .map_err(map_extension_error)?;
         Ok(())
+    }
+
+    /// Repair the in-memory lifecycle registry from the durable aggregate.
+    /// Admission and restart may legitimately leave a Pending or Ready row
+    /// present before its package has been registered in this process.
+    async fn ensure_lifecycle_package_registered_from_aggregate(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<(), ProductOperationFailure> {
+        ensure_lifecycle_package_registered(
+            &self.installation_store,
+            &self.lifecycle_service,
+            extension_id,
+        )
+        .await
     }
 
     /// Fail-closed id check for the catalog import path (#5499): reject a
@@ -2159,7 +2347,7 @@ impl ExtensionLifecycleManager {
         &self,
         extension_id: &ExtensionId,
         installation_id: &ExtensionInstallationId,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         if self
             .installation_store
             .get_installation(installation_id)
@@ -2167,7 +2355,7 @@ impl ExtensionLifecycleManager {
             .map_err(map_extension_installation_error)?
             .is_some()
         {
-            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
                 reason: format!("extension {} is already installed", extension_id.as_str()),
             });
         }
@@ -2178,7 +2366,7 @@ impl ExtensionLifecycleManager {
             .map_err(map_extension_installation_error)?
             .is_some()
         {
-            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
                 reason: format!(
                     "extension {} is already installed; if a previous removal was interrupted, run remove again to finish its cleanup, then retry the import",
                     extension_id.as_str()
@@ -2192,17 +2380,17 @@ impl ExtensionLifecycleManager {
         &self,
         extension_id: &ExtensionId,
         installation_id: &ExtensionInstallationId,
-    ) -> Result<ExtensionInstallation, ProductSurfaceFailure> {
+    ) -> Result<ExtensionInstallation, ProductOperationFailure> {
         let installation = self
             .installation_store
             .get_installation(installation_id)
             .await
             .map_err(map_extension_installation_error)?
-            .ok_or_else(|| ProductSurfaceFailure::InvalidBindingRequest {
+            .ok_or_else(|| ProductOperationFailure::InvalidBindingRequest {
                 reason: format!("extension {} is not installed", extension_id.as_str()),
             })?;
         if installation.extension_id() != extension_id {
-            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
                 reason: format!(
                     "installation {} does not belong to extension {}",
                     installation_id.as_str(),
@@ -2216,21 +2404,14 @@ impl ExtensionLifecycleManager {
     async fn lifecycle_package(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<ExtensionPackage, ProductSurfaceFailure> {
-        let lifecycle = self.lifecycle_service.lock().await;
-        lifecycle
-            .registry()
-            .get_extension(extension_id)
-            .cloned()
-            .ok_or_else(|| ProductSurfaceFailure::InvalidBindingRequest {
-                reason: format!("extension {} is not installed", extension_id.as_str()),
-            })
+    ) -> Result<ExtensionPackage, ProductOperationFailure> {
+        lifecycle_package_from(&self.lifecycle_service, extension_id).await
     }
 
     async fn enable_lifecycle_package(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         self.lifecycle_service
             .lock()
             .await
@@ -2242,7 +2423,7 @@ impl ExtensionLifecycleManager {
     async fn disable_lifecycle_package(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         self.lifecycle_service
             .lock()
             .await
@@ -2254,7 +2435,7 @@ impl ExtensionLifecycleManager {
     async fn remove_lifecycle_package(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         self.lifecycle_service
             .lock()
             .await
@@ -2266,7 +2447,7 @@ impl ExtensionLifecycleManager {
     async fn rollback_lifecycle_install(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         let mut lifecycle = self.lifecycle_service.lock().await;
         lifecycle
             .remove(extension_id)
@@ -2278,7 +2459,7 @@ impl ExtensionLifecycleManager {
         &self,
         package: &ExtensionPackage,
         previous_state: ExtensionActivationState,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         let mut lifecycle = self.lifecycle_service.lock().await;
         lifecycle
             .install(package.clone())
@@ -2304,7 +2485,7 @@ impl ExtensionLifecycleManager {
     async fn restore_installation(
         &self,
         installation: &ExtensionInstallation,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         self.installation_store
             .upsert_installation(installation.clone())
             .await
@@ -2315,7 +2496,7 @@ impl ExtensionLifecycleManager {
         &self,
         package: &ExtensionPackage,
         previous_state: ExtensionActivationState,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         if previous_state == ExtensionActivationState::Enabled {
             self.active_extensions.publish(package)?;
         }
@@ -2325,57 +2506,109 @@ impl ExtensionLifecycleManager {
     async fn persist_install_plan(
         &self,
         plan: ExtensionInstallPlan,
-    ) -> Result<(), ProductSurfaceFailure> {
-        let extension_id = plan.installation.extension_id().clone();
-        if let Err(error) = self
-            .installation_store
-            .upsert_manifest(plan.manifest_record)
+    ) -> Result<(), ProductOperationFailure> {
+        // One merged record commits the definition and installation together,
+        // so a failed install leaves nothing behind — the manifest-orphan
+        // compensation the old two-write sequence needed no longer exists.
+        self.installation_store
+            .upsert_manifest_and_installation(plan.manifest_record, plan.installation)
             .await
-        {
-            return Err(map_extension_installation_error(error));
-        }
-        if let Err(error) = self
-            .installation_store
-            .upsert_installation(plan.installation)
-            .await
-        {
-            if let Err(cleanup_error) = self.installation_store.delete_manifest(&extension_id).await
-            {
-                // Fail loud: the installation upsert failed *and* the manifest
-                // rollback failed, so a manifest is now orphaned with no
-                // installation. `ensure_not_installed` treats any manifest as
-                // installed, which would block every retry — surface both
-                // failures so the orphan is visible rather than silently
-                // poisoning future installs.
-                return Err(compensation_failure(
-                    "extension install persistence failed and manifest rollback failed",
-                    map_extension_installation_error(error),
-                    map_extension_installation_error(cleanup_error),
-                ));
-            }
-            return Err(map_extension_installation_error(error));
-        }
-        Ok(())
+            .map_err(map_extension_installation_error)
     }
 
     async fn delete_materialized_extension_files(
         &self,
-        extension_id: &ExtensionId,
-    ) -> Result<(), ProductSurfaceFailure> {
-        let Ok(extension_root) =
-            VirtualPath::new(format!("/system/extensions/{}", extension_id.as_str()))
-        else {
+        package: &ExtensionPackage,
+    ) -> Result<(), ProductOperationFailure> {
+        let Ok(extension_root) = package.materialized_root() else {
             return Ok(());
         };
-        match self.filesystem.delete(&extension_root).await {
+        match self.filesystem.delete(extension_root).await {
             Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
             Err(error) => {
-                tracing::debug!(%error, %extension_id, "extension file removal failed");
-                Err(ProductSurfaceFailure::Transient {
+                tracing::debug!(%error, extension_id = %package.id, "extension file removal failed");
+                Err(ProductOperationFailure::Transient {
                     reason: "failed to remove extension files; retry removal".to_string(),
                 })
             }
         }
+    }
+}
+
+/// Shared with [`crate::hosted_mcp_preparation::HostedMcpPreparationService`],
+/// which repairs the same in-memory lifecycle registry from the same durable
+/// aggregate before hosted-MCP registration proceeds.
+pub(crate) async fn lifecycle_package_from(
+    lifecycle_service: &Arc<Mutex<ExtensionLifecycleService>>,
+    extension_id: &ExtensionId,
+) -> Result<ExtensionPackage, ProductOperationFailure> {
+    lifecycle_service
+        .lock()
+        .await
+        .registry()
+        .get_extension(extension_id)
+        .cloned()
+        .ok_or_else(|| ProductOperationFailure::InvalidBindingRequest {
+            reason: format!("extension {} is not installed", extension_id.as_str()),
+        })
+}
+
+/// Shared with [`crate::hosted_mcp_preparation::HostedMcpPreparationService`].
+/// See [`ExtensionLifecycleManager::ensure_lifecycle_package_registered_from_aggregate`].
+pub(crate) async fn ensure_lifecycle_package_registered(
+    installation_store: &Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
+    lifecycle_service: &Arc<Mutex<ExtensionLifecycleService>>,
+    extension_id: &ExtensionId,
+) -> Result<(), ProductOperationFailure> {
+    let record = installation_store
+        .get_manifest(extension_id)
+        .await
+        .map_err(map_extension_installation_error)?
+        .ok_or_else(|| ProductOperationFailure::InvalidBindingRequest {
+            reason: format!(
+                "extension {} has no installed manifest",
+                extension_id.as_str()
+            ),
+        })?;
+    // This repair path rebuilds the in-memory package from the durable
+    // resolved contract, so a runtime step that persisted a refreshed
+    // capability catalog becomes visible to the registry.
+    //
+    // Skip packages whose loader supplied a runtime-only inbound adapter: that
+    // adapter is not represented in the durable contract, so rebuilding one of
+    // these would drop it. Every other package needs the rebuild to pick up
+    // refreshed capabilities and credentials.
+    let current_package = lifecycle_service
+        .lock()
+        .await
+        .registry()
+        .get_extension(extension_id)
+        .cloned();
+    if current_package
+        .as_ref()
+        .is_some_and(package_declares_inbound_product_adapter)
+    {
+        return Ok(());
+    }
+    let manifest: ironclaw_extensions::ExtensionManifest = record
+        .manifest()
+        .clone()
+        .try_into()
+        .map_err(map_extension_error)?;
+    let package = crate::generic_host::rebuild_package_from_resolved(
+        manifest,
+        record.resolved(),
+        extension_id.as_str(),
+    )
+    .map_err(|reason| ProductOperationFailure::InvalidBindingRequest { reason })?;
+    let mut lifecycle = lifecycle_service.lock().await;
+    match lifecycle.registry().get_extension(extension_id) {
+        None => lifecycle
+            .install(package)
+            .await
+            .map_err(map_extension_error),
+        Some(current) if current == &package => Ok(()),
+        Some(_) => lifecycle.update(package).await.map_err(map_extension_error),
     }
 }
 
@@ -2392,7 +2625,7 @@ impl crate::ChannelConfigReactivation for ExtensionLifecycleManager {
         &self,
         extension_id: &ExtensionId,
     ) -> Result<(), crate::ChannelConfigReactivationError> {
-        let result: Result<(), ProductSurfaceFailure> = async {
+        let result: Result<(), ProductOperationFailure> = async {
             let _operation_guard = self.operation_lock.lock().await;
             let installations = self
                 .installation_store
@@ -2426,12 +2659,6 @@ impl crate::ChannelConfigReactivation for ExtensionLifecycleManager {
         .await;
         result.map_err(|error| crate::ChannelConfigReactivationError::new(error.to_string()))
     }
-}
-
-struct HostedMcpDiscoveryRequest {
-    base_package: ExtensionPackage,
-    scope: ResourceScope,
-    runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
 }
 
 fn response_with_payload(
@@ -2483,10 +2710,10 @@ fn activation_success_response(
     response
 }
 
-fn activation_credentials_incomplete_response(
+pub(crate) fn activation_credentials_incomplete_response(
     package_ref: LifecyclePackageRef,
     missing: Vec<RuntimeCredentialAuthRequirement>,
-) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+) -> Result<LifecycleProductResponse, ProductOperationFailure> {
     let blockers = missing
         .iter()
         .map(|requirement| {
@@ -2577,49 +2804,49 @@ fn activation_success_message(
 // no backend mounts the generic proof-code redeem route — the first
 // inbound channel must mount one alongside this requirement or its submit
 // will 404 (see PAIRING_REDEEM_PATH in the webui pairing-api.js).
-/// The discovery call's network authority: the declared hosted-MCP server
-/// host only (the same ceiling the dispatch pipeline derives for the
-/// connection-template capability).
-fn hosted_mcp_discovery_network_policy(
-    package: &ExtensionPackage,
-) -> Option<ironclaw_host_api::NetworkPolicy> {
-    let ironclaw_extensions::ExtensionRuntime::Mcp { url: Some(url), .. } =
-        &package.manifest.runtime
-    else {
-        return None;
-    };
-    let parsed = url::Url::parse(url).ok()?;
-    let host = parsed.host_str()?;
-    Some(ironclaw_host_api::NetworkPolicy {
-        allowed_targets: vec![ironclaw_host_api::NetworkTargetPattern {
-            scheme: Some(ironclaw_host_api::NetworkScheme::Https),
-            host_pattern: host.to_string(),
-            port: parsed.port(),
-        }],
-        deny_private_ip_ranges: true,
-        max_egress_bytes: None,
-    })
-}
-
-fn generic_host_error(error: crate::LifecycleError) -> ProductSurfaceFailure {
-    ProductSurfaceFailure::InvalidBindingRequest {
+fn generic_host_error(error: crate::LifecycleError) -> ProductOperationFailure {
+    ProductOperationFailure::InvalidBindingRequest {
         reason: format!("generic extension host rejected the activation: {error}"),
     }
 }
 
-fn map_channel_config_error(error: crate::ChannelConfigError) -> ProductSurfaceFailure {
+/// A closed import-decode limiter becomes a retryable boundary failure.
+///
+/// Named rather than inlined at the `map_err` so the mapping is reachable from
+/// a test. No *production* path closes [`Self::import_decode_semaphore`] — it
+/// lives as long as the manager — so the acquire error is unreachable through
+/// `import_bundle` itself; an inline closure would therefore be a permanently
+/// uncovered branch, which the changed-line coverage gate can only accept as a
+/// standing exemption. Extracting it is the tactic CHECKLIST's WS2 coverage
+/// note prescribes for exactly this shape. A test may still close a
+/// *standalone* [`Semaphore`] to mint a real [`AcquireError`], which is how
+/// this mapping is exercised without weakening the production guarantee.
+///
+/// The `AcquireError` is logged rather than discarded: it is the only signal
+/// distinguishing "limiter shut down" from any other transient failure, and the
+/// `reason` that crosses the boundary is deliberately fixed text. Both halves —
+/// the fixed `reason` and the logged cause — are asserted, so deleting the
+/// event or dropping `%error` fails a test rather than passing silently.
+fn map_import_decode_acquire_error(error: AcquireError) -> ProductOperationFailure {
+    tracing::debug!(%error, "import decode limiter is closed");
+    ProductOperationFailure::Transient {
+        reason: "import decode limiter is closed".to_string(),
+    }
+}
+
+fn map_channel_config_error(error: crate::ChannelConfigError) -> ProductOperationFailure {
     tracing::warn!(error = %error, "effective extension configuration resolution failed");
-    ProductSurfaceFailure::Transient {
+    ProductOperationFailure::Transient {
         reason: "effective extension configuration is unavailable".to_string(),
     }
 }
 
-fn extension_ids_from_package_ref(
+pub(crate) fn extension_ids_from_package_ref(
     package_ref: &LifecyclePackageRef,
-) -> Result<(ExtensionId, ExtensionInstallationId), ProductSurfaceFailure> {
+) -> Result<(ExtensionId, ExtensionInstallationId), ProductOperationFailure> {
     package_ref.require_kind(LifecyclePackageKind::Extension)?;
     let extension_id = ExtensionId::new(package_ref.id.as_str().to_string()).map_err(|error| {
-        ProductSurfaceFailure::InvalidBindingRequest {
+        ProductOperationFailure::InvalidBindingRequest {
             reason: error.to_string(),
         }
     })?;
@@ -2664,13 +2891,56 @@ fn installation_state_for_activation(
     }
 }
 
+/// Installation state for a durable installation record.
+///
+/// A package whose capabilities have not been resolved yet carries no
+/// capabilities, so it publishes no tools — see `declares_tools`. That is
+/// the whole of its "not ready" meaning, and it is derived from the package
+/// rather than stored as a separate flag every extension has to carry. A
+/// stored flag here was read for *every* installation, which is how a
+/// package with nothing left to discover could still be pinned out of
+/// `Active`.
+/// Whether a package has anything it can actually serve once activated:
+/// a model-visible capability, a channel surface, or hooks.
+///
+/// A package whose capabilities are supplied by a later runtime step declares
+/// none until that step completes. Deriving this from the package is what
+/// replaces a stored readiness flag that every installation used to carry.
+/// It is deliberately not a tool count alone — a channel-only extension
+/// declares no tools and must still activate.
+pub(crate) fn package_has_activatable_surface(package: &ExtensionPackage) -> bool {
+    !crate::lifecycle_restore::package_visible_capability_ids(package).is_empty()
+        || package_declares_inbound_product_adapter(package)
+        || !package.manifest.hooks.is_empty()
+}
+
+fn installation_state_for_installation(
+    installation: &ExtensionInstallation,
+    has_activatable_surface: bool,
+    has_last_error: bool,
+) -> InstallationState {
+    // Nothing to serve yet: report the installed checkpoint rather than
+    // Active. The durable activation intent is unconditionally `Enabled`, so
+    // without this the caller would be told a package is Active while it
+    // publishes nothing. Mirrors the activation-side guard in
+    // `activate_inner`; a recorded failure still surfaces as `Failed`.
+    if !has_activatable_surface && !has_last_error {
+        return InstallationState::Installed;
+    }
+    installation_state_for_activation(installation.activation_state(), has_last_error)
+}
+
 async fn search_installation_phase(
     extension: &AvailableExtensionPackage,
     installation: &ExtensionInstallation,
     credential_gate: Option<&dyn ExtensionActivationCredentialGate>,
     has_last_error: bool,
-) -> Result<InstallationState, ProductSurfaceFailure> {
-    let phase = installation_state_for_activation(installation.activation_state(), has_last_error);
+) -> Result<InstallationState, ProductOperationFailure> {
+    let phase = installation_state_for_installation(
+        installation,
+        package_has_activatable_surface(&extension.package),
+        has_last_error,
+    );
     if phase == InstallationState::Active
         && !package_runtime_credential_auth_requirements(&extension.package).is_empty()
         && !search_credentials_configured(extension, credential_gate).await?
@@ -2689,7 +2959,7 @@ async fn search_installation_phase(
 async fn search_credentials_configured(
     extension: &AvailableExtensionPackage,
     credential_gate: Option<&dyn ExtensionActivationCredentialGate>,
-) -> Result<bool, ProductSurfaceFailure> {
+) -> Result<bool, ProductOperationFailure> {
     let Some(credential_gate) = credential_gate else {
         return Ok(false);
     };
@@ -2767,10 +3037,10 @@ fn extension_search_has_installed_external_channel_result(
     })
 }
 
-fn map_account_setup_error(error: ExtensionAccountSetupError) -> ProductSurfaceFailure {
+fn map_account_setup_error(error: ExtensionAccountSetupError) -> ProductOperationFailure {
     match error {
         ExtensionAccountSetupError::HostUnavailable { extension_id } => {
-            ProductSurfaceFailure::InvalidBindingRequest {
+            ProductOperationFailure::InvalidBindingRequest {
                 reason: format!(
                     "the account setup host for extension {} is not enabled on this deployment",
                     extension_id.as_str()
@@ -2786,7 +3056,7 @@ fn map_account_setup_error(error: ExtensionAccountSetupError) -> ProductSurfaceF
                 error = %source,
                 "extension account connection status read failed during activation"
             );
-            ProductSurfaceFailure::Transient {
+            ProductOperationFailure::Transient {
                 reason: format!(
                     "account connection status is temporarily unavailable for extension {}",
                     extension_id.as_str()
@@ -2796,31 +3066,34 @@ fn map_account_setup_error(error: ExtensionAccountSetupError) -> ProductSurfaceF
     }
 }
 
-fn map_extension_error(error: ExtensionError) -> ProductSurfaceFailure {
+pub(crate) fn map_extension_error(error: ExtensionError) -> ProductOperationFailure {
     match error {
         ExtensionError::Filesystem(_) | ExtensionError::LifecycleEventSink { .. } => {
-            ProductSurfaceFailure::Transient {
+            ProductOperationFailure::Transient {
                 reason: error.to_string(),
             }
         }
-        _ => ProductSurfaceFailure::InvalidBindingRequest {
+        _ => ProductOperationFailure::InvalidBindingRequest {
             reason: error.to_string(),
         },
     }
 }
 
-fn map_extension_installation_error(error: ExtensionInstallationError) -> ProductSurfaceFailure {
+pub(crate) fn map_extension_installation_error(
+    error: ExtensionInstallationError,
+) -> ProductOperationFailure {
     match error {
         // #4091: a store IO/backend outage is retryable backend trouble, not a
         // malformed lifecycle request — surface it in the same Transient class
         // credential-cleanup failures already use so callers retry the
         // operation instead of abandoning it.
-        error @ ExtensionInstallationError::StoreUnavailable { .. } => {
-            ProductSurfaceFailure::Transient {
+        error @ (ExtensionInstallationError::StoreUnavailable { .. }
+        | ExtensionInstallationError::MembershipMutationInProgress { .. }) => {
+            ProductOperationFailure::Transient {
                 reason: error.to_string(),
             }
         }
-        error => ProductSurfaceFailure::InvalidBindingRequest {
+        error => ProductOperationFailure::InvalidBindingRequest {
             reason: error.to_string(),
         },
     }
@@ -2828,7 +3101,7 @@ fn map_extension_installation_error(error: ExtensionInstallationError) -> Produc
 
 fn project_installation_owners<I>(
     installations: I,
-) -> Result<std::collections::BTreeMap<ExtensionId, InstallationOwner>, ProductSurfaceFailure>
+) -> Result<std::collections::BTreeMap<ExtensionId, InstallationOwner>, ProductOperationFailure>
 where
     I: IntoIterator<Item = ExtensionInstallation>,
 {
@@ -2841,7 +3114,7 @@ where
             .insert(extension_id.clone(), installation.owner().clone())
             .is_some()
         {
-            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
                 reason: format!(
                     "duplicate extension id in lifecycle owner projection: {}",
                     extension_id.as_str()
@@ -2857,9 +3130,9 @@ fn ensure_caller_may_mutate_tenant_installation(
     caller: &UserId,
     tenant_operator: &UserId,
     operation: &str,
-) -> Result<(), ProductSurfaceFailure> {
+) -> Result<(), ProductOperationFailure> {
     if installation.owner().is_tenant() && caller != tenant_operator {
-        return Err(ProductSurfaceFailure::InvalidBindingRequest {
+        return Err(ProductOperationFailure::InvalidBindingRequest {
             reason: format!(
                 "extension {} is a shared tool; only the tenant admin can {operation} it",
                 installation.extension_id().as_str()
@@ -2869,32 +3142,12 @@ fn ensure_caller_may_mutate_tenant_installation(
     Ok(())
 }
 
-fn hosted_mcp_discovery_error(error: HostedMcpDiscoveryError) -> ProductSurfaceFailure {
-    match error {
-        HostedMcpDiscoveryError::Transient(reason) => ProductSurfaceFailure::Transient {
-            reason: format!("hosted MCP discovery failed: {reason}"),
-        },
-        HostedMcpDiscoveryError::Permanent(reason) => {
-            ProductSurfaceFailure::InvalidBindingRequest {
-                reason: format!("hosted MCP discovery failed: {reason}"),
-            }
-        }
-    }
-}
-
-fn hosted_mcp_changed_during_discovery_error() -> ProductSurfaceFailure {
-    ProductSurfaceFailure::Transient {
-        reason: "extension changed while hosted MCP discovery was running; retry activation"
-            .to_string(),
-    }
-}
-
 fn compensation_failure(
     context: &str,
     original: impl std::fmt::Display,
     compensation: impl std::fmt::Display,
-) -> ProductSurfaceFailure {
-    ProductSurfaceFailure::Transient {
+) -> ProductOperationFailure {
+    ProductOperationFailure::Transient {
         reason: format!(
             "{context}; original error: {original}; compensation error: {compensation}"
         ),
@@ -2911,12 +3164,348 @@ mod tests {
         ManifestSource, SharedExtensionRegistry,
     };
     use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{HostPortCatalog, InvocationId, ResourceScope, UserId, VirtualPath};
-    use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef};
+    use ironclaw_host_api::{
+        host_port::HostPortCatalog,
+        ids::{InvocationId, UserId},
+        path::VirtualPath,
+        resource::ResourceScope,
+    };
+    use ironclaw_product_contracts::package_lifecycle::{
+        LifecyclePackageKind, LifecyclePackageRef,
+    };
     use ironclaw_trust::{HostTrustPolicy, InvalidationBus};
 
     use super::*;
     use crate::{AvailableExtensionAsset, AvailableExtensionAssetContent};
+
+    #[derive(Clone, Default)]
+    struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct SharedLogWriterGuard(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedLogWriterGuard {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogWriter {
+        type Writer = SharedLogWriterGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriterGuard(std::sync::Arc::clone(&self.0))
+        }
+    }
+
+    impl SharedLogWriter {
+        fn contents(&self) -> String {
+            String::from_utf8(
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
+            )
+            .expect("tracing output is UTF-8")
+        }
+    }
+
+    /// The import limiter's acquire failure is retryable, and the mapping runs
+    /// against a real `AcquireError` rather than a stand-in — a closed
+    /// semaphore is the only thing that produces one.
+    ///
+    /// Both halves of the mapper's contract are asserted together, because the
+    /// doc comment claims the debug event is the *only* signal distinguishing a
+    /// shut-down limiter from any other transient failure:
+    ///
+    /// - the `reason` crossing the boundary is deliberately **fixed text**, so
+    ///   the `AcquireError` never leaks into a caller-visible string; and
+    /// - the cause is **not discarded** — it reaches the debug event, where an
+    ///   operator can tell the two apart.
+    ///
+    /// A subscriber has to be installed for the second half to mean anything:
+    /// `tracing` short-circuits on the null dispatcher, so without one the macro
+    /// body never runs and the test could not tell "logged it" from "dropped
+    /// it". Scoped with `with_default` rather than set globally, so parallel
+    /// tests are unaffected. Deleting the event, or dropping `%error` from it,
+    /// now fails here rather than passing silently.
+    #[tokio::test]
+    async fn a_closed_import_decode_limiter_is_retryable_and_logs_the_acquire_error() {
+        let semaphore = Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES);
+        semaphore.close();
+        let error = semaphore
+            .acquire()
+            .await
+            .expect_err("a closed semaphore hands out no permits");
+        let rendered_cause = error.to_string();
+
+        let logs = SharedLogWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(logs.clone())
+            .finish();
+
+        let failure = tracing::subscriber::with_default(subscriber, || {
+            map_import_decode_acquire_error(error)
+        });
+
+        assert_eq!(
+            failure,
+            ProductOperationFailure::Transient {
+                reason: "import decode limiter is closed".to_string(),
+            },
+            "a shut-down limiter must read as retryable, not as a client mistake"
+        );
+
+        let logged = logs.contents();
+        assert!(
+            logged.contains("import decode limiter is closed"),
+            "the event keeps its stable message, got {logged:?}"
+        );
+        assert!(
+            logged.contains(&rendered_cause),
+            "the acquire cause must survive in the log, expected {rendered_cause:?} in {logged:?}"
+        );
+    }
+
+    /// The boundary mappers decide, for every lifecycle failure, whether the
+    /// caller should retry (`Transient`) or fix its request
+    /// (`InvalidBindingRequest`). That classification is the whole contract of
+    /// this layer, so each mapper is pinned on both sides of its own split
+    /// rather than on one representative input.
+    #[test]
+    fn a_corrupt_bundle_is_a_client_mistake_not_a_retryable_failure() {
+        let failure = unzip_extension_bundle_for_product(b"not a zip archive at all")
+            .expect_err("a non-zip payload cannot be unzipped");
+
+        assert!(
+            matches!(
+                failure,
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "a corrupt upload is the caller's to fix, not ours to retry: {failure:?}"
+        );
+    }
+
+    #[test]
+    fn a_generic_host_activation_rejection_is_a_client_mistake() {
+        let failure = generic_host_error(crate::LifecycleError::ActivationHook {
+            reason: "hook refused".to_string(),
+        });
+
+        assert_eq!(
+            failure,
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "generic extension host rejected the activation: activation hook failed: \
+                         hook refused"
+                    .to_string(),
+            },
+            "the host's rejection reason must reach the caller verbatim"
+        );
+    }
+
+    /// Every `ChannelConfigError` collapses to one retryable failure with fixed
+    /// text: the underlying error can name storage internals, so it is logged
+    /// rather than forwarded. Two structurally different inputs are asserted to
+    /// prove the collapse is deliberate and not an artifact of one input.
+    #[test]
+    fn effective_configuration_failures_are_retryable_with_no_detail_leak() {
+        let expected = ProductOperationFailure::Transient {
+            reason: "effective extension configuration is unavailable".to_string(),
+        };
+
+        assert_eq!(
+            map_channel_config_error(crate::ChannelConfigError::Storage {
+                reason: "postgres connection refused on 10.0.0.7".to_string(),
+            }),
+            expected,
+            "storage detail must never cross the product boundary"
+        );
+        assert_eq!(
+            map_channel_config_error(crate::ChannelConfigError::NotInstalled {
+                extension_id: "slack".to_string(),
+            }),
+            expected,
+            "the mapper collapses every configure-surface failure to one class"
+        );
+    }
+
+    /// `LifecyclePackageId` is deliberately looser than `ExtensionId` (it
+    /// accepts uppercase and surrounding whitespace), so a well-formed package
+    /// ref can still carry an id no extension can have. That gap is the only
+    /// way this rejection is reached.
+    #[test]
+    fn a_package_ref_id_that_is_not_a_valid_extension_id_is_rejected() {
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "Slack")
+            .expect("uppercase is a valid lifecycle package id");
+
+        let failure = extension_ids_from_package_ref(&package_ref)
+            .expect_err("uppercase is not a valid extension id");
+
+        assert!(
+            matches!(
+                failure,
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "an unusable extension id is a malformed request: {failure:?}"
+        );
+        assert!(
+            extension_ids_from_package_ref(
+                &LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
+                    .expect("lowercase package ref")
+            )
+            .is_ok(),
+            "the same ref in lowercase must still resolve — the rejection is about the id, \
+             not about the call"
+        );
+    }
+
+    /// A deployment that never enabled the account-setup host is a
+    /// configuration mistake the caller must fix; a status read that failed is
+    /// a retryable outage. Mapping either one to the other would make the
+    /// WebUI either retry forever or give up on a transient blip.
+    #[test]
+    fn account_setup_failures_split_configuration_from_outage() {
+        let extension_id = ExtensionId::new("gmail").expect("valid extension id");
+
+        assert!(
+            matches!(
+                map_account_setup_error(ExtensionAccountSetupError::HostUnavailable {
+                    extension_id: extension_id.clone(),
+                }),
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "a host that is not enabled on this deployment is not retryable"
+        );
+        assert!(
+            matches!(
+                map_account_setup_error(ExtensionAccountSetupError::StatusUnavailable {
+                    extension_id,
+                    source:
+                        ironclaw_product_contracts::account_setup::AccountConnectionStatusError::new(
+                            "backend timed out"
+                        ),
+                }),
+                ProductOperationFailure::Transient { .. }
+            ),
+            "a failed status read is an outage the caller should retry"
+        );
+    }
+
+    #[test]
+    fn extension_errors_split_infrastructure_from_malformed_manifests() {
+        assert!(
+            matches!(
+                map_extension_error(ExtensionError::Filesystem(FilesystemError::MountNotFound {
+                    path: VirtualPath::new("/system/extensions/gmail").expect("valid path"),
+                })),
+                ProductOperationFailure::Transient { .. }
+            ),
+            "a filesystem failure is infrastructure trouble, so it is retryable"
+        );
+        assert!(
+            matches!(
+                map_extension_error(ExtensionError::ManifestParse {
+                    reason: "expected a table".to_string(),
+                }),
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "a manifest the author must fix is not retryable"
+        );
+    }
+
+    /// #4091: a store outage must not read as a malformed request, or callers
+    /// abandon the operation instead of retrying it.
+    #[test]
+    fn installation_store_outages_stay_retryable() {
+        assert!(
+            matches!(
+                map_extension_installation_error(ExtensionInstallationError::StoreUnavailable {
+                    reason: "backend unreachable".to_string(),
+                }),
+                ProductOperationFailure::Transient { .. }
+            ),
+            "a store outage is retryable backend trouble (#4091)"
+        );
+        assert!(
+            matches!(
+                map_extension_installation_error(ExtensionInstallationError::InvalidManifest {
+                    reason: "missing id".to_string(),
+                }),
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "a malformed installation record is the caller's to fix"
+        );
+    }
+
+    /// A shared (tenant-owned) extension may only be mutated by the tenant
+    /// admin. This is an authorization boundary, so it is pinned on both the
+    /// denial and the two ways the check must let a caller through.
+    #[test]
+    fn only_the_tenant_admin_may_mutate_a_shared_installation() {
+        let admin = UserId::new("admin").expect("valid user");
+        let member = UserId::new("member").expect("valid user");
+        let tenant_owned = fixture_installation("shared-tool", InstallationOwner::Tenant);
+        let user_owned =
+            fixture_installation("personal-tool", InstallationOwner::user(member.clone()));
+
+        let denial =
+            ensure_caller_may_mutate_tenant_installation(&tenant_owned, &member, &admin, "remove")
+                .expect_err("a non-admin must not mutate a shared installation");
+        assert!(
+            matches!(
+                denial,
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "the denial is a rejected request, not an outage: {denial:?}"
+        );
+
+        assert!(
+            ensure_caller_may_mutate_tenant_installation(&tenant_owned, &admin, &admin, "remove")
+                .is_ok(),
+            "the tenant admin is exactly who may mutate a shared installation"
+        );
+        assert!(
+            ensure_caller_may_mutate_tenant_installation(&user_owned, &member, &admin, "remove")
+                .is_ok(),
+            "a user-owned installation is not gated on the tenant admin at all"
+        );
+    }
+
+    #[test]
+    fn a_compensation_failure_carries_both_causes_and_stays_retryable() {
+        assert_eq!(
+            compensation_failure("removal rollback failed", "original boom", "rollback boom"),
+            ProductOperationFailure::Transient {
+                reason: "removal rollback failed; original error: original boom; \
+                         compensation error: rollback boom"
+                    .to_string(),
+            },
+            "losing either cause makes a half-applied removal undiagnosable"
+        );
+    }
+
+    fn fixture_installation(id: &str, owner: InstallationOwner) -> ExtensionInstallation {
+        let extension_id = ExtensionId::new(id).expect("valid extension id");
+        ExtensionInstallation::new(
+            ExtensionInstallationId::new(id).expect("valid installation id"),
+            extension_id.clone(),
+            ironclaw_extensions::ExtensionManifestRef::new(extension_id, None),
+            Vec::new(),
+            chrono::Utc::now(),
+            owner,
+        )
+        .expect("installation fixture")
+    }
 
     #[tokio::test]
     async fn lifecycle_manager_installs_activates_and_removes_catalog_package() {
@@ -2947,15 +3536,22 @@ mod tests {
             Arc::new(InvalidationBus::new()),
         );
         let owner = UserId::new("lifecycle-owner").expect("valid owner");
-        let manager = ExtensionLifecycleManager::new(
+        let manager = ExtensionLifecycleManager::new(ExtensionLifecycleManagerDependencies {
             filesystem,
             catalog,
-            installation_store.clone(),
+            installation_store: installation_store.clone(),
             lifecycle_service,
             active_extensions,
-            None,
-            owner.clone(),
-        );
+            credential_cleanup: None,
+            tenant_operator_user_id: owner.clone(),
+            hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
+        });
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("package ref");
 
@@ -2964,10 +3560,7 @@ mod tests {
             .await
             .expect("install succeeds");
         manager
-            .activate_with_prechecked_credentials_for_test(
-                package_ref.clone(),
-                ExtensionActivationMode::Static,
-            )
+            .activate_with_prechecked_credentials_for_test(package_ref.clone())
             .await
             .expect("activate succeeds");
         assert!(
@@ -2999,6 +3592,732 @@ mod tests {
                 .await
                 .expect("list installations")
                 .is_empty()
+        );
+    }
+
+    /// Joining and leaving an existing installation must route through the
+    /// store's membership operations, never an aggregate rewrite — the pin
+    /// for the lost-update fix: a join leaves the installation record
+    /// untouched (same row version), and a non-final leave removes only the
+    /// caller.
+    #[tokio::test]
+    async fn membership_changes_route_through_membership_operations() {
+        let package = fixture_extension_package();
+        let catalog = AvailableExtensionCatalog::from_packages(vec![package]);
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let installation_store = Arc::new(
+            ExtensionInstallationStore::load_at(
+                filesystem.clone(),
+                VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
+                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                crate::product_extension_host_api_contract_registry().expect("host contracts"),
+            )
+            .await
+            .expect("installation store"),
+        );
+        let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let active_extensions = ActiveExtensionPublisher::new(
+            Arc::clone(&active_registry),
+            Arc::new(
+                HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
+                    .expect("trust policy"),
+            ),
+            Arc::new(InvalidationBus::new()),
+        );
+        let alice = UserId::new("alice").expect("valid user");
+        let bob = UserId::new("bob").expect("valid user");
+        let manager = ExtensionLifecycleManager::new(ExtensionLifecycleManagerDependencies {
+            filesystem: Arc::clone(&filesystem),
+            catalog,
+            installation_store: installation_store.clone(),
+            lifecycle_service,
+            active_extensions,
+            credential_cleanup: None,
+            tenant_operator_user_id: alice.clone(),
+            hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
+        });
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("package ref");
+
+        manager
+            .install(package_ref.clone(), &alice)
+            .await
+            .expect("alice installs");
+        let record_root =
+            VirtualPath::new("/system/extensions/.installations/test/v2/installations")
+                .expect("valid prefix");
+        let before = filesystem
+            .query(
+                &record_root,
+                &ironclaw_filesystem::Filter::All,
+                ironclaw_filesystem::Page::first(10),
+            )
+            .await
+            .expect("record query");
+        assert_eq!(before.len(), 1);
+
+        manager
+            .install(package_ref.clone(), &bob)
+            .await
+            .expect("bob joins");
+        let after = filesystem
+            .query(
+                &record_root,
+                &ironclaw_filesystem::Filter::All,
+                ironclaw_filesystem::Page::first(10),
+            )
+            .await
+            .expect("record query");
+        assert_eq!(
+            after[0].version, before[0].version,
+            "a join must not rewrite the installation record"
+        );
+        let installation_id =
+            ExtensionInstallationId::new("fixture").expect("valid installation id");
+        let joined = installation_store
+            .get_installation(&installation_id)
+            .await
+            .expect("installation lookup")
+            .expect("installation present");
+        assert!(
+            joined
+                .owner()
+                .members()
+                .expect("member owned")
+                .contains(&bob)
+        );
+
+        let response = manager
+            .remove(
+                package_ref.clone(),
+                &ResourceScope::local_default(alice.clone(), InvocationId::new())
+                    .expect("valid scope"),
+                Some(&alice),
+            )
+            .await
+            .expect("alice leaves");
+        assert!(matches!(
+            response.payload,
+            Some(LifecycleProductPayload::ExtensionRemove { removed: true })
+        ));
+        let remaining = installation_store
+            .get_installation(&installation_id)
+            .await
+            .expect("installation lookup")
+            .expect("installation still present");
+        assert_eq!(
+            remaining.owner().members().expect("member owned"),
+            &std::collections::BTreeSet::from([bob.clone()]),
+            "a non-final leave removes only the caller"
+        );
+
+        manager
+            .remove(
+                package_ref,
+                &ResourceScope::local_default(bob.clone(), InvocationId::new())
+                    .expect("valid scope"),
+                Some(&bob),
+            )
+            .await
+            .expect("bob's final remove tears down");
+        assert!(
+            installation_store
+                .get_installation(&installation_id)
+                .await
+                .expect("installation lookup")
+                .is_none()
+        );
+    }
+
+    /// Wraps a real [`ExtensionInstallationStore`] so `admit_package_definition`
+    /// (the call `HostedMcpPreparationService::register` makes between its two
+    /// lock acquisitions) can be paused mid-flight. Lets the deadlock test below
+    /// force the exact interleaving the lock-order fix depends on: register
+    /// signals `holding` once it is inside `admit_package_definition`, then
+    /// blocks on `release` until the test lets it continue.
+    struct PauseOnAdmitStore {
+        inner: ExtensionInstallationStore,
+        holding: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl ironclaw_extensions::ExtensionInstallationStorePort for PauseOnAdmitStore {
+        async fn admit_package_definition(
+            &self,
+            record: ExtensionManifestRecord,
+        ) -> Result<
+            ironclaw_extensions::PackageDefinitionAdmissionOutcome,
+            ExtensionInstallationError,
+        > {
+            self.holding.notify_one();
+            self.release.notified().await;
+            self.inner.admit_package_definition(record).await
+        }
+
+        async fn list_manifests(
+            &self,
+        ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
+            self.inner.list_manifests().await
+        }
+
+        async fn get_manifest(
+            &self,
+            extension_id: &ExtensionId,
+        ) -> Result<Option<ExtensionManifestRecord>, ExtensionInstallationError> {
+            self.inner.get_manifest(extension_id).await
+        }
+
+        async fn persist_removal_tombstone(
+            &self,
+            manifest: ExtensionManifestRecord,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner.persist_removal_tombstone(manifest).await
+        }
+
+        async fn upsert_manifest_and_installation(
+            &self,
+            manifest: ExtensionManifestRecord,
+            installation: ExtensionInstallation,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner
+                .upsert_manifest_and_installation(manifest, installation)
+                .await
+        }
+
+        async fn list_installations(
+            &self,
+        ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
+            self.inner.list_installations().await
+        }
+
+        async fn get_installation(
+            &self,
+            installation_id: &ExtensionInstallationId,
+        ) -> Result<Option<ExtensionInstallation>, ExtensionInstallationError> {
+            self.inner.get_installation(installation_id).await
+        }
+
+        async fn upsert_installation(
+            &self,
+            installation: ExtensionInstallation,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner.upsert_installation(installation).await
+        }
+
+        async fn activate_membership(
+            &self,
+            installation_id: &ExtensionInstallationId,
+            user_id: &UserId,
+        ) -> Result<ExtensionInstallation, ExtensionInstallationError> {
+            self.inner
+                .activate_membership(installation_id, user_id)
+                .await
+        }
+
+        async fn deactivate_membership(
+            &self,
+            installation_id: &ExtensionInstallationId,
+            user_id: &UserId,
+        ) -> Result<MembershipDeactivation, ExtensionInstallationError> {
+            self.inner
+                .deactivate_membership(installation_id, user_id)
+                .await
+        }
+
+        async fn delete_installation(
+            &self,
+            installation_id: &ExtensionInstallationId,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner.delete_installation(installation_id).await
+        }
+
+        async fn delete_manifest(
+            &self,
+            extension_id: &ExtensionId,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner.delete_manifest(extension_id).await
+        }
+    }
+
+    /// Minimal valid third-party WASM extension bundle for `import_bundle`,
+    /// parameterized by id so it never collides with the hosted-MCP fixture id.
+    fn importable_bundle_zip(id: &str) -> Vec<u8> {
+        use std::io::Write as _;
+
+        let manifest = format!(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{id}"
+name = "Lock order import fixture"
+version = "0.1.0"
+description = "Fixture extension for concurrent register/import lock-order coverage"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/tool.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "{id}.run"
+description = "Run the fixture"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/run.input.json"
+output_schema_ref = "schemas/run.output.json"
+"#
+        );
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (path, bytes) in [
+            ("manifest.toml", manifest.as_bytes()),
+            ("wasm/tool.wasm", b"\0asm\x0d\0\x01\0".as_slice()),
+            ("schemas/run.input.json", b"{}".as_slice()),
+            ("schemas/run.output.json", b"{}".as_slice()),
+        ] {
+            writer.start_file(path, options).expect("start zip entry");
+            writer.write_all(bytes).expect("write zip entry");
+        }
+        writer.finish().expect("finish zip").into_inner()
+    }
+
+    /// Regression test for the AB-BA lock-order deadlock between
+    /// `HostedMcpPreparationService::register` and
+    /// `ExtensionLifecycleManager::import_bundle`: both coordinate the same
+    /// `catalog` `RwLock` and `operation_lock` `Mutex`, and must acquire them
+    /// in the same order.
+    ///
+    /// A prior version of this test drove the same scenario through the
+    /// production `ExtensionLifecycleService::execute` + `import_extension_bundle`
+    /// entry points with `tokio::join!`, but the two tasks never reliably
+    /// interleaved (register's own async work completed before import even
+    /// reached the catalog lock), so it passed in ~0.07s against the buggy
+    /// lock order too — a non-discriminating regression test. This version
+    /// pauses `register` mid-flight (inside `admit_package_definition`, which
+    /// runs between its two lock acquisitions) via a controllable test double,
+    /// forcing `import_bundle` to actually contend for the shared locks before
+    /// `register` is allowed to finish:
+    ///
+    /// 1. `register` grabs its first lock (`catalog` when fixed,
+    ///    `operation_lock` when buggy), then blocks inside
+    ///    `admit_package_definition` and signals `holding`.
+    /// 2. The test waits for `holding`, then spawns `import_bundle`, which
+    ///    unconditionally takes `catalog` first, then `operation_lock` — and
+    ///    waits briefly to let it reach that second lock.
+    /// 3. The test releases `register`.
+    ///    - Fixed order: `register` already holds `catalog`, so `import_bundle`
+    ///      was already blocked on `catalog` in step 2 (never touched
+    ///      `operation_lock`); both complete once `register` finishes.
+    ///    - Buggy order: `register` holds only `operation_lock` in step 1, so
+    ///      `import_bundle` takes `catalog` free in step 2 and blocks on
+    ///      `operation_lock` (held by `register`). Releasing `register` lets it
+    ///      resume and block on `catalog` (held by `import_bundle`): AB-BA
+    ///      deadlock, and the timeout below fires.
+    #[tokio::test]
+    async fn concurrent_register_and_import_bundle_do_not_deadlock() {
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let inner_store = ExtensionInstallationStore::load_at(
+            filesystem.clone(),
+            VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
+            ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+            crate::product_extension_host_api_contract_registry().expect("host contracts"),
+        )
+        .await
+        .expect("installation store");
+        let holding = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let installation_store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort> =
+            Arc::new(PauseOnAdmitStore {
+                inner: inner_store,
+                holding: Arc::clone(&holding),
+                release: Arc::clone(&release),
+            });
+        let catalog = AvailableExtensionCatalog::from_packages(Vec::new());
+        let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let active_extensions = ActiveExtensionPublisher::new(
+            Arc::clone(&active_registry),
+            Arc::new(
+                HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
+                    .expect("trust policy"),
+            ),
+            Arc::new(InvalidationBus::new()),
+        );
+        let owner = UserId::new("lock-order-owner").expect("valid owner");
+        let manager = Arc::new(ExtensionLifecycleManager::new(
+            ExtensionLifecycleManagerDependencies {
+                filesystem,
+                catalog,
+                installation_store,
+                lifecycle_service,
+                active_extensions,
+                credential_cleanup: None,
+                tenant_operator_user_id: owner,
+                hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
+                    runtime_ports: None,
+                    catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                        ironclaw_safety::Sanitizer::new(),
+                    )),
+                    oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+                },
+            },
+        ));
+
+        let register_request = ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest {
+            desired_id: ironclaw_extension_contracts::lifecycle_id::LifecyclePackageId::new(
+                "lock-order-register",
+            )
+            .expect("package id"),
+            desired_name: "Lock order register fixture".to_string(),
+            endpoint: ironclaw_extension_contracts::hosted_mcp::HostedMcpEndpoint::new(
+                "https://mcp.example.test/mcp",
+            )
+            .expect("public fixture endpoint"),
+            auth_selection: Some(
+                ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::Auto,
+            ),
+        };
+        let register_manager = Arc::clone(&manager);
+        let register_task =
+            tokio::spawn(
+                async move { register_manager.register_hosted_mcp(register_request).await },
+            );
+
+        holding.notified().await;
+
+        let import_manager = Arc::clone(&manager);
+        let bundle = importable_bundle_zip("lock-order-import");
+        let import_task = tokio::spawn(async move { import_manager.import_bundle(bundle).await });
+
+        // Give `import_bundle` time to take `catalog` and reach `operation_lock`
+        // before releasing `register`. Only affects whether the buggy order's
+        // deadlock is observed; the fixed order completes regardless of timing.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        release.notify_one();
+
+        let (register_result, import_result) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(register_task, import_task)
+            })
+            .await
+            .expect(
+                "register and import_bundle both complete without deadlocking on the shared \
+                 catalog/operation locks",
+            );
+
+        register_result
+            .expect("register task did not panic")
+            .expect("hosted MCP registration completes");
+        import_result
+            .expect("import task did not panic")
+            .expect("bundle import completes");
+    }
+
+    /// A package that declares nothing model-visible publishes nothing —
+    /// derived from the package's own manifest rather than a stored
+    /// readiness flag. `fixture_host_internal_only_extension_package` below
+    /// mirrors the shape every `[mcp]` package carries before discovery
+    /// completes: `v3.rs` synthesizes a `{id}.mcp_server` capability with
+    /// `CapabilityVisibility::HostInternal` for every hosted-MCP package, so
+    /// `resolved_manifest.tools` is never empty even pre-discovery. Only the
+    /// manifest's per-capability `visibility` distinguishes "nothing to
+    /// publish yet" from "nothing declared" — `visible_capability_ids`
+    /// (`available_extensions.rs`) filters `package.manifest.capabilities`
+    /// by `CapabilityVisibility::Model`, not `resolved.tools`. This test
+    /// pins that filter as read by the `install` caller: a future edit that
+    /// swaps it for a raw read of `resolved.tools`, or that widens the
+    /// filter to include `HostInternal`, would leak the host-internal-only
+    /// capability id into `visible_capability_ids` here.
+    #[tokio::test]
+    async fn install_reports_no_visible_capabilities_for_host_internal_only_package() {
+        let package = fixture_host_internal_only_extension_package();
+        let catalog = AvailableExtensionCatalog::from_packages(vec![package]);
+        let filesystem = Arc::new(InMemoryBackend::new());
+        let installation_store = Arc::new(
+            ExtensionInstallationStore::load_at(
+                filesystem.clone(),
+                VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
+                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                crate::product_extension_host_api_contract_registry().expect("host contracts"),
+            )
+            .await
+            .expect("installation store"),
+        );
+        let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let active_extensions = ActiveExtensionPublisher::new(
+            Arc::clone(&active_registry),
+            Arc::new(
+                HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
+                    .expect("trust policy"),
+            ),
+            Arc::new(InvalidationBus::new()),
+        );
+        let owner = UserId::new("lifecycle-owner").expect("valid owner");
+        let manager = ExtensionLifecycleManager::new(ExtensionLifecycleManagerDependencies {
+            filesystem,
+            catalog,
+            installation_store,
+            lifecycle_service,
+            active_extensions,
+            credential_cleanup: None,
+            tenant_operator_user_id: owner.clone(),
+            hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
+        });
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture_host_internal")
+                .expect("package ref");
+
+        let response = manager
+            .install(package_ref, &owner)
+            .await
+            .expect("install succeeds");
+
+        match response.payload {
+            Some(LifecycleProductPayload::ExtensionInstall {
+                installed,
+                visible_capability_ids,
+                ..
+            }) => {
+                assert!(installed);
+                assert!(
+                    visible_capability_ids.is_empty(),
+                    "a package declaring only a host-internal capability must publish no \
+                     model-visible tools, got {visible_capability_ids:?}"
+                );
+            }
+            other => panic!("expected ExtensionInstall payload, got {other:?}"),
+        }
+    }
+
+    /// A first-party package that never declares `[mcp]` has no discovery
+    /// step at all, so no registration/discovery concept may ever hold it
+    /// below `Active` — the shape of the regression reported against gmail:
+    /// a readiness state owned by the hosted-MCP path leaked into the
+    /// generic phase computation every extension went through, including
+    /// ones with nothing to discover. Drives `install` ->
+    /// `activate_with_prechecked_credentials_for_user_for_test` -> `project`
+    /// through the production caller. Before the fix, this path additionally
+    /// read a stored `PreparationRequirement`; if that (or an equivalent
+    /// gate) were reintroduced with a default that isn't unconditionally
+    /// "ready" for a plain package, `activate`'s `activated` flag would flip
+    /// to `false` and phase would drop to `Installed`, exactly like the
+    /// removed early-return this test stands in for.
+    #[tokio::test]
+    async fn non_mcp_first_party_package_reaches_active_ungated_by_discovery() {
+        let package = fixture_extension_package();
+        let catalog = AvailableExtensionCatalog::from_packages(vec![package]);
+        let filesystem = Arc::new(InMemoryBackend::new());
+        let installation_store = Arc::new(
+            ExtensionInstallationStore::load_at(
+                filesystem.clone(),
+                VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
+                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                crate::product_extension_host_api_contract_registry().expect("host contracts"),
+            )
+            .await
+            .expect("installation store"),
+        );
+        let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let active_extensions = ActiveExtensionPublisher::new(
+            Arc::clone(&active_registry),
+            Arc::new(
+                HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
+                    .expect("trust policy"),
+            ),
+            Arc::new(InvalidationBus::new()),
+        );
+        let owner = UserId::new("gmail-shaped-owner").expect("valid owner");
+        let manager = ExtensionLifecycleManager::new(ExtensionLifecycleManagerDependencies {
+            filesystem,
+            catalog,
+            installation_store,
+            lifecycle_service,
+            active_extensions,
+            credential_cleanup: None,
+            tenant_operator_user_id: owner.clone(),
+            hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
+        });
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("package ref");
+
+        let install_response = manager
+            .install(package_ref.clone(), &owner)
+            .await
+            .expect("fresh install succeeds");
+        match install_response.payload {
+            Some(LifecycleProductPayload::ExtensionInstall {
+                installed,
+                visible_capability_ids,
+                ..
+            }) => {
+                assert!(installed);
+                assert!(
+                    !visible_capability_ids.is_empty(),
+                    "a plain first-party package's declared model-visible capabilities must \
+                     not be suppressed"
+                );
+            }
+            other => panic!("expected ExtensionInstall payload, got {other:?}"),
+        }
+
+        let activate_response = manager
+            .activate_with_prechecked_credentials_for_user_for_test(package_ref.clone(), &owner)
+            .await
+            .expect("activation reaches Active — there is no discovery step to wait on");
+        assert_eq!(
+            activate_response.phase,
+            InstallationState::Active,
+            "a non-mcp package has no discovery step, so activation must not report anything \
+             short of Active"
+        );
+        match activate_response.payload {
+            Some(LifecycleProductPayload::ExtensionActivate { activated, .. }) => {
+                assert!(
+                    activated,
+                    "a non-mcp package must activate immediately instead of being held back \
+                     as though discovery were pending"
+                );
+            }
+            other => panic!("expected ExtensionActivate payload, got {other:?}"),
+        }
+
+        let project_response = manager
+            .project(package_ref, &owner)
+            .await
+            .expect("project succeeds");
+        assert_eq!(
+            project_response.phase,
+            InstallationState::Active,
+            "project must not hold a non-mcp package below Active"
+        );
+    }
+
+    /// `installed_summaries` (backing `list_installed`) must read the same
+    /// durable installation state as `project` and `activate_inner` — both
+    /// derive phase solely from the installation row's activation state, so
+    /// once activation flips it to `Enabled`, `list_installed` must show
+    /// `Active` exactly like `project` does for the same installation.
+    /// Before the fix, `installed_summaries` derived phase from a separate,
+    /// catalog-sourced readiness flag that `project` did not consult, so the
+    /// two could disagree after activation completed.
+    #[tokio::test]
+    async fn list_installed_matches_project_after_activation_completes() {
+        let package = fixture_extension_package();
+        let catalog = AvailableExtensionCatalog::from_packages(vec![package]);
+        let filesystem = Arc::new(InMemoryBackend::new());
+        let installation_store = Arc::new(
+            ExtensionInstallationStore::load_at(
+                filesystem.clone(),
+                VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
+                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                crate::product_extension_host_api_contract_registry().expect("host contracts"),
+            )
+            .await
+            .expect("installation store"),
+        );
+        let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let active_extensions = ActiveExtensionPublisher::new(
+            Arc::clone(&active_registry),
+            Arc::new(
+                HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
+                    .expect("trust policy"),
+            ),
+            Arc::new(InvalidationBus::new()),
+        );
+        let owner = UserId::new("lifecycle-owner").expect("valid owner");
+        let manager = ExtensionLifecycleManager::new(ExtensionLifecycleManagerDependencies {
+            filesystem,
+            catalog,
+            installation_store,
+            lifecycle_service,
+            active_extensions,
+            credential_cleanup: None,
+            tenant_operator_user_id: owner.clone(),
+            hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
+        });
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("package ref");
+
+        manager
+            .install(package_ref.clone(), &owner)
+            .await
+            .expect("fresh install succeeds");
+        manager
+            .activate_with_prechecked_credentials_for_test(package_ref.clone())
+            .await
+            .expect("activate succeeds");
+
+        let project_response = manager
+            .project(package_ref.clone(), &owner)
+            .await
+            .expect("project succeeds");
+        assert_eq!(
+            project_response.phase,
+            InstallationState::Active,
+            "project must report Active once activation completes"
+        );
+
+        let list_response = manager
+            .list_installed(&owner)
+            .await
+            .expect("list_installed succeeds");
+        let extensions = match list_response.payload {
+            Some(LifecycleProductPayload::ExtensionList { extensions, .. }) => extensions,
+            other => panic!("expected ExtensionList payload, got {other:?}"),
+        };
+        let fixture_summary = extensions
+            .iter()
+            .find(|summary| summary.summary.package_ref == package_ref)
+            .expect("fixture summary present in list_installed");
+        assert_eq!(
+            fixture_summary.phase,
+            InstallationState::Active,
+            "list_installed must match project's phase"
         );
     }
 
@@ -3049,6 +4368,7 @@ output_schema_ref = "schemas/search.output.json"
             &contracts,
         )
         .expect("fixture manifest");
+        let root = VirtualPath::new("/system/extensions/fixture").expect("extension root");
         let resolved_manifest = Arc::new(
             ExtensionManifestRecord::from_toml(
                 manifest_toml,
@@ -3056,17 +4376,107 @@ output_schema_ref = "schemas/search.output.json"
                 &HostPortCatalog::empty(),
                 None,
                 &contracts,
+                Some(root.clone()),
             )
             .expect("resolved fixture manifest")
             .resolved()
             .clone(),
         );
-        let root = VirtualPath::new("/system/extensions/fixture").expect("extension root");
         let package = ExtensionPackage::from_manifest_toml(manifest, root, manifest_toml)
             .expect("fixture package");
         AvailableExtensionPackage {
             package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
                 .expect("fixture package ref"),
+            manifest_toml: manifest_toml.to_string(),
+            resolved_manifest,
+            source: ManifestSource::HostBundled,
+            package,
+            cleanup_requirements: Vec::new(),
+            surface_kinds: Vec::new(),
+            channel_directions: None,
+            channel_presentation: None,
+            assets: vec![
+                AvailableExtensionAsset {
+                    path: "manifest.toml".to_string(),
+                    content: AvailableExtensionAssetContent::Bytes(
+                        manifest_toml.as_bytes().to_vec(),
+                    ),
+                },
+                AvailableExtensionAsset {
+                    path: "wasm/fixture.wasm".to_string(),
+                    content: AvailableExtensionAssetContent::Bytes(b"\0asm\x01\0\0\0".to_vec()),
+                },
+            ],
+            onboarding_override: None,
+            oauth_setup_override: None,
+            search_aliases: Vec::new(),
+        }
+    }
+
+    /// Like `fixture_extension_package`, but its only declared capability is
+    /// `HostInternal` — mirroring the synthesized `{id}.mcp_server`
+    /// discovery-template capability every `[mcp]` package carries before
+    /// its `tools/list` discovery runs (`v3.rs`). It declares nothing
+    /// `Model`-visible, so `resolved_manifest.tools` is non-empty while
+    /// `visible_capability_ids` must still report an empty set.
+    fn fixture_host_internal_only_extension_package() -> AvailableExtensionPackage {
+        let manifest_toml = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "fixture_host_internal"
+name = "Host-internal-only Fixture Extension"
+version = "0.1.0"
+description = "Lifecycle fixture extension declaring only a host-internal capability"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/fixture.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "fixture_host_internal.mcp_server"
+description = "Hosted connection capability (discovery template; never model-visible)"
+effects = ["network"]
+default_permission = "ask"
+visibility = "host_internal"
+input_schema_ref = "schemas/fixture_host_internal/dynamic/mcp_server.input.v1.json"
+"#;
+        let contracts = capability_provider_contracts();
+        let manifest = ExtensionManifest::parse(
+            manifest_toml,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+            &contracts,
+        )
+        .expect("host-internal-only fixture manifest");
+        let root =
+            VirtualPath::new("/system/extensions/fixture_host_internal").expect("extension root");
+        let resolved_manifest = Arc::new(
+            ExtensionManifestRecord::from_toml(
+                manifest_toml,
+                ManifestSource::HostBundled,
+                &HostPortCatalog::empty(),
+                None,
+                &contracts,
+                Some(root.clone()),
+            )
+            .expect("resolved host-internal-only fixture manifest")
+            .resolved()
+            .clone(),
+        );
+        let package = ExtensionPackage::from_manifest_toml(manifest, root, manifest_toml)
+            .expect("host-internal-only fixture package");
+        AvailableExtensionPackage {
+            package_ref: LifecyclePackageRef::new(
+                LifecyclePackageKind::Extension,
+                "fixture_host_internal",
+            )
+            .expect("fixture package ref"),
             manifest_toml: manifest_toml.to_string(),
             resolved_manifest,
             source: ManifestSource::HostBundled,

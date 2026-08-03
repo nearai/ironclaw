@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::ids::{AgentId, ExtensionId, ProjectId, TenantId, ThreadId, UserId};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -129,6 +129,11 @@ pub struct AuthFlowRecord {
     pub kind: AuthFlowKind,
     pub status: AuthFlowStatus,
     pub provider: AuthProviderId,
+    /// The installed extension whose manifest authorized this OAuth recipe.
+    /// Legacy and built-in flows have no requester and resolve only through
+    /// the static/bundled path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_extension: Option<ExtensionId>,
     pub challenge: Option<AuthChallenge>,
     pub continuation: AuthContinuationRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -191,6 +196,7 @@ pub struct NewAuthFlow {
     pub scope: AuthProductScope,
     pub kind: AuthFlowKind,
     pub provider: AuthProviderId,
+    pub requester_extension: Option<ExtensionId>,
     pub challenge: AuthChallenge,
     pub continuation: AuthContinuationRef,
     pub update_binding: Option<CredentialAccountUpdateBinding>,

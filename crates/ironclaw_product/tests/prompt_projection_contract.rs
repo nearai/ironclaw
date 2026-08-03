@@ -2,16 +2,18 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use ironclaw_auth::{AuthProductError, AuthProviderId, OAuthAuthorizationUrl};
+use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnScope};
 use ironclaw_host_api::{
-    ExtensionId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, TenantId,
-    ThreadId, UserId, VendorId,
+    capability::RuntimeCredentialAccountSetup,
+    decision::RuntimeCredentialAuthRequirement,
+    ids::{ExtensionId, TenantId, ThreadId, UserId, VendorId},
 };
 use ironclaw_product::AuthPromptChallengeKind;
 use ironclaw_product::{
-    AuthChallengeProvider, AuthChallengeView, BlockedAuthPromptRequest, approval_prompt_lookup,
+    AuthChallengeProvider, AuthChallengeView, approval_prompt_lookup,
     auth_prompt_view_for_blocked_auth,
 };
-use ironclaw_turns::{GateRef, TurnRunId, TurnScope};
+use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
 
 #[derive(Debug)]
 struct OAuthChallenge {
@@ -54,6 +56,7 @@ impl AuthChallengeProvider for OAuthChallenge {
                     .expect("authorization URL"),
             ),
             expires_at: None,
+            pairing: None,
         }))
     }
 }
@@ -123,7 +126,7 @@ async fn auth_prompt_enrichment_accepts_the_owned_view_without_a_crossing_reques
 async fn approval_prompt_lookup_without_a_store_is_empty() {
     let lookup = approval_prompt_lookup(
         None,
-        &GateRef::new("approval:missing").expect("gate ref"),
+        &TurnGateRef::new("approval:missing").expect("gate ref"),
         &UserId::new("owner-prompt").expect("owner"),
         &turn_scope(),
     )

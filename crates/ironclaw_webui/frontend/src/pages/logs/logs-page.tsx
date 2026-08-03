@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { useOutletContext } from "react-router";
 import React from "react";
+import { ConfirmDialog } from "../../design-system/confirm-dialog";
 import { useT } from "../../lib/i18n";
 import { useLogs } from "./hooks/useLogs";
 
@@ -150,6 +151,12 @@ export function LogsPage() {
     isLoading,
     error,
     needsThreadScope,
+    nextCursor,
+    retentionLimitReached,
+    maxRetainedEntries,
+    isLoadingMore,
+    loadMoreError,
+    loadOlder,
   } = useLogs({
     isAdmin,
     defaultThreadId: isAdmin ? null : threadsState?.activeThreadId || null,
@@ -157,6 +164,7 @@ export function LogsPage() {
 
   const outputRef = React.useRef(null);
   const followLatestRef = React.useRef(true);
+  const [clearDialogOpen, setClearDialogOpen] = React.useState(false);
 
   React.useEffect(() => {
     if (autoScroll && followLatestRef.current && outputRef.current) {
@@ -226,9 +234,8 @@ export function LogsPage() {
 
           {/* Clear */}
           <button
-            onClick={() => {
-              if (confirm(t("logs.confirmClear"))) clearEntries();
-            }}
+            type="button"
+            onClick={() => setClearDialogOpen(true)}
             className="h-8 rounded-[8px] border border-[var(--v2-panel-border)] px-3 text-xs text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
           >
             {t("logs.clear")}
@@ -331,7 +338,70 @@ export function LogsPage() {
           : entries.map(
               (entry) => (<LogEntry key={entry.id} entry={entry} />)
             )}
+        {hasEntries && (nextCursor || loadMoreError)
+          ? (
+              <div
+                data-testid="logs-pagination"
+                className="flex flex-col items-center gap-2 border-t border-[var(--v2-panel-border)] px-4 py-3"
+              >
+                {retentionLimitReached
+                  ? (
+                      <span
+                        data-testid="logs-retention-limit"
+                        className="text-center text-xs text-[var(--v2-text-muted)]"
+                      >
+                        {t("logs.retentionLimitReached", {
+                          count: maxRetainedEntries,
+                        })}
+                      </span>
+                    )
+                  : loadMoreError
+                  ? (
+                      <span
+                        data-testid="logs-load-older-error"
+                        className="text-center text-xs text-red-300"
+                      >
+                        {t("error.loadFailed", {
+                          what: t("nav.logs"),
+                          message:
+                            loadMoreError.message ||
+                            loadMoreError.statusText ||
+                            "Request failed",
+                        })}
+                      </span>
+                    )
+                  : null}
+                {!retentionLimitReached
+                  ? (
+                      <button
+                        type="button"
+                        data-testid="logs-load-older"
+                        disabled={isLoadingMore}
+                        onClick={loadOlder}
+                        className="rounded-[8px] border border-[var(--v2-panel-border)] px-3 py-1.5 text-xs font-medium text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {isLoadingMore
+                          ? t("common.loading")
+                          : loadMoreError
+                            ? t("ext.catalog.retry")
+                            : t("logs.loadOlder")}
+                      </button>
+                    )
+                  : null}
+              </div>
+            )
+          : null}
       </div>
+      <ConfirmDialog
+        open={clearDialogOpen}
+        title={t("logs.confirmClear")}
+        confirmLabel={t("logs.clear")}
+        onConfirm={() => {
+          clearEntries();
+          setClearDialogOpen(false);
+        }}
+        onCancel={() => setClearDialogOpen(false)}
+      />
     </div>
   );
 }

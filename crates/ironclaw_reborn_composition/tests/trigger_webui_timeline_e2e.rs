@@ -54,7 +54,8 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use chrono::Utc;
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, TenantId, UserId};
+use ironclaw_extension_contracts::external::ExternalActorRef;
+use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
@@ -127,15 +128,15 @@ async fn build_timeline_runtime(root: &tempfile::TempDir) -> RebornRuntime {
     std::fs::create_dir_all(&host_home_root).expect("host home root");
 
     let input = local_runtime_build_input_with_options(
-        RebornCompositionProfile::LocalDevYolo,
+        RebornCompositionProfile::StandaloneUnrestricted,
         USER,
-        root.path().join("local-dev"),
+        root.path().join("standalone"),
         RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
     )
     .expect("local-yolo runtime input")
-    .with_local_dev_confirmed_host_home_root(host_home_root);
+    .with_local_runtime_confirmed_host_home_root(host_home_root);
 
     let input = RebornRuntimeInput::from_build_input(input)
         .with_identity(RebornRuntimeIdentity {
@@ -363,9 +364,10 @@ async fn fire_trigger_and_get_run_thread_id(
                 TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID,
             )
             .expect("installation id"),
-            ironclaw_conversations::ExternalActorRef::new(
+            ExternalActorRef::new(
                 TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
                 user_id.as_str(),
+                None::<String>,
             )
             .expect("actor ref"),
             user_id.clone(),

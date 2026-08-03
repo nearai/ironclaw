@@ -37,15 +37,19 @@ use crate::{
 use async_trait::async_trait;
 use axum::Json;
 use axum::response::{IntoResponse, Response};
-use ironclaw_host_api::{ActivityId, BoundProductSurface, ProductSurface, ThreadId};
-use ironclaw_product::{
-    CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, ProductCancelRunRequest, ProductCreateThreadRequest,
-    ProductSubmitTurnRequest, SUBMIT_TURN_COMMAND,
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_host_api::ids::{ActivityId, ThreadId};
+use ironclaw_product::{CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, SUBMIT_TURN_COMMAND};
+use ironclaw_product_contracts::inbound::{
+    ProductInboundAck, ProductRejection, UserMessagePayload,
 };
-use ironclaw_product::{
-    ProductInboundAck, ProductRejection, ProductTriggerReason, ProjectionReadRequest,
-    ProjectionSubscriptionRequest, UserMessagePayload,
+use ironclaw_product_contracts::inbound_requests::{
+    ProductCancelRunRequest, ProductCreateThreadRequest, ProductSubmitTurnRequest,
 };
+use ironclaw_product_contracts::projection::{
+    ProjectionReadRequest, ProjectionSubscriptionRequest,
+};
+use ironclaw_product_contracts::surface::{BoundProductSurface, ProductSurface};
 use uuid::Uuid;
 
 const DEFAULT_RESPONSES_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1498,7 +1502,7 @@ fn content_value_to_text(content: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_product::ProductInboundAck;
+    use ironclaw_product_contracts::inbound::ProductInboundAck;
     use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
     use super::accepted_ack_from_ack;

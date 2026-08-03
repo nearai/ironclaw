@@ -1,17 +1,18 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use ironclaw_loop_contracts::{
+    AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverHost,
+    AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, CheckpointSchemaId, LoopDriverId,
+    LoopExit,
+};
 use ironclaw_runner::driver_registry::{
     ConfiguredRunProfile, DriverKind, DriverReadinessDiagnosticCode, DriverReadinessInputs,
     DriverReadinessMode, DriverReadinessStatus, DriverRegistry, DriverRegistryError,
     DriverRequirements, HostGraphReadiness, LoopDriverRegistryKey, PersistedRunDriverIdentity,
     RequirementLevel,
 };
-use ironclaw_turns::{
-    AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
-    AgentLoopDriverRunRequest, LoopExit, RunProfileVersion, TurnStatus,
-    run_profile::{AgentLoopDriverHost, CheckpointSchemaId, LoopDriverId},
-};
+use ironclaw_turns::{RunProfileVersion, TurnStatus};
 
 #[test]
 fn driver_registry_rejects_duplicate_exact_identity() {
@@ -139,7 +140,7 @@ fn production_readiness_rejects_fake_driver() {
 }
 
 #[test]
-fn local_dev_readiness_allows_fake_driver_with_degraded_status() {
+fn non_production_readiness_allows_fake_driver_with_degraded_status() {
     let mut registry = DriverRegistry::new();
     let fake_key = registry
         .register_driver(
@@ -155,7 +156,7 @@ fn local_dev_readiness_allows_fake_driver_with_degraded_status() {
         .expect("reference driver registration should succeed");
 
     let report = registry.validate_readiness(
-        DriverReadinessMode::LocalDevTest,
+        DriverReadinessMode::NonProduction,
         DriverReadinessInputs {
             host_graph: HostGraphReadiness::all_available(),
             configured_profiles: vec![ConfiguredRunProfile::enabled("local_reference", fake_key)],
@@ -165,10 +166,10 @@ fn local_dev_readiness_allows_fake_driver_with_degraded_status() {
 
     assert_eq!(
         report.status,
-        DriverReadinessStatus::LocalDevDegradedReference
+        DriverReadinessStatus::NonProductionDegradedReference
     );
     assert!(report.diagnostics.iter().any(|diagnostic| diagnostic.code
-        == DriverReadinessDiagnosticCode::ReferenceDriverAllowedForLocalDev));
+        == DriverReadinessDiagnosticCode::ReferenceDriverAllowedForNonProduction));
 }
 
 #[test]

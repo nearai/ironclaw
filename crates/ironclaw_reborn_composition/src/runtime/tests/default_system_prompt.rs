@@ -38,9 +38,9 @@ impl HostManagedModelGateway for RecordingGateway {
 }
 
 #[tokio::test]
-async fn local_dev_runtime_injects_default_system_prompt_into_model_request() {
+async fn standalone_runtime_injects_default_system_prompt_into_model_request() {
     let root = tempfile::tempdir().expect("tempdir");
-    let storage_root = root.path().join("local-dev");
+    let storage_root = root.path().join("standalone");
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let input = runtime_input(storage_root.clone(), Arc::clone(&requests));
 
@@ -59,7 +59,7 @@ async fn local_dev_runtime_injects_default_system_prompt_into_model_request() {
         storage_root
             .join("system/prompts/default-system.md")
             .exists(),
-        "local-dev runtime should seed an editable prompt file under storage"
+        "standalone runtime should seed an editable prompt file under storage"
     );
     let recorded_requests = recorded_requests(&requests);
     assert_eq!(recorded_requests.len(), 1);
@@ -70,11 +70,11 @@ async fn local_dev_runtime_injects_default_system_prompt_into_model_request() {
                     .content
                     .contains("When a tool result is partial, truncated, failed")
         }),
-        "local-dev runtime should send the editable default system prompt to the model gateway"
+        "standalone runtime should send the editable default system prompt to the model gateway"
     );
-    // Disclosure is default-on: the system prompt must teach the model the
-    // tool_search/tool_describe/tool_call protocol, or a weak model never reaches
-    // the deferred long tail.
+    // Disclosure is explicitly enabled by `runtime_input`: the system prompt
+    // must teach the model the tool_search/tool_describe/tool_call protocol, or
+    // a weak model never reaches the deferred long tail.
     assert!(
         recorded_requests[0].messages.iter().any(|message| {
             message.role == HostManagedModelMessageRole::System
@@ -82,8 +82,11 @@ async fn local_dev_runtime_injects_default_system_prompt_into_model_request() {
                 && message.content.contains("tool_search")
                 && message.content.contains("tool_describe")
                 && message.content.contains("tool_call")
+                && message
+                    .content
+                    .contains("When `extension_search` and `extension_install` are present")
         }),
-        "default-on disclosure should inject the tool-discovery protocol into the system prompt"
+        "bridged disclosure should inject a visibility-conditional discovery protocol"
     );
     assert!(
         recorded_requests[0].messages.iter().any(|message| {
@@ -103,16 +106,16 @@ async fn local_dev_runtime_injects_default_system_prompt_into_model_request() {
             message.role == HostManagedModelMessageRole::System
                 && message.content.contains("Run origin: CLI chat")
         }),
-        "local-dev runtime send_user_message should tag CLI source-channel origin in runtime context"
+        "standalone runtime send_user_message should tag CLI source-channel origin in runtime context"
     );
 
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
 #[tokio::test]
-async fn local_dev_runtime_uses_existing_edited_default_system_prompt() {
+async fn standalone_runtime_uses_existing_edited_default_system_prompt() {
     let root = tempfile::tempdir().expect("tempdir");
-    let storage_root = root.path().join("local-dev");
+    let storage_root = root.path().join("standalone");
     let prompt_path = storage_root.join("system/prompts/default-system.md");
     std::fs::create_dir_all(prompt_path.parent().expect("prompt parent")).expect("prompt parent");
     std::fs::write(&prompt_path, "custom edited runtime prompt").expect("edited prompt");
@@ -137,9 +140,9 @@ async fn local_dev_runtime_uses_existing_edited_default_system_prompt() {
             message.role == HostManagedModelMessageRole::System
                 && message.content.starts_with("custom edited runtime prompt")
         }),
-        "local-dev runtime should preserve and inject the existing edited prompt"
+        "standalone runtime should preserve and inject the existing edited prompt"
     );
-    // Disclosure is default-on, so the tool-search protocol is appended to the
+    // Disclosure is explicitly enabled, so the tool-search protocol is appended to the
     // (edited) system prompt and reaches the gateway — without overwriting the
     // user's edited base content.
     assert!(
@@ -148,16 +151,29 @@ async fn local_dev_runtime_uses_existing_edited_default_system_prompt() {
                 && message.content.starts_with("custom edited runtime prompt")
                 && message.content.contains("tool_search")
         }),
-        "default-on disclosure should append the tool-search protocol to the edited prompt"
+        "bridged disclosure should append the tool-search protocol to the edited prompt"
+    );
+    // Docs grounding is ground knowledge about the runtime (#6734), not a seed
+    // default: an install whose SYSTEM.md never contained it must still be told
+    // to look IronClaw's own capabilities up in the published docs.
+    assert!(
+        recorded_requests[0].messages.iter().any(|message| {
+            message.role == HostManagedModelMessageRole::System
+                && message.content.starts_with("custom edited runtime prompt")
+                && message
+                    .content
+                    .contains("https://docs.ironclaw.com/llms.txt")
+        }),
+        "self-knowledge docs grounding should reach the model even for a custom system prompt"
     );
 
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
 #[tokio::test]
-async fn local_dev_runtime_rejects_non_file_default_system_prompt() {
+async fn standalone_runtime_rejects_non_file_default_system_prompt() {
     let root = tempfile::tempdir().expect("tempdir");
-    let storage_root = root.path().join("local-dev");
+    let storage_root = root.path().join("standalone");
     let prompt_path = storage_root.join("system/prompts/default-system.md");
     std::fs::create_dir_all(&prompt_path).expect("non-file prompt path");
     let requests = Arc::new(StdMutex::new(Vec::new()));
@@ -187,8 +203,11 @@ fn runtime_input(
 ) -> RebornRuntimeInput {
     let gateway = Arc::new(RecordingGateway { requests });
     RebornRuntimeInput::from_build_input(
-        crate::deployment::local_dev_build_input("runtime-system-prompt-owner", storage_root)
-            .with_runtime_policy(local_dev_runtime_policy()),
+        crate::deployment::local_filesystem_build_input(
+            "runtime-system-prompt-owner",
+            storage_root,
+        )
+        .with_runtime_policy(standalone_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-system-prompt-tenant".to_string(),
@@ -201,8 +220,8 @@ fn runtime_input(
         max_total: Duration::from_secs(3),
     })
     .with_model_gateway_override(gateway)
-    // Pin bridged explicitly so the disclosure-protocol assertions don't depend on
-    // the temporary default-on behavior (and won't break on the default-off revert).
+    // Pin bridged explicitly so the disclosure-protocol assertions do not depend
+    // on the production default.
     .with_tool_disclosure(ironclaw_runner::runtime::ToolDisclosureMode::Bridged)
 }
 
@@ -215,11 +234,11 @@ fn recorded_requests(
         .clone()
 }
 
-fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
+fn standalone_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,

@@ -8,11 +8,13 @@ use crate::{
     PrepareOAuthFlowRequest, ProviderScope, TurnGateAuthFlowQuery, TurnRunRef,
 };
 use chrono::{Duration as ChronoDuration, Utc};
+use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 use ironclaw_host_api::{
-    InvocationId, ResourceScope, RuntimeCredentialAuthRequirement, SecretHandle,
+    decision::RuntimeCredentialAuthRequirement,
+    ids::{InvocationId, SecretHandle},
+    resource::ResourceScope,
 };
 use ironclaw_secrets::{SecretMaterial, SecretStorePort};
-use ironclaw_turns::{TurnRunId, TurnScope};
 use secrecy::SecretString;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -24,7 +26,7 @@ pub struct OAuthGateChallengeRequest<'a> {
     pub flow_source: &'a Arc<dyn AuthFlowRecordSource>,
     pub requirements: &'a [RuntimeCredentialAuthRequirement],
     pub scope: &'a TurnScope,
-    pub owner_user_id: &'a ironclaw_host_api::UserId,
+    pub owner_user_id: &'a ironclaw_host_api::ids::UserId,
     pub run_id: TurnRunId,
     pub gate_ref: &'a AuthGateRef,
 }
@@ -58,7 +60,13 @@ impl OAuthGateFlowDriver {
     ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
         for requirement in request.requirements {
             let vendor = requirement.provider.as_str();
-            if self.engine.recipes().recipe_for_vendor(vendor).is_none() {
+            if self
+                .engine
+                .recipes()
+                .resolve(Some(&requirement.requester_extension), vendor)
+                .await
+                .is_none()
+            {
                 continue;
             }
             match self.challenge_for_requirement(request, requirement).await {
@@ -108,6 +116,7 @@ impl OAuthGateFlowDriver {
                 request.flow_source,
                 query.clone(),
                 &provider,
+                &requirement.requester_extension,
             )
             .await?
         {
@@ -121,6 +130,7 @@ impl OAuthGateFlowDriver {
             .engine
             .prepare_oauth_flow(PrepareOAuthFlowRequest {
                 vendor: vendor.to_string(),
+                requester_extension: Some(requirement.requester_extension.clone()),
                 scope: auth_scope.clone(),
                 flow_id,
                 account_label: CredentialAccountLabel::new(vendor)?,
@@ -141,6 +151,7 @@ impl OAuthGateFlowDriver {
                 scope: auth_scope.clone(),
                 kind: AuthFlowKind::IntegrationCredential,
                 provider: provider.clone(),
+                requester_extension: prepared.requester_extension,
                 challenge: AuthChallenge::OAuthUrl {
                     authorization_url: prepared.authorization_url,
                     expires_at,
@@ -165,6 +176,7 @@ impl OAuthGateFlowDriver {
                     request.flow_source,
                     query,
                     &provider,
+                    &requirement.requester_extension,
                 )
                 .await?
                 .ok_or(AuthProductError::BackendConflict)?
@@ -186,6 +198,7 @@ impl OAuthGateFlowDriver {
         flow_source: &Arc<dyn AuthFlowRecordSource>,
         query: TurnGateAuthFlowQuery,
         requested_provider: &AuthProviderId,
+        requested_requester_extension: &ironclaw_host_api::ids::ExtensionId,
     ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
         let Some(existing) = flow_source.flow_for_turn_gate(query).await? else {
             return Ok(None);
@@ -199,6 +212,19 @@ impl OAuthGateFlowDriver {
                 .map(|_| None);
         }
         if existing.expires_at > Utc::now() {
+            // A live, unexpired flow whose requester differs from the
+            // requirement asking to reuse it belongs to a different
+            // extension's in-flight consent: decline reuse rather than
+            // canceling it. Canceling would destroy another extension's
+            // legitimate in-progress OAuth work for a mere
+            // same-gate/same-vendor coincidence; the caller falls through to
+            // creating its own flow under the same `setup_lock`/`gate_ref`,
+            // so declining here is fail-closed, not racy. An expired flow
+            // (below) carries no live consent to protect, so it is always
+            // cleaned up regardless of requester.
+            if existing.requester_extension.as_ref() != Some(requested_requester_extension) {
+                return Ok(None);
+            }
             return Ok(Some(existing));
         }
         // The flow being replaced is expired and about to be canceled; drop its
@@ -292,7 +318,7 @@ impl fmt::Debug for OAuthGateFlowDriver {
 
 pub fn auth_scope_for_blocked_turn(
     scope: &TurnScope,
-    owner_user_id: &ironclaw_host_api::UserId,
+    owner_user_id: &ironclaw_host_api::ids::UserId,
 ) -> AuthProductScope {
     AuthProductScope::new(
         ResourceScope {
@@ -352,9 +378,8 @@ mod tests {
         AuthEngineDeps, AuthFlowStatus, EngineCallbackBase, InMemoryAuthProductServices,
         OAuthAuthorizationUrl, ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
     };
-    use ironclaw_host_api::{
-        AgentId, ExtensionId, TenantId, ThreadId, UserId, VendorAuthRecipe, VendorId,
-    };
+    use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
+    use ironclaw_host_api::ids::{AgentId, ExtensionId, TenantId, ThreadId, UserId, VendorId};
     use ironclaw_secrets::SecretStore;
 
     fn acme_vendor_recipe() -> ResolvedVendorAuthRecipe {
@@ -372,6 +397,7 @@ mod tests {
             vendor: "acmevendor".to_string(),
             recipe,
             token_exchange_resource: None,
+            protected_resource_metadata_url: None,
         }
     }
 
@@ -383,7 +409,7 @@ mod tests {
         async fn resolve(
             &self,
             _vendor: &str,
-            _credentials: &ironclaw_host_api::RecipeClientCredentials,
+            _credentials: &ironclaw_extension_contracts::recipe::RecipeClientCredentials,
         ) -> Result<crate::EngineOAuthClientMaterial, AuthProductError> {
             Ok(crate::EngineOAuthClientMaterial {
                 client_id: crate::OAuthClientId::new("gate-client-id")?,
@@ -400,7 +426,7 @@ mod tests {
         async fn resolve(
             &self,
             _vendor: &str,
-            _credentials: &ironclaw_host_api::RecipeClientCredentials,
+            _credentials: &ironclaw_extension_contracts::recipe::RecipeClientCredentials,
         ) -> Result<crate::EngineOAuthClientMaterial, AuthProductError> {
             Err(AuthProductError::MalformedConfig)
         }
@@ -410,13 +436,13 @@ mod tests {
     struct PanicEgress;
 
     #[async_trait::async_trait]
-    impl ironclaw_host_api::RuntimeHttpEgress for PanicEgress {
+    impl ironclaw_host_api::http::RuntimeHttpEgress for PanicEgress {
         async fn execute(
             &self,
-            _request: ironclaw_host_api::RuntimeHttpEgressRequest,
+            _request: ironclaw_host_api::http::RuntimeHttpEgressRequest,
         ) -> Result<
-            ironclaw_host_api::RuntimeHttpEgressResponse,
-            ironclaw_host_api::RuntimeHttpEgressError,
+            ironclaw_host_api::http::RuntimeHttpEgressResponse,
+            ironclaw_host_api::http::RuntimeHttpEgressError,
         > {
             panic!("gate flow preparation must not reach the vendor");
         }
@@ -474,7 +500,7 @@ mod tests {
                 gate_ref: AuthGateRef::new("gate:vendor-auth").unwrap(),
                 requirement: RuntimeCredentialAuthRequirement {
                     provider: VendorId::new("acmevendor").unwrap(),
-                    setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                    setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                         scopes: vec!["msg:read".to_string()],
                     },
                     requester_extension: ExtensionId::new("acme-messenger-fixture").unwrap(),
@@ -528,6 +554,11 @@ mod tests {
         let fixture = GateFixture::new();
         let flow = fixture.challenge().await;
         assert_eq!(flow.provider.as_str(), "acmevendor");
+        assert_eq!(
+            flow.requester_extension.as_ref(),
+            Some(&fixture.requirement.requester_extension),
+            "the gate flow durably retains the extension whose recipe was resolved"
+        );
         let AuthChallenge::OAuthUrl {
             authorization_url: url,
             ..
@@ -555,6 +586,7 @@ mod tests {
                 scope: expired_scope.clone(),
                 kind: AuthFlowKind::IntegrationCredential,
                 provider: AuthProviderId::new("acmevendor").unwrap(),
+                requester_extension: None,
                 challenge: AuthChallenge::OAuthUrl {
                     authorization_url: OAuthAuthorizationUrl::new(
                         "https://auth.acme.example/authorize?state=expired".to_string(),
@@ -631,6 +663,7 @@ mod tests {
                 scope: auth_scope,
                 kind: AuthFlowKind::IntegrationCredential,
                 provider: AuthProviderId::new("othervendor").unwrap(),
+                requester_extension: None,
                 challenge: AuthChallenge::OAuthUrl {
                     authorization_url: OAuthAuthorizationUrl::new(
                         "https://auth.other.example/authorize?state=existing".to_string(),
@@ -676,6 +709,74 @@ mod tests {
             "same gate must cancel a stale live flow for another provider before replacement"
         );
         assert_eq!(fixture.active_gate_flows().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn gate_does_not_reuse_live_flow_for_a_different_requester_extension() {
+        let fixture = GateFixture::new();
+        let auth_scope = fixture.auth_scope();
+        let other_extension_flow_id = AuthFlowId::new();
+        let other_extension = fixture
+            .flow_manager
+            .create_flow(NewAuthFlow {
+                id: Some(other_extension_flow_id),
+                scope: auth_scope,
+                kind: AuthFlowKind::IntegrationCredential,
+                provider: AuthProviderId::new("acmevendor").unwrap(),
+                requester_extension: Some(ExtensionId::new("other-extension-fixture").unwrap()),
+                challenge: AuthChallenge::OAuthUrl {
+                    authorization_url: OAuthAuthorizationUrl::new(
+                        "https://auth.acme.example/authorize?state=other-extension".to_string(),
+                    )
+                    .unwrap(),
+                    expires_at: Utc::now() + ChronoDuration::seconds(60),
+                },
+                continuation: AuthContinuationRef::TurnGateResume {
+                    turn_run_ref: TurnRunRef::new(fixture.run_id.to_string()).unwrap(),
+                    gate_ref: fixture.gate_ref.clone(),
+                },
+                update_binding: None,
+                opaque_state_hash: None,
+                pkce_verifier_hash: None,
+                expires_at: Utc::now() + ChronoDuration::seconds(60),
+            })
+            .await
+            .unwrap();
+
+        // fixture.requirement's requester_extension is "acme-messenger-fixture",
+        // distinct from the flow's "other-extension-fixture" requester, but
+        // same owner/turn_run_ref/gate_ref/provider.
+        let flow = fixture.challenge().await;
+
+        assert_ne!(
+            flow.id, other_extension.id,
+            "a requirement from one extension must never receive another \
+             extension's live, unexpired flow for the same vendor/gate"
+        );
+        let AuthChallenge::OAuthUrl {
+            authorization_url, ..
+        } = flow.challenge.expect("authorization challenge")
+        else {
+            panic!("expected OAuth URL challenge");
+        };
+        assert!(
+            !authorization_url.as_str().contains("state=other-extension"),
+            "same gate/vendor must not reuse another requester's authorization URL"
+        );
+
+        // Declining reuse is fail-closed, not destructive: the other
+        // extension's still-valid flow must survive untouched.
+        let other_extension = fixture
+            .shared
+            .get_flow(&other_extension.scope, other_extension.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            other_extension.status,
+            AuthFlowStatus::AwaitingUser,
+            "declining reuse must not cancel another extension's in-flight flow"
+        );
     }
 
     /// A resolvable-but-unconfigured vendor (operator has not saved OAuth

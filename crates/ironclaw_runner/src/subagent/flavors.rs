@@ -1,7 +1,8 @@
 use crate::subagent::directions::DirectionId;
 use async_trait::async_trait;
+use ironclaw_loop_contracts::AgentLoopHostError;
 use ironclaw_loop_host::{SubagentDefinition, SubagentDefinitionResolver, SubagentKindId};
-use ironclaw_turns::{RunProfileRequest, TurnRunId, run_profile::AgentLoopHostError};
+use ironclaw_turns::{RunProfileRequest, TurnRunId};
 use serde::{Deserialize, Serialize};
 
 use crate::planned_driver_factory::SUBAGENT_PLANNED_PROFILE_ID;
@@ -174,7 +175,7 @@ impl SubagentDefinitionResolver for StaticSubagentDefinitionResolver {
             requested_run_profile: RunProfileRequest::new(SUBAGENT_PLANNED_PROFILE_ID).map_err(
                 |reason| {
                     AgentLoopHostError::new(
-                        ironclaw_turns::run_profile::AgentLoopHostErrorKind::Internal,
+                        ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
                         reason,
                     )
                 },
@@ -345,7 +346,7 @@ mod tests {
 
     #[test]
     fn every_flavor_capability_surface_equals_allowlist() {
-        use ironclaw_host_api::CapabilityId;
+        use ironclaw_host_api::ids::CapabilityId;
         use std::collections::BTreeSet;
 
         // Attenuation invariant: the capability surface derived for each flavor
@@ -422,28 +423,33 @@ mod tests {
 
         use async_trait::async_trait;
         use ironclaw_agent_loop::test_support::test_run_context;
-        use ironclaw_host_api::{CapabilityId, Resolution, ResolutionBatch, RuntimeKind};
-        use ironclaw_loop_host::{
-            CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileFilter,
-            CapabilitySurfaceProfileResolver, SubagentPromptMaterialSource,
+        use ironclaw_host_api::{
+            ids::CapabilityId,
+            resolution::{Resolution, ResolutionBatch},
+            runtime::RuntimeKind,
         };
-        use ironclaw_turns::run_profile::{
+        use ironclaw_loop_contracts::{
             AgentLoopHostError, CapabilityDescriptorView, CapabilityInputRef,
             CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopDriverId,
             LoopRequest, LoopRequestBatch, ProviderToolDefinition, VisibleCapabilityRequest,
             VisibleCapabilitySurface, resolution,
+        };
+        use ironclaw_loop_host::{
+            CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileFilter,
+            CapabilitySurfaceProfileResolver, SubagentPromptMaterialSource,
         };
         use ironclaw_turns::{LoopResultRef, RunProfileId, RunProfileVersion};
 
         use crate::planned_driver_factory::{
             PLANNED_DRIVER_DEFAULT_VERSION, SUBAGENT_PLANNED_DRIVER_ID, SUBAGENT_PLANNED_PROFILE_ID,
         };
+        use crate::runtime::ProcessRuntimeSystem;
         use crate::subagent::capability_surface::SubagentCapabilitySurfaceResolver;
         use crate::subagent::flavors::{SubagentFlavorId, lookup_flavor};
-        use crate::subagent::goal_store::{
-            SubagentGoal, SubagentGoalStorePort, in_memory_backed_subagent_goal_store,
-        };
         use crate::subagent::prompt_material::RebornSubagentPromptMaterialSource;
+        use ironclaw_processes::{
+            ProcessInputPayload, ProcessInputSubmission, ProcessKind, SubmitProcessRequest,
+        };
 
         // Full first-party builtin capability surface the host registry exposes.
         // The flavor allowlist must be a subset of these; the filter narrows the
@@ -464,6 +470,52 @@ mod tests {
             CapabilityId::new(value).expect("valid capability id")
         }
 
+        async fn process_inputs_with_goal(
+            context: &ironclaw_loop_contracts::LoopRunContext,
+        ) -> Arc<dyn ironclaw_processes::ProcessInputPort<Error = ironclaw_turns::TurnError>>
+        {
+            let system = ProcessRuntimeSystem::in_memory_ephemeral().expect("process system");
+            let mut scope = context.scope.to_resource_scope();
+            scope.invocation_id =
+                ironclaw_host_api::ids::InvocationId::from_uuid(context.run_id.as_uuid());
+            system
+                .submission()
+                .submit_process(SubmitProcessRequest {
+                    process_id: ironclaw_host_api::ids::ProcessId::from_uuid(
+                        context.run_id.as_uuid(),
+                    ),
+                    process_kind: ProcessKind::AgentTurn,
+                    scope,
+                    exclusive_within_scope: false,
+                    operation_id: None,
+                    owner_user_id: context.actor.as_ref().map(|actor| actor.user_id.clone()),
+                    concurrency_class: None,
+                    parent_process_id: None,
+                    root_process_id: None,
+                    spawn_tree_descendant_cap: None,
+                    dependency: None,
+                    checkpoint_ref: None,
+                    input: Some(ProcessInputSubmission {
+                        input_ref: ironclaw_processes::ProcessInputRef::from_trusted(
+                            "subagent-goal:v1",
+                        ),
+                        payload: ProcessInputPayload::new(
+                            serde_json::to_vec(&ironclaw_loop_host::SubagentGoalRecord {
+                                task: "task".to_string(),
+                                handoff: None,
+                            })
+                            .expect("serialize goal"),
+                        )
+                        .expect("bounded goal"),
+                    }),
+                    created_at: chrono::Utc::now(),
+                    metadata: serde_json::Value::Null,
+                })
+                .await
+                .expect("seed process input");
+            system.inputs()
+        }
+
         /// Inner runtime capability port standing in for the host surface. The
         /// production `CapabilitySurfaceProfileFilter` wraps a port like this and
         /// narrows it to the per-flavor allowlist.
@@ -478,7 +530,7 @@ mod tests {
         impl CapabilitySurfaceProfileResolver for StaticProfileResolver {
             async fn resolve(
                 &self,
-                _run_context: &ironclaw_turns::run_profile::LoopRunContext,
+                _run_context: &ironclaw_loop_contracts::LoopRunContext,
             ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
                 Ok(self.0.clone())
             }
@@ -491,7 +543,7 @@ mod tests {
                     .iter()
                     .map(|id| ProviderToolDefinition {
                         capability_id: cap(id),
-                        name: ironclaw_host_api::ProviderToolName::new(id.replace('.', "__"))
+                        name: ironclaw_host_api::ids::ProviderToolName::new(id.replace('.', "__"))
                             .expect("provider tool name"),
                         description: format!("{id} description"),
                         parameters: serde_json::json!({"type":"object"}),
@@ -515,6 +567,7 @@ mod tests {
                             runtime: RuntimeKind::FirstParty,
                             safe_name: id.to_string(),
                             safe_description: format!("{id} description"),
+                            description_trust: Default::default(),
                             concurrency_hint: ConcurrencyHint::SafeForParallel,
                             parameters_schema: serde_json::json!({"type":"object"}),
                         })
@@ -533,7 +586,7 @@ mod tests {
                 Ok(resolution::completed(
                     LoopResultRef::new("result:ok").expect("valid result ref"),
                     "ok".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -572,7 +625,6 @@ mod tests {
             ironclaw_loop_host::CapabilitySurfaceProfileFilter,
             Arc<HostSurfaceSpy>,
         ) {
-            let goal_store = Arc::new(in_memory_backed_subagent_goal_store());
             let mut context = test_run_context("caller-level-attenuation");
             context.resolved_run_profile.profile_id =
                 RunProfileId::new(SUBAGENT_PLANNED_PROFILE_ID).expect("subagent profile id");
@@ -580,19 +632,11 @@ mod tests {
                 LoopDriverId::new(SUBAGENT_PLANNED_DRIVER_ID).expect("subagent driver id");
             context.resolved_run_profile.loop_driver.version =
                 RunProfileVersion::new(PLANNED_DRIVER_DEFAULT_VERSION);
-            goal_store
-                .put_goal(
-                    &context.scope,
-                    context.run_id,
-                    SubagentGoal {
-                        task: "task".to_string(),
-                        handoff: None,
-                    },
-                )
-                .await
-                .expect("seed goal");
             let source: Arc<dyn SubagentPromptMaterialSource> =
-                Arc::new(RebornSubagentPromptMaterialSource::new(goal_store, flavor));
+                Arc::new(RebornSubagentPromptMaterialSource::new(
+                    process_inputs_with_goal(&context).await,
+                    flavor,
+                ));
             let resolver = SubagentCapabilitySurfaceResolver::new(
                 Arc::new(StaticProfileResolver(base_allow_set)),
                 source,
@@ -790,13 +834,16 @@ mod tests {
 
         #[tokio::test]
         async fn non_subagent_surface_preserves_outer_profile_surface() {
-            let goal_store = Arc::new(in_memory_backed_subagent_goal_store());
             let context = test_run_context("caller-level-non-subagent");
             let base_allow_set =
                 CapabilityAllowSet::allowlist([cap("builtin.read_file"), cap("builtin.http")]);
-            let source: Arc<dyn SubagentPromptMaterialSource> = Arc::new(
-                RebornSubagentPromptMaterialSource::new(goal_store, SubagentFlavorId::Coder),
-            );
+            let source: Arc<dyn SubagentPromptMaterialSource> =
+                Arc::new(RebornSubagentPromptMaterialSource::new(
+                    ProcessRuntimeSystem::in_memory_ephemeral()
+                        .expect("process system")
+                        .inputs(),
+                    SubagentFlavorId::Coder,
+                ));
             let resolver = SubagentCapabilitySurfaceResolver::new(
                 Arc::new(StaticProfileResolver(base_allow_set.clone())),
                 source,

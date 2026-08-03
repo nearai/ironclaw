@@ -57,19 +57,16 @@
 //! owner's next decision: do NOT casually "fix" one — degenericize by routing
 //! on a manifest capability, or carve deliberately with a one-line justification.
 
+#[allow(dead_code)]
+mod ratchet_support;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::Value;
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("architecture crate under crates")
-        .to_path_buf()
-}
+use ratchet_support::workspace_root;
 
 // ---------------------------------------------------------------------------
 // Inventory-derived forbidden terms
@@ -189,6 +186,19 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "GitHub content API allowlist for skill installation",
     ),
     (
+        "crates/ironclaw_host_runtime/src/sandbox_process/network_allowlist.rs",
+        "github",
+        "default sandboxed-shell egress allowlist includes github.com/\
+         raw.githubusercontent.com/codeload.github.com for ordinary `git clone`/release-\
+         archive workflows — GitHub as a code host, not the github extension",
+    ),
+    (
+        "crates/ironclaw_host_runtime/src/sandbox_process/network_allowlist.rs",
+        "api.github.com",
+        "default sandboxed-shell egress allowlist includes GitHub's content API host for \
+         `gh`/archive-download workflows — GitHub as a code host, not the github extension",
+    ),
+    (
         "crates/ironclaw_host_runtime/src/first_party_tools/skill_management.rs",
         "github",
         "skill-install tool description names GitHub as a skill source",
@@ -244,13 +254,14 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "credential-prefix redaction (github_pat_)",
     ),
     (
-        "crates/ironclaw_turns/src/run_profile/host/validate.rs",
+        "crates/ironclaw_loop_contracts/src/host/validate.rs",
         "github",
         "credential-prefix redaction (github_pat_) — relocated here when \
-         run_profile/host.rs was decomposed (#6391)",
+         run_profile/host.rs was decomposed (#6391), and again when WS1.2 moved \
+         run_profile/** into ironclaw_loop_contracts",
     ),
     (
-        "crates/ironclaw_turns/src/run_profile/host/validate.rs",
+        "crates/ironclaw_loop_contracts/src/host/validate.rs",
         "google",
         "credential-prefix redaction (Google/GCP key shapes) at the \
          model-visible boundary — vendor-specific safety detection",
@@ -274,7 +285,7 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
          the leak-scanner carve-out domain (#5965)",
     ),
     (
-        "crates/ironclaw_turns/src/run_profile/prompt_text.rs",
+        "crates/ironclaw_loop_contracts/src/prompt_text.rs",
         "github",
         "credential-prefix redaction (github_pat_)",
     ),
@@ -405,11 +416,6 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "crates/ironclaw_common/src/identity.rs",
-        "telegram",
-        "persisted credential-name / channel-id vocabulary in the shared identity crate (compat law: stored ids stay readable)",
-    ),
-    (
-        "crates/ironclaw_common/src/platform.rs",
         "telegram",
         "persisted credential-name / channel-id vocabulary in the shared identity crate (compat law: stored ids stay readable)",
     ),
@@ -1066,38 +1072,67 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // shrink as the old composition-hosted tests become manifest-driven.
     ("crates/ironclaw_extension_host/Cargo.toml", "slack"),
     (
-        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
+        "crates/ironclaw_extension_contracts/src/auth_prompt.rs",
         "github",
     ),
     (
-        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
+        "crates/ironclaw_extension_contracts/src/auth_prompt.rs",
         "google",
     ),
     (
-        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
+        "crates/ironclaw_extension_contracts/src/auth_prompt.rs",
         "notion",
     ),
     (
-        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
+        "crates/ironclaw_extension_contracts/src/auth_prompt.rs",
         "telegram",
     ),
     ("crates/ironclaw_product/Cargo.toml", "telegram"),
-    (
-        "crates/ironclaw_product/src/conversation_binding.rs",
-        "slack",
-    ),
+    // `conversation_binding.rs` was carved for a vendor example in
+    // `ProductConversationRouteKey`'s doc. WS2.2 moved that type to
+    // `ironclaw_product_contracts::subject_route`, where a vendor name is
+    // forbidden outright, so the example was rewritten generically rather than
+    // re-carved. The entry is deleted, not repointed — the allowlist shrinks.
     ("crates/ironclaw_product/src/lib.rs", "telegram"),
     ("crates/ironclaw_product/src/reborn_services.rs", "slack"),
+    // WS5 port inversion: these three wire-DTO sites moved to the contracts
+    // crate with their code (`NearAiAuthProvider`'s OAuth identity providers and
+    // the project-metadata doc example). Same terms, same debt, new file.
+    //
+    // Repointed, not deleted and not added: the two entries moved with the
+    // `LlmConfigService` port from `ironclaw_product` to
+    // `ironclaw_product_contracts::operator_llm` (WS5 operator row). Same two
+    // terms, same count — the baseline is untouched.
+    //
+    // The terms are `NearAiAuthProvider::{Github, Google}`, the two SSO
+    // identity providers NEAR AI accepts, whose `as_path()` builds
+    // `/v1/auth/github` and `/v1/auth/google`. They are not extension package
+    // references; they are LLM-vendor admin vocabulary, which PROPOSAL §8.2's
+    // vendor rule sanctions for `ironclaw_operator` ("*this* is the LLM-vendor
+    // admin layer", §6.9.2).
+    //
+    // **Recorded finding, not resolved here.** §8.2's sanctioned-vendor list
+    // names `packages/*`, `llm` providers, `operator`, `webui::auth` login
+    // providers, and recipes-as-data — it does **not** name the contracts
+    // family. Declaring the port at the boundary therefore carries vendor
+    // vocabulary somewhere the rule does not cover, and this pair is only the
+    // visible tip: `LlmConfigService` has three vendor-named *methods*
+    // (`start_nearai_login`, `complete_nearai_wallet_login`,
+    // `start_codex_login`) and six vendor-named DTOs the scanner's inventory
+    // does not know to flag. Generifying that is a design change — NEAR AI SSO,
+    // NEAR wallet NEP-413, and OpenAI Codex device-code are three different
+    // protocols behind one port — and PLAN's operating principle 2 keeps
+    // semantic changes out of a move PR. The finding is in the WS5 row.
     (
-        "crates/ironclaw_product/src/reborn_services/llm_config.rs",
+        "crates/ironclaw_product_contracts/src/operator_llm.rs",
         "github",
     ),
     (
-        "crates/ironclaw_product/src/reborn_services/llm_config.rs",
+        "crates/ironclaw_product_contracts/src/operator_llm.rs",
         "google",
     ),
     (
-        "crates/ironclaw_product/src/reborn_services/projects.rs",
+        "crates/ironclaw_product_contracts/src/workspace_views.rs",
         "github",
     ),
     ("crates/ironclaw_product/src/workflow.rs", "slack"),
@@ -1140,11 +1175,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // (Google API hosts) and web-access (Exa MCP) egress it no longer
     // special-cases — the code routes purely on manifest-declared targets.
     (
-        "crates/ironclaw_reborn_composition/src/runtime/local_dev/extension_surface.rs",
+        "crates/ironclaw_extension_host/src/capability_surface.rs",
         "google",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/runtime/local_dev/extension_surface.rs",
+        "crates/ironclaw_extension_host/src/capability_surface.rs",
         "web-access",
     ),
     // lane-4: nearai-slice — the last catalog package (nearai_mcp) is still
@@ -1177,8 +1212,24 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "nearaimcp",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
+        "crates/ironclaw_reborn_composition/src/factory/auth_engine_assembly.rs",
         "nearai_mcp",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/factory/production_backend_assembly.rs",
+        "nearai_mcp",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/factory/production_backend_assembly.rs",
+        "nearaimcp",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/factory/production_build_assembly.rs",
+        "nearai_mcp",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/factory/production_build_assembly.rs",
+        "nearaimcp",
     ),
     (
         "crates/ironclaw_reborn_composition/src/input.rs",
@@ -1229,20 +1280,16 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "nearai_mcp",
     ),
     // lane-4: migration — one-time forward-migration call sites naming the v1 vocabulary they fold forward — correct-by-design (same pattern the retired-taxonomy gate sanctions); would become a SANCTIONED_PATHS carve if the sites move into a dedicated migration module
-    ("crates/ironclaw_reborn_composition/src/factory.rs", "slack"),
-    (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
-        "nearaimcp",
-    ),
     // lane-4: doc-str — incidental doc-comment / error-string / tool-description examples that NAME an extension but branch on nothing — the code routes by a manifest field (display_name/provider/effects); reword or leave (Ben's call)
+    (
+        "crates/ironclaw_extension_contracts/src/surface.rs",
+        "slack",
+    ),
     ("crates/ironclaw_filesystem/src/index.rs", "acme"),
     ("crates/ironclaw_host_api/src/capability.rs", "slack"),
     ("crates/ironclaw_host_api/src/http.rs", "slack"),
     ("crates/ironclaw_host_api/src/ids.rs", "github"),
-    ("crates/ironclaw_host_api/src/surface.rs", "slack"),
     ("crates/ironclaw_loop_host/src/capability_port.rs", "gmail"),
-    ("crates/ironclaw_auth/src/loopback_oauth.rs", "google"),
-    ("crates/ironclaw_auth/src/loopback_oauth.rs", "notion"),
     (
         "crates/ironclaw_outbound/src/delivered_gate_routes.rs",
         "slack",
@@ -1265,7 +1312,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "google",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
+        "crates/ironclaw_reborn_composition/src/factory/production_backend_assembly.rs",
+        "google",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/factory/runtime_lane_assembly.rs",
         "notion",
     ),
     (
@@ -1297,7 +1348,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/root/communication_context.rs",
+        "crates/ironclaw_product/src/communication_context.rs",
         "slack",
     ),
     ("crates/ironclaw_skills/src/selector.rs", "github"),
@@ -1393,6 +1444,37 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
 ];
 
+/// WS0 baseline for the extension-specificity allowlist (target-architecture
+/// epic #3773, workstream #6920): the number of `(path, term)` pairs measured
+/// **on this checkout**, not copied from the design docs.
+///
+/// Measured 2026-07-30 against `origin/main` @ `ae0989c37` by counting the
+/// entries of `ALLOWLIST` above (`ALLOWLIST.len()`, printed by the ratchet
+/// below on failure).
+///
+/// PROPOSAL §11.2.8 shrinks this list to the §8.1 rule-4 set and CHECKLIST
+/// WS12 wants it empty. The staleness half of that discipline already lives in
+/// the gate above (an entry that no longer matches fails); this ceiling is the
+/// other half — the list cannot *grow* untracked either. Lower it in the same
+/// PR that deletes entries so the new floor is locked in.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 129;
+
+/// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
+#[test]
+fn reborn_extension_specificity_allowlist_ratchets_down_only() {
+    assert!(
+        ALLOWLIST.len() <= WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE,
+        "extension-specificity ALLOWLIST grew to {} entries (WS0 baseline {}): this list is \
+         shrink-only (PROPOSAL §11.2.8). Degenericize the code — route on a manifest-declared \
+         capability instead of naming the vendor — rather than allowlisting a new pair. If the \
+         owner has approved a deliberate carve-out, raise \
+         WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE in the same PR with the rationale in the \
+         PR body.",
+        ALLOWLIST.len(),
+        WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE
+    );
+}
+
 /// One `(relative path, matched term)` scanner hit.
 type HitEntry = (String, String);
 
@@ -1436,7 +1518,8 @@ fn reborn_generic_code_names_no_concrete_extension() {
     if !new_violations.is_empty() {
         failures.push(format!(
             "concrete extension names in generic code (fix the code, or — for pre-existing \
-             debt only — add the exact entries below to ALLOWLIST):\n{}",
+             debt only — add the exact entries below to ALLOWLIST, which also requires raising \
+             WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE, a reviewed decision):\n{}",
             new_violations
                 .iter()
                 .map(|(path, term)| format!("    (\"{path}\", \"{term}\"),"))

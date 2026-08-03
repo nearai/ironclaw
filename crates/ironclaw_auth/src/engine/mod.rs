@@ -3,7 +3,7 @@
 //! One engine implements `oauth2_code` (with PKCE) and RFC 7591 dynamic client
 //! registration for vendors whose recipe carries no deployment client
 //! credentials. Vendors differ only in recipe **data**
-//! (`ironclaw_host_api::VendorAuthRecipe`); there is no auth trait in the
+//! (`ironclaw_extension_contracts::recipe::VendorAuthRecipe`); there is no auth trait in the
 //! extension ABI and no per-vendor code path here.
 //!
 //! Engine-owned, for every vendor:
@@ -20,6 +20,7 @@
 //! Vendor response bodies are size-capped and never logged or embedded in
 //! errors; only stable OAuth error codes (`invalid_grant`, …) are extracted.
 
+pub mod admission;
 mod dcr;
 mod exchange;
 mod http;
@@ -30,10 +31,10 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{
-    OAuth2CodeRecipe, PkceMode, RecipeClientCredentials, ResourceScope, RuntimeHttpEgress,
-    VendorAuthRecipe,
+use ironclaw_extension_contracts::recipe::{
+    OAuth2CodeRecipe, PkceMode, RecipeClientCredentials, VendorAuthRecipe,
 };
+use ironclaw_host_api::{http::RuntimeHttpEgress, ids::ExtensionId, resource::ResourceScope};
 use ironclaw_secrets::SecretStorePort;
 use secrecy::SecretString;
 use url::Url;
@@ -60,6 +61,11 @@ pub struct ResolvedVendorAuthRecipe {
     pub vendor: String,
     pub recipe: VendorAuthRecipe,
     pub token_exchange_resource: Option<String>,
+    /// The exact protected-resource metadata document admitted from the MCP
+    /// authorization challenge. Dynamic registration must use this location,
+    /// rather than reconstructing a well-known path from the resource URL.
+    pub protected_resource_metadata_url:
+        Option<ironclaw_extension_contracts::recipe::HttpsEndpoint>,
 }
 
 /// Resolver port: recipe DATA for a vendor id (never adapters, never code).
@@ -68,8 +74,16 @@ pub struct ResolvedVendorAuthRecipe {
 /// extension snapshot and the bundled-manifest catalog by the host/composition
 /// layers. Shared vendors resolve to one unified recipe (identical except
 /// `scopes`/`display_name`, scope ceiling = union) or fail resolution.
+#[async_trait]
 pub trait AuthRecipeResolver: Send + Sync + fmt::Debug {
-    fn recipe_for_vendor(&self, vendor: &str) -> Option<ResolvedVendorAuthRecipe>;
+    /// Resolve only the recipe declared by the requesting installed extension.
+    /// `None` is reserved for built-in/static callers; installed-manifest
+    /// resolvers must fail closed when it is absent.
+    async fn resolve(
+        &self,
+        requester_extension: Option<&ExtensionId>,
+        vendor: &str,
+    ) -> Option<ResolvedVendorAuthRecipe>;
 }
 
 /// Static in-memory recipe resolver for composition and tests.
@@ -91,10 +105,21 @@ impl StaticAuthRecipeResolver {
     pub fn vendors(&self) -> Vec<String> {
         self.recipes.keys().cloned().collect()
     }
+
+    /// Synchronous deployment lookup for composition-time static client
+    /// material. Runtime callers must use the requester-bound resolver port.
+    pub fn recipe_for_vendor(&self, vendor: &str) -> Option<ResolvedVendorAuthRecipe> {
+        self.recipes.get(vendor).cloned()
+    }
 }
 
+#[async_trait]
 impl AuthRecipeResolver for StaticAuthRecipeResolver {
-    fn recipe_for_vendor(&self, vendor: &str) -> Option<ResolvedVendorAuthRecipe> {
+    async fn resolve(
+        &self,
+        _requester_extension: Option<&ExtensionId>,
+        vendor: &str,
+    ) -> Option<ResolvedVendorAuthRecipe> {
         self.recipes.get(vendor).cloned()
     }
 }
@@ -186,6 +211,8 @@ pub struct AuthEngineDeps {
 #[derive(Debug, Clone)]
 pub struct PrepareOAuthFlowRequest {
     pub vendor: String,
+    /// Extension that declared the recipe. Built-in/static flows use `None`.
+    pub requester_extension: Option<ExtensionId>,
     pub scope: AuthProductScope,
     pub flow_id: AuthFlowId,
     pub account_label: CredentialAccountLabel,
@@ -198,6 +225,9 @@ pub struct PrepareOAuthFlowRequest {
 /// the hashes.
 pub struct PreparedOAuthFlow {
     pub provider: AuthProviderId,
+    /// Durable requester identity the flow record must retain for later
+    /// recipe revalidation.
+    pub requester_extension: Option<ExtensionId>,
     pub authorization_url: OAuthAuthorizationUrl,
     pub requested_scopes: Vec<ProviderScope>,
     pub opaque_state_hash: OpaqueStateHash,
@@ -257,19 +287,36 @@ impl AuthEngine {
         &self.recipes
     }
 
-    fn resolved_recipe(&self, vendor: &str) -> Result<ResolvedVendorAuthRecipe, AuthProductError> {
+    async fn resolved_recipe(
+        &self,
+        requester_extension: Option<&ExtensionId>,
+        vendor: &str,
+    ) -> Result<ResolvedVendorAuthRecipe, AuthProductError> {
         self.recipes
-            .recipe_for_vendor(vendor)
+            .resolve(requester_extension, vendor)
+            .await
             .ok_or(AuthProductError::MalformedConfig)
     }
 
-    fn oauth2_recipe(
+    async fn oauth2_recipe(
         &self,
+        requester_extension: Option<&ExtensionId>,
         vendor: &str,
-    ) -> Result<(Box<OAuth2CodeRecipe>, Option<String>), AuthProductError> {
-        let resolved = self.resolved_recipe(vendor)?;
+    ) -> Result<
+        (
+            Box<OAuth2CodeRecipe>,
+            Option<String>,
+            Option<ironclaw_extension_contracts::recipe::HttpsEndpoint>,
+        ),
+        AuthProductError,
+    > {
+        let resolved = self.resolved_recipe(requester_extension, vendor).await?;
         match resolved.recipe {
-            VendorAuthRecipe::Oauth2Code(recipe) => Ok((recipe, resolved.token_exchange_resource)),
+            VendorAuthRecipe::Oauth2Code(recipe) => Ok((
+                recipe,
+                resolved.token_exchange_resource,
+                resolved.protected_resource_metadata_url,
+            )),
             VendorAuthRecipe::ApiKey(_) => Err(AuthProductError::MalformedConfig),
         }
     }
@@ -286,6 +333,9 @@ impl AuthEngine {
         vendor: &str,
         recipe: &OAuth2CodeRecipe,
         resource: Option<&str>,
+        protected_resource_metadata_url: Option<
+            &ironclaw_extension_contracts::recipe::HttpsEndpoint,
+        >,
         register_if_missing: bool,
     ) -> Result<exchange::EffectiveOAuthClient, AuthProductError> {
         if let Some(credentials) = &recipe.client_credentials {
@@ -299,8 +349,14 @@ impl AuthEngine {
         }
         // No deployment client credentials: dynamic client registration is
         // the generic hosted-MCP behavior, implemented once here.
-        self.dcr_client(scope, vendor, recipe, resource, register_if_missing)
-            .await
+        self.dcr_client(
+            scope,
+            vendor,
+            resource,
+            protected_resource_metadata_url,
+            register_if_missing,
+        )
+        .await
     }
 
     /// Host-constructed authorize URL + state + PKCE for one vendor flow
@@ -310,7 +366,9 @@ impl AuthEngine {
         &self,
         request: PrepareOAuthFlowRequest,
     ) -> Result<PreparedOAuthFlow, AuthProductError> {
-        let (recipe, resource) = self.oauth2_recipe(&request.vendor)?;
+        let (recipe, resource, protected_resource_metadata_url) = self
+            .oauth2_recipe(request.requester_extension.as_ref(), &request.vendor)
+            .await?;
         // Enforce the recipe invariants at execution time; manifest-parse
         // validation is not trusted alone (AUTH-2).
         recipe
@@ -324,6 +382,7 @@ impl AuthEngine {
                 &request.vendor,
                 &recipe,
                 resource.as_deref(),
+                protected_resource_metadata_url.as_ref(),
                 true,
             )
             .await?;
@@ -353,6 +412,7 @@ impl AuthEngine {
 
         Ok(PreparedOAuthFlow {
             provider,
+            requester_extension: request.requester_extension,
             authorization_url,
             requested_scopes,
             opaque_state_hash,
@@ -374,11 +434,31 @@ impl AuthProviderClient for AuthEngine {
         if callback_scope.is_system() {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        let (recipe, resource) = self
-            .oauth2_recipe(request.provider.as_str())
+        let (recipe, resource, _) = self
+            .oauth2_recipe(None, request.provider.as_str())
+            .await
             .map_err(|_| AuthProductError::TokenExchangeFailed)?;
         // Widening past the ceiling is rejected before the vendor call, on
         // the exchange path too (defense in depth over prepare-time checks).
+        validate_scopes_within_ceiling(&recipe, &request.scopes)?;
+        self.execute_oauth_exchange(context, request, recipe, resource)
+            .await
+    }
+
+    async fn exchange_callback_for_requester(
+        &self,
+        requester_extension: Option<ExtensionId>,
+        context: OAuthProviderExchangeContext,
+        request: OAuthProviderCallbackRequest,
+    ) -> Result<OAuthProviderExchange, AuthProductError> {
+        validate_provider_callback_request(&request)?;
+        if context.scope.resource.is_system() {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        let (recipe, resource, _) = self
+            .oauth2_recipe(requester_extension.as_ref(), request.provider.as_str())
+            .await
+            .map_err(|_| AuthProductError::TokenExchangeFailed)?;
         validate_scopes_within_ceiling(&recipe, &request.scopes)?;
         self.execute_oauth_exchange(context, request, recipe, resource)
             .await
@@ -392,8 +472,25 @@ impl AuthProviderClient for AuthEngine {
         if refresh_scope.is_system() {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        let (recipe, resource) = self
-            .oauth2_recipe(request.provider.as_str())
+        let (recipe, resource, _) = self
+            .oauth2_recipe(None, request.provider.as_str())
+            .await
+            .map_err(|_| AuthProductError::RefreshFailed)?;
+        self.execute_oauth_refresh(request, recipe, resource).await
+    }
+
+    async fn refresh_token_for_requester(
+        &self,
+        requester_extension: Option<ExtensionId>,
+        request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError> {
+        let refresh_scope = request.scope.resource.clone();
+        if refresh_scope.is_system() {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        let (recipe, resource, _) = self
+            .oauth2_recipe(requester_extension.as_ref(), request.provider.as_str())
+            .await
             .map_err(|_| AuthProductError::RefreshFailed)?;
         self.execute_oauth_refresh(request, recipe, resource).await
     }
@@ -476,7 +573,7 @@ fn build_recipe_authorization_url(
     // The endpoint may not predefine reserved parameters (host-owned).
     for (name, _) in url.query_pairs() {
         let name = name.to_ascii_lowercase();
-        if ironclaw_host_api::RESERVED_AUTHORIZE_PARAMS.contains(&name.as_str())
+        if ironclaw_extension_contracts::recipe::RESERVED_AUTHORIZE_PARAMS.contains(&name.as_str())
             || name == recipe.scope_param()
         {
             return Err(AuthProductError::MalformedConfig);

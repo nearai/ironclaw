@@ -8,8 +8,8 @@
 //!
 //! The loop never sees raw tool input, only the sanitized projection.
 
-use ironclaw_host_api::CapabilityId;
-use ironclaw_turns::run_profile::ConcurrencyHint;
+use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_loop_contracts::ConcurrencyHint;
 
 use crate::state::LoopExecutionState;
 
@@ -73,16 +73,14 @@ pub(crate) struct CapabilityCallSummary {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{TenantId, ThreadId};
-    use ironclaw_turns::{
-        AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
-        run_profile::{
-            CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId,
-            ConcurrencyClass, ContextProfileId, LoopDriverId, LoopRunContext, ModelProfileId,
-            RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
-            ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
-            SchedulingClass, SteeringPolicy,
-        },
+    use ironclaw_host_api::ids::{TenantId, ThreadId};
+    use ironclaw_host_api::turn::{RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope};
+    use ironclaw_loop_contracts::{
+        AgentLoopDriverDescriptor, CancellationPolicy, CapabilitySurfaceProfileId,
+        CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
+        LoopRunContext, ModelProfileId, RedactedRunProfileProvenance, ResolvedRunProfile,
+        ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+        RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
     };
     use serde_json::json;
 
@@ -144,7 +142,7 @@ mod tests {
                 max_model_calls: 32,
                 max_capability_invocations: 64,
             },
-            personal_context_policy: ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
+            personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
             runtime_constraints: RuntimeProfileConstraints {
                 allow_raw_runtime_backend_selection: false,
                 allow_broad_capability_surface: false,
@@ -164,7 +162,7 @@ mod tests {
 
     fn call(name: &str, hint: ConcurrencyHint) -> CapabilityCallSummary {
         CapabilityCallSummary {
-            name: ironclaw_host_api::CapabilityId::new(name).expect("valid"),
+            name: ironclaw_host_api::ids::CapabilityId::new(name).expect("valid"),
             concurrency_hint: hint,
         }
     }

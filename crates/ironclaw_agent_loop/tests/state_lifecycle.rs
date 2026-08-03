@@ -12,7 +12,7 @@ use ironclaw_agent_loop::{
         test_run_context,
     },
 };
-use ironclaw_turns::{LoopExit, LoopFailureKind, run_profile::LoopRunInfoPort};
+use ironclaw_loop_contracts::{LoopExit, LoopFailureKind, LoopRunInfoPort};
 use serde_json::json;
 
 #[test]

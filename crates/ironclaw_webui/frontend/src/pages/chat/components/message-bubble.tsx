@@ -3,17 +3,37 @@ import { MarkdownRenderer } from "./markdown-renderer";
 import { ToolActivity } from "./tool-activity";
 import { Icon } from "../../../design-system/icons";
 import { toast } from "../../../lib/toast";
-import { ProjectFileChips } from "./project-file-chips";
 import { AttachmentChip } from "./attachment-chip";
-import { AttachmentPreviewModal } from "./attachment-preview";
 import { useT } from "../../../lib/i18n";
-import { fetchRunArtifact } from "../../../lib/api";
+import {
+  fetchRunArtifact,
+  fetchThreadArtifact,
+  projectFileContentUrl,
+} from "../../../lib/api";
 import { saveBlob } from "../../../lib/download";
+import { COMMAND_RESULT_KIND, classifyCommandResponse } from "../lib/chat-commands";
 import {
   CHAT_MESSAGE_ROLES,
+  messageBelongsToActiveRun,
   type ChatAttachment,
   type ChatMessage,
 } from "../lib/message-types";
+
+// The rich command-result card only renders for a SYSTEM notice carrying a
+// structured `commandResult` (see the branch below) — most messages never hit
+// it — so it loads as its own chunk instead of padding every /chat page load,
+// the same pattern markdown-renderer.tsx uses for its Streamdown import.
+const CommandResult = React.lazy(() =>
+  import("./command-result").then(({ CommandResult }) => ({
+    default: CommandResult,
+  }))
+);
+
+const AttachmentPreviewModal = React.lazy(() =>
+  import("./attachment-preview").then(({ AttachmentPreviewModal }) => ({
+    default: AttachmentPreviewModal,
+  }))
+);
 
 /* User keeps a tinted bubble; assistant is borderless (document-like);
    system stays as a centered notice, and error renders as an inline
@@ -29,10 +49,24 @@ const ROLE_STYLES = {
     "mr-auto rounded-[18px] border border-red-400/25 bg-red-500/10 px-4 py-3 text-left text-red-200",
 };
 
+type CommandDescriptor = {
+  name: string;
+  title: string;
+  description: string;
+  usage: string;
+};
+
 type MessageBubbleProps = {
   message: ChatMessage;
   onRetry?: (message: ChatMessage) => void;
   threadId?: string | null;
+  activeRunId?: string | null;
+  regressionArtifactExportEnabled?: boolean;
+  // The server command inventory (`useChatCommands()`, threaded down from
+  // chat.tsx through MessageList) — only read for a SYSTEM message carrying a
+  // `commandResult` whose rejection is the "available commands" help case;
+  // see command-result.tsx.
+  commands?: CommandDescriptor[];
 };
 
 function formatTimestamp(value?: string) {
@@ -45,12 +79,21 @@ function formatTimestamp(value?: string) {
 /* Collapsible provider-reasoning summary. Collapsed by default so the
    thread stays clean; expands to the full reasoning markdown. Data comes
    from the `thinking` projection item (PR #4230). */
-function ThinkingDisclosure({ content }: { content?: string }) {
+function ThinkingDisclosure({
+  content,
+  streaming = false,
+}: {
+  content?: string;
+  streaming?: boolean;
+}) {
   const t = useT();
   const [open, setOpen] = React.useState(false);
   if (!content) return null;
   return (
-    <div className="flex flex-col items-start">
+    <div
+      className="flex flex-col items-start"
+      data-streaming={String(streaming)}
+    >
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -67,22 +110,41 @@ function ThinkingDisclosure({ content }: { content?: string }) {
       {open &&
       (
         <div className="mt-1 border-l-2 border-white/10 pl-3 text-iron-300">
-          <MarkdownRenderer content={content} className="text-[13px]" />
+          <MarkdownRenderer
+            content={content}
+            className="text-[13px]"
+            streaming={streaming}
+          />
         </div>
       )}
     </div>
   );
 }
 
-function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
+function MessageBubbleImpl({
+  message,
+  onRetry,
+  threadId,
+  activeRunId,
+  regressionArtifactExportEnabled = false,
+  commands,
+}: MessageBubbleProps) {
   const t = useT();
-  const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
+  const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp, commandResult } = message;
   const isUser = role === CHAT_MESSAGE_ROLES.USER;
   const finalReplyState =
     role === CHAT_MESSAGE_ROLES.ASSISTANT &&
     typeof message.isFinalReply === "boolean"
       ? String(message.isFinalReply)
       : undefined;
+  const isStreamingAssistantReply =
+    role === CHAT_MESSAGE_ROLES.ASSISTANT &&
+    message.isFinalReply === false &&
+    message.isStreaming !== false &&
+    messageBelongsToActiveRun(message, activeRunId);
+  const isStreamingThinking =
+    role === CHAT_MESSAGE_ROLES.THINKING &&
+    messageBelongsToActiveRun(message, activeRunId);
   const failureCategory =
     role === CHAT_MESSAGE_ROLES.ERROR &&
     typeof message.failureCategory === "string"
@@ -94,10 +156,24 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
       ? message.failureStatus
       : undefined;
   const [copied, setCopied] = React.useState(false);
-  const [artifactDownloading, setArtifactDownloading] = React.useState(false);
+  const [artifactDownloading, setArtifactDownloading] = React.useState<
+    "run" | "thread" | null
+  >(null);
   // The attachment currently open in the preview modal (null when closed).
   const [previewAttachment, setPreviewAttachment] =
     React.useState<ChatAttachment | null>(null);
+  const openWorkspaceFile = React.useCallback(
+    (path: string) => {
+      if (!threadId) return;
+      setPreviewAttachment({
+        filename: path.split("/").filter(Boolean).pop() || path,
+        mime_type: "",
+        fetch_url: projectFileContentUrl({ threadId, path }),
+        workspace_path: path,
+      });
+    },
+    [threadId],
+  );
   // All hooks must run before the role-based early returns below.
   // A message can change role in place across renders (e.g. an
   // optimistic bubble upgrading, or a streaming role shift), so
@@ -118,7 +194,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
     typeof message.turnRunId === "string" ? message.turnRunId : "";
   const downloadArtifact = React.useCallback(async () => {
     if (!threadId || !turnRunId || artifactDownloading) return;
-    setArtifactDownloading(true);
+    setArtifactDownloading("run");
     try {
       const artifact = await fetchRunArtifact({ threadId, runId: turnRunId });
       const filenameRunId = turnRunId.replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -136,9 +212,32 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
         { tone: "error" },
       );
     } finally {
-      setArtifactDownloading(false);
+      setArtifactDownloading(null);
     }
   }, [artifactDownloading, t, threadId, turnRunId]);
+  const downloadThreadArtifact = React.useCallback(async () => {
+    if (!threadId || artifactDownloading) return;
+    setArtifactDownloading("thread");
+    try {
+      const artifact = await fetchThreadArtifact({ threadId });
+      const filenameThreadId = threadId.replace(/[^a-zA-Z0-9._-]/g, "_");
+      saveBlob(
+        new Blob([`${JSON.stringify(artifact, null, 2)}\n`], {
+          type: "application/json",
+        }),
+        `ironclaw-thread-${filenameThreadId}.json`,
+      );
+    } catch (error) {
+      toast(
+        error instanceof Error
+          ? error.message
+          : t("chat.fileDownloadFailed"),
+        { tone: "error" },
+      );
+    } finally {
+      setArtifactDownloading(null);
+    }
+  }, [artifactDownloading, t, threadId]);
 
   if (
     role === CHAT_MESSAGE_ROLES.TOOL_ACTIVITY ||
@@ -154,7 +253,32 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
   }
 
   if (role === CHAT_MESSAGE_ROLES.THINKING) {
-    return (<ThinkingDisclosure content={content} />);
+    return (
+      <ThinkingDisclosure
+        content={content}
+        streaming={isStreamingThinking}
+      />
+    );
+  }
+
+  // A command-execute response stashed structured data on the notice (see
+  // useChat.ts's `runCommand`) — render the rich, left-aligned presentation
+  // instead of the plain markdown notice bubble below. `commandResult` is
+  // absent on every other SYSTEM notice (e.g. the busy/rejected notice from
+  // `send()`), which keeps rendering through the legacy path unchanged; the
+  // EMPTY classification (defensive only — never hit against a real backend,
+  // see chat-commands.ts) also falls through to that legacy path rather than
+  // rendering nothing.
+  if (
+    role === CHAT_MESSAGE_ROLES.SYSTEM &&
+    commandResult &&
+    classifyCommandResponse(commandResult) !== COMMAND_RESULT_KIND.EMPTY
+  ) {
+    return (
+      <React.Suspense fallback={null}>
+        <CommandResult response={commandResult} commands={commands} />
+      </React.Suspense>
+    );
   }
 
   if (role === CHAT_MESSAGE_ROLES.IMAGE) {
@@ -177,16 +301,29 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
     );
   }
 
-  const timeLabel = formatTimestamp(timestamp);
+  const isIntermediateAssistantPhase =
+    role === CHAT_MESSAGE_ROLES.ASSISTANT &&
+    message.isFinalReply === false;
+  const timeLabel = isIntermediateAssistantPhase ? "" : formatTimestamp(timestamp);
   const showActions =
     role === CHAT_MESSAGE_ROLES.USER ||
-    (role === CHAT_MESSAGE_ROLES.ASSISTANT && !isOptimistic);
+    (role === CHAT_MESSAGE_ROLES.ASSISTANT &&
+      !isOptimistic &&
+      !isIntermediateAssistantPhase);
   const showArtifactAction = Boolean(
     role === CHAT_MESSAGE_ROLES.ASSISTANT &&
     message.isFinalReply === true &&
     !isOptimistic &&
     threadId &&
-    turnRunId,
+    turnRunId &&
+    regressionArtifactExportEnabled,
+  );
+  const showThreadArtifactAction = Boolean(
+    role === CHAT_MESSAGE_ROLES.ASSISTANT &&
+    message.isFinalReply === true &&
+    !isOptimistic &&
+    threadId &&
+    regressionArtifactExportEnabled,
   );
   const isNotice = role === CHAT_MESSAGE_ROLES.SYSTEM;
   const isError = role === CHAT_MESSAGE_ROLES.ERROR;
@@ -225,7 +362,15 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
           {role === CHAT_MESSAGE_ROLES.ASSISTANT ||
           role === CHAT_MESSAGE_ROLES.SYSTEM ||
           role === CHAT_MESSAGE_ROLES.ERROR
-            ? (<div className={contentOpacityClass}><MarkdownRenderer content={content} /></div>)
+            ? (<div className={contentOpacityClass}><MarkdownRenderer
+                content={content}
+                streaming={isStreamingAssistantReply}
+                onWorkspaceFileOpen={
+                  role === CHAT_MESSAGE_ROLES.ASSISTANT && threadId
+                    ? openWorkspaceFile
+                    : undefined
+                }
+              /></div>)
             : (<div className="v2-wrap-anywhere whitespace-pre-wrap break-words"><span className={contentOpacityClass}>{content}</span></div>)}
 
           {status === "error" && (
@@ -241,7 +386,6 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
           )}
 
           {attachments && attachments.length > 0 && (
-            <>
             <div className="mt-2 flex flex-col gap-1.5">
               {attachments.map((att, i) => (<AttachmentChip
                 key={att.id || i}
@@ -249,25 +393,24 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
                 onPreview={setPreviewAttachment}
               />))}
             </div>
-            <AttachmentPreviewModal
-              attachment={previewAttachment}
-              onClose={() => setPreviewAttachment(null)}
-            />
-            </>
           )}
 
-          {role === CHAT_MESSAGE_ROLES.ASSISTANT &&
-          (<ProjectFileChips
-            threadId={threadId}
-            content={typeof content === "string" ? content : ""}
-          />)}
+          {previewAttachment && (
+            <React.Suspense fallback={null}>
+              <AttachmentPreviewModal
+                attachment={previewAttachment}
+                onClose={() => setPreviewAttachment(null)}
+                threadId={threadId}
+              />
+            </React.Suspense>
+          )}
         </div>
       </div>
 
       {showMetaRow && (
         <div
           className={[
-            "mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100",
+            "mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-iron-400",
             isUser
               ? "self-end justify-end"
               : isNotice
@@ -293,13 +436,26 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
               <button
                 type="button"
                 onClick={downloadArtifact}
-                disabled={artifactDownloading}
-                title={artifactDownloading ? t("common.loading") : t("common.download")}
-                aria-label={artifactDownloading ? t("common.loading") : t("common.download")}
+                disabled={artifactDownloading !== null}
+                title={artifactDownloading === "run" ? t("common.loading") : t("chat.downloadRunArtifact")}
+                aria-label={artifactDownloading === "run" ? t("common.loading") : t("chat.downloadRunArtifact")}
                 data-testid="download-run-artifact"
                 className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100 disabled:opacity-50"
               >
                 <Icon name="download" className="h-3.5 w-3.5" />
+              </button>
+            )}
+            {showThreadArtifactAction && (
+              <button
+                type="button"
+                onClick={downloadThreadArtifact}
+                disabled={artifactDownloading !== null}
+                title={artifactDownloading === "thread" ? t("common.loading") : t("chat.downloadThreadArtifact")}
+                aria-label={artifactDownloading === "thread" ? t("common.loading") : t("chat.downloadThreadArtifact")}
+                data-testid="download-thread-artifact"
+                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100 disabled:opacity-50"
+              >
+                <Icon name="layers" className="h-3.5 w-3.5" />
               </button>
             )}
             {showRetryAction && (

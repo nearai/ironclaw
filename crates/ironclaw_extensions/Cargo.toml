@@ -18,6 +18,7 @@ async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_trust = { path = "../ironclaw_trust", version = "0.1.0" }
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
@@ -26,7 +27,12 @@ thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
 toml = "1.1"
 url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+deadpool-postgres = "0.14"
+ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0", features = ["test-support"] }
+libsql = { version = "0.9", default-features = false, features = ["core"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }
+tokio-postgres = "0.7"

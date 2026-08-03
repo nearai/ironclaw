@@ -6,7 +6,7 @@
 //! `ironclaw_host_runtime`, keeping `ironclaw_memory` out of `ironclaw_runner`.
 
 use async_trait::async_trait;
-use ironclaw_turns::run_profile::{LoopRunContext, UserProfileContext};
+use ironclaw_loop_contracts::{LoopRunContext, UserProfileContext};
 
 /// Resolves the per-user agent-context profile for a run. Returns the validated
 /// `UserProfileContext` (timezone/locale/location), or `None` when no profile is
@@ -36,11 +36,11 @@ impl HostUserProfileSource for EmptyUserProfileSource {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{TenantId, ThreadId};
-    use ironclaw_turns::{
-        RunProfileResolver, TurnId, TurnRunId, TurnScope,
-        run_profile::{InMemoryRunProfileResolver, RunProfileResolutionRequest},
+    use ironclaw_host_api::ids::{TenantId, ThreadId};
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver,
     };
+    use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
     use super::*;
 

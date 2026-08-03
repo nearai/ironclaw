@@ -1,25 +1,28 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
-use futures::StreamExt;
 use ironclaw_filesystem::{
-    CasApply, ContentType, Entry, FileType, Filter, Page, RecordKind, RootFilesystem, cas_update,
+    CasApply, CasExpectation, ContentType, Entry, FileType, Filter, IndexKey, IndexKind, IndexName,
+    IndexSpec, IndexValue, OrderedPage, OrderedQueryCursor, Page, RecordKind, RootFilesystem,
+    SortDirection, cas_update,
 };
-use ironclaw_host_api::{ScopedPath, ThreadId};
+use ironclaw_host_api::{ids::ThreadId, path::ScopedPath};
 use serde::{Deserialize, Serialize};
 
-use crate::{FilesystemSessionThreadService, SessionThreadError, SessionThreadRecord, ThreadScope};
+use crate::{
+    FilesystemSessionThreadService, SessionThreadError, SessionThreadRecord, SummaryArtifact,
+    ThreadMessageRecord, ThreadScope,
+};
 
 use super::{
-    LIST_THREADS_MISSING_INDEX_READ_CONCURRENCY, StoredThreadRecord, deserialize, invalid_path,
-    is_not_found, map_cas_error, scope_axes_string, scoped_path, serialize_pretty,
+    StoredThreadRecord, deserialize, invalid_path, is_not_found, map_cas_error, messages_root,
+    scope_axes_string, scoped_path, serialize_pretty, summaries_root,
 };
 
 const THREAD_INDEX_KIND: &str = "thread_index";
-const THREAD_INDEX_CACHE_MAX_SCOPES: usize = 128;
+const THREAD_SCOPE_INDEX_KEY: &str = "scope_key";
+const THREAD_ACTIVITY_SORT_KEY: &str = "activity_sort";
+const THREAD_ID_INDEX_KEY: &str = "thread_id";
 const THREAD_INDEX_KNOWN_ROW_MAX: usize = 100_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,7 +51,125 @@ where
         })?;
         let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
         entry.kind = Some(kind);
-        Ok(entry)
+        Ok(entry
+            .with_indexed(
+                thread_index_key(THREAD_SCOPE_INDEX_KEY)?,
+                IndexValue::Text(thread_index_cache_key(&record.record.scope)),
+            )
+            .with_indexed(
+                thread_index_key(THREAD_ACTIVITY_SORT_KEY)?,
+                IndexValue::Text(thread_activity_sort_key(&record.record)),
+            )
+            .with_indexed(
+                thread_index_key(THREAD_ID_INDEX_KEY)?,
+                IndexValue::Text(record.record.thread_id.as_str().to_string()),
+            ))
+    }
+
+    async fn ensure_thread_index_query(
+        &self,
+        scope: &ThreadScope,
+        required: bool,
+    ) -> Result<(), SessionThreadError> {
+        let scope_key = thread_index_cache_key(scope);
+        let already_declared = self
+            .ready_thread_index_scopes
+            .lock()
+            .map(|ready| ready.contains(&scope_key))
+            .unwrap_or(false);
+        if already_declared && !required {
+            return Ok(());
+        }
+        if already_declared {
+            let marker = thread_index_migration_marker_path(scope)?;
+            if self
+                .filesystem
+                .get(&scope.to_resource_scope(), &marker)
+                .await?
+                .is_some()
+            {
+                return Ok(());
+            }
+        }
+        let _declaration_guard = self.thread_index_declaration_lock.lock().await;
+        let already_declared = self
+            .ready_thread_index_scopes
+            .lock()
+            .map(|ready| ready.contains(&scope_key))
+            .unwrap_or(false);
+        if already_declared && !required {
+            return Ok(());
+        }
+        if already_declared {
+            let marker = thread_index_migration_marker_path(scope)?;
+            if self
+                .filesystem
+                .get(&scope.to_resource_scope(), &marker)
+                .await?
+                .is_some()
+            {
+                return Ok(());
+            }
+        }
+        let root = thread_index_root(scope)?;
+        let spec = IndexSpec::new(
+            thread_index_name()?,
+            vec![
+                thread_index_key(THREAD_SCOPE_INDEX_KEY)?,
+                thread_index_key(THREAD_ACTIVITY_SORT_KEY)?,
+                thread_index_key(THREAD_ID_INDEX_KEY)?,
+            ],
+            IndexKind::Exact,
+        );
+        let result = self
+            .filesystem
+            .ensure_index(&scope.to_resource_scope(), &root, &spec)
+            .await;
+        if let Err(ironclaw_filesystem::FilesystemError::Unsupported { .. }) = result
+            && !required
+        {
+            return Ok(());
+        }
+        result.map_err(SessionThreadError::from)?;
+        if let Ok(mut ready) = self.ready_thread_index_scopes.lock() {
+            ready.insert(scope_key.clone());
+            evict_hash_set_entry_over_limit(&mut ready, 128, &scope_key);
+        }
+        if required {
+            let marker = thread_index_migration_marker_path(scope)?;
+            if self
+                .filesystem
+                .get(&scope.to_resource_scope(), &marker)
+                .await?
+                .is_none()
+            {
+                if let Err(error) = self.migrate_thread_index_for_scope(scope).await {
+                    if let Ok(mut ready) = self.ready_thread_index_scopes.lock() {
+                        ready.remove(&scope_key);
+                    }
+                    return Err(error);
+                }
+                self.filesystem
+                    .put(
+                        &scope.to_resource_scope(),
+                        &marker,
+                        Entry::bytes(b"thread-index-v1".to_vec()),
+                        CasExpectation::Any,
+                    )
+                    .await?;
+                if self
+                    .filesystem
+                    .get(&scope.to_resource_scope(), &marker)
+                    .await?
+                    .is_none()
+                {
+                    return Err(SessionThreadError::Backend(
+                        "thread index migration marker was not durable after write".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn thread_index_record(stored: &StoredThreadRecord) -> ThreadIndexRecord {
@@ -63,58 +184,10 @@ where
         }
     }
 
-    pub(super) fn invalidate_thread_index_cache(&self, scope: &ThreadScope) {
-        let key = thread_index_cache_key(scope);
-        if let Ok(mut cache) = self.thread_index_cache.lock() {
-            cache.remove(&key);
-        }
-        if let Ok(mut positions) = self.thread_index_cursor_positions.lock() {
-            positions.remove(&key);
-        }
-        if let Ok(mut epochs) = self.thread_index_cache_epochs.lock() {
-            let epoch = epochs.entry(key).or_insert(0);
-            *epoch = epoch.saturating_add(1);
-        }
-    }
-
-    pub(super) fn clear_thread_index_cache_for_scope_once(&self, scope: &ThreadScope) {
-        let key = thread_index_cache_key(scope);
-        let current_epoch = self.thread_index_cache_epoch(&key);
-        let should_clear = self
-            .thread_index_manual_clear_epochs
-            .lock()
-            .map(|mut manual_clears| {
-                if manual_clears.get(&key).copied() == Some(current_epoch) {
-                    return false;
-                }
-                manual_clears.insert(key.clone(), current_epoch.saturating_add(1));
-                true
-            })
-            .unwrap_or(true);
-        if should_clear {
-            let had_cache = self
-                .thread_index_cache
-                .lock()
-                .map(|cache| cache.contains_key(&key))
-                .unwrap_or(false);
-            if had_cache {
-                self.force_thread_source_validation(&key);
-            }
-            self.invalidate_thread_index_cache(scope);
-        }
-    }
-
-    fn force_thread_source_validation(&self, key: &str) {
-        if let Ok(mut scopes) = self.thread_index_force_validate_scopes.lock() {
-            scopes.insert(key.to_string());
-        }
-    }
-
     pub(super) fn forget_thread_index_row(&self, scope: &ThreadScope, thread_id: &ThreadId) {
         if let Ok(mut known) = self.known_thread_index_rows.lock() {
             known.remove(&thread_index_record_cache_key(scope, thread_id));
         }
-        self.forget_thread_source_row(scope, thread_id);
     }
 
     pub(super) async fn delete_thread_index_record(
@@ -132,12 +205,10 @@ where
             Err(error) if is_not_found(&error) => {}
             Err(error) => {
                 self.forget_thread_index_row(scope, thread_id);
-                self.invalidate_thread_index_cache(scope);
                 return Err(error.into());
             }
         }
         self.forget_thread_index_row(scope, thread_id);
-        self.invalidate_thread_index_cache(scope);
         Ok(())
     }
 
@@ -149,40 +220,11 @@ where
         }
     }
 
-    fn mark_thread_source_known(&self, scope: &ThreadScope, thread_id: &ThreadId) {
-        if let Ok(mut known) = self.known_thread_source_rows.lock() {
-            known
-                .entry(thread_index_cache_key(scope))
-                .or_default()
-                .insert(thread_id.clone());
-        }
-    }
-
-    fn forget_thread_source_row(&self, scope: &ThreadScope, thread_id: &ThreadId) {
-        if let Ok(mut known) = self.known_thread_source_rows.lock() {
-            let key = thread_index_cache_key(scope);
-            if let Some(ids) = known.get_mut(&key) {
-                ids.remove(thread_id);
-                if ids.is_empty() {
-                    known.remove(&key);
-                }
-            }
-        }
-    }
-
     pub(super) fn is_thread_index_known(&self, scope: &ThreadScope, thread_id: &ThreadId) -> bool {
         self.known_thread_index_rows
             .lock()
             .map(|known| known.contains(&thread_index_record_cache_key(scope, thread_id)))
             .unwrap_or(false)
-    }
-
-    fn mark_thread_index_scope_complete(&self, scope: &ThreadScope) {
-        if let Ok(mut complete) = self.complete_thread_index_scopes.lock() {
-            let key = thread_index_cache_key(scope);
-            complete.insert(key.clone());
-            evict_hash_set_entry_over_limit(&mut complete, THREAD_INDEX_CACHE_MAX_SCOPES, &key);
-        }
     }
 
     pub(super) async fn refresh_thread_index_from_source(
@@ -194,15 +236,22 @@ where
             return Ok(());
         };
         let index = Self::thread_index_record(&stored);
-        self.merge_thread_index_record_from_source(index, true)
-            .await?;
+        self.merge_thread_index_record_from_source(index).await?;
         Ok(())
     }
 
     async fn merge_thread_index_record_from_source(
         &self,
         source: ThreadIndexRecord,
-        invalidate_cache: bool,
+    ) -> Result<ThreadIndexRecord, SessionThreadError> {
+        self.ensure_thread_index_query(&source.record.scope, false)
+            .await?;
+        self.merge_thread_index_record_declared(source).await
+    }
+
+    async fn merge_thread_index_record_declared(
+        &self,
+        source: ThreadIndexRecord,
     ) -> Result<ThreadIndexRecord, SessionThreadError> {
         let path = thread_index_record_path(&source.record.scope, &source.record.thread_id)?;
         let resource_scope = source.record.scope.to_resource_scope();
@@ -227,10 +276,6 @@ where
         .await
         .map_err(map_cas_error)?;
         self.mark_thread_index_known(&merged.record.scope, &merged.record.thread_id);
-        self.mark_thread_source_known(&merged.record.scope, &merged.record.thread_id);
-        if invalidate_cache {
-            self.invalidate_thread_index_cache(&merged.record.scope);
-        }
         Ok(merged)
     }
 
@@ -277,6 +322,7 @@ where
         thread_id: &ThreadId,
         updated_at: DateTime<Utc>,
     ) -> Result<(), SessionThreadError> {
+        self.ensure_thread_index_query(scope, false).await?;
         let path = thread_index_record_path(scope, thread_id)?;
         let resource_scope = scope.to_resource_scope();
         let scope_for_retry = scope.clone();
@@ -320,8 +366,6 @@ where
         .map_err(map_cas_error)?;
         if row_known {
             self.mark_thread_index_known(scope, thread_id);
-            self.mark_thread_source_known(scope, thread_id);
-            self.invalidate_thread_index_cache(scope);
         }
         Ok(())
     }
@@ -344,6 +388,270 @@ where
             return Ok(None);
         }
         Ok(Some(record))
+    }
+
+    pub(super) async fn list_thread_index_page(
+        &self,
+        scope: &ThreadScope,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<ThreadIndexRecord>, bool), SessionThreadError> {
+        self.ensure_thread_index_query(scope, true).await?;
+        let root = thread_index_root(scope)?;
+        let mut page = OrderedPage::new(
+            thread_index_name()?,
+            thread_index_key(THREAD_ACTIVITY_SORT_KEY)?,
+            thread_index_key(THREAD_ID_INDEX_KEY)?,
+            SortDirection::Ascending,
+            u32::try_from(limit.saturating_add(1))
+                .unwrap_or(Page::MAX_LIMIT)
+                .min(Page::MAX_LIMIT),
+        );
+        if let Some(cursor) = cursor {
+            let cursor = self.decode_thread_index_cursor(scope, cursor).await?;
+            page = page.after(OrderedQueryCursor {
+                value: IndexValue::Text(cursor.activity_sort),
+                tie_breaker: IndexValue::Text(cursor.thread_id),
+            });
+        }
+        let rows = self
+            .filesystem
+            .query_ordered(
+                &scope.to_resource_scope(),
+                &root,
+                &Filter::Eq {
+                    key: thread_index_key(THREAD_SCOPE_INDEX_KEY)?,
+                    value: IndexValue::Text(thread_index_cache_key(scope)),
+                },
+                &page,
+            )
+            .await?;
+        let has_more = rows.len() > limit;
+        let records = rows
+            .into_iter()
+            .take(limit)
+            .map(|row| deserialize::<ThreadIndexRecord>(&row.entry.body))
+            .collect::<Result<Vec<_>, _>>()?;
+        // Index rows are the list projection. Source validation belongs to the
+        // explicit migration/repair path; rereading every source row here
+        // turns each user-facing page into an N+1 storage operation.
+        Ok((records, has_more))
+    }
+
+    async fn decode_thread_index_cursor(
+        &self,
+        scope: &ThreadScope,
+        cursor: &str,
+    ) -> Result<ThreadIndexCursor, SessionThreadError> {
+        if let Ok(cursor) = serde_json::from_str::<ThreadIndexCursor>(cursor) {
+            return Ok(cursor);
+        }
+        let thread_id = ThreadId::new(cursor.to_string()).map_err(invalid_path)?;
+        let record = self
+            .read_thread_index_record(scope, &thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            })?;
+        Ok(ThreadIndexCursor::from_record(&record.record))
+    }
+
+    pub(super) fn encode_thread_index_cursor(
+        record: &SessionThreadRecord,
+    ) -> Result<String, SessionThreadError> {
+        serde_json::to_string(&ThreadIndexCursor::from_record(record))
+            .map_err(|error| SessionThreadError::Serialization(error.to_string()))
+    }
+
+    /// Idempotent legacy repair used before indexed listing is exposed.
+    pub async fn migrate_thread_index_for_scope(
+        &self,
+        scope: &ThreadScope,
+    ) -> Result<usize, SessionThreadError> {
+        let root = scoped_path(&format!("{}/threads", scope_axes_string(scope)))?;
+        let entries = match self
+            .filesystem
+            .list_dir(&scope.to_resource_scope(), &root)
+            .await
+        {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        let thread_ids = entries
+            .into_iter()
+            .filter(|entry| entry.file_type == FileType::Directory)
+            .map(|entry| ThreadId::new(entry.name).map_err(invalid_path))
+            .collect::<Result<Vec<_>, _>>()?;
+        for thread_id in &thread_ids {
+            if let Some((stored, _)) = self.read_thread_versioned(scope, thread_id).await? {
+                self.merge_thread_index_record_declared(Self::thread_index_record(&stored))
+                    .await?;
+            }
+        }
+        let source_ids = thread_ids
+            .iter()
+            .map(ThreadId::as_str)
+            .collect::<HashSet<_>>();
+        let index_root = thread_index_root(scope)?;
+        let index_entries = match self
+            .filesystem
+            .list_dir(&scope.to_resource_scope(), &index_root)
+            .await
+        {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        for entry in index_entries {
+            let Some(raw_id) = entry.name.strip_suffix(".json") else {
+                continue;
+            };
+            if !source_ids.contains(raw_id) {
+                let stale_id = ThreadId::new(raw_id.to_string()).map_err(invalid_path)?;
+                self.delete_thread_index_record(scope, &stale_id).await?;
+            }
+        }
+        Ok(thread_ids.len())
+    }
+
+    /// Idempotent rebuild for message, summary, and exact-lookup projections.
+    pub async fn migrate_transcript_indexes_for_scope(
+        &self,
+        scope: &ThreadScope,
+    ) -> Result<usize, SessionThreadError> {
+        let root = scoped_path(&format!("{}/threads", scope_axes_string(scope)))?;
+        let entries = match self
+            .filesystem
+            .list_dir(&scope.to_resource_scope(), &root)
+            .await
+        {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        let thread_ids = entries
+            .into_iter()
+            .filter(|entry| entry.file_type == FileType::Directory)
+            .map(|entry| ThreadId::new(entry.name).map_err(invalid_path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut migrated = 0usize;
+        for thread_id in thread_ids {
+            self.ensure_thread_record_indexes(scope, &thread_id).await?;
+            for (prefix, messages) in [
+                (messages_root(scope, &thread_id)?, true),
+                (summaries_root(scope, &thread_id)?, false),
+            ] {
+                let mut offset = 0u64;
+                loop {
+                    let rows = self
+                        .filesystem
+                        .query(
+                            &scope.to_resource_scope(),
+                            &prefix,
+                            &Filter::All,
+                            Page::new(offset, Page::MAX_LIMIT),
+                        )
+                        .await?;
+                    if rows.is_empty() {
+                        break;
+                    }
+                    let received = rows.len();
+                    let mut txn = self
+                        .filesystem
+                        .begin(
+                            &scope.to_resource_scope(),
+                            &scoped_path(crate::filesystem_service::THREADS_PREFIX)?,
+                        )
+                        .await?;
+                    for listed_row in rows {
+                        // The listing runs before BEGIN IMMEDIATE owns the
+                        // writer lock. Re-read inside the transaction so a
+                        // current-code message update in that window cannot
+                        // make this one-time migration fail with a stale CAS.
+                        let Some(row) = txn.get(&listed_row.path).await? else {
+                            continue;
+                        };
+                        let expected_kind = if messages {
+                            crate::filesystem_service::THREAD_MESSAGE_KIND
+                        } else {
+                            crate::filesystem_service::THREAD_SUMMARY_KIND
+                        };
+                        if row.entry.kind.as_ref().map(RecordKind::as_str) != Some(expected_kind) {
+                            continue;
+                        }
+                        let entry = if messages {
+                            let record = deserialize::<ThreadMessageRecord>(&row.entry.body)?;
+                            for (lookup_path, lookup_entry, expectation) in
+                                crate::filesystem_service::message_lookup_index::MessageLookupIndexStore::<F>::entries_for_message(
+                                    scope,
+                                    &thread_id,
+                                    &record,
+                                )?
+                            {
+                                let virtual_path = self
+                                    .filesystem
+                                    .resolve(&scope.to_resource_scope(), &lookup_path)?;
+                                if matches!(expectation, CasExpectation::Absent)
+                                    && txn.get(&virtual_path).await?.is_some()
+                                {
+                                    continue;
+                                }
+                                txn.put(&virtual_path, lookup_entry, expectation).await?;
+                            }
+                            Self::message_entry(&record)?
+                        } else {
+                            let record = deserialize::<SummaryArtifact>(&row.entry.body)?;
+                            Self::summary_entry(&record)?
+                        };
+                        txn.put(&row.path, entry, CasExpectation::Version(row.version))
+                            .await?;
+                    }
+                    txn.commit().await?;
+                    migrated = migrated.saturating_add(received);
+                    if received < Page::MAX_LIMIT as usize {
+                        break;
+                    }
+                    offset = offset.saturating_add(received as u64);
+                }
+            }
+        }
+        Ok(migrated)
+    }
+
+    pub(super) async fn ensure_transcript_indexes_migrated(
+        &self,
+        scope: &ThreadScope,
+    ) -> Result<(), SessionThreadError> {
+        let marker = transcript_index_migration_marker_path(scope)?;
+        if self
+            .filesystem
+            .get(&scope.to_resource_scope(), &marker)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+        self.migrate_transcript_indexes_for_scope(scope).await?;
+        self.filesystem
+            .put(
+                &scope.to_resource_scope(),
+                &marker,
+                Entry::bytes(b"transcript-index-v1".to_vec()),
+                CasExpectation::Any,
+            )
+            .await?;
+        if self
+            .filesystem
+            .get(&scope.to_resource_scope(), &marker)
+            .await?
+            .is_none()
+        {
+            return Err(SessionThreadError::Backend(
+                "transcript index migration marker was not durable after write".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     pub(super) async fn thread_record_with_index_overlay(
@@ -371,329 +679,48 @@ where
         }
         Ok(stored.record)
     }
-
-    pub(super) async fn cached_thread_index_for_scope(
-        &self,
-        scope: &ThreadScope,
-    ) -> Result<Arc<Vec<ThreadIndexRecord>>, SessionThreadError> {
-        let key = thread_index_cache_key(scope);
-        if let Some(cached) = self.cached_thread_index(&key) {
-            return Ok(cached);
-        }
-
-        let load_lock = self.thread_index_load_lock(&key);
-        let _guard = load_lock.lock().await;
-        if let Some(cached) = self.cached_thread_index(&key) {
-            return Ok(cached);
-        }
-
-        let start_epoch = self.thread_index_cache_epoch(&key);
-        let loaded = self.load_thread_index_for_scope(scope).await?;
-        let cacheable = loaded.cacheable;
-        let records = Arc::new(loaded.records);
-        if cacheable && self.thread_index_cache_epoch(&key) == start_epoch {
-            self.store_thread_index_cache(key, Arc::clone(&records));
-        }
-        Ok(records)
-    }
-
-    async fn load_thread_index_for_scope(
-        &self,
-        scope: &ThreadScope,
-    ) -> Result<ThreadIndexLoad, SessionThreadError> {
-        let entries = self.query_thread_index_records(scope).await?;
-        let source = self.thread_source_listing_for_index_load(scope).await?;
-        let mut by_thread_id = HashMap::new();
-        let mut indexed_by_thread_id = entries
-            .into_iter()
-            .map(|record| (record.record.thread_id.clone(), record))
-            .collect::<HashMap<_, _>>();
-
-        let mut missing_thread_ids = Vec::new();
-        for thread_id in &source.thread_ids {
-            if let Some(existing) = indexed_by_thread_id.remove(thread_id) {
-                by_thread_id.insert(thread_id.clone(), existing);
-            } else {
-                missing_thread_ids.push(thread_id.clone());
-            }
-        }
-
-        let missing = self
-            .bootstrap_missing_thread_index_records(scope, missing_thread_ids)
-            .await?;
-        for source_record in missing.records {
-            let thread_id = source_record.record.thread_id.clone();
-            by_thread_id.insert(thread_id, source_record);
-        }
-
-        if source.complete {
-            for stale in indexed_by_thread_id.into_values() {
-                self.delete_thread_index_record(&stale.record.scope, &stale.record.thread_id)
-                    .await?;
-            }
-            if missing.complete {
-                self.mark_thread_index_scope_complete(scope);
-            }
-        } else {
-            by_thread_id.extend(indexed_by_thread_id);
-        }
-        let mut entries: Vec<_> = by_thread_id.into_values().collect();
-        entries.sort_by(|a, b| compare_thread_activity(&a.record, &b.record));
-        Ok(ThreadIndexLoad {
-            records: entries,
-            cacheable: source.complete && missing.complete,
-        })
-    }
-
-    fn cached_thread_index(&self, key: &str) -> Option<Arc<Vec<ThreadIndexRecord>>> {
-        self.thread_index_cache
-            .lock()
-            .ok()
-            .and_then(|cache| cache.get(key).cloned())
-    }
-
-    fn thread_index_cache_epoch(&self, key: &str) -> u64 {
-        self.thread_index_cache_epochs
-            .lock()
-            .ok()
-            .and_then(|epochs| epochs.get(key).copied())
-            .unwrap_or(0)
-    }
-
-    fn store_thread_index_cache(&self, key: String, value: Arc<Vec<ThreadIndexRecord>>) {
-        let cursor_positions = Arc::new(
-            value
-                .iter()
-                .enumerate()
-                .map(|(index, record)| (record.record.thread_id.as_str().to_string(), index))
-                .collect::<HashMap<_, _>>(),
-        );
-        if let Ok(mut cache) = self.thread_index_cache.lock() {
-            cache.insert(key.clone(), value);
-            evict_hash_map_entry_over_limit(&mut cache, THREAD_INDEX_CACHE_MAX_SCOPES, &key);
-        }
-        if let Ok(mut positions) = self.thread_index_cursor_positions.lock() {
-            positions.insert(key.clone(), cursor_positions);
-            evict_hash_map_entry_over_limit(&mut positions, THREAD_INDEX_CACHE_MAX_SCOPES, &key);
-        }
-    }
-
-    pub(super) fn thread_index_start_after_cursor(
-        &self,
-        scope: &ThreadScope,
-        cursor: &str,
-        fallback: impl FnOnce() -> usize,
-    ) -> usize {
-        let key = thread_index_cache_key(scope);
-        self.thread_index_cursor_positions
-            .lock()
-            .ok()
-            .and_then(|positions| positions.get(&key).cloned())
-            .and_then(|positions| positions.get(cursor).copied())
-            .map(|index| index + 1)
-            .unwrap_or_else(fallback)
-    }
-
-    fn thread_index_load_lock(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
-        self.thread_index_load_locks
-            .lock()
-            .map(|mut locks| {
-                locks.retain(|_, lock| lock.strong_count() > 0);
-                if let Some(lock) = locks.get(key).and_then(|lock| lock.upgrade()) {
-                    return lock;
-                }
-                let lock = Arc::new(tokio::sync::Mutex::new(()));
-                locks.insert(key.to_string(), Arc::downgrade(&lock));
-                lock
-            })
-            .unwrap_or_else(|_| Arc::new(tokio::sync::Mutex::new(())))
-    }
-
-    async fn thread_source_listing_for_index_load(
-        &self,
-        scope: &ThreadScope,
-    ) -> Result<ThreadSourceListing, SessionThreadError> {
-        let key = thread_index_cache_key(scope);
-        let force_validate = self
-            .thread_index_force_validate_scopes
-            .lock()
-            .map(|scopes| scopes.contains(&key))
-            .unwrap_or(true);
-        if !force_validate && let Some(thread_ids) = self.cached_thread_source_ids(&key) {
-            return Ok(ThreadSourceListing {
-                thread_ids,
-                complete: true,
-            });
-        }
-        let listing = self.list_thread_source_ids(scope).await?;
-        self.store_thread_source_ids(key, &listing.thread_ids);
-        Ok(listing)
-    }
-
-    fn cached_thread_source_ids(&self, key: &str) -> Option<HashSet<ThreadId>> {
-        let source_complete = self
-            .complete_thread_source_scopes
-            .lock()
-            .ok()
-            .map(|complete| complete.contains(key))
-            .unwrap_or(false);
-        if !source_complete {
-            return None;
-        }
-        self.known_thread_source_rows
-            .lock()
-            .ok()
-            .and_then(|known| known.get(key).cloned())
-    }
-
-    fn store_thread_source_ids(&self, key: String, ids: &HashSet<ThreadId>) {
-        if let Ok(mut known) = self.known_thread_source_rows.lock() {
-            known.insert(key.clone(), ids.clone());
-            evict_hash_map_entry_over_limit(&mut known, THREAD_INDEX_CACHE_MAX_SCOPES, &key);
-        }
-        if let Ok(mut complete) = self.complete_thread_source_scopes.lock() {
-            complete.insert(key.clone());
-            evict_hash_set_entry_over_limit(&mut complete, THREAD_INDEX_CACHE_MAX_SCOPES, &key);
-        }
-        if let Ok(mut scopes) = self.thread_index_force_validate_scopes.lock() {
-            scopes.remove(&key);
-        }
-    }
-
-    async fn query_thread_index_records(
-        &self,
-        scope: &ThreadScope,
-    ) -> Result<Vec<ThreadIndexRecord>, SessionThreadError> {
-        let root = thread_index_root(scope)?;
-        let mut records = Vec::new();
-        let mut offset = 0_u64;
-        loop {
-            let page = self
-                .filesystem
-                .query(
-                    &scope.to_resource_scope(),
-                    &root,
-                    &Filter::All,
-                    Page::new(offset, Page::MAX_LIMIT),
-                )
-                .await?;
-            if page.is_empty() {
-                break;
-            }
-            offset += page.len() as u64;
-            for versioned in page {
-                let record = deserialize::<ThreadIndexRecord>(&versioned.entry.body)?;
-                if record.record.scope == *scope {
-                    self.mark_thread_index_known(&record.record.scope, &record.record.thread_id);
-                    records.push(record);
-                }
-            }
-        }
-        Ok(records)
-    }
-
-    async fn list_thread_source_ids(
-        &self,
-        scope: &ThreadScope,
-    ) -> Result<ThreadSourceListing, SessionThreadError> {
-        let root = thread_source_root(scope)?;
-        let entries = match self
-            .filesystem
-            .list_dir(&scope.to_resource_scope(), &root)
-            .await
-        {
-            Ok(entries) => entries,
-            Err(error) if is_not_found(&error) => {
-                return Ok(ThreadSourceListing {
-                    thread_ids: HashSet::new(),
-                    complete: true,
-                });
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let thread_ids = entries
-            .into_iter()
-            .filter(|entry| entry.file_type == FileType::Directory)
-            .map(|entry| ThreadId::new(entry.name).map_err(invalid_path))
-            .collect::<Result<HashSet<_>, _>>()?;
-        Ok(ThreadSourceListing {
-            thread_ids,
-            complete: true,
-        })
-    }
-
-    async fn bootstrap_missing_thread_index_records(
-        &self,
-        scope: &ThreadScope,
-        thread_ids: Vec<ThreadId>,
-    ) -> Result<ThreadIndexBootstrap, SessionThreadError> {
-        if thread_ids.is_empty() {
-            return Ok(ThreadIndexBootstrap {
-                records: Vec::new(),
-                complete: true,
-            });
-        }
-        let reads: Vec<(ThreadId, ThreadRecordReadResult)> = futures::stream::iter(thread_ids)
-            .map(|tid| async move {
-                let result = self.read_thread_versioned(scope, &tid).await;
-                (tid, result)
-            })
-            .buffer_unordered(LIST_THREADS_MISSING_INDEX_READ_CONCURRENCY)
-            .collect()
-            .await;
-
-        let mut records = Vec::with_capacity(reads.len());
-        let mut complete = true;
-        for (thread_id, result) in reads {
-            match result {
-                Ok(Some((stored, _))) if stored.record.scope == *scope => {
-                    let index = Self::thread_index_record(&stored);
-                    let index = self
-                        .merge_thread_index_record_from_source(index, false)
-                        .await?;
-                    records.push(index);
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    complete = false;
-                    tracing::debug!(
-                        thread_id = %thread_id.as_str(),
-                        scope = ?scope,
-                        ?error,
-                        "skipping unreadable thread record during thread index bootstrap",
-                    );
-                }
-            }
-        }
-        Ok(ThreadIndexBootstrap { records, complete })
-    }
 }
 
-struct ThreadSourceListing {
-    thread_ids: HashSet<ThreadId>,
-    complete: bool,
+fn thread_index_name() -> Result<IndexName, SessionThreadError> {
+    IndexName::new("thread_activity_v2")
+        .map_err(|error| SessionThreadError::Backend(error.to_string()))
 }
 
-struct ThreadIndexLoad {
-    records: Vec<ThreadIndexRecord>,
-    cacheable: bool,
+#[derive(Serialize, Deserialize)]
+struct ThreadIndexCursor {
+    activity_sort: String,
+    thread_id: String,
 }
 
-#[derive(Default)]
-struct ThreadIndexBootstrap {
-    records: Vec<ThreadIndexRecord>,
-    complete: bool,
+impl ThreadIndexCursor {
+    fn from_record(record: &SessionThreadRecord) -> Self {
+        Self {
+            activity_sort: thread_activity_sort_key(record),
+            thread_id: record.thread_id.as_str().to_string(),
+        }
+    }
 }
-
-type ThreadRecordReadResult =
-    Result<Option<(StoredThreadRecord, ironclaw_filesystem::RecordVersion)>, SessionThreadError>;
 
 fn thread_index_root(scope: &ThreadScope) -> Result<ScopedPath, SessionThreadError> {
     scoped_path(&format!("{}/thread_index", scope_axes_string(scope)))
 }
 
-fn thread_source_root(scope: &ThreadScope) -> Result<ScopedPath, SessionThreadError> {
-    scoped_path(&format!("{}/threads", scope_axes_string(scope)))
+fn thread_index_migration_marker_path(
+    scope: &ThreadScope,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/index-migrations/thread-index-v1.complete",
+        scope_axes_string(scope)
+    ))
+}
+
+fn transcript_index_migration_marker_path(
+    scope: &ThreadScope,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/index-migrations/transcript-index-v1.complete",
+        scope_axes_string(scope)
+    ))
 }
 
 pub(super) fn thread_index_record_path(
@@ -714,6 +741,20 @@ fn thread_index_record_cache_key(scope: &ThreadScope, thread_id: &ThreadId) -> S
     format!("{}:{}", thread_index_cache_key(scope), thread_id.as_str())
 }
 
+fn thread_index_key(raw: &str) -> Result<IndexKey, SessionThreadError> {
+    IndexKey::new(raw).map_err(|error| SessionThreadError::Backend(error.to_string()))
+}
+
+fn thread_activity_sort_key(record: &SessionThreadRecord) -> String {
+    let timestamp = record
+        .updated_at
+        .or(record.created_at)
+        .map(|value| value.timestamp_micros())
+        .unwrap_or(i64::MIN);
+    let descending_rank = i128::from(i64::MAX) - i128::from(timestamp);
+    format!("{descending_rank:020}")
+}
+
 fn evict_hash_set_entry_over_limit(set: &mut HashSet<String>, max_entries: usize, keep: &str) {
     if set.len() <= max_entries {
         return;
@@ -726,25 +767,6 @@ fn evict_hash_set_entry_over_limit(set: &mut HashSet<String>, max_entries: usize
     };
     if let Some(victim) = victim {
         set.remove(&victim);
-    }
-}
-
-fn evict_hash_map_entry_over_limit<T>(
-    map: &mut HashMap<String, T>,
-    max_entries: usize,
-    keep: &str,
-) {
-    if map.len() <= max_entries {
-        return;
-    }
-    let mut keys = map.keys();
-    let victim = match keys.next() {
-        Some(first) if first.as_str() == keep => keys.next().cloned(),
-        Some(first) => Some(first.clone()),
-        None => None,
-    };
-    if let Some(victim) = victim {
-        map.remove(&victim);
     }
 }
 
@@ -765,22 +787,15 @@ fn no_op_thread_index_record(scope: ThreadScope, thread_id: ThreadId) -> ThreadI
     }
 }
 
-fn compare_thread_activity(a: &SessionThreadRecord, b: &SessionThreadRecord) -> std::cmp::Ordering {
-    let a_key = a.updated_at.or(a.created_at);
-    let b_key = b.updated_at.or(b.created_at);
-    std::cmp::Reverse(a_key)
-        .cmp(&std::cmp::Reverse(b_key))
-        .then_with(|| a.thread_id.as_str().cmp(b.thread_id.as_str()))
-}
-
 #[cfg(test)]
 mod tests {
     use std::{sync::Arc, time::Duration};
 
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
-        AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
-        ThreadId, UserId, VirtualPath,
+        ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
     };
 
     use crate::{
@@ -883,7 +898,6 @@ mod tests {
             .touch_thread_index_updated_at(&request_scope, &thread_id, chrono::Utc::now())
             .await
             .expect("missing touch is a no-op");
-        service.mark_thread_index_scope_complete(&request_scope);
 
         service
             .ensure_thread(EnsureThreadRequest {

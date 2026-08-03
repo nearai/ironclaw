@@ -4,7 +4,7 @@
 //! defined in the kernel, implemented up-layer by
 //! `ironclaw_host_runtime`'s `DefaultHostRuntime`. It returns **facts only** —
 //! never a verdict. `authorize()` ([`crate::CapabilityHost`]) maps these facts
-//! into the sealed [`ironclaw_host_api::AuthorizeResult`]:
+//! into the sealed [`ironclaw_host_api::authorized::AuthorizeResult`]:
 //!
 //! - a missing credential → `Blocked::Auth`, surfaced *before* the approval
 //!   decision so a human approval is never consumed for an action that cannot
@@ -25,8 +25,11 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityGrant, CapabilityId, ExecutionContext, ResourceScope,
-    RuntimeCredentialAuthRequirement, SecretHandle,
+    capability::CapabilityGrant,
+    decision::RuntimeCredentialAuthRequirement,
+    ids::{CapabilityId, SecretHandle},
+    resource::ResourceScope,
+    scope::ExecutionContext,
 };
 
 /// Presence of a capability's required credentials, read from the host secret

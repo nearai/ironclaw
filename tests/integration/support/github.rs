@@ -2,8 +2,10 @@ use std::path::{Path, PathBuf};
 
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
-    SecretHandle, VirtualPath,
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::EffectKind,
+    ids::{CapabilityId, ExtensionId, SecretHandle},
+    path::VirtualPath,
 };
 use ironclaw_host_runtime::{default_host_api_contract_registry, default_host_port_catalog};
 
@@ -57,18 +59,17 @@ pub fn extension_registry() -> GithubSupportResult<ExtensionRegistry> {
 pub fn extension_package() -> GithubSupportResult<ExtensionPackage> {
     // Parse through the single record entry point (the bundled assets are
     // manifest v3 documents since the first-party rewrite).
+    let root = VirtualPath::new("/system/extensions/github")?;
     let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
         std::fs::read_to_string(asset_root().join("manifest.toml"))?,
         ManifestSource::HostBundled,
         &default_host_port_catalog()?,
         None,
         &default_host_api_contract_registry()?,
+        Some(root.clone()),
     )?;
     let manifest = ExtensionManifest::try_from(record.manifest().clone())?;
-    Ok(ExtensionPackage::from_manifest(
-        manifest,
-        VirtualPath::new("/system/extensions/github")?,
-    )?)
+    Ok(ExtensionPackage::from_manifest(manifest, root)?)
 }
 
 pub fn asset_root() -> PathBuf {

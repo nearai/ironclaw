@@ -6,7 +6,7 @@
 //!   checkpoint (the host-derived `retryable` signal: a `Failed` run that has a
 //!   resumable checkpoint).
 //! - [`FailureLane::Explainable`] — terminal, but carries a specific
-//!   user-facing sentence (see [`crate::reborn_failure_summary_for_category`]).
+//!   user-facing sentence (see [`ironclaw_host_api::failure::summary::reborn_failure_summary_for_category`]).
 //! - [`FailureLane::Security`] — reserved for the ingress safety/leak refusal
 //!   path (`ironclaw_safety`); the run-boundary classifier never produces it,
 //!   because injection/leak are caught before the run starts (minimal
@@ -19,7 +19,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::failure_categories::BUDGET_ACCOUNTING_FAILED_CATEGORY;
+use ironclaw_host_api::failure::categories::{
+    BUDGET_ACCOUNTING_FAILED_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
+};
 
 /// The lane a terminal run failure (or ingress refusal) belongs to.
 ///
@@ -64,9 +66,9 @@ pub fn failure_lane(category: &str, retryable: bool) -> FailureLane {
 ///
 /// Sources: `LoopFailureKind::as_str()` (ironclaw_turns), the reborn driver /
 /// scheduler / model / capability / compaction / host-stage categories
-/// (`failure_categories.rs` + `planned_driver` / `turn_runner` / recovery
+/// (`ironclaw_host_api::failure::categories` + `planned_driver` / `turn_runner` / recovery
 /// mapping), and the pinned provider categories. Keep this in lockstep with
-/// `reborn_failure_summary_for_category`: a new producer category MUST be added
+/// `host_api::failure::summary::reborn_failure_summary_for_category`: a new producer category MUST be added
 /// here (the enforcement test asserts each has a specific explanation + lane).
 ///
 /// `unknown_failure` is deliberately excluded — it IS the generic fallback.
@@ -84,13 +86,18 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
     "lease_expired",
     // LoopFailureKind (ironclaw_turns)
     "model_error",
+    // Permanent model-stage failures (see `host_api::failure::categories`): named
+    // separately so they are not auto-retried as generic host outages.
+    "model_stage_request_invalid",
+    "model_stage_policy_denied",
+    "model_stage_scope_mismatch",
     "context_build_failed",
     "capability_protocol_error",
     "iteration_limit",
     "invalid_model_output",
     "checkpoint_rejected",
     "checkpoint_unavailable",
-    "transcript_write_failed",
+    TRANSCRIPT_WRITE_FAILED_CATEGORY,
     "driver_bug",
     "interrupted_unexpectedly",
     "no_progress_detected",
@@ -103,6 +110,7 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
     "model_unavailable",
     "model_internal",
     "model_invalid_output",
+    "model_output_truncated",
     "model_stale_request",
     // Capability recovery categories
     "capability_transient",
@@ -120,7 +128,7 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
     "compaction_inference_failed",
     "compaction_cancelled",
     "compaction_persistence_failed",
-    // Host-stage-unavailable categories (failure_categories.rs)
+    // Host-stage-unavailable categories (host_api::failure::categories)
     "host_stage_unavailable_prompt",
     "host_stage_unavailable_model",
     "host_stage_unavailable_capability",
@@ -128,16 +136,17 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
     "host_stage_unavailable_checkpoint",
     "host_stage_unavailable_input",
     "host_stage_unavailable_unknown",
-    // Pinned provider categories (failure_categories.rs)
+    // Pinned provider categories (host_api::failure::categories)
     "model_credits_exhausted",
     "model_credentials_unavailable",
+    "model_spend_budget_exhausted",
     BUDGET_ACCOUNTING_FAILED_CATEGORY,
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::failure_summary::reborn_failure_summary_for_category;
+    use ironclaw_host_api::failure::summary::reborn_failure_summary_for_category;
 
     #[test]
     fn failure_lane_is_retriable_when_retryable_else_explainable() {
@@ -215,19 +224,19 @@ mod tests {
     #[test]
     fn canonical_list_covers_loop_failure_kinds() {
         for kind in [
-            ironclaw_turns::LoopFailureKind::ModelError,
-            ironclaw_turns::LoopFailureKind::ContextBuildFailed,
-            ironclaw_turns::LoopFailureKind::CapabilityProtocolError,
-            ironclaw_turns::LoopFailureKind::IterationLimit,
-            ironclaw_turns::LoopFailureKind::InvalidModelOutput,
-            ironclaw_turns::LoopFailureKind::CheckpointRejected,
-            ironclaw_turns::LoopFailureKind::CheckpointUnavailable,
-            ironclaw_turns::LoopFailureKind::TranscriptWriteFailed,
-            ironclaw_turns::LoopFailureKind::DriverBug,
-            ironclaw_turns::LoopFailureKind::InterruptedUnexpectedly,
-            ironclaw_turns::LoopFailureKind::NoProgressDetected,
-            ironclaw_turns::LoopFailureKind::PolicyDenied,
-            ironclaw_turns::LoopFailureKind::CompactionUnavailable,
+            ironclaw_loop_contracts::LoopFailureKind::ModelError,
+            ironclaw_loop_contracts::LoopFailureKind::ContextBuildFailed,
+            ironclaw_loop_contracts::LoopFailureKind::CapabilityProtocolError,
+            ironclaw_loop_contracts::LoopFailureKind::IterationLimit,
+            ironclaw_loop_contracts::LoopFailureKind::InvalidModelOutput,
+            ironclaw_loop_contracts::LoopFailureKind::CheckpointRejected,
+            ironclaw_loop_contracts::LoopFailureKind::CheckpointUnavailable,
+            ironclaw_loop_contracts::LoopFailureKind::TranscriptWriteFailed,
+            ironclaw_loop_contracts::LoopFailureKind::DriverBug,
+            ironclaw_loop_contracts::LoopFailureKind::InterruptedUnexpectedly,
+            ironclaw_loop_contracts::LoopFailureKind::NoProgressDetected,
+            ironclaw_loop_contracts::LoopFailureKind::PolicyDenied,
+            ironclaw_loop_contracts::LoopFailureKind::CompactionUnavailable,
         ] {
             assert!(
                 ALL_RUN_FAILURE_CATEGORIES.contains(&kind.as_str()),

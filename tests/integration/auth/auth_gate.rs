@@ -25,7 +25,7 @@ mod reborn_support;
 #[path = "../../support/mod.rs"]
 mod support;
 
-use ironclaw_turns::{GateRef, TurnStatus};
+use ironclaw_host_api::turn::{TurnGateRef, TurnStatus};
 use reborn_support::assertions::ToolErrorClass;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;
@@ -140,12 +140,12 @@ async fn runtime_401_after_injection_populates_provider_credential_requirement()
     let requirement = &state.credential_requirements[0];
     assert_eq!(
         requirement.provider,
-        ironclaw_host_api::VendorId::new("github").expect("valid provider id"),
+        ironclaw_host_api::ids::VendorId::new("github").expect("valid provider id"),
         "provider must be populated so AuthPromptView.provider is non-null"
     );
     assert_eq!(
         requirement.setup,
-        ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+        ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
         "expected the ManualToken setup GithubHarnessAuthorizer declares -- a \
          wrong setup kind would route the WebUI to the wrong re-auth UI"
     );
@@ -244,7 +244,7 @@ async fn cancel_blocked_auth_gate_leaves_no_stale_replay() {
 }
 
 /// Regression guard, flip side of the stale-replay test above: an
-/// invalid/unknown `GateRef` against a still-open run must also fail cleanly,
+/// invalid/unknown `TurnGateRef` against a still-open run must also fail cleanly,
 /// not resume under a synthesized ref.
 #[tokio::test]
 async fn deny_auth_gate_rejects_a_non_auth_gate_ref_prefix() {
@@ -263,7 +263,8 @@ async fn deny_auth_gate_rejects_a_non_auth_gate_ref_prefix() {
         .await
         .expect("run blocks on an auth gate");
 
-    let wrong_prefix_ref = GateRef::new("gate:approval-not-an-auth-gate").expect("valid gate ref");
+    let wrong_prefix_ref =
+        TurnGateRef::new("gate:approval-not-an-auth-gate").expect("valid gate ref");
     let result = harness
         .deny_auth_gate(run_id, &wrong_prefix_ref)
         .await

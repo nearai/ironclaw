@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{ScopedPath, TenantId};
+use ironclaw_host_api::{ids::TenantId, path::ScopedPath};
 use ironclaw_loop_host::{
     FilesystemSkillBundleRoot, FilesystemSkillBundleSource, HostSkillContextSource,
 };
@@ -298,20 +298,19 @@ mod tests {
     use super::*;
     use ironclaw_filesystem::{CasExpectation, Entry, InMemoryBackend, RootFilesystem};
     use ironclaw_host_api::{
-        AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, UserId,
-        VirtualPath,
+        ids::{AgentId, ProjectId, TenantId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest,
+        RunProfileResolver, SkillActivationState, SkillTrustLevel, SkillVisibility,
     };
     use ironclaw_loop_host::{
         SkillBundleContextSource, SkillBundleSource, build_skill_run_snapshot,
     };
     use ironclaw_skills::SkillTrust;
-    use ironclaw_turns::{
-        AcceptedMessageRef, TurnActor, TurnId, TurnRunId, TurnScope,
-        run_profile::{
-            InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest,
-            RunProfileResolver, SkillActivationState, SkillTrustLevel, SkillVisibility,
-        },
-    };
+    use ironclaw_turns::{AcceptedMessageRef, TurnActor, TurnId, TurnRunId, TurnScope};
 
     fn skill_md(name: &str, description: &str, prompt: &str) -> Vec<u8> {
         format!("---\nname: {name}\ndescription: {description}\n---\n{prompt}\n").into_bytes()
@@ -327,7 +326,7 @@ mod tests {
                 TenantId::new("tenant-a").unwrap(),
                 Some(AgentId::new("agent-a").unwrap()),
                 Some(ProjectId::new("project-a").unwrap()),
-                ironclaw_host_api::ThreadId::new("thread-a").unwrap(),
+                ironclaw_host_api::ids::ThreadId::new("thread-a").unwrap(),
             ),
             TurnId::new(),
             TurnRunId::new(),

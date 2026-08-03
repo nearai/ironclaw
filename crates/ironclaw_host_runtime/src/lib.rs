@@ -7,7 +7,7 @@
 //!   depend on;
 //! - [`DefaultHostRuntime`] — the production composition that wraps
 //!   [`ironclaw_capabilities::CapabilityHost`] (which itself coordinates
-//!   authorization, approvals, run-state lifecycle, and process spawn) behind
+//!   authorization, approvals, process invocation lifecycle, and process spawn) behind
 //!   that contract.
 //!
 //! The service preserves three important boundaries:
@@ -26,10 +26,14 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, CorrelationId,
-    DispatchFailureDetail, ExecutionContext, ExtensionId, ProcessId, ResourceEstimate,
-    ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
+    decision::RuntimeCredentialAuthRequirement,
+    dispatch::{CapabilityDisplayOutputPreview, DispatchFailureDetail},
+    ids::{ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, ProcessId, SecretHandle},
+    resource::{ResourceEstimate, ResourceScope, ResourceUsage},
+    result_meta::{FailureFate, FailureKind},
+    runtime::RuntimeKind,
     runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
+    scope::ExecutionContext,
 };
 use ironclaw_trust::TrustDecision;
 use serde_json::Value;
@@ -84,27 +88,30 @@ pub use first_party::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 pub use first_party_tools::{
-    APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools,
-    ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
-    HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
-    MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
-    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
-    TIME_CAPABILITY_ID, TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
-    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
-    TriggerCreateHook, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    APPLY_PATCH_CAPABILITY_ID, ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
+    BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
+    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID,
+    LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID,
+    MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MemoryToolProfile,
+    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, NativeMemoryToolHandler,
+    OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
+    READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID,
+    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TriggerCreateHook,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook,
-    builtin_first_party_handlers_with_trigger_create_hook_and_memory_resolver,
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
-    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend_and_memory_resolver,
     builtin_first_party_package, builtin_first_party_package_for_process_backend,
-    register_outbound_delivery_first_party_handler,
+    ensure_memory_mount, finish_memory_tool_result, is_allowed_code_artifact_host,
+    map_memory_service_error, memory_invocation_for_request, memory_tool_profiles,
+    normalize_memory_tool_input, register_memory_tool_handler, register_native_memory_tools,
+    register_outbound_delivery_first_party_handler, register_reply_attachment_first_party_handler,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use first_party_tools::{
@@ -131,9 +138,13 @@ pub use process_port::{
 };
 pub use production::DefaultHostRuntime;
 pub use sandbox_process::{
-    RebornSandboxConfig, RebornSandboxContainerIdentity, RebornSandboxNetworkBroker,
-    RebornSandboxScopeKey, RebornSandboxSecretBroker, RebornSandboxWorkspaceMode,
-    RebornScopedSandboxCommandTransport,
+    DEFAULT_SANDBOX_ALLOWED_DOMAINS, DEFAULT_SANDBOX_MAX_EGRESS_BYTES, RebornSandboxConfig,
+    RebornSandboxContainerIdentity, RebornSandboxNetworkBroker, RebornSandboxScopeKey,
+    RebornSandboxSecretBroker, RebornSandboxUserKey, RebornSandboxWorkspaceMode,
+    RebornScopedSandboxCommandTransport, SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV,
+    SANDBOX_MAX_EGRESS_BYTES_ENV, SandboxActivityRegistry, SandboxDockerReadiness,
+    connect_docker_with_retry, sandbox_allowed_domains, sandbox_docker_readiness,
+    sandbox_extra_allowed_domains, sandbox_max_egress_bytes, sandbox_network_policy,
 };
 /// Scoped cleanup guard consumed by the generic extension activation
 /// transaction's composition adapter. Raw obligation handoff stores remain
@@ -444,7 +455,7 @@ pub struct RuntimeProcessHandle {
 #[derive(Clone, Eq)]
 pub struct RuntimeCapabilityFailure {
     pub capability_id: CapabilityId,
-    pub kind: RuntimeFailureKind,
+    pub kind: FailureKind,
     pub message: Option<String>,
     pub detail: Option<DispatchFailureDetail>,
     /// Registry-scrubbed descriptive cause for the model-visible Diagnostic
@@ -542,7 +553,7 @@ pub enum RuntimeBlockedReason {
 ///
 /// Raw transport errors can contain URLs, query strings, host paths, proxy
 /// details, or credential-shaped text. Keep this disabled unless debugging a
-/// trusted `LocalDev` or `LocalYolo` run. Hosted and enterprise deployments
+/// trusted `Standalone` or `LocalYolo` run. Hosted and enterprise deployments
 /// never enable raw diagnostics from this environment variable alone.
 pub(crate) const UNSAFE_RAW_HTTP_EGRESS_ERRORS_ENV: &str = "IRONCLAW_UNSAFE_RAW_HTTP_EGRESS_ERRORS";
 
@@ -561,7 +572,7 @@ pub(crate) fn local_runtime_allows_unsafe_raw_http_diagnostics(
     matches!(deployment, DeploymentMode::LocalSingleUser)
         && matches!(
             profile,
-            RuntimeProfile::LocalDev | RuntimeProfile::LocalYolo
+            RuntimeProfile::LocalHost | RuntimeProfile::LocalYolo
         )
 }
 
@@ -574,10 +585,10 @@ mod raw_http_diagnostic_policy_tests {
     use super::*;
 
     #[test]
-    fn raw_http_diagnostics_are_limited_to_local_dev_and_yolo_profiles() {
+    fn raw_http_diagnostics_are_limited_to_standalone_and_yolo_profiles() {
         assert!(local_runtime_allows_unsafe_raw_http_diagnostics(
             DeploymentMode::LocalSingleUser,
-            RuntimeProfile::LocalDev,
+            RuntimeProfile::LocalHost,
         ));
         assert!(local_runtime_allows_unsafe_raw_http_diagnostics(
             DeploymentMode::LocalSingleUser,
@@ -598,60 +609,6 @@ mod raw_http_diagnostic_policy_tests {
     }
 }
 
-/// Stable, sanitized failure categories.
-///
-// Deliberately NOT `#[non_exhaustive]`: the `Unknown` variant is the open-set
-// escape hatch for unrecognized runtime failures, so the attribute would only
-// force classifiers to keep a wildcard arm that silently buckets a new named
-// variant. Without it, disposition/classification matches are exhaustive and a
-// new named variant fails to compile until classified. See
-// `docs/plans/2026-06-28-reborn-error-recoverability-audit.md` §6.1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RuntimeFailureKind {
-    Authorization,
-    Backend,
-    Cancelled,
-    Dispatcher,
-    GateDeclined,
-    Internal,
-    InvalidInput,
-    InvalidOutput,
-    MissingRuntime,
-    Network,
-    OperationFailed,
-    OutputTooLarge,
-    PolicyDenied,
-    Process,
-    Resource,
-    Transient,
-    Unavailable,
-}
-
-impl RuntimeFailureKind {
-    /// Returns a stable, snake_case identifier for use in metrics/tracing.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Authorization => "authorization",
-            Self::Backend => "backend",
-            Self::Cancelled => "cancelled",
-            Self::Dispatcher => "dispatcher",
-            Self::GateDeclined => "gate_declined",
-            Self::Internal => "internal",
-            Self::InvalidInput => "invalid_input",
-            Self::InvalidOutput => "invalid_output",
-            Self::MissingRuntime => "missing_runtime",
-            Self::Network => "network",
-            Self::OperationFailed => "operation_failed",
-            Self::OutputTooLarge => "output_too_large",
-            Self::PolicyDenied => "policy_denied",
-            Self::Process => "process",
-            Self::Resource => "resource",
-            Self::Transient => "transient",
-            Self::Unavailable => "unavailable",
-        }
-    }
-}
-
 /// Agent-loop handling decision for a sanitized runtime capability failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CapabilityFailureDisposition {
@@ -666,11 +623,7 @@ pub enum CapabilityFailureDisposition {
 const MAX_RUNTIME_FAILURE_SUMMARY_CHARS: usize = 512;
 
 impl RuntimeCapabilityFailure {
-    pub fn new(
-        capability_id: CapabilityId,
-        kind: RuntimeFailureKind,
-        message: Option<String>,
-    ) -> Self {
+    pub fn new(capability_id: CapabilityId, kind: FailureKind, message: Option<String>) -> Self {
         Self {
             capability_id,
             kind,
@@ -731,40 +684,32 @@ fn bounded_runtime_failure_summary(summary: &str) -> String {
 
 /// Central disposition policy for runtime capability failures.
 ///
-/// Runtime failures should be surfaced through normal model-visible tool-error
-/// handling whenever they are not retryable infrastructure outages. Security
+/// Delegates the recoverability decision to the unified
+/// [`FailureKind::fate`] projection instead of re-deriving a local retryable
+/// set — re-declared domains drift, and the drift is where recoverability
+/// died (#6284). Only `Retry`-fated kinds are retried before the model sees
+/// anything. `Park` and `Terminal` fates are not expected to reach this
+/// disposition on the production paths (gates suspend as
+/// `AuthRequired`/`ApprovalRequired` outcomes and cancellation ends the run
+/// upstream — intent, not a code-enforced invariant); if a lane nevertheless
+/// mints one, it conservatively surfaces as a model-visible tool error rather
+/// than burning retry budget. Security
 /// isolation failures must use a separate quarantine path instead of this
 /// generic failure disposition.
-pub const fn capability_failure_disposition(
-    kind: RuntimeFailureKind,
-) -> CapabilityFailureDisposition {
-    if matches!(kind, RuntimeFailureKind::InvalidInput) {
-        return CapabilityFailureDisposition::ModelVisibleToolError;
+pub fn capability_failure_disposition(kind: FailureKind) -> CapabilityFailureDisposition {
+    match kind.fate() {
+        FailureFate::Retry => CapabilityFailureDisposition::RetrySameCall,
+        FailureFate::ModelVisible | FailureFate::Park | FailureFate::Terminal => {
+            CapabilityFailureDisposition::ModelVisibleToolError
+        }
     }
-
-    if runtime_failure_is_retryable(kind) {
-        return CapabilityFailureDisposition::RetrySameCall;
-    }
-
-    CapabilityFailureDisposition::ModelVisibleToolError
-}
-
-const fn runtime_failure_is_retryable(kind: RuntimeFailureKind) -> bool {
-    matches!(
-        kind,
-        RuntimeFailureKind::Internal
-            | RuntimeFailureKind::Backend
-            | RuntimeFailureKind::Network
-            | RuntimeFailureKind::Transient
-            | RuntimeFailureKind::Unavailable
-    )
 }
 
 /// Work ids tracked by the host runtime for status/cancellation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum RuntimeWorkId {
-    Invocation(ironclaw_host_api::InvocationId),
+    Invocation(ironclaw_host_api::ids::InvocationId),
     Process(ProcessId),
     Gate(RuntimeGateId),
 }
@@ -884,6 +829,13 @@ pub trait HostRuntime: Send + Sync {
         request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError>;
 
+    /// Default: this host runtime does not implement capability spawn.
+    ///
+    /// The kind is [`FailureKind::UnsupportedRunner`] — model-visible and
+    /// **non-retryable** — because "this implementation does not provide the
+    /// operation" is a permanent property of the implementation, not a
+    /// temporary outage. `Unavailable` would be `FailureFate::Retry` and would
+    /// burn the whole capability retry budget on a call that can never succeed.
     async fn spawn_capability(
         &self,
         request: RuntimeInvocation,
@@ -892,7 +844,7 @@ pub trait HostRuntime: Send + Sync {
         Ok(RuntimeCapabilityOutcome::Failed(
             RuntimeCapabilityFailure::new(
                 capability_id,
-                RuntimeFailureKind::Unavailable,
+                FailureKind::UnsupportedRunner,
                 Some("capability spawn is unsupported by this host runtime".to_string()),
             ),
         ))
@@ -915,6 +867,10 @@ pub trait HostRuntime: Send + Sync {
     /// bypass run-state validation and the approval-lease-claim path).  Any
     /// `HostRuntime` implementation that participates in auth-resume flows must
     /// provide an explicit override.
+    ///
+    /// The kind is [`FailureKind::UnsupportedRunner`] (non-retryable) for the
+    /// same reason as [`HostRuntime::spawn_capability`]: a missing override is
+    /// permanent, so retrying it only burns budget.
     async fn auth_resume_capability(
         &self,
         request: RuntimeAuthResume,
@@ -923,7 +879,7 @@ pub trait HostRuntime: Send + Sync {
         Ok(RuntimeCapabilityOutcome::Failed(
             RuntimeCapabilityFailure::new(
                 capability_id,
-                RuntimeFailureKind::Unavailable,
+                FailureKind::UnsupportedRunner,
                 Some("capability auth-resume is unsupported by this host runtime".to_string()),
             ),
         ))
@@ -942,6 +898,9 @@ pub trait HostRuntime: Send + Sync {
         ))
     }
 
+    /// Default: this host runtime does not implement spawn resume. Permanent,
+    /// so [`FailureKind::UnsupportedRunner`] rather than the retryable
+    /// `Unavailable` — see [`HostRuntime::spawn_capability`].
     async fn resume_spawn_capability(
         &self,
         request: RuntimeApprovalResume,
@@ -950,7 +909,7 @@ pub trait HostRuntime: Send + Sync {
         Ok(RuntimeCapabilityOutcome::Failed(
             RuntimeCapabilityFailure::new(
                 capability_id,
-                RuntimeFailureKind::Unavailable,
+                FailureKind::UnsupportedRunner,
                 Some("capability spawn resume is unsupported by this host runtime".to_string()),
             ),
         ))
@@ -993,6 +952,155 @@ impl HostRuntimeError {
     pub fn unavailable(reason: impl Into<String>) -> Self {
         Self::Unavailable {
             reason: reason.into(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod unsupported_operation_default_tests {
+    use super::*;
+    use ironclaw_host_api::{
+        capability::CapabilitySet, ids::UserId, mount::MountView, runtime::TrustClass,
+    };
+
+    /// A `HostRuntime` that implements only the required methods, so every
+    /// optional operation falls through to the trait's default body.
+    struct DefaultsOnlyRuntime;
+
+    #[async_trait]
+    impl HostRuntime for DefaultsOnlyRuntime {
+        async fn invoke_capability(
+            &self,
+            _request: RuntimeInvocation,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            unreachable!("test only exercises the optional-operation defaults")
+        }
+
+        async fn resume_capability(
+            &self,
+            _request: RuntimeApprovalResume,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            unreachable!("test only exercises the optional-operation defaults")
+        }
+
+        async fn visible_capabilities(
+            &self,
+            _request: VisibleCapabilityRequest,
+        ) -> Result<VisibleCapabilitySurface, HostRuntimeError> {
+            unreachable!("test only exercises the optional-operation defaults")
+        }
+
+        async fn cancel_work(
+            &self,
+            _request: CancelRuntimeWorkRequest,
+        ) -> Result<CancelRuntimeWorkOutcome, HostRuntimeError> {
+            unreachable!("test only exercises the optional-operation defaults")
+        }
+
+        async fn runtime_status(
+            &self,
+            _request: RuntimeStatusRequest,
+        ) -> Result<HostRuntimeStatus, HostRuntimeError> {
+            unreachable!("test only exercises the optional-operation defaults")
+        }
+
+        async fn health(&self) -> Result<HostRuntimeHealth, HostRuntimeError> {
+            unreachable!("test only exercises the optional-operation defaults")
+        }
+    }
+
+    fn context() -> ExecutionContext {
+        ExecutionContext::local_default(
+            UserId::new("user").expect("user id"), // safety: test-only static fixture
+            ExtensionId::new("caller").expect("extension id"), // safety: test-only static fixture
+            RuntimeKind::Wasm,
+            TrustClass::UserTrusted,
+            CapabilitySet::default(),
+            MountView::default(),
+        )
+        .expect("execution context") // safety: test-only static fixture
+    }
+
+    fn capability_id() -> CapabilityId {
+        CapabilityId::new("echo.say").expect("capability id") // safety: test-only static fixture
+    }
+
+    fn failure(outcome: RuntimeCapabilityOutcome) -> RuntimeCapabilityFailure {
+        match outcome {
+            RuntimeCapabilityOutcome::Failed(failure) => failure,
+            other => panic!("expected a Failed outcome, got {}", other.kind()),
+        }
+    }
+
+    /// Regression (#6684 review): "this host runtime does not implement the
+    /// operation" is a **permanent** property of the implementation — it cannot
+    /// become true on the next attempt. Minting `FailureKind::Unavailable`
+    /// (fate `Retry`) made the capability retry budget burn down to zero on a
+    /// call that can never succeed, the same budget-burn class this PR fixed
+    /// for `NetworkDenied`. The honest kind is `UnsupportedRunner`:
+    /// model-visible, non-retryable.
+    #[tokio::test]
+    async fn unsupported_operation_defaults_are_permanent_not_retryable() {
+        let runtime = DefaultsOnlyRuntime;
+
+        let spawn = failure(
+            runtime
+                .spawn_capability((
+                    context(),
+                    capability_id(),
+                    ResourceEstimate::default(),
+                    Value::Null,
+                ))
+                .await
+                .expect("default spawn body returns an outcome, not an error"), // safety: test-only assertion
+        );
+        let auth_resume = failure(
+            runtime
+                .auth_resume_capability((
+                    context(),
+                    capability_id(),
+                    ResourceEstimate::default(),
+                    Value::Null,
+                    None,
+                ))
+                .await
+                .expect("default auth-resume body returns an outcome, not an error"), // safety: test-only assertion
+        );
+        let spawn_resume = failure(
+            runtime
+                .resume_spawn_capability((
+                    context(),
+                    ApprovalRequestId::new(),
+                    capability_id(),
+                    ResourceEstimate::default(),
+                    Value::Null,
+                ))
+                .await
+                .expect("default spawn-resume body returns an outcome, not an error"), // safety: test-only assertion
+        );
+
+        for (label, failure) in [
+            ("spawn_capability", spawn),
+            ("auth_resume_capability", auth_resume),
+            ("resume_spawn_capability", spawn_resume),
+        ] {
+            assert_eq! // safety: test-only assertion
+            (
+                failure.kind,
+                FailureKind::UnsupportedRunner,
+                "{label} default must name the permanent unsupported-operation kind"
+            );
+            assert! // safety: test-only assertion
+            (
+                !failure.kind.is_retryable(),
+                "{label} default must not consume retry budget on a permanently unsupported operation"
+            );
+            assert_eq! // safety: test-only assertion
+            (
+                failure.kind.fate(),
+                FailureFate::ModelVisible,
+                "{label} default must surface to the model so it can route around the gap"
+            );
         }
     }
 }

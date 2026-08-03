@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use ironclaw_capabilities::ProcessAuthorizationRemintPort;
-use ironclaw_host_api::{CapabilityDispatcher, RuntimeKind};
+use ironclaw_host_api::{dispatch::CapabilityDispatcher, runtime::RuntimeKind};
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_processes::{
     ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor,
@@ -264,14 +264,20 @@ mod tests {
 
     use ironclaw_host_api::dispatch_test_support::TestDispatcher;
     use ironclaw_host_api::{
-        ActivityId, Actor, AgentId, CapabilityDispatchResult, CapabilityId, CorrelationId,
-        DispatchError, ExtensionId, InvocationId, InvocationOrigin, MountView,
-        ProcessAuthorizedContinuation, ProcessAuthorizedInvocation, ProcessId, ProductKind,
-        ProjectId, ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceReservationId,
-        ResourceScope, ResourceUsage, RuntimeDispatchErrorKind, RuntimeLane, TenantId, ThreadId,
-        UserId,
+        authorized::{ProcessAuthorizedContinuation, ProcessAuthorizedInvocation},
+        dispatch::{CapabilityDispatchResult, DispatchError, RuntimeDispatchErrorKind},
+        ids::{
+            ActivityId, AgentId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProcessId,
+            ProductKind, ProjectId, ResourceReservationId, TenantId, ThreadId, UserId,
+        },
+        invocation::{Actor, InvocationOrigin},
+        lane::RuntimeLane,
+        mount::MountView,
+        resource::{
+            ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceScope, ResourceUsage,
+        },
     };
-    use ironclaw_processes::{ProcessCancellationToken, ProcessStart, ProcessStorePort};
+    use ironclaw_processes::{ProcessCancellationToken, ProcessRuntimePort, ProcessStart};
     use serde_json::json;
 
     #[derive(Default)]
@@ -624,14 +630,16 @@ mod tests {
         request: &ProcessExecutionRequest,
     ) -> RuntimeDispatchProcessExecutor {
         let store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
-        store
-            .start(process_start_from_request(request))
-            .await
-            .unwrap();
-        let process_store: Arc<dyn ProcessStorePort> = store;
+        ironclaw_processes::submit_capability_process(
+            store.as_ref(),
+            process_start_from_request(request),
+        )
+        .await
+        .unwrap();
+        let processes: Arc<dyn ProcessRuntimePort> = store;
         RuntimeDispatchProcessExecutor::new(
             dispatcher,
-            ironclaw_capabilities::process_authorization_remint_port(process_store),
+            ironclaw_capabilities::process_authorization_remint_port(processes),
         )
     }
 

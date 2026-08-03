@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
+#[cfg(any(test, feature = "test-support"))]
+use crate::InMemoryAuthProductServices;
 use crate::{
     AuthChallenge, AuthFlowKind, AuthFlowManager, AuthFlowRecord, AuthInteractionId,
     AuthInteractionService, AuthProductError, AuthProductScope, CredentialAccountService,
-    CredentialAccountStatus, InMemoryAuthProductServices, ManualTokenCompletionInput,
-    ManualTokenSetupRequest, NewAuthFlow, SecretSubmitRequest, SecretSubmitResult,
+    CredentialAccountStatus, ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow,
+    SecretSubmitRequest, SecretSubmitResult,
 };
 use async_trait::async_trait;
 use ironclaw_filesystem::RootFilesystem;
@@ -97,6 +99,7 @@ impl RebornManualTokenFlowService for PortBackedManualTokenFlowService {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl RebornManualTokenFlowService for InMemoryAuthProductServices {
     async fn request_manual_token_flow(
@@ -180,6 +183,7 @@ async fn request_manual_token_flow_with(
             scope: flow_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: flow_provider,
+            requester_extension: None,
             challenge: AuthChallenge::ManualTokenRequired {
                 interaction_id: *interaction_id,
                 provider: provider.clone(),

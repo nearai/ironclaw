@@ -5,9 +5,11 @@ use std::{
 
 use ironclaw_approvals::LeaseApproval;
 use ironclaw_host_api::{
-    Action, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-    ExtensionId, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern, PackageId,
-    Principal,
+    action::{Action, NetworkPolicy, NetworkTargetPattern},
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+    ids::{CapabilityGrantId, CapabilityId, ExtensionId, PackageId},
+    mount::MountView,
+    scope::Principal,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -18,25 +20,25 @@ const BUILTIN_CAPABILITY_POLICY_TOML: &str = include_str!("builtin_capability_po
 
 #[derive(Debug, Error)]
 pub(crate) enum BuiltinCapabilityPolicyError {
-    #[error("local-dev capability policy TOML is invalid: {0}")]
+    #[error("standalone capability policy TOML is invalid: {0}")]
     InvalidToml(#[from] toml::de::Error),
-    #[error("local-dev capability policy has no grants")]
+    #[error("standalone capability policy has no grants")]
     EmptyGrants,
-    #[error("local-dev capability policy has duplicate grant for {capability}")]
+    #[error("standalone capability policy has duplicate grant for {capability}")]
     DuplicateGrant { capability: CapabilityId },
-    #[error("local-dev capability policy is missing grant for {capability}")]
+    #[error("standalone capability policy is missing grant for {capability}")]
     MissingGrant { capability: CapabilityId },
-    #[error("local-dev capability policy has empty effect set for {target}")]
+    #[error("standalone capability policy has empty effect set for {target}")]
     EmptyEffects { target: String },
-    #[error("local-dev capability policy has duplicate effect {effect:?} for {target}")]
+    #[error("standalone capability policy has duplicate effect {effect:?} for {target}")]
     DuplicateEffect { target: String, effect: EffectKind },
-    #[error("local-dev capability policy provider id is invalid as an extension id: {0}")]
-    InvalidProviderExtensionId(#[source] ironclaw_host_api::HostApiError),
-    #[error("local-dev capability policy provider manifest path is empty")]
+    #[error("standalone capability policy provider id is invalid as an extension id: {0}")]
+    InvalidProviderExtensionId(#[source] ironclaw_host_api::error::HostApiError),
+    #[error("standalone capability policy provider manifest path is empty")]
     EmptyProviderManifestPath,
-    #[error("local-dev capability policy provider manifest path must be absolute")]
+    #[error("standalone capability policy provider manifest path must be absolute")]
     NonAbsoluteProviderManifestPath,
-    #[error("local-dev capability policy is invalid: {reason}")]
+    #[error("standalone capability policy is invalid: {reason}")]
     CachedInvalid { reason: String },
 }
 
@@ -167,7 +169,7 @@ impl BuiltinCapabilityPolicy {
                     Err(BuiltinCapabilityPolicyError::MissingGrant { .. }) => {
                         tracing::debug!(
                             %capability,
-                            "local-dev spawn capability approval is using default lease terms"
+                            "standalone spawn capability approval is using default lease terms"
                         );
                         constraint_terms(
                             &self.approval_defaults.spawn_capability,
@@ -201,7 +203,7 @@ pub(crate) fn builtin_one_shot_lease_approval(constraints: GrantConstraints) -> 
     LeaseApproval {
         issued_by: Principal::HostRuntime,
         constraints: GrantConstraints {
-            // Local-dev leases are single-use (max_invocations = 1).
+            // Standalone leases are single-use (max_invocations = 1).
             // Wall-clock expiry is intentionally None: the policy file does
             // not configure an expires_at ceiling, and a short hard-coded
             // timeout would race against slow human approval flows. The
@@ -464,7 +466,7 @@ pub(crate) fn dev_wildcard_network_policy() -> NetworkPolicy {
             host_pattern: "*".to_string(),
             port: None,
         }],
-        // Local-dev shell is intentionally broad for developer CLI workflows,
+        // Standalone shell is intentionally broad for developer CLI workflows,
         // but it still uses the coarse host-local guard so cloud metadata,
         // link-local, multicast, loopback, and private IP targets remain
         // blocked by the shared network policy enforcer.
@@ -508,7 +510,7 @@ mod tests {
         // before the network POST); trace_commons.profile_set is deliberately NOT
         // exempt — publishing a public community profile must hit the runtime
         // approval gate, with its model-controlled confirmed=true only as
-        // defense-in-depth. builtin.profile_set IS exempt: private local write
+        // defense-in-depth. ironclaw.memory.profile_set IS exempt: private local write
         // only (no network/external_write), analogous to memory_write on a fixed path.
         assert!(
             policy
@@ -558,9 +560,18 @@ mod tests {
             policy
                 .approval_gate_exempt_capabilities()
                 .iter()
-                .any(|capability| capability.as_str() == "builtin.profile_set"),
-            "builtin.profile_set must be in the exempt list (private local write, no \
+                .any(|capability| capability.as_str() == "ironclaw.memory.profile_set"),
+            "ironclaw.memory.profile_set must be in the exempt list (private local write, no \
              network/external_write — analogous to memory_write on a fixed path)"
+        );
+        assert!(
+            !policy
+                .approval_gate_exempt_capabilities()
+                .iter()
+                .any(|capability| {
+                    capability.as_str() == "builtin.outbound_delivery_target_route_current"
+                }),
+            "natural-language destination intent is model interpretation, not host-verifiable consent; current-run external routing must stay approval-gated"
         );
         assert!(
             policy
@@ -617,9 +628,14 @@ mod tests {
             "builtin.trigger_remove",
             &[EffectKind::DispatchCapability, EffectKind::ExternalWrite],
         );
+        assert_trigger_grant(
+            &policy,
+            "builtin.outbound_delivery_target_route_current",
+            &[EffectKind::DispatchCapability, EffectKind::ExternalWrite],
+        );
 
         // Trace Commons capabilities must be granted here or they vanish from
-        // the model-visible tool surface in local-dev (REPL/serve) runs.
+        // the model-visible tool surface in standalone (REPL/serve) runs.
         let onboard = policy
             .grant(&CapabilityId::new("builtin.trace_commons.onboard").expect("capability id"))
             .expect("trace_commons.onboard grant");
@@ -653,23 +669,23 @@ mod tests {
             assert_eq!(grant.mounts, CapabilityMountProfile::Ambient);
             assert_eq!(grant.network, CapabilityNetworkProfile::Default);
         }
-        // builtin.profile_set writes context/profile.json under the memory mount.
+        // ironclaw.memory.profile_set writes context/profile.json under the memory mount.
         // It mirrors memory_write's effect set (read+write filesystem, memory mount,
         // default network) and must be present here or it is denied as MissingGrant.
-        let builtin_profile_set = policy
-            .grant(&CapabilityId::new("builtin.profile_set").expect("capability id"))
-            .expect("builtin.profile_set grant must be present");
+        let memory_profile_set = policy
+            .grant(&CapabilityId::new("ironclaw.memory.profile_set").expect("capability id"))
+            .expect("ironclaw.memory.profile_set grant must be present");
         assert_eq!(
-            builtin_profile_set.effects,
+            memory_profile_set.effects,
             vec![
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
             ]
         );
-        assert_eq!(builtin_profile_set.mounts, CapabilityMountProfile::Memory);
+        assert_eq!(memory_profile_set.mounts, CapabilityMountProfile::Memory);
         assert_eq!(
-            builtin_profile_set.network,
+            memory_profile_set.network,
             CapabilityNetworkProfile::Default
         );
 

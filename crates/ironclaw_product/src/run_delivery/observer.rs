@@ -2,14 +2,23 @@
 //! channel message submitted and deliver its outputs back to the
 //! originating conversation, entirely through the [`DeliveryCoordinator`].
 
+use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
 
+use crate::commands::{
+    CommandAudience, CommandResultView, declared_command_help_text,
+    declared_command_help_text_with_prefix, product_command_descriptors,
+    render_command_result_text,
+};
 use crate::{
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, OutboundPart, ProductAdapterError,
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
-    ProductRejectionKind, ProductSurfaceRejectionKind, ProductTriggerReason,
+    AuthPromptChallengeKind, ExternalActorRef, ExternalConversationRef, ExternalEventId,
+    OutboundPart, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
+    ProductInboundPayload, ProductRejection, ProductRejectionKind, ProductSurfaceRejectionKind,
+    ProductTriggerReason,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -20,7 +29,9 @@ use ironclaw_outbound::{
     RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext,
     ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest,
 };
-use ironclaw_threads::FinalizedAssistantMessageByRunRequest;
+use ironclaw_threads::{
+    AttachmentRef, FinalizedAssistantMessageByRunRequest, ThreadMessageRecord, ThreadScope,
+};
 use ironclaw_turns::{
     GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnErrorCategory, TurnRunId,
     TurnRunState, TurnScope, TurnStatus,
@@ -29,18 +40,15 @@ use tokio::sync::Semaphore;
 
 use super::prompts;
 use super::{
-    BlockedActionableMarker, BlockedAuthPromptRequest, DeliveredChannelMessage, HINT_SEEN_CAP,
-    HintSeenSet, RunDeliveryError, RunDeliveryServices, RunDeliverySettings,
-    blocked_actionable_marker, cancel_auth_blocked_run, delivered_messages_from_outcome,
-    gate_routes::record_gate_route_if_needed, thread_scope_from_binding,
-    turn_scope_from_thread_scope,
+    BlockedActionableMarker, DeliveredChannelMessage, HINT_SEEN_CAP, HintSeenSet, RunDeliveryError,
+    RunDeliveryServices, RunDeliverySettings, blocked_actionable_marker, cancel_auth_blocked_run,
+    delivered_messages_from_outcome, gate_routes::record_gate_route_if_needed,
+    thread_scope_from_binding, turn_scope_from_thread_scope,
 };
 use crate::delivery_coordinator::{
     CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest, DeliveryIntent,
 };
-use crate::{
-    ChannelConnectionNoticePolicy, ProductSurfaceFailure, ResolveBindingRequest, ResolvedBinding,
-};
+use crate::{ProductSurfaceFailure, ResolveBindingRequest, ResolvedBinding};
 
 const CONNECT_NOTICE_THROTTLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -50,10 +58,18 @@ struct ActionableNotification {
     event_kind: RunNotificationEventKind,
     intent: DeliveryIntent,
     text: String,
+    attachments: Vec<AttachmentRef>,
     /// Gate ref recorded into the delivered-gate route store for approval
     /// and auth prompts, so a bare reply next to the prompt resolves the
     /// gate. `None` for other kinds.
     gate_ref_for_routing: Option<String>,
+}
+
+struct RunNotificationDeliveryContext<'a> {
+    envelope: &'a ProductInboundEnvelope,
+    scope: &'a TurnScope,
+    thread_scope: &'a ThreadScope,
+    actor: &'a TurnActor,
 }
 
 /// Bound on the delivered-run memory. Evicted oldest-first; an evicted entry
@@ -139,6 +155,7 @@ pub struct RunDeliveryObserver {
     services: RunDeliveryServices,
     settings: RunDeliverySettings,
     connection_notices: ChannelConnectionNoticePolicy,
+    command_help_text: String,
     delivery_permits: Arc<Semaphore>,
     /// Per-observer, per-conversation connect-nudge reservations. Reserving
     /// before delivery prevents concurrent unbound events from racing.
@@ -181,11 +198,38 @@ impl RunDeliveryObserver {
             services,
             settings,
             connection_notices,
+            command_help_text: declared_command_help_text(std::iter::empty::<&str>()),
             delivery_permits: Arc::new(Semaphore::new(settings.max_concurrent_deliveries.get())),
             connect_nudge_reservations: Mutex::new(HashMap::new()),
             hint_seen: Mutex::new((std::collections::VecDeque::new(), HashSet::new())),
             delivery_runs: Mutex::new(DeliveryRunLedger::default()),
         }
+    }
+
+    /// `prefix` is the channel's manifest-declared
+    /// `[channel.presentation].command_prefix` (e.g. an app-scoped
+    /// dispatcher's `"/ironclaw "`); `None` renders the bare `/{name}` form.
+    pub fn with_enabled_commands<I, S>(mut self, commands: I, prefix: Option<&str>) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        // Filter to user-audience declared names so the static help text
+        // never advertises an admin-only command to a non-admin actor. This
+        // filter is unconditional (applies to every actor); the observer has
+        // no per-actor role to check at this seam — it only has the fixed
+        // enabled-command declaration.
+        let user_visible: Vec<String> = commands
+            .into_iter()
+            .filter(|name| {
+                product_command_descriptors().any(|descriptor| {
+                    descriptor.name == name.as_ref() && descriptor.audience == CommandAudience::User
+                })
+            })
+            .map(|name| name.as_ref().to_string())
+            .collect();
+        self.command_help_text = declared_command_help_text_with_prefix(user_visible, prefix);
+        self
     }
 
     pub async fn post_connection_status_notice(
@@ -210,6 +254,11 @@ impl RunDeliveryObserver {
     /// entry point the composition's post-admission observer seam calls.
     pub async fn observe_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck) {
         self.close_connect_nudge_epoch_after_accepted_user_message(&envelope, &ack);
+        // Product commands settle synchronously; their result or
+        // user-correctable rejection is the only reply this event will see.
+        if self.post_command_feedback(&envelope, &ack).await {
+            return;
+        }
         // Rejected approval/auth feedback is a single best-effort post, not
         // a long-running delivery — handle before taking the semaphore.
         if self
@@ -451,9 +500,12 @@ impl RunDeliveryObserver {
             let gate_ref_for_routing = notification.gate_ref_for_routing.clone();
             let delivered_messages = self
                 .deliver_run_notification(
-                    &envelope,
-                    &scope,
-                    &actor,
+                    RunNotificationDeliveryContext {
+                        envelope: &envelope,
+                        scope: &scope,
+                        thread_scope: &thread_scope,
+                        actor: &actor,
+                    },
                     run_id,
                     &actionable_state,
                     notification,
@@ -570,8 +622,8 @@ impl RunDeliveryObserver {
         let direct_message = envelope_is_direct_chat(envelope);
         let notification = match state.status {
             TurnStatus::Completed => {
-                let Some(text) = self
-                    .read_latest_assistant_text(thread_scope, binding, run_id)
+                let Some(message) = self
+                    .read_latest_assistant_message(thread_scope, binding, run_id)
                     .await?
                 else {
                     tracing::warn!(
@@ -580,10 +632,18 @@ impl RunDeliveryObserver {
                     );
                     return Ok(None);
                 };
+                let Some(text) = message.content else {
+                    tracing::warn!(
+                        %run_id,
+                        "completed run finalized assistant message has no content; skipping final reply delivery"
+                    );
+                    return Ok(None);
+                };
                 ActionableNotification {
                     event_kind: RunNotificationEventKind::FinalReplyReady,
                     intent: DeliveryIntent::FinalReply,
                     text,
+                    attachments: message.attachments,
                     gate_ref_for_routing: None,
                 }
             }
@@ -609,6 +669,7 @@ impl RunDeliveryObserver {
                     event_kind: RunNotificationEventKind::ApprovalNeeded,
                     intent: DeliveryIntent::GatePrompt,
                     text: prompts::gate_prompt_text(&view, direct_message),
+                    attachments: Vec::new(),
                     gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
                 }
             }
@@ -643,21 +704,48 @@ impl RunDeliveryObserver {
                 // it: cancel the run (same outcome as `auth deny`) and
                 // redirect to the web app.
                 match view {
-                    Some(view) if view.authorization_url.is_some() => {
+                    // Serviceable = the challenge can actually be completed
+                    // from a chat surface: an OAuth link the provider hosts,
+                    // or a host-issued pairing code. A manual-token challenge
+                    // never is, and an unknown one fails closed.
+                    Some(view) if prompts::auth_prompt_is_serviceable(&view) => {
                         let mut view = view;
-                        // OAuth setup links are only safe in a private DM;
-                        // strip the URL for any other origin.
+                        view.body = prompts::actionable_auth_prompt_body(&view);
+                        // Setup links and pairing codes are bearer material:
+                        // only a private DM may carry them. Any other origin
+                        // gets a redirect to the web app instead.
                         if !auth_setup_link_is_private(envelope) {
                             view.authorization_url = None;
+                            view.pairing = None;
+                            view.body = match view.challenge_kind {
+                                Some(AuthPromptChallengeKind::Pairing) => {
+                                    prompts::PAIRING_PRIVATE_SETUP_MESSAGE.to_string()
+                                }
+                                // `None` reaches here only through
+                                // `auth_prompt_is_serviceable`'s legacy arm,
+                                // which admits a prompt on a non-empty
+                                // `authorization_url` alone -- i.e. an OAuth
+                                // prompt predating the `challenge_kind` wire
+                                // field. It gets the OAuth redirect, not the
+                                // generic dead end.
+                                Some(AuthPromptChallengeKind::OAuthUrl) | None => {
+                                    prompts::OAUTH_PRIVATE_SETUP_MESSAGE.to_string()
+                                }
+                                Some(
+                                    AuthPromptChallengeKind::ManualToken
+                                    | AuthPromptChallengeKind::Other,
+                                ) => prompts::AUTH_UNAVAILABLE_MESSAGE.to_string(),
+                            };
                         }
                         ActionableNotification {
                             event_kind: RunNotificationEventKind::AuthRequired,
                             intent: DeliveryIntent::AuthPrompt,
                             text: prompts::auth_prompt_text(&view, direct_message),
+                            attachments: Vec::new(),
                             gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
                         }
                     }
-                    _ => {
+                    view => {
                         cancel_auth_blocked_run(
                             self.services.turn_coordinator.as_ref(),
                             self.services.auth_flow_cancel.as_deref(),
@@ -673,7 +761,7 @@ impl RunDeliveryObserver {
                                 scope.clone(),
                                 Some(run_id),
                                 envelope.external_conversation_ref(),
-                                prompts::AUTH_UNAVAILABLE_MESSAGE,
+                                prompts::unserviceable_auth_prompt_message(view.as_ref()),
                                 format!("auth-unavailable:{run_id}"),
                             )
                             .await;
@@ -688,13 +776,17 @@ impl RunDeliveryObserver {
 
     async fn deliver_run_notification(
         &self,
-        envelope: &ProductInboundEnvelope,
-        scope: &TurnScope,
-        actor: &TurnActor,
+        context: RunNotificationDeliveryContext<'_>,
         run_id: TurnRunId,
         state: &TurnRunState,
         notification: ActionableNotification,
     ) -> Result<Vec<DeliveredChannelMessage>, RunDeliveryError> {
+        let RunNotificationDeliveryContext {
+            envelope,
+            scope,
+            thread_scope,
+            actor,
+        } = context;
         let reply_target = state.reply_target_binding_ref.clone();
         let target_authority = ObservedReplyTargetAuthority {
             scope: scope.clone(),
@@ -738,13 +830,24 @@ impl RunDeliveryObserver {
                 &outbound_policy,
                 self.services.communication_preferences.as_ref(),
                 &target_authority,
+                self.services.project_filesystem.as_ref(),
                 CoordinatedDeliveryRequest {
                     intent: notification.intent,
                     delivery,
                     parts: vec![OutboundPart::Text(notification.text)],
+                    attachments: notification.attachments,
                     thread_anchor: None,
+                    // MUST stay false on this path. `ObservedReplyTargetAuthority`
+                    // (below) has no DM classification for the raw source
+                    // conversation and hard-fails any request that sets this,
+                    // so setting it would drop every DM auth prompt instead of
+                    // protecting it. The privacy strip on the inbound envelope
+                    // is this path's enforcement; the flag belongs to the
+                    // triggered path, whose resolver can classify the target
+                    // (`triggered.rs` passes true for auth prompts).
                     require_direct_message_target: false,
                     extension_id: &self.services.extension_id,
+                    thread_scope,
                 },
             )
             .await?;
@@ -756,13 +859,13 @@ impl RunDeliveryObserver {
         }
     }
 
-    async fn read_latest_assistant_text(
+    async fn read_latest_assistant_message(
         &self,
         thread_scope: &ironclaw_threads::ThreadScope,
         binding: &ResolvedBinding,
         run_id: TurnRunId,
-    ) -> Result<Option<String>, RunDeliveryError> {
-        Ok(self
+    ) -> Result<Option<ThreadMessageRecord>, RunDeliveryError> {
+        let message = self
             .services
             .thread_service
             .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
@@ -770,8 +873,8 @@ impl RunDeliveryObserver {
                 thread_id: binding.thread_id.clone(),
                 turn_run_id: run_id.to_string(),
             })
-            .await?
-            .and_then(|message| message.content))
+            .await?;
+        Ok(message)
     }
 
     /// Scope for notices raised outside a resolved delivery loop: the
@@ -826,6 +929,54 @@ impl RunDeliveryObserver {
                 envelope.external_conversation_ref(),
                 hint,
                 format!("rejection-hint:{}", envelope.external_event_id().as_str()),
+            )
+            .await;
+        true
+    }
+
+    async fn post_command_feedback(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        ack: &ProductInboundAck,
+    ) -> bool {
+        if !matches!(envelope.payload(), ProductInboundPayload::Command(_)) {
+            return false;
+        }
+        let text = match ack {
+            ProductInboundAck::CommandResult { command, payload } => {
+                render_command_result(command, payload)
+            }
+            ProductInboundAck::Rejected(rejection) => match rejection.kind {
+                ProductRejectionKind::InvalidRequest => self.command_help_text.clone(),
+                // Fixed host copy keyed by rejection kind only — the
+                // rejection's internal `reason` string is never echoed to
+                // the user.
+                ProductRejectionKind::AccessDenied => {
+                    "This command requires an admin account.".to_string()
+                }
+                ProductRejectionKind::PolicyDenied => {
+                    "Commands can only be used in a direct conversation with Ironclaw.".to_string()
+                }
+                // The connect-nudge path owns first-contact feedback.
+                ProductRejectionKind::BindingRequired => return false,
+                // Remaining terminal families intentionally settle without
+                // exposing internal rejection details.
+                _ => return true,
+            },
+            _ => return true,
+        };
+        // Results use the bound conversation scope. Admission rejections may
+        // happen before a shared-route binding exists; their fixed host text
+        // falls back to the channel notice scope and leaks no user data.
+        let scope = self.notice_scope(envelope).await;
+        self.services
+            .post_notice(
+                DeliveryIntent::CommandFeedback,
+                scope,
+                None,
+                envelope.external_conversation_ref(),
+                &text,
+                format!("command-feedback:{}", envelope.external_event_id().as_str()),
             )
             .await;
         true
@@ -1165,6 +1316,30 @@ pub(crate) fn submitted_run_id(ack: &ProductInboundAck) -> Option<TurnRunId> {
     }
 }
 
+fn render_command_result(command: &str, payload: &crate::ProductCommandResultPayload) -> String {
+    if let Ok(view) = serde_json::from_value::<CommandResultView>(payload.as_value().clone()) {
+        return render_command_result_text(&view);
+    }
+    let heading = format!("Command `/{command}` completed.");
+    let rendered = match serde_json::to_string_pretty(payload.as_value()) {
+        Ok(rendered) => rendered,
+        Err(error) => {
+            tracing::debug!(
+                target = "ironclaw::reborn::run_delivery",
+                %error,
+                "could not render product command result payload"
+            );
+            return heading;
+        }
+    };
+    let indented = rendered
+        .lines()
+        .map(|line| format!("    {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{heading}\n\n{indented}")
+}
+
 fn submitted_run_id_for_feedback(_error: &RunDeliveryError) -> Option<TurnRunId> {
     None
 }
@@ -1301,4 +1476,22 @@ pub(crate) fn envelope_is_direct_chat(envelope: &ProductInboundEnvelope) -> bool
 /// OAuth setup links are only safe in a private DM.
 fn auth_setup_link_is_private(envelope: &ProductInboundEnvelope) -> bool {
     envelope_is_direct_chat(envelope)
+}
+
+#[cfg(test)]
+mod delivery_claim_tests {
+    use super::{DeliveryClaim, DeliveryRunLedger};
+    use ironclaw_turns::TurnRunId;
+
+    #[test]
+    fn delivery_run_ledger_distinguishes_active_and_delivered_claims() {
+        let mut ledger = DeliveryRunLedger::default();
+        let run_id = TurnRunId::new();
+
+        assert_eq!(ledger.try_claim(run_id), DeliveryClaim::Claimed);
+        assert_eq!(ledger.try_claim(run_id), DeliveryClaim::AlreadyActive);
+
+        ledger.record_delivered(run_id);
+        assert_eq!(ledger.try_claim(run_id), DeliveryClaim::AlreadyDelivered);
+    }
 }

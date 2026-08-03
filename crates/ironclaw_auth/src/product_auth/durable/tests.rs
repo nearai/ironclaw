@@ -3,8 +3,11 @@ use std::sync::Arc;
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
-    ExtensionId, HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-    ResourceScope, SecretHandle, ThreadId, UserId, VendorId, VirtualPath,
+    error::HostApiError,
+    ids::{ExtensionId, InvocationId, SecretHandle, ThreadId, UserId, VendorId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_secrets::{SecretStore, SecretStorePort};
 use secrecy::SecretString;
@@ -34,7 +37,7 @@ fn test_scope() -> AuthProductScope {
 }
 
 fn test_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
-    let mounts = ironclaw_host_api::MountView::new(vec![MountGrant::new(
+    let mounts = ironclaw_host_api::mount::MountView::new(vec![MountGrant::new(
         MountAlias::new("/secrets").unwrap(),
         VirtualPath::new("/tenants/test/users/alice/secrets").unwrap(),
         MountPermissions::read_write_list_delete(),
@@ -125,6 +128,7 @@ async fn create_manual_token_flow(
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider,
+            requester_extension: None,
             challenge: AuthChallenge::ManualTokenRequired {
                 interaction_id,
                 provider: google_provider(),
@@ -218,7 +222,9 @@ async fn filesystem_runtime_account_selection_matches_setup_invocation_account()
         .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
             CredentialAccountSelectionRequest::new(runtime_scope.clone(), google_provider()),
             runtime_scope,
-            ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
+            ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
+                scopes: Vec::new(),
+            },
             Vec::new(),
         ))
         .await
@@ -261,7 +267,7 @@ async fn filesystem_runtime_account_selection_matches_new_thread_reusable_accoun
     let request = runtime_credential_account_selection_request(
         &runtime_scope.resource,
         &VendorId::new("google").unwrap(),
-        ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+        ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
         &[],
         &ExtensionId::new("google-calendar").unwrap(),
     )
@@ -471,6 +477,7 @@ async fn filesystem_manual_token_completion_persists_auth_flow_account() {
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::ManualTokenRequired {
                 interaction_id,
                 provider,
@@ -693,6 +700,7 @@ async fn filesystem_flow_record_source_projects_session_scoped_manual_flows() {
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::ManualTokenRequired {
                 interaction_id,
                 provider,
@@ -881,7 +889,7 @@ async fn filesystem_runtime_account_selection_tolerates_many_session_account_roo
         .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
             CredentialAccountSelectionRequest::new(runtime_scope.clone(), google_provider()),
             runtime_scope,
-            ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+            ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                 scopes: vec!["drive.readonly".to_string()],
             },
             vec![ProviderScope::new("drive.readonly").unwrap()],
@@ -928,7 +936,7 @@ async fn filesystem_runtime_account_selection_tolerates_many_account_records_per
         .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
             CredentialAccountSelectionRequest::new(runtime_scope.clone(), google_provider()),
             runtime_scope,
-            ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+            ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                 scopes: vec!["drive.readonly".to_string()],
             },
             vec![ProviderScope::new("drive.readonly").unwrap()],
@@ -945,6 +953,7 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
     let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+    let requester_extension = ExtensionId::new("hosted-mcp-fixture").unwrap();
 
     let flow = service
         .create_flow(NewAuthFlow {
@@ -952,6 +961,7 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: Some(requester_extension.clone()),
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -977,6 +987,11 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
         .await
         .unwrap();
     assert_eq!(claimed.status, AuthFlowStatus::CallbackReceived);
+    assert_eq!(
+        claimed.requester_extension.as_ref(),
+        Some(&requester_extension),
+        "callback claim preserves requester-scoped recipe authority"
+    );
 
     let second_claim = service
         .claim_oauth_callback(&scope, claim.clone())
@@ -1024,6 +1039,10 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
         .expect("completed flow should be durable");
     assert_eq!(stored.status, AuthFlowStatus::Completed);
     assert_eq!(stored.continuation_emitted_at, Some(emitted_at));
+    assert_eq!(
+        stored.requester_extension.as_ref(),
+        Some(&requester_extension)
+    );
 
     let completed_replay = recreated
         .claim_oauth_callback(&scope, claim)
@@ -1031,6 +1050,10 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
         .expect("completed callback replay should not reclaim provider exchange");
     assert_eq!(completed_replay.status, AuthFlowStatus::Completed);
     assert_eq!(completed_replay.continuation_emitted_at, Some(emitted_at));
+    assert_eq!(
+        completed_replay.requester_extension.as_ref(),
+        Some(&requester_extension)
+    );
 }
 
 #[tokio::test]
@@ -1092,7 +1115,7 @@ async fn filesystem_manual_token_submit_allows_only_one_concurrent_consumer() {
 fn fs_error_maps_version_mismatch_to_backend_conflict() {
     use super::paths::fs_error;
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
-    use ironclaw_host_api::VirtualPath;
+    use ironclaw_host_api::path::VirtualPath;
 
     let version_mismatch = FilesystemError::VersionMismatch {
         path: VirtualPath::new("/secrets/test").unwrap(),
@@ -1132,6 +1155,7 @@ async fn filesystem_oauth_continuation_marker_is_idempotent() {
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -1434,7 +1458,7 @@ async fn filesystem_manual_token_reconnect_updates_bound_account_across_a_differ
 #[tokio::test]
 async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_uninstall() {
     use crate::{SecretCleanupAction, SecretCleanupRequest, SecretCleanupService};
-    use ironclaw_host_api::ExtensionId;
+    use ironclaw_host_api::ids::ExtensionId;
 
     let filesystem = test_filesystem();
     let concrete_secret_store = Arc::new(SecretStore::ephemeral());
@@ -1545,7 +1569,7 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
 #[tokio::test]
 async fn filesystem_cleanup_matches_owner_granularity_and_provider_selector() {
     use crate::{SecretCleanupAction, SecretCleanupRequest, SecretCleanupService};
-    use ironclaw_host_api::ExtensionId;
+    use ironclaw_host_api::ids::ExtensionId;
 
     let filesystem = test_filesystem();
     let concrete_secret_store = Arc::new(SecretStore::ephemeral());
@@ -1829,6 +1853,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -1931,6 +1956,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -2070,6 +2096,7 @@ async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation()
             scope: setup_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -2128,7 +2155,8 @@ async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation()
     let mut reauth_resource = setup_scope.resource.clone();
     reauth_resource.invocation_id = InvocationId::new();
     reauth_resource.thread_id = Some(ThreadId::new("thread-reauth").unwrap());
-    reauth_resource.mission_id = Some(ironclaw_host_api::MissionId::new("mission-reauth").unwrap());
+    reauth_resource.mission_id =
+        Some(ironclaw_host_api::ids::MissionId::new("mission-reauth").unwrap());
     let reauth_scope = AuthProductScope::new(reauth_resource, setup_scope.surface);
 
     let flow2 = service
@@ -2137,6 +2165,7 @@ async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation()
             scope: reauth_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -2324,6 +2353,7 @@ async fn filesystem_oauth_callback_cas_conflict_reuses_concurrent_account() {
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -2410,7 +2440,7 @@ async fn filesystem_oauth_callback_cas_conflict_reuses_concurrent_account() {
 #[tokio::test]
 async fn filesystem_cleanup_removes_grant_from_non_owner_account() {
     use crate::{SecretCleanupAction, SecretCleanupRequest, SecretCleanupService};
-    use ironclaw_host_api::ExtensionId;
+    use ironclaw_host_api::ids::ExtensionId;
 
     let filesystem = test_filesystem();
     let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
@@ -2621,6 +2651,7 @@ async fn filesystem_cancel_flow_and_terminal_state_rejection() {
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -2660,6 +2691,7 @@ async fn filesystem_fail_oauth_callback_marks_flow_failed() {
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -2732,6 +2764,7 @@ async fn filesystem_complete_credential_selection_completes_flow() {
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::AccountSelectionRequired {
                 provider: google_provider(),
                 accounts: vec![account.projection()],
@@ -2776,6 +2809,7 @@ async fn filesystem_create_flow_rejects_invalid_update_binding() {
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -3061,6 +3095,7 @@ async fn filesystem_expired_flow_status_persisted_before_returning_error() {
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -3134,6 +3169,7 @@ async fn filesystem_expired_flow_status_persisted_before_returning_error() {
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -3196,6 +3232,7 @@ async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -3322,7 +3359,9 @@ async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
 /// Builds an `AuthProductScope` for `resource` using the Web surface (the
 /// surface used by most fixture helpers). This is only for scope construction;
 /// the surface does not affect the keepalive candidate filter.
-fn scope_for_resource(resource: ironclaw_host_api::ResourceScope) -> crate::AuthProductScope {
+fn scope_for_resource(
+    resource: ironclaw_host_api::resource::ResourceScope,
+) -> crate::AuthProductScope {
     crate::AuthProductScope::new(resource, AuthSurface::Web)
 }
 
@@ -3333,9 +3372,9 @@ fn resource_scope(
     user_id: &str,
     agent_id: Option<&str>,
     project_id: Option<&str>,
-) -> ironclaw_host_api::ResourceScope {
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId};
-    ironclaw_host_api::ResourceScope {
+) -> ironclaw_host_api::resource::ResourceScope {
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId};
+    ironclaw_host_api::resource::ResourceScope {
         tenant_id: TenantId::new(tenant_id).unwrap(),
         user_id: UserId::new(user_id).unwrap(),
         agent_id: agent_id.map(|a| AgentId::new(a).unwrap()),
@@ -4056,6 +4095,7 @@ async fn filesystem_complete_credential_selection_succeeds_across_different_invo
             scope: flow_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::AccountSelectionRequired {
                 provider: google_provider(),
                 accounts: vec![account.projection()],
@@ -4152,6 +4192,7 @@ async fn filesystem_complete_credential_selection_rejects_genuinely_foreign_owne
             scope: alice_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::AccountSelectionRequired {
                 provider: google_provider(),
                 accounts: vec![bob_account.projection()],
@@ -4247,6 +4288,7 @@ async fn filesystem_complete_credential_selection_rejects_different_session_id()
             scope: flow_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::AccountSelectionRequired {
                 provider: google_provider(),
                 accounts: vec![account.projection()],
@@ -4339,6 +4381,7 @@ async fn filesystem_complete_credential_selection_rejects_different_auth_surface
             scope: cli_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::AccountSelectionRequired {
                 provider: google_provider(),
                 accounts: vec![account.projection()],
@@ -4404,6 +4447,7 @@ async fn create_flow_supersedes_prior_live_setup_class_flows_in_the_durable_stor
         scope: scope.clone(),
         kind: AuthFlowKind::IntegrationCredential,
         provider: flow_provider.clone(),
+        requester_extension: None,
         challenge: AuthChallenge::OAuthUrl {
             authorization_url: OAuthAuthorizationUrl::new(
                 "https://example.com/oauth/authorize?state=supersede",
@@ -4558,7 +4602,7 @@ async fn filesystem_cleanup_cancels_pending_flow_across_surfaces() {
         AuthErrorCode, AuthGateRef, OAuthCallbackFailureInput, SecretCleanupAction,
         SecretCleanupRequest, SecretCleanupService, TurnRunRef,
     };
-    use ironclaw_host_api::ExtensionId;
+    use ironclaw_host_api::ids::ExtensionId;
 
     let filesystem = test_filesystem();
     let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
@@ -4576,6 +4620,7 @@ async fn filesystem_cleanup_cancels_pending_flow_across_surfaces() {
                     scope,
                     kind: AuthFlowKind::IntegrationCredential,
                     provider,
+                    requester_extension: None,
                     challenge: AuthChallenge::OAuthUrl {
                         authorization_url: OAuthAuthorizationUrl::new(
                             "https://provider.example/oauth",
@@ -4605,6 +4650,7 @@ async fn filesystem_cleanup_cancels_pending_flow_across_surfaces() {
                     scope,
                     kind: AuthFlowKind::IntegrationCredential,
                     provider: github,
+                    requester_extension: None,
                     challenge: AuthChallenge::OAuthUrl {
                         authorization_url: OAuthAuthorizationUrl::new(
                             "https://provider.example/oauth",

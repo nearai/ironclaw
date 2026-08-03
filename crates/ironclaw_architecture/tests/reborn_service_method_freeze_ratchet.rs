@@ -3,7 +3,7 @@
 //! `docs/reborn/contracts/kernel-boundary.md`).
 //!
 //! §5.2's target: product consumers share the neutral
-//! `ironclaw_host_api::ProductSurface` vocabulary (`invoke`, `query`, and
+//! `ironclaw_product_contracts::surface::ProductSurface` vocabulary (`invoke`, `query`, and
 //! `stream_events`). Feature work adds a **capability descriptor** and/or a
 //! **view descriptor**, never a product-local service method.
 //!
@@ -24,7 +24,8 @@
 //! [`ratchet_support::strip_comments_and_strings`]).
 //!
 //! Definition of done for this axis (§5.2.5 step 5 / §10): product consumers use
-//! `host_api::ProductSurface` (`invoke`, `query`, `stream_events`) plus
+//! `product_contracts::surface::ProductSurface` (`invoke`, `query`,
+//! `stream_events`) plus
 //! descriptors, and the product crate does not reintroduce its own product
 //! surface trait vocabulary.
 
@@ -40,14 +41,19 @@ use ratchet_support::{strip_comments_and_strings, workspace_root};
 
 /// Path (relative to the workspace root) of the crate that defines the shared
 /// product-surface contract.
-const HOST_PRODUCT_SURFACE_SOURCE: &str = "crates/ironclaw_host_api/src/product_surface.rs";
+///
+/// Repointed by WS1.4: the trait left `ironclaw_host_api` for the product
+/// tier's own contracts crate (PROPOSAL §6.1.3). This constant is the whole
+/// reach of the ratchet, so it moves with the code or the gate reads a missing
+/// file — which is exactly how it failed, loudly, when the file moved.
+const HOST_PRODUCT_SURFACE_SOURCE: &str = "crates/ironclaw_product_contracts/src/surface.rs";
 /// Product implementation source that must not grow another local ProductSurface
 /// trait.
 const PRODUCT_REBORN_SERVICES_SOURCE: &str = "crates/ironclaw_product/src/reborn_services.rs";
 const PRODUCT_SURFACE_TRAIT: &str = "ProductSurface";
 const RETIRED_PROTO_FACADE_TRAIT: &str = "RebornServicesApi";
 
-/// The frozen inventory of shared `host_api::ProductSurface` methods.
+/// The frozen inventory of shared `product_contracts::ProductSurface` methods.
 const EXPECTED_HOST_PRODUCT_SURFACE_METHODS: &[&str] = &["invoke", "query", "stream_events"];
 
 /// Extract the method names declared **directly** in `trait <trait_name>`'s block
@@ -198,7 +204,7 @@ fn product_local_product_surface_traits_stay_retired() {
     assert!(
         !stripped.contains(&product_surface_needle),
         "`ironclaw_product::{PRODUCT_SURFACE_TRAIT}` was retired; use \
-         `ironclaw_host_api::{PRODUCT_SURFACE_TRAIT}` and descriptors instead."
+         `ironclaw_product_contracts::surface::{PRODUCT_SURFACE_TRAIT}` and descriptors instead."
     );
     assert!(
         !stripped.contains(&retired_needle),

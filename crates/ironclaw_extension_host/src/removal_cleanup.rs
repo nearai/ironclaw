@@ -7,8 +7,9 @@ pub use ironclaw_extensions::{
     ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
     ExtensionRemovalCleanupRequirement,
 };
-use ironclaw_host_api::{ProductSurfaceError, ResourceScope, UserId};
-use ironclaw_product::ProductSurfaceFailure;
+use ironclaw_host_api::{ids::UserId, resource::ResourceScope};
+use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::surface::ProductSurfaceError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionRemovalCleanupContext {
@@ -58,12 +59,12 @@ impl ExtensionRemovalCleanupRegistry {
 
     pub fn try_from_adapters(
         adapters: Vec<Arc<dyn ExtensionRemovalCleanupAdapter>>,
-    ) -> Result<Self, ProductSurfaceFailure> {
+    ) -> Result<Self, ProductOperationFailure> {
         let mut by_id = BTreeMap::new();
         for adapter in adapters {
             let adapter_id = adapter.adapter_id();
             if by_id.insert(adapter_id.clone(), adapter).is_some() {
-                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
                     reason: format!(
                         "duplicate extension removal cleanup adapter: {}",
                         adapter_id.as_str()
@@ -78,12 +79,12 @@ impl ExtensionRemovalCleanupRegistry {
         &self,
         requirements: &[ExtensionRemovalCleanupRequirement],
         context: &ExtensionRemovalCleanupContext,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         let mut ordered_requirements = requirements.iter().collect::<Vec<_>>();
         ordered_requirements.sort();
         for requirement in ordered_requirements {
             let adapter = self.adapters.get(&requirement.adapter_id).ok_or_else(|| {
-                ProductSurfaceFailure::Transient {
+                ProductOperationFailure::Transient {
                     reason: format!(
                         "required extension removal cleanup adapter is unavailable: {}",
                         requirement.adapter_id.as_str()
@@ -93,7 +94,7 @@ impl ExtensionRemovalCleanupRegistry {
             adapter
                 .cleanup(context, &requirement.binding)
                 .await
-                .map_err(|error| ProductSurfaceFailure::Transient {
+                .map_err(|error| ProductOperationFailure::Transient {
                     reason: format!(
                         "extension removal cleanup adapter {} failed: {:?}",
                         requirement.adapter_id.as_str(),
@@ -111,9 +112,11 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        AgentId, InvocationId, ProductSurfaceError, ProjectId, ResourceScope, TenantId, UserId,
+        ids::{AgentId, InvocationId, ProjectId, TenantId, UserId},
+        resource::ResourceScope,
     };
-    use ironclaw_product::ProductSurfaceFailure;
+    use ironclaw_product_contracts::error::ProductOperationFailure;
+    use ironclaw_product_contracts::surface::ProductSurfaceError;
 
     use super::*;
 
@@ -235,7 +238,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            ProductSurfaceFailure::InvalidBindingRequest { reason }
+            ProductOperationFailure::InvalidBindingRequest { reason }
                 if reason.contains("duplicate extension removal cleanup adapter")
         ));
     }
@@ -255,7 +258,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            ProductSurfaceFailure::Transient { reason }
+            ProductOperationFailure::Transient { reason }
                 if reason.contains("required extension removal cleanup adapter is unavailable")
                     && reason.contains("missing.cleanup")
         ));
@@ -280,7 +283,7 @@ mod tests {
             .await
             .expect_err("adapter failure must fail cleanup");
 
-        let ProductSurfaceFailure::Transient { reason } = error else {
+        let ProductOperationFailure::Transient { reason } = error else {
             panic!("adapter failure should be retryable");
         };
         assert!(reason.contains("failing.cleanup"));

@@ -321,9 +321,9 @@ async fn assertions_fail_when_tool_present_but_requested_tool_or_url_does_not_ma
 /// encoding to `builtin__http__save` at the provider seam) resolves end-to-end,
 /// writing to the `/workspace` mount `core_builtin_tools` provides read-write.
 #[tokio::test]
-async fn runs_http_save_tool_call_through_recorded_egress() {
+async fn runs_http_save_tool_call_through_real_egress_and_persists_body() {
     let h = RebornIntegrationHarness::test_default()
-        .with_builtin_http_tools()
+        .with_real_egress_pipeline()
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.http.save",
@@ -340,10 +340,9 @@ async fn runs_http_save_tool_call_through_recorded_egress() {
     h.assert_tool_invoked("builtin.http.save")
         .await
         .expect("http.save tool ran");
-    // The save path must reach the real `RuntimeHttpEgress`.
-    h.assert_egress_request_matching("api.example.test")
+    h.assert_workspace_file_contains("response.json", r#"{"ok":true}"#)
         .await
-        .expect("http.save egress captured");
+        .expect("http.save persisted the response body");
     h.assert_reply_contains("saved")
         .await
         .expect("final reply finalized");
@@ -463,49 +462,43 @@ async fn disabled_spawn_subagent_capability_is_stripped_from_model_surface() {
 
 /// A model that calls the disabled `builtin.spawn_subagent` anyway is rejected
 /// at the gateway (`CapabilitySurfaceDenyFilter`, before
-/// `register_provider_tool_call` ever stages an invocation) — the whole
-/// provider response fails with `InvalidOutput` → `Unavailable`, reaching a
-/// terminal `TurnStatus::Failed`/`"model_unavailable"` after exactly one
-/// scripted turn. No `ToolResultReference` is persisted; `assert_tool_invoked`
-/// returning `Err` proves the capability was never dispatched.
+/// `register_provider_tool_call` ever stages an invocation). The loop must
+/// surface the precise `outside_capability_surface` observation to the model,
+/// let it repair the response on the next call, and complete without ever
+/// dispatching or reporting the rejected call as successful.
 #[tokio::test]
-async fn disabled_spawn_subagent_capability_call_anyway_fails_the_run() {
+async fn disabled_spawn_subagent_capability_call_recovers_without_dispatch() {
     let h = RebornIntegrationHarness::test_default()
         .with_builtin_http_tools()
-        .script([RebornScriptedReply::tool_call(
-            "builtin.spawn_subagent",
-            json!({"goal": "test"}),
-        )])
+        .script([
+            RebornScriptedReply::tool_call("builtin.spawn_subagent", json!({"goal": "test"})),
+            RebornScriptedReply::text(
+                "I cannot use that capability, so I will continue without it.",
+            ),
+        ])
         .build()
         .await
         .expect("harness builds");
 
-    let run_id = h
-        .submit_turn_async("spawn a subagent")
+    h.submit_turn("spawn a subagent")
         .await
-        .expect("turn submitted");
-    let state = h
-        .wait_for_status(run_id, ironclaw_turns::TurnStatus::Failed)
+        .expect("run recovers from the disabled capability call");
+    h.assert_reply_contains("continue without it")
         .await
-        .expect("run reaches Failed after the disabled capability is rejected at the gateway");
-    let failure = state
-        .failure
-        .as_ref()
-        .expect("a Failed run must carry a failure detail");
-    assert_eq!(
-        failure.category(),
-        "model_unavailable",
-        "expected the Unavailable fidelity category (InvalidOutput -> Unavailable), got {failure:?}"
-    );
+        .expect("repaired reply is finalized");
+    h.assert_model_request_contains(
+        "model error observation: invalid_output reason=outside_capability_surface; \
+         repair the response and continue",
+    )
+    .await
+    .expect("the retry tells the model precisely why its tool call was rejected");
 
-    // No side effect: the capability was rejected before dispatch, so it was
-    // never invoked.
-    assert!(
-        h.assert_tool_invoked("builtin.spawn_subagent")
-            .await
-            .is_err(),
-        "disabled capability must never be dispatched, even when the model calls it anyway"
-    );
+    h.assert_tool_not_invoked("builtin.spawn_subagent")
+        .await
+        .expect("the rejected capability must never be dispatched");
+    h.assert_capability_result_count("builtin.spawn_subagent", 0)
+        .await
+        .expect("the rejected call must not produce a successful capability result");
 }
 
 /// A `read_file` result large enough to exceed `TOOL_RESULT_RECORD_READ_MAX_BYTES`
@@ -525,13 +518,26 @@ fn large_durable_file_content() -> String {
         .join("\n")
 }
 
+fn durable_file_content_with_suppressed_continuation_preview() -> String {
+    (0..1500)
+        .map(|i| {
+            if i == 800 {
+                "line-0800 secret filler filler filler".to_string()
+            } else {
+                format!("line-{i:04} filler filler filler filler")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Durable tool-result projection (issue #5838 / PR #5902): a `read_file`
 /// result routed through the REAL `StagedCapabilityIo`
 /// (`.with_durable_capability_io_file_tools()`, which wires
 /// `new_with_durable_previews` over this harness's own local-dev session
 /// thread service — mirrors production's `capability_wiring`) must reach the
 /// model as a truncated `ResultReference` preview
-/// (`local_dev_result_reference_observation`), never the raw payload.
+/// (`standalone_result_reference_observation`), never the raw payload.
 ///
 /// RED evidence for this PR: against the harness's `ProductLive` default
 /// (`ProductLiveCapabilityIo::write_capability_result`, which sets no
@@ -591,14 +597,17 @@ async fn durable_large_read_file_result_reaches_model_as_truncated_preview() {
 
 /// `result_read` continuation (issue #5838): a second scripted turn on the
 /// SAME thread calls `builtin.result_read` (`RESULT_READ_CAPABILITY_ID`,
-/// `runtime/local_dev/result_read.rs`) with the durable `result_ref` and
+/// `runtime/standalone/result_read.rs`) with the durable `result_ref` and
 /// `next_offset` the first turn's `read_file` observation reported —
 /// discovered via `latest_tool_result_ref`/`latest_tool_result_next_offset`
 /// (a static script cannot know a server-minted ref ahead of time) and
 /// injected with `push_script`. Asserts the returned chunk continues
 /// byte-exactly from the SAME canonical serialization `tool_result_output`
 /// returns for `read_file` — no gap, no overlap — and reports the true
-/// `total_bytes` of the durable record.
+/// `total_bytes` of the durable record. The requested chunk contains a
+/// credential marker, so its inline preview is suppressed; replay must still
+/// retain the original durable ref and continuation metadata rather than the
+/// unreadable `InlineOnly` invocation ref.
 #[tokio::test]
 async fn result_read_continues_a_durable_result_byte_exactly() {
     let h = RebornIntegrationHarness::test_default()
@@ -606,7 +615,10 @@ async fn result_read_continues_a_durable_result_byte_exactly() {
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.write_file",
-                json!({"path": "/workspace/durable.txt", "content": large_durable_file_content()}),
+                json!({
+                    "path": "/workspace/durable.txt",
+                    "content": durable_file_content_with_suppressed_continuation_preview()
+                }),
             ),
             RebornScriptedReply::tool_call(
                 "builtin.read_file",
@@ -670,6 +682,44 @@ async fn result_read_continues_a_durable_result_byte_exactly() {
         chunk["total_bytes"].as_u64(),
         Some(serialized.len() as u64),
         "result_read must report the true total byte length of the durable record"
+    );
+    assert!(
+        chunk_content.contains("secret"),
+        "fixture must put the rejected marker inside the requested chunk"
+    );
+
+    let envelopes = h
+        .persisted_tool_result_envelopes()
+        .await
+        .expect("tool-result envelopes persist");
+    let result_read = envelopes.last().expect("result_read envelope exists");
+    let observation = result_read
+        .model_observation
+        .as_ref()
+        .expect("metadata-only result_read observation survives");
+    let detail = &observation["detail"];
+    assert_ne!(
+        result_read.result_ref, result_ref,
+        "the result_read invocation keeps its own ephemeral envelope ref"
+    );
+    assert_eq!(
+        detail["result_ref"].as_str(),
+        Some(result_ref.as_str()),
+        "continuation authority remains the durable source ref"
+    );
+    assert!(
+        detail.get("preview").is_none(),
+        "credential-bearing preview remains suppressed"
+    );
+    assert_eq!(
+        detail["total_bytes"].as_u64(),
+        Some(serialized.len() as u64)
+    );
+    assert!(
+        detail["next_offset"]
+            .as_u64()
+            .is_some_and(|offset| offset > next_offset),
+        "paging metadata survives independently of preview content"
     );
 }
 
@@ -809,7 +859,8 @@ fn truncated_array_result_persists_item_count_to_model_transcript() {
 }
 
 async fn truncated_array_result_persists_item_count_to_model_transcript_impl() {
-    let items: Vec<String> = (0..4000).map(|i| format!("item-{i:04}")).collect();
+    let mut items: Vec<String> = (0..4000).map(|i| format!("item-{i:04}")).collect();
+    items[0] = "secret".to_string();
     let array_json = serde_json::to_string(&items).expect("array fixture serializes");
     assert!(
         array_json.len() > ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES,
@@ -841,6 +892,19 @@ async fn truncated_array_result_persists_item_count_to_model_transcript_impl() {
     h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, "4000 items")
         .await
         .expect("persisted summary names the array's element count");
+    let envelopes = h
+        .persisted_tool_result_envelopes()
+        .await
+        .expect("tool-result envelopes persist");
+    let observation = envelopes
+        .last()
+        .and_then(|envelope| envelope.model_observation.as_ref())
+        .expect("metadata-only array observation survives");
+    assert_eq!(observation["detail"]["item_count"], 4000);
+    assert!(
+        observation["detail"].get("preview").is_none(),
+        "credential-bearing array preview remains suppressed"
+    );
 }
 
 /// Spawns the async test body on a thread with a larger-than-default OS
@@ -867,4 +931,50 @@ where
     if let Err(panic) = handle.join() {
         std::panic::resume_unwind(panic);
     }
+}
+
+/// #6284 item 1, at the seam that matters: a **caller-shaped capability port
+/// error ends the tool call, not the run**.
+///
+/// Before the capability-stage fix, `capability_host_error` mapped every
+/// non-`Cancelled` `AgentLoopHostError` from the port to a terminal
+/// `HostUnavailable{Capability}` — so an expired credential, a scope
+/// mismatch, or a malformed invocation killed a run the model could have
+/// recovered from. The executor now splits the port-error kinds exhaustively:
+/// caller-shaped ones (`InvalidInvocation` here) surface as a model-visible tool
+/// error and the loop continues; genuine host faults stay terminal.
+///
+/// Asserted at the durable seam — the persisted `ToolResultReference` envelope
+/// and the finalized reply — not on a completed status, so it proves the model
+/// actually saw the failure *and* kept working. Crate-tier coverage of the same
+/// split lives in `ironclaw_agent_loop`'s executor tests; this pins it through
+/// the production composition.
+#[tokio::test]
+async fn caller_shaped_capability_port_error_is_a_tool_error_not_a_dead_run() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_recoverable_port_error_for_test()
+        .script([
+            RebornScriptedReply::tool_call("test_echo", json!({"message": "hi"})),
+            RebornScriptedReply::text("the tool was refused, so here is what I can say instead"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("use the echo tool")
+        .await
+        .expect("turn completes");
+
+    // The model was told, in the durable envelope the next turn reads from.
+    h.assert_tool_error(
+        reborn_support::assertions::ToolErrorClass::Failed,
+        "input_encode",
+    )
+    .await
+    .expect("a caller-shaped port error reaches the model as a recoverable tool error");
+
+    // …and the run kept going rather than dying on the port error.
+    h.assert_reply_contains("here is what I can say instead")
+        .await
+        .expect("the run continues past a recoverable port error");
 }

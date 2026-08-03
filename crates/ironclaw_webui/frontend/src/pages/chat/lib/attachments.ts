@@ -25,12 +25,19 @@ export function attachmentKindFromMime(mime) {
   const normalized = (mime || "").toLowerCase();
   if (normalized.startsWith("image/")) return "image";
   if (normalized.startsWith("audio/")) return "audio";
-  return "document";
+  if (normalized.startsWith("video/")) return "video";
+  if (
+    normalized.startsWith("application/") ||
+    normalized.startsWith("text/")
+  ) {
+    return "document";
+  }
+  return "other";
 }
 
 // How the preview modal should render an attachment, derived from its MIME
-// type (the kind enum is too coarse — a "document" may be a PDF, CSV, or
-// arbitrary binary). Each mode maps to a CSP-allowed representation:
+// type (a "document" may be a PDF, CSV, or another application format).
+// Each mode maps to a CSP-allowed representation:
 //   image    → <img src=data:>           (img-src 'self' data:)
 //   audio    → <audio src=data:>         (media-src 'self' data:)
 //   video    → <video src=data:>         (media-src 'self' data:)

@@ -1,12 +1,15 @@
 use super::*;
-use ironclaw_runner::failure_categories::{
-    BUDGET_ACCOUNTING_FAILED_CATEGORY, HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY,
-    HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY, HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY,
-    HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY, HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY,
-    HOST_STAGE_UNAVAILABLE_TRANSCRIPT_CATEGORY, HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY,
-    MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+use ironclaw_host_api::failure::categories::{
+    BUDGET_ACCOUNTING_FAILED_CATEGORY, CHECKPOINT_REJECTED_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY, HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY, HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY, HOST_STAGE_UNAVAILABLE_TRANSCRIPT_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
+    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
+    MODEL_STAGE_POLICY_DENIED_CATEGORY, MODEL_STAGE_REQUEST_INVALID_CATEGORY,
+    MODEL_STAGE_SCOPE_MISMATCH_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
 };
-use ironclaw_turns::LoopFailureKind;
+use ironclaw_loop_contracts::LoopFailureKind;
 
 const GENERIC_FAILURE_SUMMARY: &str = "The run failed before producing a reply. Retry the run, and contact support if it keeps happening.";
 
@@ -81,6 +84,16 @@ async fn product_event_stream_projects_scheduler_executor_panic_summary() {
 }
 
 #[tokio::test]
+async fn product_event_stream_projects_crash_retry_exhausted_summary() {
+    assert_failed_run_status_summary(
+        "webui-events-crash-retry-exhausted-thread",
+        "crash_retry_exhausted",
+        "The run could not be recovered after repeated runner crashes. Retry the request, and contact support if it happens again.",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn product_event_stream_projects_unknown_failure_summary_without_echoing_code() {
     assert_failed_run_status_summary(
         "webui-events-unknown-thread",
@@ -129,7 +142,7 @@ fn failure_summary_covers_every_loop_failure_kind_category() {
         ),
         (
             LoopFailureKind::CheckpointRejected.as_str(),
-            "The run failed because its checkpoint was rejected. Retry from the last available checkpoint or start a new run.",
+            "The host rejected a checkpoint, so the run stopped before continuing. No model or capability ran from the rejected state. Start a new run. If this repeats, ask an operator to inspect checkpoint storage and run-profile compatibility.",
         ),
         (
             LoopFailureKind::CheckpointUnavailable.as_str(),
@@ -172,8 +185,9 @@ fn failure_summary_covers_every_loop_failure_kind_category() {
     );
 
     for (category, expected_summary) in expected {
-        let summary =
-            ironclaw_runner::failure_summary::reborn_failure_summary_for_category(Some(category));
+        let summary = ironclaw_host_api::failure::summary::reborn_failure_summary_for_category(
+            Some(category),
+        );
         assert_eq!(summary, expected_summary, "category {category}");
         assert_ne!(summary, GENERIC_FAILURE_SUMMARY, "category {category}");
         assert!(
@@ -195,8 +209,20 @@ fn failure_summary_covers_reborn_failure_category_constants() {
             "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL, then try again.",
         ),
         (
+            MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
+            "The run stopped because its configured model spend budget was exhausted. Increase the budget or start a new run.",
+        ),
+        (
             BUDGET_ACCOUNTING_FAILED_CATEGORY,
             "The run failed because resource accounting was temporarily unavailable. Retry the run, and contact support if it keeps happening.",
+        ),
+        (
+            TRANSCRIPT_WRITE_FAILED_CATEGORY,
+            "The run failed while saving transcript output. Retry the run, and contact support if saving still fails.",
+        ),
+        (
+            CHECKPOINT_REJECTED_CATEGORY,
+            "The host rejected a checkpoint, so the run stopped before continuing. No model or capability ran from the rejected state. Start a new run. If this repeats, ask an operator to inspect checkpoint storage and run-profile compatibility.",
         ),
         (
             HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY,
@@ -226,6 +252,22 @@ fn failure_summary_covers_reborn_failure_category_constants() {
             HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY,
             "The run failed because a required host stage was unavailable. Retry the run, and contact support if it keeps happening.",
         ),
+        // Permanent model-stage failures. Each says retrying will not help,
+        // because these previously inherited the generic "Retry the run"
+        // summary — advice that can never work for a refused or malformed
+        // request.
+        (
+            MODEL_STAGE_REQUEST_INVALID_CATEGORY,
+            "The model request was rejected as invalid. Retrying it unchanged will not help; the request itself needs to change.",
+        ),
+        (
+            MODEL_STAGE_POLICY_DENIED_CATEGORY,
+            "Policy does not permit this model request. Retrying will not help; the policy or the model profile needs to change.",
+        ),
+        (
+            MODEL_STAGE_SCOPE_MISMATCH_CATEGORY,
+            "The model request fell outside the granted scope. Retrying will not help; the scope or configuration needs to change.",
+        ),
     ];
     let source_values = reborn_failure_category_constant_values_from_source();
     let expected_values = expected
@@ -234,12 +276,14 @@ fn failure_summary_covers_reborn_failure_category_constants() {
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         source_values, expected_values,
-        "failure_categories.rs gained or lost a public category constant; update the Tier-2 summary table"
+        "host_api::failure::categories gained or lost a public category constant; update the Tier-2 summary table"
     );
 
     for (category, expected_summary) in expected {
         assert_eq!(
-            ironclaw_runner::failure_summary::reborn_failure_summary_for_category(Some(category)),
+            ironclaw_host_api::failure::summary::reborn_failure_summary_for_category(Some(
+                category
+            )),
             expected_summary,
             "category {category}"
         );
@@ -281,7 +325,9 @@ fn failure_summary_covers_host_stage_unavailable_categories() {
 
     for (category, expected_summary) in expected {
         assert_eq!(
-            ironclaw_runner::failure_summary::reborn_failure_summary_for_category(Some(category)),
+            ironclaw_host_api::failure::summary::reborn_failure_summary_for_category(Some(
+                category
+            )),
             expected_summary,
             "category {category}"
         );
@@ -316,6 +362,10 @@ fn failure_summary_covers_agent_loop_safe_summary_categories() {
             "The run failed because the model returned output the runner could not use. Retry the run or choose a different model.",
         ),
         (
+            "model_output_truncated",
+            "The run failed because the model repeatedly reached its output limit. Retry with a request for a shorter answer or increase the output limit.",
+        ),
+        (
             "model_stale_request",
             "The run failed because the available tools changed while a model request was in flight. Retry the run.",
         ),
@@ -325,7 +375,7 @@ fn failure_summary_covers_agent_loop_safe_summary_categories() {
         ),
         (
             "checkpoint_rejected",
-            "The run failed because its checkpoint was rejected. Retry from the last available checkpoint or start a new run.",
+            "The host rejected a checkpoint, so the run stopped before continuing. No model or capability ran from the rejected state. Start a new run. If this repeats, ask an operator to inspect checkpoint storage and run-profile compatibility.",
         ),
         (
             "transcript_write_failed",
@@ -362,7 +412,7 @@ fn failure_summary_covers_agent_loop_safe_summary_categories() {
         // The granular `compaction_*` categories are deliberately absent: the
         // agent loop no longer mints them since non-cancellation compaction
         // failures became a deferred-continue path instead of a terminal exit
-        // (#5838). `ironclaw_runner::failure_summary` keeps display support so
+        // (#5838). `host_api::failure::summary` keeps display support so
         // historical records still render.
     ];
 
@@ -381,8 +431,9 @@ fn failure_summary_covers_agent_loop_safe_summary_categories() {
     );
 
     for (category, expected_summary) in expected {
-        let summary =
-            ironclaw_runner::failure_summary::reborn_failure_summary_for_category(Some(category));
+        let summary = ironclaw_host_api::failure::summary::reborn_failure_summary_for_category(
+            Some(category),
+        );
         assert_eq!(summary, expected_summary, "category {category}");
         assert_ne!(summary, GENERIC_FAILURE_SUMMARY, "category {category}");
     }
@@ -390,7 +441,7 @@ fn failure_summary_covers_agent_loop_safe_summary_categories() {
 
 #[test]
 fn failure_summary_uses_safe_generic_fallback_for_unknown_categories() {
-    let summary = ironclaw_runner::failure_summary::reborn_failure_summary_for_category(Some(
+    let summary = ironclaw_host_api::failure::summary::reborn_failure_summary_for_category(Some(
         "new_snake_case_code",
     ));
 
@@ -646,6 +697,65 @@ async fn product_event_stream_pins_model_credentials_summary_before_explainer() 
         })),
     )
     .await;
+}
+
+#[tokio::test]
+async fn product_event_stream_pins_transcript_failure_before_explainer() {
+    assert_failed_run_status_summary_with_explainer(
+        "webui-events-pinned-transcript-write-thread",
+        TRANSCRIPT_WRITE_FAILED_CATEGORY,
+        "The run failed while saving transcript output. Retry the run, and contact support if saving still fails.",
+        Some(Arc::new(FakeFailureExplainer {
+            explanation: "SENTINEL model output must not cross the failed transcript boundary"
+                .to_string(),
+        })),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn product_event_stream_projects_checkpoint_rejection_without_model_explainer() {
+    const FALLBACK: &str = "The host rejected a checkpoint, so the run stopped before continuing. No model or capability ran from the rejected state. Start a new run. If this repeats, ask an operator to inspect checkpoint storage and run-profile compatibility.";
+    const VALID_DETAIL: &str = "The host rejected the pre-model checkpoint because checkpoint state write conflicted with current turn state. No model or capability ran after the rejection. Start a new run. If this repeats, ask an operator to inspect checkpoint storage and run-profile compatibility.";
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    for (thread_id, detail, expected_summary) in [
+        (
+            "webui-events-checkpoint-rejected-detail-thread",
+            Some(VALID_DETAIL),
+            VALID_DETAIL,
+        ),
+        (
+            "webui-events-checkpoint-rejected-legacy-thread",
+            None,
+            FALLBACK,
+        ),
+        (
+            "webui-events-checkpoint-rejected-malformed-thread",
+            Some(
+                "The host rejected the pre-model checkpoint because {raw checkpoint payload}. No model or capability ran after the rejection. Start a new run. If this repeats, ask an operator to inspect checkpoint storage and run-profile compatibility.",
+            ),
+            FALLBACK,
+        ),
+    ] {
+        assert_failed_run_status_summary_for_event(
+            thread_id,
+            CHECKPOINT_REJECTED_CATEGORY,
+            detail,
+            expected_summary,
+            Some(Arc::new(CountingFailureExplainer {
+                explanation: "SENTINEL model explanation must not be used".to_string(),
+                calls: Arc::clone(&calls),
+            })),
+        )
+        .await;
+    }
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "checkpoint rejection is a host-authored exception; projection must not call a model"
+    );
 }
 
 #[tokio::test]
@@ -1102,13 +1212,24 @@ async fn model_failure_explainer_returns_none_when_gateway_fails() {
 }
 
 fn loop_failure_kind_as_str_values_from_source() -> std::collections::BTreeSet<&'static str> {
-    const SOURCE: &str = include_str!("../../../../ironclaw_turns/src/loop_exit.rs");
+    // WS1.2 moved the `LoopExit` claim vocabulary (and this `impl`) out of the
+    // turn kernel into `ironclaw_loop_contracts`. The scan is a cross-crate
+    // source reach-in — pre-existing §11.2.7 debt that WS2 deletes — so it has
+    // to follow the code; left pointing at the old path it still resolves and
+    // silently matches nothing.
+    const SOURCE: &str = include_str!("../../../../ironclaw_loop_contracts/src/loop_exit.rs");
     source_match_string_values(SOURCE, "impl LoopFailureKind")
 }
 
 fn reborn_failure_category_constant_values_from_source() -> std::collections::BTreeSet<&'static str>
 {
-    const SOURCE: &str = include_str!("../../../../ironclaw_runner/src/failure_categories.rs");
+    // WS1.7 moved the category constants out of the turn runner into
+    // `ironclaw_host_api::failure::categories`, beside the summary table this
+    // test pins them against. The scan is a cross-crate source reach-in —
+    // pre-existing §11.2.7 debt that WS2 deletes — so it has to follow the
+    // code; left pointing at the old path it still resolves and silently
+    // matches nothing.
+    const SOURCE: &str = include_str!("../../../../ironclaw_host_api/src/failure/categories.rs");
     SOURCE
         .lines()
         .filter_map(|line| {

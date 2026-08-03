@@ -1,19 +1,19 @@
 //! Shared budget-accountant composition helpers.
 //!
-//! Both the local-dev runtime (`build_reborn_runtime`) and any
+//! Both the standalone runtime (`build_reborn_runtime`) and any
 //! production loop composer go through [`build_default_budget_accountant`]
 //! so the same `BudgetDefaults`-derived seeding policy + overestimate
 //! factor reach every code path that needs to enforce daily caps. Without
-//! a shared helper, local-dev would seed defaults and production wouldn't
+//! a shared helper, standalone would seed defaults and production wouldn't
 //! — the kind of split-brain configuration the #3899 review pass
 //! flagged (review feedback High #2).
 
 use std::sync::Arc;
 
+use ironclaw_loop_contracts::LoopModelBudgetAccountant;
 use ironclaw_loop_host::{BudgetSeedingPolicy, GovernorBackedAccountant, ModelCostTable};
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::{BudgetEventSink, BudgetPeriod, BudgetThresholds, ResourceGovernor};
-use ironclaw_turns::run_profile::LoopModelBudgetAccountant;
 use rust_decimal::Decimal;
 
 /// Build a production-shaped `GovernorBackedAccountant` from the
@@ -21,11 +21,11 @@ use rust_decimal::Decimal;
 ///
 /// The accountant gets:
 ///
-/// 1. The caller's `ResourceGovernor` (in-memory for non-durable local-dev,
+/// 1. The caller's `ResourceGovernor` (in-memory for non-durable standalone,
 ///    `FilesystemResourceGovernor` for libsql / postgres production).
 /// 2. The caller's `ModelCostTable` (typically derived from
 ///    `LlmModelProfilePolicy::build_cost_table()` at startup).
-/// 3. A `BudgetGateStore` (in-memory for local-dev,
+/// 3. A `BudgetGateStore` (in-memory for standalone,
 ///    `BudgetGateStore` scoped to the tenant for production).
 /// 4. A `BudgetSeedingPolicy` derived from the caller-resolved
 ///    [`BudgetDefaults`] so fresh user/project accounts pick up the
@@ -83,7 +83,10 @@ pub fn build_default_budget_accountant(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{InvocationId, ResourceEstimate, ResourceScope, TenantId, UserId};
+    use ironclaw_host_api::{
+        ids::{InvocationId, TenantId, UserId},
+        resource::{ResourceEstimate, ResourceScope},
+    };
     use ironclaw_loop_host::ZeroCostTable;
     use ironclaw_resources::test_support::in_memory_backed_budget_gate_store;
     use ironclaw_resources::{InMemoryBudgetEventSink, InMemoryResourceGovernor, ResourceAccount};
@@ -113,11 +116,12 @@ mod tests {
 
         // Drive one `pre_model_call` to fire the seeding policy.
         let context = test_run_context("tenant-shared-helper", "alice-shared-helper");
-        let request = ironclaw_turns::run_profile::LoopModelRequest {
+        let request = ironclaw_loop_contracts::LoopModelRequest {
             inline_messages: Vec::new(),
             messages: vec![],
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         };
         let _ = governor
@@ -155,19 +159,17 @@ mod tests {
         );
     }
 
-    fn test_run_context(tenant: &str, user: &str) -> ironclaw_turns::run_profile::LoopRunContext {
-        use ironclaw_host_api::ThreadId;
+    fn test_run_context(tenant: &str, user: &str) -> ironclaw_loop_contracts::LoopRunContext {
+        use ironclaw_host_api::ids::ThreadId;
+        use ironclaw_loop_contracts::{
+            AgentLoopDriverDescriptor, CancellationPolicy, CapabilitySurfaceProfileId,
+            CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
+            LoopRunContext, ModelProfileId, PersonalContextPolicy, RedactedRunProfileProvenance,
+            ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
+            RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
+        };
         use ironclaw_turns::{
-            AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnActor, TurnId,
-            TurnRunId, TurnScope,
-            run_profile::{
-                CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,
-                CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
-                LoopRunContext, ModelProfileId, PersonalContextPolicy,
-                RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
-                ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
-                SchedulingClass, SteeringPolicy,
-            },
+            RunProfileId, RunProfileVersion, TurnActor, TurnId, TurnRunId, TurnScope,
         };
 
         let scope = TurnScope::new(

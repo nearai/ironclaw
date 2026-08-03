@@ -4,10 +4,12 @@ use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, ThreadId, VirtualPath,
+    ids::ThreadId,
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
 };
 use ironclaw_threads::{
-    FilesystemSessionThreadService, SessionThreadService, ThreadHistoryRequest,
+    FilesystemSessionThreadService, SessionThreadService, SummaryArtifact, ThreadHistoryRequest,
     ThreadMessageRecord, ThreadScope,
 };
 use thiserror::Error;
@@ -15,7 +17,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum RebornThreadHarnessError {
     #[error("invalid mount view: {0}")]
-    MountView(#[from] ironclaw_host_api::HostApiError),
+    MountView(#[from] ironclaw_host_api::error::HostApiError),
     #[error("thread service failed: {0}")]
     Thread(#[from] ironclaw_threads::SessionThreadError),
     #[error("thread history does not contain final assistant reply containing {0:?}")]
@@ -77,6 +79,20 @@ impl<F: RootFilesystem> RebornThreadHarness<F> {
             .messages)
     }
 
+    pub async fn summary_artifacts(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<Vec<SummaryArtifact>, RebornThreadHarnessError> {
+        Ok(self
+            .service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: self.scope.clone(),
+                thread_id,
+            })
+            .await?
+            .summary_artifacts)
+    }
+
     pub async fn assert_final_reply(
         &self,
         thread_id: ThreadId,
@@ -132,7 +148,7 @@ impl RebornThreadHarness<InMemoryBackend> {
 /// `CompositeRootFilesystem`-specific constructor (integration tier).
 impl RebornThreadHarness<CompositeRootFilesystem> {
     /// Harness backed by a shared production-path composite; threads land at
-    /// `/tenants/{tenant}/users/{user}/threads` (visible via `mount_local_dev_database_roots`).
+    /// `/tenants/{tenant}/users/{user}/threads` (visible via `mount_standalone_database_roots`).
     /// `root` (also held by `GroupSharedStorage::turn_root`) keeps the `TempDir` alive so
     /// on-disk libsql data persists across `reopened()` calls.
     pub fn filesystem_shared_composite(
@@ -164,7 +180,7 @@ impl RebornThreadHarness<CompositeRootFilesystem> {
 fn scoped_threads_fs_at<F>(
     root_prefix: &str,
     backend: Arc<F>,
-) -> Result<Arc<ScopedFilesystem<F>>, ironclaw_host_api::HostApiError>
+) -> Result<Arc<ScopedFilesystem<F>>, ironclaw_host_api::error::HostApiError>
 where
     F: RootFilesystem,
 {
@@ -183,8 +199,8 @@ where
 /// path; see `path_segment`.
 pub(crate) fn threads_mount_view(
     root_prefix: &str,
-    scope: &ironclaw_host_api::ResourceScope,
-) -> Result<MountView, ironclaw_host_api::HostApiError> {
+    scope: &ironclaw_host_api::resource::ResourceScope,
+) -> Result<MountView, ironclaw_host_api::error::HostApiError> {
     let tenant_id = path_segment(scope.tenant_id.as_str());
     let user_id = path_segment(scope.user_id.as_str());
     let target = format!("{root_prefix}/tenants/{tenant_id}/users/{user_id}/threads");
@@ -199,7 +215,7 @@ pub(crate) fn threads_mount_view(
 /// production's `__system__` — see `threads_mount_view`); everything else passes through
 /// verbatim.
 pub(crate) fn path_segment(value: &str) -> &str {
-    if value == ironclaw_host_api::SYSTEM_RESERVED_ID {
+    if value == ironclaw_host_api::resource::SYSTEM_RESERVED_ID {
         "_system"
     } else {
         value

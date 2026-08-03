@@ -17,25 +17,51 @@
 use std::sync::Arc;
 
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+use ironclaw_host_api::{
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+};
 
 use crate::{
-    AutoApproveSettingStore, CapabilityPermissionOverrideStore, PersistentApprovalPolicyStore,
+    ApprovalRequestStore, AutoApproveSettingStore, CapabilityPermissionOverrideStore,
+    GateRecordStore, PersistentApprovalPolicyStore,
 };
 
 /// A fresh, volatile `ScopedFilesystem<InMemoryBackend>` mounted at `/approvals`
 /// — the in-memory backend seam every approval store uses in tests.
 pub fn in_memory_backed_approvals_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
-    let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/approvals").expect("static valid mount alias"), // safety: test-support scaffolding, static literal
-        VirtualPath::new("/engine/approvals").expect("static valid virtual path"), // safety: test-support scaffolding, static literal
-        MountPermissions::read_write_list_delete(),
-    )])
+    let mounts = MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/approvals").expect("static valid mount alias"), // safety: test-support scaffolding, static literal
+            VirtualPath::new("/engine/approvals").expect("static valid virtual path"), // safety: test-support scaffolding, static literal
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/gate-records").expect("static valid mount alias"), // safety: test-support scaffolding, static literal
+            VirtualPath::new("/engine/gate-records").expect("static valid virtual path"), // safety: test-support scaffolding, static literal
+            MountPermissions::read_write_list_delete(),
+        ),
+    ])
     .expect("static valid approvals mount view"); // safety: test-support scaffolding, static literal
     Arc::new(ScopedFilesystem::with_fixed_view(
         Arc::new(InMemoryBackend::new()),
         mounts,
     ))
+}
+
+/// The production approval-request store over a fresh in-memory backend.
+pub fn in_memory_backed_approval_request_store() -> ApprovalRequestStore<InMemoryBackend> {
+    ApprovalRequestStore::new(in_memory_backed_approvals_filesystem())
+}
+
+/// The production gate-record store over a fresh in-memory backend.
+pub fn in_memory_backed_gate_record_store() -> GateRecordStore<InMemoryBackend> {
+    GateRecordStore::new(in_memory_backed_approvals_filesystem())
+}
+
+/// Compatibility name for callers that only need approval and gate mounts.
+pub fn in_memory_backed_approval_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
+    in_memory_backed_approvals_filesystem()
 }
 
 /// The production auto-approve store over a fresh in-memory backend.

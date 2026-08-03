@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use crate::identity::HookId;
 use crate::points::BeforeCapabilityHookContext;
 use crate::predicate::CapabilityPredicate;
-use ironclaw_turns::{TurnId, TurnRunId};
+use ironclaw_host_api::turn::{TurnId, TurnRunId};
 
 /// Closed vocabulary of static labels the agent may use as a reason when
 /// authoring a hook. Free-text reasons are intentionally not allowed — the
@@ -282,8 +282,8 @@ mod tests {
         }
     }
 
-    fn tenant() -> ironclaw_host_api::TenantId {
-        ironclaw_host_api::TenantId::new("alpha").expect("tenant")
+    fn tenant() -> ironclaw_host_api::ids::TenantId {
+        ironclaw_host_api::ids::TenantId::new("alpha").expect("tenant")
     }
 
     fn hook_id() -> HookId {

@@ -31,15 +31,20 @@ use ironclaw_auth::{
     OAuthProviderIdentityBindingRollback, OAuthProviderIdentityCheck,
     OAuthProviderIdentityCheckFuture, ProviderIdentityHookFactory,
 };
+use ironclaw_extension_contracts::channel_identity::{
+    ChannelConnectionScopeSource, ChannelIdentityOverride, ChannelIdentityPostBind,
+    ChannelIdentityPostBindFactory,
+};
 use ironclaw_extension_host::{
     ChannelConfigService, channel_config_connection_scope_source, discover_channel_extensions,
 };
 use ironclaw_host_api::{
-    ChannelConnectionScopeSource, ChannelIdentityOverride, ChannelIdentityPostBind,
-    ChannelIdentityPostBindFactory, ExtensionId, RebornIdentityProviderId,
-    RebornIdentityProviderUserId, RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore, TenantId, UserId,
-    installation_scoped_provider_user_id,
+    ids::{ExtensionId, TenantId, UserId},
+    user_identity::{
+        RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
+        RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
+        RebornUserIdentityBindingStore, installation_scoped_provider_user_id,
+    },
 };
 
 /// The identity claims the OAuth token exchange can prove
@@ -391,15 +396,15 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
+    use ironclaw_extension_contracts::channel_identity::ChannelConnectionScope;
     use ironclaw_extension_host::handle_declares_claim;
     use ironclaw_extensions::{
         ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
         ExtensionInstallationStorePort as _, ExtensionManifestRecord, ExtensionManifestRef,
         ManifestSource,
     };
-    use ironclaw_host_api::{
-        AdapterInstallationId, ChannelConnectionScope, InvocationId, ResourceScope,
-    };
+    use ironclaw_host_api::product_adapter::AdapterInstallationId;
+    use ironclaw_host_api::{ids::InvocationId, resource::ResourceScope};
 
     use super::*;
     use ironclaw_extension_host::product_extension_host_api_contract_registry;
@@ -493,6 +498,7 @@ app_id = "/app_id"
             &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
             None,
             &product_extension_host_api_contract_registry().expect("contracts"),
+            None,
         )
         .expect("fixture manifest parses");
         let extension_id = ExtensionId::new("acmechat").expect("extension id");

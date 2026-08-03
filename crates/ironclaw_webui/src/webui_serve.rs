@@ -34,17 +34,18 @@ use crate::webui_v2::{
 };
 use axum::{
     Json, Router,
-    extract::{Request, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::{HeaderName, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
 };
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
-use ironclaw_host_api::{AgentId, ProductSurface, ProjectId, TenantId, UserId};
 use ironclaw_host_ingress::{
     ProtectedRouteMount, PublicRouteDrains, PublicRouteMount, SplitRouteMount,
 };
+use ironclaw_product_contracts::surface::ProductSurface;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -56,8 +57,10 @@ use crate::webui_operator_auth::{
 };
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
 use crate::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
-use ironclaw_host_api::ProductSurfaceCaller;
-use ironclaw_product::mark_bearer_token_verified_for_tenant;
+use ironclaw_host_api::product_adapter::auth::{
+    HostProtocolAuthenticator, mark_bearer_token_verified_for_tenant,
+};
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use serde::Serialize;
 
 /// Default per-request body limit (14 MiB) — sized to cover ~10 MiB of
@@ -155,6 +158,15 @@ impl WebuiAuthentication {
 /// field. Hidden by default while the surface is still being finished.
 fn reborn_projects_enabled() -> bool {
     std::env::var("IRONCLAW_REBORN_PROJECTS")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+}
+
+/// Deployment gate for QA-only scrubbed regression artifact exports.
+/// Read once at composition and default off so production users never receive
+/// the browser affordance or mounted HTTP routes without an operator opt-in.
+fn regression_artifact_export_enabled() -> bool {
+    std::env::var("IRONCLAW_REBORN_REGRESSION_ARTIFACT_EXPORT")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false)
 }
@@ -531,7 +543,10 @@ pub fn webui_v2_app_with_lifecycle(
             .filter_map(|mount| mount.drain.clone())
             .collect(),
     );
-    let mut descriptors = crate::webui_v2::webui_v2_routes();
+    let regression_artifact_export_enabled = regression_artifact_export_enabled();
+    let mut descriptors = crate::webui_v2::webui_v2_routes_with_regression_artifact_export(
+        regression_artifact_export_enabled,
+    );
     let mut operator_descriptors: Vec<IngressRouteDescriptor> = descriptors
         .iter()
         .filter(|descriptor| {
@@ -580,7 +595,8 @@ pub fn webui_v2_app_with_lifecycle(
         WebUiV2RouteOptions::without_operator_routes()
     };
     let v2_state = WebUiV2State::new(product_surface, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
-        .with_reborn_projects_enabled(reborn_projects_enabled());
+        .with_reborn_projects_enabled(reborn_projects_enabled())
+        .with_regression_artifact_export_enabled(regression_artifact_export_enabled);
     let v2_inner: Router<()> = webui_v2_router_with_options(v2_state, route_options).with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);
@@ -671,8 +687,12 @@ pub fn webui_v2_app_with_lifecycle(
         .merge(static_router_with_config(static_router_config))
         // Outer global cap: applies to unmatched paths (e.g. 404 fallback)
         // as defense in depth. v2 routes are tighter via the per-route
-        // body-limit middleware above.
+        // body-limit middleware above. Disable Axum's implicit 2 MiB extractor
+        // cap so `Json<T>` cannot silently override the descriptor-owned
+        // 14 MiB send-message contract after that middleware accepts and
+        // rebuilds an inline-attachment request body.
         .layer(RequestBodyLimitLayer::new(config.max_body_bytes))
+        .layer(DefaultBodyLimit::disable())
         .layer(CatchPanicLayer::custom(panic_handler))
         .layer(cors)
         .layer(SetResponseHeaderLayer::if_not_present(
@@ -730,6 +750,20 @@ struct AuthLayerState {
     operator_routes: OperatorWebuiConfigRouteState,
 }
 
+/// This crate is the host transport that performs bearer/session authentication
+/// — trust stage T1 — so it holds the one production `HostProtocolAuthenticator`
+/// implementation in the workspace, and `reborn_sealed_evidence_mint_ratchet`
+/// keeps it that way.
+///
+/// The impl sits on `AuthLayerState`, which is **private to this module**, so
+/// the grant source is not even nameable outside the crate: the only place a
+/// `HostAuthenticationGrant` can come from is a few lines below, immediately
+/// after `authenticator.authenticate(&token)` returned `Some`. Before WS1.5 the
+/// same mint was reached through `ironclaw_product`'s re-export behind a
+/// `host-auth-mint` cargo feature that cargo's feature unification made
+/// vacuous — see `ironclaw_host_api::product_adapter::auth`.
+impl HostProtocolAuthenticator for AuthLayerState {}
+
 /// Resolve `Authorization: Bearer <token>` for any v2 route, OR the
 /// `?token=…` query parameter only on the v2 SSE stream endpoint
 /// (mirrors the browser's `EventSource` limitation — it cannot set
@@ -783,8 +817,14 @@ async fn authenticate_request(
             state.default_agent_id.clone(),
             state.default_project_id.clone(),
         );
-        let auth_evidence =
-            mark_bearer_token_verified_for_tenant(openai_user_id.as_str(), state.tenant_id.clone());
+        // The grant is minted from `state` — the middleware value that just ran
+        // `authenticate()` — so the evidence cannot be produced by any code path
+        // that did not authenticate the request.
+        let auth_evidence = mark_bearer_token_verified_for_tenant(
+            state.host_authentication_grant(),
+            openai_user_id.as_str(),
+            state.tenant_id.clone(),
+        );
         let caller = match ironclaw_reborn_openai_compat::OpenAiCompatAuthenticatedCaller::new(
             scope,
             auth_evidence,

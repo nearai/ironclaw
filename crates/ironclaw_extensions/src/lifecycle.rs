@@ -2,7 +2,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{ExtensionId, ExtensionLifecycleOperation, RuntimeKind};
+use ironclaw_host_api::{
+    action::ExtensionLifecycleOperation, ids::ExtensionId, runtime::RuntimeKind,
+};
 
 use crate::{ExtensionError, ExtensionPackage, ExtensionRegistry};
 
@@ -102,6 +104,21 @@ impl ExtensionLifecycleService {
         Ok(())
     }
 
+    /// Replace an installed package definition without changing its enabled
+    /// state. Preparation uses this after a durable aggregate checkpoint wins
+    /// so ordinary activation sees the authoritative prepared descriptors.
+    pub async fn update(&mut self, package: ExtensionPackage) -> Result<(), ExtensionError> {
+        self.registry.validate_replacement(&package)?;
+        self.emit_lifecycle_event(ExtensionLifecycleEvent::from_package(
+            ExtensionLifecycleOperation::Update,
+            &package,
+            true,
+        ))
+        .await?;
+        self.registry.replace_validated(package);
+        Ok(())
+    }
+
     pub async fn remove(&mut self, id: &ExtensionId) -> Result<(), ExtensionError> {
         let package = self.registry.existing_package(id)?.clone();
         self.emit_lifecycle_event(ExtensionLifecycleEvent::from_package(
@@ -164,7 +181,7 @@ impl ExtensionLifecycleService {
 mod tests {
     use tokio::sync::Mutex;
 
-    use ironclaw_host_api::{HostPortCatalog, VirtualPath};
+    use ironclaw_host_api::{host_port::HostPortCatalog, path::VirtualPath};
 
     use super::*;
     use crate::{ExtensionManifest, ManifestSource};
@@ -198,6 +215,34 @@ mod tests {
             .map(|event| event.capability_surface_changed)
             .collect::<Vec<_>>();
         assert_eq!(surface_changes, vec![true, false, true, false]);
+    }
+
+    #[tokio::test]
+    async fn update_replaces_descriptors_without_changing_enabled_state() {
+        let mut service = ExtensionLifecycleService::new(ExtensionRegistry::new());
+        let seed = test_package("prepared-fixture");
+        let extension_id = seed.id.clone();
+        service.install(seed).await.expect("install seed");
+        service.disable(&extension_id).await.expect("disable seed");
+
+        let mut prepared = test_package("prepared-fixture");
+        prepared.manifest.capabilities[0].description = "prepared descriptor".to_string();
+        prepared.capabilities[0].description = "prepared descriptor".to_string();
+        service
+            .update(prepared)
+            .await
+            .expect("replace prepared package");
+
+        assert!(!service.is_enabled(&extension_id));
+        assert_eq!(
+            service
+                .registry()
+                .get_extension(&extension_id)
+                .expect("updated package")
+                .capabilities[0]
+                .description,
+            "prepared descriptor"
+        );
     }
 
     #[derive(Default)]

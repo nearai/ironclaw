@@ -41,13 +41,22 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileSchemaRef, CapabilitySurfaceKind, EffectKind, ExtensionId,
-    HostApiError, HostPortCatalog, HostPortId, NetworkScheme, NetworkTargetPattern,
-    OriginGateMatrix, PermissionMode, RequestedTrustClass, ResourceProfile,
-    RuntimeCredentialAccountSetup, RuntimeCredentialRequirement,
-    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
-    TrustClass, VendorId,
+    action::{NetworkScheme, NetworkTargetPattern},
+    capability::{
+        EffectKind, OriginGateMatrix, PermissionMode, RuntimeCredentialAccountSetup,
+        RuntimeCredentialRequirement, RuntimeCredentialRequirementSource,
+    },
+    capability_profile::CapabilityProfileSchemaRef,
+    error::HostApiError,
+    host_port::{HostPortCatalog, HostPortId},
+    http::RuntimeCredentialTarget,
+    ids::{CapabilityId, ExtensionId, SecretHandle, VendorId},
+    resource::ResourceProfile,
+    runtime::{RuntimeKind, TrustClass},
+    trust::RequestedTrustClass,
 };
+
+use ironclaw_extension_contracts::surface::CapabilitySurfaceKind;
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
 
@@ -56,6 +65,12 @@ pub const MANIFEST_SCHEMA_VERSION: &str = "reborn.extension_manifest.v2";
 
 /// Reserved extension-ID prefix for host-bundled extensions.
 pub const RESERVED_HOST_BUNDLED_ID_PREFIX: &str = "ironclaw.";
+
+/// Reserved extension-ID prefix for user-registered MCP servers. Only a
+/// [`ManifestSource::UserRegistered`] manifest may declare an id in this
+/// namespace; enforced as a single arm in [`crate::v3::parse_v3`] so every
+/// import path that reaches it inherits the rule.
+pub const RESERVED_MCP_ID_PREFIX: &str = "mcp-";
 
 /// Upper bound on raw manifest TOML input size.
 ///
@@ -131,6 +146,12 @@ pub enum ManifestSource {
     /// Installed from registry/catalog with digest/signature metadata. Never
     /// eligible for effective FirstParty/System in v2.
     RegistryInstalled,
+    /// Registered directly by the user (e.g. a hand-configured MCP server).
+    /// Never eligible for effective FirstParty/System trust — sits alongside
+    /// `InstalledLocal` for trust purposes. Only source allowed to declare an
+    /// extension id in the reserved `mcp-` namespace (see
+    /// [`crate::v3::parse_v3`]).
+    UserRegistered,
 }
 
 impl ManifestSource {
@@ -138,6 +159,75 @@ impl ManifestSource {
     pub fn allows_first_party(self) -> bool {
         matches!(self, Self::HostBundled)
     }
+}
+
+/// One reserved extension-id prefix plus the predicate that authorizes a
+/// [`ManifestSource`] to declare an id in it.
+///
+/// The predicate is a function pointer, not a `ManifestSource` compared by
+/// equality — the two rules enforced today are semantically different kinds
+/// of check and must stay that way:
+/// - `ironclaw.` is gated on [`ManifestSource::allows_first_party`], a
+///   *capability* predicate that today happens to equal
+///   `matches!(source, ManifestSource::HostBundled)` but is free to widen
+///   independently of this table;
+/// - `mcp-` is gated on `source == ManifestSource::UserRegistered`, an
+///   *identity* check.
+///
+/// Flattening both into `(prefix, ManifestSource)` compared by `==` would
+/// silently narrow the host-bundled rule the moment `allows_first_party()`
+/// ever admits a second source, so each entry carries its own predicate.
+struct ReservedIdPrefixRule {
+    prefix: &'static str,
+    permitted: fn(ManifestSource) -> bool,
+    /// Human-readable description of who *is* permitted, used verbatim in
+    /// the rejection message (e.g. "host-bundled only").
+    permitted_description: &'static str,
+}
+
+/// The full reserved-prefix table. Add a new rule here — never re-derive a
+/// third parallel `if` block in either parser.
+const RESERVED_ID_PREFIX_RULES: &[ReservedIdPrefixRule] = &[
+    ReservedIdPrefixRule {
+        prefix: RESERVED_HOST_BUNDLED_ID_PREFIX,
+        permitted: ManifestSource::allows_first_party,
+        permitted_description: "host-bundled only",
+    },
+    ReservedIdPrefixRule {
+        prefix: RESERVED_MCP_ID_PREFIX,
+        permitted: |source| matches!(source, ManifestSource::UserRegistered),
+        permitted_description: "user-registered only",
+    },
+];
+
+/// A reserved id-prefix rule was violated: `id` starts with `prefix`, but
+/// `source` is not among the sources `permitted_description` names.
+pub(crate) struct ReservedIdPrefixViolation {
+    pub id: ExtensionId,
+    pub prefix: &'static str,
+    pub permitted_description: &'static str,
+}
+
+/// Enforce every entry of [`RESERVED_ID_PREFIX_RULES`] against `id`/`source`.
+///
+/// Shared by both manifest parsers — v2's [`ExtensionManifestV2::from_raw`]
+/// and v3's [`crate::v3::parse_v3`] — so the reserved namespace enforced here
+/// can never drift between schema versions: every manifest reaches this one
+/// function regardless of which `schema_version` it declares.
+pub(crate) fn check_reserved_id_prefix(
+    id: &ExtensionId,
+    source: ManifestSource,
+) -> Result<(), ReservedIdPrefixViolation> {
+    for rule in RESERVED_ID_PREFIX_RULES {
+        if id.as_str().starts_with(rule.prefix) && !(rule.permitted)(source) {
+            return Err(ReservedIdPrefixViolation {
+                id: id.clone(),
+                prefix: rule.prefix,
+                permitted_description: rule.permitted_description,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Per-capability surface visibility.
@@ -688,10 +778,14 @@ pub enum ManifestV2Error {
         manifest_source: ManifestSource,
         kind: RuntimeKind,
     },
-    #[error("extension id '{id}' uses the reserved '{prefix}' prefix, which is host-bundled only")]
+    #[error(
+        "extension id '{id}' uses the reserved '{prefix}' prefix, which is \
+         {permitted_description}"
+    )]
     ReservedIdForInstalledSource {
         id: ExtensionId,
         prefix: &'static str,
+        permitted_description: &'static str,
     },
     #[error(
         "capability {capability} declares unknown host port '{port}' (not in host-defined catalog)"
@@ -934,11 +1028,11 @@ impl ExtensionManifestV2 {
         }
 
         let id = ExtensionId::new(raw.id)?;
-        if !source.allows_first_party() && id.as_str().starts_with(RESERVED_HOST_BUNDLED_ID_PREFIX)
-        {
+        if let Err(violation) = check_reserved_id_prefix(&id, source) {
             return Err(ManifestV2Error::ReservedIdForInstalledSource {
-                id,
-                prefix: RESERVED_HOST_BUNDLED_ID_PREFIX,
+                id: violation.id,
+                prefix: violation.prefix,
+                permitted_description: violation.permitted_description,
             });
         }
 
@@ -1054,15 +1148,23 @@ impl CapabilityDeclV2 {
         raw: RawCapabilityV2,
         extension_id: &ExtensionId,
         host_port_catalog: &HostPortCatalog,
+        extra_id_namespace: Option<&str>,
     ) -> Result<Self, ManifestV2Error> {
         let id = CapabilityId::new(raw.id)?;
         // Provider-prefix check without an intermediate `format!` allocation:
         // capability id must be `<extension_id>.<...>` (the dot is required so
-        // `foo.bar` cannot squat `foo`'s namespace via `foobar.baz`).
-        let prefixed = id
-            .as_str()
-            .strip_prefix(extension_id.as_str())
-            .is_some_and(|rest| rest.starts_with('.'));
+        // `foo.bar` cannot squat `foo`'s namespace via `foobar.baz`). A caller
+        // may open exactly one extra reserved namespace — the v3 parser passes
+        // the stable memory-tool namespace for `[memory]`-declaring manifests
+        // (host-bundled only), so a swapped memory backend keeps the stable
+        // `ironclaw.memory.*` tool ids.
+        let in_namespace = |namespace: &str| {
+            id.as_str()
+                .strip_prefix(namespace)
+                .is_some_and(|rest| rest.starts_with('.'))
+        };
+        let prefixed =
+            in_namespace(extension_id.as_str()) || extra_id_namespace.is_some_and(in_namespace);
         if !prefixed {
             return Err(ManifestV2Error::CapabilityIdNotPrefixed {
                 id,
@@ -1853,8 +1955,8 @@ mod tests {
 
     fn product_auth_source() -> RuntimeCredentialRequirementSource {
         RuntimeCredentialRequirementSource::ProductAuthAccount {
-            provider: ironclaw_host_api::VendorId::new("google").unwrap(),
-            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+            provider: ironclaw_host_api::ids::VendorId::new("google").unwrap(),
+            setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
         }
     }
 

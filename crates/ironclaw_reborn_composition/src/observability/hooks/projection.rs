@@ -43,13 +43,13 @@ pub const MAX_TOTAL_HOOKS_PER_TENANT: usize = 256;
 /// "no conversion provided" newtype boundary.
 #[derive(Debug, Clone)]
 pub(super) struct HookProjection {
-    pub(super) extension_id: ironclaw_host_api::ExtensionId,
+    pub(super) extension_id: ironclaw_host_api::ids::ExtensionId,
     pub(super) version: String,
     /// Trust posture (drives quarantine-vs-fail-closed). Copied off the
     /// manifest at extraction time; the capability surface is left behind.
     pub(super) source: ironclaw_extensions::ManifestSource,
     /// Package root, for the projection-layer containment check only.
-    pub(super) root: ironclaw_host_api::VirtualPath,
+    pub(super) root: ironclaw_host_api::path::VirtualPath,
     /// The declared `[[hooks]]` payloads — the ONLY package content carried.
     pub(super) hooks: Vec<ironclaw_extensions::HookSectionEntryV2>,
 }
@@ -62,11 +62,17 @@ impl HookProjection {
         if package.manifest.hooks.is_empty() {
             return None;
         }
+        // silent-ok: only virtual-root (hosted MCP) packages fail materialized_root();
+        // they cannot declare filesystem hooks, so skipping projection is correct.
+        let Ok(root) = package.materialized_root() else {
+            return None;
+        };
+        let root = root.clone();
         Some(Self {
             extension_id: package.manifest.id.clone(),
             version: package.manifest.version.clone(),
             source: package.manifest.source,
-            root: package.root.clone(),
+            root,
             hooks: package.manifest.hooks.clone(),
         })
     }
@@ -137,11 +143,11 @@ impl std::fmt::Debug for HookProjectionRegistry {
 /// containment defense knows the root) but returns the fixed `/system/extensions`
 /// path. The isolation guarantee is: **the per-tenant `RootFilesystem` passed
 /// to discovery resolves `/system/extensions/<id>` to that tenant's storage and
-/// no other's.** In local-dev (single-tenant, the only profile
+/// no other's.** In standalone (single-tenant, the only profile
 /// `build_reborn_runtime` wires) the runtime's FS is constructed once per
 /// identity in `build_runtime_substrate`, so it is per-identity by construction;
 /// production wiring (a follow-up, since `build_reborn_runtime` only supports
-/// local-dev) must supply a tenant-scoped backend here.
+/// standalone) must supply a tenant-scoped backend here.
 ///
 /// **This makes the scoped FS the SOLE isolation boundary** — see the
 /// FS-hardening gate on [`HooksActivationConfig`]: `HOOKS_THIRD_PARTY_ENABLED`
@@ -150,9 +156,9 @@ impl std::fmt::Debug for HookProjectionRegistry {
 /// that hardening is precisely what protects the scoped-FS-is-the-boundary
 /// property against symlink/`..` escapes below the virtual layer.
 pub fn tenant_extension_root(
-    _tenant_id: &ironclaw_host_api::TenantId,
-) -> Result<ironclaw_host_api::VirtualPath, RebornBuildError> {
-    ironclaw_host_api::VirtualPath::new("/system/extensions").map_err(|error| {
+    _tenant_id: &ironclaw_host_api::ids::TenantId,
+) -> Result<ironclaw_host_api::path::VirtualPath, RebornBuildError> {
+    ironclaw_host_api::path::VirtualPath::new("/system/extensions").map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("could not derive extension discovery root: {error}"),
         }
@@ -169,8 +175,8 @@ pub fn tenant_extension_root(
 /// `tenant_root`; otherwise an error naming the violation (the caller turns
 /// this into a quarantine, not a whole-build failure, for untrusted sources).
 pub(super) fn enforce_root_containment(
-    tenant_root: &ironclaw_host_api::VirtualPath,
-    package_root: &ironclaw_host_api::VirtualPath,
+    tenant_root: &ironclaw_host_api::path::VirtualPath,
+    package_root: &ironclaw_host_api::path::VirtualPath,
 ) -> Result<(), String> {
     let root = tenant_root.as_str().trim_end_matches('/');
     let candidate = package_root.as_str();
@@ -206,7 +212,7 @@ pub(super) fn enforce_root_containment(
 /// [`RootFilesystem`] already built in `build_runtime_substrate`.
 pub struct ThirdPartyDiscoveryInput<'a, F: ironclaw_filesystem::RootFilesystem> {
     pub filesystem: &'a F,
-    pub tenant_id: &'a ironclaw_host_api::TenantId,
+    pub tenant_id: &'a ironclaw_host_api::ids::TenantId,
 }
 
 /// Assemble the hook-projection registry (Step 3).

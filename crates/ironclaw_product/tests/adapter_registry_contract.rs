@@ -2,14 +2,17 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use ironclaw_extensions::{
-    ExtensionCredentialBinding, ExtensionCredentialHandle, ExtensionHealthMessage,
-    ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
+    ExtensionCredentialBinding, ExtensionCredentialHandle, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
     ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef,
     InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, VirtualPath};
+use ironclaw_host_api::{
+    host_port::HostPortCatalog,
+    ids::{ExtensionId, SecretHandle},
+    path::VirtualPath,
+};
 use ironclaw_product::adapter_registry::{
     ManifestHash, parse_product_adapter_manifest_record, product_adapter_sections,
     register_product_adapter_host_api_contract,
@@ -112,10 +115,12 @@ async fn default_store_has_no_enabled_installations() {
 async fn installed_extension_surfaces_product_adapter_runtime_entries() {
     let store = filesystem_store().await;
     store
-        .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
+        .upsert_manifest_and_installation(
+            manifest("telegram_bot_token", "sha256:abc123"),
+            installation(),
+        )
         .await
         .unwrap();
-    store.upsert_installation(installation()).await.unwrap();
 
     let installed = store.list_installations().await.unwrap();
     assert_eq!(installed.len(), 1);
@@ -172,9 +177,10 @@ prompt_doc_ref = "prompts/do.md"
     let plain_manifest = ExtensionManifestRecord::from_toml(
         plain_raw,
         ManifestSource::HostBundled,
-        &ironclaw_host_api::HostPortCatalog::empty(),
+        &ironclaw_host_api::host_port::HostPortCatalog::empty(),
         Some(manifest_hash("sha256:plain")),
         &contracts,
+        None,
     )
     .unwrap();
     let plain_install = ExtensionInstallation::new(
@@ -188,8 +194,10 @@ prompt_doc_ref = "prompts/do.md"
     .unwrap();
 
     let store = filesystem_store().await;
-    store.upsert_manifest(plain_manifest.clone()).await.unwrap();
-    store.upsert_installation(plain_install).await.unwrap();
+    store
+        .upsert_manifest_and_installation(plain_manifest.clone(), plain_install)
+        .await
+        .unwrap();
 
     let sections = product_adapter_sections(&plain_manifest).unwrap();
     assert!(
@@ -201,12 +209,14 @@ prompt_doc_ref = "prompts/do.md"
 #[tokio::test]
 async fn manifest_hash_mismatch_is_rejected() {
     let store = filesystem_store().await;
-    store
-        .upsert_manifest(manifest("telegram_bot_token", "sha256:different"))
-        .await
-        .unwrap();
 
-    let err = store.upsert_installation(installation()).await.unwrap_err();
+    let err = store
+        .upsert_manifest_and_installation(
+            manifest("telegram_bot_token", "sha256:different"),
+            installation(),
+        )
+        .await
+        .unwrap_err();
     assert!(matches!(
         err,
         ExtensionInstallationError::ManifestHashMismatch { .. }
@@ -344,8 +354,10 @@ handle = "outbound_token"
     .unwrap();
 
     let store = filesystem_store().await;
-    store.upsert_manifest(multi_manifest.clone()).await.unwrap();
-    store.upsert_installation(multi_install).await.unwrap();
+    store
+        .upsert_manifest_and_installation(multi_manifest.clone(), multi_install)
+        .await
+        .unwrap();
 
     let sections = product_adapter_sections(&multi_manifest).unwrap();
     assert_eq!(sections.len(), 2, "both PA sections should project");
@@ -362,44 +374,13 @@ async fn arc_store_delegation_works() {
     let store = filesystem_store().await;
     let arc_store: Arc<dyn ExtensionInstallationStorePort> = Arc::new(store);
     arc_store
-        .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
+        .upsert_manifest_and_installation(
+            manifest("telegram_bot_token", "sha256:abc123"),
+            installation(),
+        )
         .await
         .unwrap();
-    arc_store.upsert_installation(installation()).await.unwrap();
 
     let installed = arc_store.list_installations().await.unwrap();
     assert_eq!(installed.len(), 1);
-}
-
-#[tokio::test]
-async fn update_health_uses_redacted_string() {
-    let store = filesystem_store().await;
-    store
-        .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
-        .await
-        .unwrap();
-    store.upsert_installation(installation()).await.unwrap();
-
-    let health = ExtensionHealthSnapshot::new(
-        ExtensionHealthStatus::Degraded,
-        Some(ExtensionHealthMessage::new("timeout after 5s")),
-        Utc::now(),
-    );
-    store
-        .update_health(&installation_id(), health)
-        .await
-        .unwrap();
-
-    let inst = store
-        .get_installation(&installation_id())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(inst.health().status(), ExtensionHealthStatus::Degraded);
-    // ExtensionHealthMessage Debug impl should redact the value.
-    let debug = format!("{:?}", inst.health().message().unwrap());
-    assert!(
-        !debug.contains("timeout after 5s"),
-        "ExtensionHealthMessage should redact the message in Debug output"
-    );
 }

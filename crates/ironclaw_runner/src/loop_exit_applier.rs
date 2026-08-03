@@ -6,21 +6,24 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
+use ironclaw_loop_contracts::{LoopBlockedKind, LoopCheckpointKind};
 use ironclaw_loop_host::RunCancellationFactory;
 use ironclaw_threads::{
     MessageKind, MessageStatus, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
     ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
 };
 use ironclaw_turns::{
-    CheckpointStateStorePort, GetCheckpointStateRequest, GetLoopCheckpointRequest,
-    GetRunStateRequest, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStateRef, LoopGateRef,
-    LoopMessageRef, LoopResultRef, TurnError, TurnId, TurnRunId, TurnScope, TurnStateStore,
-    TurnStatus,
+    AgentTurnRuntimePort, GetLoopCheckpointRequest, GetRunStateRequest, LoopGateRef,
+    LoopMessageRef, LoopResultRef, TurnError, TurnId, TurnRunId, TurnScope, TurnStatus,
 };
 
-pub use ironclaw_turns::loop_exit::{
+// Not re-exported: a `Loop*Port` has exactly one import path, and
+// `LoopExitEvidencePort` belongs to the turn kernel that validates against it
+// (PROPOSAL §11.2.4, pinned by `reborn_loop_port_location_scan`). The evidence
+// requests and the applier travel with it for the same reason — one home each.
+use ironclaw_turns::loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
-    FinalCheckpointEvidenceRequest, LoopExitApplier, LoopExitEvidencePort,
+    FinalCheckpointEvidenceRequest, LoopExitEvidencePort,
 };
 
 /// Strict test/local evidence port. Defaults to distrust everything.
@@ -162,10 +165,8 @@ where
     S: SessionThreadService + ?Sized,
 {
     thread_service: Arc<S>,
-    turn_state_store: Arc<dyn TurnStateStore>,
+    agent_turn_runtime: Arc<dyn AgentTurnRuntimePort>,
     loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
-    // arch-exempt: optional_arc, checkpoint evidence is absent in minimal loop-exit tests, plan #4539
-    checkpoint_state_store: Option<Arc<dyn CheckpointStateStorePort>>,
     approval_gate_evidence: Option<Arc<dyn ApprovalGateEvidenceStore>>,
     resource_gate_evidence: Option<Arc<dyn ResourceGateEvidenceStore>>,
     await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
@@ -210,15 +211,14 @@ where
 {
     pub fn new(
         thread_service: Arc<S>,
-        turn_state_store: Arc<dyn TurnStateStore>,
+        agent_turn_runtime: Arc<dyn AgentTurnRuntimePort>,
         loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
         await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
     ) -> Self {
         Self {
             thread_service,
-            turn_state_store,
+            agent_turn_runtime,
             loop_checkpoint_store,
-            checkpoint_state_store: None,
             approval_gate_evidence: None,
             resource_gate_evidence: None,
             await_dependent_run_evidence,
@@ -229,30 +229,21 @@ where
 
     pub fn new_with_thread_scope(
         thread_service: Arc<S>,
-        turn_state_store: Arc<dyn TurnStateStore>,
+        agent_turn_runtime: Arc<dyn AgentTurnRuntimePort>,
         loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
         await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
         thread_scope: ThreadScope,
     ) -> Self {
         Self {
             thread_service,
-            turn_state_store,
+            agent_turn_runtime,
             loop_checkpoint_store,
-            checkpoint_state_store: None,
             approval_gate_evidence: None,
             resource_gate_evidence: None,
             await_dependent_run_evidence,
             thread_scope: Some(thread_scope),
             cancellation_factory: None,
         }
-    }
-
-    pub fn with_checkpoint_state_store(
-        mut self,
-        checkpoint_state_store: Arc<dyn CheckpointStateStorePort>,
-    ) -> Self {
-        self.checkpoint_state_store = Some(checkpoint_state_store);
-        self
     }
 
     pub fn with_approval_gate_evidence(
@@ -383,9 +374,6 @@ where
         let Some(checkpoint_id) = request.failed.checkpoint_id else {
             return Ok(false);
         };
-        let Some(checkpoint_state_store) = &self.checkpoint_state_store else {
-            return Ok(false);
-        };
         let Some(checkpoint) = self
             .loop_checkpoint_store
             .get_loop_checkpoint(GetLoopCheckpointRequest {
@@ -401,23 +389,17 @@ where
         if checkpoint.kind != LoopCheckpointKind::Final {
             return Ok(false);
         }
-        let state_ref = checkpoint_state_store_ref(request.run_id, &checkpoint.state_ref)?;
-        let Some(checkpoint_state) = checkpoint_state_store
-            .get_checkpoint_state(GetCheckpointStateRequest {
-                scope: request.scope.clone(),
-                turn_id: request.turn_id,
-                run_id: request.run_id,
-                state_ref,
-                schema_id: checkpoint.schema_id,
-                schema_version: checkpoint.schema_version,
-                kind: checkpoint.kind,
-            })
-            .await?
-        else {
+        if let Some(rest) = checkpoint.state_ref.as_str().strip_prefix("checkpoint:")
+            && let Some((run_id, _)) = rest.split_once(':')
+            && TurnRunId::parse(run_id).is_ok_and(|run_id| run_id != request.run_id)
+        {
+            return Ok(false);
+        }
+        let Some(payload) = checkpoint.payload else {
             return Ok(false);
         };
         let state = match ironclaw_agent_loop::state::LoopExecutionState::from_checkpoint_payload(
-            checkpoint_state.payload.as_bytes(),
+            payload.as_bytes(),
             ironclaw_agent_loop::state::CheckpointKind::Final,
         ) {
             Ok(state) => state,
@@ -464,7 +446,7 @@ where
             return Ok(true);
         }
         let state = self
-            .turn_state_store
+            .agent_turn_runtime
             .get_run_state(GetRunStateRequest {
                 scope: scope.clone(),
                 run_id,
@@ -489,23 +471,6 @@ where
     }
 }
 
-fn checkpoint_state_store_ref(
-    run_id: TurnRunId,
-    state_ref: &LoopCheckpointStateRef,
-) -> Result<LoopCheckpointStateRef, TurnError> {
-    let run_scoped_prefix = format!("checkpoint:{run_id}:");
-    if let Some(token) = state_ref.as_str().strip_prefix(&run_scoped_prefix) {
-        return LoopCheckpointStateRef::new(format!("checkpoint:{token}")).map_err(|reason| {
-            TurnError::InvalidRequest {
-                reason: format!(
-                    "could not rebuild store key from run-scoped checkpoint ref: {reason}"
-                ),
-            }
-        });
-    }
-    Ok(state_ref.clone())
-}
-
 impl<S> ThreadCheckpointLoopExitEvidencePort<S>
 where
     S: SessionThreadService + ?Sized + Send + Sync,
@@ -526,20 +491,20 @@ where
         // authenticated owner (`owners/<caller>`), so evidence reads must use
         // the same owner or they will look in the wrong subtree.
         if scope.has_explicit_thread_owner() {
-            thread_scope = crate::thread_scope::ThreadScopeResolver::resolve_for_turn(
+            thread_scope = ironclaw_loop_host::ThreadScopeResolver::resolve_for_turn(
                 &thread_scope,
                 scope,
                 None,
             );
         } else if thread_scope.owner_user_id.is_some() {
             let run_state = self
-                .turn_state_store
+                .agent_turn_runtime
                 .get_run_state(GetRunStateRequest {
                     scope: scope.clone(),
                     run_id,
                 })
                 .await?;
-            thread_scope = crate::thread_scope::ThreadScopeResolver::resolve_for_turn(
+            thread_scope = ironclaw_loop_host::ThreadScopeResolver::resolve_for_turn(
                 &thread_scope,
                 scope,
                 run_state.actor.as_ref(),

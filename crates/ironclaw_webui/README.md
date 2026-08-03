@@ -27,7 +27,7 @@ across it:
 ### 1. WebChat v2 route surface + SPA (`src/webui_v2/`)
 
 The native WebChat v2 HTTP routes on top of
-`ironclaw_host_api::ProductSurface`. Handlers are thin: they read the
+`ironclaw_host_api::product_surface::ProductSurface`. Handlers are thin: they read the
 `ProductSurfaceCaller` + `WebUiV2Capabilities` injected as axum extensions,
 dispatch to the facade, and render redacted responses through `WebUiV2HttpError`.
 
@@ -37,7 +37,8 @@ dispatch to the facade, and render redacted responses through `WebUiV2HttpError`
   (route id, method, pattern, auth, rate/body limits, streaming class). The
   descriptors are the contract host composition folds into the per-route policy
   stack; the table is locked by `tests/webui_v2_descriptors_contract.rs`.
-- ~60 routes across sessions, threads/timeline, message send, SSE + WebSocket
+- ~90 routes across sessions, threads/timeline, message send, SSE + WebSocket
+  (count them: `rg -o '"webui\.v2\.[a-z_.0-9]+"' src/webui_v2/descriptors.rs | sort -u | wc -l`)
   event streams, logs, automations, connectable channels, extensions
   (install/import/setup/remove lifecycle), LLM config, tool-approval settings,
   operator setup/config/diagnostics, admin user management, and trace credits.
@@ -65,14 +66,14 @@ Each middleware is its own module: `webui_ws_origin`, `webui_body_limit`,
 the descriptor-driven policy (from `webui_v2_routes()`) is turned into real
 tower layers, where product-auth and OAuth `PublicRouteMount`s are merged
 outside bearer auth, and where the OpenAI-compat host-beta route mounts
-attach under their feature flag.
+attach (unconditionally — there is no feature flag; see the note further down).
 
 ### 3. Serve loop + host authentication (`src/lib.rs`, `src/auth/`, `src/session.rs`, `src/oidc.rs`)
 
 - `serve_webui_v2(RebornWebuiServeOptions)` — bind a `tokio::net::TcpListener`
   and run `axum::serve` with graceful shutdown.
 - **Authenticators** (`WebuiAuthenticator` impls): `EnvBearerAuthenticator`
-  (single operator token for the standalone binary / local dev),
+  (single operator token for the standalone binary),
   `SessionAuthenticator` (bearer → `SignedTokenSessionStore` lookup),
   `OidcAuthenticator` (JWKS + standard-claim verifier, non-operator).
 - **Sessions:** `SignedTokenSessionStore` plus the signed-token login surface
@@ -85,10 +86,10 @@ attach under their feature flag.
 ## Layering & boundaries
 
 - Reaches the rest of Reborn **only** through
-  `ironclaw_host_api::ProductSurface` and the neutral
+  `ironclaw_host_api::product_surface::ProductSurface` and the neutral
   `PublicRouteMount`/`ProtectedRouteMount` vocabulary supplied by the host.
 - Direct `ironclaw_product` access is limited to wire DTOs and ProductSurface
-  descriptors; handlers reach behavior through `ironclaw_host_api::ProductSurface`.
+  descriptors; handlers reach behavior through `ironclaw_host_api::product_surface::ProductSurface`.
   There is no v1 `src/` import, v1 secrets/settings/DB, or lower-substrate
   access. Host auth stays host-owned here (Path A of
   `docs/reborn/how-to-port-channel-to-reborn.md`).
@@ -100,7 +101,7 @@ attach under their feature flag.
 | Feature | Effect |
 |---|---|
 | `default` | Route surface + SPA + serve loop + auth. |
-| `test-support` | Compile in `EmailUserDirectory` for local dev / tests. |
+| `test-support` | Compile in `EmailUserDirectory` for standalone deployments and tests. |
 
 The generic extension administration surface and the `OpenAiCompatActorScope`
 stamping for protected OpenAI-compatible mounts are unconditional parts of
@@ -113,7 +114,8 @@ stamping for protected OpenAI-compatible mounts are unconditional parts of
 cargo test  -p ironclaw_webui
 cargo clippy -p ironclaw_webui --all-targets -- -D warnings
 
-# Everything, incl. the OpenAI-compat host-beta surface
+# Everything (`--all-features` here means `test-support`; the OpenAI-compat
+# surface is already in the default build)
 cargo test  -p ironclaw_webui --all-features
 cargo clippy -p ironclaw_webui --all-features --all-targets -- -D warnings
 
@@ -122,8 +124,9 @@ cargo test  -p ironclaw_architecture reborn_crate_dependency_boundaries_hold
 ```
 
 The SPA frontend builds through `build.rs` (Vite). `frontend/README.md` covers
-the JS/TS toolchain; `Dockerfile.reborn` installs `frontend/` deps before the
-`cargo build` so the release image bundles compiled assets.
+the JS/TS toolchain; the repo-root `Dockerfile` installs Node/corepack-pnpm and
+copies `crates/ironclaw_webui/frontend/` before the `cargo build`, so the
+release image bundles compiled assets.
 
 ## Where to read next
 

@@ -2,7 +2,7 @@
 //! Lane 7 end-to-end coverage for the WebChat v2 HTTP surface.
 //!
 //! Unlike [`webui_v2_serve`], which drives the composed router against a
-//! stub `ProductSurface`, this test stands up a real local-dev
+//! stub `ProductSurface`, this test stands up a real standalone
 //! `RebornRuntime`, overrides its LLM gateway with a scripted
 //! tool-calling fake, composes the v2 router through
 //! [`runtime.product_surface`] + [`webui_v2_app`], and exercises it from
@@ -33,8 +33,11 @@ use ironclaw_host_api::runtime_policy::{
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, ProviderToolName, ResourceScope, SecretHandle, TenantId,
-    UserId,
+    ids::{AgentId, CapabilityId, InvocationId, ProviderToolName, SecretHandle, TenantId, UserId},
+    resource::ResourceScope,
+};
+use ironclaw_loop_contracts::{
+    CapabilityCallCandidate, LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -44,9 +47,6 @@ use ironclaw_loop_host::{
 use ironclaw_reborn_composition::{
     OAuthClientConfig, PollSettings, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
     build_reborn_runtime,
-};
-use ironclaw_turns::run_profile::{
-    CapabilityCallCandidate, LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
 use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use serde_json::{Value, json};
@@ -108,16 +108,16 @@ impl WebuiAuthenticator for TwoUserTokens {
 
 // ─── runtime policy ───────────────────────────────────────────────────
 
-fn local_dev_effective_policy() -> EffectiveRuntimePolicy {
+fn local_host_effective_policy() -> EffectiveRuntimePolicy {
     // Mirrors the policy the in-mod runtime tests use. Avoids the
-    // public `local_dev_runtime_policy()` helper because that returns a
+    // public `standalone_runtime_policy()` helper because that returns a
     // `ResolvedRuntimePolicy` shape; `RebornHostBindings::with_runtime_policy`
     // takes the `EffectiveRuntimePolicy` shape and the two are not
     // interchangeable in this direction yet.
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,
@@ -135,7 +135,7 @@ fn local_yolo_effective_policy() -> EffectiveRuntimePolicy {
         requested_profile: RuntimeProfile::LocalYolo,
         resolved_profile: RuntimeProfile::LocalYolo,
         approval_policy: ApprovalPolicy::Minimal,
-        ..local_dev_effective_policy()
+        ..local_host_effective_policy()
     }
 }
 
@@ -253,7 +253,7 @@ impl HostManagedModelGateway for ToolCallingGateway {
             })?
             .into_iter()
             .find(|def| def.capability_id == echo_id)
-            .expect("builtin.echo must be visible in local-dev capability surface");
+            .expect("builtin.echo must be visible in standalone capability surface");
 
         let candidate = capabilities
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
@@ -443,7 +443,7 @@ impl HostManagedModelGateway for WriteFileGateway {
             })?
             .into_iter()
             .find(|def| def.capability_id == write_id)
-            .expect("builtin.write_file must be visible in local-dev capability surface");
+            .expect("builtin.write_file must be visible in standalone capability surface");
 
         // One tool round writes both files (mirrors the single-round shape the
         // echo gateway proves), then the follow-up call emits the final reply.
@@ -528,7 +528,7 @@ impl HostManagedModelGateway for MemoryWriteGateway {
             })?
             .into_iter()
             .find(|def| def.capability_id == memory_write_id)
-            .expect("ironclaw.memory.write must be visible in local-dev capability surface");
+            .expect("ironclaw.memory.write must be visible in standalone capability surface");
         let write = capabilities
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
                 provider_id: "e2e-provider".to_string(),
@@ -569,7 +569,7 @@ async fn build_harness() -> Harness {
 }
 
 async fn build_harness_with_gateway(gateway: Arc<dyn HostManagedModelGateway>) -> Harness {
-    build_harness_with_gateway_and_policy(gateway, local_dev_effective_policy()).await
+    build_harness_with_gateway_and_policy(gateway, local_host_effective_policy()).await
 }
 
 async fn build_harness_with_gateway_and_policy(
@@ -577,7 +577,7 @@ async fn build_harness_with_gateway_and_policy(
     policy: EffectiveRuntimePolicy,
 ) -> Harness {
     let root = tempfile::tempdir().expect("tempdir");
-    let storage_root = root.path().join("local-dev");
+    let storage_root = root.path().join("standalone");
     build_harness_at(storage_root, Some(root), gateway, policy).await
 }
 
@@ -589,7 +589,7 @@ async fn build_harness_on_storage(storage_root: impl AsRef<Path>) -> Harness {
         storage_root.as_ref().to_path_buf(),
         None,
         Arc::new(ToolCallingGateway::with_sensitive_tool_message()),
-        local_dev_effective_policy(),
+        local_host_effective_policy(),
     )
     .await
 }
@@ -619,12 +619,12 @@ async fn build_harness_at(
 /// `webui_v2_extension_activate_returns_400_when_provider_instance_not_configured`.
 async fn build_harness_without_google_oauth_backend() -> Harness {
     let root = tempfile::tempdir().expect("tempdir");
-    let storage_root = root.path().join("local-dev");
+    let storage_root = root.path().join("standalone");
     build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
         storage_root,
         Some(root),
         Arc::new(ToolCallingGateway::default()),
-        local_dev_effective_policy(),
+        local_host_effective_policy(),
         USER,
         USER,
         None,
@@ -689,69 +689,84 @@ async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
     authenticated_user_id: &str,
     google_oauth_backend: Option<OAuthClientConfig>,
 ) -> Harness {
-    let mut build_input =
-        ironclaw_reborn_composition::local_dev_build_input(runtime_owner_id, storage_root)
-            .with_runtime_policy(policy)
-            .with_bundled_first_party_for_test();
-    if let Some(google_oauth_backend) = google_oauth_backend {
-        build_input = build_input
-            .with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_oauth_backend);
-    }
-    let input = RebornRuntimeInput::from_build_input(build_input)
-        .with_identity(RebornRuntimeIdentity {
-            tenant_id: TENANT.to_string(),
-            agent_id: AGENT.to_string(),
-            source_binding_id: "e2e-source".to_string(),
-            reply_target_binding_id: "e2e-reply".to_string(),
-        })
-        .with_poll_settings(PollSettings {
-            interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(10),
-        })
-        .with_model_gateway_override(gateway);
+    // Every test in this file awaits this builder, so without the box the
+    // whole `build_reborn_runtime` composition state machine is inlined into
+    // each test's future and sits on the 2 MiB test-thread stack alongside
+    // the test's own locals. Debug builds do not collapse that nesting, and
+    // the combined frame has already overflowed the stack twice as the
+    // composition graph grew. Boxing here moves the composition future to the
+    // heap once, for every caller.
+    Box::pin(async move {
+        let mut build_input = ironclaw_reborn_composition::local_filesystem_build_input(
+            runtime_owner_id,
+            storage_root,
+        )
+        .with_runtime_policy(policy)
+        .with_bundled_first_party_for_test();
+        if let Some(google_oauth_backend) = google_oauth_backend {
+            build_input = build_input
+                .with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_oauth_backend);
+        }
+        let input = RebornRuntimeInput::from_build_input(build_input)
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: TENANT.to_string(),
+                agent_id: AGENT.to_string(),
+                source_binding_id: "e2e-source".to_string(),
+                reply_target_binding_id: "e2e-reply".to_string(),
+            })
+            .with_poll_settings(PollSettings {
+                interval: Duration::from_millis(10),
+                max_total: Duration::from_secs(10),
+            })
+            .with_model_gateway_override(gateway);
 
-    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    // The Tools-settings global auto-approve switch is authoritative for
-    // first-party tool dispatch; enable it for the e2e dispatch scope so
-    // scripted tool calls complete instead of parking on the per-tool approval
-    // gate (which would otherwise leave the turn without an assistant reply).
-    runtime
-        .local_dev_auto_approve_settings_for_test()
-        .expect("local-dev exposes auto-approve settings for test")
-        .set(ironclaw_approvals::AutoApproveSettingInput {
-            updated_by: ironclaw_host_api::Principal::User(UserId::new(USER).expect("user")),
-            scope: ResourceScope {
-                tenant_id: TenantId::new(TENANT).expect("tenant"),
-                user_id: UserId::new(USER).expect("user"),
-                agent_id: Some(AgentId::new(AGENT).expect("agent")),
-                project_id: None,
-                mission_id: None,
-                thread_id: None,
-                invocation_id: InvocationId::new(),
-            },
-            enabled: true,
-        })
-        .await
-        .expect("enable global auto-approve for e2e dispatch");
-    let bundle = runtime.product_surface(None).expect("product surface");
-    let config = WebuiServeConfig::new(
-        TenantId::new(TENANT).expect("tenant"),
-        Arc::new(ValidTokenForUser::new(authenticated_user_id)),
-        // CORS allowlist is unused in oneshot tests (no Origin header
-        // is set), but the WebuiServeConfig constructor rejects an
-        // empty Vec to keep production deployments fail-closed. Any
-        // throwaway origin satisfies the type without affecting these
-        // tests.
-        vec![HeaderValue::from_static("http://localhost:0")],
-    )
-    .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
-    let router = webui_v2_app(bundle.clone(), config).expect("webui v2 app");
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        // The Tools-settings global auto-approve switch is authoritative for
+        // first-party tool dispatch; enable it for the e2e dispatch scope so
+        // scripted tool calls complete instead of parking on the per-tool
+        // approval gate (which would otherwise leave the turn without an
+        // assistant reply).
+        runtime
+            .standalone_auto_approve_settings_for_test()
+            .expect("standalone exposes auto-approve settings for test")
+            .set(ironclaw_approvals::AutoApproveSettingInput {
+                updated_by: ironclaw_host_api::scope::Principal::User(
+                    UserId::new(USER).expect("user"),
+                ),
+                scope: ResourceScope {
+                    tenant_id: TenantId::new(TENANT).expect("tenant"),
+                    user_id: UserId::new(USER).expect("user"),
+                    agent_id: Some(AgentId::new(AGENT).expect("agent")),
+                    project_id: None,
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: InvocationId::new(),
+                },
+                enabled: true,
+            })
+            .await
+            .expect("enable global auto-approve for e2e dispatch");
+        let bundle = runtime.product_surface(None).expect("product surface");
+        let config = WebuiServeConfig::new(
+            TenantId::new(TENANT).expect("tenant"),
+            Arc::new(ValidTokenForUser::new(authenticated_user_id)),
+            // CORS allowlist is unused in oneshot tests (no Origin header
+            // is set), but the WebuiServeConfig constructor rejects an
+            // empty Vec to keep production deployments fail-closed. Any
+            // throwaway origin satisfies the type without affecting these
+            // tests.
+            vec![HeaderValue::from_static("http://localhost:0")],
+        )
+        .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
+        let router = webui_v2_app(bundle.clone(), config).expect("webui v2 app");
 
-    Harness {
-        runtime,
-        router,
-        _root: root,
-    }
+        Harness {
+            runtime,
+            router,
+            _root: root,
+        }
+    })
+    .await
 }
 
 async fn build_two_user_harness(
@@ -759,9 +774,9 @@ async fn build_two_user_harness(
     policy: EffectiveRuntimePolicy,
 ) -> Harness {
     let root = tempfile::tempdir().expect("tempdir");
-    let storage_root = root.path().join("local-dev");
+    let storage_root = root.path().join("standalone");
     let input = RebornRuntimeInput::from_build_input(
-        ironclaw_reborn_composition::local_dev_build_input(USER, storage_root)
+        ironclaw_reborn_composition::local_filesystem_build_input(USER, storage_root)
             .with_runtime_policy(policy)
             .with_bundled_first_party_for_test(),
     )
@@ -779,10 +794,10 @@ async fn build_two_user_harness(
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
     runtime
-        .local_dev_auto_approve_settings_for_test()
-        .expect("local-dev exposes auto-approve settings for test")
+        .standalone_auto_approve_settings_for_test()
+        .expect("standalone exposes auto-approve settings for test")
         .set(ironclaw_approvals::AutoApproveSettingInput {
-            updated_by: ironclaw_host_api::Principal::User(UserId::new(USER).expect("user")),
+            updated_by: ironclaw_host_api::scope::Principal::User(UserId::new(USER).expect("user")),
             scope: ResourceScope {
                 tenant_id: TenantId::new(TENANT).expect("tenant"),
                 user_id: UserId::new(USER).expect("user"),
@@ -1271,12 +1286,12 @@ async fn webui_v2_http_list_automations_uses_composed_runtime_facade() {
 #[tokio::test]
 async fn webui_v2_timeline_persists_display_preview_under_authenticated_owner() {
     let root = tempfile::tempdir().expect("tempdir");
-    let storage_root = root.path().join("local-dev");
+    let storage_root = root.path().join("standalone");
     let harness = build_harness_at_with_runtime_owner_and_auth_user(
         storage_root,
         Some(root),
         Arc::new(ToolCallingGateway::default()),
-        local_dev_effective_policy(),
+        local_host_effective_policy(),
         "e2e-runtime-owner",
         USER,
     )
@@ -1299,12 +1314,12 @@ async fn webui_v2_timeline_persists_display_preview_under_authenticated_owner() 
 /// v2 API from the browser side, stream live Reborn projections over
 /// SSE, replay with `Last-Event-ID`, verify final durable timeline
 /// state, reject a cross-thread cursor as a redacted SSE error, and
-/// reopen the same local-dev stores to prove the transcript survives
+/// reopen the same standalone stores to prove the transcript survives
 /// runtime restart.
 #[tokio::test]
 async fn webui_v2_beta_acceptance_stream_replay_restart_and_redaction() {
     let root = tempfile::tempdir().expect("tempdir");
-    let storage_root = root.path().join("local-dev");
+    let storage_root = root.path().join("standalone");
     let harness = build_harness_on_storage(&storage_root).await;
 
     let thread_id = create_thread(&harness.router, "e2e-create-1").await;
@@ -1880,56 +1895,59 @@ async fn webui_v2_google_drive_oauth_setup_coalesces_operation_scopes() {
 /// could not read the resulting thread's timeline.
 #[tokio::test]
 async fn untrusted_request_body_cannot_inject_system_scope() {
-    let harness = build_harness().await;
-    let sentinel = "\u{1f}SYSTEM\u{1f}";
+    Box::pin(async {
+        let harness = build_harness().await;
+        let sentinel = "\u{1f}SYSTEM\u{1f}";
 
-    let malicious = json!({
-        "client_action_id": "inject-scope-1",
-        "tenant_id": sentinel,
-        "user_id": sentinel,
-        "scope": { "tenant_id": sentinel, "user_id": sentinel },
-    });
-    let create = harness
-        .router
-        .clone()
-        .oneshot(bearer_post("/api/webchat/v2/threads", malicious))
-        .await
-        .expect("create oneshot");
-    assert_eq!(
-        create.status(),
-        StatusCode::OK,
-        "injected scope fields must be ignored (unknown fields), not honored or errored"
-    );
-    let body = read_json(create).await;
-    let thread_id = body["thread"]["thread_id"]
-        .as_str()
-        .expect("thread_id")
-        .to_string();
+        let malicious = json!({
+            "client_action_id": "inject-scope-1",
+            "tenant_id": sentinel,
+            "user_id": sentinel,
+            "scope": { "tenant_id": sentinel, "user_id": sentinel },
+        });
+        let create = harness
+            .router
+            .clone()
+            .oneshot(bearer_post("/api/webchat/v2/threads", malicious))
+            .await
+            .expect("create oneshot");
+        assert_eq!(
+            create.status(),
+            StatusCode::OK,
+            "injected scope fields must be ignored (unknown fields), not honored or errored"
+        );
+        let body = read_json(create).await;
+        let thread_id = body["thread"]["thread_id"]
+            .as_str()
+            .expect("thread_id")
+            .to_string();
 
-    let timeline = harness
-        .router
-        .clone()
-        .oneshot(bearer_get(&format!(
-            "/api/webchat/v2/threads/{thread_id}/timeline"
-        )))
-        .await
-        .expect("timeline oneshot");
-    assert_eq!(
-        timeline.status(),
-        StatusCode::OK,
-        "the thread must belong to the authenticated caller — the body could not set scope"
-    );
+        let timeline = harness
+            .router
+            .clone()
+            .oneshot(bearer_get(&format!(
+                "/api/webchat/v2/threads/{thread_id}/timeline"
+            )))
+            .await
+            .expect("timeline oneshot");
+        assert_eq!(
+            timeline.status(),
+            StatusCode::OK,
+            "the thread must belong to the authenticated caller — the body could not set scope"
+        );
 
-    harness
-        .runtime
-        .shutdown()
-        .await
-        .expect("runtime shutdown clean");
+        harness
+            .runtime
+            .shutdown()
+            .await
+            .expect("runtime shutdown clean");
+    })
+    .await;
 }
 
 // ─── operator LLM-config smoke (issue #4673) ──────────────────────────
 //
-// Stands up the same real local-dev runtime as the chat e2e, but with a boot
+// Stands up the same real standalone runtime as the chat e2e, but with a boot
 // config (so the product surface composes the operator LLM-config service) and an
 // operator-scoped authenticator (so the `/api/webchat/v2/llm/providers` routes
 // mount). Saving the built-in NEAR AI provider stores its API key under the
@@ -1962,19 +1980,19 @@ mod operator_llm_config {
 
     async fn build_operator_harness() -> Harness {
         let root = tempfile::tempdir().expect("tempdir");
-        let storage_root = root.path().join("local-dev");
+        let storage_root = root.path().join("standalone");
         let home = RebornHome::resolve_from_env_parts(
             Some(root.path().join("reborn-home").into_os_string()),
             None,
             None,
         )
         .expect("valid reborn home");
-        let boot = RebornBootConfig::new(home, RebornProfile::LocalDev);
+        let boot = RebornBootConfig::new(home, RebornProfile::Standalone);
 
         let gateway = Arc::new(ToolCallingGateway::default());
         let input = RebornRuntimeInput::from_build_input(
-            ironclaw_reborn_composition::local_dev_build_input(USER, storage_root)
-                .with_runtime_policy(local_dev_effective_policy())
+            ironclaw_reborn_composition::local_filesystem_build_input(USER, storage_root)
+                .with_runtime_policy(local_host_effective_policy())
                 .with_bundled_first_party_for_test(),
         )
         .with_identity(RebornRuntimeIdentity {
@@ -2165,7 +2183,7 @@ async fn wait_for_assistant_reply(router: &axum::Router, thread_id: &str, needle
 async fn webui_filesystem_memory_mount_is_scoped_to_authenticated_user() {
     let harness = build_two_user_harness(
         Arc::new(MemoryWriteGateway::default()),
-        local_dev_effective_policy(),
+        local_host_effective_policy(),
     )
     .await;
     let router = &harness.router;

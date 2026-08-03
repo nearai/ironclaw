@@ -6,31 +6,33 @@ use async_trait::async_trait;
 use ironclaw_filesystem::{
     DirEntry, FileStat, FileType, FilesystemError, FilesystemOperation, RootFilesystem,
 };
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 
-use crate::backend::{MemoryBackend, MemoryContext};
-use crate::chunking::{content_bytes_sha256, content_sha256};
-use crate::events::{
-    MemorySignificantEvent, MemorySignificantEventSink, MemorySignificantEventSource,
-    record_memory_significant_event,
-};
+use crate::backend::MemoryBackend;
+use crate::events::record_memory_significant_event;
 use crate::indexer::MemoryDocumentIndexer;
 use crate::metadata::{MemoryBackendWriteOptions, MemoryWriteOptions, resolve_document_metadata};
-use crate::path::{
-    MemoryDocumentPath, MemoryDocumentScope, ParsedMemoryPath, memory_error, memory_not_found,
-};
+use crate::path::{ParsedMemoryPath, memory_error, memory_not_found};
 use crate::repo::{
     MemoryAppendOutcome, MemoryDocumentRepository, memory_direct_children,
     scoped_memory_changed_by_key,
 };
 use crate::safety::{
-    DefaultPromptWriteSafetyPolicy, PromptProtectedPathRegistry, PromptSafetyAllowanceId,
-    PromptWriteOperation, PromptWriteSafetyCheck, PromptWriteSafetyEnforcement,
-    PromptWriteSafetyEventSink, PromptWriteSafetyPolicy, PromptWriteSource,
+    DefaultPromptWriteSafetyPolicy, PromptWriteSafetyCheck, PromptWriteSafetyEnforcement,
     enforce_prompt_write_safety, prompt_write_policy_requires_previous_content_hash,
     prompt_write_protected_classification, take_prompt_safety_allowance,
 };
 use crate::schema::validate_content_against_schema;
+use ironclaw_memory::MemoryContext;
+use ironclaw_memory::{MemoryDocumentPath, MemoryDocumentScope};
+use ironclaw_memory::{
+    MemorySignificantEvent, MemorySignificantEventSink, MemorySignificantEventSource,
+};
+use ironclaw_memory::{
+    PromptProtectedPathRegistry, PromptSafetyAllowanceId, PromptWriteOperation,
+    PromptWriteSafetyEventSink, PromptWriteSafetyPolicy, PromptWriteSource,
+};
+use ironclaw_memory::{content_bytes_sha256, content_sha256};
 
 const MAX_MEMORY_APPEND_RETRIES: usize = 8;
 

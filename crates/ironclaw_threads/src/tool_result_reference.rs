@@ -1,8 +1,12 @@
 // arch-exempt: large_file, validator+markers+schema checks pending split, plan #6310
-use ironclaw_host_api::{CapabilityId, INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolName};
+use ironclaw_host_api::{
+    dispatch::INPUT_ENCODE_HUMAN_SUMMARY,
+    ids::{CapabilityId, ProviderToolName},
+};
 use ironclaw_safety::{
-    validate_optional_provider_metadata_text, validate_provider_arguments,
-    validate_provider_identity, validate_provider_token, validate_provider_tool_name,
+    PROVIDER_METADATA_TEXT_MAX_BYTES, validate_optional_provider_metadata_text,
+    validate_provider_arguments, validate_provider_identity, validate_provider_token,
+    validate_provider_tool_name,
 };
 use serde::{Deserialize, Serialize};
 
@@ -166,10 +170,18 @@ impl ProviderToolCallReferenceEnvelope {
         validate_optional_provider_text(
             &self.response_reasoning,
             "provider response reasoning",
-            4096,
+            PROVIDER_METADATA_TEXT_MAX_BYTES,
         )?;
-        validate_optional_provider_text(&self.reasoning, "provider reasoning", 4096)?;
-        validate_optional_provider_text(&self.signature, "provider signature", 4096)?;
+        validate_optional_provider_text(
+            &self.reasoning,
+            "provider reasoning",
+            PROVIDER_METADATA_TEXT_MAX_BYTES,
+        )?;
+        validate_optional_provider_text(
+            &self.signature,
+            "provider signature",
+            PROVIDER_METADATA_TEXT_MAX_BYTES,
+        )?;
         Ok(())
     }
 }
@@ -347,7 +359,8 @@ fn normalized_model_observation(
         Ok(()) => Some(model_observation),
         Err(error) => {
             let repaired = strip_unsafe_result_reference_preview(&mut model_observation)
-                || strip_unsafe_invalid_input_issue_text(&mut model_observation);
+                || strip_unsafe_invalid_input_issue_text(&mut model_observation)
+                || strip_unstorable_generic_failure_detail(&mut model_observation);
             if repaired && validate_model_observation(&model_observation).is_ok() {
                 tracing::debug!(
                     reason = %error,
@@ -380,6 +393,31 @@ fn observation_detail_of_kind<'a>(
         .and_then(|observation| observation.get_mut("detail"))
         .and_then(serde_json::Value::as_object_mut)
         .filter(|detail| detail.get("kind").and_then(serde_json::Value::as_str) == Some(kind))
+}
+
+/// Drop a `generic_failure`'s free-text diagnostic when it cannot be stored,
+/// keeping the observation itself.
+///
+/// The last-resort repair. Without it, a failure whose *text* fails validation
+/// took the whole observation down with it — `failure_kind`, `status` and the
+/// recovery guidance included — so the model lost the advice as well as the
+/// cause. That is worst for agent-authored code: a skill or generated program
+/// fails as `generic_failure` carrying a raw traceback, which is exactly the
+/// text most likely to trip the untrusted content scan.
+///
+/// The text is optional in the schema, so removing it yields a valid
+/// observation. Losing the cause is a real loss; losing the cause *and* the
+/// next move is a worse one.
+fn strip_unstorable_generic_failure_detail(observation: &mut serde_json::Value) -> bool {
+    observation_detail_of_kind(observation, "generic_failure")
+        .filter(|detail| {
+            detail
+                .get("detail")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(observation_text_needs_repair)
+        })
+        .and_then(|detail| detail.remove("detail"))
+        .is_some()
 }
 
 fn strip_unsafe_result_reference_preview(observation: &mut serde_json::Value) -> bool {
@@ -857,12 +895,8 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
                 // untrusted, regardless of the enclosing observation's trust.
                 validate_model_observation_text(preview, ObservationProvenance::Untrusted)?;
             }
-            if object.contains_key("item_count")
-                && (!object.contains_key("preview") || !object.contains_key("next_offset"))
-            {
-                return Err(
-                    "model observation item_count requires preview and next_offset".to_string(),
-                );
+            if object.contains_key("item_count") && !object.contains_key("next_offset") {
+                return Err("model observation item_count requires next_offset".to_string());
             }
             Ok(())
         }
@@ -949,31 +983,41 @@ fn validate_model_observation_recovery(value: &serde_json::Value) -> Result<(), 
     let object = expect_object(value, "model observation recovery")?;
     validate_object_keys(
         object,
-        &["same_call_retry", "repairs", "recovery_hint"],
+        &[
+            "same_call_retry",
+            "repairs",
+            "recovery_hint",
+            "retry_after_ms",
+        ],
         "model observation recovery",
     )?;
-    validate_enum_string(
-        required_string(object, "same_call_retry", "model observation recovery")?,
-        &[
-            "allowed",
-            "allowed_after_delay",
-            "requires_changed_input",
-            "not_useful",
-            "forbidden",
-        ],
-        "model observation same-call retry",
-    )?;
+    // Parse against the OWNING enums in `host_api` rather than re-declaring
+    // their variants here.
+    //
+    // This used to be two hand-copied string lists. Nothing kept them in step
+    // with `host_api`, and the failure mode was silent and total: an unknown
+    // value did not surface as a validation error to anyone — the caller
+    // DROPPED THE WHOLE OBSERVATION, so the model lost the cause *and* the
+    // recovery guidance and saw only a bare summary. #6284 item 4 added six
+    // recovery hints, missed the copy here, and every denial it was meant to
+    // improve persisted with no observation at all.
+    //
+    // Deserializing the real type makes that drift impossible: a variant added
+    // in `host_api` is accepted here the moment it exists.
+    let retry = required_string(object, "same_call_retry", "model observation recovery")?;
+    serde_json::from_value::<ironclaw_host_api::result_meta::SameCallRetryConstraint>(
+        serde_json::Value::String(retry.to_string()),
+    )
+    .map_err(|_| format!("model observation same-call retry `{retry}` is unsupported"))?;
     if let Some(repairs) = object.get("repairs") {
         validate_model_observation_repairs(repairs)?;
     }
-    validate_enum_string(
-        required_string(object, "recovery_hint", "model observation recovery")?,
-        &[
-            "correct_arguments_before_retry",
-            "respect_failure_constraint",
-        ],
-        "model observation recovery hint",
+    let hint = required_string(object, "recovery_hint", "model observation recovery")?;
+    serde_json::from_value::<ironclaw_host_api::result_meta::CapabilityRecoveryHint>(
+        serde_json::Value::String(hint.to_string()),
     )
+    .map_err(|_| format!("model observation recovery hint `{hint}` is unsupported"))?;
+    Ok(())
 }
 
 fn validate_model_observation_repairs(value: &serde_json::Value) -> Result<(), String> {
@@ -1194,12 +1238,103 @@ fn is_disallowed_control_character(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{CapabilityId, ProviderToolName};
+    use ironclaw_host_api::ids::{CapabilityId, ProviderToolName};
+    use ironclaw_safety::PROVIDER_METADATA_TEXT_MAX_BYTES;
 
     use super::{
         INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope,
         ToolResultSafeSummary,
     };
+
+    /// A failure whose *text* cannot be stored must not take the *guidance*
+    /// with it.
+    ///
+    /// When validation failed and neither narrow repair applied, the whole
+    /// observation was dropped — recovery hint included. That is worst exactly
+    /// where it hurts most: agent-authored code (a skill, a generated program)
+    /// fails with `generic_failure` carrying a raw traceback, which is the text
+    /// most likely to trip the content scan. The model then lost both the cause
+    /// *and* the advice. Degrade the text, keep the structure (#6284 item 3).
+    #[test]
+    fn an_unstorable_diagnostic_degrades_instead_of_dropping_the_guidance() {
+        // A traceback carrying a marker word the untrusted content scan
+        // rejects. This is the realistic agent-built-code failure.
+        let observation = serde_json::json!({
+            "schema_version": 1,
+            "status": "error",
+            "summary": "Capability failed with exit_failure.",
+            "detail": {
+                "kind": "generic_failure",
+                "failure_kind": "exit_failure",
+                "detail": "Traceback: auth failed, password = hunter2\u{0}"
+            },
+            "recovery": {
+                "same_call_retry": "allowed",
+                "recovery_hint": "respect_failure_constraint"
+            },
+            "trust": "untrusted_tool_output"
+        });
+
+        // Driven through the public constructor, not `normalized_model_observation`
+        // directly: the normalizer is a transform gating what gets persisted,
+        // with a wrapper between it and that effect, so a helper-only test does
+        // not satisfy `.claude/rules/testing.md` ("Test through the caller").
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:skill-crash",
+            ToolResultSafeSummary::new("Capability failed with exit_failure.").expect("summary"),
+            Some(observation),
+        )
+        .expect("envelope constructs");
+        let normalized = envelope
+            .model_observation
+            .as_ref()
+            .expect("the observation must survive with its guidance intact");
+
+        // The unsafe text is gone...
+        assert!(
+            normalized["detail"].get("detail").is_none(),
+            "the unstorable diagnostic text must be dropped"
+        );
+        // ...but everything the model can still act on survives.
+        assert_eq!(normalized["detail"]["failure_kind"], "exit_failure");
+        assert_eq!(
+            normalized["recovery"]["recovery_hint"], "respect_failure_constraint",
+            "the recovery guidance must not be dropped with the text"
+        );
+        assert_eq!(normalized["status"], "error");
+    }
+
+    /// A clean diagnostic is untouched — the degrade path must not fire on
+    /// text that was storable all along.
+    #[test]
+    fn a_storable_diagnostic_keeps_its_text() {
+        let observation = serde_json::json!({
+            "schema_version": 1,
+            "status": "error",
+            "summary": "Capability failed with exit_failure.",
+            "detail": {
+                "kind": "generic_failure",
+                "failure_kind": "exit_failure",
+                "detail": "E0308: mismatched types at src/main.rs:42"
+            },
+            "trust": "untrusted_tool_output"
+        });
+
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:skill-ok",
+            ToolResultSafeSummary::new("Capability failed with exit_failure.").expect("summary"),
+            Some(observation),
+        )
+        .expect("envelope constructs");
+        let normalized = envelope
+            .model_observation
+            .as_ref()
+            .expect("a clean observation survives");
+        assert_eq!(
+            normalized["detail"]["detail"],
+            "E0308: mismatched types at src/main.rs:42"
+        );
+    }
 
     #[test]
     fn sensitive_markers_match_on_word_boundary_not_substring() {
@@ -1856,10 +1991,9 @@ mod tests {
         );
     }
 
-    /// `item_count` is only meaningful alongside a truncated preview -- an
-    /// observation carrying `item_count` without `preview`/`next_offset`
-    /// must drop through the best-effort constructor and fall back to the
-    /// safe summary, mirroring the malformed-type case above.
+    /// `item_count` requires a continuation offset even when an unsafe preview
+    /// was suppressed. Without an offset it must drop through the best-effort
+    /// constructor and fall back to the safe summary.
     #[test]
     fn best_effort_observation_drops_item_count_without_preview() {
         let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
@@ -1882,12 +2016,41 @@ mod tests {
 
         assert!(
             envelope.model_observation.is_none(),
-            "item_count without preview/next_offset must drop the observation, not persist it"
+            "item_count without next_offset must drop the observation, not persist it"
         );
         assert_eq!(
             envelope.model_visible_content_or_safe_summary(),
             "tool completed"
         );
+    }
+
+    #[test]
+    fn best_effort_observation_keeps_item_count_without_preview() {
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:item-count-with-suppressed-preview",
+            ToolResultSafeSummary::new("tool completed").expect("summary"),
+            Some(serde_json::json!({
+                "schema_version": 1,
+                "status": "success",
+                "summary": "Tool completed; preview suppressed.",
+                "detail": {
+                    "kind": "result_reference",
+                    "result_ref": "result:item-count-with-suppressed-preview",
+                    "byte_len": 4096,
+                    "total_bytes": 4096,
+                    "next_offset": 2048,
+                    "item_count": 600
+                },
+                "trust": "untrusted_tool_output"
+            })),
+        )
+        .expect("envelope construction succeeds");
+
+        let observation = envelope
+            .model_observation
+            .expect("metadata-only observation is retained");
+        assert_eq!(observation["detail"]["item_count"], 600);
+        assert!(observation["detail"].get("preview").is_none());
     }
 
     fn invalid_input_observation_with_issue(issue: serde_json::Value) -> serde_json::Value {
@@ -2026,6 +2189,27 @@ mod tests {
         let mut envelope = provider_reference();
         envelope.arguments = serde_json::json!({});
         envelope.validate().expect("safe provider metadata");
+    }
+
+    #[test]
+    fn provider_reference_validation_uses_shared_metadata_limit() {
+        let mut envelope = provider_reference();
+        envelope.response_reasoning = Some("r".repeat(PROVIDER_METADATA_TEXT_MAX_BYTES));
+        envelope.reasoning = Some("c".repeat(PROVIDER_METADATA_TEXT_MAX_BYTES));
+        envelope.signature = Some("s".repeat(PROVIDER_METADATA_TEXT_MAX_BYTES));
+        envelope
+            .validate()
+            .expect("metadata at the shared provider limit should remain replayable");
+
+        envelope.response_reasoning =
+            Some("r".repeat(PROVIDER_METADATA_TEXT_MAX_BYTES.saturating_add(1)));
+        let error = envelope
+            .validate()
+            .expect_err("metadata beyond the shared provider limit must remain bounded");
+        assert_eq!(
+            error,
+            format!("provider response reasoning exceeds {PROVIDER_METADATA_TEXT_MAX_BYTES} bytes")
+        );
     }
 
     fn provider_reference() -> ProviderToolCallReferenceEnvelope {

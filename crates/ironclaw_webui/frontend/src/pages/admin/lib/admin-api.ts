@@ -27,7 +27,9 @@ export async function fetchAdminUsers(params) {
   if (params?.limit != null) query.set("limit", String(params.limit));
   if (params?.cursor) query.set("cursor", params.cursor);
   const suffix = query.toString() ? `?${query.toString()}` : "";
-  const response = await apiFetch(`${ADMIN_BASE}/users${suffix}`);
+  const response = await apiFetch(`${ADMIN_BASE}/users${suffix}`, {
+    signal: params?.signal,
+  });
   const users = Array.isArray(response?.users) ? response.users.map(normalizeUser) : [];
   return { users, total: users.length, nextCursor: response?.next_cursor ?? null };
 }

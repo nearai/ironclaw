@@ -4,7 +4,7 @@
   services, fake services, and the recipe-driven `AuthEngine`
   (extension-runtime workstream D): `oauth2_code` + PKCE, `api_key` + probe,
   RFC 7591 dynamic client registration, and the `AuthAccountState` machine.
-  The engine executes `ironclaw_host_api::VendorAuthRecipe` data only — never
+  The engine executes `ironclaw_extension_contracts::recipe::VendorAuthRecipe` data only — never
   add a vendor-conditional code path here; a vendor difference belongs in
   recipe data or (as a last resort, with an ADR) a narrow declared quirk hook.
 - Engine transport is the injected `RuntimeHttpEgress` port and token storage is the injected `ironclaw_secrets::SecretStore`; every vendor request pins a network policy to the recipe endpoint's host and caps the response body. Vendor response bodies are never logged, stored, or embedded in errors — only stable OAuth error codes are extracted.

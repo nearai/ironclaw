@@ -4,17 +4,15 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, LoadCheckpointPayloadRequest,
+    LoadedCheckpointPayload, LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef,
+    LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
+    LoopInputCursor, LoopInputPort, LoopProgressEvent, LoopProgressPort, LoopRunContext,
+    LoopRunInfoPort, RedactedCheckpointPayload, StageCheckpointPayloadRequest,
+};
 use ironclaw_turns::{
-    CheckpointStateStorePort, GetCheckpointStateRequest, GetLoopCheckpointRequest,
-    LoopCheckpointStateRef, LoopCheckpointStore, PutCheckpointStateRequest,
-    PutLoopCheckpointRequest, TurnCheckpointId, TurnRunId,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, LoadCheckpointPayloadRequest,
-        LoadedCheckpointPayload, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
-        LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
-        LoopInputCursor, LoopInputPort, LoopProgressEvent, LoopProgressPort, LoopRunContext,
-        LoopRunInfoPort, StageCheckpointPayloadRequest,
-    },
+    GetLoopCheckpointRequest, LoopCheckpointStore, PutLoopCheckpointRequest, TurnCheckpointId,
 };
 
 use super::turn_error_to_host_error;
@@ -77,33 +75,30 @@ impl LoopInputPort for NoExtraLoopInputPort {
 #[derive(Clone)]
 pub(super) struct HostManagedLoopCheckpointPort {
     run_context: LoopRunContext,
-    checkpoint_state_store: Arc<dyn CheckpointStateStorePort>,
     loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-    staged_checkpoint_refs: Arc<Mutex<HashMap<LoopCheckpointStateRef, LoopCheckpointKind>>>,
+    staged_checkpoints: Arc<Mutex<HashMap<LoopCheckpointStateRef, StageCheckpointPayloadRequest>>>,
 }
 
 impl HostManagedLoopCheckpointPort {
     pub(super) fn new(
         run_context: LoopRunContext,
-        checkpoint_state_store: Arc<dyn CheckpointStateStorePort>,
         loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     ) -> Self {
         Self {
             run_context,
-            checkpoint_state_store,
             loop_checkpoint_store,
             milestone_sink,
-            staged_checkpoint_refs: Arc::new(Mutex::new(HashMap::new())),
+            staged_checkpoints: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    fn staged_checkpoint_kind(
+    fn staged_checkpoint(
         &self,
         state_ref: &LoopCheckpointStateRef,
-    ) -> Result<Option<LoopCheckpointKind>, AgentLoopHostError> {
-        self.staged_checkpoint_refs
+    ) -> Result<Option<StageCheckpointPayloadRequest>, AgentLoopHostError> {
+        self.staged_checkpoints
             .lock()
             .map_err(|_| {
                 AgentLoopHostError::new(
@@ -111,7 +106,7 @@ impl HostManagedLoopCheckpointPort {
                     "checkpoint staged-ref cache lock was poisoned",
                 )
             })
-            .map(|staged| staged.get(state_ref).copied())
+            .map(|staged| staged.get(state_ref).cloned())
     }
 }
 
@@ -127,43 +122,17 @@ impl LoopCheckpointPort for HostManagedLoopCheckpointPort {
         &self,
         request: LoopCheckpointRequest,
     ) -> Result<TurnCheckpointId, AgentLoopHostError> {
-        // `stage_checkpoint_payload` returns a run-scoped ref of the form
-        // `checkpoint:{run_id}:{token}`. The underlying store indexed the payload
-        // under the original `checkpoint:{token}` key (which `new_state_ref()`
-        // generated). Unwrap to the store key so the look-up succeeds, then pass
-        // the caller-supplied (run-scoped) ref through to the loop-checkpoint
-        // record so `is_for_run` validators see the correct form.
-        let store_ref = checkpoint_state_store_ref(&self.run_context, &request.state_ref)?;
-
-        match self.staged_checkpoint_kind(&request.state_ref)? {
-            Some(kind) if kind == request.kind => {}
-            Some(_) => {
-                return Err(AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::CheckpointRejected,
-                    "checkpoint state ref kind does not match the checkpoint request",
-                ));
-            }
-            None => {
-                let loaded = self
-                    .checkpoint_state_store
-                    .get_checkpoint_state(GetCheckpointStateRequest {
-                        scope: self.run_context.scope.clone(),
-                        turn_id: self.run_context.turn_id,
-                        run_id: self.run_context.run_id,
-                        state_ref: store_ref,
-                        schema_id: self.run_context.checkpoint_schema_id.clone(),
-                        schema_version: self.run_context.checkpoint_schema_version,
-                        kind: request.kind,
-                    })
-                    .await
-                    .map_err(turn_error_to_host_error)?;
-                if loaded.is_none() {
-                    return Err(AgentLoopHostError::new(
-                        AgentLoopHostErrorKind::CheckpointRejected,
-                        "checkpoint state ref is unavailable for this loop run",
-                    ));
-                }
-            }
+        let staged = self.staged_checkpoint(&request.state_ref)?.ok_or_else(|| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::CheckpointRejected,
+                "checkpoint state ref is unavailable for this loop run",
+            )
+        })?;
+        if staged.kind != request.kind {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::CheckpointRejected,
+                "checkpoint state ref kind does not match the checkpoint request",
+            ));
         }
 
         let checkpoint = self
@@ -173,6 +142,9 @@ impl LoopCheckpointPort for HostManagedLoopCheckpointPort {
                 turn_id: self.run_context.turn_id,
                 run_id: self.run_context.run_id,
                 state_ref: request.state_ref,
+                payload: RedactedCheckpointPayload::new(staged.payload).map_err(|reason| {
+                    AgentLoopHostError::new(AgentLoopHostErrorKind::CheckpointRejected, reason)
+                })?,
                 schema_id: self.run_context.checkpoint_schema_id.clone(),
                 schema_version: self.run_context.checkpoint_schema_version,
                 kind: request.kind,
@@ -180,6 +152,15 @@ impl LoopCheckpointPort for HostManagedLoopCheckpointPort {
             })
             .await
             .map_err(turn_error_to_host_error)?;
+        self.staged_checkpoints
+            .lock()
+            .map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "checkpoint staged-ref cache lock was poisoned",
+                )
+            })?
+            .remove(&checkpoint.state_ref);
         LoopHostMilestoneEmitter::new(self.run_context.clone(), Arc::clone(&self.milestone_sink))
             .checkpoint_created(checkpoint.checkpoint_id, request.kind)
             .await?;
@@ -191,9 +172,8 @@ impl LoopCheckpointPort for HostManagedLoopCheckpointPort {
         request: StageCheckpointPayloadRequest,
     ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
         // Reject staged payloads whose schema_id disagrees with the run
-        // profile's resolved checkpoint schema — the read-side
-        // `get_checkpoint_state` checks `(state_ref, schema_id, kind)` as a
-        // unit, so mismatches here would lead to phantom resume rejections.
+        // profile's resolved checkpoint schema. Rejecting mismatches before
+        // staging keeps the eventual process checkpoint command self-consistent.
         if request.schema_id != self.run_context.checkpoint_schema_id {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::CheckpointRejected,
@@ -201,39 +181,20 @@ impl LoopCheckpointPort for HostManagedLoopCheckpointPort {
             ));
         }
 
-        let record = self
-            .checkpoint_state_store
-            .put_checkpoint_state(PutCheckpointStateRequest::new(
-                self.run_context.scope.clone(),
-                self.run_context.turn_id,
-                self.run_context.run_id,
-                self.run_context.checkpoint_schema_id.clone(),
-                self.run_context.checkpoint_schema_version,
-                request.kind,
-                request.payload,
-            ))
-            .await
-            .map_err(turn_error_to_host_error)?;
-
-        // The store produces `checkpoint:{uuid}` refs. Wrap into the run-scoped
-        // form `checkpoint:{run_id}:{token}` so that `LoopCheckpointStateRef::
-        // is_for_run` validators accept the returned ref without treating it as
-        // a cross-run ref. The token is the opaque UUID the store already minted.
-        let raw = record.state_ref.as_str();
-        let token = raw.strip_prefix("checkpoint:").ok_or_else(|| {
+        RedactedCheckpointPayload::new(request.payload.clone()).map_err(|reason| {
+            AgentLoopHostError::new(AgentLoopHostErrorKind::CheckpointRejected, reason)
+        })?;
+        let run_scoped_ref = LoopCheckpointStateRef::for_run(
+            &self.run_context,
+            TurnCheckpointId::new().as_uuid().simple().to_string(),
+        )
+        .map_err(|reason| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Internal,
-                "checkpoint state store returned ref without expected `checkpoint:` prefix",
+                format!("could not build run-scoped checkpoint state ref: {reason}"),
             )
         })?;
-        let run_scoped_ref =
-            LoopCheckpointStateRef::for_run(&self.run_context, token).map_err(|reason| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Internal,
-                    format!("could not build run-scoped checkpoint state ref: {reason}"),
-                )
-            })?;
-        self.staged_checkpoint_refs
+        self.staged_checkpoints
             .lock()
             .map_err(|_| {
                 AgentLoopHostError::new(
@@ -241,7 +202,7 @@ impl LoopCheckpointPort for HostManagedLoopCheckpointPort {
                     "checkpoint staged-ref cache lock was poisoned",
                 )
             })?
-            .insert(run_scoped_ref.clone(), request.kind);
+            .insert(run_scoped_ref.clone(), request);
         Ok(run_scoped_ref)
     }
 
@@ -275,86 +236,20 @@ impl LoopCheckpointPort for HostManagedLoopCheckpointPort {
             ));
         }
 
-        let (state_ref, state_run_id) =
-            checkpoint_state_store_ref_and_run_id(&self.run_context, &metadata.state_ref)?;
-        let state_record = self
-            .checkpoint_state_store
-            .get_checkpoint_state(GetCheckpointStateRequest {
-                scope: self.run_context.scope.clone(),
-                turn_id: self.run_context.turn_id,
-                run_id: state_run_id,
-                state_ref,
-                schema_id: metadata.schema_id.clone(),
-                schema_version: metadata.schema_version,
-                kind: metadata.kind,
-            })
-            .await
-            .map_err(turn_error_to_host_error)?
-            .ok_or_else(|| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Unavailable,
-                    "checkpoint payload was not found for this loop run",
-                )
-            })?;
+        let payload = metadata.payload.ok_or_else(|| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "checkpoint payload was not found for this loop run",
+            )
+        })?;
 
         Ok(LoadedCheckpointPayload {
-            kind: state_record.kind,
-            schema_id: state_record.schema_id,
-            schema_version: state_record.schema_version,
-            payload: state_record.payload,
+            kind: metadata.kind,
+            schema_id: metadata.schema_id,
+            schema_version: metadata.schema_version,
+            payload,
         })
     }
-}
-
-fn checkpoint_state_store_ref(
-    run_context: &LoopRunContext,
-    state_ref: &LoopCheckpointStateRef,
-) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
-    // Write path: a checkpoint record may only be staged under the current
-    // run's scope. Cross-run links (`checkpoint:{other_run}:{token}`) are a
-    // read-only retry-resume affordance resolved in `load_checkpoint_payload`;
-    // accepting one here would index the write against a foreign run's payload
-    // and later fail to load. Reject anything not scoped to this run.
-    let (store_ref, source_run_id) = checkpoint_state_store_ref_and_run_id(run_context, state_ref)?;
-    if source_run_id != run_context.run_id {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::CheckpointRejected,
-            "checkpoint state ref is not scoped to this loop run",
-        ));
-    }
-    Ok(store_ref)
-}
-
-fn checkpoint_state_store_ref_and_run_id(
-    run_context: &LoopRunContext,
-    state_ref: &LoopCheckpointStateRef,
-) -> Result<(LoopCheckpointStateRef, TurnRunId), AgentLoopHostError> {
-    let run_scoped_prefix = format!("checkpoint:{}:", run_context.run_id);
-    if let Some(token) = state_ref.as_str().strip_prefix(&run_scoped_prefix) {
-        return Ok((store_checkpoint_state_ref(token)?, run_context.run_id));
-    }
-    let Some(rest) = state_ref.as_str().strip_prefix("checkpoint:") else {
-        return Ok((state_ref.clone(), run_context.run_id));
-    };
-    let Some((run_id, token)) = rest.split_once(':') else {
-        return Ok((state_ref.clone(), run_context.run_id));
-    };
-    let source_run_id = TurnRunId::parse(run_id).map_err(|error| {
-        AgentLoopHostError::new(
-            AgentLoopHostErrorKind::Invalid,
-            format!("checkpoint state ref contains invalid source run id: {error}"),
-        )
-    })?;
-    Ok((store_checkpoint_state_ref(token)?, source_run_id))
-}
-
-fn store_checkpoint_state_ref(token: &str) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
-    LoopCheckpointStateRef::new(format!("checkpoint:{token}")).map_err(|reason| {
-        AgentLoopHostError::new(
-            AgentLoopHostErrorKind::Internal,
-            format!("could not rebuild store key from run-scoped checkpoint ref: {reason}"),
-        )
-    })
 }
 
 #[derive(Clone)]
@@ -444,6 +339,16 @@ impl LoopProgressPort for HostManagedLoopProgressPort {
                     )
                     .await
             }
+            LoopProgressEvent::FailureRecovered {
+                sequence,
+                stage,
+                class,
+                disposition,
+            } => {
+                emitter
+                    .failure_recovered(sequence, stage, class, disposition)
+                    .await
+            }
             LoopProgressEvent::GateBlocked {
                 iteration,
                 gate_kind,
@@ -471,7 +376,12 @@ impl LoopProgressPort for HostManagedLoopProgressPort {
             LoopProgressEvent::CompactionLeakDetected {
                 task_id,
                 reason_kind,
-            } => emitter.compaction_leak_detected(task_id, reason_kind).await,
+                redacted_leak_count,
+            } => {
+                emitter
+                    .compaction_leak_detected(task_id, reason_kind, redacted_leak_count)
+                    .await
+            }
             // Goal refresh has event types reserved in the run-profile surface,
             // but no producer path in the current loop.
             LoopProgressEvent::GoalRefreshStarted { .. }

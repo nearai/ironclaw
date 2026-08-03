@@ -4,8 +4,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::ScopedPath;
-use ironclaw_turns::run_profile::LoopRunContext;
+use ironclaw_host_api::path::ScopedPath;
+use ironclaw_loop_contracts::LoopRunContext;
 
 use crate::{SkillActivationSelectionError, activation::SetupMarkerSource};
 
@@ -98,13 +98,14 @@ fn workspace_setup_marker_path(marker: &str) -> Option<ScopedPath> {
 mod tests {
     use super::*;
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-    use ironclaw_host_api::{AgentId, MountView, ProjectId, TenantId};
-    use ironclaw_turns::{
-        AcceptedMessageRef, TurnActor, TurnId, TurnRunId, TurnScope,
-        run_profile::{
-            InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver,
-        },
+    use ironclaw_host_api::{
+        ids::{AgentId, ProjectId, TenantId},
+        mount::MountView,
     };
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver,
+    };
+    use ironclaw_turns::{AcceptedMessageRef, TurnActor, TurnId, TurnRunId, TurnScope};
 
     async fn run_context() -> LoopRunContext {
         let resolved = InMemoryRunProfileResolver::default()
@@ -116,7 +117,7 @@ mod tests {
                 TenantId::new("tenant-a").expect("valid tenant"),
                 Some(AgentId::new("agent-a").expect("valid agent")),
                 Some(ProjectId::new("project-a").expect("valid project")),
-                ironclaw_host_api::ThreadId::new("thread-a").expect("valid thread"),
+                ironclaw_host_api::ids::ThreadId::new("thread-a").expect("valid thread"),
             ),
             TurnId::new(),
             TurnRunId::new(),
@@ -126,7 +127,7 @@ mod tests {
             AcceptedMessageRef::new("msg:setup-marker").expect("valid message ref"),
         )
         .with_actor(TurnActor::new(
-            ironclaw_host_api::UserId::new("user-a").expect("valid user"),
+            ironclaw_host_api::ids::UserId::new("user-a").expect("valid user"),
         ))
     }
 

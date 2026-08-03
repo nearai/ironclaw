@@ -6,14 +6,28 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::AutoApproveSettingInput;
-use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
-    AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-    ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant, MountPermissions,
-    MountView, NetworkPolicy, Principal, Resolution, ResolutionBatch, ResourceScope, RuntimeKind,
-    TenantId, ThreadId, TrustClass, UserId, VirtualPath,
+    action::NetworkPolicy,
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+    ids::{
+        AgentId, CapabilityGrantId, CapabilityId, ExtensionId, InvocationId, TenantId, ThreadId,
+        UserId,
+    },
+    resolution::{Resolution, ResolutionBatch},
+    resource::ResourceScope,
+    runtime::{RuntimeKind, TrustClass},
+    scope::Principal,
 };
 use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind};
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
+    CapabilitySurfaceVersion, ConcurrencyHint, InMemoryLoopHostMilestoneSink,
+    InstructionSafetyContext, LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken,
+    LoopInputCursorToken, LoopRequest, LoopRequestBatch, LoopRunContext, NoOpBudgetAccountant,
+    NoOpPolicyGuard, ParentLoopOutput, PromptMode, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, resolution,
+};
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     EmptyLoopCapabilityPort, EmptyUserProfileSource, HostIdentityContextBuildError,
@@ -45,44 +59,32 @@ use ironclaw_runner::{
         ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
     },
     runtime::{
-        DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RebornRuntimeLoopComposition,
-        RuntimeTurnStateStore, build_product_live_planned_runtime,
+        DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, ProcessRuntimeSystem,
+        RebornRuntimeLoopComposition, build_product_live_planned_runtime,
     },
     subagent::await_edge::{
         boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
     },
-    subagent::goal_store::in_memory_backed_subagent_goal_store,
 };
 use ironclaw_threads::{
     InMemorySessionThreadService, SessionThreadService, ThreadHistoryRequest, ThreadMessageRecord,
     ThreadScope,
 };
 use ironclaw_trust::EffectiveTrustClass;
-use ironclaw_turns::test_support::in_memory_turn_state_store;
+use ironclaw_turns::ProcessLoopCheckpointStore;
 use ironclaw_turns::{
-    CancelRunRequest, GetRunStateRequest, IdempotencyKey, LoopResultRef, SanitizedCancelReason,
-    TurnActor, TurnCoordinator, TurnRunId, TurnRunState, TurnRunWake, TurnScope, TurnStateRowStore,
-    TurnStateStore, TurnStatus,
-    run_profile::{
-        AgentLoopHostError, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilitySurfaceVersion, ConcurrencyHint, InMemoryLoopHostMilestoneSink,
-        InstructionSafetyContext, LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken,
-        LoopInputCursorToken, LoopRequest, LoopRequestBatch, LoopRunContext, NoOpBudgetAccountant,
-        NoOpPolicyGuard, ParentLoopOutput, PromptMode, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, resolution,
-    },
+    AgentTurnRuntimePort, CancelRunRequest, IdempotencyKey, LoopResultRef, SanitizedCancelReason,
+    TurnActor, TurnCoordinator, TurnRunId, TurnRunState, TurnRunWake, TurnScope, TurnStatus,
 };
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
-
-use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 pub struct ProductLiveAgentLoopHarness {
     binding_service: FakeConversationBindingService,
     binding: ResolvedBinding,
     thread_scope: ThreadScope,
     thread_service: InMemorySessionThreadService,
-    turn_store: Arc<TurnStateRowStore<InMemoryBackend>>,
+    turn_store: Arc<ironclaw_turns::AgentTurnProcessRuntime>,
     cancellation_factory: Arc<ReadyRunCancellationFactory>,
     composition: RebornRuntimeLoopComposition<dyn SessionThreadService, RecordingModelGateway>,
     model_requests: Arc<Mutex<Vec<HostManagedModelRequest>>>,
@@ -184,8 +186,8 @@ async fn enable_host_runtime_auto_approve_for_harness_user(
     binding: &ResolvedBinding,
 ) {
     let auto_approve = services
-        .local_dev_auto_approve_settings_for_test()
-        .expect("local-dev host runtime auto-approve settings");
+        .standalone_auto_approve_settings_for_test()
+        .expect("standalone host runtime auto-approve settings");
     let scope = ResourceScope {
         tenant_id: binding.tenant_id.clone(),
         user_id: binding
@@ -216,6 +218,7 @@ pub fn capability_call_response(
         safe_text_deltas: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
         usage: None,
+        effective_fallback_index: Some(0),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: harness_surface_version(),
@@ -247,8 +250,11 @@ impl ProductLiveAgentLoopHarness {
             mission_id: None,
         };
         let thread_service = InMemorySessionThreadService::default();
-        let turn_store = Arc::new(in_memory_turn_state_store());
-        let checkpoint_store = Arc::clone(&turn_store);
+        let process_system = ProcessRuntimeSystem::in_memory_ephemeral().expect("process system");
+        let turn_store = Arc::new(process_system.agent_turn_runtime());
+        let checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore> = Arc::new(
+            ProcessLoopCheckpointStore::new(process_system.checkpoints()),
+        );
         let model_requests = Arc::new(Mutex::new(Vec::new()));
         let model_responses = VecDeque::from(config.model_responses);
         let model_release = config
@@ -260,9 +266,9 @@ impl ProductLiveAgentLoopHarness {
             .map(|_| tempfile::tempdir().expect("host runtime harness tempdir"));
         let host_runtime_services = if let Some(root) = &host_runtime_root {
             let services = build_runtime(RebornRuntimeInput::from_build_input(
-                ironclaw_reborn_composition::local_dev_build_input(
+                ironclaw_reborn_composition::local_filesystem_build_input(
                     "planned-harness-host-runtime",
-                    root.path().join("local-dev"),
+                    root.path().join("standalone"),
                 ),
             ))
             .await
@@ -304,7 +310,7 @@ impl ProductLiveAgentLoopHarness {
         // requirements / fails the exit (#6287 IronLoop). `None` for the
         // non-ProductLive fakes (which do not persist gate records), preserving
         // the executor's tolerant "no store wired" path.
-        let mut turn_executor_gate_store: Option<Arc<dyn ironclaw_run_state::GateRecordStorePort>> =
+        let mut turn_executor_gate_store: Option<Arc<dyn ironclaw_approvals::GateRecordStorePort>> =
             None;
         let capability_factory: Arc<dyn LoopCapabilityPortFactory> = if let Some(capability) =
             config.host_runtime_capability
@@ -315,8 +321,8 @@ impl ProductLiveAgentLoopHarness {
             // same records.
             let capability_store_filesystem =
                 ironclaw_reborn_composition::wrap_scoped(Arc::new(InMemoryBackend::new()));
-            let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort> = Arc::new(
-                ironclaw_run_state::GateRecordStore::new(Arc::clone(&capability_store_filesystem)),
+            let gate_record_store: Arc<dyn ironclaw_approvals::GateRecordStorePort> = Arc::new(
+                ironclaw_approvals::GateRecordStore::new(Arc::clone(&capability_store_filesystem)),
             );
             turn_executor_gate_store = Some(Arc::clone(&gate_record_store));
             let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort> =
@@ -361,21 +367,10 @@ impl ProductLiveAgentLoopHarness {
         );
         let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> =
             Arc::new(ProductLiveCapabilityIo::default());
-        let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
-        let await_edge_mounts = MountView::new(vec![MountGrant::new(
-            MountAlias::new("/turns").unwrap(),
-            VirtualPath::new("/turns").unwrap(),
-            MountPermissions::read_write_list_delete(),
-        )])
-        .unwrap();
-        let await_edge_store = Arc::new(AwaitEdgeStore::new(Arc::new(
-            ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), await_edge_mounts),
-        )));
-        let await_edge_goal_store = Arc::new(in_memory_backed_subagent_goal_store());
+        let await_edge_store = Arc::new(AwaitEdgeStore::new(process_system.dependencies()));
         let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
             Arc::clone(&await_edge_store),
-            await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
-            turn_store.clone() as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
+            turn_store.clone() as Arc<dyn ironclaw_turns::AgentTurnSpawnTreeRuntimePort>,
             capability_result_writer.clone(),
             Arc::new(thread_service.clone()),
         ));
@@ -385,18 +380,17 @@ impl ProductLiveAgentLoopHarness {
         ));
         let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
             attachment_read_port: None,
+            reply_attachment_intent_port: None,
             gate_record_store: turn_executor_gate_store,
-            turn_state: turn_state_for_runtime,
+            process_system,
             thread_service: Arc::new(thread_service.clone()),
             thread_scope: thread_scope.clone(),
             model_gateway,
-            checkpoint_state_store: in_memory_checkpoint_state_store(),
             loop_checkpoint_store: checkpoint_store.clone(),
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             capability_factory,
             capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
             capability_result_writer,
-            subagent_goal_store: await_edge_goal_store,
             subagent_await_edge_writer: await_edge_driver
                 as Arc<dyn ironclaw_loop_host::AwaitEdgeWriter>,
             subagent_await_edge_settler: await_edge_resolver
@@ -413,7 +407,7 @@ impl ProductLiveAgentLoopHarness {
             loop_exit_evidence: Arc::new(
                 ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
                     Arc::new(thread_service.clone()),
-                    Arc::clone(&turn_store) as Arc<dyn TurnStateStore>,
+                    Arc::clone(&turn_store) as Arc<dyn AgentTurnRuntimePort>,
                     checkpoint_store,
                     await_edge_store
                         as Arc<
@@ -532,10 +526,7 @@ impl ProductLiveAgentLoopHarness {
             loop {
                 let state = self
                     .turn_store
-                    .get_run_state(GetRunStateRequest {
-                        scope: scope.clone(),
-                        run_id,
-                    })
+                    .get_run_state(&scope, run_id)
                     .await
                     .expect("harness run state");
                 if state.status.is_terminal() {
@@ -682,6 +673,7 @@ impl ScriptedHostRuntimeToolCall {
             safe_text_deltas: Vec::new(),
             safe_reasoning_deltas: Vec::new(),
             usage: None,
+            effective_fallback_index: Some(request.fallback_index),
             output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version,
@@ -736,8 +728,8 @@ struct ProductLiveHostRuntimeCapabilityFactory {
     // Durable gate-record + replay-payload stores wired into the ProductLive
     // capability port, so a raise and its later resume round-trip through the
     // SAME store (both built over one in-memory filesystem below). Modeling the
-    // production wiring the local-dev path already has (#6287).
-    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStorePort>,
+    // production wiring the standalone path already has (#6287).
+    gate_record_store: Arc<dyn ironclaw_approvals::GateRecordStorePort>,
     replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStorePort>,
 }
 
@@ -879,7 +871,7 @@ impl RecordingDelegatingCapabilityPort {
         };
         let result_ref = LoopResultRef::new(origin.as_str()).map_err(|error| {
             AgentLoopHostError::new(
-                ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation,
+                ironclaw_loop_contracts::AgentLoopHostErrorKind::InvalidInvocation,
                 format!("invalid preserved loop result ref: {error}"),
             )
         })?;
@@ -945,6 +937,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
                 runtime: RuntimeKind::FirstParty,
                 safe_name: self.capability.capability_id.clone(),
                 safe_description: "harness capability".to_string(),
+                description_trust: Default::default(),
                 parameters_schema: serde_json::json!({ "type": "object" }),
                 concurrency_hint: ConcurrencyHint::Exclusive,
             }],
@@ -963,7 +956,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             LoopResultRef::new(self.capability.result_ref.clone())
                 .expect("valid harness result ref"),
             self.capability.safe_summary.clone(),
-            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
             self.capability.terminate_hint,
             0,
             None,
@@ -1218,7 +1211,7 @@ fn dispatch_grants_for_user<const N: usize>(
                 issued_by: Principal::HostRuntime,
                 constraints: GrantConstraints {
                     allowed_effects: vec![EffectKind::DispatchCapability],
-                    mounts: ironclaw_host_api::MountView::default(),
+                    mounts: ironclaw_host_api::mount::MountView::default(),
                     network: NetworkPolicy::default(),
                     secrets: Vec::new(),
                     resource_ceiling: None,
@@ -1232,7 +1225,7 @@ fn dispatch_grants_for_user<const N: usize>(
 
 fn adapter_error(error: impl Display) -> AgentLoopHostError {
     AgentLoopHostError::new(
-        ironclaw_turns::run_profile::AgentLoopHostErrorKind::Internal,
+        ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
         error.to_string(),
     )
 }

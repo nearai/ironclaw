@@ -2,9 +2,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    Authorized, CapabilityAuthorizer, CapabilityId, Invocation, ProcessId, Timestamp,
+    Timestamp,
+    authorized::{Authorized, CapabilityAuthorizer},
+    ids::{CapabilityId, ProcessId},
+    invocation::Invocation,
 };
-use ironclaw_processes::{ProcessError, ProcessExecutionRequest, ProcessStatus, ProcessStorePort};
+use ironclaw_processes::{
+    GetProcessSnapshotRequest, ProcessExecutionRequest, ProcessJournalStoreError,
+    ProcessRuntimePort, ProcessStatus, process_record_from_snapshot,
+};
 use thiserror::Error;
 
 /// Kernel-owned re-minting surface for detached process continuations.
@@ -51,20 +57,20 @@ impl ProcessAuthorizationRemintError {
 }
 
 pub fn process_authorization_remint_port(
-    process_store: Arc<dyn ProcessStorePort>,
+    processes: Arc<dyn ProcessRuntimePort>,
 ) -> Arc<dyn ProcessAuthorizationRemintPort> {
-    Arc::new(StoreBackedProcessAuthorizationReminter { process_store })
+    Arc::new(ProcessAuthorizationReminter { processes })
 }
 
 #[derive(Clone)]
-struct StoreBackedProcessAuthorizationReminter {
-    process_store: Arc<dyn ProcessStorePort>,
+struct ProcessAuthorizationReminter {
+    processes: Arc<dyn ProcessRuntimePort>,
 }
 
-impl CapabilityAuthorizer for StoreBackedProcessAuthorizationReminter {}
+impl CapabilityAuthorizer for ProcessAuthorizationReminter {}
 
 #[async_trait]
-impl ProcessAuthorizationRemintPort for StoreBackedProcessAuthorizationReminter {
+impl ProcessAuthorizationRemintPort for ProcessAuthorizationReminter {
     async fn remint(
         &self,
         request: &ProcessExecutionRequest,
@@ -74,14 +80,20 @@ impl ProcessAuthorizationRemintPort for StoreBackedProcessAuthorizationReminter 
                 capability: request.capability_id.clone(),
             }
         })?;
-        let record = self
-            .process_store
-            .get(&request.scope, request.process_id)
-            .await
-            .map_err(|error| process_lookup_error(request.process_id, error))?
-            .ok_or(ProcessAuthorizationRemintError::UnknownProcess {
+        let snapshot = self
+            .processes
+            .get_process_snapshot(GetProcessSnapshotRequest {
+                scope: request.scope.clone(),
                 process_id: request.process_id,
-            })?;
+            })
+            .await
+            .map_err(|error| process_lookup_error(request.process_id, error))?;
+        let record = process_record_from_snapshot(snapshot).map_err(|error| {
+            ProcessAuthorizationRemintError::ProcessLookup {
+                process_id: request.process_id,
+                reason: error.to_string(),
+            }
+        })?;
 
         if record.status != ProcessStatus::Running {
             return Err(ProcessAuthorizationRemintError::ProcessNotRunning {
@@ -156,7 +168,7 @@ impl ProcessAuthorizationRemintPort for StoreBackedProcessAuthorizationReminter 
         }
 
         let continuation = continuation.clone();
-        let ironclaw_host_api::ProcessAuthorizedContinuation {
+        let ironclaw_host_api::authorized::ProcessAuthorizedContinuation {
             invocation,
             lane,
             mounts,
@@ -187,11 +199,16 @@ impl ProcessAuthorizationRemintPort for StoreBackedProcessAuthorizationReminter 
 
 fn process_lookup_error(
     process_id: ProcessId,
-    error: ProcessError,
+    error: ProcessJournalStoreError,
 ) -> ProcessAuthorizationRemintError {
-    ProcessAuthorizationRemintError::ProcessLookup {
-        process_id,
-        reason: error.to_string(),
+    match error {
+        ProcessJournalStoreError::UnknownProcess { .. } => {
+            ProcessAuthorizationRemintError::UnknownProcess { process_id }
+        }
+        error => ProcessAuthorizationRemintError::ProcessLookup {
+            process_id,
+            reason: error.to_string(),
+        },
     }
 }
 

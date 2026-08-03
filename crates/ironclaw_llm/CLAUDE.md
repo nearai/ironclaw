@@ -17,7 +17,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `openai_codex_provider.rs` | OpenAI Codex Responses API client (SSE streaming, JWT auth, subscription billing) |
 | `openai_codex_session.rs` | OAuth 2.0 session manager for OpenAI Codex (device code flow, token persistence) |
 | `token_refreshing.rs` | Token-refreshing `LlmProvider` decorator for OpenAI Codex (pre-emptive refresh, zero-cost billing) |
-| `reasoning.rs` | `Reasoning` struct, `ReasoningContext`, `RespondResult`, `ActionPlan`, `ToolSelection`; thinking-tag stripping; `SILENT_REPLY_TOKEN` |
+| `reasoning.rs` | Model-response text cleanup (`clean_response` — thinking-tag stripping) and textual tool-call recovery (`contains_codex_text_tool_call_syntax`, `recover_codex_text_tool_calls_from_tool_names`) |
 | `session.rs` | NEAR AI session token management with disk + DB persistence, OAuth login flow |
 | `circuit_breaker.rs` | Circuit breaker: Closed → Open → HalfOpen state machine |
 | `retry.rs` | Exponential backoff retry wrapper; `is_retryable()` classification |
@@ -32,7 +32,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `gemini_oauth.rs` | Gemini OAuth provider (Cloud OAuth credentials → `generativelanguage.googleapis.com`) |
 | `github_copilot.rs` | GitHub Copilot Chat provider (uses dedicated reqwest client, not `RigAdapter`) |
 | `github_copilot_auth.rs` | Copilot session-token exchange and refresh (`CopilotTokenManager`) |
-| `host.rs` | Host-side trait surface: `SessionDb`, `SessionSecrets`, `SessionRenewer`, `SessionKeyPersistor` (binary supplies adapters in `src/llm_host.rs`) |
+| `host.rs` | Host-side trait surface: `SessionDb`, `SessionSecrets`, `SessionRenewer`, `SessionKeyPersistor` (adapters are the composing binary's to supply; none does today — see "Host Trait Surface") |
 | `runtime.rs` | `SwappableLlmProvider` + `LlmReloadHandle` for hot-reloading the provider chain on settings change |
 | `registry.rs` | Provider registry (`ProviderDefinition`, `ProviderProtocol`); resolves backend strings to clients |
 | `resolution.rs` | Full `LlmConfig` resolution for composition roots that select from `providers.json` and need dedicated providers plus the shared provider chain |
@@ -43,7 +43,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `vision_models.rs` | Vision-capable model registry for attachment routing |
 | `reasoning_models.rs` | Reasoning-capable model registry (Codex, R1, o-series, etc.) used for thinking-mode dispatch |
 | `models.rs` | Top-level model-name catalog and helpers |
-| `testing/` | `StubLlm`, `StubErrorKind`, `fault_injection` — gated behind the `testing` cargo feature for downstream test harnesses |
+| `testing/` | `StubLlm`, `StubErrorKind`, `fault_injection` — gated behind the `test-support` cargo feature for downstream test harnesses |
 
 ## Provider Selection
 
@@ -116,7 +116,7 @@ ID, migrate to it immediately. Advanced users can override headers via
 
 **HTTP request timeout:** Non-streaming NEAR AI requests have a 60-second total timeout (`DEFAULT_REQUEST_TIMEOUT_SECS` in `config.rs`). Streaming requests use the same value for time-to-response-headers and each inter-event idle gap, but have no total wall-clock timeout; active long answers must not be cancelled merely because they exceed 60 seconds. The 10 s connect timeout and 30 s TCP keepalive from the shared hardened client also apply (see "Shared client timeout hygiene" below). Rate limit `Retry-After` headers are parsed (both delay-seconds and HTTP-date formats) and forwarded as `LlmError::RateLimited { retry_after }` for the `RetryProvider` to honor.
 
-**Interrupted streams:** A streamed response is complete only after an SSE `[DONE]` marker or an explicit provider finish reason. EOF, transport failure, or an idle timeout before either terminal signal remains an error even when partial text was received. Never reinterpret a partial response as success or issue a semantic continuation request: the runtime must receive the real failure, and only the original provider stream can preserve exact output and tool-call semantics.
+**Interrupted streams:** A streamed response is complete only after an SSE `[DONE]` marker or an explicit provider finish reason. EOF, transport failure, or an idle timeout before either terminal signal is `LlmError::StreamInterrupted` even when partial text was received. Never reinterpret a partial response as success or issue a semantic continuation request: the runtime must receive the real failure, and only the original provider stream can preserve exact output and tool-call semantics. Completed malformed or empty responses use `InvalidResponse` / `EmptyResponse`; those are invalid model output, not provider availability.
 
 **Shared client timeout hygiene:** Every production reqwest client in this crate starts from the shared hardened builders in `config.rs`, the single source of truth for connect-timeout (`CONNECT_TIMEOUT_SECS` = 10 s), TCP keepalive (`TCP_KEEPALIVE_SECS` = 30 s), and idle-pool bound (`POOL_IDLE_TIMEOUT_SECS` = 90 s). One-shot requests additionally use `hardened_client_builder(request_timeout_secs)` for a total timeout; streaming responses use `hardened_streaming_client_builder()` and apply header/idle bounds while consuming the stream. Callers chain site-specific options (`.redirect`, `.resolve_to_addrs`, `.default_headers`) onto the returned builder. Do not re-apply these settings inline — change them only in `config.rs`. Exception: the few infallible constructors that cannot return an error (`SessionManager::new_async`, the transcription providers in `transcription/openai.rs` and `transcription/chat_completions.rs`) build via the hardened builder but log a `tracing::error!` and degrade to a bare `Client::new()` on the rare `.build()` failure (e.g. TLS-backend init) rather than failing construction; making the hardened client the only constructable path in these sites is tracked as durable enforcement in issue #5214.
 
@@ -131,7 +131,7 @@ Closed (normal)
       → Open (if any probe fails)
 ```
 
-**Transient vs non-transient errors:** Only `RequestFailed`, `RateLimited`, `InvalidResponse`, `SessionExpired`, `SessionRenewalFailed`, `Http`, and `Io` count toward the threshold. `AuthFailed`, `ContextLengthExceeded`, `ModelNotAvailable`, and `Json` errors never trip the breaker — they indicate caller problems, not backend degradation.
+**Transient vs non-transient errors:** `RequestFailed`, `RateLimited`, `BadGateway`, `StreamInterrupted`, `SessionExpired`, and `SessionRenewalFailed` count toward the threshold. `Http` and `Io` count only when their concrete status/error kind carries transient connection evidence. `InvalidResponse`, `EmptyResponse`, `AuthFailed`, `ContextLengthExceeded`, `ModelNotAvailable`, `QuotaExceeded`, and `Json` never trip the breaker.
 
 Configure via `LlmConfig` fields: `circuit_breaker_threshold` (env: `LLM_CIRCUIT_BREAKER_THRESHOLD`, falls back to `CIRCUIT_BREAKER_THRESHOLD`; None = disabled), `circuit_breaker_recovery_secs` (env: `LLM_CIRCUIT_BREAKER_RECOVERY_SECS`; default: 30).
 
@@ -147,7 +147,7 @@ The circuit breaker wraps the entire provider chain. When open, it immediately r
 
 ## Retry
 
-`RetryProvider` in `retry.rs` wraps any `LlmProvider` with exponential backoff. Retries on: `RequestFailed`, `RateLimited`, `InvalidResponse`, `SessionRenewalFailed`, `Http`, `Io`. Does **not** retry: `AuthFailed`, `SessionExpired`, `ContextLengthExceeded`, `ModelNotAvailable`, `Json`.
+`RetryProvider` in `retry.rs` wraps any `LlmProvider` with exponential backoff. Retries on: `RequestFailed`, `RateLimited`, `BadGateway`, `StreamInterrupted`, `SessionRenewalFailed`, plus `Http` / `Io` only with concrete transient evidence. Does **not** retry completed `InvalidResponse` / `EmptyResponse`, `AuthFailed`, `SessionExpired`, `ContextLengthExceeded`, `ModelNotAvailable`, `QuotaExceeded`, or `Json`.
 
 **Backoff schedule:** base 1s doubled per attempt with ±25% jitter, minimum floor 100ms. Attempt 0: ~1s, attempt 1: ~2s, attempt 2: ~4s. For `RateLimited`, uses the `retry_after` duration from the error (provider-supplied) instead of backoff.
 
@@ -179,15 +179,15 @@ pub trait LlmProvider: Send + Sync {
 Key notes:
 - `model_name()` returns the configured model name; `active_model_name()` returns the currently active model (may differ if `set_model()` was called — only `NearAiChatProvider` supports this).
 - `cost_per_token()` returns `(Decimal, Decimal)` using `rust_decimal`. Look up via `costs::model_cost()` in your constructor; fall back to `costs::default_cost()` for unknowns.
-- `RigAdapter` ignores per-request model overrides (logs a warning). Only `NearAiChatProvider` supports per-request model overrides via `CompletionRequest::model`.
+- `RigAdapter` forwards per-request model overrides through rig-core's typed request model field. Do not put `model` in flattened `additional_params`, which would serialize a duplicate top-level JSON key.
 - `complete_with_tools()` is never cached (tool calls can have side effects) — `CachedProvider` always passes them through.
 
 To add a new provider:
 1. Create `crates/ironclaw_llm/src/myprovider.rs` implementing `LlmProvider`
 2. Add a `ProviderProtocol` variant in `registry.rs` (or wire a backend-string match in `lib.rs` for non-registry providers like `nearai`/`bedrock`/`openai_codex`)
 3. Wire into the factory dispatch in `lib.rs` (`create_registry_provider` for registry-backed protocols, top-level `create_llm_provider` for backend-string-keyed providers)
-4. Add env vars to `src/config/llm.rs` (main crate) and `.env.example`
-5. If the provider needs persistent state (session tokens, refresh tokens, etc.), use the host traits in `host.rs` — never reach for `crate::db`, `crate::secrets`, or `crate::bootstrap`. The crate must stay independent of the binary; the binary supplies adapter impls in `src/llm_host.rs`.
+4. Add env vars to `.env.example` and to whichever crate reads them (the v1 `src/config/llm.rs` is gone)
+5. If the provider needs persistent state (session tokens, refresh tokens, etc.), use the host traits in `host.rs` — never reach for `crate::db`, `crate::secrets`, or `crate::bootstrap`. The crate must stay independent of the binary; the binary supplies the adapter impls.
 
 ## Host Trait Surface
 
@@ -195,12 +195,19 @@ To add a new provider:
 
 | Trait | Purpose | Binary adapter |
 |-------|---------|----------------|
-| `SessionDb` | JSON settings persistence | `DatabaseSessionDb` in `src/llm_host.rs` |
-| `SessionSecrets` | Encrypted secrets store | `SecretsStoreSessionSecrets` in `src/llm_host.rs` |
-| `SessionRenewer` | Interactive NEAR-AI re-auth flow | CLI/wizard impl wired in `src/setup/` |
-| `SessionKeyPersistor` | Runtime env overlay + `.env` upsert | `BootstrapKeyPersistor` in `src/llm_host.rs` |
+| `SessionDb` | JSON settings persistence | none today |
+| `SessionSecrets` | Encrypted secrets store | none today |
+| `SessionRenewer` | Interactive NEAR-AI re-auth flow | only `NoopSessionRenewer` (`src/host.rs`) |
+| `SessionKeyPersistor` | Runtime env overlay + `.env` upsert | only `NoopKeyPersistor` (`src/host.rs`) |
 
-`NoopSessionRenewer` and `NoopKeyPersistor` are provided for headless / hosted contexts (return errors / no-ops). The binary plugs concrete impls into `SessionManager` at startup.
+The v1 adapter names this table used to cite (`DatabaseSessionDb`,
+`SecretsStoreSessionSecrets`, `BootstrapKeyPersistor`, `src/llm_host.rs`,
+`src/setup/`) went with the monolith and resolve to nothing today — and no
+Reborn binary has supplied replacements yet. Re-derive the real implementor set
+with `rg -n "impl (SessionDb|SessionSecrets|SessionRenewer|SessionKeyPersistor) for" crates/`
+before assuming any of these ports is wired.
+
+`NoopSessionRenewer` and `NoopKeyPersistor` are provided for headless / hosted contexts (return errors / no-ops) and are the only implementations in the tree today. A binary that needs real behavior plugs concrete impls into `SessionManager` at startup; no Reborn binary currently does.
 
 ## Response Cache
 
@@ -232,7 +239,7 @@ Uses the Responses API at `chatgpt.com/backend-api/codex/responses` with ChatGPT
 
 ## Provider Chain Construction
 
-`build_provider_chain()` in `lib.rs` is the entry point for chain construction: it creates the base provider (dispatching to `create_openai_codex_provider()` for codex, `create_llm_provider()` for everything else), then delegates the decorator stack to `pub(crate) async fn apply_decorator_chain(raw, config, session)` — the single source of truth for decorator assembly. Assemble the chain only through `apply_decorator_chain`; never apply these decorators inline or at a higher seam. It is crate-internal; the integration-test harness wraps a scripted raw provider beneath the real chain via the test-only `testing::provider_chain_over` re-export (gated by the `testing` feature), so the production API is not widened. The decorators `apply_decorator_chain` assembles, in order (`RecordingLlm` is appended afterward by `build_provider_chain`, not by `apply_decorator_chain`):
+`build_provider_chain()` in `lib.rs` is the entry point for chain construction: it creates the base provider (dispatching to `create_openai_codex_provider()` for codex, `create_llm_provider()` for everything else), then delegates the decorator stack to `pub(crate) async fn apply_decorator_chain(raw, config, session)` — the single source of truth for decorator assembly. Assemble the chain only through `apply_decorator_chain`; never apply these decorators inline or at a higher seam. It is crate-internal; the integration-test harness wraps a scripted raw provider beneath the real chain via the test-only `testing::provider_chain_over` re-export (gated by the `test-support` feature), so the production API is not widened. The decorators `apply_decorator_chain` assembles, in order (`RecordingLlm` is appended afterward by `build_provider_chain`, not by `apply_decorator_chain`):
 
 ```
 Raw provider
@@ -244,17 +251,26 @@ Raw provider
   → RecordingLlm            (trace capture; only when IRONCLAW_RECORD_TRACE is set)
 ```
 
+Host-managed requests with an explicit fallback index dispatch through the
+same routing/failover stack but use the equivalent single-attempt provider for
+that selected route. The agent loop owns retry and fallback advancement for
+those requests, preventing an inner `RetryProvider` from duplicating a vendor
+call before recovery can advance the ordered chain.
+
 `build_provider_chain()` also returns a separate standalone cheap LLM provider (for heartbeat/evaluation tasks — not part of the decorator chain).
 
 ## reasoning.rs Contents
 
-`reasoning.rs` does **not** contain an `IntentClassifier`. It contains:
-- `Reasoning` struct — the main reasoning engine used by the agent worker; calls `complete_with_tools()` and handles tool dispatch
-- `ReasoningContext` — carries messages, available tools, job description, and metadata into a reasoning call
-- `RespondResult`, `ActionPlan`, `ToolSelection` — output types from the reasoning engine
-- `TokenUsage` — input/output token counts
-- `SILENT_REPLY_TOKEN` (`"NO_REPLY"`) and `is_silent_reply()` — used by the dispatcher to suppress empty responses in group chats
-- Thinking-tag stripping — regex-based removal of `<thinking>`, `<reflection>`, `<scratchpad>`, `<|think|>`, `<final>`, etc. from model responses before returning to the user
+`reasoning.rs` does **not** contain an `IntentClassifier`, and it is **not** a
+reasoning *engine* — the v1 `Reasoning` struct and its planner/evaluator types
+were deleted in the WS8 dead-surface sweep. What survives is a provider-quirk
+cleanup module with exactly three public functions, all consumed by
+`ironclaw_runner`'s model gateway on the live model-response path:
+- `clean_response()` — thinking-tag stripping: regex-based, code-region-aware removal of `<thinking>`, `<reflection>`, `<scratchpad>`, `<|think|>`, `<final>`, tool-call tags, and markdown-fenced/bracket tool-call residue from model responses before they reach the user
+- `contains_codex_text_tool_call_syntax()` — detects Codex textual tool-call syntax (`to=tool.name json\n{…}`) outside code regions
+- `recover_codex_text_tool_calls_from_tool_names()` — recovers those textual calls as structured `ToolCall`s when the name matches an advertised tool
+
+Everything else in the file is private support for those three.
 
 ## Cost table (moved to `ironclaw_common::llm_costs`)
 
@@ -272,7 +288,7 @@ Providers in this crate import it as `use ironclaw_common::llm_costs as costs;`
 ## rig_adapter.rs Details
 
 `RigAdapter<M>` bridges any rig-core `CompletionModel` to `LlmProvider`. It is actively used in production for all non-NEAR AI providers (OpenAI, Anthropic, Ollama, Tinfoil, OpenAI-compatible). Key behaviors:
-- **Per-request model overrides are silently ignored** (warning logged); the model is baked at construction time.
+- **Per-request model overrides** are forwarded through rig-core's typed request model field, preserving one serialized top-level `model` key.
 - **OpenAI strict-mode schema normalization** is applied to all tool definitions: `additionalProperties: false`, all properties added to `required`, optional fields made nullable via `"type": ["T", "null"]`. This happens transparently at the provider boundary.
 - **System messages** are extracted into the rig-core `preamble` field (concatenated with newlines if multiple).
 - **Tool call IDs** are generated (`generated_tool_call_{seed}`) if the provider returns empty/whitespace IDs.

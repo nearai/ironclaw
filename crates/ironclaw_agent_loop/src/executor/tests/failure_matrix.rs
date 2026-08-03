@@ -1,6 +1,6 @@
 use super::{
     AgentLoopExecutor, AgentLoopExecutorError, AgentLoopHostError, AgentLoopHostErrorKind,
-    CanonicalAgentLoopExecutor, CapabilityFailureKind, CheckpointKind, DefaultCompactionStrategy,
+    CanonicalAgentLoopExecutor, CheckpointKind, DefaultCompactionStrategy, FailureKind,
     FixedReplyAdmissionPolicy, GateOutcome, HostStage, LoopCheckpointKind, LoopCompactionError,
     LoopExecutionState, LoopExit, LoopFailureKind, LoopGateRef, LoopResultRef, LoopSafeSummary,
     MockHost, TerminalWarningObservation, active_task_preserving_compaction_index, calls_response,
@@ -8,12 +8,12 @@ use super::{
     family_with_iteration_limit, family_with_reply_admission, final_staged_state,
     provider_calls_response, reply_response, reply_response_with_text, resolution,
 };
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     AppendCapabilityResultRef, CapabilityFailureDetail, LoopRunInfoPort, ToolObservationDetail,
     ToolObservationStatus,
 };
 
-const PERMANENT_CAPABILITY_DETAIL: &str = "permanent dispatch failure code 47";
+const OPERATION_FAILED_CAPABILITY_DETAIL: &str = "permanent dispatch failure code 47";
 const INVALID_OUTPUT_CAPABILITY_SUMMARY: &str = "MCP dispatch failed at /tmp/{socket}";
 const INVALID_OUTPUT_CAPABILITY_DETAIL: &str = "MCP dispatch failed with transport error";
 
@@ -28,7 +28,7 @@ struct MatrixRow {
 #[derive(Debug, Clone, Copy)]
 enum FailureSetup {
     ModelError,
-    CapabilityProtocolError,
+    CapabilityOperationFailedRecoverable,
     CapabilityInvalidInputRecoverable,
     CapabilityInvalidOutputRecoverable,
     IterationLimit,
@@ -59,14 +59,21 @@ enum ExpectedTerminal {
 
 #[derive(Debug, Clone, Copy)]
 enum ExpectedError {
-    HostUnavailable { stage: HostStage },
-    CheckpointFailed { stage: CheckpointKind },
+    HostUnavailableWithDiagnostics {
+        stage: HostStage,
+        kind: AgentLoopHostErrorKind,
+        safe_summary: &'static str,
+    },
+    CheckpointRejected {
+        stage: CheckpointKind,
+        safe_summary: &'static str,
+    },
 }
 
 #[derive(Debug)]
 struct ObservedTerminal {
     terminal: Terminal,
-    final_assistant_refs: Option<Vec<ironclaw_turns::LoopMessageRef>>,
+    final_assistant_refs: Option<Vec<ironclaw_host_api::turn::LoopMessageRef>>,
     finalized_assistant_messages: Vec<String>,
     model_request_count: usize,
     appended_result_refs: Vec<AppendCapabilityResultRef>,
@@ -89,13 +96,17 @@ const ROWS: &[MatrixRow] = &[
         expects_explanation: false,
     },
     MatrixRow {
-        label: "CapabilityProtocolError <- batch outcome Failed(Permanent)",
-        setup: FailureSetup::CapabilityProtocolError,
-        expected_kind: ExpectedTerminal::Failed {
-            kind: LoopFailureKind::CapabilityProtocolError,
-            safe_summary: Some("capability_permanent"),
+        label: "CapabilityProtocolError <- batch outcome Failed(OperationFailed)",
+        setup: FailureSetup::CapabilityOperationFailedRecoverable,
+        // Unified-FailureKind migration: the retired `Permanent` kind merged
+        // into `OperationFailed`, whose fate is ModelVisible — the failure
+        // surfaces as a tool error and the run recovers instead of aborting.
+        // The terminal set for capability failure kinds is exactly
+        // `{Cancelled}` now.
+        expected_kind: ExpectedTerminal::CompletedDivergence {
+            planned_kind: LoopFailureKind::CapabilityProtocolError,
         },
-        expects_explanation: true,
+        expects_explanation: false,
     },
     MatrixRow {
         label: "ModelError <- capability Failed(InvalidInput)",
@@ -205,12 +216,13 @@ const ROWS: &[MatrixRow] = &[
     MatrixRow {
         label: "TranscriptWriteFailed <- fail_transcript_with",
         setup: FailureSetup::TranscriptWriteFailed,
-        // matrix-divergence: TranscriptWriteFailed enum origin is legacy
-        // text_loop_driver; planned executor maps assistant transcript finalize
-        // failure to HostUnavailable { stage: Transcript } before any LoopExit.
+        // The planned executor must preserve the typed transcript cause while
+        // dropping backend detail that may contain raw reply text or secrets.
         expected_kind: ExpectedTerminal::Error {
-            error: ExpectedError::HostUnavailable {
+            error: ExpectedError::HostUnavailableWithDiagnostics {
                 stage: HostStage::Transcript,
+                kind: AgentLoopHostErrorKind::TranscriptWriteFailed,
+                safe_summary: "assistant transcript write failed",
             },
         },
         expects_explanation: false,
@@ -218,12 +230,12 @@ const ROWS: &[MatrixRow] = &[
     MatrixRow {
         label: "CheckpointRejected <- fail_checkpoint(BeforeModel)",
         setup: FailureSetup::CheckpointRejected,
-        // matrix-divergence: CheckpointRejected enum origin is legacy
-        // text_loop_driver; planned executor maps host checkpoint rejection to
-        // AgentLoopExecutorError::CheckpointFailed rather than LoopExit::Failed.
+        // A pre-model rejection cannot produce a trustworthy LoopExit. Preserve
+        // its bounded host cause on the distinct typed executor error instead.
         expected_kind: ExpectedTerminal::Error {
-            error: ExpectedError::CheckpointFailed {
+            error: ExpectedError::CheckpointRejected {
                 stage: CheckpointKind::BeforeModel,
+                safe_summary: "scripted checkpoint failure",
             },
         },
         expects_explanation: false,
@@ -258,7 +270,7 @@ macro_rules! matrix_row_test {
 }
 
 matrix_row_test!(matrix_model_error_exhausting_retries, 0);
-matrix_row_test!(matrix_capability_protocol_error_permanent, 1);
+matrix_row_test!(matrix_capability_operation_failed_recovers, 1);
 matrix_row_test!(matrix_capability_invalid_input_recovers, 2);
 matrix_row_test!(matrix_capability_invalid_output_recovers, 3);
 matrix_row_test!(matrix_iteration_limit, 4);
@@ -280,12 +292,12 @@ async fn run_matrix_row(row: &MatrixRow) {
 async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
     match setup {
         FailureSetup::ModelError => {
-            // One more error than the availability retry budget so the abort
-            // (and its category) is driven by the Unavailable class rather
-            // than the mock's script-exhausted Internal fallback.
+            // The availability retry budget plus its one observation turn and
+            // the final repeated error drive the typed Unavailable abort,
+            // rather than the mock's script-exhausted Internal fallback.
             let unavailable_error_count = crate::strategies::DefaultRecoveryStrategy::default()
                 .max_model_availability_attempts as usize
-                + 1;
+                + 2;
             let host = MockHost::new(Vec::new()).with_model_errors(
                 (0..unavailable_error_count)
                     .map(|_| {
@@ -298,17 +310,21 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
             );
             run_local(crate::families::default(), host, None).await
         }
-        FailureSetup::CapabilityProtocolError => {
+        FailureSetup::CapabilityOperationFailedRecoverable => {
+            // Provider-call path on purpose: model-visible observations are
+            // persisted on provider result refs only, so the cause-survival
+            // assertion below is real (a plain `calls_response()` would leave
+            // `model_observation` None and silently skip it).
             let host = MockHost::new(vec![
-                calls_response(),
+                provider_calls_response(),
                 reply_response_with_text("explanation"),
             ])
             .with_batch_outcomes(vec![batch_outcome(resolution::failed(
-                CapabilityFailureKind::Permanent,
+                FailureKind::OperationFailed,
                 "permanent protocol failure".to_string(),
-                Some(CapabilityFailureDetail::Diagnostic {
-                    text: PERMANENT_CAPABILITY_DETAIL.to_string(),
-                }),
+                CapabilityFailureDetail::Diagnostic {
+                    text: OPERATION_FAILED_CAPABILITY_DETAIL.to_string(),
+                },
             ))]);
             run_local(crate::families::default(), host, None).await
         }
@@ -318,7 +334,7 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
                 reply_response_with_text("completed after invalid input"),
             ])
             .with_batch_outcomes(vec![batch_outcome(failed_capability(
-                CapabilityFailureKind::InvalidInput,
+                FailureKind::InputEncode,
                 "invalid input supplied by model",
             ))]);
             run_local(crate::families::default(), host, None).await
@@ -329,11 +345,11 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
                 reply_response_with_text("completed after invalid output"),
             ])
             .with_batch_outcomes(vec![batch_outcome(resolution::failed(
-                CapabilityFailureKind::InvalidOutput,
+                FailureKind::OutputDecode,
                 INVALID_OUTPUT_CAPABILITY_SUMMARY.to_string(),
-                Some(CapabilityFailureDetail::Diagnostic {
+                CapabilityFailureDetail::Diagnostic {
                     text: INVALID_OUTPUT_CAPABILITY_DETAIL.to_string(),
-                }),
+                },
             ))]);
             run_local(crate::families::default(), host, None).await
         }
@@ -417,7 +433,7 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
             ])
             .with_batch_outcomes(vec![batch_outcome(
                 resolution::denied(
-                    ironclaw_turns::run_profile::CapabilityDeniedReasonKind::EmptySurface,
+                    ironclaw_loop_contracts::CapabilityDeniedReasonKind::EmptySurface,
                     "provider call denied".to_string(),
                 )
                 .resolution,
@@ -430,7 +446,7 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
                 reply_response_with_text("completed after policy denial"),
             ])
             .with_batch_outcomes(vec![batch_outcome(failed_capability(
-                CapabilityFailureKind::PolicyDenied,
+                FailureKind::PolicyDenied,
                 "capability policy denied",
             ))]);
             run_local(crate::families::default(), host, None).await
@@ -441,7 +457,7 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
                 reply_response_with_text("completed after authorization failure"),
             ])
             .with_batch_outcomes(vec![batch_outcome(failed_capability(
-                CapabilityFailureKind::Authorization,
+                FailureKind::Authorization,
                 "the provider token has expired",
             ))]);
             run_local(crate::families::default(), host, None).await
@@ -531,17 +547,6 @@ fn assert_expected_terminal(row: &MatrixRow, observed: &ObservedTerminal) {
                 row.label
             );
             assert_explanation_refs(row, &failed.explanation_message_refs);
-            if matches!(row.setup, FailureSetup::CapabilityProtocolError) {
-                assert_eq!(
-                    failed
-                        .safe_summary
-                        .as_ref()
-                        .and_then(|failure| failure.detail()),
-                    Some(PERMANENT_CAPABILITY_DETAIL),
-                    "{}: terminal capability cause should survive on detail",
-                    row.label
-                );
-            }
             let final_refs = observed
                 .final_assistant_refs
                 .as_ref()
@@ -560,8 +565,9 @@ fn assert_expected_terminal(row: &MatrixRow, observed: &ObservedTerminal) {
                 row.label
             );
             match error {
-                ExpectedError::HostUnavailable {
+                ExpectedError::HostUnavailableWithDiagnostics {
                     stage: HostStage::Transcript,
+                    ..
                 } => {
                     assert_eq!(
                         observed.model_request_count, 1,
@@ -574,14 +580,24 @@ fn assert_expected_terminal(row: &MatrixRow, observed: &ObservedTerminal) {
                         row.label
                     );
                 }
-                ExpectedError::CheckpointFailed { .. } => {
+                ExpectedError::CheckpointRejected { .. } => {
                     assert_eq!(
                         observed.model_request_count, 0,
-                        "{}: checkpoint failure before model should not fabricate a reply",
+                        "{}: rejected pre-model state must not reach the model",
+                        row.label
+                    );
+                    assert!(
+                        observed.appended_result_refs.is_empty(),
+                        "{}: rejected pre-model state must not dispatch a capability",
+                        row.label
+                    );
+                    assert!(
+                        observed.finalized_assistant_messages.is_empty(),
+                        "{}: rejected pre-model state must not finalize assistant output",
                         row.label
                     );
                 }
-                ExpectedError::HostUnavailable { .. } => {}
+                ExpectedError::HostUnavailableWithDiagnostics { .. } => {}
             }
         }
         (
@@ -605,6 +621,25 @@ fn assert_expected_terminal(row: &MatrixRow, observed: &ObservedTerminal) {
                 "{}: completed divergence row should still checkpoint final state",
                 row.label
             );
+            if matches!(
+                row.setup,
+                FailureSetup::CapabilityOperationFailedRecoverable
+            ) {
+                // The capability cause survives on the model-visible
+                // observation detail even though the run recovers.
+                let observation = observed
+                    .appended_result_refs
+                    .iter()
+                    .find_map(|result| result.model_observation.as_ref())
+                    .expect("recovered capability failure must carry a model-visible observation");
+                assert!(matches!(
+                    &observation.detail,
+                    ToolObservationDetail::GenericFailure {
+                        failure_kind: FailureKind::OperationFailed,
+                        detail: Some(detail),
+                    } if detail == OPERATION_FAILED_CAPABILITY_DETAIL
+                ));
+            }
             if matches!(row.setup, FailureSetup::CapabilityInvalidOutputRecoverable) {
                 // Phase 1: the capability failure's safe_summary carries `/`
                 // and `{` and fails strict validation. The run must NOT bork —
@@ -624,7 +659,7 @@ fn assert_expected_terminal(row: &MatrixRow, observed: &ObservedTerminal) {
                 assert!(matches!(
                     &observation.detail,
                     ToolObservationDetail::GenericFailure {
-                        failure_kind: CapabilityFailureKind::InvalidOutput,
+                        failure_kind: FailureKind::OutputDecode,
                         detail: Some(detail),
                     } if detail == INVALID_OUTPUT_CAPABILITY_DETAIL
                 ));
@@ -643,18 +678,47 @@ fn assert_expected_error(
     actual: &AgentLoopExecutorError,
 ) {
     match expected {
-        ExpectedError::HostUnavailable { stage } => {
-            assert_eq!(
-                actual,
-                &AgentLoopExecutorError::HostUnavailable { stage },
-                "{}: executor error",
+        ExpectedError::HostUnavailableWithDiagnostics {
+            stage,
+            kind,
+            safe_summary,
+        } => match actual {
+            AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+                stage: actual_stage,
+                kind: actual_kind,
+                safe_summary: actual_summary,
+                detail,
+                ..
+            } => {
+                assert_eq!(actual_stage, &stage, "{}: executor stage", row.label);
+                assert_eq!(actual_kind, &kind, "{}: executor kind", row.label);
+                assert_eq!(
+                    actual_summary.as_str(),
+                    safe_summary,
+                    "{}: safe summary",
+                    row.label
+                );
+                assert_eq!(
+                    detail, &None,
+                    "{}: backend detail must be dropped",
+                    row.label
+                );
+            }
+            other => panic!(
+                "{}: expected HostUnavailableWithDiagnostics, got {other:?}",
                 row.label
-            );
-        }
-        ExpectedError::CheckpointFailed { stage } => {
+            ),
+        },
+        ExpectedError::CheckpointRejected {
+            stage,
+            safe_summary,
+        } => {
             assert_eq!(
                 actual,
-                &AgentLoopExecutorError::CheckpointFailed { stage },
+                &AgentLoopExecutorError::CheckpointRejected {
+                    stage,
+                    safe_summary: LoopSafeSummary::new(safe_summary).expect("safe summary"),
+                },
                 "{}: executor error",
                 row.label
             );
@@ -662,7 +726,7 @@ fn assert_expected_error(
     }
 }
 
-fn assert_explanation_refs(row: &MatrixRow, refs: &[ironclaw_turns::LoopMessageRef]) {
+fn assert_explanation_refs(row: &MatrixRow, refs: &[ironclaw_host_api::turn::LoopMessageRef]) {
     if row.expects_explanation {
         assert!(
             !refs.is_empty(),
@@ -678,34 +742,42 @@ fn assert_explanation_refs(row: &MatrixRow, refs: &[ironclaw_turns::LoopMessageR
     }
 }
 
-fn batch_outcome(outcome: ironclaw_host_api::Resolution) -> ironclaw_host_api::ResolutionBatch {
-    ironclaw_host_api::ResolutionBatch {
+fn batch_outcome(
+    outcome: ironclaw_host_api::resolution::Resolution,
+) -> ironclaw_host_api::resolution::ResolutionBatch {
+    ironclaw_host_api::resolution::ResolutionBatch {
         resolutions: vec![outcome],
         stopped_on_suspension: false,
     }
 }
 
 fn failed_capability(
-    error_kind: CapabilityFailureKind,
+    error_kind: FailureKind,
     safe_summary: &str,
-) -> ironclaw_host_api::Resolution {
-    resolution::failed(error_kind, safe_summary.to_string(), None)
+) -> ironclaw_host_api::resolution::Resolution {
+    resolution::failed(
+        error_kind,
+        safe_summary.to_string(),
+        CapabilityFailureDetail::Diagnostic {
+            text: safe_summary.to_string(),
+        },
+    )
 }
 
 fn batch_outcome_stopped(
-    outcome: ironclaw_host_api::Resolution,
-) -> ironclaw_host_api::ResolutionBatch {
-    ironclaw_host_api::ResolutionBatch {
+    outcome: ironclaw_host_api::resolution::Resolution,
+) -> ironclaw_host_api::resolution::ResolutionBatch {
+    ironclaw_host_api::resolution::ResolutionBatch {
         resolutions: vec![outcome],
         stopped_on_suspension: true,
     }
 }
 
-fn no_change_result(result_ref: &str) -> ironclaw_host_api::Resolution {
+fn no_change_result(result_ref: &str) -> ironclaw_host_api::resolution::Resolution {
     resolution::completed(
         LoopResultRef::new(result_ref).expect("valid"),
         "completed without progress".to_string(),
-        ironclaw_turns::run_profile::CapabilityProgress::NoChange,
+        ironclaw_loop_contracts::CapabilityProgress::NoChange,
         false,
         0,
         None,

@@ -20,6 +20,8 @@
 //!    connection-limit row of `02-network-limits.md` previously had only
 //!    unit coverage in `sse_capacity.rs`): holding the cap open makes the
 //!    next stream open return 429, and releasing a stream frees a slot.
+//! 5. SSE remains explicitly uncompressed even when a client advertises
+//!    Brotli/gzip support, so intermediary buffering is not introduced.
 //!
 //! Supports the static-security-header + sanitized-error slice of the
 //! #3615 WebUI security parity audit, plus the connection-limit backfill
@@ -32,7 +34,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_webui::EnvBearerAuthenticator;
 use ironclaw_webui::{WebuiServeConfig, webui_v2_app};
 use secrecy::SecretString;
@@ -267,14 +269,47 @@ async fn panic_boundary_returns_sanitized_500() {
 }
 
 fn events_request() -> Request<Body> {
-    with_peer(
-        Request::builder()
-            .method(Method::GET)
-            .uri("/api/webchat/v2/threads/t1/events")
-            .header(header::AUTHORIZATION, format!("Bearer {ENV_TOKEN}"))
-            .body(Body::empty())
-            .expect("request"),
-    )
+    events_request_with_encoding(None)
+}
+
+fn events_request_with_encoding(accept_encoding: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(Method::GET)
+        .uri("/api/webchat/v2/threads/t1/events")
+        .header(header::AUTHORIZATION, format!("Bearer {ENV_TOKEN}"));
+    if let Some(accept_encoding) = accept_encoding {
+        builder = builder.header(header::ACCEPT_ENCODING, accept_encoding);
+    }
+    with_peer(builder.body(Body::empty()).expect("request"))
+}
+
+#[tokio::test]
+async fn sse_streams_are_not_compressed() {
+    let (app, _services) = build_app();
+    let response = app
+        .oneshot(events_request_with_encoding(Some("br, gzip")))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream"),
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-cache, no-transform"),
+    );
+    assert!(
+        response.headers().get(header::CONTENT_ENCODING).is_none(),
+        "SSE must not be compressed or buffered",
+    );
 }
 
 #[tokio::test]

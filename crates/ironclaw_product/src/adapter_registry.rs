@@ -11,6 +11,8 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use ironclaw_extension_contracts::egress::{DeclaredEgressTarget, EgressCredentialHandle};
+use ironclaw_extension_contracts::surface::CapabilitySurfaceKind;
 use ironclaw_extensions::{
     ExtensionInstallationError, ExtensionManifestRecord, ExtensionManifestV2,
     HostApiContractRegistry, HostApiId, HostApiManifestContext, HostApiManifestContract,
@@ -18,12 +20,13 @@ use ironclaw_extensions::{
     ManifestSectionPath, ManifestSource, ManifestV2Error,
 };
 use ironclaw_host_api::product_adapter::{
-    AuthRequirement, DeclaredEgressTarget, EgressCredentialHandle, ProductAdapterCapabilities,
-    ProductAdapterId, ProductCapabilityFlag, ProductSurfaceKind,
+    AuthRequirement, ProductAdapterCapabilities, ProductAdapterId, ProductCapabilityFlag,
+    ProductSurfaceKind,
 };
 use ironclaw_host_api::{
-    CapabilitySurfaceKind, ExtensionId, HostPortCatalog, IngressAuthPolicy, IngressRouteDescriptor,
-    IngressRouteId,
+    host_port::HostPortCatalog,
+    ids::ExtensionId,
+    ingress::{IngressAuthPolicy, IngressRouteDescriptor, IngressRouteId},
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -45,12 +48,14 @@ pub fn parse_product_adapter_manifest_record(
 ) -> Result<ExtensionManifestRecord, RegistryError> {
     let mut contracts = HostApiContractRegistry::new();
     register_product_adapter_host_api_contract(&mut contracts)?;
-    let record = ExtensionManifestRecord::from_toml(
+    let record = ExtensionManifestRecord::from_toml_with_root_binding(
         raw_toml,
         source,
         host_port_catalog,
         manifest_hash,
         &contracts,
+        // Contract-projection helper: no package root is materialized here.
+        ironclaw_extensions::PackageRootBinding::FabricateOnLoad,
     )
     .map_err(|error| match error {
         ExtensionInstallationError::Manifest(error) => RegistryError::Manifest(error),
@@ -751,9 +756,12 @@ mod tests {
     //! in `tests/manifest_ingestion.rs`.
     use super::*;
     use ironclaw_host_api::{
-        AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthScheme,
-        IngressJustification, IngressPolicy, IngressPolicyParts, IngressScopeSource, ListenerClass,
-        NetworkMethod, RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
+        action::NetworkMethod,
+        ingress::{
+            AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthScheme,
+            IngressJustification, IngressPolicy, IngressPolicyParts, IngressScopeSource,
+            ListenerClass, RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
+        },
     };
     use serde::Serialize;
     use std::num::{NonZeroU32, NonZeroU64};

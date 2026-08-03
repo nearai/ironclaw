@@ -1,21 +1,19 @@
 use std::sync::Arc;
 
 use super::{
-    DefaultHostRuntime, DefaultTurnCoordinator, HostRuntimeServices, ProcessBackendKind,
-    ProcessResultStorePort, ProcessStorePort, ProductionComponentType,
-    ProductionEventStoreWiringError, ProductionImplementationReadiness, ProductionWiringComponent,
-    ProductionWiringConfig, ProductionWiringIssue, ProductionWiringIssueKind,
-    ProductionWiringReport, RebornEventStoreConfig, RebornProfile, ResourceGovernor,
-    RootFilesystem, RuntimeKind, TurnRunTransitionPort, TurnStateStore, component_name,
-    local_only_runtime_policy_reason, production_wiring_report, runtime_http_egress_is_configured,
+    AgentTurnRuntimePort, DefaultHostRuntime, DefaultTurnCoordinator, HostRuntimeServices,
+    ProcessBackendKind, ProductionComponentType, ProductionEventStoreWiringError,
+    ProductionImplementationReadiness, ProductionWiringComponent, ProductionWiringConfig,
+    ProductionWiringIssue, ProductionWiringIssueKind, ProductionWiringReport,
+    RebornEventStoreConfig, RebornProfile, ResourceGovernor, RootFilesystem, RuntimeKind,
+    component_name, local_only_runtime_policy_reason, production_wiring_report,
+    runtime_http_egress_is_configured,
 };
 
-impl<F, G, S, R> HostRuntimeServices<F, G, S, R>
+impl<F, G> HostRuntimeServices<F, G>
 where
     F: RootFilesystem + 'static,
     G: ResourceGovernor + 'static,
-    S: ProcessStorePort + 'static,
-    R: ProcessResultStorePort + 'static,
 {
     /// Validates that this service graph is explicitly wired for production
     /// instead of relying on local/test defaults. This is a guardrail for
@@ -48,8 +46,8 @@ where
         }
         self.push_missing(
             &mut issues,
-            ProductionWiringComponent::RunState,
-            self.run_state.is_some(),
+            ProductionWiringComponent::InvocationState,
+            self.invocation_state.is_some(),
         );
         self.push_missing(
             &mut issues,
@@ -162,7 +160,7 @@ where
                 | RuntimeKind::Mcp
                 | RuntimeKind::Wasm
                 | RuntimeKind::FirstParty => {}
-                RuntimeKind::System => self.push_issue(
+                RuntimeKind::System | RuntimeKind::Sandbox => self.push_issue(
                     &mut issues,
                     ProductionWiringComponent::RuntimeBackend,
                     ProductionWiringIssueKind::UnsupportedRequirement,
@@ -248,7 +246,7 @@ where
         );
         self.push_local_only(
             &mut issues,
-            ProductionWiringComponent::ProcessStorePort,
+            ProductionWiringComponent::ProcessRuntimePort,
             Some(self.component_types.process_store),
         );
         self.push_local_only(
@@ -258,8 +256,8 @@ where
         );
         self.push_local_only(
             &mut issues,
-            ProductionWiringComponent::RunState,
-            self.component_types.run_state,
+            ProductionWiringComponent::InvocationState,
+            self.component_types.invocation_state,
         );
         self.push_local_only(
             &mut issues,
@@ -408,7 +406,7 @@ where
     /// callers.
     pub fn turn_coordinator_for_production(
         &self,
-    ) -> Result<DefaultTurnCoordinator<dyn TurnStateStore>, ProductionWiringReport> {
+    ) -> Result<DefaultTurnCoordinator<dyn AgentTurnRuntimePort>, ProductionWiringReport> {
         self.validate_production_turn_wiring()?;
         let Some(turn_state) = self.turn_state.as_ref() else {
             return Err(production_wiring_report(
@@ -434,59 +432,6 @@ where
         Ok(DefaultTurnCoordinator::new(Arc::clone(turn_state))
             .with_run_profile_resolver(Arc::clone(run_profile_resolver))
             .with_wake_notifier(Arc::clone(notifier)))
-    }
-
-    /// Validates turn persistence wiring and returns the configured trusted
-    /// runner transition port. The runner crate owns scheduler construction;
-    /// host runtime only verifies that the lower service is production-ready.
-    pub fn turn_run_transition_port_for_production(
-        &self,
-    ) -> Result<Arc<dyn TurnRunTransitionPort>, ProductionWiringReport> {
-        let mut issues = Vec::new();
-        self.push_missing(
-            &mut issues,
-            ProductionWiringComponent::TurnState,
-            self.turn_state.is_some(),
-        );
-        self.push_local_only(
-            &mut issues,
-            ProductionWiringComponent::TurnState,
-            self.component_types.turn_state,
-        );
-        self.push_local_only(
-            &mut issues,
-            ProductionWiringComponent::TurnState,
-            self.component_types.turn_run_transition_port,
-        );
-        if self.turn_run_transition_port.is_some()
-            && !self.component_types.turn_run_transition_port_verified
-        {
-            self.push_issue(
-                &mut issues,
-                ProductionWiringComponent::TurnState,
-                ProductionWiringIssueKind::UnverifiedProductionImplementation,
-                component_name(self.component_types.turn_run_transition_port),
-            );
-        }
-        if self.turn_run_transition_port.is_none() {
-            self.push_issue(
-                &mut issues,
-                ProductionWiringComponent::TurnState,
-                ProductionWiringIssueKind::UnsupportedRequirement,
-                component_name(self.component_types.turn_state),
-            );
-        }
-        if !issues.is_empty() {
-            return Err(ProductionWiringReport { issues });
-        }
-        let Some(transition_port) = self.turn_run_transition_port.as_ref() else {
-            return Err(production_wiring_report(
-                ProductionWiringComponent::TurnState,
-                ProductionWiringIssueKind::UnsupportedRequirement,
-                component_name(self.component_types.turn_state),
-            ));
-        };
-        Ok(Arc::clone(transition_port))
     }
 
     fn validate_production_turn_wiring(&self) -> Result<(), ProductionWiringReport> {

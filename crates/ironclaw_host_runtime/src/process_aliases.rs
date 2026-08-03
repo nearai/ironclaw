@@ -58,7 +58,7 @@ pub(crate) fn rewrite_local_host_command_aliases(
     // contexts but does NOT model command-substitution context reset.
     // Inside `$(...)` the shell restarts quoting from scratch, so a command
     // like `printf "$(cat '/workspace/file')"` may misquote the rewritten
-    // path. Paths in local-dev-yolo mode are trusted, so this produces a
+    // path. Paths in standalone-unrestricted mode are trusted, so this produces a
     // misquoted but not dangerous rewrite. Full $(...) tracking is left as
     // a future enhancement.
     if aliases.is_empty() {

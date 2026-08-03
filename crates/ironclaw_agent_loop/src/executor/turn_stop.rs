@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_turns::LoopExit;
+use ironclaw_loop_contracts::LoopExit;
 use tracing::debug;
 
 use crate::{

@@ -38,19 +38,16 @@ Reborn should not grow:
 - ad-hoc persistence records carrying raw prompts, tool input, secrets, host
   paths, or backend diagnostics;
 - separate subagent execution machinery outside the normal runner/driver loop;
-- local-dev shortcuts that silently become hosted or production behavior.
+- standalone shortcuts that silently become hosted or production behavior.
 
 ### Relationship to the legacy v1 engine
 
-`crates/ironclaw_engine` ("engine v2") is the **v1 monolith's** agent loop — a
-complete parallel machinery with its own capability registry, lease manager,
-and policy engine, consumed only by the root `ironclaw` crate through
-`src/bridge/`. It is **not part of Reborn**: the dependency-boundary tests
-forbid Reborn crates from importing it, and nothing else in this document
-describes it. Do not build new Reborn behavior on it; it retires with the
-monolith. `ironclaw_tui`, `ironclaw_gateway`, and `ironclaw_embeddings` are
-in the same v1-only category despite living in `crates/`. The v1 loopback
-OAuth transport is folded into `ironclaw_auth::oauth` until v1 retires.
+There is no longer one. The v1 monolith (root `src/`, package `ironclaw_legacy`)
+and its crates — `ironclaw_engine`, `ironclaw_tui`, `ironclaw_gateway`,
+`ironclaw_oauth` — have been deleted from the tree, so `crates/` is entirely
+Reborn and this document describes all of it. Older guidance and comments still
+name those crates; treat any such reference as drift. The v1 loopback OAuth
+transport landed in `ironclaw_auth::oauth`, which is where OAuth lives now.
 
 ## Mental Model
 
@@ -186,7 +183,7 @@ policy.
 
 In crates, product-facing assembly currently enters through
 `ironclaw_reborn_composition::RebornRuntime`. CLI and WebUI code should treat
-that service as the public runtime handle instead of wiring `TurnStateStore`,
+that service as the public runtime handle instead of wiring `ProcessRuntimeSystem`,
 the `TurnRunScheduler`/`TurnRunExecutor` pair, `HostRuntimeServices`, or
 concrete drivers directly.
 
@@ -228,7 +225,7 @@ still passes through `CapabilityHost` and obligation handling before dispatch.
 Substrates are reusable service and storage primitives. They are deliberately
 less product-aware than the runtime service and less behavior-aware than loops.
 Examples include event logs, projection stores, filesystem roots, memory
-services, approval/run-state stores, resource governors, thread services, and
+services, approval/process-journal stores, resource governors, thread services, and
 runtime lanes.
 
 Substrates should expose typed capabilities and durable records, not product UX
@@ -265,7 +262,8 @@ services that decide whether work may proceed and how recovery remains safe.
 
 ```text
 Kernel-facing mediators
-  TurnCoordinator / TurnRunTransitionPort
+  TurnCoordinator over AgentTurnProcessRuntime
+  ProcessJournalStore + process lifecycle ports
   TurnRunScheduler + TurnRunExecutor + LoopExitApplier
   CapabilityHost + obligation handler
   authorization and approval services
@@ -274,7 +272,7 @@ Kernel-facing mediators
   event/audit publication gates
 
 Substrate primitives
-  TurnStateStore and checkpoint stores
+  ProcessJournalStore and checkpoint stores
   SessionThreadService
   DurableEventLog and projection streams
   RootFilesystem / ScopedFilesystem / memory services
@@ -294,9 +292,10 @@ flowchart TD
     CLI["ironclaw_reborn_cli\nUX shell"]
     WebUI["ironclaw_webui /\nweb ingress"]
     Runtime["ironclaw_reborn_composition::RebornRuntime\nproduct-facing handle"]
-    Factory["build_reborn_runtime /\nbuild_reborn_services"]
+    Factory["build_reborn_runtime\ncomposition assembly entry point"]
     Coordinator["ironclaw_turns::TurnCoordinator\nadapter-safe turn API"]
-    Store["TurnStateStore + Checkpoint stores\nmemory/filesystem/libSQL/Postgres slices"]
+    Processes["ProcessJournalStore\nneutral lifecycle authority"]
+    TurnView["AgentTurnRuntimePort\nagent-turn projection"]
     Worker["TurnRunScheduler + RebornTurnRunExecutor\n(ironclaw_runner)\nclaim, heartbeat, invoke, apply"]
     Registry["DriverRegistry\nregistered loop drivers"]
     Planned["PlannedDriver\nAgentLoopDriver adapter"]
@@ -316,9 +315,10 @@ flowchart TD
     Runtime --> Coordinator
     Runtime --> Worker
     Factory --> Coordinator
-    Factory --> Store
+    Factory --> Processes
+    Factory --> TurnView
     Factory --> Worker
-    Worker --> Store
+    Worker --> Processes
     Worker --> Registry
     Registry --> Planned
     Planned --> Executor
@@ -328,8 +328,9 @@ flowchart TD
     LoopSupport --> HostRuntime
     LoopSupport --> LLM
     LoopSupport --> Threads
-    Coordinator --> Store
-    Store --> Events
+    Coordinator --> TurnView
+    TurnView --> Processes
+    Processes --> Events
     Worker --> Events
 ```
 
@@ -338,8 +339,9 @@ flowchart TD
 | Crate | Owns | Does not own |
 | --- | --- | --- |
 | `ironclaw_reborn_composition` | Product-facing runtime assembly, service handles, local/prod profiles, WebUI/runtime integration, projection services. | Low-level policy internals or direct product traffic bypassing Reborn adapters. |
-| `ironclaw_runner` | Trusted worker-side control plane: claiming/heartbeat scheduler (`TurnRunScheduler`), per-run executor (`RebornTurnRunExecutor`), concrete loop driver registry, planned/text driver adapters, loop host factory, and exit-applier wiring. | Loop strategy internals, neutral turn contracts, product idempotency/binding policy, or host-runtime service implementation. |
-| `ironclaw_turns` | Turn/run IDs, scopes, coordinator API, runner transition ports, state machine contracts, loop-exit DTOs, run profiles, checkpoint contracts. | Runtime dispatch, product adapters, raw prompts/tool inputs/secrets. |
+| `ironclaw_processes` | Neutral process journal, lifecycle transitions, leases, suspension, process trees, gates, and lifecycle queries. | Agent-loop policy, product bindings, or turn projections. |
+| `ironclaw_runner` | Agent-turn scheduling policy, per-process executor, concrete loop driver registry, loop host factory, and exit-applier wiring over process ports. | Generic process persistence, loop strategy internals, or product workflow. |
+| `ironclaw_turns` | Turn admission and the coordinator API, agent-turn process projections, loop-exit DTOs, run profiles, and loop checkpoint contracts. | The turn vocabulary itself (ids/scope/status/refs — those are `ironclaw_host_api::turn`'s), generic process lifecycle state, runtime dispatch, product adapters, or raw prompts/tool inputs/secrets. |
 | `ironclaw_agent_loop` | Canonical executor, loop families, sealed strategy composition, resumable loop state. | Host services, runtime lanes, product transport, provider auth. |
 | `ironclaw_loop_host` | Reusable adapters that implement loop host ports over threads, model gateways, capabilities, skills, checkpoints, cancellation, subagents. | Product-facing runtime service or durable turn state ownership. |
 | `ironclaw_host_runtime` | Kernel-facing host runtime services: capability host, dispatcher composition, approvals, resources, processes, secrets/network mediation. | Agent-loop planning or product conversation UX. |
@@ -352,7 +354,7 @@ composition. Lower layers should not import product/runtime orchestration.
 ```text
 host_api / common / prompt_envelope
   -> filesystem / memory / events / projections / streams / resources / trust
-  -> auth / authorization / approvals / run_state / runtime_policy / secrets / network
+  -> auth / authorization / approvals / processes / runtime_policy / secrets / network
   -> host_runtime / dispatcher / processes / runtime lanes
   -> turns / threads / loop_host / agent_loop / capabilities
   -> reborn / reborn_composition / product workflow / adapters
@@ -397,30 +399,30 @@ refs that cross crate boundaries:
 
 | Data | Purpose | Owner |
 | --- | --- | --- |
-| `TurnScope` | Canonical tenant/agent/project/thread scope. It is the active-lock and isolation key. | `ironclaw_turns` |
-| `TurnActor` | Actor metadata for the accepted turn. It does not change the active-lock key. | `ironclaw_turns` |
-| `AcceptedMessageRef` | Durable ref to the accepted inbound message in thread/transcript storage. | `ironclaw_turns` + thread service |
-| `SourceBindingRef` / `ReplyTargetBindingRef` | Canonical product binding refs for source and reply target. | Product workflow / turns |
-| `TurnId` | Accepted inbound turn identity. | `ironclaw_turns` |
-| `TurnRunId` | Executable run identity. A turn may have resumed/child run behavior around this run record. | `ironclaw_turns` |
-| `TurnRunState` | Current status, resolved run profile, runner lease metadata, checkpoint/gate refs, event cursor. | `TurnStateStore` |
-| `TurnActiveLockRecord` | One-active-run-per-canonical-thread lock. | `TurnStateStore` |
-| `TurnIdempotencyRecord` | Sanitized replay outcome for adapter-facing submit/resume/cancel mutations. | `TurnStateStore` |
+| `TurnScope` | Canonical tenant/agent/project/thread scope. It is the active-lock and isolation key. | `ironclaw_host_api::turn` |
+| `TurnActor` | Actor metadata for the accepted turn. It does not change the active-lock key. | `ironclaw_host_api::turn` |
+| `AcceptedMessageRef` | Durable ref to the accepted inbound message in thread/transcript storage. | `ironclaw_host_api::turn` (minted by the thread service) |
+| `SourceBindingRef` / `ReplyTargetBindingRef` | Canonical product binding refs for source and reply target. | `ironclaw_host_api::turn` (minted by product workflow) |
+| `TurnId` | Accepted inbound turn identity. | `ironclaw_host_api::turn` |
+| `TurnRunId` | Executable run identity. A turn may have resumed/child run behavior around this run record. | `ironclaw_host_api::turn` |
+| `JournaledProcessSnapshot` | Authoritative lifecycle status, lease, suspension, checkpoint, tree, and journal cursor. | `ironclaw_processes` |
+| `TurnRunState` | Agent-turn view of a process snapshot plus typed profile and binding metadata. | `ironclaw_turns::AgentTurnRuntimePort` |
 | `LoopExecutionState` | Loop-owned resumable strategy state, serialized only as bounded checkpoint payload bytes. | `ironclaw_agent_loop` |
-| `LoopCheckpointStateRef` / `TurnCheckpointId` | Opaque checkpoint payload ref and public checkpoint metadata id. | checkpoint stores + turns |
+| `LoopCheckpointStateRef` / `TurnCheckpointId` | Opaque checkpoint payload ref and agent-turn checkpoint projection id. | processes + turns |
 | `LoopExit` | Driver claim containing durable refs only; never trusted by itself. | loop driver / turns |
 | `LoopMessageRef` / `LoopResultRef` / `LoopGateRef` | Host-minted evidence refs used to validate exits and blocked gates. | host ports / turns |
 | `LoopRequest` / `CapabilityOutcome` | Scoped tool/capability request and sanitized result refs/summaries. | loop host ports + host runtime |
-| `EventCursor` | Replay/projection cursor for redacted lifecycle and progress events. | events / turns |
+| `EventCursor` | Replay/projection cursor for redacted lifecycle and progress events. Two distinct types: `ironclaw_events::EventCursor` for the durable event log, `ironclaw_host_api::turn::EventCursor` for a turn's lifecycle stream. | `ironclaw_events` / `ironclaw_host_api::turn` |
 
 Persistence placement follows this split:
 
 ```text
-TurnStateStore
-  turn/run lifecycle, active locks, runner leases, idempotency, checkpoint refs
+ProcessJournalStore
+  process lifecycle, concurrency, leases, idempotency, suspension,
+  checkpoint refs/metadata/bounded payloads
 
-CheckpointStateStore
-  bounded loop checkpoint payload bytes keyed by opaque refs and scope/run
+AgentTurnRuntimePort
+  product-facing submit/resume/cancel and agent-turn projections
 
 SessionThreadService
   accepted inbound messages, assistant drafts/finals, transcript state
@@ -472,7 +474,7 @@ profile selects runtime constraints
 ```
 
 Runtime deployment profiles are a separate outer envelope. For example,
-`LocalDev`, `HostedDev`, and `EnterpriseDev` may all run the same loop and
+Standalone, hosted, and production deployments may all run the same loop and
 capability contracts, but resolve to different filesystem, process, network,
 secret, approval, and audit backends. Deployment mode may reduce requested
 authority; it must not increase it.
@@ -510,7 +512,7 @@ sequenceDiagram
     participant Caller as Product caller / RebornRuntime
     participant Threads as SessionThreadService
     participant Coord as TurnCoordinator
-    participant Store as TurnStateStore
+    participant Processes as ProcessJournalStore
     participant Worker as TurnRunScheduler + RebornTurnRunExecutor
     participant Driver as AgentLoopDriver
     participant Host as AgentLoopDriverHost
@@ -519,12 +521,12 @@ sequenceDiagram
     Caller->>Threads: accept_inbound_message(text)
     Threads-->>Caller: accepted message id
     Caller->>Coord: submit_turn(scope, accepted_message_ref, idempotency_key)
-    Coord->>Store: persist queued run + active-thread lock
+    Coord->>Processes: submit agent_turn process
     Coord-->>Caller: Accepted(run_id, cursor)
     Coord-->>Worker: best-effort wake hint
-    Worker->>Store: recover_expired_leases()
-    Worker->>Store: claim_next_run(runner_id, lease_token)
-    Store-->>Worker: ClaimedTurnRun + resolved profile
+    Worker->>Processes: recover_expired_process_leases()
+    Worker->>Processes: claim_next_processes(worker_id)
+    Processes-->>Worker: ClaimedProcess + agent-turn metadata
     Worker->>Host: create per-run host
     Worker->>Driver: run() or resume()
     Driver->>Host: prompt/model/transcript/checkpoint/input calls
@@ -533,8 +535,8 @@ sequenceDiagram
     Kernel-->>Host: sanitized capability outcome refs
     Host-->>Driver: safe summaries and durable refs
     Driver-->>Worker: LoopExit(refs only)
-    Worker->>Store: apply_validated_loop_exit(...)
-    Caller->>Store: poll run state/events until terminal
+    Worker->>Processes: apply validated process outcome
+    Caller->>Processes: poll projected run state/events until terminal
     Caller->>Threads: read assistant reply
 ```
 
@@ -549,7 +551,7 @@ semaphore with per-user and per-inbound-type caps.
 ```mermaid
 stateDiagram-v2
     [*] --> Queued: submit_turn
-    Queued --> Running: claim_next_run
+    Queued --> Running: claim_next_processes
     Running --> Running: heartbeat
     Running --> BlockedApproval: LoopExit::Blocked(approval)
     Running --> BlockedAuth: LoopExit::Blocked(auth)
@@ -569,7 +571,7 @@ stateDiagram-v2
 Important invariants:
 
 - `submit_turn` creates queued work, but no model/tool side effect runs before
-  `claim_next_run` succeeds.
+  the process claim succeeds.
 - Heartbeats require the matching runner id and lease token.
 - Expired running leases move to terminal `Failed` (sanitized
   `lease_expired`); expired cancel-requested leases move to `Cancelled`.
@@ -647,7 +649,7 @@ records before changing durable run state.
 
 ```text
 model call fails through LoopModelPort
-  -> host returns stable sanitized error category and optional diagnostic ref
+  -> host returns stable sanitized error category and bounded inline cause
   -> loop may retry or checkpoint according to strategy/profile budget
   -> terminal failure returns LoopExit::Failed with safe failure kind
   -> runner validates and records sanitized failure
@@ -870,9 +872,12 @@ Reborn distinguishes durable run state, transcript state, and transport-facing
 event projections.
 
 ```text
-TurnStateStore
-  source of truth for turn/run lifecycle, locks, runner leases, checkpoints,
-  idempotency, spawn tree state
+ProcessJournalStore
+  source of truth for lifecycle, concurrency, leases, checkpoints,
+  idempotency, suspension, gates, and process trees
+
+AgentTurnRuntimePort
+  product and runner projection over the process journal
 
 SessionThreadService
   source of truth for accepted user messages and finalized assistant replies
@@ -899,7 +904,9 @@ their data models:
 `ironclaw_reborn_composition::build_reborn_runtime` is the intended assembled
 entry point for CLI, WebUI, and harness callers. It:
 
-- builds substrate services with `build_reborn_services`;
+- builds substrate services through composition's internal
+  `build_runtime_substrate` factory (`src/factory.rs`, `pub(crate)` — callers
+  outside composition go through `build_reborn_runtime`);
 - wires thread, turn, checkpoint, event, approval, auth, skill, and projection
   services;
 - builds the default planned runtime through `ironclaw_runner`;
@@ -915,7 +922,7 @@ Composition mode changes which backends are legal, not the architecture:
 
 | Mode | Shape | Important constraint |
 | --- | --- | --- |
-| Local dev / local single user | Local workspace, optional local host process, local-friendly approvals. | Local shortcuts must be explicit and must not leak into hosted production. |
+| Standalone / single user | Local workspace, optional host process access, operator-friendly approvals. | Standalone shortcuts must be explicit and must not leak into hosted production. |
 | Product-live | Production service graph with real host runtime handles, durable events/audit, cancellation, policy guards, budgets, and safety context. | Missing handles fail closed during readiness/build. |
 | Migration/dry-run | Reborn service and stores used to validate compatibility without silently taking over live traffic. | No hidden bridge mode without migration contract. |
 | CLI / REPL | UX shell over `RebornRuntime`. | Must not import lower-level Reborn crates directly. |
@@ -997,8 +1004,8 @@ Partial or evolving:
 - `crates/AGENTS.md`
 - `crates/ironclaw_turns/src/lib.rs`
 - `crates/ironclaw_turns/src/runner.rs`
-- `crates/ironclaw_turns/src/run_profile/driver.rs`
-- `crates/ironclaw_turns/src/run_profile/host.rs`
+- `crates/ironclaw_loop_contracts/src/driver.rs`
+- `crates/ironclaw_loop_contracts/src/host/`
 - `crates/ironclaw_agent_loop/src/executor.rs`
 - `crates/ironclaw_agent_loop/src/family.rs`
 - `crates/ironclaw_agent_loop/src/state.rs`

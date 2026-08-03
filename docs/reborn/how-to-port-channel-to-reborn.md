@@ -2,7 +2,7 @@
 
 Use this guide when adding a native host surface or an external protocol
 integration. Reborn has two entry shapes, but both converge on
-`ironclaw_host_api::ProductSurface` for product-facing reads and effects.
+`ironclaw_product_contracts::surface::ProductSurface` for product-facing reads and effects.
 
 ## Choose the boundary
 
@@ -53,6 +53,8 @@ verification, installation scope, deduplication, persistence, and admission.
 ```text
 external payload
   -> host verifies protocol auth and installation scope
+  -> host drops verification secrets and resolves manifest-declared
+     non-secret configuration for the verified installation
   -> ChannelAdapter::inbound
   -> normalized inbound message
   -> host admission and ProductSurface
@@ -66,7 +68,7 @@ Use the existing implementations as references:
 - `crates/ironclaw_slack_extension/src/channel.rs`
 - `crates/ironclaw_telegram_extension/src/channel.rs`
 - `crates/ironclaw_extension_host/src/ingress/`
-- `crates/ironclaw_host_api/src/product_adapter/channel_adapter.rs`
+- `crates/ironclaw_extension_contracts/src/channel_adapter.rs`
 
 The adapter must not own canonical threads, runs, transcripts, authorization,
 approval state, secrets, filesystem access, or direct network clients. It must

@@ -12,20 +12,29 @@ use super::*;
 use async_trait::async_trait;
 use ironclaw_extensions::InstallationOwner;
 use ironclaw_extensions::{
-    ExtensionHealthSnapshot, ExtensionInstallation, ExtensionInstallationError,
-    ExtensionInstallationId, ExtensionInstallationStore, ExtensionInstallationStorePort,
-    ExtensionManifest, ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry,
-    ManifestSource,
+    ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
+    ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionManifest,
+    ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry, ManifestSource,
+    MembershipDeactivation,
 };
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
-    ActivityId, Blocked, ExtensionId, FailureKind, HostPath, HostPortCatalog, MountAlias,
-    MountGrant, MountPermissions, MountView, ProductSurface, ProductSurfaceCaller,
-    ProductSurfaceError, Resolution, TenantId, UserId, VirtualPath,
+    host_port::HostPortCatalog,
+    ids::{ActivityId, ExtensionId, TenantId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{HostPath, MountAlias, VirtualPath},
+    resolution::{Blocked, Resolution},
+    result_meta::FailureKind,
 };
 use ironclaw_product::{
     EXTENSION_INSTALL_CAPABILITY, EXTENSION_REMOVE_CAPABILITY, OPERATOR_SERVICE_LIFECYCLE_COMMAND,
-    ProductCapabilityDescriptor, RebornOperatorToolCatalog, RebornOperatorToolInfo,
+    ProductCapabilityDescriptor,
+};
+use ironclaw_product_contracts::operator_tools::{
+    RebornOperatorToolCatalog, RebornOperatorToolInfo,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
 };
 use std::time::Duration;
 
@@ -107,6 +116,7 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
             &HostPortCatalog::empty(),
             None,
             &product_extension_host_api_contract_registry().expect("contracts"),
+            None,
         )
         .expect("manifest record")
     }
@@ -162,19 +172,28 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
             .expect("trust policy"),
     );
     let port = Arc::new(RebornLocalExtensionManagementPort::new(
-        Arc::new(DiskFilesystem::new()),
-        AvailableExtensionCatalog::from_packages(Vec::new()),
-        installation_store,
-        Arc::new(Mutex::new(ExtensionLifecycleService::new(
-            ExtensionRegistry::new(),
-        ))),
-        ironclaw_extension_host::ActiveExtensionPublisher::new(
-            Arc::clone(&registry),
-            trust_policy,
-            Arc::new(ironclaw_trust::InvalidationBus::new()),
-        ),
-        None,
-        UserId::new("operator").expect("operator user id"),
+        ironclaw_extension_host::ExtensionLifecycleManagerDependencies {
+            filesystem: Arc::new(DiskFilesystem::new()),
+            catalog: AvailableExtensionCatalog::from_packages(Vec::new()),
+            installation_store,
+            lifecycle_service: Arc::new(Mutex::new(ExtensionLifecycleService::new(
+                ExtensionRegistry::new(),
+            ))),
+            active_extensions: ironclaw_extension_host::ActiveExtensionPublisher::new(
+                Arc::clone(&registry),
+                trust_policy,
+                Arc::new(ironclaw_trust::InvalidationBus::new()),
+            ),
+            credential_cleanup: None,
+            tenant_operator_user_id: UserId::new("operator").expect("operator user id"),
+            hosted_mcp_dependencies: ironclaw_extension_host::HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: ironclaw_extension_host::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
+        },
     ));
 
     let catalog = ActiveRegistryOperatorToolCatalog::new(registry, Vec::new(), Some(port));
@@ -274,11 +293,11 @@ impl ExtensionInstallationStorePort for OwnerReadFailingStore {
         self.inner.get_manifest(extension_id).await
     }
 
-    async fn upsert_manifest(
+    async fn persist_removal_tombstone(
         &self,
         manifest: ExtensionManifestRecord,
     ) -> Result<(), ExtensionInstallationError> {
-        self.inner.upsert_manifest(manifest).await
+        self.inner.persist_removal_tombstone(manifest).await
     }
 
     async fn upsert_manifest_and_installation(
@@ -319,6 +338,26 @@ impl ExtensionInstallationStorePort for OwnerReadFailingStore {
         self.inner.upsert_installation(installation).await
     }
 
+    async fn activate_membership(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        user_id: &UserId,
+    ) -> Result<ExtensionInstallation, ExtensionInstallationError> {
+        self.inner
+            .activate_membership(installation_id, user_id)
+            .await
+    }
+
+    async fn deactivate_membership(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        user_id: &UserId,
+    ) -> Result<MembershipDeactivation, ExtensionInstallationError> {
+        self.inner
+            .deactivate_membership(installation_id, user_id)
+            .await
+    }
+
     async fn delete_installation(
         &self,
         installation_id: &ExtensionInstallationId,
@@ -332,24 +371,19 @@ impl ExtensionInstallationStorePort for OwnerReadFailingStore {
     ) -> Result<(), ExtensionInstallationError> {
         self.inner.delete_manifest(extension_id).await
     }
-
-    async fn update_health(
-        &self,
-        installation_id: &ExtensionInstallationId,
-        health: ExtensionHealthSnapshot,
-    ) -> Result<(), ExtensionInstallationError> {
-        self.inner.update_health(installation_id, health).await
-    }
 }
 
 #[tokio::test]
 async fn runtime_product_surface_wires_lifecycle_owner_identity() {
     let dir = tempfile::tempdir().expect("tempdir");
     let input = crate::RebornRuntimeInput::from_build_input(
-        crate::deployment::local_dev_build_input("runtime-owner", dir.path().join("local-dev"))
-            .with_runtime_policy(
-                crate::local_dev_runtime_policy().expect("local-dev policy resolves"),
-            ),
+        crate::deployment::local_filesystem_build_input(
+            "runtime-owner",
+            dir.path().join("standalone"),
+        )
+        .with_runtime_policy(
+            crate::standalone_runtime_policy().expect("standalone policy resolves"),
+        ),
     )
     .with_identity(crate::RebornRuntimeIdentity {
         tenant_id: "tenant-alpha".to_string(),
@@ -364,14 +398,17 @@ async fn runtime_product_surface_wires_lifecycle_owner_identity() {
         .product_surface(None)
         .expect("product surface build");
 
-    let surface = ironclaw_host_api::BoundProductSurface::new(bundle.clone(), caller("bob"));
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
+        bundle.clone(),
+        caller("bob"),
+    );
     let error = OPERATOR_SERVICE_LIFECYCLE_COMMAND
         .invoke_on(
             &surface,
             ironclaw_product::RebornOperatorServiceLifecycleRequest {
                 action: ironclaw_product::RebornOperatorServiceLifecycleAction::Status,
             },
-            ironclaw_host_api::ActivityId::new(),
+            ironclaw_host_api::ids::ActivityId::new(),
         )
         .await
         .expect_err("non-owner caller is rejected before lifecycle dispatch");
@@ -384,11 +421,13 @@ async fn runtime_product_surface_wires_lifecycle_owner_identity() {
 async fn product_surface_extension_lifecycle_remove_succeeds_after_activation() {
     let dir = tempfile::tempdir().expect("tempdir");
     let input = crate::RebornRuntimeInput::from_build_input(
-        crate::deployment::local_dev_build_input(
+        crate::deployment::local_filesystem_build_input(
             "product-surface-extension-owner",
-            dir.path().join("local-dev"),
+            dir.path().join("standalone"),
         )
-        .with_runtime_policy(crate::local_dev_runtime_policy().expect("local-dev policy resolves")),
+        .with_runtime_policy(
+            crate::standalone_runtime_policy().expect("standalone policy resolves"),
+        ),
     )
     .with_identity(crate::RebornRuntimeIdentity {
         tenant_id: "tenant-alpha".to_string(),
@@ -527,7 +566,7 @@ async fn readiness_operator_status_keeps_info_diagnostics_ready() {
 #[tokio::test]
 async fn skills_product_service_surfaces_shared_auto_activate_learned_flag() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let storage_root = dir.path().join("local-dev");
+    let storage_root = dir.path().join("standalone");
     std::fs::create_dir_all(&storage_root).expect("storage root");
 
     let mut filesystem = DiskFilesystem::new();
@@ -581,11 +620,11 @@ async fn skills_product_service_surfaces_shared_auto_activate_learned_flag() {
 
 #[tokio::test]
 async fn skills_product_service_defaults_auto_activate_learned_when_no_selector_is_wired() {
-    // Production assembly mounts the read service but wires no local-dev
+    // Production assembly mounts the read service but wires no standalone
     // flag-reading selector. The list still renders with a sane default
     // rather than erroring; writes go through the first-party capability.
     let dir = tempfile::tempdir().expect("tempdir");
-    let storage_root = dir.path().join("local-dev");
+    let storage_root = dir.path().join("standalone");
     std::fs::create_dir_all(&storage_root).expect("storage root");
 
     let mut filesystem = DiskFilesystem::new();
@@ -614,7 +653,7 @@ async fn skills_product_service_defaults_auto_activate_learned_when_no_selector_
 #[tokio::test]
 async fn skills_product_service_hides_owner_user_skills_from_other_callers() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let storage_root = dir.path().join("local-dev");
+    let storage_root = dir.path().join("standalone");
     std::fs::create_dir_all(&storage_root).expect("storage root");
     std::fs::create_dir_all(storage_root.join("system/skills/system-helper"))
         .expect("system skill dir");
@@ -730,7 +769,8 @@ async fn invoke_lifecycle_product_capability(
     capability: ProductCapabilityDescriptor,
     input: serde_json::Value,
 ) -> Result<Resolution, ProductSurfaceError> {
-    let surface = ironclaw_host_api::BoundProductSurface::new(Arc::clone(bundle), caller);
+    let surface =
+        ironclaw_product_contracts::surface::BoundProductSurface::new(Arc::clone(bundle), caller);
     capability
         .invoke_on(&surface, input, ActivityId::new())
         .await
@@ -798,7 +838,7 @@ fn caller_in_tenant(tenant_id: &str, user_id: &str) -> ProductSurfaceCaller {
 
 fn scoped_skill_mounts(
     scope: &ResourceScope,
-) -> Result<MountView, ironclaw_host_api::HostApiError> {
+) -> Result<MountView, ironclaw_host_api::error::HostApiError> {
     let user_skills = format!(
         "/projects/tenants/{}/users/{}/skills",
         scope.tenant_id.as_str(),
@@ -832,11 +872,13 @@ fn skill_content(name: &str, description: &str) -> String {
 async fn product_surface_channel_extension_remove_deletes_the_durable_membership() {
     let dir = tempfile::tempdir().expect("tempdir");
     let input = crate::RebornRuntimeInput::from_build_input(
-        crate::deployment::local_dev_build_input(
+        crate::deployment::local_filesystem_build_input(
             "channel-remove-owner",
-            dir.path().join("local-dev"),
+            dir.path().join("standalone"),
         )
-        .with_runtime_policy(crate::local_dev_runtime_policy().expect("local-dev policy resolves")),
+        .with_runtime_policy(
+            crate::standalone_runtime_policy().expect("standalone policy resolves"),
+        ),
     )
     .with_identity(crate::RebornRuntimeIdentity {
         tenant_id: "tenant-alpha".to_string(),
@@ -866,7 +908,7 @@ async fn product_surface_channel_extension_remove_deletes_the_durable_membership
     match install {
         Resolution::Done(ref outcome) if outcome.verdict.is_success() => {}
         Resolution::Done(ref outcome)
-            if outcome.verdict.error_kind() == Some(&FailureKind::InvalidInput) => {}
+            if outcome.verdict.error_kind() == Some(&FailureKind::InputEncode) => {}
         Resolution::Blocked(Blocked::Auth(_)) => {}
         other => panic!("telegram install failed: {other:?}"),
     }
@@ -887,7 +929,10 @@ async fn product_surface_channel_extension_remove_deletes_the_durable_membership
     let installer_view: ironclaw_product::RebornExtensionListResponse =
         ironclaw_product::EXTENSIONS_VIEW
             .query_on(
-                &ironclaw_host_api::BoundProductSurface::new(Arc::clone(&bundle), caller.clone()),
+                &ironclaw_product_contracts::surface::BoundProductSurface::new(
+                    Arc::clone(&bundle),
+                    caller.clone(),
+                ),
                 serde_json::json!({}),
                 None,
             )

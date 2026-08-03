@@ -9,7 +9,7 @@
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
-use ironclaw_host_api::{
+use ironclaw_product_contracts::surface::{
     ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     ProductSurfaceValidationCode,
 };

@@ -8,7 +8,14 @@ use std::{
 
 use tempfile::tempdir;
 
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    ids::{
+        AgentId, InvocationId, MissionId, ProjectId, ResourceReservationId, TenantId, ThreadId,
+        UserId,
+    },
+    path::VirtualPath,
+    resource::{ReservationStatus, ResourceEstimate, ResourceScope, ResourceUsage},
+};
 use ironclaw_resources::*;
 use rust_decimal_macros::dec;
 
@@ -1342,7 +1349,10 @@ fn persistent_governor_rejects_unsupported_snapshot_schema_version() {
 #[tokio::test]
 async fn filesystem_persistent_governor_reloads_active_holds_and_usage_from_store() {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
 
     let backend = std::sync::Arc::new(InMemoryBackend::new());
     let mounts = MountView::new(vec![MountGrant::new(
@@ -1410,7 +1420,10 @@ async fn filesystem_persistent_governor_reloads_active_holds_and_usage_from_stor
 #[tokio::test]
 async fn filesystem_resource_governor_replays_journaled_holds_and_usage_after_restart() {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
 
     let backend = Arc::new(InMemoryBackend::new());
     let mounts = MountView::new(vec![MountGrant::new(
@@ -1482,7 +1495,10 @@ async fn filesystem_resource_governor_replays_journaled_holds_and_usage_after_re
 #[tokio::test]
 async fn filesystem_resource_governor_serializes_concurrent_reservations_on_shared_handle() {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
 
     let backend = Arc::new(InMemoryBackend::new());
     let mounts = MountView::new(vec![MountGrant::new(
@@ -1550,7 +1566,10 @@ async fn filesystem_resource_governor_serializes_concurrent_reservations_on_shar
 #[tokio::test]
 async fn filesystem_resource_governor_releases_account_gate_before_delta_ack() {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
 
     let backend = Arc::new(BlockFirstAppendFilesystem::new(InMemoryBackend::new()));
     let mounts = MountView::new(vec![MountGrant::new(
@@ -1625,7 +1644,10 @@ async fn filesystem_resource_governor_releases_account_gate_before_delta_ack() {
 #[tokio::test]
 async fn filesystem_resource_governor_fails_closed_then_recovers_after_delta_append_error() {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
 
     let backend = Arc::new(RejectAppendFilesystem::new(InMemoryBackend::new()));
     let mounts = MountView::new(vec![MountGrant::new(
@@ -1698,16 +1720,17 @@ async fn filesystem_resource_governor_fails_closed_then_recovers_after_delta_app
 /// `DiskFilesystem` is used here because it is the canonical byte-only
 /// `RootFilesystem`: its `put` impl rejects entries with
 /// `entry.kind.is_some()`, which `cas_update` maps to `CasUnsupported`.
-/// Mirrors `ironclaw_run_state`'s
+/// Mirrors `ironclaw_approvals`'s
 /// `filesystem_approval_store_fails_closed_on_byte_only_backend`
 /// regression
-/// (crates/ironclaw_run_state/tests/run_state_contract.rs:1027-1048) for
+/// (crates/ironclaw_approvals/tests/run_state_contract.rs:1027-1048) for
 /// the resources crate's CAS snapshot stores.
 #[tokio::test]
 async fn filesystem_resource_governor_store_fails_closed_on_byte_only_backend() {
     use ironclaw_filesystem::{DiskFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
-        HostPath, MountAlias, MountGrant, MountPermissions, MountView, VirtualPath,
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{HostPath, MountAlias, VirtualPath},
     };
 
     let dir = tempdir().expect("temp dir");
@@ -1755,7 +1778,8 @@ async fn filesystem_resource_governor_store_fails_closed_on_byte_only_backend() 
 async fn filesystem_budget_gate_store_fails_closed_on_byte_only_backend() {
     use ironclaw_filesystem::{DiskFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
-        HostPath, MountAlias, MountGrant, MountPermissions, MountView, VirtualPath,
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{HostPath, MountAlias, VirtualPath},
     };
 
     let dir = tempdir().expect("temp dir");
@@ -1832,7 +1856,7 @@ struct PersistentVersionMismatchBackend {
 impl PersistentVersionMismatchBackend {
     fn new(
         inner: Arc<ironclaw_filesystem::InMemoryBackend>,
-        watched: ironclaw_host_api::VirtualPath,
+        watched: ironclaw_host_api::path::VirtualPath,
     ) -> Self {
         Self {
             inner,
@@ -1854,7 +1878,7 @@ impl ironclaw_filesystem::RootFilesystem for PersistentVersionMismatchBackend {
 
     async fn put(
         &self,
-        path: &ironclaw_host_api::VirtualPath,
+        path: &ironclaw_host_api::path::VirtualPath,
         entry: ironclaw_filesystem::Entry,
         cas: ironclaw_filesystem::CasExpectation,
     ) -> Result<ironclaw_filesystem::RecordVersion, ironclaw_filesystem::FilesystemError> {
@@ -1876,7 +1900,7 @@ impl ironclaw_filesystem::RootFilesystem for PersistentVersionMismatchBackend {
 
     async fn get(
         &self,
-        path: &ironclaw_host_api::VirtualPath,
+        path: &ironclaw_host_api::path::VirtualPath,
     ) -> Result<Option<ironclaw_filesystem::VersionedEntry>, ironclaw_filesystem::FilesystemError>
     {
         self.inner.get(path).await
@@ -1884,28 +1908,28 @@ impl ironclaw_filesystem::RootFilesystem for PersistentVersionMismatchBackend {
 
     async fn list_dir(
         &self,
-        path: &ironclaw_host_api::VirtualPath,
+        path: &ironclaw_host_api::path::VirtualPath,
     ) -> Result<Vec<ironclaw_filesystem::DirEntry>, ironclaw_filesystem::FilesystemError> {
         self.inner.list_dir(path).await
     }
 
     async fn stat(
         &self,
-        path: &ironclaw_host_api::VirtualPath,
+        path: &ironclaw_host_api::path::VirtualPath,
     ) -> Result<ironclaw_filesystem::FileStat, ironclaw_filesystem::FilesystemError> {
         self.inner.stat(path).await
     }
 
     async fn delete(
         &self,
-        path: &ironclaw_host_api::VirtualPath,
+        path: &ironclaw_host_api::path::VirtualPath,
     ) -> Result<(), ironclaw_filesystem::FilesystemError> {
         self.inner.delete(path).await
     }
 
     async fn query(
         &self,
-        path: &ironclaw_host_api::VirtualPath,
+        path: &ironclaw_host_api::path::VirtualPath,
         filter: &ironclaw_filesystem::Filter,
         page: ironclaw_filesystem::Page,
     ) -> Result<Vec<ironclaw_filesystem::VersionedEntry>, ironclaw_filesystem::FilesystemError>
@@ -1915,7 +1939,7 @@ impl ironclaw_filesystem::RootFilesystem for PersistentVersionMismatchBackend {
 
     async fn ensure_index(
         &self,
-        path: &ironclaw_host_api::VirtualPath,
+        path: &ironclaw_host_api::path::VirtualPath,
         spec: &ironclaw_filesystem::IndexSpec,
     ) -> Result<(), ironclaw_filesystem::FilesystemError> {
         self.inner.ensure_index(path, spec).await
@@ -1932,7 +1956,10 @@ impl ironclaw_filesystem::RootFilesystem for PersistentVersionMismatchBackend {
 async fn filesystem_resource_governor_store_surfaces_storage_error_on_persistent_version_mismatch()
 {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, ScopedPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, ScopedPath},
+    };
 
     let inner = Arc::new(InMemoryBackend::new());
     let mounts = MountView::new(vec![MountGrant::new(

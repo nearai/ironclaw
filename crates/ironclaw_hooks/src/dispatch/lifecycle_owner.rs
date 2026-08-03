@@ -31,7 +31,7 @@
 //!   3. Missing hook_id on a lifecycle event — cannot be anchored to an owner.
 
 use ironclaw_events::{RuntimeEvent, RuntimeEventKind};
-use ironclaw_host_api::ExtensionId;
+use ironclaw_host_api::ids::ExtensionId;
 
 /// Result of probing the hook registry for the owner of a `hook_id`.
 ///
@@ -81,7 +81,8 @@ pub(crate) fn is_lifecycle_kind(kind: RuntimeEventKind) -> bool {
         | RuntimeEventKind::ProcessStarted
         | RuntimeEventKind::ProcessCompleted
         | RuntimeEventKind::ProcessFailed
-        | RuntimeEventKind::ProcessKilled => false,
+        | RuntimeEventKind::ProcessKilled
+        | RuntimeEventKind::FailureRecovered => false,
     }
 }
 
@@ -162,7 +163,8 @@ mod tests {
     use super::*;
     use ironclaw_events::RuntimeEvent;
     use ironclaw_host_api::{
-        AgentId, CapabilityId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+        ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
+        resource::ResourceScope,
     };
 
     fn ext(id: &str) -> ExtensionId {
@@ -177,7 +179,7 @@ mod tests {
             project_id: Some(ProjectId::new("project-a").expect("project")),
             mission_id: None,
             thread_id: Some(ThreadId::new("thread-a").expect("thread")),
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         }
     }
 
@@ -253,6 +255,7 @@ mod tests {
             RuntimeEventKind::ProcessCompleted,
             RuntimeEventKind::ProcessFailed,
             RuntimeEventKind::ProcessKilled,
+            RuntimeEventKind::FailureRecovered,
         ];
         for kind in lifecycle {
             assert!(

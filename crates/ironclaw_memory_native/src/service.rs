@@ -8,27 +8,22 @@
 use std::{cmp::Ordering, collections::BTreeMap, sync::Arc};
 
 use crate::{
-    ChunkingMemoryDocumentIndexer, DocumentMetadata, FilesystemMemoryDocumentRepository,
-    MemoryBackend, MemoryBackendCapabilities, MemoryBackendWriteOptions, MemoryContext,
-    MemoryDocumentPath, MemoryDocumentScope, MemorySearchRequest, MemorySearchResult,
-    MemoryWriteOutcome, PromptSafetyAllowanceId, PromptWriteSafetyEventSink,
-    RepositoryMemoryBackend, content_bytes_sha256,
+    ChunkingMemoryDocumentIndexer, FilesystemMemoryDocumentRepository, MemoryBackend,
+    MemoryBackendCapabilities, MemoryBackendWriteOptions, MemorySearchRequest, MemorySearchResult,
+    MemoryWriteOutcome, RepositoryMemoryBackend,
 };
 use async_trait::async_trait;
 use chrono::Utc;
 use chrono_tz::Tz;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::ThreadId;
-use serde_json::{Map, Value, json};
-
-// The host-facing operation shapes + the `MemoryService` trait moved to
-// `ironclaw_memory`; re-exported so `crate::service::*` and the crate's
-// public API stay unchanged while `NativeMemoryService` (below) keeps the native
-// adapter behavior here.
-pub use ironclaw_memory::{
-    MemoryContextProfileId, MemoryInteractionMessage, MemoryInteractionRole, MemoryInvocation,
-    MemoryProfileSetStatus, MemoryService, MemoryServiceContextRequest,
-    MemoryServiceContextSnippet, MemoryServiceError, MemoryServiceErrorKind,
+use ironclaw_host_api::ids::ThreadId;
+use ironclaw_memory::{
+    DocumentMetadata, MemoryContext, MemoryDocumentPath, MemoryDocumentScope,
+    PromptSafetyAllowanceId, PromptWriteSafetyEventSink, content_bytes_sha256,
+};
+use ironclaw_memory::{
+    MemoryInteractionMessage, MemoryInvocation, MemoryProfileSetStatus, MemoryService,
+    MemoryServiceContextRequest, MemoryServiceContextSnippet, MemoryServiceError,
     MemoryServiceProfileReadResponse, MemoryServiceProfileSetRequest,
     MemoryServiceProfileSetResponse, MemoryServiceReadRequest, MemoryServiceReadResponse,
     MemoryServiceRecordRequest, MemoryServiceRecordResponse, MemoryServiceSearchRequest,
@@ -36,6 +31,13 @@ pub use ironclaw_memory::{
     MemoryServiceTreeResponse, MemoryServiceWriteRequest, MemoryServiceWriteResponse,
     MemoryWriteStatus, memory_context_disabled,
 };
+use serde_json::{Map, Value, json};
+
+// The host-facing operation shapes and the `MemoryService` trait are owned by
+// `ironclaw_memory`; consumers import them from there. The imports above are
+// private to this module — #6943 deleted the re-export shim that used to
+// republish them under `ironclaw_memory_native::` — and this module exports
+// only `NativeMemoryService`, the native adapter implemented below.
 
 const MEMORY_PATH: &str = "MEMORY.md";
 const HEARTBEAT_PATH: &str = "HEARTBEAT.md";
@@ -87,16 +89,19 @@ impl NativeMemoryService {
     }
 }
 
-#[async_trait]
-impl MemoryService for NativeMemoryService {
-    async fn search(
+/// The provider's conventional tool operations — INHERENT methods, not part
+/// of any memory contract. The model reaches them only through the tools the
+/// manifest declares, served by this provider's first-party capability
+/// handler.
+impl NativeMemoryService {
+    pub async fn search(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceSearchRequest,
     ) -> Result<MemoryServiceSearchResponse, MemoryServiceError> {
         let (_, context) = self.scoped_context(&invocation)?;
         let search_request = MemorySearchRequest::new(&request.query)
-            .map_err(|_| MemoryServiceError::input())?
+            .map_err(MemoryServiceError::input_from)?
             .with_limit(request.limit)
             .with_pre_fusion_limit(request.limit.max(20))
             .with_vector(false);
@@ -119,7 +124,7 @@ impl MemoryService for NativeMemoryService {
         })
     }
 
-    async fn write(
+    pub async fn write(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceWriteRequest,
@@ -222,7 +227,7 @@ impl MemoryService for NativeMemoryService {
         })
     }
 
-    async fn read(
+    pub async fn read(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceReadRequest,
@@ -246,7 +251,7 @@ impl MemoryService for NativeMemoryService {
         })
     }
 
-    async fn tree(
+    pub async fn tree(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceTreeRequest,
@@ -269,7 +274,7 @@ impl MemoryService for NativeMemoryService {
         })
     }
 
-    async fn profile_set(
+    pub async fn profile_set(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceProfileSetRequest,
@@ -325,7 +330,10 @@ impl MemoryService for NativeMemoryService {
         }
         Err(MemoryServiceError::operation())
     }
+}
 
+#[async_trait]
+impl MemoryService for NativeMemoryService {
     async fn profile_read(
         &self,
         invocation: MemoryInvocation,
@@ -345,75 +353,41 @@ impl MemoryService for NativeMemoryService {
         Ok(MemoryServiceProfileReadResponse { document })
     }
 
-    async fn retrieve_context(
+    async fn read_long_term(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceContextRequest,
     ) -> Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError> {
-        if request.max_snippets == 0 || memory_context_disabled(request.context_profile_id.as_str())
-        {
+        let Some(mut results) = self.ranked_in_scope_results(&invocation, &request).await? else {
             return Ok(Vec::new());
-        }
-        let (_, context) = self.scoped_context(&invocation)?;
-        // Over-fetch BEFORE the lane filter below. `backend.search` caps results to
-        // the search limit, so capping at `max_snippets` up front would let general
-        // (long-term) hits in the global top-N starve the thread-scoped
-        // (short-term) lane — a short-term call could come back short or empty
-        // under normal ranking pressure. Fetch a wider candidate set, apply the
-        // scope + lane retains, THEN truncate to `max_snippets` so each lane keeps
-        // its own top results. (CR review: filter before limiting the short-term lane.)
-        let fetch_limit = request.max_snippets.saturating_mul(8).max(64);
-        let search_request = MemorySearchRequest::new(&request.query)
-            .map_err(|_| MemoryServiceError::input())?
-            .with_limit(fetch_limit)
-            .with_pre_fusion_limit(fetch_limit.max(20))
-            // Full-text only: the native backend declares vector_search=false and
-            // fails closed on a vector request (matches the `search` method).
-            //
-            // Regression-audit note: origin's prompt-context search left
-            // `vector=true`. `false` is intentional and correct for this provider —
-            // the native backend is FTS-only (no embeddings wired), so a vector
-            // request would fail closed and return nothing. A future
-            // vector-capable provider would set this in its own `retrieve_context`.
-            .with_vector(false);
-        let mut results = self
-            .backend
-            .search(&context, search_request)
-            .await
-            .map_err(MemoryServiceError::unavailable_from)?;
-        results.retain(|result| result.path.scope() == context.scope() && result.score.is_finite());
-        // Thread-aware lane selection. The `thread_id` is supplied by the trusted
-        // host run context on the invocation scope, never by the model.
-        match invocation.scope.thread_id.as_ref() {
-            // Short-term ("run-local") lane: restrict to the active thread's
-            // memory subtree.
-            Some(thread_id) => {
-                let prefix = thread_memory_prefix(thread_id);
-                results
-                    .retain(|result| path_has_thread_prefix(result.path.relative_path(), &prefix));
-            }
-            // Long-term lane: the user's general/durable memory — exclude every
-            // per-thread short-term scratch subtree so the two lanes stay disjoint
-            // when the host concatenates them into one memory block.
-            None => {
-                results.retain(|result| !is_thread_scoped_path(result.path.relative_path()));
-            }
-        }
-        results.sort_by(compare_memory_search_results);
-        // Truncate to the requested count AFTER the lane filter so the over-fetch
-        // above never leaks extra candidates and each lane keeps its own top N.
-        results.truncate(request.max_snippets);
+        };
+        // Long-term lane: the user's general/durable memory — exclude every
+        // per-thread short-term scratch subtree, regardless of whether the
+        // invocation carries an active thread, so the two lanes stay disjoint
+        // when the host concatenates them into one memory block.
+        results.retain(|result| !is_thread_scoped_path(result.path.relative_path()));
+        Ok(rank_and_truncate(results, request.max_snippets))
+    }
 
-        // Return raw, ranked, in-scope candidates. The host sanitizes the text,
-        // wraps it in the untrusted-memory envelope, builds the `memory-snippet:*`
-        // reference, and enforces the per-snippet + aggregate model-visible byte
-        // budgets — see `ironclaw_host_runtime::memory_context`. This provider only
-        // ranks and scopes; it never shapes model-visible content, so a provider
-        // cannot bypass host prompt safety.
-        Ok(results
-            .into_iter()
-            .map(map_search_result_to_snippet)
-            .collect())
+    async fn read_short_term(
+        &self,
+        invocation: MemoryInvocation,
+        request: MemoryServiceContextRequest,
+    ) -> Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError> {
+        // Short-term ("run-local") lane: restrict to the active thread's memory
+        // subtree. The `thread_id` is supplied by the trusted host run context
+        // on the invocation scope, never by the model; with no active thread
+        // there is nothing to retrieve, so degrade to empty.
+        let Some(thread_id) = invocation.scope.thread_id.clone() else {
+            tracing::debug!("read_short_term skipped: no thread_id on invocation scope");
+            return Ok(Vec::new());
+        };
+        let Some(mut results) = self.ranked_in_scope_results(&invocation, &request).await? else {
+            return Ok(Vec::new());
+        };
+        let prefix = thread_memory_prefix(&thread_id);
+        results.retain(|result| path_has_thread_prefix(result.path.relative_path(), &prefix));
+        Ok(rank_and_truncate(results, request.max_snippets))
     }
 
     async fn record_interaction(
@@ -439,7 +413,7 @@ impl MemoryService for NativeMemoryService {
             return Ok(MemoryServiceRecordResponse { recorded: false });
         }
         // Write the full transcript to a PER-RUN file under the SAME `threads/<T>/`
-        // convention `retrieve_context`'s short-term lane filters on (reusing
+        // convention the `read_short_term` lane filters on (reusing
         // `thread_memory_prefix`). Using a per-run path
         // (`threads/<thread_id>/<turn_run_id>.md`) with `append: false` (overwrite)
         // makes the record idempotent: a scheduler re-run of an already-`Completed`
@@ -458,6 +432,49 @@ impl MemoryService for NativeMemoryService {
 }
 
 impl NativeMemoryService {
+    /// Shared body of the two retrieval lanes ([`MemoryService::read_long_term`]
+    /// / [`MemoryService::read_short_term`]): guard the disabled/zero cases,
+    /// over-fetch a wide candidate set, and drop cross-scope + non-finite
+    /// results. Returns `None` when retrieval is disabled for this request.
+    ///
+    /// Over-fetch BEFORE the caller's lane filter. `backend.search` caps results
+    /// to the search limit, so capping at `max_snippets` up front would let
+    /// general (long-term) hits in the global top-N starve the thread-scoped
+    /// (short-term) lane — a short-term call could come back short or empty
+    /// under normal ranking pressure. Fetch a wider candidate set, apply the
+    /// scope + lane retains, THEN truncate to `max_snippets` (in
+    /// `rank_and_truncate`) so each lane keeps its own top results.
+    async fn ranked_in_scope_results(
+        &self,
+        invocation: &MemoryInvocation,
+        request: &MemoryServiceContextRequest,
+    ) -> Result<Option<Vec<MemorySearchResult>>, MemoryServiceError> {
+        if request.max_snippets == 0 || memory_context_disabled(request.context_profile_id.as_str())
+        {
+            return Ok(None);
+        }
+        let (_, context) = self.scoped_context(invocation)?;
+        let fetch_limit = request.max_snippets.saturating_mul(8).max(64);
+        let search_request = MemorySearchRequest::new(&request.query)
+            .map_err(MemoryServiceError::input_from)?
+            .with_limit(fetch_limit)
+            .with_pre_fusion_limit(fetch_limit.max(20))
+            // Full-text only: the native backend declares vector_search=false and
+            // fails closed on a vector request (matches the `search` method).
+            // FTS-only is intentional and correct for this provider — no
+            // embeddings are wired, so a vector request would fail closed and
+            // return nothing. A vector-capable provider sets this in its own
+            // lane methods.
+            .with_vector(false);
+        let mut results = self
+            .backend
+            .search(&context, search_request)
+            .await
+            .map_err(MemoryServiceError::unavailable_from)?;
+        results.retain(|result| result.path.scope() == context.scope() && result.score.is_finite());
+        Ok(Some(results))
+    }
+
     /// Write `content` to the reserved `threads/` namespace, bypassing the
     /// `write`-level reservation guard. ONLY the trusted per-run recorder
     /// ([`MemoryService::record_interaction`]) may write there; the public
@@ -741,6 +758,26 @@ fn strip_thread_memory_root(relative_path: &str) -> Option<&str> {
     root.eq_ignore_ascii_case(THREAD_MEMORY_ROOT)
         .then(|| relative_path.get(THREAD_MEMORY_ROOT.len()..))
         .flatten()
+}
+
+/// Order the lane-filtered candidates (score descending, path ascending on
+/// ties), truncate to the requested count AFTER the lane filter so the
+/// over-fetch never leaks extra candidates, and map to raw snippets. The host
+/// sanitizes the text, wraps it in the untrusted-memory envelope, builds the
+/// `memory-snippet:*` reference, and enforces the per-snippet + aggregate
+/// model-visible byte budgets — see `ironclaw_host_runtime::memory_context`.
+/// This provider only ranks and scopes; it never shapes model-visible content,
+/// so a provider cannot bypass host prompt safety.
+fn rank_and_truncate(
+    mut results: Vec<MemorySearchResult>,
+    max_snippets: usize,
+) -> Vec<MemoryServiceContextSnippet> {
+    results.sort_by(compare_memory_search_results);
+    results.truncate(max_snippets);
+    results
+        .into_iter()
+        .map(map_search_result_to_snippet)
+        .collect()
 }
 
 fn compare_memory_search_results(

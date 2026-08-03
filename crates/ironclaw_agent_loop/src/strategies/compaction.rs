@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use crate::state::{
     CompactionEffectivenessBaseline, IndexedMessageKind, LoopExecutionState, MessageIndexEntry,
 };
-use ironclaw_host_api::CapabilityId;
-use ironclaw_turns::run_profile::{CompactionInitiator, LoopRunContext, PromptContextTokenBudget};
+use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_loop_contracts::{CompactionInitiator, LoopRunContext, PromptContextTokenBudget};
 
 /// Decides whether to replace older transcript context with a host-managed summary.
 ///
@@ -279,8 +279,8 @@ mod tests {
         CompactionEffectivenessBaseline, CompactionPromptSnapshot, CompactionStrategyState,
         DeferredCompactionWatermark, LoopExecutionState, MessageIndexEntry,
     };
-    use ironclaw_host_api::CapabilityId;
-    use ironclaw_turns::run_profile::PromptContextTokenBudget;
+    use ironclaw_host_api::ids::CapabilityId;
+    use ironclaw_loop_contracts::PromptContextTokenBudget;
 
     #[test]
     fn evaluate_skips_when_message_index_is_empty() {

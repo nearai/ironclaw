@@ -16,10 +16,20 @@ import { deleteThreadErrorMessage } from "../lib/thread-errors";
 import { useThreads } from "../pages/chat/hooks/useThreads";
 import { Sidebar } from "../components/sidebar";
 import { PageHeader } from "../components/page-header";
-import { CommandPalette } from "../components/command-palette";
 import { ToastViewport } from "../components/toast-viewport";
 import React from "react";
 import { cn } from "../utils/cn";
+
+// The ⌘K launcher is opened by an explicit keyboard shortcut (see the
+// keydown listener below) rather than needed for the page's first paint, so
+// it loads as its own chunk instead of padding the initial /chat bundle —
+// same pattern as the route-level pages in app/app.tsx and the settings/admin
+// tabs (settings-page.tsx, admin-page.tsx).
+const CommandPalette = React.lazy(() =>
+  import("../components/command-palette").then(({ CommandPalette }) => ({
+    default: CommandPalette,
+  }))
+);
 
 export function GatewayLayout({
   token,
@@ -27,6 +37,7 @@ export function GatewayLayout({
   isChecking = false,
   isAdmin,
   rebornProjectsEnabled = false,
+  regressionArtifactExportEnabled = false,
   globalAutoApproveEnabled = false,
   onSignOut,
 }) {
@@ -173,6 +184,7 @@ export function GatewayLayout({
               currentUser: profile,
               isChecking,
               isAdmin,
+              regressionArtifactExportEnabled,
               globalAutoApproveEnabled,
               threadsState: routeThreadsState,
               setHeaderStatus,
@@ -182,13 +194,15 @@ export function GatewayLayout({
           />
         </main>
       </div>
-      <CommandPalette
-        open={paletteOpen}
-        onClose={() => setPaletteOpen(false)}
-        threadsState={threadsState}
-        onNewChat={sidebar.newChat}
-        onToggleTheme={toggleTheme}
-      />
+      <React.Suspense fallback={null}>
+        <CommandPalette
+          open={paletteOpen}
+          onClose={() => setPaletteOpen(false)}
+          threadsState={threadsState}
+          onNewChat={sidebar.newChat}
+          onToggleTheme={toggleTheme}
+        />
+      </React.Suspense>
       <ToastViewport />
     </div>
   );

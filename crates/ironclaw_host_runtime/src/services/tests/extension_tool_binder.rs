@@ -5,9 +5,10 @@
 
 use std::collections::BTreeSet;
 
-use ironclaw_host_api::{
-    RequestedTrustClass, ToolCall, ToolCallResources, ToolError, ToolPorts, TrustClass, VirtualPath,
+use ironclaw_extension_contracts::tool_adapter::{
+    ToolCall, ToolCallResources, ToolError, ToolPorts,
 };
+use ironclaw_host_api::{path::VirtualPath, runtime::TrustClass, trust::RequestedTrustClass};
 
 use super::super::ExtensionToolBindError;
 use super::*;
@@ -36,10 +37,11 @@ fn first_party_test_package(service: &str, capability_id: &str) -> ExtensionPack
                 max_egress_bytes: None,
                 default_permission: PermissionMode::Allow,
                 visibility: ironclaw_extensions::CapabilityVisibility::Model,
-                input_schema_ref: ironclaw_host_api::CapabilityProfileSchemaRef::new(
-                    "schemas/fixture/input.v1.json",
-                )
-                .unwrap(),
+                input_schema_ref:
+                    ironclaw_host_api::capability_profile::CapabilityProfileSchemaRef::new(
+                        "schemas/fixture/input.v1.json",
+                    )
+                    .unwrap(),
                 output_schema_ref: None,
                 prompt_doc_ref: None,
                 required_host_ports: Vec::new(),
@@ -85,12 +87,7 @@ impl crate::FirstPartyCapabilityHandler for GatingHandler {
 
 fn binder_services(
     handlers: FirstPartyCapabilityRegistry,
-) -> HostRuntimeServices<
-    DiskFilesystem,
-    InMemoryResourceGovernor,
-    ironclaw_processes::ProcessStore<ironclaw_filesystem::InMemoryBackend>,
-    ironclaw_processes::ProcessResultStore<ironclaw_filesystem::InMemoryBackend>,
-> {
+) -> HostRuntimeServices<DiskFilesystem, InMemoryResourceGovernor> {
     HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
         Arc::new(DiskFilesystem::new()),
@@ -227,7 +224,7 @@ impl ironclaw_mcp::McpExecutor for RecordingMcpExecutor {
             .unwrap_or_default();
         let reservation_id = ResourceReservationId::new();
         Ok(ironclaw_mcp::McpExecutionResult {
-            result: ironclaw_host_api::CapabilityHostResult {
+            result: ironclaw_host_api::resource::CapabilityHostResult {
                 output: self.output.clone(),
                 reservation_id,
                 usage: ResourceUsage::default(),
@@ -252,15 +249,15 @@ impl ironclaw_mcp::McpExecutor for RecordingMcpExecutor {
 struct UnusedRuntimeHttpEgress;
 
 #[async_trait]
-impl ironclaw_host_api::RuntimeHttpEgress for UnusedRuntimeHttpEgress {
+impl ironclaw_host_api::http::RuntimeHttpEgress for UnusedRuntimeHttpEgress {
     async fn execute(
         &self,
-        request: ironclaw_host_api::RuntimeHttpEgressRequest,
+        request: ironclaw_host_api::http::RuntimeHttpEgressRequest,
     ) -> Result<
-        ironclaw_host_api::RuntimeHttpEgressResponse,
-        ironclaw_host_api::RuntimeHttpEgressError,
+        ironclaw_host_api::http::RuntimeHttpEgressResponse,
+        ironclaw_host_api::http::RuntimeHttpEgressError,
     > {
-        Err(ironclaw_host_api::RuntimeHttpEgressError::Request {
+        Err(ironclaw_host_api::http::RuntimeHttpEgressError::Request {
             reason: "runtime egress must not be called in the binder routing test".to_string(),
             request_bytes: request.body.len() as u64,
             response_bytes: 0,

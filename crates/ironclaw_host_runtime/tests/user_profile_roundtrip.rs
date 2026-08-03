@@ -1,5 +1,5 @@
 //! Caller-level integration test for the user-profile round trip:
-//! `builtin.profile_set` (writer) → `MemoryBackedUserProfileSource` (reader) →
+//! `ironclaw.memory.profile_set` (writer) → `MemoryBackedUserProfileSource` (reader) →
 //! `LoopRuntimeContext::render_model_content()` (render).
 //!
 //! This test exercises the full real-capability dispatch path (not just
@@ -25,28 +25,39 @@ use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
-    AgentId, CapabilityGrantId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId,
-    GrantConstraints, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy,
-    PackageId, Principal, ProjectId, ResourceEstimate, RunId, RuntimeHttpEgress,
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
-    TenantId, ThreadId, TrustClass, UserId, VirtualPath,
+    action::NetworkPolicy,
+    capability::{CapabilitySet, EffectKind, GrantConstraints},
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    ids::{
+        AgentId, CapabilityGrantId, ExtensionId, PackageId, ProjectId, RunId, TenantId, ThreadId,
+        UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceEstimate,
+    runtime::{RuntimeKind, TrustClass},
     runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
     },
+    scope::{ExecutionContext, Principal},
 };
-use ironclaw_host_runtime::builtin_first_party_package;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, MemoryBackedUserProfileSource,
     PROFILE_SET_CAPABILITY_ID, RuntimeCapabilityOutcome, builtin_first_party_handlers,
+    register_native_memory_tools,
+};
+use ironclaw_host_runtime::{builtin_first_party_package, native_memory_first_party_package};
+use ironclaw_loop_contracts::{
+    InMemoryRunProfileResolver, LoopRuntimeContext, RunProfileResolutionRequest, RunProfileResolver,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_triggers::InMemoryTriggerRepository;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
-use ironclaw_turns::{
-    RunProfileResolver, TurnActor, TurnId, TurnRunId, TurnScope,
-    run_profile::{InMemoryRunProfileResolver, LoopRuntimeContext, RunProfileResolutionRequest},
-};
+use ironclaw_turns::{TurnActor, TurnId, TurnRunId, TurnScope};
 use serde_json::json;
 
 // ── Noop HTTP egress (profile_set does not need network) ──
@@ -69,11 +80,11 @@ impl RuntimeHttpEgress for NoopRuntimeHttpEgress {
 
 // ── Shared test helpers ──
 
-fn local_dev_policy() -> EffectiveRuntimePolicy {
+fn local_host_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,
@@ -102,6 +113,21 @@ fn trust_policy() -> HostTrustPolicy {
             ],
             None,
         ),
+        // The profile tool rides the bound memory provider's package
+        // (`ironclaw.memory`), so it carries the production memory trust
+        // entry: dispatch + filesystem read/write only.
+        AdminEntry::for_local_manifest(
+            PackageId::new("ironclaw.memory").unwrap(),
+            "/system/extensions/ironclaw.memory/manifest.toml".to_string(),
+            None,
+            HostTrustAssignment::first_party(),
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ],
+            None,
+        ),
     ]))])
     .unwrap()
 }
@@ -118,10 +144,10 @@ fn memory_mounts() -> MountView {
 fn dispatch_grant_with_mounts(
     capability: &str,
     mounts: MountView,
-) -> ironclaw_host_api::CapabilityGrant {
-    ironclaw_host_api::CapabilityGrant {
+) -> ironclaw_host_api::capability::CapabilityGrant {
+    ironclaw_host_api::capability::CapabilityGrant {
         id: CapabilityGrantId::new(),
-        capability: ironclaw_host_api::CapabilityId::new(capability).unwrap(),
+        capability: ironclaw_host_api::ids::CapabilityId::new(capability).unwrap(),
         grantee: Principal::Extension(ExtensionId::new("caller").unwrap()),
         issued_by: Principal::HostRuntime,
         constraints: GrantConstraints {
@@ -189,7 +215,7 @@ fn agent_scoped_context(
 async fn loop_run_context_with_user(
     tenant_id: &str,
     user_id: &str,
-) -> ironclaw_turns::run_profile::LoopRunContext {
+) -> ironclaw_loop_contracts::LoopRunContext {
     let resolved_run_profile = InMemoryRunProfileResolver::default()
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
         .await
@@ -201,7 +227,7 @@ async fn loop_run_context_with_user(
         ThreadId::new("thread-profile-roundtrip-test").unwrap(),
     );
     let actor = TurnActor::new(UserId::new(user_id).unwrap());
-    ironclaw_turns::run_profile::LoopRunContext::new(
+    ironclaw_loop_contracts::LoopRunContext::new(
         scope,
         TurnId::new(),
         TurnRunId::new(),
@@ -212,6 +238,12 @@ async fn loop_run_context_with_user(
 
 fn build_runtime(shared_fs: Arc<InMemoryBackend>) -> impl HostRuntime {
     let mut registry = ExtensionRegistry::new();
+    // The profile tool is declared by the bound memory provider's package now
+    // (`ironclaw.memory.profile_set`), so the roundtrip runtime registers the
+    // native memory package beside builtin — mirroring the default binding.
+    registry
+        .insert(native_memory_first_party_package().unwrap())
+        .unwrap();
     registry
         .insert(builtin_first_party_package().unwrap())
         .unwrap();
@@ -223,19 +255,25 @@ fn build_runtime(shared_fs: Arc<InMemoryBackend>) -> impl HostRuntime {
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(
-        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
-    ))
+    .with_first_party_capabilities(Arc::new({
+        // Local-testing analog of the composition registration: builtin
+        // handlers + the bound (native) memory provider's registry-routed
+        // tools (this test dispatches `ironclaw.memory.profile_set`).
+        let mut handlers =
+            builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap();
+        register_native_memory_tools(&mut handlers).unwrap();
+        handlers
+    }))
     .with_runtime_http_egress(Arc::new(NoopRuntimeHttpEgress))
     .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
-    .with_runtime_policy(local_dev_policy())
+    .with_runtime_policy(local_host_policy())
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
 
 // ── Round-trip test ──
 
-/// End-to-end round trip: dispatch `builtin.profile_set` through the real
+/// End-to-end round trip: dispatch `ironclaw.memory.profile_set` through the real
 /// capability dispatch path for an AGENT+PROJECT-scoped run, then read back
 /// via `MemoryBackedUserProfileSource`, and assert `render_model_content()`
 /// renders the expected strings.
@@ -256,7 +294,7 @@ async fn profile_set_then_runtime_context_renders_local_time_and_profile_line() 
     let shared_fs = Arc::new(InMemoryBackend::new());
     let runtime = build_runtime(shared_fs.clone());
 
-    // ── Step 1: dispatch builtin.profile_set for an agent+project-scoped run ──
+    // ── Step 1: dispatch ironclaw.memory.profile_set for an agent+project-scoped run ──
     //
     // The `ResourceScope` on this request carries agent_id and project_id.
     // `profile_merge_write` → `profile_scope_and_path` will drop these,
@@ -271,7 +309,7 @@ async fn profile_set_then_runtime_context_renders_local_time_and_profile_line() 
     let outcome = runtime
         .invoke_capability((
             context,
-            ironclaw_host_api::CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
+            ironclaw_host_api::ids::CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),
             json!({"timezone": "Asia/Tokyo", "locale": "ja-JP", "location": "Tokyo, Japan"}),
         ))
@@ -391,7 +429,7 @@ async fn profile_set_for_one_user_is_not_visible_to_another() {
     let outcome = runtime
         .invoke_capability((
             context_a,
-            ironclaw_host_api::CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
+            ironclaw_host_api::ids::CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),
             json!({"timezone": "America/New_York", "locale": "en-US"}),
         ))

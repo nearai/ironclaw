@@ -7,7 +7,7 @@
 //! PATH (the store is multi-tenant).
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ironclaw_host_api::ScopedPath;
+use ironclaw_host_api::path::ScopedPath;
 
 use crate::{RebornIdentityError, SurfaceKind};
 

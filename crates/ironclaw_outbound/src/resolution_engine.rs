@@ -1,4 +1,4 @@
-use ironclaw_turns::ReplyTargetBindingRef;
+use ironclaw_host_api::turn::ReplyTargetBindingRef;
 
 use crate::{
     CommunicationDeliveryCandidate, CommunicationDeliveryIntent, CommunicationDeliveryKind,
@@ -63,8 +63,8 @@ impl<'a> OutboundResolutionEngine<'a> {
 
     async fn resolve_run_notification_context(
         &self,
-        scope: &ironclaw_turns::TurnScope,
-        actor: &ironclaw_turns::TurnActor,
+        scope: &ironclaw_host_api::turn::TurnScope,
+        actor: &ironclaw_host_api::turn::TurnActor,
         context: &RunNotificationContext,
     ) -> Result<CommunicationDeliveryResolution, OutboundError> {
         let kind = context.delivery_kind();
@@ -103,8 +103,8 @@ impl<'a> OutboundResolutionEngine<'a> {
         &self,
         kind: CommunicationDeliveryKind,
         source_route_target: &ReplyTargetBindingRef,
-        scope: &ironclaw_turns::TurnScope,
-        actor: &ironclaw_turns::TurnActor,
+        scope: &ironclaw_host_api::turn::TurnScope,
+        actor: &ironclaw_host_api::turn::TurnActor,
     ) -> Result<ReplyTargetBindingRef, OutboundError> {
         self.resolve_triggered_explicit_target(kind, source_route_target, scope, actor)
             .await
@@ -114,8 +114,8 @@ impl<'a> OutboundResolutionEngine<'a> {
         &self,
         kind: CommunicationDeliveryKind,
         ordinary_notification_target: &ReplyTargetBindingRef,
-        scope: &ironclaw_turns::TurnScope,
-        actor: &ironclaw_turns::TurnActor,
+        scope: &ironclaw_host_api::turn::TurnScope,
+        actor: &ironclaw_host_api::turn::TurnActor,
     ) -> Result<ReplyTargetBindingRef, OutboundError> {
         match kind {
             CommunicationDeliveryKind::ApprovalPrompt => {
@@ -134,8 +134,8 @@ impl<'a> OutboundResolutionEngine<'a> {
 
     async fn resolve_triggered_target(
         &self,
-        scope: &ironclaw_turns::TurnScope,
-        actor: &ironclaw_turns::TurnActor,
+        scope: &ironclaw_host_api::turn::TurnScope,
+        actor: &ironclaw_host_api::turn::TurnActor,
         kind: CommunicationDeliveryKind,
     ) -> Result<ReplyTargetBindingRef, OutboundError> {
         match kind {
@@ -161,8 +161,8 @@ impl<'a> OutboundResolutionEngine<'a> {
 
     async fn load_preference_target(
         &self,
-        scope: &ironclaw_turns::TurnScope,
-        actor: &ironclaw_turns::TurnActor,
+        scope: &ironclaw_host_api::turn::TurnScope,
+        actor: &ironclaw_host_api::turn::TurnActor,
         kind: PreferenceTargetKind,
     ) -> Result<ReplyTargetBindingRef, OutboundError> {
         let key = default_preference_key(scope, actor);
@@ -196,8 +196,8 @@ impl<'a> OutboundResolutionEngine<'a> {
 }
 
 fn default_preference_key(
-    scope: &ironclaw_turns::TurnScope,
-    actor: &ironclaw_turns::TurnActor,
+    scope: &ironclaw_host_api::turn::TurnScope,
+    actor: &ironclaw_host_api::turn::TurnActor,
 ) -> CommunicationPreferenceKey {
     match (
         scope.explicit_owner_user_id(),
@@ -239,8 +239,8 @@ fn missing_preference_error(kind: PreferenceTargetKind) -> OutboundError {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-    use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnScope};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnActor, TurnScope};
 
     use super::*;
     use crate::test_support::in_memory_backed_outbound_state_store;

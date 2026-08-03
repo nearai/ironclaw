@@ -35,16 +35,17 @@
 //! (isolation, round-trip, list filtering, search isolation). The
 //! shape — not the breadth — is the point. Follow-up PRs can extend
 //! the suite (CAS, metadata, append outcomes) and port other traits
-//! (`IdempotencyLedger`, `CheckpointStateStorePort`, `ProcessStorePort`, …)
+//! (`IdempotencyLedger`, process repositories, and similar ports)
 //! onto the same pattern.
 
 use ironclaw_filesystem::FilesystemError;
 
-use crate::chunking::{MemoryChunkWrite, content_sha256};
+use crate::chunking::MemoryChunkWrite;
 use crate::indexer::{MemoryChunkReplaceOutcome, MemoryDocumentIndexRepository};
-use crate::path::{MemoryDocumentPath, MemoryDocumentScope};
 use crate::repo::MemoryDocumentRepository;
 use crate::search::MemorySearchRequest;
+use ironclaw_memory::content_sha256;
+use ironclaw_memory::{MemoryDocumentPath, MemoryDocumentScope};
 
 /// Factory closure shape every contract takes.
 ///

@@ -10,20 +10,22 @@
 //! production removal is the service path (`remove_record` + auth cleanup) and
 //! is covered through the composition services.
 
+use ironclaw_extension_contracts::state::InstallationState;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::tool_adapter::ToolAdapter;
 use ironclaw_extension_host::test_support::{
     FakeChannelAdapter, FakeEgressFactory, FakeLoader, RecordingDrain, mcp_manifest,
     tool_and_channel_manifest,
 };
 use ironclaw_extension_host::{
     ExtensionBindings, ExtensionHost, ExtensionHostDeps, InstallationRecord,
-    InstallationRecordStore, InstallationState, LifecycleError, RehydratedInstallationRecordStore,
+    InstallationRecordStore, LifecycleError, RehydratedInstallationRecordStore,
 };
-use ironclaw_host_api::{InvocationOrigin, ProductKind, ToolAdapter};
-use ironclaw_product::ChannelAdapter;
+use ironclaw_host_api::{ids::ProductKind, invocation::InvocationOrigin};
 
 struct Harness {
     host: ExtensionHost,
@@ -196,7 +198,7 @@ async fn activation_publishes_and_resolves() {
     assert!(snapshot.extension("acme").is_some());
     assert_eq!(channel.activate_calls.load(Ordering::SeqCst), 1);
     // Tool resolves (TOOL-1 groundwork: prebound adapter by capability id).
-    let capability = ironclaw_host_api::CapabilityId::new("acme.ping").unwrap();
+    let capability = ironclaw_host_api::ids::CapabilityId::new("acme.ping").unwrap();
     let binding = snapshot.resolve_tool(&capability).expect("tool resolves");
     assert_eq!(binding.declaration.id.as_str(), "acme");
     assert_eq!(
@@ -313,7 +315,7 @@ async fn snapshot_watch_subscription_observes_every_publish() {
 #[tokio::test]
 async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
     use ironclaw_capabilities::ToolResolver;
-    use ironclaw_host_api::CapabilityId;
+    use ironclaw_host_api::ids::CapabilityId;
 
     let channel = Arc::new(FakeChannelAdapter::default());
     let h = harness_with(
@@ -337,7 +339,10 @@ async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
 
     let resolved = resolver.resolve(&ping).expect("activated tool resolves");
     assert_eq!(resolved.provider.as_str(), "acme");
-    assert_eq!(resolved.runtime, ironclaw_host_api::RuntimeKind::Wasm);
+    assert_eq!(
+        resolved.runtime,
+        ironclaw_host_api::runtime::RuntimeKind::Wasm
+    );
 
     // An in-flight binding keeps working across the deactivation swap; new
     // resolution stops.
@@ -354,7 +359,7 @@ async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: ping.clone(),
             scope: sample_scope(),
-            estimate: ironclaw_host_api::ResourceEstimate::default(),
+            estimate: ironclaw_host_api::resource::ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,
             authenticated_actor_user_id: None,
@@ -369,9 +374,12 @@ async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
 #[tokio::test]
 async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
     use ironclaw_capabilities::ToolResolver;
+    use ironclaw_extension_contracts::tool_adapter::{
+        ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
+    };
     use ironclaw_host_api::{
-        CapabilityId, DispatchError, SecretHandle, ToolAdapter, ToolCall, ToolError, ToolPorts,
-        ToolResult,
+        dispatch::DispatchError,
+        ids::{CapabilityId, SecretHandle},
     };
 
     struct AuthGatingAdapter;
@@ -416,7 +424,7 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("acme.ping").unwrap(),
             scope: sample_scope(),
-            estimate: ironclaw_host_api::ResourceEstimate::default(),
+            estimate: ironclaw_host_api::resource::ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,
             authenticated_actor_user_id: None,
@@ -441,11 +449,19 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
 }
 
 #[tokio::test]
-async fn extension_capability_colliding_with_a_host_builtin_fails_activation() {
-    use ironclaw_host_api::CapabilityId;
+async fn extension_capabilities_colliding_with_host_bridges_fail_activation() {
+    use ironclaw_host_api::ids::CapabilityId;
 
     let channel = Arc::new(FakeChannelAdapter::default());
     let store = Arc::new(RehydratedInstallationRecordStore::default());
+    let reserved_capability_ids: std::collections::BTreeSet<_> = [
+        "ironclaw.tool_search",
+        "ironclaw.tool_describe",
+        "ironclaw.tool_call",
+    ]
+    .into_iter()
+    .map(|id| CapabilityId::new(id).unwrap())
+    .collect();
     let deps = ExtensionHostDeps {
         store: Arc::clone(&store) as Arc<dyn InstallationRecordStore>,
         loader: Arc::new(FakeLoader {
@@ -455,32 +471,37 @@ async fn extension_capability_colliding_with_a_host_builtin_fails_activation() {
         }),
         drain: Arc::new(RecordingDrain::default()),
         egress: Arc::new(FakeEgressFactory),
-        reserved_capability_ids: [CapabilityId::new("acme.ping").unwrap()]
-            .into_iter()
-            .collect(),
+        reserved_capability_ids: reserved_capability_ids.clone(),
         reserved_ingress_routes: Default::default(),
         hook_deadline: Duration::from_secs(5),
     };
     let host = ExtensionHost::new(deps).await;
-    host.install(record("acme", tool_and_channel_manifest()))
-        .await
-        .unwrap();
 
-    let err = host.activate("acme").await.unwrap_err();
-    assert!(
-        matches!(
-            &err,
-            LifecycleError::Conflict(
-                ironclaw_extension_host::SnapshotConflict::ReservedCapability { capability_id, .. }
-            ) if capability_id == "acme.ping"
-        ),
-        "expected reserved-capability conflict, got {err:?}"
-    );
-    // Nothing published; the record recorded the terminal Failed state.
-    assert!(host.snapshot().await.extension("acme").is_none());
-    let stored = store.get("acme").await.unwrap().unwrap();
-    assert_eq!(stored.state, InstallationState::Failed);
-    assert!(stored.last_error.is_some());
+    for capability_id in reserved_capability_ids {
+        let extension_id = capability_id.as_str().replace('.', "-");
+        let mut manifest = tool_and_channel_manifest();
+        manifest.tools[0].id = capability_id.clone();
+        host.install(record(&extension_id, manifest)).await.unwrap();
+
+        let err = host.activate(&extension_id).await.unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                LifecycleError::Conflict(
+                    ironclaw_extension_host::SnapshotConflict::ReservedCapability {
+                        capability_id: conflicting_id,
+                        ..
+                    }
+                ) if conflicting_id == capability_id.as_str()
+            ),
+            "expected reserved-capability conflict for {capability_id}, got {err:?}"
+        );
+        // Nothing published; the record recorded the terminal Failed state.
+        assert!(host.snapshot().await.extension(&extension_id).is_none());
+        let stored = store.get(&extension_id).await.unwrap().unwrap();
+        assert_eq!(stored.state, InstallationState::Failed);
+        assert!(stored.last_error.is_some());
+    }
 
     // The redacted reason is exposed to the product projection via
     // `installation_errors()` — the single source both the `Failed` projection
@@ -488,23 +509,31 @@ async fn extension_capability_colliding_with_a_host_builtin_fails_activation() {
     let errors = host.installation_errors().await.unwrap();
     assert_eq!(
         errors.len(),
-        1,
-        "one failed extension has a recorded reason"
+        3,
+        "every failed bridge collision has a recorded reason"
     );
-    assert!(
-        errors.get("acme").is_some_and(|reason| !reason.is_empty()),
-        "the failed activation reason is keyed by extension id"
-    );
+    for extension_id in [
+        "ironclaw-tool_search",
+        "ironclaw-tool_describe",
+        "ironclaw-tool_call",
+    ] {
+        assert!(
+            errors
+                .get(extension_id)
+                .is_some_and(|reason| !reason.is_empty()),
+            "the failed activation reason is keyed by extension id"
+        );
+    }
 }
 
-fn sample_scope() -> ironclaw_host_api::ResourceScope {
-    ironclaw_host_api::ResourceScope {
-        tenant_id: ironclaw_host_api::TenantId::new("tenant-a").unwrap(),
-        user_id: ironclaw_host_api::UserId::new("user-a").unwrap(),
+fn sample_scope() -> ironclaw_host_api::resource::ResourceScope {
+    ironclaw_host_api::resource::ResourceScope {
+        tenant_id: ironclaw_host_api::ids::TenantId::new("tenant-a").unwrap(),
+        user_id: ironclaw_host_api::ids::UserId::new("user-a").unwrap(),
         agent_id: None,
         project_id: None,
         mission_id: None,
         thread_id: None,
-        invocation_id: ironclaw_host_api::InvocationId::new(),
+        invocation_id: ironclaw_host_api::ids::InvocationId::new(),
     }
 }

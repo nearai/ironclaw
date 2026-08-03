@@ -14,7 +14,7 @@
 //! near-identical request shapes across the crate graph (§1.1):
 //! `CapabilityInvocation` (`ironclaw_turns`), `RuntimeCapabilityRequest`
 //! (`ironclaw_host_runtime`), `CapabilityInvocationRequest`
-//! (`ironclaw_capabilities`) and `RuntimeAdapterRequest` (`ironclaw_dispatcher`).
+//! and `RuntimeAdapterRequest` (both `ironclaw_capabilities`).
 //! The live names are `LoopRequest`, runtime tuple parts, direct
 //! `CapabilityHost` parameters, and the private runtime-lane request.
 //! The field-level diff shows only
@@ -34,7 +34,7 @@
 //!
 //! These vocabulary types are now consumed on the live path (the wiring slice has
 //! landed): [`InvocationOrigin`] is sealed at the membrane and read by the
-//! capability authorization fold ([`crate::ExecutionContext::resolved_origin`],
+//! capability authorization fold ([`crate::scope::ExecutionContext::resolved_origin`],
 //! the `origin`→gate matrix) and by the first-party trigger-mutation policy that
 //! denies `ScheduledLoopRun`, and [`Invocation`]/[`Actor`] back the
 //! `ironclaw_capabilities` `authorize()` path. The retired shapes still coexist,
@@ -45,8 +45,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    ActivityId, CapabilityId, CorrelationId, ProcessId, ProductKind, ResourceEstimate,
-    ResourceScope, RoutineId, RunId, UserId,
+    ids::{
+        ActivityId, CapabilityId, CorrelationId, ProcessId, ProductKind, RoutineId, RunId, UserId,
+    },
+    resource::{ResourceEstimate, ResourceScope},
 };
 
 /// Where a capability invocation originated — sealed at the membrane, exactly
@@ -64,7 +66,7 @@ use crate::{
 /// `LoopRun` carries [`RunId`] — this crate's prompt-visible loop turn-run
 /// identity (the `TurnRunId` the design doc names is `ironclaw_turns`' higher-level
 /// alias for the same run; `host_api` cannot depend on `turns`, so the run identity
-/// is modeled here as `RunId`, matching [`crate::ExecutionContext::run_id`]).
+/// is modeled here as `RunId`, matching [`crate::scope::ExecutionContext::run_id`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InvocationOrigin {
@@ -147,8 +149,8 @@ impl Actor {
 /// **omits `mounts`, `grants`, `trust`, and `resource_reservation`**: trust,
 /// grants, and mounts are *derived or produced by* `authorize()`, and
 /// mounts/reservation are authorization *outputs* that live on the sealed
-/// [`crate::Authorized`] witness, never on the request. `Invocation` is the
-/// pre-auth input; [`crate::Authorized`] is the post-auth witness.
+/// [`crate::authorized::Authorized`] witness, never on the request. `Invocation` is the
+/// pre-auth input; [`crate::authorized::Authorized`] is the post-auth witness.
 ///
 /// This is an in-process payload (`input` is arbitrary JSON, not `Eq`), so it
 /// derives `PartialEq` but not `Eq` and is not itself a wire type.
@@ -186,7 +188,7 @@ pub struct Invocation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::InvocationId;
+    use crate::ids::InvocationId;
 
     fn sample_scope() -> ResourceScope {
         ResourceScope::local_default(UserId::new("user1").unwrap(), InvocationId::new()).unwrap()

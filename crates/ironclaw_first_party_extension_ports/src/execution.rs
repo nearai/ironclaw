@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use ironclaw_loop_contracts::LoopRunContext;
 use ironclaw_loop_host::{SkillBundleId, SkillBundleSource};
-use ironclaw_turns::run_profile::LoopRunContext;
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId, TurnScope};
 use thiserror::Error;
 
@@ -161,21 +161,22 @@ mod tests {
     use std::collections::HashMap;
 
     use async_trait::async_trait;
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver,
+        SkillVisibility,
+    };
     use ironclaw_loop_host::{
         SkillBundleDescriptor, SkillBundleId, SkillBundleSource, SkillBundleSourceError,
         SkillFilePath, SkillSourceKind,
     };
     use ironclaw_skills::SkillTrust;
-    use ironclaw_turns::{
-        RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
-        run_profile::{InMemoryRunProfileResolver, SkillVisibility},
-    };
+    use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
     use super::super::{
         SkillActivationMode, SkillActivationRequest, SkillActivationSelectorConfig,
     };
     use super::*;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
 
     struct StaticSkillBundleSource {
         descriptors: Vec<SkillBundleDescriptor>,
@@ -239,14 +240,14 @@ mod tests {
     impl SkillBundleSource for StaticSkillBundleSource {
         async fn list_skill_bundles(
             &self,
-            _run_context: &ironclaw_turns::run_profile::LoopRunContext,
+            _run_context: &ironclaw_loop_contracts::LoopRunContext,
         ) -> Result<Vec<SkillBundleDescriptor>, SkillBundleSourceError> {
             Ok(self.descriptors.clone())
         }
 
         async fn read_skill_bundle_file(
             &self,
-            _run_context: &ironclaw_turns::run_profile::LoopRunContext,
+            _run_context: &ironclaw_loop_contracts::LoopRunContext,
             bundle_id: &SkillBundleId,
             path: &SkillFilePath,
         ) -> Result<Vec<u8>, SkillBundleSourceError> {
@@ -268,12 +269,12 @@ mod tests {
         }
     }
 
-    async fn run_context() -> ironclaw_turns::run_profile::LoopRunContext {
+    async fn run_context() -> ironclaw_loop_contracts::LoopRunContext {
         let resolved = InMemoryRunProfileResolver::default()
             .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
             .await
             .unwrap();
-        ironclaw_turns::run_profile::LoopRunContext::new(
+        ironclaw_loop_contracts::LoopRunContext::new(
             TurnScope::new(
                 TenantId::new("tenant-a").unwrap(),
                 Some(AgentId::new("agent-a").unwrap()),

@@ -18,14 +18,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec;
 use ironclaw_outbound::{
     CommunicationPreferenceKey, CommunicationPreferenceRepository, DeliveryDefaultScope,
     OutboundDeliveryTargetId, OutboundDeliveryTargetScope, TriggeredRunDeliveryOutcomeKind,
     TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
 };
 use ironclaw_product::{
-    PreferenceTargetCodec, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
-    triggered_run_delivery_settings,
+    TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest, triggered_run_delivery_settings,
 };
 use ironclaw_triggers::TriggerFire;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId, TurnScope};
@@ -76,7 +76,7 @@ impl GenericTriggeredRunDeliveryHook {
     async fn route_extension(
         &self,
         scope: &TurnScope,
-        creator: &ironclaw_host_api::UserId,
+        creator: &ironclaw_host_api::ids::UserId,
         per_trigger_target: Option<&ReplyTargetBindingRef>,
     ) -> Result<(String, Arc<dyn PreferenceTargetCodec>), String> {
         let codecs = self.assembly.active_preference_codecs();
@@ -146,7 +146,7 @@ impl GenericTriggeredRunDeliveryHook {
     async fn stored_preference_target(
         &self,
         scope: &TurnScope,
-        creator: &ironclaw_host_api::UserId,
+        creator: &ironclaw_host_api::ids::UserId,
     ) -> Result<Option<ReplyTargetBindingRef>, String> {
         let key = CommunicationPreferenceKey {
             scope: DeliveryDefaultScope::personal(scope.tenant_id.clone(), creator.clone()),

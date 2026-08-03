@@ -76,12 +76,58 @@ jobs:
     secrets: inherit
     with:
       ref: ${{ github.sha }}
+      # Workstream 9 of #6524: longer generated lifecycle orderings than a
+      # pull request can afford (84 sequences vs 20).
+      deep_generations: true
 
   reborn-e2e:
     name: Reborn E2E
     uses: ./.github/workflows/reborn-e2e.yml
     with:
       ref: ${{ github.sha }}
+      # Workstream 3 of #6524: mutating journeys share one provider world, so
+      # reversing them can expose state leaking from a different journey.
+      # Too slow to repeat per PR, cheap once a night.
+      reversed_journey_order: true
+      # Workstream 3 of #6524: proves each mutating journey stands on its own,
+      # which the shared ordinary lane cannot show. One server start per
+      # journey, so nightly only.
+      alone_journey_replay: true
+
+  mutation-frontier:
+    name: Mutation frontier audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install pinned cargo-mutants
+        run: cargo install cargo-mutants --locked --version 27.1.0
+      - name: Self-test mutation audit guardrails
+        run: scripts/test-mutation-audit.sh
+      - name: Audit escaped-bug frontier
+        env:
+          MUT_ITERATE: "1"
+          MUT_JOBS: "3"
+          MUT_OUT: target/nightly-mutation
+          MUT_TIMEOUT: "300"
+        # Targets the dispatch routing logic itself. Keep this pointed at a file
+        # with real mutable statements — a pure `pub use` re-export file yields
+        # zero mutants and makes this step silently vacuous.
+        run: >-
+          scripts/mutation-audit.sh
+          -p ironclaw_capabilities
+          crates/ironclaw_capabilities/src/dispatch.rs
+      - name: Upload mutation triage queue
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-mutation-frontier
+          path: target/nightly-mutation/mutants.out/
+          if-no-files-found: error
+          retention-days: 14
 
 # Failure reporting: nightly-watchdog.yml checks this workflow's latest
 # scheduled run from outside and posts failures to Slack. An in-run alert

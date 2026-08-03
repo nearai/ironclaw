@@ -43,21 +43,25 @@ use ironclaw_auth::{
     ProviderScope, SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, Timestamp,
     TurnRunRef, binding_scope_owns_account,
 };
-use ironclaw_host_api::NetworkMethod;
+use ironclaw_host_api::action::NetworkMethod;
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
     IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
 use ironclaw_host_api::{
-    AgentId, BoundProductSurface, ExtensionId, InvocationId, ProductSurface, ProductSurfaceCaller,
-    ProductSurfaceError, ProductSurfaceQueryRequest, ProjectId, ResourceScope, TenantId, ThreadId,
-    UserId,
+    ids::{AgentId, ExtensionId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
+    resource::ResourceScope,
 };
 use ironclaw_host_ingress::SplitRouteMount;
-use ironclaw_product::{
-    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, LifecyclePackageKind, RebornExtensionCredentialSetup,
-    RebornExtensionListResponse, RebornSetupExtensionResponse,
+use ironclaw_product::{EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, RebornExtensionListResponse};
+use ironclaw_product_contracts::package_lifecycle::LifecyclePackageKind;
+use ironclaw_product_contracts::product_wire::{
+    RebornExtensionCredentialSetup, RebornSetupExtensionResponse,
+};
+use ironclaw_product_contracts::surface::{
+    BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
+    ProductSurfaceQueryRequest,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -744,7 +748,7 @@ pub(super) fn protected_mutation_policy() -> IngressPolicy {
         auth: IngressAuthPolicy::Required {
             schemes: vec![IngressAuthScheme::BearerToken],
         },
-        scope_source: ironclaw_host_api::IngressScopeSource::AuthenticatedCaller,
+        scope_source: ironclaw_host_api::ingress::IngressScopeSource::AuthenticatedCaller,
         body_limit: BodyLimitPolicy::Limited {
             max_bytes: PRODUCT_AUTH_MUTATION_BODY_LIMIT_BYTES,
         },
@@ -768,7 +772,7 @@ pub(super) fn flow_status_policy() -> IngressPolicy {
         auth: IngressAuthPolicy::Required {
             schemes: vec![IngressAuthScheme::BearerToken],
         },
-        scope_source: ironclaw_host_api::IngressScopeSource::AuthenticatedCaller,
+        scope_source: ironclaw_host_api::ingress::IngressScopeSource::AuthenticatedCaller,
         // Read-only status probe: no request body is read, so reject any.
         body_limit: BodyLimitPolicy::NoBody,
         rate_limit: RateLimitPolicy::Limited {
@@ -791,7 +795,7 @@ pub(super) fn flow_reconcile_policy() -> IngressPolicy {
         auth: IngressAuthPolicy::Required {
             schemes: vec![IngressAuthScheme::BearerToken],
         },
-        scope_source: ironclaw_host_api::IngressScopeSource::AuthenticatedCaller,
+        scope_source: ironclaw_host_api::ingress::IngressScopeSource::AuthenticatedCaller,
         // The command carries no browser-selected lifecycle inputs. Its only
         // authority is the caller-scoped durable flow id plus invocation id.
         body_limit: BodyLimitPolicy::NoBody,
@@ -815,7 +819,7 @@ pub(super) fn accounts_refresh_policy() -> IngressPolicy {
         auth: IngressAuthPolicy::Required {
             schemes: vec![IngressAuthScheme::BearerToken],
         },
-        scope_source: ironclaw_host_api::IngressScopeSource::AuthenticatedCaller,
+        scope_source: ironclaw_host_api::ingress::IngressScopeSource::AuthenticatedCaller,
         body_limit: BodyLimitPolicy::Limited {
             max_bytes: PRODUCT_AUTH_MUTATION_BODY_LIMIT_BYTES,
         },
@@ -839,7 +843,7 @@ pub(super) fn callback_policy() -> IngressPolicy {
         auth: IngressAuthPolicy::Required {
             schemes: vec![IngressAuthScheme::OAuthState],
         },
-        scope_source: ironclaw_host_api::IngressScopeSource::HostResolved,
+        scope_source: ironclaw_host_api::ingress::IngressScopeSource::HostResolved,
         body_limit: BodyLimitPolicy::NoBody,
         rate_limit: RateLimitPolicy::Limited {
             scope: RateLimitScope::PerIp,
@@ -1724,8 +1728,10 @@ mod tests {
         ProviderCallbackOutcome, SecretCleanupService,
     };
     use ironclaw_host_api::{
-        NetworkMethod, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
-        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle, VendorId,
+        action::NetworkMethod,
+        decision::RuntimeCredentialAuthRequirement,
+        http::{RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse},
+        ids::{SecretHandle, VendorId},
     };
     use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};
     use ironclaw_turns::{TurnRunId, TurnScope};
@@ -1764,7 +1770,7 @@ mod tests {
         );
         assert_eq!(
             policy.scope_source(),
-            ironclaw_host_api::IngressScopeSource::AuthenticatedCaller
+            ironclaw_host_api::ingress::IngressScopeSource::AuthenticatedCaller
         );
         // Per-caller rate limit for the poll cadence; never per-IP/public.
         assert!(
@@ -1798,7 +1804,7 @@ mod tests {
         ));
         assert_eq!(
             policy.scope_source(),
-            ironclaw_host_api::IngressScopeSource::AuthenticatedCaller
+            ironclaw_host_api::ingress::IngressScopeSource::AuthenticatedCaller
         );
         assert!(matches!(
             policy.rate_limit(),
@@ -1824,6 +1830,7 @@ mod tests {
                 scope: scope.clone(),
                 kind: AuthFlowKind::IntegrationCredential,
                 provider: provider.clone(),
+                requester_extension: None,
                 challenge: AuthChallenge::SetupRequired {
                     provider: provider.clone(),
                     message: "route reconciliation test".to_string(),
@@ -1956,6 +1963,7 @@ mod tests {
                 scope: scope.clone(),
                 kind: AuthFlowKind::IntegrationCredential,
                 provider: AuthProviderId::new("route-reconcile-terminal").expect("provider"),
+                requester_extension: None,
                 challenge: AuthChallenge::SetupRequired {
                     provider: AuthProviderId::new("route-reconcile-terminal").expect("provider"),
                     message: "terminal route reconciliation test".to_string(),
@@ -2089,7 +2097,7 @@ mod tests {
 
     fn test_state() -> ProductAuthRouteState {
         ProductAuthRouteState::new(
-            Arc::new(RebornProductAuthServices::local_dev_in_memory(Arc::new(
+            Arc::new(RebornProductAuthServices::in_memory_for_test(Arc::new(
                 NoopDispatcher,
             ))),
             TenantId::new("tenant-alpha").expect("tenant"),
@@ -2162,6 +2170,7 @@ mod tests {
             vendor: "vendorco".to_string(),
             recipe: serde_json::from_value(recipe).expect("test recipe parses"),
             token_exchange_resource: resource.map(str::to_string),
+            protected_resource_metadata_url: None,
         }
     }
 
@@ -2173,7 +2182,7 @@ mod tests {
         async fn resolve(
             &self,
             _vendor: &str,
-            _credentials: &ironclaw_host_api::RecipeClientCredentials,
+            _credentials: &ironclaw_extension_contracts::recipe::RecipeClientCredentials,
         ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, AuthProductError> {
             Ok(ironclaw_auth::EngineOAuthClientMaterial {
                 client_id: ironclaw_auth::OAuthClientId::new("vendorco-client-id")?,
@@ -2187,9 +2196,21 @@ mod tests {
         egress: Arc<dyn RuntimeHttpEgress>,
         secret_store: Arc<dyn SecretStorePort>,
     ) -> Arc<ironclaw_auth::AuthEngine> {
+        test_engine_with_resolver(
+            Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![recipe])),
+            egress,
+            secret_store,
+        )
+    }
+
+    fn test_engine_with_resolver(
+        recipes: Arc<dyn ironclaw_auth::AuthRecipeResolver>,
+        egress: Arc<dyn RuntimeHttpEgress>,
+        secret_store: Arc<dyn SecretStorePort>,
+    ) -> Arc<ironclaw_auth::AuthEngine> {
         Arc::new(ironclaw_auth::AuthEngine::new(
             ironclaw_auth::AuthEngineDeps {
-                recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![recipe])),
+                recipes,
                 client_credentials: Arc::new(StaticTestCredentials),
                 egress,
                 secret_store,
@@ -2200,6 +2221,43 @@ mod tests {
                 dcr_client_name: "Ironclaw".to_string(),
             },
         ))
+    }
+
+    #[derive(Debug)]
+    struct RequesterBoundTestResolver {
+        requester: ExtensionId,
+        recipe: ironclaw_auth::ResolvedVendorAuthRecipe,
+        calls: Mutex<Vec<(Option<ExtensionId>, String)>>,
+    }
+
+    impl RequesterBoundTestResolver {
+        fn new(requester: ExtensionId, recipe: ironclaw_auth::ResolvedVendorAuthRecipe) -> Self {
+            Self {
+                requester,
+                recipe,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<(Option<ExtensionId>, String)> {
+            self.calls.lock().expect("resolver calls lock").clone()
+        }
+    }
+
+    #[async_trait]
+    impl ironclaw_auth::AuthRecipeResolver for RequesterBoundTestResolver {
+        async fn resolve(
+            &self,
+            requester_extension: Option<&ExtensionId>,
+            vendor: &str,
+        ) -> Option<ironclaw_auth::ResolvedVendorAuthRecipe> {
+            self.calls
+                .lock()
+                .expect("resolver calls lock")
+                .push((requester_extension.cloned(), vendor.to_string()));
+            (requester_extension == Some(&self.requester) && vendor == self.recipe.vendor)
+                .then(|| self.recipe.clone())
+        }
     }
 
     /// A recipe without `client_credentials` declares dynamic client
@@ -2213,7 +2271,7 @@ mod tests {
             Arc::new(RouteDcrSetupEgress),
             Arc::new(SecretStore::ephemeral()),
         );
-        let product_auth = RebornProductAuthServices::local_dev_in_memory(Arc::new(NoopDispatcher))
+        let product_auth = RebornProductAuthServices::in_memory_for_test(Arc::new(NoopDispatcher))
             .with_auth_engine(engine);
         let state = ProductAuthRouteState::new(
             Arc::new(product_auth),
@@ -2284,8 +2342,13 @@ mod tests {
         let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
         let provider_client: Arc<dyn AuthProviderClient> = shared.clone();
         let cleanup_service: Arc<dyn SecretCleanupService> = shared.clone();
-        let engine = test_engine(
+        let requester_extension = ExtensionId::new("vendorco-tools").expect("extension");
+        let resolver = Arc::new(RequesterBoundTestResolver::new(
+            requester_extension.clone(),
             test_vendor_recipe(true, None),
+        ));
+        let engine = test_engine_with_resolver(
+            resolver.clone(),
             Arc::new(PanickingDcrEgress),
             Arc::new(SecretStore::ephemeral()),
         );
@@ -2352,6 +2415,11 @@ mod tests {
             .expect("flow lookup")
             .expect("flow");
         assert!(flow.update_binding.is_none());
+        assert_eq!(
+            flow.requester_extension.as_ref(),
+            Some(&requester_extension),
+            "extension setup must persist the manifest-local recipe requester"
+        );
 
         let authorization_url = json["authorization_url"]
             .as_str()
@@ -2400,6 +2468,17 @@ mod tests {
 
         assert_eq!(account.status, CredentialAccountStatus::Configured);
         assert_eq!(account.provider.as_str(), "vendorco");
+        let calls = resolver.calls();
+        assert!(
+            calls.len() >= 2,
+            "start and callback preflight both resolve manifest-local recipes"
+        );
+        assert!(
+            calls.iter().all(|(requester, vendor)| requester.as_ref()
+                == Some(&requester_extension)
+                && vendor == "vendorco"),
+            "manifest-local OAuth must never retry without a requester or under another vendor: {calls:?}"
+        );
     }
 
     /// Restart/replica regression for the durable setup-PKCE port: the
@@ -2416,8 +2495,13 @@ mod tests {
         let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
         let provider_client: Arc<dyn AuthProviderClient> = shared.clone();
         let cleanup_service: Arc<dyn SecretCleanupService> = shared.clone();
-        let engine = test_engine(
+        let requester_extension = ExtensionId::new("vendorco-tools").expect("extension");
+        let resolver = Arc::new(RequesterBoundTestResolver::new(
+            requester_extension.clone(),
             test_vendor_recipe(true, None),
+        ));
+        let engine = test_engine_with_resolver(
+            resolver.clone(),
             Arc::new(PanickingDcrEgress),
             Arc::new(SecretStore::ephemeral()),
         );
@@ -2521,12 +2605,24 @@ mod tests {
             completed_flow.credential_account_id.is_some(),
             "callback should persist an account id"
         );
+        assert_eq!(
+            completed_flow.requester_extension.as_ref(),
+            Some(&requester_extension),
+            "requester survives route-state restart through durable flow state"
+        );
+        let calls = resolver.calls();
+        assert!(
+            calls.iter().all(|(requester, vendor)| requester.as_ref()
+                == Some(&requester_extension)
+                && vendor == "vendorco"),
+            "reopened callback must resolve only the originating extension recipe: {calls:?}"
+        );
     }
 
     #[tokio::test]
     async fn extension_oauth_start_fails_closed_without_a_composed_engine() {
         let state = ProductAuthRouteState::new(
-            Arc::new(RebornProductAuthServices::local_dev_in_memory(Arc::new(
+            Arc::new(RebornProductAuthServices::in_memory_for_test(Arc::new(
                 NoopDispatcher,
             ))),
             TenantId::new("tenant-alpha").expect("tenant"),
@@ -2570,7 +2666,7 @@ mod tests {
     #[tokio::test]
     async fn installed_extension_lookup_is_required_even_in_test_builds() {
         let state = ProductAuthRouteState::new(
-            Arc::new(RebornProductAuthServices::local_dev_in_memory(Arc::new(
+            Arc::new(RebornProductAuthServices::in_memory_for_test(Arc::new(
                 NoopDispatcher,
             ))),
             TenantId::new("tenant-alpha").expect("tenant"),
@@ -2665,7 +2761,7 @@ mod tests {
             engine.clone(),
             secret_store.clone() as Arc<dyn SecretStorePort>,
         ));
-        let product_auth = RebornProductAuthServices::local_dev_in_memory(Arc::new(NoopDispatcher))
+        let product_auth = RebornProductAuthServices::in_memory_for_test(Arc::new(NoopDispatcher))
             .with_auth_engine(engine)
             .with_oauth_gate_driver(driver);
         let state = ProductAuthRouteState::new(
@@ -2830,7 +2926,8 @@ mod tests {
         async fn execute(
             &self,
             _request: RuntimeHttpEgressRequest,
-        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
+        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::http::RuntimeHttpEgressError>
+        {
             panic!("this test must not perform vendor HTTP egress")
         }
     }
@@ -2845,13 +2942,14 @@ mod tests {
         async fn execute(
             &self,
             request: RuntimeHttpEgressRequest,
-        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
+        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::http::RuntimeHttpEgressError>
+        {
             let body = match request.url.as_str() {
                 "https://mcp.vendorco.example/mcp/.well-known/oauth-protected-resource" => {
-                    br#"{"authorization_servers":["https://oauth.vendorco.example"]}"#.to_vec()
+                    br#"{"resource":"https://mcp.vendorco.example/mcp","authorization_servers":["https://oauth.vendorco.example"]}"#.to_vec()
                 }
                 "https://oauth.vendorco.example/.well-known/oauth-authorization-server" => {
-                    br#"{"authorization_endpoint":"https://oauth.vendorco.example/authorize","token_endpoint":"https://oauth.vendorco.example/token","registration_endpoint":"https://oauth.vendorco.example/register"}"#.to_vec()
+                    br#"{"issuer":"https://oauth.vendorco.example","authorization_endpoint":"https://oauth.vendorco.example/authorize","token_endpoint":"https://oauth.vendorco.example/token","registration_endpoint":"https://oauth.vendorco.example/register"}"#.to_vec()
                 }
                 "https://oauth.vendorco.example/register" => {
                     br#"{"client_id":"dcr-client"}"#.to_vec()
@@ -2879,7 +2977,8 @@ mod tests {
         async fn execute(
             &self,
             request: RuntimeHttpEgressRequest,
-        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
+        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::http::RuntimeHttpEgressError>
+        {
             assert_eq!(request.url, "https://auth.vendorco.example/token");
             let body = br#"{"access_token":"vendor-access-token","scope":"items:read"}"#.to_vec();
             Ok(RuntimeHttpEgressResponse {

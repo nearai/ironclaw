@@ -12,9 +12,16 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-    Authorized, CapabilityId, ExtensionId, HostRemediation, InvocationOrigin, MountView,
-    ResourceEstimate, ResourceReceipt, ResourceReservation, ResourceScope, ResourceUsage, RunId,
-    RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle, UserId,
+    authorized::Authorized,
+    decision::RuntimeCredentialAuthRequirement,
+    host_remediation::HostRemediation,
+    ids::{CapabilityId, ExtensionId, RunId, SecretHandle, UserId},
+    invocation::InvocationOrigin,
+    mount::MountView,
+    resource::{
+        ResourceEstimate, ResourceReceipt, ResourceReservation, ResourceScope, ResourceUsage,
+    },
+    runtime::RuntimeKind,
 };
 
 /// Internal adapter request produced after a sealed [`Authorized`] witness is
@@ -185,6 +192,10 @@ pub enum RuntimeDispatchErrorKind {
     Manifest,
     Memory,
     MethodMissing,
+    /// Transport-level network failure (unreachable, reset, timeout) —
+    /// distinct from [`NetworkDenied`](Self::NetworkDenied), which is an egress
+    /// policy denial. Transport faults retry; policy denials never do.
+    Network,
     NetworkDenied,
     OperationFailed,
     OutputDecode,
@@ -203,6 +214,63 @@ pub enum RuntimeDispatchErrorKind {
 /// they reject arbitrary summaries mentioning raw tool input.
 pub const INPUT_ENCODE_HUMAN_SUMMARY: &str = "the tool input could not be encoded";
 
+/// Lossless injection into the unified [`FailureKind`](crate::result_meta::FailureKind):
+/// every precise mechanism name survives 1:1 — this replaces the retired
+/// 22→12 coarsening fold that destroyed 17 names (and with them, every
+/// remediation hint) on the way to the loop. The single non-identity edge is
+/// `Unknown` → `Unclassified`: `Unknown` is the dispatch lane's redaction
+/// bucket for failures it cannot classify, and the unified vocabulary's
+/// explicit `Unclassified` sink surfaces those model-visibly without retry —
+/// an unclassifiable failure may be permanent, so routing it to the retryable
+/// `Internal` bucket (the retired fold's mapping) burned retry budget on
+/// calls that could never succeed.
+impl From<RuntimeDispatchErrorKind> for crate::result_meta::FailureKind {
+    fn from(kind: RuntimeDispatchErrorKind) -> Self {
+        match kind {
+            RuntimeDispatchErrorKind::Backend => Self::Backend,
+            RuntimeDispatchErrorKind::Client => Self::Client,
+            RuntimeDispatchErrorKind::Executor => Self::Executor,
+            RuntimeDispatchErrorKind::ExitFailure => Self::ExitFailure,
+            RuntimeDispatchErrorKind::ExtensionRuntimeMismatch => Self::ExtensionRuntimeMismatch,
+            RuntimeDispatchErrorKind::FilesystemDenied => Self::FilesystemDenied,
+            RuntimeDispatchErrorKind::Guest => Self::Guest,
+            RuntimeDispatchErrorKind::InputEncode => Self::InputEncode,
+            RuntimeDispatchErrorKind::InvalidResult => Self::InvalidResult,
+            RuntimeDispatchErrorKind::Manifest => Self::Manifest,
+            RuntimeDispatchErrorKind::Memory => Self::Memory,
+            RuntimeDispatchErrorKind::MethodMissing => Self::MethodMissing,
+            RuntimeDispatchErrorKind::Network => Self::Network,
+            RuntimeDispatchErrorKind::NetworkDenied => Self::NetworkDenied,
+            RuntimeDispatchErrorKind::OperationFailed => Self::OperationFailed,
+            RuntimeDispatchErrorKind::OutputDecode => Self::OutputDecode,
+            RuntimeDispatchErrorKind::OutputTooLarge => Self::OutputTooLarge,
+            RuntimeDispatchErrorKind::PolicyDenied => Self::PolicyDenied,
+            RuntimeDispatchErrorKind::Resource => Self::Resource,
+            RuntimeDispatchErrorKind::SecretDenied => Self::SecretDenied,
+            RuntimeDispatchErrorKind::UndeclaredCapability => Self::UndeclaredCapability,
+            RuntimeDispatchErrorKind::UnsupportedRunner => Self::UnsupportedRunner,
+            RuntimeDispatchErrorKind::Unknown => Self::Unclassified,
+        }
+    }
+}
+
+/// Lossless injection for the dispatch-control-plane siblings — each has its
+/// own named variant in the unified vocabulary (they were previously coarsened
+/// into `InvalidOutput`/`MissingRuntime`/`Authorization`/`Backend`).
+impl From<DispatchFailureKind> for crate::result_meta::FailureKind {
+    fn from(kind: DispatchFailureKind) -> Self {
+        match kind {
+            DispatchFailureKind::UnknownCapability => Self::UnknownCapability,
+            DispatchFailureKind::UnknownProvider => Self::UnknownProvider,
+            DispatchFailureKind::RuntimeMismatch => Self::RuntimeMismatch,
+            DispatchFailureKind::MissingRuntimeBackend => Self::MissingRuntimeBackend,
+            DispatchFailureKind::UnsupportedRuntime => Self::UnsupportedRunner,
+            DispatchFailureKind::AuthRequired => Self::AuthRequired,
+            DispatchFailureKind::Runtime(kind) => kind.into(),
+        }
+    }
+}
+
 impl RuntimeDispatchErrorKind {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -218,6 +286,7 @@ impl RuntimeDispatchErrorKind {
             Self::Manifest => "Manifest",
             Self::Memory => "Memory",
             Self::MethodMissing => "MethodMissing",
+            Self::Network => "Network",
             Self::NetworkDenied => "NetworkDenied",
             Self::OperationFailed => "OperationFailed",
             Self::OutputDecode => "OutputDecode",
@@ -250,6 +319,7 @@ impl RuntimeDispatchErrorKind {
             Self::Manifest => "the tool manifest is invalid",
             Self::Memory => "the tool exceeded its memory limit",
             Self::MethodMissing => "the tool method is not available",
+            Self::Network => "a network error interrupted the tool",
             Self::NetworkDenied => "the tool was denied network access",
             Self::OperationFailed => "the tool operation failed",
             Self::OutputDecode => "the tool output could not be decoded",
@@ -278,6 +348,7 @@ impl RuntimeDispatchErrorKind {
             Self::Manifest => "manifest",
             Self::Memory => "memory",
             Self::MethodMissing => "method_missing",
+            Self::Network => "network",
             Self::NetworkDenied => "network_denied",
             Self::OperationFailed => "operation_failed",
             Self::OutputDecode => "output_decode",

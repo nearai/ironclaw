@@ -3,7 +3,8 @@
 First-class **Project** entity, membership, and access control for the IronClaw
 Reborn stack. Plan: `docs/plans/2026-06-17-reborn-projects.md`.
 
-> Not to be confused with `ironclaw_engine`'s legacy `Project` type. This crate
+> The v1 engine's legacy `Project` type is gone with `ironclaw_engine`; this is
+> now the only `Project` in the tree. This crate
 > serves the Reborn stack (`ironclaw_product` → composition →
 > `ironclaw_webui`).
 
@@ -43,8 +44,8 @@ move there without forcing lower substrate crates to depend upward.
   (see `.claude/rules/error-handling.md`).
 - This crate persists data; it does **not** authorize callers, expose HTTP, or
   know about the service. Authorization gating that combines `resolve_access`
-  with a required role lives in the composition adapter (`RebornProjectService`),
-  not here.
+  with a required role lives in the product workflow
+  (`ironclaw_product::RebornProjectService`), not here.
 
 ## Storage
 

@@ -2,8 +2,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_extensions::ExtensionPackage;
-use ironclaw_host_api::{CredentialStageError, ResourceScope, RuntimeCredentialAuthRequirement};
-use ironclaw_product::ProductSurfaceFailure;
+use ironclaw_host_api::{
+    decision::RuntimeCredentialAuthRequirement, dispatch::CredentialStageError,
+    resource::ResourceScope,
+};
+use ironclaw_product_contracts::error::ProductOperationFailure;
 
 use ironclaw_auth::product_auth::credentials::runtime_credentials::{
     RuntimeCredentialAccountSelectionService, missing_runtime_credential_auth_requirements,
@@ -48,7 +51,7 @@ impl ExtensionActivationCredentialGate for RuntimeExtensionActivationCredentialG
     async fn ensure_credentials(
         &self,
         package: &ExtensionPackage,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         match self.credential_readiness(package).await? {
             ExtensionActivationCredentialReadiness::Ready => Ok(()),
             ExtensionActivationCredentialReadiness::Missing(_) => {
@@ -60,7 +63,7 @@ impl ExtensionActivationCredentialGate for RuntimeExtensionActivationCredentialG
     async fn credential_readiness(
         &self,
         package: &ExtensionPackage,
-    ) -> Result<ExtensionActivationCredentialReadiness, ProductSurfaceFailure> {
+    ) -> Result<ExtensionActivationCredentialReadiness, ProductOperationFailure> {
         let missing = self
             .missing_requirements(package_runtime_credential_auth_requirements(package))
             .await
@@ -73,14 +76,47 @@ impl ExtensionActivationCredentialGate for RuntimeExtensionActivationCredentialG
     }
 }
 
-fn map_activation_credential_stage_error(error: CredentialStageError) -> ProductSurfaceFailure {
+fn map_activation_credential_stage_error(error: CredentialStageError) -> ProductOperationFailure {
     match error {
-        CredentialStageError::AuthRequired => ProductSurfaceFailure::InvalidBindingRequest {
+        CredentialStageError::AuthRequired => ProductOperationFailure::InvalidBindingRequest {
             reason: "extension requires product auth credentials before activation".to_string(),
         },
-        CredentialStageError::Backend => ProductSurfaceFailure::Transient {
+        CredentialStageError::Backend => ProductOperationFailure::Transient {
             reason: "extension product auth credential state is temporarily unavailable"
                 .to_string(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_activation_credential_stage_error;
+    use ironclaw_host_api::dispatch::CredentialStageError;
+    use ironclaw_product_contracts::error::ProductOperationFailure;
+
+    /// The activation gate reads credential state before letting an extension
+    /// go active. "The user has not connected an account yet" and "we could not
+    /// read the credential store" are opposite outcomes: the first must send
+    /// the user to the connect flow, the second must be retried. Collapsing
+    /// them would either send users to reconnect an already-connected account
+    /// during an outage, or leave a genuinely unconnected extension retrying
+    /// forever.
+    #[test]
+    fn credential_staging_separates_missing_auth_from_a_credential_store_outage() {
+        assert_eq!(
+            map_activation_credential_stage_error(CredentialStageError::AuthRequired),
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "extension requires product auth credentials before activation".to_string(),
+            },
+            "a missing connection is the caller's to resolve, via the connect flow"
+        );
+        assert_eq!(
+            map_activation_credential_stage_error(CredentialStageError::Backend),
+            ProductOperationFailure::Transient {
+                reason: "extension product auth credential state is temporarily unavailable"
+                    .to_string(),
+            },
+            "a credential-store outage must stay retryable, not read as 'not connected'"
+        );
     }
 }

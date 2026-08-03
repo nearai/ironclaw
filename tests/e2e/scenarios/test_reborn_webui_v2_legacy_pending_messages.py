@@ -823,7 +823,9 @@ async def test_reborn_legacy_failed_send_marks_single_error_message(
             has_text="send-failure cleanup test"
         )
         await expect(failed).to_have_count(1, timeout=5000)
-        await expect(failed).to_contain_text("Service unavailable")
+        await expect(failed).to_contain_text(
+            "The request failed: service_unavailable."
+        )
         await expect(failed.get_by_label("Retry message")).to_be_visible()
         assert len(harness["send_requests"]) == 1
     finally:
@@ -858,13 +860,20 @@ async def test_reborn_legacy_failed_send_retry_resubmits_message(
             has_text="retry failed send test"
         )
         await expect(failed).to_have_count(1, timeout=5000)
-        await expect(failed).to_contain_text("Service unavailable")
+        await expect(failed).to_contain_text(
+            "The request failed: service_unavailable."
+        )
 
         await failed.get_by_label("Retry message").click()
 
         await expect(failed).to_have_count(1, timeout=5000)
-        await expect(failed).not_to_contain_text("Service unavailable")
+        await expect(failed).not_to_contain_text(
+            "The request failed: service_unavailable."
+        )
         await expect(failed.get_by_label("Retry message")).to_have_count(0)
+        await expect(page.locator(SEL_V2["typing_indicator"])).to_be_visible(
+            timeout=5000
+        )
         assert [request["content"] for request in harness["send_requests"]] == [
             "retry failed send test",
             "retry failed send test",

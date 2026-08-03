@@ -3,7 +3,7 @@ use std::{cmp::Ordering, collections::HashMap};
 use ironclaw_events::{
     EventLogEntry, RuntimeEvent, RuntimeEventKind, sanitize_error_kind, sanitize_error_summary,
 };
-use ironclaw_host_api::InvocationId;
+use ironclaw_host_api::ids::InvocationId;
 
 use crate::{
     CapabilityActivityProjection, CapabilityActivityStatus, RunProjectionStatus,
@@ -402,7 +402,8 @@ fn capability_activity_status_for_event(
         | RuntimeEventKind::LoopFailed
         | RuntimeEventKind::HookDispatched
         | RuntimeEventKind::HookDecisionEmitted
-        | RuntimeEventKind::HookFailed => None,
+        | RuntimeEventKind::HookFailed
+        | RuntimeEventKind::FailureRecovered => None,
     }
 }
 
@@ -442,7 +443,8 @@ fn run_status_for_event(
         | RuntimeEventKind::HookFailed
         | RuntimeEventKind::CapabilityActivityRequested
         | RuntimeEventKind::CapabilityActivitySucceeded
-        | RuntimeEventKind::CapabilityActivityFailed => {
+        | RuntimeEventKind::CapabilityActivityFailed
+        | RuntimeEventKind::FailureRecovered => {
             current_status.unwrap_or(RunProjectionStatus::Running)
         }
     }

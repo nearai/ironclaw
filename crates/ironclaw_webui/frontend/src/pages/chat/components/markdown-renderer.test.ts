@@ -12,6 +12,10 @@ const appCssSource = readFileSync(
   new URL("../../../styles/app.css", import.meta.url),
   "utf8",
 );
+const highlighterSource = readFileSync(
+  new URL("../../../lib/syntax-highlighting.ts", import.meta.url),
+  "utf8",
+);
 
 function rendererEnhancerSourceForTest() {
   const lines = [];
@@ -20,7 +24,7 @@ function rendererEnhancerSourceForTest() {
     if (line.startsWith("function MarkdownRendererImpl")) break;
     lines.push(line);
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { enhanceCodeBlocks };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { enhanceCodeBlocks, syncCodeBlockLabelsInRoot };`;
 }
 
 class FakeElement {
@@ -68,6 +72,10 @@ class FakeElement {
     this.listeners[type] = handler;
   }
 
+  removeEventListener(type, handler) {
+    if (this.listeners[type] === handler) delete this.listeners[type];
+  }
+
   querySelectorAll(selector) {
     const matches = [];
     this.#visit((node) => {
@@ -112,6 +120,7 @@ function setupEnhancerContext() {
   const toastCalls = [];
   const clipboardWrites = [];
   const timers = [];
+  const clearedTimers = [];
   const context = {
     document: {
       createElement: (tagName) => new FakeElement(tagName),
@@ -126,12 +135,14 @@ function setupEnhancerContext() {
     },
     setTimeout: (fn) => {
       timers.push(fn);
+      return timers.length - 1;
     },
+    clearTimeout: (timer) => clearedTimers.push(timer),
     toast: (...args) => toastCalls.push(args),
     globalThis: {},
   };
   vm.runInNewContext(rendererEnhancerSourceForTest(), context);
-  return { clipboardWrites, context, timers, toastCalls };
+  return { clearedTimers, clipboardWrites, context, timers, toastCalls };
 }
 
 function buildCodeBlock() {
@@ -158,25 +169,98 @@ function translator(prefix) {
     })[key] || key;
 }
 
-test("markdown code blocks are passed through highlight.js when available", () => {
-  assert.ok(
-    rendererSource.includes('import hljs from "highlight.js/lib/common"'),
-    "highlight.js should be bundled through npm rather than loaded from a window global",
+test("markdown and syntax highlighting stay out of the synchronous chat chunk", () => {
+  assert.doesNotMatch(
+    rendererSource,
+    /^import .*["'](?:highlight\.js|\.\.\/\.\.\/\.\.\/lib\/markdown)["'];?$/m,
+    "expensive markdown dependencies should not be statically imported by the chat renderer",
   );
   assert.match(
     rendererSource,
-    /hljs\.highlightElement\(codeEl\)/,
-    "markdown code blocks should be enhanced by highlight.js after rendering",
+    /import\("\.\.\/\.\.\/\.\.\/lib\/markdown"\)/,
+    "the sanitized markdown pipeline should load only for stable non-empty content",
+  );
+  assert.match(
+    rendererSource,
+    /root\?\.querySelector\("pre code"\)[\s\S]*import\("\.\.\/\.\.\/\.\.\/lib\/syntax-highlighting"\)/,
+    "syntax highlighting should load only after rendered code is present",
+  );
+  assert.doesNotMatch(
+    highlighterSource,
+    /highlight\.js\/lib\/common/,
+    "the broad highlight.js common bundle must not return",
+  );
+  assert.match(
+    highlighterSource,
+    /highlight\.js\/lib\/core/,
+    "the lazy highlighter should start from highlight.js core",
+  );
+});
+
+test("streaming markdown delegates accumulated text without a fixed render interval", () => {
+  assert.match(
+    rendererSource,
+    /import\("streamdown"\)/,
+    "streaming replies should use the streaming-optimized Markdown renderer",
+  );
+  assert.match(
+    rendererSource,
+    /<StreamingMarkdown[\s\S]*isAnimating=\{streaming\}[\s\S]*mode=\{streaming \? "streaming" : "static"\}/,
+    "the renderer should animate active streams and hold their final snapshot statically",
+  );
+  assert.doesNotMatch(
+    rendererSource,
+    /STREAMING_RENDER_INTERVAL_MS|scheduleStreamingRenderRef|renderTimerRef/,
+    "a fixed timer must not turn provider-rate text into visible bursts",
+  );
+  assert.match(
+    rendererSource,
+    /<React\.Suspense[\s\S]*\{normalizedContent\}[\s\S]*<\/React\.Suspense>/,
+    "the lazy streaming renderer should retain an escaped-text fallback",
+  );
+  assert.match(
+    rendererSource,
+    /if \(streaming \|\| keepStreamingRendererUntilFinalIsReady\) \{[\s\S]*<StreamingMarkdown[\s\S]*\{normalizedContent\}[\s\S]*if \(renderedHtml === null\)/,
+    "streaming content should bypass the completed-reply innerHTML path",
+  );
+  assert.match(
+    rendererSource,
+    /html: renderMarkdown\(currentContent,\s*\{\s*workspaceFileLinks:\s*currentWorkspaceFileLinksEnabled,?\s*\}\)/,
+    "completed replies must still pass through the sanitizer with the latest workspace-link scope",
+  );
+  assert.match(
+    appCssSource,
+    /@source "\.\.\/\.\.\/node_modules\/streamdown\/dist\/\*\.js";/,
+    "Tailwind should include the package's streaming renderer classes",
+  );
+  assert.match(
+    rendererSource,
+    /markdownLoadFailedRef\.current/,
+    "completed Markdown rendering should retain its failure guard",
+  );
+  assert.match(
+    rendererSource,
+    /markdownLoadFailedRef\.current = true/,
+    "a failed completed-reply render should trip the failure guard",
   );
 });
 
 test("markdown code block controls use resynced labels after language changes", async () => {
-  const { clipboardWrites, context, timers, toastCalls } = setupEnhancerContext();
+  const {
+    clearedTimers,
+    clipboardWrites,
+    context,
+    timers,
+    toastCalls,
+  } = setupEnhancerContext();
   const { pre, root } = buildCodeBlock();
-  const { enhanceCodeBlocks } = context.globalThis.__testExports;
+  const {
+    enhanceCodeBlocks,
+    syncCodeBlockLabelsInRoot,
+  } = context.globalThis.__testExports;
 
-  enhanceCodeBlocks(root, translator("old"));
-  enhanceCodeBlocks(root, translator("new"));
+  const cleanup = enhanceCodeBlocks(root, translator("old"));
+  syncCodeBlockLabelsInRoot(root, translator("new"));
 
   const frame = pre.closest(".markdown-code-frame");
   const wrapBtn = frame.querySelector('[data-code-block-role="wrap"]');
@@ -204,6 +288,14 @@ test("markdown code block controls use resynced labels after language changes", 
   assert.equal(expandBtn.textContent, "new:show-less");
   expandBtn.listeners.click();
   assert.equal(expandBtn.textContent, "new:show-more");
+
+  await copyBtn.listeners.click();
+  cleanup();
+  assert.equal(Object.keys(frame.listeners).length, 0);
+  assert.equal(Object.keys(wrapBtn.listeners).length, 0);
+  assert.equal(Object.keys(copyBtn.listeners).length, 0);
+  assert.equal(Object.keys(expandBtn.listeners).length, 0);
+  assert.deepEqual(clearedTimers, [1]);
 });
 
 test("highlight.js token classes have local readable styles", () => {

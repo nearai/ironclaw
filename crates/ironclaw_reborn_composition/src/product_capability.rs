@@ -9,21 +9,39 @@ use ironclaw_filesystem::{
     ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
-    ActivityId, Blocked, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId,
-    CapabilitySet, CorrelationId, Denial, DenyReason, DenyRef, EffectKind, ExecutionContext,
-    ExtensionId, FailureKind, GateRef, GateWaypoint, GrantConstraints, InvocationId,
-    InvocationOrigin, MountView, NetworkPolicy, Outcome, OutcomeRefs, Principal, ProcessRef,
-    ProcessWaypoint, ProductKind, ProductSurfaceCaller, ProductSurfaceError, Resolution,
-    ResourceEstimate, ResourceScope, ResultPreviewMeta, ResultProgress, ResultRef, ResumeToken,
-    RuntimeKind, SafeSummary, ScopedPath, Suspension, TerminateHint, ToolVerdict, TrustClass,
+    action::NetworkPolicy,
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+    },
+    decision::DenyReason,
+    ids::{
+        ActivityId, CapabilityGrantId, CapabilityId, CorrelationId, DenyRef, ExtensionId, GateRef,
+        InvocationId, ProcessRef, ProductKind, ResultRef,
+    },
+    invocation::InvocationOrigin,
+    mount::MountView,
+    path::ScopedPath,
+    resolution::{
+        Blocked, Denial, GateWaypoint, Outcome, OutcomeRefs, ProcessWaypoint, Resolution,
+        ResultPreviewMeta, Suspension, ToolVerdict,
+    },
+    resource::{ResourceEstimate, ResourceScope},
+    result_meta::{
+        FailureKind, ModelDiagnostic, ModelFailureDiagnostic, ResultProgress, ResumeToken,
+        TerminateHint,
+    },
+    runtime::{RuntimeKind, TrustClass},
+    safe_summary::SafeSummary,
+    scope::{ExecutionContext, Principal},
 };
-use ironclaw_host_runtime::{HostRuntime, RuntimeCapabilityOutcome, RuntimeFailureKind};
+use ironclaw_host_runtime::{HostRuntime, RuntimeCapabilityOutcome};
 use ironclaw_product::{
     EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
     EXTENSION_REMOVE_CAPABILITY_ID, ProductCapabilityInvoker,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
     SKILL_UPDATE_CAPABILITY_ID,
 };
+use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
 
 use crate::RebornRuntime;
 use ironclaw_skills::ScopedSkillManagementMountResolver;
@@ -39,7 +57,7 @@ pub(crate) struct RuntimeProductCapabilityInvoker {
     registry: Arc<ExtensionRegistry>,
     results: ProductResultFilesystem,
     // The scope→mount-view resolver the runtime's skill-management port was
-    // composed with. Reused here (rather than re-deriving a local-dev vs
+    // composed with. Reused here (rather than re-deriving a standalone vs
     // production branch) so product-surface skill gestures resolve exactly the
     // mounts the agent loop's skill tools do; the unified runtime graph exposes
     // a single composite filesystem, so which resolver is live is the only
@@ -368,12 +386,12 @@ async fn product_resolution(
         RuntimeCapabilityOutcome::Failed(failure)
             if matches!(
                 failure.kind,
-                RuntimeFailureKind::Authorization | RuntimeFailureKind::PolicyDenied
+                FailureKind::Authorization | FailureKind::PolicyDenied
             ) =>
         {
             let reason = match failure.kind {
-                RuntimeFailureKind::Authorization => DenyReason::MissingGrant,
-                RuntimeFailureKind::PolicyDenied => DenyReason::PolicyDenied,
+                FailureKind::Authorization => DenyReason::MissingGrant,
+                FailureKind::PolicyDenied => DenyReason::PolicyDenied,
                 _ => DenyReason::InternalInvariantViolation,
             };
             Ok(Resolution::Denied(
@@ -382,19 +400,39 @@ async fn product_resolution(
                     .with_summary(runtime_failure_summary(&failure)),
             ))
         }
-        RuntimeCapabilityOutcome::Failed(failure) => Ok(recoverable_failure(
-            invocation_id,
-            FailureKind::from_tag(failure.kind.as_str()),
-            runtime_failure_summary(&failure),
-        )),
-        RuntimeCapabilityOutcome::Unknown(unknown) => Ok(recoverable_failure(
-            invocation_id,
-            FailureKind::from_tag(&unknown.kind),
-            unknown
+        RuntimeCapabilityOutcome::Failed(failure) => {
+            let summary = runtime_failure_summary(&failure);
+            let diagnostic = model_diagnostic(
+                failure
+                    .model_visible_cause()
+                    .unwrap_or_else(|| summary.as_str()),
+            );
+            Ok(recoverable_failure(
+                invocation_id,
+                FailureKind::from_tag(failure.kind.as_str()),
+                summary,
+                diagnostic,
+            ))
+        }
+        RuntimeCapabilityOutcome::Unknown(unknown) => {
+            let diagnostic = unknown
+                .message
+                .as_deref()
+                .map(model_diagnostic)
+                .unwrap_or_else(|| ModelFailureDiagnostic::Diagnostic {
+                    text: ModelDiagnostic::unavailable(),
+                });
+            let summary = unknown
                 .message
                 .and_then(|value| SafeSummary::new(value).ok())
-                .unwrap_or_else(SafeSummary::placeholder),
-        )),
+                .unwrap_or_else(SafeSummary::placeholder);
+            Ok(recoverable_failure(
+                invocation_id,
+                FailureKind::from_tag(&unknown.kind),
+                summary,
+                diagnostic,
+            ))
+        }
     }
 }
 
@@ -402,6 +440,7 @@ fn recoverable_failure(
     invocation_id: InvocationId,
     kind: FailureKind,
     summary: SafeSummary,
+    diagnostic: ModelFailureDiagnostic,
 ) -> Resolution {
     Resolution::Done(Outcome {
         refs: OutcomeRefs {
@@ -412,11 +451,27 @@ fn recoverable_failure(
             origin: None,
             output_digest: None,
         },
-        verdict: ToolVerdict::recoverable_failure(kind),
+        verdict: ToolVerdict::recoverable_failure_with_diagnostic(kind, diagnostic),
         summary,
         progress: ResultProgress::Unknown,
         terminate_hint: TerminateHint::Continue,
     })
+}
+
+fn model_diagnostic(cause: &str) -> ModelFailureDiagnostic {
+    let scrubbed = ironclaw_loop_host::scrub_model_visible_detail(cause);
+    let text = ModelDiagnostic::truncating(scrubbed).unwrap_or_else(|error| {
+        // silent-ok: the model-visible diagnostic boundary fails closed to a
+        // fixed sentence rather than failing the turn. Reaching this arm means
+        // the scrub upstream did not fully sanitize, which an operator wants
+        // to see; `debug!` avoids corrupting the REPL/TUI.
+        tracing::debug!(
+            %error,
+            "model-visible diagnostic rejected after scrubbing; substituting the fixed fallback"
+        );
+        ModelDiagnostic::unavailable()
+    });
+    ModelFailureDiagnostic::Diagnostic { text }
 }
 
 fn runtime_failure_summary(
@@ -557,9 +612,16 @@ where
 mod tests {
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        EffectKind, MountAlias, MountGrant, MountPermissions, NetworkScheme, NetworkTargetPattern,
-        PermissionMode, RuntimeCredentialRequirement, RuntimeCredentialRequirementSource,
-        RuntimeCredentialTarget, RuntimeKind, SecretHandle, TrustClass, VirtualPath,
+        action::{NetworkScheme, NetworkTargetPattern},
+        capability::{
+            EffectKind, PermissionMode, RuntimeCredentialRequirement,
+            RuntimeCredentialRequirementSource,
+        },
+        http::RuntimeCredentialTarget,
+        ids::SecretHandle,
+        mount::{MountGrant, MountPermissions},
+        path::{MountAlias, VirtualPath},
+        runtime::{RuntimeKind, TrustClass},
     };
 
     use super::*;
@@ -657,9 +719,8 @@ mod tests {
             EXTENSION_REMOVE_CAPABILITY_ID,
         ] {
             let descriptor = descriptor_with_id(capability);
-            let lifecycle_mounts =
-                crate::local_dev_mounts::system_extensions_lifecycle_mount_view()
-                    .expect("expected extension lifecycle mounts");
+            let lifecycle_mounts = crate::runtime_mounts::system_extensions_lifecycle_mount_view()
+                .expect("expected extension lifecycle mounts");
             let mounts = product_invocation_mounts(
                 &resource_scope(),
                 Some(&descriptor),
@@ -689,7 +750,7 @@ mod tests {
         let scope = resource_scope();
         let descriptor = descriptor_with_id(SKILL_REMOVE_CAPABILITY_ID);
         let skill_mount_resolver = |scope: &ResourceScope| {
-            crate::local_dev_mounts::scoped_skill_management_mount_view(scope)
+            crate::runtime_mounts::scoped_skill_management_mount_view(scope)
         };
         let lifecycle_mounts = MountView::default();
         let mounts = product_invocation_mounts(
@@ -702,7 +763,7 @@ mod tests {
 
         assert_eq!(
             mounts,
-            crate::local_dev_mounts::scoped_skill_management_mount_view(&scope)
+            crate::runtime_mounts::scoped_skill_management_mount_view(&scope)
                 .expect("expected skill mounts")
         );
     }
@@ -747,6 +808,110 @@ mod tests {
         assert_eq!(outcome.verdict, ToolVerdict::Success);
     }
 
+    #[tokio::test]
+    async fn failed_runtime_outcome_inlines_full_model_visible_cause() {
+        let cause = "failed reading /workspace/project/config.json";
+        let outcome = RuntimeCapabilityOutcome::Failed(
+            ironclaw_host_runtime::RuntimeCapabilityFailure::new(
+                CapabilityId::new("demo.read").unwrap(),
+                FailureKind::Backend,
+                Some("capability invocation failed".to_string()),
+            )
+            .with_model_visible_cause(cause),
+        );
+
+        let resolution = product_resolution(
+            &empty_product_result_filesystem(),
+            &resource_scope(),
+            InvocationId::new(),
+            outcome,
+        )
+        .await
+        .expect("runtime failure remains model-recoverable");
+
+        assert_eq!(model_visible_failure_text(&resolution), cause);
+    }
+
+    #[tokio::test]
+    async fn unknown_runtime_outcome_inlines_message_before_summary_fallback() {
+        let cause = "legacy runtime failed at /workspace/project/input.json";
+        let outcome =
+            RuntimeCapabilityOutcome::Unknown(ironclaw_host_runtime::RuntimeCapabilityUnknown {
+                capability_id: CapabilityId::new("demo.legacy").unwrap(),
+                kind: "legacy_failure".to_string(),
+                message: Some(cause.to_string()),
+            });
+
+        let resolution = product_resolution(
+            &empty_product_result_filesystem(),
+            &resource_scope(),
+            InvocationId::new(),
+            outcome,
+        )
+        .await
+        .expect("unknown runtime outcome remains model-recoverable");
+
+        assert_eq!(model_visible_failure_text(&resolution), cause);
+    }
+
+    #[tokio::test]
+    async fn missing_runtime_detail_uses_explicit_fallbacks() {
+        let failed =
+            RuntimeCapabilityOutcome::Failed(ironclaw_host_runtime::RuntimeCapabilityFailure::new(
+                CapabilityId::new("demo.read").unwrap(),
+                FailureKind::Backend,
+                Some("capability invocation failed".to_string()),
+            ));
+        let failed_resolution = product_resolution(
+            &empty_product_result_filesystem(),
+            &resource_scope(),
+            InvocationId::new(),
+            failed,
+        )
+        .await
+        .expect("runtime failure remains model-recoverable");
+        assert_eq!(
+            model_visible_failure_text(&failed_resolution),
+            "capability invocation failed"
+        );
+
+        let unknown =
+            RuntimeCapabilityOutcome::Unknown(ironclaw_host_runtime::RuntimeCapabilityUnknown {
+                capability_id: CapabilityId::new("demo.legacy").unwrap(),
+                kind: "legacy_failure".to_string(),
+                message: None,
+            });
+        let unknown_resolution = product_resolution(
+            &empty_product_result_filesystem(),
+            &resource_scope(),
+            InvocationId::new(),
+            unknown,
+        )
+        .await
+        .expect("unknown runtime outcome remains model-recoverable");
+        assert_eq!(
+            model_visible_failure_text(&unknown_resolution),
+            ModelDiagnostic::unavailable().as_str()
+        );
+    }
+
+    fn model_visible_failure_text(resolution: &Resolution) -> &str {
+        let Resolution::Done(outcome) = resolution else {
+            panic!("expected recoverable failure outcome, got {resolution:?}");
+        };
+        outcome
+            .verdict
+            .diagnostic()
+            .and_then(ModelFailureDiagnostic::model_visible_text)
+            .expect("recoverable failure must carry model-visible text")
+    }
+
+    fn empty_product_result_filesystem() -> ProductResultFilesystem {
+        ProductResultFilesystem::Composite(crate::wrap_scoped(Arc::new(
+            CompositeRootFilesystem::new(),
+        )))
+    }
+
     fn descriptor_with_id(id: &str) -> CapabilityDescriptor {
         let mut descriptor = descriptor_with_network(Vec::new(), Vec::new());
         descriptor.id = CapabilityId::new(id).unwrap();
@@ -755,10 +920,10 @@ mod tests {
 
     fn resource_scope() -> ResourceScope {
         ResourceScope {
-            tenant_id: ironclaw_host_api::TenantId::new("tenant-test").unwrap(),
-            user_id: ironclaw_host_api::UserId::new("user-test").unwrap(),
-            agent_id: Some(ironclaw_host_api::AgentId::new("agent-test").unwrap()),
-            project_id: Some(ironclaw_host_api::ProjectId::new("project-test").unwrap()),
+            tenant_id: ironclaw_host_api::ids::TenantId::new("tenant-test").unwrap(),
+            user_id: ironclaw_host_api::ids::UserId::new("user-test").unwrap(),
+            agent_id: Some(ironclaw_host_api::ids::AgentId::new("agent-test").unwrap()),
+            project_id: Some(ironclaw_host_api::ids::ProjectId::new("project-test").unwrap()),
             mission_id: None,
             thread_id: None,
             invocation_id: InvocationId::new(),

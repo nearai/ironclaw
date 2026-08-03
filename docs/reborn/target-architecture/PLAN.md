@@ -1,0 +1,97 @@
+# Target Architecture — Proposed Execution Plan
+
+**What this is:** the recommended way to start and keep tackling the restructure — waves, gates, PR-sizing rules, and decision points. It sequences the workstreams defined in [CHECKLIST.md](CHECKLIST.md) (WS0–WS12); the checklist is the *what*, this is the *when and how*. Nothing here is sacred except the four load-bearing ordering constraints, which are marked ⚠.
+
+**Refreshed 2026-07-30.** The plan got simpler: #6691 and #6696 both merged, so Wave 4 starts from a partly-advanced position and **Wave 6 is no longer gated on anyone else's PR** — the only wave with an external dependency no longer has one. What remains of Wave 6 is a single open design question, which is cheap to hold and can be called in parallel with any other wave.
+
+**Operating principles** (learned from the July train, and from what went wrong in it):
+
+1. **Owner-by-owner, never big-bang.** The extractions that worked (#6529…#6669) moved one coherent owner per PR. The four god-crate narrowings are *many* PRs each, not one.
+2. **Move-only PRs are behavior-free and say so.** `git mv` + path updates + guidance updates, nothing else in the diff. Splits and semantic changes never share a PR with moves.
+3. **Tests and guidance travel with the change** — every PR updates the crate guides + family AGENTS.md + boundary rules it invalidates, in the same diff (the audit's clearest lesson: guidance drift is how agents get confused).
+4. **Deletions use the un-masking discipline**: full unfiltered suites for every touched crate; a surfaced failure is a candidate behavior to preserve, not a test to edit.
+5. **`main` stays shippable after every PR.** No wave leaves a half-flipped dependency edge; each PR ends with the architecture suite green and the exception count monotonically non-increasing.
+6. **Decision gates are cheap to hold, expensive to skip.** The **[decision]** items (Strategy confirmation, triggers/hooks SQL, trust's signed-registry path, skills revival, identity binding-store, tools default-members) get called before their wave starts — most are one Slack thread each.
+
+---
+
+## Wave 0 — "Start now" (no design risk, immediate payoff)
+
+*Everything here is independently landable today and shrinks the problem for every later wave.*
+
+1. **WS0 de-wildcard of `host_api`'s prelude** ⚠ — the single prerequisite most later rows lean on. Behavior-free, mechanical, big diff but trivially reviewable.
+2. **WS8 safe deletions, first tranche** — the zero-consumer items with the smallest blast radius: `dispatcher`, `embeddings`, `llm::reasoning`, `common::trust_boundary`, `events` jsonl helpers, `outbound`/`approvals` dead traits, `event_projections`' three dead subsystems (this alone shrinks its dep set to events+host_api), unused dep edges, root `fuzz/`, `auth::loopback_oauth`, gating `auth::fakes`. Each with the un-masking discipline.
+3. **WS11 drift hotfixes that mislead agents today** — the references to seven nonexistent crates, `build_reborn_services`, `NetworkPolicyDecider`, the composition guide's phantom `src/webui/` section, stale feature-gating claims. These don't wait for the restructure; they are wrong *now*.
+4. **WS0 baselines + WS10 §11.2.2 exception ratchet** (armed at 20, must only go down) and the §11.2.7 include-scan in warn mode (it will fail until WS2 — that's the point; it makes the debt visible).
+5. **Decision round #1** **[decision]**: confirm Strategy B + tools default-members. One thread with Illia. Rename scope is no longer on the agenda: all renames are decided (2026-07-29 owner review + 2026-07-30 naming audit — see PROPOSAL §12.10 and the §5.1 naming rule) and execute unconditionally in their waves.
+
+*Exit criteria: exception count still 20 but ratcheted; dead-surface tranche gone; prelude de-wildcarded; team sign-off recorded.*
+
+## Wave 1 — Contracts (WS1) — the leverage wave
+
+*Creates the three contracts crates and completes the turn vocabulary. Everything afterward gets cheaper.*
+
+- Order inside the wave: turn vocabulary → `loop_contracts` → `extension_contracts` → `product_contracts` → evidence-mint consolidation ⚠ (security-sensitive; its refute-tests land in the same PR) → `common` narrowing → the two single-symbol product edges (`runner`, `loop_host`).
+- Each new crate lands with its §11.2.3 allowlist + §11.2.4 port-location scan in the same PR (new-crate-adds-rule discipline).
+- **Milestone:** exceptions 20 → 12 (all W4.3 + `auth→turns` gone); `agent_loop` passes contracts-only with zero exceptions; webui/openai/channel crates *can* now compile against contracts (the flips happen in Wave 2).
+- ✎ **Wave 1 closed 2026-07-31** across seven PRs (turn vocabulary → `loop_contracts` → `extension_contracts` → `product_contracts` → evidence mint → `common` narrowing + the two product edges): all three contracts crates exist and `agent_loop` is contracts-only with zero exceptions, but **exceptions ended at 13, not 12** — `conversations → turns` is turn *admission authority*, not vocabulary, so it falls in WS5 and the 12 in this milestone was never reachable here. Two findings worth carrying: the `host-auth-mint` cargo feature was never a seal (feature unification compiled the mint gate on for the whole workspace), and every slot found its lead-sheet row partly stale — re-measure rows against your own base, never inherit a predecessor's count. Full end-state in CHECKLIST's WS1 verify row.
+
+## Wave 2 — Extensions + product flips (WS2 + WS5)
+
+*The most ordering-sensitive wave.* ⚠ **Port inversions land before the layer flip**: extension_host implements `product_contracts` ports first; only when its `ironclaw_product` dep is gone does its layer move to loops (otherwise it cannot compile). Same discipline for `operator` and `webui`/`openai_compat` flips.
+
+- Sequence: port flips (extension_host, operator, webui, openai_compat) → `extension_manager` split (the #6616/#6669 inventory moves as a unit, like it arrived) → strays out (pairing routes→webui, skill-learning seam, bundled skills) → include_str kills + package colocation + telegram merge → memory-provider package move (`memory-native` + `mem0` → `extensions/packages/`, landing with the enforcement re-point — the mem0-naming architecture test + composition's `memory-mem0` feature migration — in the same PR) → re-layer extensions/extension_host → naming-trap fixes (conversations/threads) → attachments widening.
+- **Milestone:** `extension_host→product` edge gone; packages self-contained under `extensions/packages/`; Discord-proof (§10.1) is now literally true — a new channel touches one package dir + one binding line.
+
+## Wave 3 — Kernel + loop narrowing (WS3 + WS4, non-gated parts)
+
+- Sequence: first-party tools → `extensions/ironclaw_extension_support/` (registrar pattern; one tool family per PR) → `sandbox` lane merge (no production behavior — verify at land time) → `mcp` contracts flip → obligations/builder internal splits → secrets direct-consumer tightening ⚠ (port replacements before edge removal) → runner sheds (composition functions out, model gateway → loop_host, tool disclosure) → re-layer runner/hooks/processes → `wit/` move.
+- **Milestone:** exceptions 12 → 0. The ratchet pins it. `host_runtime` has no Docker/DB-driver cone; runner is the thin loop-hosting adapter.
+
+## Wave 4 — Composition, app, domains (WS6)
+
+*Overlaps Waves 2–3 freely — every eviction is independent.* ✎ **PR #6691 landed 2026-07-30**, and it did what this wave hoped: composition shed ~8.7k lines, four eviction items are done, and the `local_dev` misnomer is retired. So this wave starts roughly half-advanced — the remaining inventory is in PROPOSAL §6.10.1 and CHECKLIST WS6, both reconciled item-by-item against the merge. Two carry-overs worth planning around: the project service and project-create capability landed in `product` rather than `identity::projects`, so they need a second hop; and the project-create move added a `product → loop_host` behavioral edge that the §6.9.1 shed now has to resolve alongside the two pure-data ones.
+
+- Composition evictions one owner per PR (the §6.10.1 inventory); `local_dev` misnomer retired; `RebornRuntime` slimming; config vendor-section removal with its compat window; CLI vendor-resolution shed; the renames (all decided — 2026-07-29 + 2026-07-30) as pure-rename PRs, no shims, each landing *after* that crate's content-change PRs in Waves 2–3 so a crate churns once for content and once for name, never interleaved: the three stutter kills (`event_log`, `extension_registry`, `assistant`), the naming-audit four (`architecture_tests`, `extension_support`, `turn_runner`, `trace_commons`), and the rest of the `reborn_` batch (`composition`, `config`, `event_store`, `identity`, `openai_compat`, cli dir, root `integration_tests`).
+- **Milestone:** composition reads as assembly (its mass ratchet re-baselined at the new floor); config has no vendor sections; renames done.
+
+## Wave 5 — Physical family moves (WS7)
+
+*Deliberately late for split crates, flexible for stable ones.* ⚠ **Before the first family `git mv`:** the path-keyed gates listed in WS10 (coverage merge, panic scanner + baseline, e2e path filters, test-scope classifier, dev-metrics globs) are rewritten to nested-tree-safe forms — under family directories they fail *silently*, not loudly. Two allowed modes: (a) **move-with-your-milestone** — a crate moves when its narrowing lands (preferred; one churn each); (b) **early batch-move** of untouched retain-as-is crates (substrate/events/domains leaves) any time after Wave 0 if the team wants the tree visible sooner — it's pure `git mv` churn, decide by taste **[decision]**.
+
+- Last move lands with the §11.2.1 family⇄layer test and the tree-comparison script.
+- **Milestone:** `crates/` matches PROPOSAL §5 exactly.
+
+## Wave 6 — Process-journal work (WS9) — ✎ **ungated 2026-07-30; mostly already landed**
+
+*The gate is gone.* #6696 merged on 2026-07-29 with its import/rollback contract, and took most of this wave with it: `processes` widened to the row-native journal and `ProcessSupervisor`, `approvals` absorbed the approval and gate records, `run_state` was deleted, the turn store became a projection, and runner's scheduler inverted onto the supervisor.
+
+What is left is one item, and it is a **decision before it is work**: runner's `subagent/await_edge/` (~2.9k lines) was reworked onto process edges rather than deleted, contrary to #6696's own design note. Call it with the journal's author — do process edges express what that resolver does, or is await-edge resolution genuinely loop-tier? — then either shed it into Wave 3's runner narrowing or amend PROPOSAL §6.7.3 to keep it. It is a one-thread decision that no longer blocks any other wave, and no other wave blocks it.
+
+## Continuous tracks (run alongside every wave)
+
+- **Enforcement (WS10):** every rule lands with or before the change it protects — never after.
+- **Guidance (WS11):** family AGENTS.md files are written *when the family directory first exists*; crate guides move/update with their crates; the ten-family set is complete by end of Wave 5.
+- **Verification (WS12):** the full gauntlet runs at each wave boundary; the extension user-journeys re-verify after Waves 2 and 3; the final 100% gate (including the fresh-agent placement test) closes the checklist.
+
+## Suggested first five PRs (concrete, in order)
+
+1. `host_api`: de-wildcard prelude + repoint consumers (WS0.1).
+2. Dead-surface tranche #1: `dispatcher` + `embeddings` + `llm::reasoning` + unused dep edges (WS8).
+3. Guidance drift hotfix: nonexistent-crate references + phantom modules across root docs, `crates/AGENTS.md`, composition guides, `.claude` skills (WS11.3 subset).
+4. Turn vocabulary completion in `host_api::turn` + delete the turns re-export shims + repoint the six vocabulary-only consumers (WS1.1) — exceptions drop 20→15 in one PR (five of the six consumers carry exceptions; conversations and hooks follow with the port PRs).
+5. `contracts/ironclaw_loop_contracts` extraction + `agent_loop` flip (WS1.2) — exceptions 15→12 (the conversations and hooks stragglers fall with the port repoints here), and the loop tier has its contract home. ✎ *Landed as #6975 and the figure in this line is superseded: **15→13**. `hooks` fell as predicted; `conversations` did not and could not — it is turn admission authority, not vocabulary. See the Wave 1 ✎ note above and CHECKLIST WS1's verify row. The five items in this list are all landed (#6934, #6942/#6943/#6964, #6944, #6967, #6975); it is kept as the authored plan, not as a live queue.*
+
+## Coordination notes
+
+- ✎ **#6691 — merged 2026-07-30.** It advanced Wave 4 substantially, as expected. Before restarting any composition eviction, re-read PROPOSAL §6.10.1: four items are done and two of the "done" ones landed in a destination that still needs a second hop.
+- ✎ **#6696 — merged 2026-07-29.** Wave 6 is ungated. One caution for anyone planning against it: **the merge did not match its own design note on runner's await-edge machinery**, so any estimate that assumed runner shrank by 4.6k more than it did is wrong. Re-cost from the live tree, not from the PR description.
+- ✎ **#6863 — merged 2026-07-29** (not previously tracked here). It added `ironclaw_libsql_runtime`, a substrates-layer crate with no workspace dependencies. It needs no wave of its own — it moves with the substrate batch in Wave 5 — but it does change one rule the enforcement track lands (§11.2.6), so WS10's persistence-idiom item is now two assertions rather than one.
+- ✎ **#6930 ("register hosted MCP servers") — merged 2026-07-31, `2e6522580`** (+15,002/−1,818, 153 files). The first *feature* PR big enough to change this program's inputs, and it lands squarely in Wave 2's territory. **It gates nothing** — no `LAYER_MATRIX_EXCEPTIONS` change, no new internal edge except `extension_host → common`, `host_api` still a zero-`ironclaw_*` leaf. Three things to plan around, all recorded in PROPOSAL §2.7:
+  1. **Wave 2 inherits a new sub-owner.** `extension_host` gained a hosted-MCP *registration pipeline* (4 modules, +3.4k lines) that is neither manager UX nor registry records, so the `extension_manager` split has a third destination question to answer before it moves the #6616/#6669 inventory. PROPOSAL §6.8.2 states the question; it is not decided.
+  2. **Wave 5 inherits a new silent path-keyed gate.** `reborn_registration_pipeline_boundary.rs` hardcodes `crates/ironclaw_extension_host/src/hosted_mcp_` and `crates/ironclaw_extensions/src/hosted_mcp_`. Unlike the loud siblings, it goes green while enforcing nothing once a prefix breaks — and the WS6 *rename* breaks one before the WS7 `git mv` breaks both. CHECKLIST WS10 and WS6 both carry the note.
+  3. **Wave 1 has a live merge-down item.** `host_api/src/package_lifecycle.rs` gained an `ExtensionRegisterHostedMcp` lifecycle action/command-kind on `main` — and that is the one file the in-flight `extension_contracts` slot moves out of `host_api`. The stack owns porting main's edit onto the moved location; the new `host_api::hosted_mcp` module is mutually bound to `package_lifecycle` (§6.1.1), so it travels with it. Nothing for this plan to sequence, but re-cost any Wave 1 estimate that assumed `host_api` was quiet.
+- ✎ **Stacked-PR evidence is currently broken, and every wave from here runs stacked — #6978, filed from Wave 1.** Two facts compound. First, the four `pull_request: branches: [main]`-gated workflows (`reborn-tests`, `reborn-e2e`, `platform-and-compat`, `history-check`) **do not attach** to a PR that targets a sibling branch, so a stacked slice gets no CI status of its own; the established workaround is `workflow_dispatch` with a `ref`. Second, **every `workflow_dispatch` run of `reborn-tests.yml` fails the `Tests (Reborn)` roll-up structurally** — `critical-mutation` is `pull_request`/`merge_group`-gated, so under dispatch it is `skipped`, and the roll-up disallows `skipped` for that job — regardless of branch or diff. Net effect for this program: **a stacked slice's dispatch run always reads red at the roll-up even when every real lane is green.** Until #6978 closes, three operating rules: (1) reviewers of a dispatch run read the per-job tally, never the roll-up; (2) each slice's PR body states which evidence is local and which is dispatched, with the run URL and the head SHA it matches; (3) do not treat a red roll-up on a dispatch run as a blocker without first checking whether `critical-mutation` is the only "failure". Wave 1 lost review time to exactly this before it was diagnosed.
+- ✎ **Wave 1 landed as seven PRs** — WS1.1 #6967, WS1.2 #6975, WS1.3 #6977, WS1.4 #6980, WS1.5 #6981, WS1.6+WS1.7 #6982, plus the mid-wave docs reconciliation #6979 — all on `main` at `a50ad0638`. Two habits it proved worth keeping, beyond the "re-measure your own base" rule above: every slice collapsed onto `main` verified its post-merge delta byte-identical (or line-diffed the shared files) against the pre-collapse delta, which is what caught a squash-merge history artifact from silently dropping a sibling's edits; and every enumerating gate that failed was **fixed rather than relaxed**, which is the property those gates were built with.
+- **Review load:** expect ~35–50 PRs total across waves at the sizes above; the July train demonstrated this cadence is sustainable. Anything trending past ~400 effective lines of *semantic* change (moves excluded) should split.
+- **Where to record progress:** tick [CHECKLIST.md](CHECKLIST.md) boxes in the PRs that land them; PROPOSAL.md stays frozen as the decision record; disagreements found during implementation go back through a PROPOSAL amendment, not silent divergence.

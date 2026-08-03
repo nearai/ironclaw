@@ -7,40 +7,34 @@
 #![warn(unreachable_pub)]
 
 mod admission;
-mod block_persistence;
+mod agent_turn_runtime;
 mod checkpoint_state;
 mod coordinator;
 pub mod events;
 mod external_tool_catalog;
-mod ids;
-mod lifecycle;
+pub mod host_managed_ports;
 pub mod loop_exit;
-mod origin;
-pub mod product_adapter;
+pub mod process_projection;
 pub mod product_context;
 mod request;
 mod response;
-pub mod run_profile;
 pub mod runner;
-pub mod scope;
 mod status;
-mod store;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
-mod turn_state_row_store;
 
 pub use admission::{
     AllowAllTurnAdmissionLimitProvider, StaticTurnAdmissionLimitProvider, TurnAdmissionAxisKind,
     TurnAdmissionBucket, TurnAdmissionBucketKind, TurnAdmissionBucketScope,
     TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionLimit,
-    TurnAdmissionLimitProvider, TurnAdmissionLimitUnavailable, TurnAdmissionReservationRecord,
+    TurnAdmissionLimitProvider, TurnAdmissionLimitUnavailable,
 };
-pub use block_persistence::TurnStateBlockPersistence;
+pub use agent_turn_runtime::{
+    AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort, SpawnTreeReservation, TurnRunRecord,
+    active_run_ref_state,
+};
 pub use checkpoint_state::{
-    CheckpointStateMatchMetadata, CheckpointStateRecord, CheckpointStateStorePort,
-    GetCheckpointStateRequest, GetLoopCheckpointRequest, LoopCheckpointRecord, LoopCheckpointStore,
-    MAX_CHECKPOINT_STATE_PAYLOAD_BYTES, PutCheckpointStateRequest, PutLoopCheckpointRequest,
-    RedactedCheckpointPayload, checkpoint_state_metadata_matches_request, new_checkpoint_state_ref,
+    GetLoopCheckpointRequest, LoopCheckpointRecord, LoopCheckpointStore, PutLoopCheckpointRequest,
 };
 pub use coordinator::{
     AllowAllTurnAdmissionPolicy, DefaultTurnCoordinator, NoopTurnRunWakeNotifier,
@@ -48,7 +42,7 @@ pub use coordinator::{
     TurnSpawnTreePort,
 };
 pub use events::{
-    EventCursor, InMemoryTurnEventSink, MAX_TURN_EVENT_PROJECTION_LIMIT, TurnBlockedGateKind,
+    InMemoryTurnEventSink, MAX_TURN_EVENT_PROJECTION_LIMIT, TurnBlockedGateKind,
     TurnBlockedGateMetadata, TurnCommittedEventObserver, TurnEventKind, TurnEventPage,
     TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
     TurnEventProjectionService, TurnEventProjectionSnapshot, TurnEventProjectionSource,
@@ -59,61 +53,41 @@ pub use external_tool_catalog::{
     ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, ExternalToolSpecError,
     InMemoryExternalToolCatalog, PendingExternalCall,
 };
-pub use ids::{
-    AcceptedMessageRef, CapabilityActivityId, GateRef, IdempotencyKey, LoopDiagnosticRef,
-    LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, ReplyTargetBindingRef, RunProfileId,
-    RunProfileRequest, RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId,
-    TurnLeaseToken, TurnRunId, TurnRunnerId,
-};
-pub use ironclaw_host_api::{
-    ModelInvalidOutputDetailReason, SanitizedCancelReason, SanitizedFailure, TurnOwner,
-};
-pub use lifecycle::{
-    DefaultTurnLifecycleEventBus, LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore,
-    NoopLifecyclePublicationErrorPort, TurnLifecycleEventBus,
+// The turn vocabulary itself is `ironclaw_host_api::turn`'s, not this crate's:
+// ids, refs, scope/actor/owner, status and its gate correspondence, the event
+// cursor, the run-origin adapter identity, and the sanitized failure/cancel
+// shapes. This crate names them because it coordinates turns; it re-exports
+// them only so its own consumers keep one import for the kernel API they
+// already depend on. A crate that needs *only* vocabulary must depend on
+// `ironclaw_host_api` directly — see this crate's CLAUDE.md.
+pub use host_managed_ports::{HostManagedLoopModelPort, HostManagedLoopPromptPort};
+pub use ironclaw_host_api::turn::{
+    AcceptedMessageRef, BlockedReason, CapabilityActivityId, EventCursor, GateKind,
+    GateResumeDisposition, IdempotencyKey, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef,
+    ModelInvalidOutputDetailReason, ProductTurnContext, ReplyTargetBindingRef, RunOriginAdapter,
+    RunProfileId, RunProfileRequest, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
+    SourceBindingRef, TurnActor, TurnCheckpointId, TurnGateRef, TurnId, TurnLeaseToken,
+    TurnOriginKind, TurnOwner, TurnRunId, TurnRunnerId, TurnScope, TurnStatus, TurnSurfaceType,
 };
 pub use loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
-    FinalCheckpointEvidenceRequest, LoopBlocked, LoopBlockedKind, LoopCancelled,
-    LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopExit, LoopExitApplier,
-    LoopExitEvidencePort, LoopExitMapping, LoopExitValidationDecision, LoopExitViolation,
-    LoopExitViolationKind, LoopFailed, LoopFailureKind,
+    FinalCheckpointEvidenceRequest, LoopExitApplier, LoopExitEvidencePort, LoopExitMapping,
+    LoopExitValidationDecision, LoopExitViolation, LoopExitViolationKind,
 };
-pub use origin::{ProductTurnContext, RunOriginAdapter, TurnOriginKind, TurnSurfaceType};
+pub use process_projection::{
+    AGENT_TURN_PROCESS_KIND, AgentTurnProcessCommitObserver, AgentTurnProcessMetadata,
+    AgentTurnProcessRuntime, AgentTurnProcessStateMetadata, ProcessJournalStoreTurnAdapter,
+    ProcessLoopCheckpointStore, TurnEventProjectionFromProcessJournal,
+    claimed_turn_run_from_process_claim, turn_run_state_from_process_snapshot,
+};
 pub use request::{
-    CancelRunRequest, GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition,
-    ResumeTurnRequest, RetryTurnRequest, SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
+    CancelRunRequest, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
+    RetryTurnRequest, SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
 };
 pub use response::{
     CancelRunResponse, ResumeTurnResponse, RetryTurnResponse, SubmitTurnResponse, ThreadBusy,
 };
-pub use run_profile::{
-    AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
-    AgentLoopDriverRunRequest, CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,
-    CheckpointSchemaId, CommunicationRuntimeContext, ConcurrencyClass, ConnectedChannelSummary,
-    ConnectedChannelsState, ContextProfileId, DeliveryTargetState, DeliveryTargetSummary,
-    EmptyMemoryPromptContextService, InMemoryRunProfileRegistry, InMemoryRunProfileResolver,
-    LoopCheckpointKind, LoopCheckpointStateRef, LoopDriverId, MemoryPromptContextRequest,
-    MemoryPromptContextService, ModelProfileId, PrivilegedRunProfileDimension,
-    RedactedRunProfileProvenance, RedactedRunProfileSource, ResolvedRunProfile,
-    ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
-    RunProfileRegistryError, RunProfileRequestAuthority, RunProfileResolutionError,
-    RunProfileResolutionRequest, RunProfileResolver, RunProfileSourceLayer, RunProfileSourceRef,
-    RunnerPoolId, RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
-};
-pub use scope::{TurnActor, TurnScope};
 pub use status::{
-    AdmissionRejection, AdmissionRejectionReason, BlockedReason, GateKind, TurnActiveRunRefState,
-    TurnCapacityResource, TurnError, TurnErrorCategory, TurnRunProfile, TurnRunState, TurnStatus,
-    is_recoverability_critical,
-};
-pub use store::{
-    SpawnTreeReservation, SpawnTreeReservationKey, TurnActiveLockKey, TurnActiveLockRecord,
-    TurnCheckpointRecord, TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind,
-    TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLockVersion,
-    TurnPersistenceSnapshot, TurnRecord, TurnRunRecord, TurnSpawnTreeStateStore, TurnStateStore,
-    active_run_ref_state,
-};
-pub use turn_state_row_store::{
-    FilesystemTurnStateBlockPersistence, TurnStateRowStore, TurnStateStoreLimits,
+    AdmissionRejection, AdmissionRejectionReason, TurnActiveRunRefState, TurnCapacityResource,
+    TurnError, TurnErrorCategory, TurnRunProfile, TurnRunState, is_recoverability_critical,
 };

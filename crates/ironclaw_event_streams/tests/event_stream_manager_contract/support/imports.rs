@@ -21,10 +21,7 @@ use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
 use ironclaw_filesystem::{
     Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
 };
-use ironclaw_host_api::{
-    CapabilityId, ExtensionId, InvocationId, MissionId, MountAlias, MountGrant, MountPermissions,
-    MountView, ProjectId, RuntimeKind, TenantId, ThreadId, UserId, VirtualPath,
-};
+use ironclaw_host_api::{ids::{CapabilityId, ExtensionId, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId}, path::{MountAlias, VirtualPath}, mount::{MountGrant, MountPermissions, MountView}, runtime::RuntimeKind};
 use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
     AdvanceSubscriptionCursorRequest, OutboundStateStore, LoadSubscriptionCursorRequest,
@@ -33,7 +30,7 @@ use ironclaw_outbound::{
     ProjectionUpdateRef, ThreadNotificationPolicy, ThreadNotificationTarget,
     UpdateDeliveryStatusRequest,
 };
-use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
+use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use tokio::{
     sync::Barrier,
     time::{Duration, timeout},

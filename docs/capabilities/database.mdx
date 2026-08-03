@@ -1,313 +1,156 @@
 ---
-title: Database Backends
-description: PostgreSQL vs libSQL — choosing your database
+title: Storage
+sidebarTitle: Storage
+description: Where IronClaw keeps its data, and when to move to PostgreSQL
 ---
 
-IronClaw supports two database backends: **PostgreSQL** and **libSQL** (embedded SQLite). **PostgreSQL is the default** — if you don't set `DATABASE_BACKEND`, IronClaw will use PostgreSQL and require a `DATABASE_URL`. Choose libSQL for zero-config personal use.
+IronClaw stores conversations, events, memory, and runtime state locally by default. No
+database server is required to get started. Served and multi-user deployments move that
+state to PostgreSQL.
 
-<Warning>
-If you start IronClaw without configuring a database, you'll see: `DATABASE_URL is required`. Run `ironclaw onboard` or set the environment variables manually.
-</Warning>
+---
 
-## Quick Comparison
+## Local Storage
 
-| Feature | PostgreSQL (default) | libSQL |
-|---------|----------------------|--------|
-| **Setup** | Requires PostgreSQL server | Zero-dependency, auto-created |
-| **Best For** | Production, multi-user | Personal use, single-user |
-| **Search** | Hybrid (FTS + vector) | FTS only (vector via Turso) |
-| **Scaling** | Horizontal (read replicas) | Single node |
-| **Backup** | pg_dump, replication | File copy, Turso sync |
-| **Size** | 100MB+ installed | ~5MB binary |
+Under the default `local-dev` profile, IronClaw keeps state in embedded database files
+inside your IronClaw home:
+
+```bash
+ls ~/.ironclaw/reborn
+```
+
+Nothing to install, nothing to configure. Back it up by copying the directory while
+IronClaw is stopped.
+
+This is the right choice for personal use on your own machine.
+
+---
 
 ## PostgreSQL
 
-Recommended for production deployments, multi-user scenarios, and high-throughput use cases.
+Move to PostgreSQL when you serve the web interface to more than one person, run on a
+host where local disk is ephemeral, or want a database you can back up and replicate
+independently.
 
-### Requirements
+<Steps>
 
-- PostgreSQL 15 or later
-- pgvector extension for embeddings
+<Step title="Provision a database">
 
-### Installation
-
-<AccordionGroup>
-  <Accordion title="Docker Compose (recommended)" icon="container">
-    The fastest way to get started. A `docker-compose.yml` is included in the IronClaw repository:
-
-    ```bash
-    cd ironclaw
-    docker compose up -d postgres
-    ```
-
-    This starts `pgvector/pgvector:pg16` on `127.0.0.1:5432` with database, user, and password all set to `ironclaw`.
-
-    <Warning>
-    These credentials are for local development only. Change `POSTGRES_PASSWORD` for any non-local deployment.
-    </Warning>
-  </Accordion>
-
-  <Accordion title="Ubuntu/Debian" icon="terminal">
-    ```bash
-    sudo apt install postgresql-15 postgresql-15-pgvector
-    sudo systemctl enable --now postgresql
-    ```
-  </Accordion>
-
-  <Accordion title="macOS (Homebrew)" icon="terminal">
-    ```bash
-    brew install postgresql
-    brew install pgvector
-    brew services start postgresql
-    ```
-  </Accordion>
-</AccordionGroup>
-
-### Configuration
+PostgreSQL 15 or later. Managed providers work; so does a local container:
 
 ```bash
-# Create database
-sudo -u postgres psql -c "CREATE DATABASE ironclaw;"
-sudo -u postgres psql -c "CREATE USER ironclaw WITH PASSWORD 'your-password';"
-sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE ironclaw TO ironclaw;"
-
-# Enable pgvector
-sudo -u postgres psql -d ironclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
+docker run -d --name ironclaw-pg \
+  -e POSTGRES_USER=ironclaw \
+  -e POSTGRES_PASSWORD=ironclaw \
+  -e POSTGRES_DB=ironclaw \
+  -p 127.0.0.1:5432:5432 \
+  pgvector/pgvector:pg16
 ```
 
-### IronClaw Configuration
+The `pgvector` image is used so embeddings-backed search works. See
+[Memory](/capabilities/memory/memory).
+
+</Step>
+
+<Step title="Switch to a profile that accepts a database">
+
+Do this **before** you add the `[storage]` block. Only three profiles wire it:
+`hosted-single-tenant`, `production`, and `migration-dry-run`. Under any other profile a
+`[storage]` block is a startup failure, not a warning:
+
+```
+config file section(s) [storage] are parsed but not wired in this runtime slice
+```
+
+```toml
+[boot]
+profile = "hosted-single-tenant"
+```
+
+Use `production` for a multi-user deployment. See
+[Configuration](/capabilities/configuration#profiles).
+
+<Warning>
+`hosted-single-tenant-volume` does **not** accept `[storage]`, despite the name. It is a
+volume-backed variant of local embedded storage, not a PostgreSQL profile. Pairing it with
+a `[storage]` block leaves the instance unable to start.
+</Warning>
+
+</Step>
+
+<Step title="Point IronClaw at it">
+
+Put the URL in the environment and name the variable in your configuration:
 
 ```bash
-# Select backend (optional — postgres is the default)
-# Accepted values: postgres, postgresql, pg | libsql, turso, sqlite
-export DATABASE_BACKEND=postgres
+export IRONCLAW_REBORN_POSTGRES_URL="postgres://ironclaw:ironclaw@127.0.0.1:5432/ironclaw"
+```
 
-# Required for PostgreSQL
-export DATABASE_URL="postgres://ironclaw:***@localhost/ironclaw"
-export DATABASE_POOL_SIZE=30  # default; increase for high-throughput workloads
+```toml
+[storage]
+backend               = "postgres"
+url_env               = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+pool_max_size         = 2
 ```
 
 <Warning>
-`DATABASE_URL` is **required** when using PostgreSQL. If not set, IronClaw will fail to start with the error: `DATABASE_URL is required — Run 'ironclaw onboard' or set DATABASE_URL environment variable`.
+The URL is environment-only. `config.toml` may name the variable that holds it, but must
+never contain the URL itself — it carries the database password.
 </Warning>
 
-Or in the wizard:
-1. Select "PostgreSQL"
-2. Enter connection string
-3. Test connection
+</Step>
 
-### SSL Modes
-
-| Mode | Behavior | Use Case |
-|------|----------|----------|
-| `disable` | Never use TLS | Local development |
-| `prefer` | Try TLS, fallback to plaintext | **Default** — works everywhere |
-| `require` | Require TLS | Production with TLS |
+<Step title="Verify">
 
 ```bash
-export DATABASE_SSLMODE=require
+ironclaw doctor
 ```
 
-## libSQL
+</Step>
 
-Recommended for personal use, development, and single-user deployments. Zero setup required.
+</Steps>
 
-### How It Works
+### Connection Security
 
-libSQL is an embedded SQLite-compatible database:
-- Database is a single file (`~/.ironclaw/ironclaw.db`)
-- No separate server process
-- Auto-created on first connection
-- Full SQLite feature set
+Managed remote PostgreSQL must use TLS. Append `sslmode=require` to the URL:
 
-### IronClaw Configuration
-
-```bash
-export DATABASE_BACKEND=libsql
-export LIBSQL_PATH="/home/user/.ironclaw/ironclaw.db"
+```
+postgres://user:password@db.example.com:5432/ironclaw?sslmode=require
 ```
 
-Or just use the wizard defaults:
-1. Select "libSQL"
-2. Accept default path
-3. Done!
+### Pool Sizing
 
-### Turso Cloud Sync
+`storage.pool_max_size` defaults to 2. Keep it below your PostgreSQL server's connection
+limit — or your managed provider's session-pool cap — after reserving capacity for
+restarts and operator sessions. Override it with
+`IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE`.
 
-libSQL supports syncing to Turso for cloud backup:
+---
+
+## Secrets and the Master Key
+
+Credentials are encrypted before they reach whichever backend you're using. The master key
+that protects them lives in the OS keychain, not the database.
+
+On a headless host with no keychain, provide it explicitly:
 
 ```bash
-export DATABASE_BACKEND=libsql
-export LIBSQL_PATH="/home/user/.ironclaw/ironclaw.db"
-export LIBSQL_URL="libsql://your-db.turso.io"
-export LIBSQL_AUTH_TOKEN="***"
+export IRONCLAW_REBORN_SECRET_MASTER_KEY=...
 ```
 
 <Warning>
-`LIBSQL_AUTH_TOKEN` is **required** when `LIBSQL_URL` is set. IronClaw will fail to start without it.
+Losing the master key makes every stored credential unrecoverable. Back it up somewhere
+other than the machine running IronClaw. See [Security](/security).
 </Warning>
 
-This keeps a local copy with automatic cloud sync.
+---
 
-## Feature Comparison
+## Choosing
 
-### Hybrid Search
-
-**PostgreSQL:** Full hybrid search (FTS + vector via RRF)
-```
-Keyword matches + semantic similarity
-Reciprocal Rank Fusion ranking
-```
-
-**libSQL:** FTS only (text search)
-```
-Keyword matching via FTS5
-Vector search via Turso cloud only
-```
-
-### Embeddings
-
-Both backends support embeddings, but with different implementations:
-
-| Backend | Embeddings | Notes |
-|---------|------------|-------|
-| PostgreSQL | Yes | pgvector for vector storage |
-| libSQL local | FTS only | No local vector storage |
-| libSQL + Turso | Yes | Via Turso vector indexes |
-
-<Warning>
-**Encryption at rest:** The local SQLite database stores conversation and workspace data in plaintext. Only secrets (API tokens) are encrypted with AES-256-GCM. If you handle sensitive data, use full-disk encryption (FileVault, LUKS, BitLocker) or choose PostgreSQL with TDE.
-</Warning>
-
-## Migration
-
-### From libSQL to PostgreSQL
-
-<Warning>
-SQLite and PostgreSQL have different SQL dialects. A raw `sqlite3 .dump` output may fail on PostgreSQL due to PRAGMA statements, type differences, and quoting. Use a conversion tool like [pgloader](https://pgloader.io/) or [pgloader Docker](https://hub.docker.com/r/dimitri/pgloader) for reliable migration.
-</Warning>
-
-1. **Using pgloader (recommended):**
-   ```bash
-   pgloader ~/.ironclaw/ironclaw.db postgresql://ironclaw:***@localhost/ironclaw
-   ```
-
-2. **Manual export (may require editing):**
-   ```bash
-   sqlite3 ~/.ironclaw/ironclaw.db ".dump" > ironclaw.sql
-   # Edit ironclaw.sql to remove PRAGMAs and fix type incompatibilities
-   psql -d ironclaw -f ironclaw.sql
-   ```
-
-3. **Update IronClaw config:**
-   ```bash
-   export DATABASE_BACKEND=postgres
-   export DATABASE_URL="postgres://user:***@localhost/ironclaw"
-   ```
-
-4. **Restart IronClaw**
-
-### From PostgreSQL to libSQL
-
-1. **Export:**
-   ```bash
-   pg_dump -h localhost -U ironclaw ironclaw > ironclaw.sql
-   ```
-
-2. **Convert and import to SQLite** (requires conversion tools)
-
-3. **Update IronClaw config**
-
-## When to Choose Which
-
-### Choose libSQL if:
-
-- Running IronClaw on a personal laptop/desktop
-- Single-user deployment
-- Want zero database administration
-- Don't need horizontal scaling
-- FTS-only search is sufficient
-
-### Choose PostgreSQL if:
-
-- Production multi-user deployment
-- Need hybrid (FTS + vector) search locally
-- High-throughput scenario
-- Existing PostgreSQL infrastructure
-- Require advanced backup/recovery
-- Team or shared deployment
-
-## Backup
-
-### PostgreSQL
-
-```bash
-# Backup
-pg_dump -h localhost -U ironclaw ironclaw > backup.sql
-
-# Restore
-psql -d ironclaw -f backup.sql
-```
-
-### libSQL
-
-```bash
-# Backup (simple file copy)
-cp ~/.ironclaw/ironclaw.db ~/.ironclaw/ironclaw.db.backup
-
-# Restore
-cp ~/.ironclaw/ironclaw.db.backup ~/.ironclaw/ironclaw.db
-
-# With Turso: automatic cloud backup
-```
-
-## Troubleshooting
-
-<AccordionGroup>
-  <Accordion title="pgvector not found" icon="x-circle">
-    ```bash
-    # Install pgvector
-    sudo apt install postgresql-15-pgvector
-
-    # Or compile manually
-    git clone https://github.com/pgvector/pgvector.git
-    cd pgvector
-    make
-    sudo make install
-    ```
-  </Accordion>
-
-  <Accordion title="Database file is locked" icon="lock">
-    ```bash
-    # Find and kill process
-    lsof ~/.ironclaw/ironclaw.db
-    kill -9 <pid>
-
-    # Or wait for it to release
-    ```
-  </Accordion>
-
-  <Accordion title="Connection refused (PostgreSQL)" icon="network">
-    ```bash
-    # Check PostgreSQL is running
-    sudo systemctl status postgresql
-
-    # Check listen addresses
-    sudo -u postgres psql -c "SHOW listen_addresses;"
-
-    # Should be '*' or 'localhost'
-    ```
-  </Accordion>
-</AccordionGroup>
-
-## Next Steps
-
-<CardGroup cols={2}>
-  <Card title="Configuration" icon="settings" href="/capabilities/configuration">
-    Full environment variable reference
-  </Card>
-
-  <Card title="VPS Install" icon="server" href="/infrastructure/droplet">
-    Production deployment guide with PostgreSQL
-  </Card>
-</CardGroup>
+| | Local (default) | PostgreSQL |
+| --- | --- | --- |
+| Setup | None | Provision a server |
+| Best for | Personal use, one machine | Served, multi-user, production |
+| Backup | Copy the home directory | `pg_dump`, replication |
+| Profile | `local-dev` | `hosted-single-tenant`, `production` |

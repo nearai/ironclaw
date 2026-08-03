@@ -37,7 +37,7 @@ fallback_feature_flags() {
 
 case "${package}" in
   ironclaw_product)
-    printf '%s\n' "--features test-support,host-auth-mint"
+    printf '%s\n' "--features test-support"
     ;;
   ironclaw_reborn_composition)
     # memory-mem0 turns on the (off-by-default) mem0 third-party memory provider

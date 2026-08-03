@@ -11,7 +11,7 @@ use crate::{
     OAuthProviderRefreshRequest, SecretCleanupReport, SecretCleanupRequest, SecretSubmitRequest,
     SecretSubmitResult,
 };
-use ironclaw_turns::TurnRunId;
+use ironclaw_host_api::turn::TurnRunId;
 
 struct SharedAuthTestDouble;
 
@@ -81,7 +81,10 @@ fn with_host_managed_nearai_credential_scope_rejects_thread_scoped_value() {
 #[test]
 fn with_host_managed_nearai_credential_scope_accepts_owner_granularity_scope() {
     use crate::AuthSurface;
-    use ironclaw_host_api::{AgentId, ResourceScope, TenantId, UserId};
+    use ironclaw_host_api::{
+        ids::{AgentId, TenantId, UserId},
+        resource::ResourceScope,
+    };
 
     let shared = Arc::new(SharedAuthTestDouble);
     let services =
@@ -94,7 +97,7 @@ fn with_host_managed_nearai_credential_scope_accepts_owner_granularity_scope() {
             project_id: None,
             mission_id: None,
             thread_id: None,
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         },
         AuthSurface::Api,
     );
@@ -430,7 +433,7 @@ impl SecretCleanupService for ReportingCleanupService {
 /// in `cleanup_credentials_for_lifecycle`.
 #[tokio::test]
 async fn lifecycle_cleanup_drops_canceled_flows_durable_pkce_verifier() {
-    use ironclaw_host_api::ExtensionId;
+    use ironclaw_host_api::ids::ExtensionId;
 
     let secret_store: Arc<dyn ironclaw_secrets::SecretStorePort> =
         Arc::new(ironclaw_secrets::SecretStore::ephemeral());
@@ -531,7 +534,10 @@ fn make_auth_services_with_flow_source(
 /// `TurnScope` used by `cancel_blocked_auth_flow`.
 fn test_auth_product_scope() -> AuthProductScope {
     use crate::AuthSurface;
-    use ironclaw_host_api::{AgentId, ResourceScope, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::{
+        ids::{AgentId, TenantId, ThreadId, UserId},
+        resource::ResourceScope,
+    };
 
     let resource = ResourceScope {
         tenant_id: TenantId::new("test-tenant").expect("tenant"),
@@ -540,7 +546,7 @@ fn test_auth_product_scope() -> AuthProductScope {
         project_id: None,
         mission_id: None,
         thread_id: Some(ThreadId::new("test-thread").expect("thread")),
-        invocation_id: ironclaw_host_api::InvocationId::new(),
+        invocation_id: ironclaw_host_api::ids::InvocationId::new(),
     };
     AuthProductScope::new(resource, AuthSurface::Chat)
 }
@@ -689,6 +695,7 @@ async fn lifecycle_dispatch_fence_failure_stays_retryable() {
         kind: AuthFlowKind::IntegrationCredential,
         status: AuthFlowStatus::Completed,
         provider: AuthProviderId::new("github").expect("provider"),
+        requester_extension: None,
         challenge: None,
         continuation: AuthContinuationRef::LifecycleActivation {
             package_ref: crate::LifecyclePackageRef::new("github-extension").expect("package ref"),
@@ -734,6 +741,7 @@ async fn create_test_flow(
             scope,
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("test-provider").expect("provider"),
+            requester_extension: None,
             challenge: AuthChallenge::SetupRequired {
                 provider: AuthProviderId::new("test-provider").expect("provider"),
                 message: "test".to_string(),
@@ -755,8 +763,8 @@ async fn create_test_flow(
 /// when `flow_record_source` returns one for the queried run/gate.
 #[tokio::test]
 async fn cancel_blocked_auth_flow_cancels_non_terminal_flow() {
-    use ironclaw_host_api::UserId;
-    use ironclaw_turns::TurnScope;
+    use ironclaw_host_api::ids::UserId;
+    use ironclaw_host_api::turn::TurnScope;
 
     let auth_svc = Arc::new(InMemoryAuthProductServices::new());
     let services = Arc::new(make_auth_services_with_flow_source(Arc::clone(&auth_svc)));
@@ -774,10 +782,10 @@ async fn cancel_blocked_auth_flow_cancels_non_terminal_flow() {
     );
 
     let turn_scope = TurnScope::new_with_owner(
-        ironclaw_host_api::TenantId::new("test-tenant").expect("tenant"),
-        Some(ironclaw_host_api::AgentId::new("test-agent").expect("agent")),
+        ironclaw_host_api::ids::TenantId::new("test-tenant").expect("tenant"),
+        Some(ironclaw_host_api::ids::AgentId::new("test-agent").expect("agent")),
         None,
-        ironclaw_host_api::ThreadId::new("test-thread").expect("thread"),
+        ironclaw_host_api::ids::ThreadId::new("test-thread").expect("thread"),
         Some(UserId::new("creator-user").expect("owner")),
     );
     let owner_user_id = UserId::new("creator-user").expect("owner");
@@ -805,18 +813,18 @@ async fn cancel_blocked_auth_flow_cancels_non_terminal_flow() {
 /// or already terminal).
 #[tokio::test]
 async fn cancel_blocked_auth_flow_is_noop_when_flow_absent() {
-    use ironclaw_host_api::UserId;
-    use ironclaw_turns::{TurnRunId, TurnScope};
+    use ironclaw_host_api::ids::UserId;
+    use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 
     let auth_svc = Arc::new(InMemoryAuthProductServices::new());
     let services = Arc::new(make_auth_services_with_flow_source(Arc::clone(&auth_svc)));
 
     // No flow is seeded — `flow_for_turn_gate` returns None.
     let turn_scope = TurnScope::new_with_owner(
-        ironclaw_host_api::TenantId::new("test-tenant").expect("tenant"),
-        Some(ironclaw_host_api::AgentId::new("test-agent").expect("agent")),
+        ironclaw_host_api::ids::TenantId::new("test-tenant").expect("tenant"),
+        Some(ironclaw_host_api::ids::AgentId::new("test-agent").expect("agent")),
         None,
-        ironclaw_host_api::ThreadId::new("test-thread").expect("thread"),
+        ironclaw_host_api::ids::ThreadId::new("test-thread").expect("thread"),
         Some(UserId::new("creator-user").expect("owner")),
     );
     let owner_user_id = UserId::new("creator-user").expect("owner");
@@ -850,8 +858,8 @@ async fn cancel_blocked_auth_flow_treats_terminal_race_as_ok() {
         AuthFlowId, AuthFlowRecord, AuthProductError, AuthProductScope, OAuthCallbackClaimRequest,
         OAuthCallbackFailureInput, OAuthCallbackInput, Timestamp,
     };
-    use ironclaw_host_api::UserId;
-    use ironclaw_turns::TurnScope;
+    use ironclaw_host_api::ids::UserId;
+    use ironclaw_host_api::turn::TurnScope;
 
     /// A `AuthFlowManager` whose `cancel_flow` returns a caller-supplied error
     /// while all other methods forward to the real in-memory store.  Used to
@@ -989,10 +997,10 @@ async fn cancel_blocked_auth_flow_treats_terminal_race_as_ok() {
         };
 
     let turn_scope = TurnScope::new_with_owner(
-        ironclaw_host_api::TenantId::new("test-tenant").expect("tenant"),
-        Some(ironclaw_host_api::AgentId::new("test-agent").expect("agent")),
+        ironclaw_host_api::ids::TenantId::new("test-tenant").expect("tenant"),
+        Some(ironclaw_host_api::ids::AgentId::new("test-agent").expect("agent")),
         None,
-        ironclaw_host_api::ThreadId::new("test-thread").expect("thread"),
+        ironclaw_host_api::ids::ThreadId::new("test-thread").expect("thread"),
         Some(UserId::new("creator-user").expect("owner")),
     );
     let owner_user_id = UserId::new("creator-user").expect("owner");
@@ -1061,8 +1069,8 @@ async fn cancel_blocked_auth_flow_treats_terminal_race_as_ok() {
 /// `flow_record_source`.
 #[tokio::test]
 async fn cancel_blocked_auth_flow_fails_closed_without_flow_record_source() {
-    use ironclaw_host_api::UserId;
-    use ironclaw_turns::{TurnRunId, TurnScope};
+    use ironclaw_host_api::ids::UserId;
+    use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 
     let double = Arc::new(SharedAuthTestDouble);
     // Build WITHOUT `.with_flow_record_source` — `flow_record_source` is None.
@@ -1077,10 +1085,10 @@ async fn cancel_blocked_auth_flow_fails_closed_without_flow_record_source() {
     ));
 
     let turn_scope = TurnScope::new_with_owner(
-        ironclaw_host_api::TenantId::new("test-tenant").expect("tenant"),
-        Some(ironclaw_host_api::AgentId::new("test-agent").expect("agent")),
+        ironclaw_host_api::ids::TenantId::new("test-tenant").expect("tenant"),
+        Some(ironclaw_host_api::ids::AgentId::new("test-agent").expect("agent")),
         None,
-        ironclaw_host_api::ThreadId::new("test-thread").expect("thread"),
+        ironclaw_host_api::ids::ThreadId::new("test-thread").expect("thread"),
         Some(UserId::new("creator-user").expect("owner")),
     );
     let owner_user_id = UserId::new("creator-user").expect("owner");
@@ -1107,17 +1115,17 @@ async fn cancel_blocked_auth_flow_fails_closed_without_flow_record_source() {
 /// whether any flow or source is present.
 #[tokio::test]
 async fn cancel_blocked_auth_flow_rejects_invalid_gate_ref() {
-    use ironclaw_host_api::UserId;
-    use ironclaw_turns::{TurnRunId, TurnScope};
+    use ironclaw_host_api::ids::UserId;
+    use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 
     let auth_svc = Arc::new(InMemoryAuthProductServices::new());
     let services = Arc::new(make_auth_services_with_flow_source(Arc::clone(&auth_svc)));
 
     let turn_scope = TurnScope::new_with_owner(
-        ironclaw_host_api::TenantId::new("test-tenant").expect("tenant"),
-        Some(ironclaw_host_api::AgentId::new("test-agent").expect("agent")),
+        ironclaw_host_api::ids::TenantId::new("test-tenant").expect("tenant"),
+        Some(ironclaw_host_api::ids::AgentId::new("test-agent").expect("agent")),
         None,
-        ironclaw_host_api::ThreadId::new("test-thread").expect("thread"),
+        ironclaw_host_api::ids::ThreadId::new("test-thread").expect("thread"),
         Some(UserId::new("creator-user").expect("owner")),
     );
     let owner_user_id = UserId::new("creator-user").expect("owner");
@@ -1152,8 +1160,8 @@ async fn cancel_blocked_auth_flow_rejects_invalid_gate_ref() {
 /// on the `source.flow_for_turn_gate(…).await?` call site.
 #[tokio::test]
 async fn cancel_blocked_auth_flow_propagates_flow_source_error() {
-    use ironclaw_host_api::UserId;
-    use ironclaw_turns::{TurnRunId, TurnScope};
+    use ironclaw_host_api::ids::UserId;
+    use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 
     /// A flow record source that always errors out.
     struct AlwaysFailingFlowSource;
@@ -1193,10 +1201,10 @@ async fn cancel_blocked_auth_flow_propagates_flow_source_error() {
         );
 
     let turn_scope = TurnScope::new_with_owner(
-        ironclaw_host_api::TenantId::new("test-tenant").expect("tenant"),
-        Some(ironclaw_host_api::AgentId::new("test-agent").expect("agent")),
+        ironclaw_host_api::ids::TenantId::new("test-tenant").expect("tenant"),
+        Some(ironclaw_host_api::ids::AgentId::new("test-agent").expect("agent")),
         None,
-        ironclaw_host_api::ThreadId::new("test-thread").expect("thread"),
+        ironclaw_host_api::ids::ThreadId::new("test-thread").expect("thread"),
         Some(UserId::new("creator-user").expect("owner")),
     );
     let owner_user_id = UserId::new("creator-user").expect("owner");

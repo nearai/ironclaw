@@ -16,7 +16,8 @@
 //! | IronClaw op        | mem0 mapping                                   | fidelity |
 //! |--------------------|------------------------------------------------|----------|
 //! | `search`           | `POST /search`                                 | clean    |
-//! | `retrieve_context` | `POST /search` → snippets                      | clean    |
+//! | `read_long_term`   | `POST /search` → snippets                      | clean    |
+//! | `read_short_term`  | not declared (no thread partitioning)          | none     |
 //! | `write` (add)      | `POST /memories` add (`infer=false`, verbatim) | good     |
 //! | `read`             | `GET /memories` + filter by `target` metadata  | loose    |
 //! | `tree`             | `GET /memories` → distinct `target` tags       | loose    |
@@ -25,10 +26,10 @@
 //! | `profile_set`      | read-merge-write a `kind=profile` memory       | good     |
 //! | `profile_read`     | latest `kind=profile` memory bytes             | loose    |
 //!
-//! ## `infer=false` (verbatim) document-store mapping
+//! ## `infer=false` (verbatim) document-tool mapping
 //!
 //! mem0's `add` defaults to running an LLM to *extract facts* from the message
-//! (e.g. "I love pizza" → "Likes pizza"). For a **document store** that must
+//! (e.g. "I love pizza" → "Likes pizza"). For document tools that must
 //! round-trip exactly — `read` reconstructs a document from the memories tagged
 //! with a `target`, and `profile_set`/`profile_read` round-trip a structured JSON
 //! blob — that rewrite is lossy. Every add this provider issues therefore sets
@@ -39,7 +40,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::ResourceScope;
+use ironclaw_host_api::resource::ResourceScope;
 use ironclaw_memory::{
     MemoryInvocation, MemoryProfileSetStatus, MemoryService, MemoryServiceContextRequest,
     MemoryServiceContextSnippet, MemoryServiceError, MemoryServiceProfileReadResponse,
@@ -98,7 +99,7 @@ impl Mem0MemoryService {
             "messages": [{ "role": "user", "content": content }],
             "user_id": namespace,
             "metadata": metadata,
-            // Document-store semantics: store the content verbatim. `infer=false`
+            // Document-tool semantics: store the content verbatim. `infer=false`
             // disables mem0's LLM fact-extraction so `read`/`profile_read` round-trip
             // the exact bytes and the all-local deployment needs only an embedder.
             "infer": false,
@@ -130,7 +131,7 @@ impl Mem0MemoryService {
     /// returns the other partition's rows). Rather than depend on which secondary
     /// identifiers a given mem0 version actually enforces, the provider encodes
     /// the ENTIRE partition — full scope AND workspace — into the one key that is
-    /// guaranteed enforced: `user_id`. So the workspace partition the local-dev
+    /// guaranteed enforced: `user_id`. So the workspace partition the standalone
     /// composition passes as `config.app_id` is prefixed into the `user_id`
     /// namespace here; that prefix IS the isolation boundary. (`app_id` is still
     /// stamped via `stamp_app_id` as forward-compatible metadata, but MUST NOT be
@@ -204,9 +205,12 @@ impl Mem0MemoryService {
     }
 }
 
-#[async_trait]
-impl MemoryService for Mem0MemoryService {
-    async fn search(
+/// The provider's conventional tool operations — INHERENT methods, not part
+/// of any memory contract. The model reaches them only through the tools the
+/// manifest declares, served by this provider's first-party capability
+/// handler.
+impl Mem0MemoryService {
+    pub async fn search(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceSearchRequest,
@@ -240,7 +244,7 @@ impl MemoryService for Mem0MemoryService {
         })
     }
 
-    async fn write(
+    pub async fn write(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceWriteRequest,
@@ -291,7 +295,7 @@ impl MemoryService for Mem0MemoryService {
         })
     }
 
-    async fn read(
+    pub async fn read(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceReadRequest,
@@ -331,7 +335,7 @@ impl MemoryService for Mem0MemoryService {
         })
     }
 
-    async fn tree(
+    pub async fn tree(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceTreeRequest,
@@ -358,7 +362,7 @@ impl MemoryService for Mem0MemoryService {
         })
     }
 
-    async fn profile_set(
+    pub async fn profile_set(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceProfileSetRequest,
@@ -394,7 +398,10 @@ impl MemoryService for Mem0MemoryService {
             status: MemoryProfileSetStatus::Ok,
         })
     }
+}
 
+#[async_trait]
+impl MemoryService for Mem0MemoryService {
     async fn profile_read(
         &self,
         invocation: MemoryInvocation,
@@ -414,7 +421,13 @@ impl MemoryService for Mem0MemoryService {
         Ok(MemoryServiceProfileReadResponse { document })
     }
 
-    async fn retrieve_context(
+    /// Long-term retrieval lane, the only lane mem0 declares: its namespace
+    /// partition is tenant/user/agent/project with no thread axis, so there is
+    /// no distinct short-term (active-thread) lane to serve. `read_short_term`
+    /// stays at the trait default (`unavailable`), the manifest does not
+    /// declare it, and the host therefore never queries it — one query per
+    /// run instead of two identical ones (F4).
+    async fn read_long_term(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceContextRequest,
@@ -432,7 +445,7 @@ impl MemoryService for Mem0MemoryService {
             .execute(Mem0HttpRequest::post(SEARCH_PATH, body))
             .await
             .map_err(MemoryServiceError::unavailable_from)?;
-        ensure_success(&response, "retrieve_context")
+        ensure_success(&response, "read_long_term")
             .map_err(MemoryServiceError::unavailable_from)?;
         let scope = &invocation.scope;
         // Return raw, unsanitized snippet bodies plus the resolved scope/path
@@ -574,7 +587,10 @@ fn result_path(item: &Value) -> String {
 mod tests {
     use super::*;
     use crate::transport::{Mem0HttpMethod, MockMem0Transport};
-    use ironclaw_host_api::{CorrelationId, InvocationId, ResourceScope, TenantId, UserId};
+    use ironclaw_host_api::{
+        ids::{CorrelationId, InvocationId, TenantId, UserId},
+        resource::ResourceScope,
+    };
     use ironclaw_memory::{MemoryContextProfileId, MemoryServiceErrorKind};
     use serde_json::Map;
 
@@ -811,9 +827,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retrieve_context_maps_search_hits_to_snippets() {
+    async fn read_long_term_maps_search_hits_to_snippets() {
         // The kind=profile record shares the owner namespace with memories, so
-        // search can return it; retrieve_context must drop it (profile state
+        // search can return it; read_long_term must drop it (profile state
         // has its own read path and must not enter the prompt as a snippet).
         let (service, _transport) = service_with(MockMem0Transport::always_ok(json!({
             "results": [
@@ -822,7 +838,7 @@ mod tests {
             ]
         })));
         let snippets = service
-            .retrieve_context(
+            .read_long_term(
                 invocation(),
                 MemoryServiceContextRequest {
                     query: "ctx".to_string(),
@@ -831,7 +847,7 @@ mod tests {
                 },
             )
             .await
-            .expect("retrieve_context should succeed");
+            .expect("read_long_term should succeed");
         assert_eq!(
             snippets.len(),
             1,
@@ -844,11 +860,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retrieve_context_short_circuits_when_disabled_or_empty() {
+    async fn read_long_term_short_circuits_when_disabled_or_empty() {
         let (service, transport) =
             service_with(MockMem0Transport::always_ok(json!({ "results": [] })));
         let disabled = service
-            .retrieve_context(
+            .read_long_term(
                 invocation(),
                 MemoryServiceContextRequest {
                     query: "ctx".to_string(),
@@ -861,7 +877,7 @@ mod tests {
         assert!(disabled.is_empty());
 
         let zero = service
-            .retrieve_context(
+            .read_long_term(
                 invocation(),
                 MemoryServiceContextRequest {
                     query: "ctx".to_string(),
@@ -874,6 +890,36 @@ mod tests {
         assert!(zero.is_empty());
         // Neither short-circuit should have touched the transport.
         assert!(transport.recorded().is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_short_term_stays_at_the_unavailable_default() {
+        // mem0 has no thread partitioning, so it does not implement (or
+        // declare) the short-term lane: the trait default fails closed as
+        // `unavailable` without touching the transport. F4 regression — the
+        // host no longer receives duplicate snippets from a second identical
+        // query.
+        let (service, transport) =
+            service_with(MockMem0Transport::always_ok(json!({ "results": [] })));
+        let error = service
+            .read_short_term(
+                invocation(),
+                MemoryServiceContextRequest {
+                    query: "ctx".to_string(),
+                    max_snippets: 3,
+                    context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+                },
+            )
+            .await
+            .expect_err("mem0 must not implement the short-term lane");
+        assert!(matches!(
+            error.kind(),
+            ironclaw_memory::MemoryServiceErrorKind::Unavailable
+        ));
+        assert!(
+            transport.recorded().is_empty(),
+            "the unimplemented lane must not issue a transport call"
+        );
     }
 
     #[tokio::test]

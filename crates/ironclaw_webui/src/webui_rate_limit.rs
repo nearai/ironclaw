@@ -43,8 +43,8 @@ use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use ironclaw_host_api::ProductSurfaceCaller;
 use ironclaw_host_api::ingress::{IngressRouteDescriptor, RateLimitPolicy, RateLimitScope};
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use lru::LruCache;
 
 use crate::webui_route_match::{network_method_to_axum, parse_pattern, segments_match};
@@ -398,7 +398,7 @@ pub(crate) async fn enforce_rate_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{TenantId, UserId};
+    use ironclaw_host_api::ids::{TenantId, UserId};
 
     fn caller(tenant: &str, user: &str) -> ProductSurfaceCaller {
         ProductSurfaceCaller::new(
@@ -522,7 +522,7 @@ mod tests {
         // than silently degrade to no enforcement. Without this test, a
         // future v2 descriptor flipping `send_message` to e.g.
         // `PerTenant` would skip the limiter entirely.
-        use ironclaw_host_api::NetworkMethod;
+        use ironclaw_host_api::action::NetworkMethod;
         use ironclaw_host_api::ingress::{
             AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
             IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor,

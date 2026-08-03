@@ -528,4 +528,5 @@ async def test_reborn_legacy_looping_tool_calls_stop_at_low_iteration_boundary(
                 )
 
     assert run_status.get("failure_category") == "iteration_limit", run_status
-    assert completed_loop_echoes == 1
+    # The bounded pre-termination warning is a final tool-capable turn.
+    assert completed_loop_echoes == 2

@@ -8,7 +8,32 @@ use async_trait::async_trait;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    audit::AuditStage,
+    authorized::Authorized,
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+    },
+    decision::{Decision, Obligation, Obligations},
+    dispatch::{
+        CapabilityDispatchResult, CapabilityDispatcher, DispatchError, RuntimeDispatchErrorKind,
+    },
+    host_port::HostPortCatalog,
+    http::{
+        RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+        RuntimeHttpEgress, RuntimeHttpEgressRequest,
+    },
+    ids::{
+        CapabilityGrantId, CapabilityId, ExtensionId, ResourceReservationId, RunId, SecretHandle,
+        UserId,
+    },
+    mount::MountView,
+    path::VirtualPath,
+    resource::{ResourceEstimate, ResourceUsage},
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
     RuntimeCapabilityOutcome,
@@ -24,7 +49,7 @@ use serde_json::json;
 fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
     ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
         ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
-        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalDev,
+        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalHost,
     ))
     .unwrap()
 }

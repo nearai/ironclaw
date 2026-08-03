@@ -892,13 +892,14 @@ mod tests {
         let expected_working_directory = reborn_home.join("workspace");
         assert!(
             contents.contains(&format!(
-                "WorkingDirectory=\"{}\"",
+                "WorkingDirectory={}\n",
                 expected_working_directory.display()
             )),
             "unit file must anchor cwd at <reborn_home>/workspace, not the Reborn home itself \
-             (the Reborn home is an ancestor of every default skill root, so cwd=reborn_home \
-             still trips composition's overlap check — the crash-loop persisted after the first \
-             attempt at this fix): {contents}"
+             (an ancestor of every default skill root, so cwd=reborn_home still trips \
+             composition's overlap check — the crash-loop persisted after the first attempt at \
+             this fix), as a bare unquoted path: WorkingDirectory= is never shell-quote-parsed, \
+             so a quoted value fails to load with `bad-setting` (issue #6575): {contents}"
         );
         assert!(
             expected_working_directory.is_dir(),

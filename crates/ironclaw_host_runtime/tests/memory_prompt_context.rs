@@ -9,35 +9,41 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_extension_contracts::memory::{MemoryDescriptor, MemoryLifecycleHook};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::turn::{TurnActor, TurnScope};
+use ironclaw_loop_contracts::{
+    ContextProfileId, MemoryPromptContextRequest, MemoryPromptContextService,
+    memory_snippet_display_ref,
+};
 use ironclaw_memory::{
     MemoryInvocation, MemoryService, MemoryServiceContextRequest, MemoryServiceContextSnippet,
     MemoryServiceError,
 };
-use ironclaw_turns::run_profile::{
-    ContextProfileId, MemoryPromptContextRequest, MemoryPromptContextService,
-    memory_snippet_display_ref,
-};
-use ironclaw_turns::scope::{TurnActor, TurnScope};
 
 use ironclaw_host_runtime::memory_context::ProductionMemoryPromptContextService;
 
-/// Per-lane behavior for the mock. `load_memory_snippets` fetches two lanes
-/// (mem0 `on_run_start` shape): a short-term lane with the active thread kept,
-/// and a long-term lane with the thread cleared. The mock returns lane-specific
-/// snippets (or errors) so each lane can be driven independently.
+/// Per-lane behavior for the mock. `load_memory_snippets` queries the
+/// provider's two lane METHODS (`read_short_term` / `read_long_term`) with the
+/// same invocation; the mock returns lane-specific snippets (or errors) so
+/// each lane can be driven independently.
 #[derive(Clone)]
 enum LaneBehavior {
     Snippets(Vec<MemoryServiceContextSnippet>),
     Error,
 }
 
+/// Which provider lane method a captured call arrived on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lane {
+    ShortTerm,
+    LongTerm,
+}
+
 struct MockMemoryService {
-    /// Behavior for the short-term lane — the invocation carries a `thread_id`.
     short_term: LaneBehavior,
-    /// Behavior for the long-term lane — the invocation has the thread cleared.
     long_term: LaneBehavior,
-    captured: Mutex<Vec<(MemoryInvocation, MemoryServiceContextRequest)>>,
+    captured: Mutex<Vec<(Lane, MemoryInvocation, MemoryServiceContextRequest)>>,
 }
 
 impl MockMemoryService {
@@ -75,28 +81,48 @@ impl MockMemoryService {
         )
     }
 
-    fn captured(&self) -> Vec<(MemoryInvocation, MemoryServiceContextRequest)> {
+    fn captured(&self) -> Vec<(Lane, MemoryInvocation, MemoryServiceContextRequest)> {
         self.captured.lock().unwrap().clone()
+    }
+
+    fn lane(
+        &self,
+        lane: Lane,
+        invocation: MemoryInvocation,
+        request: MemoryServiceContextRequest,
+    ) -> Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError> {
+        let behavior = match lane {
+            Lane::ShortTerm => &self.short_term,
+            Lane::LongTerm => &self.long_term,
+        };
+        let outcome = match behavior {
+            LaneBehavior::Snippets(snippets) => Ok(snippets.clone()),
+            LaneBehavior::Error => Err(MemoryServiceError::unavailable()),
+        };
+        self.captured
+            .lock()
+            .unwrap()
+            .push((lane, invocation, request));
+        outcome
     }
 }
 
 #[async_trait]
 impl MemoryService for MockMemoryService {
-    async fn retrieve_context(
+    async fn read_long_term(
         &self,
         invocation: MemoryInvocation,
         request: MemoryServiceContextRequest,
     ) -> Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError> {
-        let lane = if invocation.scope.thread_id.is_some() {
-            &self.short_term
-        } else {
-            &self.long_term
-        };
-        self.captured.lock().unwrap().push((invocation, request));
-        match lane {
-            LaneBehavior::Snippets(snippets) => Ok(snippets.clone()),
-            LaneBehavior::Error => Err(MemoryServiceError::unavailable()),
-        }
+        self.lane(Lane::LongTerm, invocation, request)
+    }
+
+    async fn read_short_term(
+        &self,
+        invocation: MemoryInvocation,
+        request: MemoryServiceContextRequest,
+    ) -> Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError> {
+        self.lane(Lane::ShortTerm, invocation, request)
     }
 }
 
@@ -121,8 +147,23 @@ fn test_request(
     }
 }
 
+/// A service over a provider declaring BOTH retrieval lanes (the native
+/// shape); lane-gating tests use [`make_service_with_lifecycle`] instead.
 fn make_service(memory_service: Arc<MockMemoryService>) -> ProductionMemoryPromptContextService {
-    ProductionMemoryPromptContextService::new(memory_service)
+    make_service_with_lifecycle(
+        memory_service,
+        vec![
+            MemoryLifecycleHook::ReadLongTerm,
+            MemoryLifecycleHook::ReadShortTerm,
+        ],
+    )
+}
+
+fn make_service_with_lifecycle(
+    memory_service: Arc<MockMemoryService>,
+    lifecycle: Vec<MemoryLifecycleHook>,
+) -> ProductionMemoryPromptContextService {
+    ProductionMemoryPromptContextService::new(memory_service, MemoryDescriptor { lifecycle })
 }
 
 /// A raw provider candidate scoped to `(tenant-a, user-x)` with no agent/project,
@@ -262,9 +303,10 @@ async fn unavailable_memory_service_degrades_both_lanes_to_empty() {
 
 #[tokio::test]
 async fn host_derived_scope_is_passed_to_both_lanes() {
-    // Both lanes (short-term + long-term) carry the host-derived
-    // tenant/user/agent/project scope; exactly one keeps the thread (short-term)
-    // and one clears it (long-term).
+    // Both lane METHODS are queried exactly once, and both receive the SAME
+    // host-derived invocation — tenant/user/agent/project AND the active
+    // thread. Lane semantics (what each lane includes) belong to the provider
+    // method, not to scope shape.
     let memory_service = Arc::new(MockMemoryService::with_snippets(vec![]));
     let service = make_service(memory_service.clone());
 
@@ -280,12 +322,8 @@ async fn host_derived_scope_is_passed_to_both_lanes() {
         .unwrap();
 
     let captured = memory_service.captured();
-    assert_eq!(
-        captured.len(),
-        2,
-        "both lanes must issue a retrieve_context call"
-    );
-    for (invocation, request) in &captured {
+    assert_eq!(captured.len(), 2, "both lane methods must be queried");
+    for (_, invocation, request) in &captured {
         assert_eq!(invocation.scope.tenant_id.as_str(), "tenant-a");
         assert_eq!(invocation.scope.user_id.as_str(), "user-x");
         assert_eq!(
@@ -296,29 +334,28 @@ async fn host_derived_scope_is_passed_to_both_lanes() {
             invocation.scope.project_id.as_ref().map(|id| id.as_str()),
             Some("project-1")
         );
+        assert_eq!(
+            invocation.scope.thread_id.as_ref().map(|id| id.as_str()),
+            Some("thread-1"),
+            "both lanes receive the full host scope including the active thread"
+        );
         assert_eq!(request.query, "test query");
         assert_eq!(request.max_snippets, 10);
         // The caller's context profile must cross the facade unchanged so
         // profile-routing regressions are caught at the request boundary.
         assert_eq!(request.context_profile_id.as_str(), "default");
     }
-    let mut thread_present: Vec<bool> = captured
-        .iter()
-        .map(|(invocation, _)| invocation.scope.thread_id.is_some())
-        .collect();
-    thread_present.sort_unstable();
-    assert_eq!(
-        thread_present,
-        vec![false, true],
-        "one lane keeps the thread (short-term), one clears it (long-term)"
+    let lanes: Vec<Lane> = captured.iter().map(|(lane, ..)| *lane).collect();
+    assert!(
+        lanes.contains(&Lane::ShortTerm) && lanes.contains(&Lane::LongTerm),
+        "exactly one call per lane method: {lanes:?}"
     );
 }
 
 #[tokio::test]
 async fn load_memory_snippets_fetches_both_short_term_and_long_term_lanes() {
-    // The host fetches both lanes once (mem0 `on_run_start` shape): a short-term
-    // lane with the active thread kept and a long-term lane with the thread
-    // cleared. Both lanes' admitted snippets appear in the combined result.
+    // The host queries both lane methods once per run. Both lanes' admitted
+    // snippets appear in the combined result.
     let short_term = vec![raw_snippet(
         "threads/thread-1/scratch.md",
         "active thread note",
@@ -332,21 +369,12 @@ async fn load_memory_snippets_fetches_both_short_term_and_long_term_lanes() {
         .await
         .unwrap();
 
-    // Both lanes were fetched: exactly one with a thread_id and one without.
+    // Both lane methods were queried exactly once.
     let captured = memory_service.captured();
     assert_eq!(captured.len(), 2);
-    let thread_states: Vec<bool> = captured
-        .iter()
-        .map(|(invocation, _)| invocation.scope.thread_id.is_some())
-        .collect();
-    assert!(
-        thread_states.contains(&true),
-        "short-term lane keeps the thread"
-    );
-    assert!(
-        thread_states.contains(&false),
-        "long-term lane clears the thread"
-    );
+    let lanes: Vec<Lane> = captured.iter().map(|(lane, ..)| *lane).collect();
+    assert!(lanes.contains(&Lane::ShortTerm), "short-term lane queried");
+    assert!(lanes.contains(&Lane::LongTerm), "long-term lane queried");
 
     // Both lanes' snippets are returned, short-term first so this conversation
     // keeps priority under the shared memory budget.
@@ -357,6 +385,61 @@ async fn load_memory_snippets_fetches_both_short_term_and_long_term_lanes() {
         "short-term lane is concatenated first"
     );
     assert_eq!(snippets[1].snippet_ref, expected_ref("notes/long-term.md"));
+}
+
+/// F3/F8 regression at the retrieval seam: a lifecycle hook the provider's
+/// manifest does not declare is NEVER called — the undeclared lane
+/// contributes nothing AND is not queried.
+#[tokio::test]
+async fn undeclared_short_term_lane_is_not_queried() {
+    let memory_service = Arc::new(MockMemoryService::with_lane_snippets(
+        vec![raw_snippet("threads/thread-1/scratch.md", "short note")],
+        vec![raw_snippet("notes/long-term.md", "long note")],
+    ));
+    let service = make_service_with_lifecycle(
+        memory_service.clone(),
+        vec![MemoryLifecycleHook::ReadLongTerm],
+    );
+
+    let snippets = service
+        .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
+        .await
+        .unwrap();
+
+    let lanes: Vec<Lane> = memory_service
+        .captured()
+        .iter()
+        .map(|(lane, ..)| *lane)
+        .collect();
+    assert_eq!(
+        lanes,
+        vec![Lane::LongTerm],
+        "only the declared lane may be queried"
+    );
+    assert_eq!(snippets.len(), 1);
+    assert_eq!(snippets[0].snippet_ref, expected_ref("notes/long-term.md"));
+}
+
+/// A provider declaring NO retrieval lanes is never queried at all: the
+/// memory block is empty and the provider sees zero lane calls.
+#[tokio::test]
+async fn empty_lifecycle_issues_no_retrieval_queries() {
+    let memory_service = Arc::new(MockMemoryService::with_snippets(vec![raw_snippet(
+        "notes/a.md",
+        "must not surface",
+    )]));
+    let service = make_service_with_lifecycle(memory_service.clone(), Vec::new());
+
+    let snippets = service
+        .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
+        .await
+        .unwrap();
+
+    assert!(snippets.is_empty());
+    assert!(
+        memory_service.captured().is_empty(),
+        "an empty lifecycle must issue no provider retrieval calls"
+    );
 }
 
 #[tokio::test]
@@ -458,7 +541,7 @@ async fn host_builds_stable_legacy_memory_snippet_reference() {
     // the model-visible reference cannot silently rotate across the lift (see PR
     // #5163 thread discussion_r3466587649). The host builds this from the
     // provider's raw scope/path components via the canonical
-    // `ironclaw_turns::run_profile::memory_snippet_display_ref`.
+    // `ironclaw_loop_contracts::memory_snippet_display_ref`.
     let memory_service = Arc::new(MockMemoryService::with_snippets(vec![
         MemoryServiceContextSnippet {
             tenant_id: "tenant-native-memory".to_string(),

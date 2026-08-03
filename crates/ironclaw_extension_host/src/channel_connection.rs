@@ -25,17 +25,21 @@ use ironclaw_auth::{
     SecretCleanupReport, SecretCleanupRequest,
 };
 use ironclaw_host_api::{
-    ExtensionId, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ResourceScope, TenantId,
+    ids::{ExtensionId, InvocationId, TenantId},
+    resource::ResourceScope,
 };
 use ironclaw_product::{ChannelAuthAccountState, ChannelConnectionService};
+use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
 
+use ironclaw_extension_contracts::channel_identity::{
+    ChannelConnectionScope, ChannelConnectionScopeSource,
+};
 use ironclaw_extension_host::{
     FilesystemChannelDmTargetStore, channel_config_connection_scope_source,
     discover_channel_extensions,
 };
-use ironclaw_host_api::{
-    ChannelConnectionScope, ChannelConnectionScopeSource, RebornUserIdentityBindingDeleteStore,
-    RebornUserIdentityLookup,
+use ironclaw_host_api::user_identity::{
+    RebornUserIdentityBindingDeleteStore, RebornUserIdentityLookup,
 };
 
 /// Narrow disconnect-side port over product-auth lifecycle cleanup, so the
@@ -516,12 +520,12 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    use ironclaw_host_api::{AgentId, UserId};
-    use ironclaw_product::AdapterInstallationId;
+    use ironclaw_host_api::ids::{AgentId, UserId};
+    use ironclaw_host_api::product_adapter::AdapterInstallationId;
 
     use super::*;
     use ironclaw_extension_host::product_extension_host_api_contract_registry;
-    use ironclaw_host_api::{
+    use ironclaw_host_api::user_identity::{
         RebornUserIdentityBindingError, RebornUserIdentityLookupError,
         installation_scoped_provider_user_id,
     };
@@ -998,6 +1002,7 @@ team_id = "/team/id"
             &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
             None,
             &product_extension_host_api_contract_registry().expect("contracts"),
+            None,
         )
         .expect("fixture manifest parses");
         let extension_id = ExtensionId::new(EXTENSION).expect("extension id");
@@ -1144,6 +1149,7 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
             &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
             None,
             &product_extension_host_api_contract_registry().expect("contracts"),
+            None,
         )
         .expect("pairing channel manifest parses");
         let extension_id = ExtensionId::new("pairchat").expect("extension id");

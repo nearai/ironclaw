@@ -7,8 +7,33 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, DenyReason, DispatchInputIssueCode, MissionId, ProjectId,
-    ProviderToolName, Resolution, ResolutionBatch, ResourceScope, TenantId, ThreadId, UserId,
+    decision::DenyReason,
+    dispatch::DispatchInputIssueCode,
+    ids::{
+        AgentId, CapabilityId, MissionId, ProjectId, ProviderToolName, RunId, TenantId, ThreadId,
+        UserId,
+    },
+    path::ScopedPath,
+    resolution::{Resolution, ResolutionBatch},
+    resource::ResourceScope,
+};
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
+    AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
+    CapabilityInputIssue, CapabilityInputRef, CapabilitySurfaceVersion,
+    EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
+    InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopCapabilityPort,
+    LoopContextBundle, LoopContextCompactionKind, LoopContextMessage, LoopContextPort,
+    LoopContextRequest, LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneKind,
+    LoopHostMilestoneSink, LoopInputCursor, LoopInputCursorToken, LoopModelCapabilityView,
+    LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopPromptBundle,
+    LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
+    LoopRequest, LoopRequestBatch, LoopRunContext, LoopTranscriptPort, ModelVisibleToolObservation,
+    ObservationTrust, ParentLoopOutput, PersonalContextPolicy, PromptMode,
+    PromptSkillContextMetadata, ProviderToolCallReference, ProviderToolCallReplay,
+    ProviderToolDefinition, RunProfileResolutionRequest, RunProfileResolver, SkillTrustLevel,
+    SkillVisibility, ToolObservationDetail, ToolObservationStatus, UpdateAssistantDraft,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
 };
 use ironclaw_loop_host::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
@@ -23,42 +48,26 @@ use ironclaw_loop_host::{
     ThreadBackedLoopTranscriptPort, ThreadContextWindowCache, build_skill_run_snapshot,
     identity_message_ref,
 };
+use ironclaw_outbound::{
+    OutboundError, OutboundStateStore, ReplyAttachmentHandle, ReplyAttachmentIntent,
+    ReplyAttachmentIntentPort,
+};
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-    AppendToolResultReferenceRequest, AttachmentKind, AttachmentRef, ContextMessage,
-    ContextMessages, ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    InMemorySessionThreadService, LoadContextMessagesRequest, MessageContent, MessageKind,
-    MessageStatus, ProviderToolCallReferenceEnvelope, RedactMessageRequest,
+    AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest, AttachmentKind,
+    AttachmentRef, ContextMessage, ContextMessages, ContextWindow, CreateSummaryArtifactRequest,
+    EnsureThreadRequest, InMemorySessionThreadService, LoadContextMessagesRequest, MessageContent,
+    MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
     SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
     ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
     ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
     UpdateToolResultReferenceRequest,
 };
-use ironclaw_turns::{
-    LoopMessageRef, LoopResultRef, RunProfileResolutionRequest, RunProfileResolver, TurnActor,
-    TurnId, TurnRunId, TurnScope,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
-        AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
-        CapabilityInputIssue, CapabilityInputRef, CapabilitySurfaceVersion,
-        EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
-        HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver,
-        LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopDriverNoteKind,
-        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputCursor, LoopInputCursorToken,
-        LoopModelCapabilityView, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelRouteSnapshot, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef,
-        LoopPromptBundleRequest, LoopPromptPort, LoopRequest, LoopRequestBatch, LoopRunContext,
-        LoopTranscriptPort, ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput,
-        PersonalContextPolicy, PromptMode, PromptSkillContextMetadata, ProviderToolCallReference,
-        ProviderToolCallReplay, ProviderToolDefinition, SkillTrustLevel, SkillVisibility,
-        ToolObservationDetail, ToolObservationStatus, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
-    },
-};
+use ironclaw_turns::HostManagedLoopPromptPort;
+use ironclaw_turns::{LoopMessageRef, LoopResultRef, TurnActor, TurnId, TurnRunId, TurnScope};
 use tracing_test::traced_test;
 
 #[tokio::test]
@@ -75,7 +84,7 @@ async fn thread_context_port_loads_policy_filtered_transcript_messages() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -121,7 +130,7 @@ async fn thread_context_port_applies_prompt_token_budget_to_scanned_messages() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -163,8 +172,8 @@ async fn prompt_port_default_scan_reaches_past_old_sixteen_message_tail() {
     );
 
     let prompt_bundle = prompt_port
-        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: None,
@@ -203,6 +212,7 @@ async fn model_port_empty_request_applies_prompt_token_budget_to_context_fallbac
         messages: Vec::new(),
         surface_version: None,
         model_preference: None,
+        fallback_index: 0,
         capability_view: None,
     })
     .await
@@ -260,6 +270,7 @@ async fn prompt_and_model_ports_share_cached_context_window_for_one_request() {
             messages: prompt_bundle.messages,
             surface_version: prompt_bundle.surface_version,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -314,6 +325,7 @@ async fn model_port_reuses_smaller_prompt_context_window_for_explicit_prompt_ref
             messages: prompt_bundle.messages,
             surface_version: prompt_bundle.surface_version,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -407,6 +419,7 @@ async fn context_window_cache_does_not_cross_thread_scope_boundaries() {
             messages: prompt_bundle.messages,
             surface_version: prompt_bundle.surface_version,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -439,7 +452,7 @@ async fn thread_context_port_rejects_run_actor_owner_mismatch() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .expect_err("owner mismatch must be rejected before the thread read");
@@ -477,7 +490,7 @@ async fn thread_context_port_accepts_explicit_owner_with_distinct_actor() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .expect("explicit owner should allow actor/owner divergence");
@@ -504,7 +517,7 @@ async fn thread_context_port_accepts_matching_run_actor_owner() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .expect("matching run actor owner must load context");
@@ -539,7 +552,7 @@ async fn thread_context_port_preserves_summary_replacements_as_system_messages()
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -588,7 +601,7 @@ async fn thread_context_port_builds_skill_instruction_snippets_from_real_skill_m
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -738,7 +751,7 @@ async fn context_port_populates_identity_when_source_set() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -794,7 +807,7 @@ async fn context_port_empty_identity_when_source_unset() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -822,7 +835,7 @@ async fn context_port_caches_stable_identity_within_run() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -830,7 +843,7 @@ async fn context_port_caches_stable_identity_within_run() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -1293,8 +1306,8 @@ async fn prompt_and_model_ports_materialize_trusted_identity_content() {
         HostManagedLoopPromptPort::new(fixture.run_context.clone(), context_port, milestones)
             .with_instruction_materialization_store(materialization_store);
     let prompt_bundle = prompt_port
-        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: None,
@@ -1328,6 +1341,7 @@ async fn prompt_and_model_ports_materialize_trusted_identity_content() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -1368,6 +1382,7 @@ async fn model_port_limits_provider_tool_definitions_to_model_visible_capability
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: Some(LoopModelCapabilityView {
                 visible_capability_ids: vec![allowed_id],
             }),
@@ -1410,6 +1425,7 @@ async fn model_port_maps_invalid_model_output_to_recoverable_model_error() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -1454,6 +1470,7 @@ async fn model_port_preserves_capability_info_for_filtered_capability_view() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: Some(LoopModelCapabilityView {
                 visible_capability_ids: vec![allowed_id],
             }),
@@ -1504,7 +1521,7 @@ async fn thread_context_port_filters_skill_visibility_and_installed_prompt_conte
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -1586,7 +1603,7 @@ async fn thread_context_port_ignores_malformed_hidden_skill_content() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -1621,7 +1638,7 @@ async fn thread_context_port_fails_closed_when_visible_skill_content_is_missing(
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap_err();
@@ -1655,7 +1672,7 @@ async fn thread_context_port_fails_closed_when_skill_policy_data_is_missing() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap_err();
@@ -1691,8 +1708,8 @@ async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
     let prompt_port =
         HostManagedLoopPromptPort::new(fixture.run_context.clone(), context_port, milestones);
     let prompt_bundle = prompt_port
-        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: None,
@@ -1725,6 +1742,7 @@ async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -1783,8 +1801,8 @@ async fn prompt_and_model_ports_resolve_skill_refs_after_prompt_sorting() {
     let prompt_port =
         HostManagedLoopPromptPort::new(fixture.run_context.clone(), context_port, milestones);
     let prompt_bundle = prompt_port
-        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: None,
@@ -1827,6 +1845,7 @@ async fn prompt_and_model_ports_resolve_skill_refs_after_prompt_sorting() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -1886,8 +1905,8 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
         HostManagedLoopPromptPort::new(fixture.run_context.clone(), context_port, milestones)
             .with_instruction_materialization_store(materialization_store.clone());
     let prompt_bundle = prompt_port
-        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: None,
@@ -1915,6 +1934,7 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -1962,6 +1982,7 @@ async fn model_port_rejects_policy_denied_identity_ref_before_gateway_call() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -2002,8 +2023,8 @@ async fn prompt_port_records_installed_skill_trust_metadata_without_prompt_paylo
     );
 
     prompt_port
-        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: None,
@@ -2063,8 +2084,8 @@ async fn prompt_port_records_multiple_active_skill_metadata_in_prompt_order() {
     );
 
     prompt_port
-        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: None,
@@ -2128,8 +2149,8 @@ async fn prompt_and_model_ports_keep_duplicate_skill_names_distinct() {
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
     );
     let prompt_bundle = prompt_port
-        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: None,
@@ -2162,6 +2183,7 @@ async fn prompt_and_model_ports_keep_duplicate_skill_names_distinct() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -2197,8 +2219,8 @@ async fn model_port_rejects_skill_context_refs_when_source_changes_after_prompt_
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
     );
     let prompt_bundle = prompt_port
-        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: None,
@@ -2230,6 +2252,7 @@ async fn model_port_rejects_skill_context_refs_when_source_changes_after_prompt_
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -2256,7 +2279,7 @@ async fn thread_context_port_rejects_non_origin_context_cursor() {
                 LoopInputCursorToken::new("input-cursor:after-first-input").unwrap(),
             )),
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap_err();
@@ -2280,7 +2303,7 @@ async fn thread_ports_reject_thread_scope_mismatch_before_thread_access() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap_err();
@@ -2311,7 +2334,7 @@ async fn context_port_rejects_cursor_from_another_run() {
                 LoopInputCursorToken::new("input-cursor:foreign-run").unwrap(),
             )),
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap_err();
@@ -2360,6 +2383,496 @@ async fn transcript_port_finalizes_assistant_reply_into_durable_thread_history()
 }
 
 #[tokio::test]
+async fn finalized_assistant_attachment_refs_are_sealed_in_registration_order() {
+    let fixture = ThreadFixture::new().await;
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/report.csv",
+        "report.csv",
+        "text/csv",
+        19,
+    )
+    .await;
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/chart.gif",
+        "chart.gif",
+        "image/gif",
+        23,
+    )
+    .await;
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/voice.wav",
+        "voice.wav",
+        "audio/wav",
+        11,
+    )
+    .await;
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/clip.mp4",
+        "clip.mp4",
+        "video/mp4",
+        13,
+    )
+    .await;
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/scene.glb",
+        "scene.glb",
+        "model/gltf-binary",
+        17,
+    )
+    .await;
+    let intent_port: Arc<dyn ReplyAttachmentIntentPort> = store.clone();
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    )
+    .with_reply_attachment_intent_port(intent_port);
+
+    adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: "Created [the report](/workspace/report.csv); unrelated [link](/workspace/missing.txt).".to_string(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let assistant = finalized_assistant_message(&fixture).await;
+    assert_eq!(
+        assistant.content.as_deref(),
+        Some(
+            "Created [the report](/workspace/report.csv); unrelated [link](/workspace/missing.txt)."
+        )
+    );
+    assert_eq!(assistant.attachments.len(), 5);
+    let run_id = reply_attachment_run_id(&fixture);
+    assert_eq!(
+        assistant
+            .attachments
+            .iter()
+            .map(|attachment| attachment.id.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            ReplyAttachmentHandle::for_run_path(
+                &run_id,
+                &ScopedPath::new("/workspace/report.csv").unwrap(),
+            )
+            .to_string(),
+            ReplyAttachmentHandle::for_run_path(
+                &run_id,
+                &ScopedPath::new("/workspace/chart.gif").unwrap(),
+            )
+            .to_string(),
+            ReplyAttachmentHandle::for_run_path(
+                &run_id,
+                &ScopedPath::new("/workspace/voice.wav").unwrap(),
+            )
+            .to_string(),
+            ReplyAttachmentHandle::for_run_path(
+                &run_id,
+                &ScopedPath::new("/workspace/clip.mp4").unwrap(),
+            )
+            .to_string(),
+            ReplyAttachmentHandle::for_run_path(
+                &run_id,
+                &ScopedPath::new("/workspace/scene.glb").unwrap(),
+            )
+            .to_string(),
+        ]
+    );
+    assert_eq!(
+        assistant
+            .attachments
+            .iter()
+            .map(|attachment| attachment.storage_key.as_deref())
+            .collect::<Vec<_>>(),
+        vec![
+            Some("/workspace/report.csv"),
+            Some("/workspace/chart.gif"),
+            Some("/workspace/voice.wav"),
+            Some("/workspace/clip.mp4"),
+            Some("/workspace/scene.glb"),
+        ]
+    );
+    assert_eq!(
+        assistant.attachments[0].filename.as_deref(),
+        Some("report.csv")
+    );
+    assert_eq!(assistant.attachments[0].mime_type, "text/csv");
+    assert_eq!(assistant.attachments[0].size_bytes, Some(19));
+    assert_eq!(assistant.attachments[0].kind, AttachmentKind::Document);
+    assert_eq!(assistant.attachments[1].kind, AttachmentKind::Image);
+    assert_eq!(assistant.attachments[2].kind, AttachmentKind::Audio);
+    assert_eq!(assistant.attachments[3].kind, AttachmentKind::Video);
+    assert_eq!(assistant.attachments[4].kind, AttachmentKind::Other);
+    let error = store
+        .register(
+            &reply_attachment_scope(&fixture),
+            &reply_attachment_run_id(&fixture),
+            reply_attachment("/workspace/late.txt", "late.txt", "text/plain", 4),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, OutboundError::ReplyAttachmentIntentsSealed));
+}
+
+#[tokio::test]
+async fn finalized_assistant_deprojects_host_context_for_the_same_typed_attachment() {
+    let fixture = ThreadFixture::new().await;
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/attachments/photo.jpg",
+        "photo.jpg",
+        "image/jpeg",
+        3714,
+    )
+    .await;
+    let intent_port: Arc<dyn ReplyAttachmentIntentPort> = store;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    )
+    .with_reply_attachment_intent_port(intent_port);
+    let copied_context = "Reattached the image.\n\n<attachments>\n\
+<attachment index=\"1\" type=\"document\" filename=\"photo.jpg\" mime=\"image/jpeg\" project_path=\"/workspace/attachments/photo.jpg\" size=\"3KB\">\n\
+Saved to project file: /workspace/attachments/photo.jpg\n\
+[Document attached — text extraction unavailable]\n\
+</attachment>\n\
+</attachments>";
+
+    adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: copied_context.to_string(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let assistant = finalized_assistant_message(&fixture).await;
+    assert_eq!(assistant.content.as_deref(), Some("Reattached the image."));
+    assert_eq!(assistant.attachments.len(), 1);
+    assert_eq!(assistant.attachments[0].kind, AttachmentKind::Image);
+    assert_eq!(
+        assistant.attachments[0].storage_key.as_deref(),
+        Some("/workspace/attachments/photo.jpg")
+    );
+}
+
+#[tokio::test]
+async fn finalized_assistant_attachment_port_with_no_intents_stays_text_only() {
+    let fixture = ThreadFixture::new().await;
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let intent_port: Arc<dyn ReplyAttachmentIntentPort> = store;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    )
+    .with_reply_attachment_intent_port(intent_port);
+
+    adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: "plain reply".to_string(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let assistant = finalized_assistant_message(&fixture).await;
+    assert_eq!(assistant.content.as_deref(), Some("plain reply"));
+    assert!(assistant.attachments.is_empty());
+}
+
+#[tokio::test]
+async fn finalized_assistant_attachment_seal_failure_prevents_transcript_write() {
+    let fixture = ThreadFixture::new().await;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    )
+    .with_reply_attachment_intent_port(Arc::new(FailingSealReplyAttachmentIntentPort));
+
+    let error = adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: "must not persist".to_string(),
+            },
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::TranscriptWriteFailed);
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        history
+            .messages
+            .iter()
+            .all(|message| message.kind != MessageKind::Assistant)
+    );
+}
+
+#[tokio::test]
+async fn finalized_assistant_attachment_duplicate_retry_preserves_complete_content() {
+    let fixture = ThreadFixture::new().await;
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/result.json",
+        "result.json",
+        "application/json",
+        7,
+    )
+    .await;
+    let intent_port: Arc<dyn ReplyAttachmentIntentPort> = store;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    )
+    .with_reply_attachment_intent_port(intent_port);
+    let request = FinalizeAssistantMessage {
+        reply: AssistantReply {
+            content: "retry reply".to_string(),
+        },
+    };
+
+    let first = adapter
+        .finalize_assistant_message(request.clone())
+        .await
+        .unwrap();
+    let second = adapter.finalize_assistant_message(request).await.unwrap();
+
+    assert_eq!(first, second);
+    let assistant = finalized_assistant_message(&fixture).await;
+    assert_eq!(assistant.attachments.len(), 1);
+    assert_eq!(
+        assistant.attachments[0].storage_key.as_deref(),
+        Some("/workspace/result.json")
+    );
+}
+
+#[tokio::test]
+async fn finalized_assistant_attachment_retry_rejects_mismatched_refs() {
+    let fixture = ThreadFixture::new().await;
+    let plain_adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+    let request = FinalizeAssistantMessage {
+        reply: AssistantReply {
+            content: "same text".to_string(),
+        },
+    };
+    plain_adapter
+        .finalize_assistant_message(request.clone())
+        .await
+        .unwrap();
+
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/different.txt",
+        "different.txt",
+        "text/plain",
+        9,
+    )
+    .await;
+    let intent_port: Arc<dyn ReplyAttachmentIntentPort> = store;
+    let attachment_adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    )
+    .with_reply_attachment_intent_port(intent_port);
+
+    let error = attachment_adapter
+        .finalize_assistant_message(request)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::TranscriptWriteFailed);
+    assert!(
+        finalized_assistant_message(&fixture)
+            .await
+            .attachments
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn transcript_port_retries_transient_finalized_assistant_backend_failure() {
+    let fixture = ThreadFixture::new().await;
+    let service = Arc::new(ScriptedTranscriptWriteThreadService::new(
+        Arc::clone(&fixture.thread_service),
+        TranscriptWriteOperation::FinalizedAssistant,
+        TranscriptWriteFailure::Backend,
+        1,
+    ));
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+
+    adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: "persist after transient failure".to_string(),
+            },
+        })
+        .await
+        .expect("the exact finalized assistant write is retried");
+
+    assert_eq!(service.attempts(), 2);
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope,
+            thread_id: fixture.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .filter(|message| message.kind == MessageKind::Assistant)
+            .count(),
+        1,
+        "retry must converge on one durable assistant message"
+    );
+}
+
+#[tokio::test]
+async fn transcript_port_retries_transient_tool_result_backend_failure() {
+    let fixture = ThreadFixture::new().await;
+    let service = Arc::new(ScriptedTranscriptWriteThreadService::new(
+        Arc::clone(&fixture.thread_service),
+        TranscriptWriteOperation::ToolResultReference,
+        TranscriptWriteFailure::Backend,
+        1,
+    ));
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+
+    adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: LoopResultRef::new("result:transient-tool-write").unwrap(),
+            safe_summary: "tool completed once".to_string(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .expect("the exact tool-result reference write is retried");
+
+    assert_eq!(service.attempts(), 2);
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope,
+            thread_id: fixture.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .filter(|message| message.kind == MessageKind::ToolResultReference)
+            .count(),
+        1,
+        "retry must not duplicate the tool-result reference"
+    );
+}
+
+#[tokio::test]
+async fn transcript_port_does_not_retry_non_backend_write_failure() {
+    let fixture = ThreadFixture::new().await;
+    let service = Arc::new(ScriptedTranscriptWriteThreadService::new(
+        Arc::clone(&fixture.thread_service),
+        TranscriptWriteOperation::FinalizedAssistant,
+        TranscriptWriteFailure::Serialization,
+        1,
+    ));
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&service),
+        fixture.thread_scope,
+        fixture.run_context,
+    );
+
+    let error = adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: "invalid write".to_string(),
+            },
+        })
+        .await
+        .expect_err("serialization failures are terminal without retry");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::TranscriptWriteFailed);
+    assert_eq!(service.attempts(), 1);
+}
+
+#[tokio::test]
+async fn transcript_port_stops_after_bounded_backend_write_attempts() {
+    let fixture = ThreadFixture::new().await;
+    let service = Arc::new(ScriptedTranscriptWriteThreadService::new(
+        Arc::clone(&fixture.thread_service),
+        TranscriptWriteOperation::ToolResultReference,
+        TranscriptWriteFailure::Backend,
+        usize::MAX,
+    ));
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&service),
+        fixture.thread_scope,
+        fixture.run_context,
+    );
+
+    let error = adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: LoopResultRef::new("result:permanent-tool-write").unwrap(),
+            safe_summary: "tool completed once".to_string(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .expect_err("persistent backend failure remains terminal");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::TranscriptWriteFailed);
+    assert_eq!(service.attempts(), 3);
+}
+
+#[tokio::test]
 async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
     let fixture = ThreadFixture::new().await;
     let adapter = ThreadBackedLoopTranscriptPort::new(
@@ -2368,6 +2881,13 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
         fixture.run_context.clone(),
     );
     let result_ref = LoopResultRef::new("result:demo-tool").unwrap();
+    // Provider validation has accepted metadata above 4 KiB since #5001.
+    // This exercises the transcript caller that used to retain the stale
+    // 4 KiB bound and terminate otherwise successful reasoning-heavy runs.
+    let response_reasoning = "response reasoning ".repeat(256);
+    let call_reasoning = "call reasoning ".repeat(320);
+    assert!(response_reasoning.len() > 4096);
+    assert!(call_reasoning.len() > 4096);
 
     let first_ref = adapter
         .append_capability_result_ref(AppendCapabilityResultRef {
@@ -2382,8 +2902,8 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
                     provider_tool_name: ProviderToolName::new("demo__echo")
                         .expect("provider tool name"),
                     arguments: serde_json::json!({"message":"hello"}),
-                    response_reasoning: Some("provider reasoning".to_string()),
-                    reasoning: Some("provider reasoning".to_string()),
+                    response_reasoning: Some(response_reasoning.clone()),
+                    reasoning: Some(call_reasoning.clone()),
                     signature: Some("sig-1".to_string()),
                 },
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
@@ -2456,11 +2976,11 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
     );
     assert_eq!(
         provider_call.response_reasoning.as_deref(),
-        Some("provider reasoning")
+        Some(response_reasoning.as_str())
     );
     assert_eq!(
         provider_call.reasoning.as_deref(),
-        Some("provider reasoning")
+        Some(call_reasoning.as_str())
     );
     assert_eq!(provider_call.signature.as_deref(), Some("sig-1"));
 }
@@ -3039,7 +3559,7 @@ async fn empty_capability_batch_returns_typed_denial_reason() {
     let port = EmptyLoopCapabilityPort;
 
     let outcome = port
-        .invoke_capability_batch(ironclaw_turns::run_profile::LoopRequestBatch {
+        .invoke_capability_batch(ironclaw_loop_contracts::LoopRequestBatch {
             invocations: vec![LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),
@@ -3072,7 +3592,7 @@ async fn empty_capability_batch_rejects_stale_surface() {
     let port = EmptyLoopCapabilityPort;
 
     let error = port
-        .invoke_capability_batch(ironclaw_turns::run_profile::LoopRequestBatch {
+        .invoke_capability_batch(ironclaw_loop_contracts::LoopRequestBatch {
             invocations: vec![LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: CapabilitySurfaceVersion::new("nonempty:v1").unwrap(),
@@ -3109,6 +3629,7 @@ async fn model_port_resolves_thread_message_refs_and_delegates_to_gateway() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3130,6 +3651,122 @@ async fn model_port_resolves_thread_message_refs_and_delegates_to_gateway() {
     assert_eq!(calls[0].turn_id, fixture.run_context.turn_id);
     assert_eq!(calls[0].messages[0].role, HostManagedModelMessageRole::User);
     assert_eq!(calls[0].messages[0].content, "hello reborn");
+}
+
+#[tokio::test]
+async fn model_port_rejects_mismatched_fallback_route_evidence() {
+    let fixture = ThreadFixture::new().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(RecordingGateway::reply_with_fallback("model says hi", 1));
+    let port = ThreadBackedLoopModelPort::with_milestone_sink(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+        milestone_sink.clone(),
+    );
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let error = port
+        .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages,
+            surface_version: None,
+            model_preference: None,
+            fallback_index: 2,
+            capability_view: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
+    assert_eq!(
+        error.safe_summary,
+        "model gateway returned mismatched fallback route evidence"
+    );
+    let calls = gateway.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].fallback_index, 2);
+    let milestones = milestone_sink.milestones();
+    assert_eq!(milestones.len(), 2);
+    assert!(matches!(
+        &milestones[1].kind,
+        LoopHostMilestoneKind::ModelFailed {
+            reason_kind: AgentLoopHostErrorKind::Internal
+        }
+    ));
+}
+
+#[tokio::test]
+async fn model_port_rejects_missing_fallback_route_evidence() {
+    let fixture = ThreadFixture::new().await;
+    let gateway = Arc::new(RecordingGateway::reply_without_fallback_evidence(
+        "model says hi",
+    ));
+    let port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway,
+        16,
+    );
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let error = port
+        .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages,
+            surface_version: None,
+            model_preference: None,
+            fallback_index: 0,
+            capability_view: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
+    assert_eq!(
+        error.safe_summary,
+        "model gateway returned mismatched fallback route evidence"
+    );
+}
+
+#[tokio::test]
+async fn model_port_accepts_matching_fallback_route_evidence() {
+    let fixture = ThreadFixture::new().await;
+    let gateway = Arc::new(RecordingGateway::reply_with_fallback(
+        "fallback model says hi",
+        2,
+    ));
+    let port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    );
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let response = port
+        .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages,
+            surface_version: None,
+            model_preference: None,
+            fallback_index: 2,
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(response.chunks[0].safe_text_delta, "fallback model says hi");
+    let calls = gateway.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].fallback_index, 2);
 }
 
 /// Records every storage key the model port asks it to read and returns a fixed
@@ -3210,6 +3847,7 @@ async fn model_port_reads_image_attachment_bytes_into_model_image_parts() {
         messages,
         surface_version: None,
         model_preference: None,
+        fallback_index: 0,
         capability_view: None,
     })
     .await
@@ -3256,6 +3894,7 @@ async fn model_port_threads_resolved_model_route_snapshot_to_gateway() {
         messages,
         surface_version: None,
         model_preference: None,
+        fallback_index: 0,
         capability_view: None,
     })
     .await
@@ -3300,6 +3939,7 @@ async fn model_port_resolves_explicit_refs_that_fall_outside_context_window() {
         messages,
         surface_version: None,
         model_preference: None,
+        fallback_index: 0,
         capability_view: None,
     })
     .await
@@ -3371,6 +4011,7 @@ async fn model_port_preserves_provider_metadata_for_explicit_refs_outside_contex
         messages,
         surface_version: None,
         model_preference: None,
+        fallback_index: 0,
         capability_view: None,
     })
     .await
@@ -3413,8 +4054,8 @@ async fn prompt_port_builds_bundle_with_tool_result_reference_context() {
     );
 
     let prompt_bundle = prompt_port
-        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: None,
@@ -3460,7 +4101,7 @@ async fn model_port_round_trips_tool_result_reference_context_as_typed_model_inp
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -3493,6 +4134,7 @@ async fn model_port_round_trips_tool_result_reference_context_as_typed_model_inp
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3543,6 +4185,7 @@ async fn model_port_rejects_malformed_tool_result_reference_content() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3586,6 +4229,7 @@ async fn model_port_rejects_missing_explicit_tool_result_reference_before_gatewa
             inline_messages: Vec::new(),
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3629,6 +4273,7 @@ async fn model_port_emits_model_milestones_without_prompt_or_output_payloads() {
                     .model_profile_id
                     .clone(),
             ),
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3687,6 +4332,7 @@ async fn model_port_emits_started_and_failed_milestones_when_gateway_fails() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3745,6 +4391,7 @@ async fn model_port_logs_model_started_milestone_failure_without_losing_response
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3786,6 +4433,7 @@ async fn model_port_logs_model_completed_milestone_failure_without_losing_respon
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3825,6 +4473,7 @@ async fn model_port_rejects_message_role_that_disagrees_with_thread_record() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3854,6 +4503,7 @@ async fn model_port_surfaces_fail_closed_gateway_policy_errors_without_raw_detai
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3889,6 +4539,7 @@ async fn model_port_replaces_invalid_gateway_safe_summary_with_stable_summary() 
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3948,6 +4599,7 @@ async fn model_port_preserves_gateway_safe_reason_kind() {
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3970,7 +4622,7 @@ impl LoopContextPort for StaticLoopContextPort {
     async fn load_loop_context(
         &self,
         _request: LoopContextRequest,
-    ) -> Result<LoopContextBundle, ironclaw_turns::run_profile::AgentLoopHostError> {
+    ) -> Result<LoopContextBundle, ironclaw_loop_contracts::AgentLoopHostError> {
         Ok(self.bundle.clone())
     }
 }
@@ -4358,6 +5010,85 @@ impl ThreadFixture {
     }
 }
 
+fn reply_attachment_scope(fixture: &ThreadFixture) -> ResourceScope {
+    let mut scope = fixture.thread_scope.to_resource_scope();
+    scope.thread_id = Some(fixture.thread_id.clone());
+    scope
+}
+
+fn reply_attachment_run_id(fixture: &ThreadFixture) -> RunId {
+    RunId::from_uuid(fixture.run_context.run_id.as_uuid())
+}
+
+fn reply_attachment(
+    path: &str,
+    filename: &str,
+    mime_type: &str,
+    size_bytes: u64,
+) -> ReplyAttachmentIntent {
+    ReplyAttachmentIntent {
+        path: ScopedPath::new(path).expect("reply attachment path"),
+        filename: filename.to_string(),
+        mime_type: mime_type.to_string(),
+        size_bytes,
+    }
+}
+
+async fn register_reply_attachment(
+    store: &OutboundStateStore<ironclaw_filesystem::InMemoryBackend>,
+    fixture: &ThreadFixture,
+    path: &str,
+    filename: &str,
+    mime_type: &str,
+    size_bytes: u64,
+) {
+    store
+        .register(
+            &reply_attachment_scope(fixture),
+            &reply_attachment_run_id(fixture),
+            reply_attachment(path, filename, mime_type, size_bytes),
+        )
+        .await
+        .expect("reply attachment registration");
+}
+
+async fn finalized_assistant_message(fixture: &ThreadFixture) -> ThreadMessageRecord {
+    fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .expect("thread history")
+        .messages
+        .into_iter()
+        .find(|message| message.kind == MessageKind::Assistant)
+        .expect("finalized assistant message")
+}
+
+struct FailingSealReplyAttachmentIntentPort;
+
+#[async_trait]
+impl ReplyAttachmentIntentPort for FailingSealReplyAttachmentIntentPort {
+    async fn register(
+        &self,
+        _scope: &ResourceScope,
+        _run_id: &RunId,
+        _intent: ReplyAttachmentIntent,
+    ) -> Result<(), OutboundError> {
+        Ok(())
+    }
+
+    async fn seal(
+        &self,
+        _scope: &ResourceScope,
+        _run_id: &RunId,
+    ) -> Result<Vec<ReplyAttachmentIntent>, OutboundError> {
+        Err(OutboundError::Backend)
+    }
+}
+
 struct GatedThreadFixture {
     thread_service: Arc<GatedFinalizeThreadService>,
     thread_scope: ThreadScope,
@@ -4379,6 +5110,208 @@ impl GatedThreadFixture {
             thread_id: base.thread_id,
             run_context: base.run_context,
         }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TranscriptWriteOperation {
+    FinalizedAssistant,
+    ToolResultReference,
+}
+
+#[derive(Clone, Copy)]
+enum TranscriptWriteFailure {
+    Backend,
+    Serialization,
+}
+
+struct ScriptedTranscriptWriteThreadService {
+    inner: Arc<InMemorySessionThreadService>,
+    operation: TranscriptWriteOperation,
+    failure: TranscriptWriteFailure,
+    failures_remaining: AtomicUsize,
+    attempts: AtomicUsize,
+}
+
+impl ScriptedTranscriptWriteThreadService {
+    fn new(
+        inner: Arc<InMemorySessionThreadService>,
+        operation: TranscriptWriteOperation,
+        failure: TranscriptWriteFailure,
+        failures: usize,
+    ) -> Self {
+        Self {
+            inner,
+            operation,
+            failure,
+            failures_remaining: AtomicUsize::new(failures),
+            attempts: AtomicUsize::new(0),
+        }
+    }
+
+    fn attempts(&self) -> usize {
+        self.attempts.load(Ordering::SeqCst)
+    }
+
+    fn scripted_failure(&self, operation: TranscriptWriteOperation) -> Option<SessionThreadError> {
+        if self.operation != operation {
+            return None;
+        }
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        if self
+            .failures_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_err()
+        {
+            return None;
+        }
+        Some(match self.failure {
+            TranscriptWriteFailure::Backend => {
+                SessionThreadError::Backend("transient transcript backend failure".to_string())
+            }
+            TranscriptWriteFailure::Serialization => {
+                SessionThreadError::Serialization("invalid transcript request".to_string())
+            }
+        })
+    }
+}
+
+#[async_trait]
+impl SessionThreadService for ScriptedTranscriptWriteThreadService {
+    async fn ensure_thread(
+        &self,
+        _request: EnsureThreadRequest,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        panic!("scripted transcript service does not create threads")
+    }
+
+    async fn accept_inbound_message(
+        &self,
+        _request: AcceptInboundMessageRequest,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        panic!("scripted transcript service does not accept inbound messages")
+    }
+
+    async fn replay_accepted_inbound_message(
+        &self,
+        _request: ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+        panic!("scripted transcript service does not replay inbound messages")
+    }
+
+    async fn mark_message_submitted(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+        _turn_id: String,
+        _turn_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not mark submitted")
+    }
+
+    async fn mark_message_rejected_busy(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not reject messages")
+    }
+
+    async fn append_assistant_draft(
+        &self,
+        _request: AppendAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not append assistant drafts")
+    }
+
+    async fn append_finalized_assistant_message(
+        &self,
+        request: AppendFinalizedAssistantMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        if let Some(error) = self.scripted_failure(TranscriptWriteOperation::FinalizedAssistant) {
+            return Err(error);
+        }
+        self.inner.append_finalized_assistant_message(request).await
+    }
+
+    async fn append_tool_result_reference(
+        &self,
+        request: AppendToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        if let Some(error) = self.scripted_failure(TranscriptWriteOperation::ToolResultReference) {
+            return Err(error);
+        }
+        self.inner.append_tool_result_reference(request).await
+    }
+
+    async fn append_capability_display_preview(
+        &self,
+        _request: AppendCapabilityDisplayPreviewRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not append capability display previews")
+    }
+
+    async fn update_tool_result_reference(
+        &self,
+        _request: UpdateToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not update tool result references")
+    }
+
+    async fn update_assistant_draft(
+        &self,
+        _request: UpdateAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not update assistant drafts")
+    }
+
+    async fn finalize_assistant_message(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+        _content: MessageContent,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not finalize draft messages")
+    }
+
+    async fn redact_message(
+        &self,
+        _request: RedactMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not redact messages")
+    }
+
+    async fn load_context_window(
+        &self,
+        _request: ironclaw_threads::LoadContextWindowRequest,
+    ) -> Result<ContextWindow, SessionThreadError> {
+        panic!("scripted transcript service does not load context windows")
+    }
+
+    async fn load_context_messages(
+        &self,
+        _request: LoadContextMessagesRequest,
+    ) -> Result<ContextMessages, SessionThreadError> {
+        panic!("scripted transcript service does not load context messages")
+    }
+
+    async fn list_thread_history(
+        &self,
+        request: ThreadHistoryRequest,
+    ) -> Result<ThreadHistory, SessionThreadError> {
+        self.inner.list_thread_history(request).await
+    }
+
+    async fn create_summary_artifact(
+        &self,
+        _request: CreateSummaryArtifactRequest,
+    ) -> Result<SummaryArtifact, SessionThreadError> {
+        panic!("scripted transcript service does not create summaries")
     }
 }
 
@@ -4713,11 +5646,11 @@ impl SessionThreadService for StaticContextThreadService {
 
 #[derive(Default)]
 struct FailOnceMilestoneSink {
-    attempts: Mutex<Vec<ironclaw_turns::run_profile::LoopHostMilestone>>,
+    attempts: Mutex<Vec<ironclaw_loop_contracts::LoopHostMilestone>>,
 }
 
 impl FailOnceMilestoneSink {
-    fn milestones(&self) -> Vec<ironclaw_turns::run_profile::LoopHostMilestone> {
+    fn milestones(&self) -> Vec<ironclaw_loop_contracts::LoopHostMilestone> {
         self.attempts
             .lock()
             .unwrap()
@@ -4735,7 +5668,7 @@ impl FailOnceMilestoneSink {
 async fn wait_for_in_memory_milestones(
     sink: &InMemoryLoopHostMilestoneSink,
     expected: usize,
-) -> Vec<ironclaw_turns::run_profile::LoopHostMilestone> {
+) -> Vec<ironclaw_loop_contracts::LoopHostMilestone> {
     for _ in 0..20 {
         let milestones = sink.milestones();
         if milestones.len() == expected {
@@ -4756,15 +5689,15 @@ async fn wait_for_fail_once_attempts(sink: &FailOnceMilestoneSink, expected: usi
 }
 
 #[async_trait]
-impl ironclaw_turns::run_profile::LoopHostMilestoneSink for FailOnceMilestoneSink {
+impl ironclaw_loop_contracts::LoopHostMilestoneSink for FailOnceMilestoneSink {
     async fn publish_loop_milestone(
         &self,
-        milestone: ironclaw_turns::run_profile::LoopHostMilestone,
-    ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
+        milestone: ironclaw_loop_contracts::LoopHostMilestone,
+    ) -> Result<(), ironclaw_loop_contracts::AgentLoopHostError> {
         let mut attempts = self.attempts.lock().unwrap();
         if attempts.is_empty() {
             attempts.push(milestone);
-            return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
+            return Err(ironclaw_loop_contracts::AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 "loop milestone sink unavailable",
             ));
@@ -4776,7 +5709,7 @@ impl ironclaw_turns::run_profile::LoopHostMilestoneSink for FailOnceMilestoneSin
 
 #[derive(Default)]
 struct FailOnModelStartedMilestoneSink {
-    published: Mutex<Vec<ironclaw_turns::run_profile::LoopHostMilestone>>,
+    published: Mutex<Vec<ironclaw_loop_contracts::LoopHostMilestone>>,
 }
 
 impl FailOnModelStartedMilestoneSink {
@@ -4791,13 +5724,13 @@ impl FailOnModelStartedMilestoneSink {
 }
 
 #[async_trait]
-impl ironclaw_turns::run_profile::LoopHostMilestoneSink for FailOnModelStartedMilestoneSink {
+impl ironclaw_loop_contracts::LoopHostMilestoneSink for FailOnModelStartedMilestoneSink {
     async fn publish_loop_milestone(
         &self,
-        milestone: ironclaw_turns::run_profile::LoopHostMilestone,
-    ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
+        milestone: ironclaw_loop_contracts::LoopHostMilestone,
+    ) -> Result<(), ironclaw_loop_contracts::AgentLoopHostError> {
         if matches!(milestone.kind, LoopHostMilestoneKind::ModelStarted { .. }) {
-            return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
+            return Err(ironclaw_loop_contracts::AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 "loop milestone sink unavailable",
             ));
@@ -4809,7 +5742,7 @@ impl ironclaw_turns::run_profile::LoopHostMilestoneSink for FailOnModelStartedMi
 
 #[derive(Default)]
 struct FailOnModelCompletedMilestoneSink {
-    published: Mutex<Vec<ironclaw_turns::run_profile::LoopHostMilestone>>,
+    published: Mutex<Vec<ironclaw_loop_contracts::LoopHostMilestone>>,
 }
 
 impl FailOnModelCompletedMilestoneSink {
@@ -4824,13 +5757,13 @@ impl FailOnModelCompletedMilestoneSink {
 }
 
 #[async_trait]
-impl ironclaw_turns::run_profile::LoopHostMilestoneSink for FailOnModelCompletedMilestoneSink {
+impl ironclaw_loop_contracts::LoopHostMilestoneSink for FailOnModelCompletedMilestoneSink {
     async fn publish_loop_milestone(
         &self,
-        milestone: ironclaw_turns::run_profile::LoopHostMilestone,
-    ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
+        milestone: ironclaw_loop_contracts::LoopHostMilestone,
+    ) -> Result<(), ironclaw_loop_contracts::AgentLoopHostError> {
         if matches!(milestone.kind, LoopHostMilestoneKind::ModelCompleted { .. }) {
-            return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
+            return Err(ironclaw_loop_contracts::AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 "loop milestone sink unavailable",
             ));
@@ -4854,6 +5787,27 @@ impl RecordingGateway {
             response: Ok(HostManagedModelResponse::assistant_reply(
                 content.to_string(),
             )),
+        }
+    }
+
+    fn reply_with_fallback(content: &str, fallback_index: u32) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            tool_definition_calls: Mutex::new(Vec::new()),
+            response: Ok(
+                HostManagedModelResponse::assistant_reply(content.to_string())
+                    .with_effective_fallback_index(fallback_index),
+            ),
+        }
+    }
+
+    fn reply_without_fallback_evidence(content: &str) -> Self {
+        let mut response = HostManagedModelResponse::assistant_reply(content.to_string());
+        response.effective_fallback_index = None;
+        Self {
+            calls: Mutex::new(Vec::new()),
+            tool_definition_calls: Mutex::new(Vec::new()),
+            response: Ok(response),
         }
     }
 
@@ -5000,16 +5954,14 @@ impl LoopCapabilityPort for StaticToolDefinitionPort {
 /// caller-level test can assert both the captured request and the once-per-run
 /// fetch guarantee.
 struct RecordingMemoryPromptContextService {
-    calls: Mutex<Vec<ironclaw_turns::run_profile::MemoryPromptContextRequest>>,
+    calls: Mutex<Vec<ironclaw_loop_contracts::MemoryPromptContextRequest>>,
 }
 
 #[async_trait]
-impl ironclaw_turns::run_profile::MemoryPromptContextService
-    for RecordingMemoryPromptContextService
-{
+impl ironclaw_loop_contracts::MemoryPromptContextService for RecordingMemoryPromptContextService {
     async fn load_memory_snippets(
         &self,
-        request: ironclaw_turns::run_profile::MemoryPromptContextRequest,
+        request: ironclaw_loop_contracts::MemoryPromptContextRequest,
     ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError> {
         self.calls.lock().expect("memory calls lock").push(request);
         Ok(vec![LoopContextSnippet {
@@ -5055,7 +6007,7 @@ async fn thread_context_port_loads_memory_snippets_through_wired_service_once_pe
     let request = || LoopContextRequest {
         after: None,
         limit: 16,
-        mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        mode: ironclaw_loop_contracts::PromptMode::TextOnly,
     };
     let first = adapter.load_loop_context(request()).await.unwrap();
     let second = adapter.load_loop_context(request()).await.unwrap();

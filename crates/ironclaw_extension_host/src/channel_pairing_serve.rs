@@ -26,12 +26,13 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use ironclaw_host_api::action::NetworkMethod;
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
     IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
-use ironclaw_host_api::{NetworkMethod, ProductSurfaceCaller};
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use serde::Serialize;
 
 use ironclaw_host_ingress::ProtectedRouteMount;
@@ -103,7 +104,7 @@ fn mutation_policy() -> IngressPolicy {
         auth: IngressAuthPolicy::Required {
             schemes: vec![IngressAuthScheme::BearerToken],
         },
-        scope_source: ironclaw_host_api::IngressScopeSource::AuthenticatedCaller,
+        scope_source: ironclaw_host_api::ingress::IngressScopeSource::AuthenticatedCaller,
         body_limit: BodyLimitPolicy::Limited {
             max_bytes: PAIRING_MUTATION_BODY_LIMIT_BYTES,
         },
@@ -127,7 +128,7 @@ fn read_policy() -> IngressPolicy {
         auth: IngressAuthPolicy::Required {
             schemes: vec![IngressAuthScheme::BearerToken],
         },
-        scope_source: ironclaw_host_api::IngressScopeSource::AuthenticatedCaller,
+        scope_source: ironclaw_host_api::ingress::IngressScopeSource::AuthenticatedCaller,
         body_limit: BodyLimitPolicy::NoBody,
         rate_limit: RateLimitPolicy::Limited {
             scope: RateLimitScope::PerCaller,

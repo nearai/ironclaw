@@ -276,7 +276,7 @@ async fn http_network_policy_denied_surfaces_recoverable_denied() {
 /// `Failed{OutputTooLarge}` capability outcome; the run recovers to completion.
 #[tokio::test]
 async fn http_oversize_response_surfaces_recoverable_failed() {
-    use ironclaw_host_api::RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED;
+    use ironclaw_host_api::http::RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED;
     let h = RebornIntegrationHarness::test_default()
         .with_keyed_http_responses([ScriptedHttpResponse::response_error(
             ERR_URL,
@@ -370,7 +370,7 @@ const ERR_B_URL: &str = "https://api.example.test/v1/err-b";
 /// the full-history `assert_tool_error` (single-turn-only) can't reach.
 #[tokio::test]
 async fn multi_turn_baseline_sliced_history_assertions() {
-    use ironclaw_host_api::RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED;
+    use ironclaw_host_api::http::RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED;
     let h = RebornIntegrationHarness::test_default()
         .with_keyed_http_responses([
             ScriptedHttpResponse::network_error(ERR_A_URL, "policy_denied"),

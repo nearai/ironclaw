@@ -43,7 +43,7 @@ impl InputDrainStrategy for DefaultInputDrainStrategy {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use ironclaw_turns::{LoopMessageRef, LoopResultRef};
+    use ironclaw_host_api::turn::{LoopMessageRef, LoopResultRef};
 
     use super::*;
     use crate::strategies::{CapabilityBatchTurnSummary, TurnEndKind, TurnSummary};
@@ -68,17 +68,16 @@ mod tests {
 
     #[tokio::test]
     async fn default_input_drain_strategy_returns_true_for_both_hooks() {
-        use ironclaw_host_api::{TenantId, ThreadId};
-        use ironclaw_turns::{
-            AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId,
-            TurnScope,
-            run_profile::{
-                CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,
-                CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
-                LoopRunContext, ModelProfileId, RedactedRunProfileProvenance, ResolvedRunProfile,
-                ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
-                RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
-            },
+        use ironclaw_host_api::ids::{TenantId, ThreadId};
+        use ironclaw_host_api::turn::{
+            RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
+        };
+        use ironclaw_loop_contracts::{
+            AgentLoopDriverDescriptor, CancellationPolicy, CapabilitySurfaceProfileId,
+            CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
+            LoopRunContext, ModelProfileId, RedactedRunProfileProvenance, ResolvedRunProfile,
+            ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+            RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
         };
 
         let scope = TurnScope::new(
@@ -135,7 +134,7 @@ mod tests {
                 max_model_calls: 32,
                 max_capability_invocations: 64,
             },
-            personal_context_policy: ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
+            personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
             runtime_constraints: RuntimeProfileConstraints {
                 allow_raw_runtime_backend_selection: false,
                 allow_broad_capability_surface: false,

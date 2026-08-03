@@ -1,5 +1,5 @@
-use ironclaw_host_api::CapabilityId;
-use ironclaw_turns::run_profile::{ContentDigest, normalize_for_hash};
+use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_loop_contracts::{ContentDigest, normalize_for_hash};
 
 /// Stable identity for a capability call, suitable for repetition detection
 /// without retaining raw arguments (per turns-agent-loop.md §6: no raw tool
@@ -112,7 +112,7 @@ fn reject_non_finite_numbers(
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::CapabilityId;
+    use ironclaw_host_api::ids::CapabilityId;
     use serde_json::json;
 
     use super::*;

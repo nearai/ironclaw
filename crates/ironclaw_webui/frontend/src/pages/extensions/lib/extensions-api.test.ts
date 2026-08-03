@@ -11,8 +11,27 @@ function extensionsApiSourceForTest() {
     if (line.startsWith("import ")) continue;
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { installExtension, removeExtension, submitExtensionSetup, startExtensionOauth };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { installExtension, registerCustomMcp, removeExtension, submitExtensionSetup, startExtensionOauth };`;
 }
+
+test("registerCustomMcp sends only the admission wire shape", async () => {
+  const apiCalls = [];
+  const context = {
+    apiFetch: async (url, options) => { apiCalls.push({ url, options }); return { success: true }; },
+    clientActionId: () => "unused", encodeURIComponent, globalThis: {}, setupExtension: () => {},
+  };
+  vm.runInNewContext(extensionsApiSourceForTest(), context);
+  await context.globalThis.__testExports.registerCustomMcp({
+    desiredId: "linear", desiredName: "Linear MCP", endpoint: "https://mcp.linear.app/mcp",
+    authSelection: { kind: "oauth", client_profile_id: "linear-default" },
+    identity: "must-not-cross", tools: [{ name: "must-not-cross" }], secrets: { token: "must-not-cross" },
+  });
+  assert.equal(apiCalls[0].url, "/api/webchat/v2/extensions/register-hosted-mcp");
+  assert.deepEqual(JSON.parse(apiCalls[0].options.body), {
+    desired_id: "linear", desired_name: "Linear MCP", endpoint: "https://mcp.linear.app/mcp",
+    auth_selection: { kind: "oauth", client_profile_id: "linear-default" },
+  });
+});
 
 test("installExtension assigns a fresh client idempotency key to each gesture", async () => {
   const apiCalls = [];

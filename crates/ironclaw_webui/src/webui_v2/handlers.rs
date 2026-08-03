@@ -10,18 +10,19 @@
 //! 3. Maps every error through [`WebUiV2HttpError`] so the wire shape stays
 //!    redacted and stable.
 //!
-//! [`ProductSurface`]: ironclaw_host_api::ProductSurface
+//! [`ProductSurface`]: ironclaw_product_contracts::surface::ProductSurface
 
 // arch-exempt: large_file, ProductSurface service-collapse routes stay in the existing WebUI handler table until the WebUI route split lands, plan #5985
 
 mod run_artifact;
-pub use run_artifact::get_run_artifact;
+pub use run_artifact::{get_run_artifact, get_thread_artifact};
 
 use std::convert::Infallible;
 use std::time::Duration;
 
 use axum::Json;
 use axum::body::Body;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -29,6 +30,7 @@ use axum::response::{IntoResponse, Response};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::SinkExt;
 use futures::stream::Stream;
+use ironclaw_attachments::{AttachmentCapabilities, attachment_capabilities};
 use ironclaw_product::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_VIEW, ADMIN_USER_CREATE_COMMAND,
     ADMIN_USER_DELETE_CAPABILITY, ADMIN_USER_DELETE_SECRET_COMMAND,
@@ -36,85 +38,113 @@ use ironclaw_product::{
     ADMIN_USER_SET_STATUS_CAPABILITY, ADMIN_USER_UPDATE_CAPABILITY, ADMIN_USER_VIEW,
     ADMIN_USERS_VIEW, ATTACHMENT_READ_COMMAND, AUTOMATION_DELETE_COMMAND, AUTOMATION_PAUSE_COMMAND,
     AUTOMATION_RENAME_COMMAND, AUTOMATION_RESUME_COMMAND, AUTOMATIONS_VIEW, CANCEL_RUN_COMMAND,
-    CREATE_THREAD_COMMAND, CodexLoginStart, EXTENSION_IMPORT_CAPABILITY,
-    EXTENSION_INSTALL_CAPABILITY, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY,
-    EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
-    EmptyProductCommandInput, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_READ_COMMAND, FS_STAT_VIEW, FsMount,
-    GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY, LLM_CODEX_LOGIN_COMMAND, LLM_CONFIG_VIEW,
-    LLM_LIST_MODELS_COMMAND, LLM_NEARAI_LOGIN_COMMAND, LLM_NEARAI_WALLET_LOGIN_COMMAND,
-    LLM_PROVIDER_DELETE_CAPABILITY, LLM_PROVIDER_UPSERT_CAPABILITY, LLM_TEST_CONNECTION_COMMAND,
-    LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult,
-    LlmProbeResult, NearAiLoginStart, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
-    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY,
-    OPERATOR_CONFIG_SET_KEY_COMMAND, OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
-    OPERATOR_LOGS_VIEW, OPERATOR_SERVICE_LIFECYCLE_COMMAND, OPERATOR_SETUP_RUN_CAPABILITY,
-    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
-    OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_VIEW, PROJECT_CREATE_COMMAND,
-    PROJECT_DELETE_CAPABILITY, PROJECT_FS_LIST_VIEW, PROJECT_FS_READ_COMMAND, PROJECT_FS_STAT_VIEW,
-    PROJECT_MEMBER_ADD_CAPABILITY, PROJECT_MEMBER_REMOVE_CAPABILITY,
-    PROJECT_MEMBER_UPDATE_CAPABILITY, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY,
-    PROJECT_VIEW, PROJECTS_VIEW, ProductAttachmentCapabilities, ProductCancelRunRequest,
-    ProductCapabilityDescriptor, ProductCreateThreadRequest, ProductListAutomationsRequest,
-    ProductListThreadsRequest, ProductOutboundEnvelope, ProductRenameAutomationRequest,
-    ProductResolveGateRequest, ProductRetryRunRequest, ProductSetupExtensionRequest,
-    ProductSubmitTurnRequest, ProductSurfaceCommandDescriptor, ProjectFsFile, ProjectionCursor,
-    RESOLVE_GATE_COMMAND, RETRY_RUN_COMMAND, RebornAccountLoginLinkResponse,
-    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAdminCreateUserRequest,
-    RebornAdminDeleteSecretProductRequest, RebornAdminPutSecretProductRequest,
-    RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
-    RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
-    RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
+    CREATE_THREAD_COMMAND, EXTENSION_IMPORT_CAPABILITY, EXTENSION_INSTALL_CAPABILITY,
+    EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY,
+    EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FS_LIST_VIEW,
+    FS_MOUNTS_VIEW, FS_READ_COMMAND, FS_STAT_VIEW, GLOBAL_AUTO_APPROVE_VIEW,
+    LLM_ACTIVE_SET_CAPABILITY, LLM_CODEX_LOGIN_COMMAND, LLM_CONFIG_VIEW, LLM_LIST_MODELS_COMMAND,
+    LLM_NEARAI_LOGIN_COMMAND, LLM_NEARAI_WALLET_LOGIN_COMMAND, LLM_PROVIDER_DELETE_CAPABILITY,
+    LLM_PROVIDER_UPSERT_CAPABILITY, LLM_TEST_CONNECTION_COMMAND, LOGS_VIEW,
+    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY, OPERATOR_CONFIG_SET_KEY_COMMAND,
+    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
+    OPERATOR_SERVICE_LIFECYCLE_COMMAND, OPERATOR_SETUP_RUN_CAPABILITY, OPERATOR_SETUP_VIEW,
+    OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY,
+    OUTBOUND_PREFERENCES_VIEW, PRODUCT_COMMAND_EXECUTE_COMMAND, PRODUCT_COMMAND_LIST_COMMAND,
+    PROJECT_CREATE_COMMAND, PROJECT_DELETE_CAPABILITY, PROJECT_FS_LIST_VIEW,
+    PROJECT_FS_READ_COMMAND, PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY,
+    PROJECT_MEMBER_REMOVE_CAPABILITY, PROJECT_MEMBER_UPDATE_CAPABILITY, PROJECT_MEMBERS_VIEW,
+    PROJECT_UPDATE_CAPABILITY, PROJECT_VIEW, PROJECTS_VIEW, RESOLVE_GATE_COMMAND,
+    RETRY_RUN_COMMAND, RebornCreateThreadResponse, RebornExtensionListResponse,
+    RebornListThreadsResponse, RebornTimelineResponse, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
+    SKILL_REMOVE_CAPABILITY, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY, SKILLS_VIEW,
+    SUBMIT_TURN_COMMAND, THREAD_DELETE_CAPABILITY, THREADS_VIEW, TIMELINE_VIEW,
+    TRACE_ACCOUNT_LOGIN_LINK_COMMAND, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
+    TRACE_HOLD_AUTHORIZE_COMMAND,
+};
+use ironclaw_product_contracts::admin_users::{
+    RebornAdminCreateUserRequest, RebornAdminDeleteSecretProductRequest,
+    RebornAdminPutSecretProductRequest, RebornAdminPutSecretRequest,
+    RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleProductRequest,
+    RebornAdminSetRoleRequest, RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
     RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest,
     RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
-    RebornAdminUserSecretsListResponse, RebornAttachmentRequest, RebornAutomationMutationResponse,
-    RebornAutomationRequest, RebornCancelRunResponse, RebornCreateProjectRequest,
-    RebornCreateThreadResponse, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
-    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse,
-    RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
-    RebornFsStatResponse, RebornGetProjectRequest, RebornGlobalAutoApproveRequest,
-    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
-    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
-    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupResponse,
+    RebornAdminUserSecretsListResponse,
+};
+use ironclaw_product_contracts::descriptors::{
+    EmptyProductCommandInput, ProductCapabilityDescriptor, ProductSurfaceCommandDescriptor,
+};
+use ironclaw_product_contracts::inbound_requests::{
+    ProductCancelRunRequest, ProductCreateThreadRequest, ProductListAutomationsRequest,
+    ProductListThreadsRequest, ProductRenameAutomationRequest, ProductResolveGateRequest,
+    ProductRetryRunRequest, ProductSetupExtensionRequest, ProductSubmitTurnRequest,
+};
+use ironclaw_product_contracts::operator_llm::{
+    CodexLoginStart, LlmConfigSnapshot, LlmModelsResult, LlmProbeResult, NearAiLoginStart,
+    NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
+};
+use ironclaw_product_contracts::outbound::{ProductOutboundEnvelope, ProjectionCursor};
+use ironclaw_product_contracts::package_lifecycle::{
+    LifecyclePackageKind, LifecyclePackageRef, project_public_lifecycle_states,
+};
+use ironclaw_product_contracts::product_wire::{
+    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAttachmentRequest,
+    RebornAutomationMutationResponse, RebornAutomationRequest, RebornCancelRunResponse,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExecuteProductCommandRequest,
+    RebornExtensionActionResponse, RebornExtensionRegistryResponse, RebornGlobalAutoApproveRequest,
+    RebornListAutomationsResponse, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
+    RebornOperatorConfigListResponse, RebornOperatorConfigSetProductRequest,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupResponse,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
-    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
-    RebornProjectResponse, RebornRemoveMemberRequest, RebornRenameAutomationProductRequest,
+    RebornProductCommandListResponse, RebornRenameAutomationProductRequest,
     RebornResolveGateResponse, RebornRetryRunResponse, RebornSetOutboundPreferencesRequest,
     RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewDescriptor,
-    RebornViewPage, RebornViewQuery, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
-    SKILL_REMOVE_CAPABILITY, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY, SKILLS_VIEW,
-    SUBMIT_TURN_COMMAND, SetActiveLlmRequest, SettingsToolPermissionState,
-    THREAD_DELETE_CAPABILITY, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_LOGIN_LINK_COMMAND,
-    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND,
-    UpsertLlmProviderRequest, product_attachment_capabilities, project_public_lifecycle_states,
+    RebornTimelineRequest, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
+    RebornTraceHoldAuthorizeResponse, SettingsToolPermissionState,
+};
+use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewPage, RebornViewQuery};
+use ironclaw_product_contracts::workspace_views::{
+    FsMount, ProjectFsFile, RebornAddMemberRequest, RebornCreateProjectRequest,
+    RebornDeleteProjectRequest, RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest,
+    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
+    RebornGetProjectRequest, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornProjectFsListRequest,
+    RebornProjectFsListResponse, RebornProjectFsReadRequest, RebornProjectFsStatRequest,
+    RebornProjectFsStatResponse, RebornProjectMemberInfo, RebornProjectResponse,
+    RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
 };
 use secrecy::ExposeSecret;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use ironclaw_extension_contracts::hosted_mcp::{
+    HostedMcpAuthSelection, HostedMcpEndpoint, RegisterHostedMcpRequest, hosted_mcp_extension_id,
+};
+use ironclaw_extension_contracts::lifecycle_id::LifecyclePackageId;
+use ironclaw_extension_contracts::state::LifecyclePublicState;
 use ironclaw_host_api::turn::IdempotencyKey;
 use ironclaw_host_api::{
-    ActivityId, Blocked, FailureKind, InstallationState, ProductSurface, ProductSurfaceCaller,
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    ProductSurfaceValidationCode, Resolution, SecretHandle, ThreadId, UserId,
+    ids::{ActivityId, SecretHandle, ThreadId, UserId},
+    resolution::{Blocked, Resolution},
+    result_meta::FailureKind,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ProductSurfaceValidationCode,
 };
 use uuid::Uuid;
 
 use crate::webui_v2::error::WebUiV2HttpError;
 use crate::webui_v2::router::{WebUiV2Capabilities, WebUiV2State};
-use crate::webui_v2::schema::WebChatV2EventFrame;
+use crate::webui_v2::schema::{WebChatV2Event, WebChatV2EventFrame};
 use crate::webui_v2::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
+use ironclaw_product_contracts::admin_users::AdminUserSecretMeta;
 
 // Session bootstrap must stay cheap and non-blocking: this flag only tunes
 // initial approval UI state. It is mutable through `/settings/tools`, so do
@@ -140,7 +170,7 @@ pub struct WebUiV2SessionResponse {
     /// the browser advertises on its file picker. Generated from the shared
     /// format registry so the picker can never drift from the server's
     /// allowed set; the send-message decode remains authoritative.
-    pub attachments: ProductAttachmentCapabilities,
+    pub attachments: AttachmentCapabilities,
 }
 
 /// Deployment-wide WebUI feature gates surfaced to the browser on
@@ -154,6 +184,9 @@ pub struct WebUiV2Features {
     /// `IRONCLAW_REBORN_PROJECTS`, while the surface is still being
     /// finished.
     pub reborn_projects: bool,
+    /// QA-only run and full-thread artifact export surface. Hidden and
+    /// unmounted unless the deployment explicitly opts in.
+    pub regression_artifact_export: bool,
     /// Effective global auto-approve setting for the authenticated caller.
     /// The browser treats it as a bootstrap UI flag and does not inspect the
     /// operator settings payload shape. Settings mutations should update local
@@ -183,9 +216,10 @@ pub async fn get_session(
         capabilities,
         features: WebUiV2Features {
             reborn_projects: state.reborn_projects_enabled(),
+            regression_artifact_export: state.regression_artifact_export_enabled(),
             global_auto_approve,
         },
-        attachments: product_attachment_capabilities(),
+        attachments: attachment_capabilities(),
     })
 }
 
@@ -292,9 +326,11 @@ async fn read_admin_user_secret(
     caller: ProductSurfaceCaller,
     user_id: UserId,
     handle: String,
-) -> Result<ironclaw_product::AdminUserSecretMeta, WebUiV2HttpError> {
-    let surface =
-        ironclaw_host_api::BoundProductSurface::new(std::sync::Arc::clone(services), caller);
+) -> Result<AdminUserSecretMeta, WebUiV2HttpError> {
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
+        std::sync::Arc::clone(services),
+        caller,
+    );
     let response = ADMIN_USER_SECRETS_VIEW
         .query_on(&surface, RebornAdminUserRequest { user_id }, None)
         .await?;
@@ -704,7 +740,7 @@ pub struct FsBrowseQuery {
     pub path: Option<String>,
     /// Optional project to browse, authorized by the product-workflow service.
     #[serde(default)]
-    pub project_id: Option<ironclaw_host_api::ProjectId>,
+    pub project_id: Option<ironclaw_host_api::ids::ProjectId>,
 }
 
 /// `GET /api/webchat/v2/fs/mounts`
@@ -1017,8 +1053,10 @@ async fn read_project_member(
     project_id: String,
     user_id: String,
 ) -> Result<RebornProjectMemberInfo, WebUiV2HttpError> {
-    let surface =
-        ironclaw_host_api::BoundProductSurface::new(std::sync::Arc::clone(services), caller);
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
+        std::sync::Arc::clone(services),
+        caller,
+    );
     let response = PROJECT_MEMBERS_VIEW
         .query_on(&surface, RebornListMembersRequest { project_id }, None)
         .await?;
@@ -1107,9 +1145,8 @@ pub async fn get_attachment(
     Ok((StatusCode::OK, headers, attachment.bytes).into_response())
 }
 
-/// SSE polling cadence for `stream_events`. The service only exposes a
-/// drain-style read; once the backlog is flushed the handler waits this
-/// long before checking for newly arrived events.
+/// SSE polling cadence for product surfaces that expose only the legacy
+/// drain-style read. Subscription-capable surfaces bypass this fallback.
 const SSE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Upper bound for idle `stream_events` polling. A browser tab with no
@@ -1118,8 +1155,8 @@ const SSE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// hosted Postgres.
 const SSE_IDLE_POLL_MAX_INTERVAL: Duration = Duration::from_secs(3);
 
-/// SSE keep-alive cadence. axum emits an SSE comment line every interval
-/// to keep proxies from closing the idle connection.
+/// SSE keep-alive cadence. Axum emits a comment line for proxies, and the
+/// subscription path emits a typed frame for browser application code.
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
 /// HTTP header the browser's `EventSource` sends on auto-reconnect to
@@ -1159,7 +1196,7 @@ fn sse_poll_interval_for_idle_polls(idle_polls: u32) -> Duration {
 /// documented on [`ProductSurface::stream_events`].
 ///
 /// [`WebChatV2EventFrame`]: crate::webui_v2::schema::WebChatV2EventFrame
-/// [`ProductSurface::stream_events`]: ironclaw_host_api::ProductSurface::stream_events
+/// [`ProductSurface::stream_events`]: ironclaw_product_contracts::surface::ProductSurface::stream_events
 /// [`SSE_MAX_LIFETIME`]: crate::webui_v2::sse_capacity::SSE_MAX_LIFETIME
 pub async fn stream_events(
     State(state): State<WebUiV2State>,
@@ -1304,6 +1341,12 @@ fn sse_error_event(error: ProductSurfaceError) -> Event {
     }
 }
 
+fn sse_keep_alive_event() -> Event {
+    Event::default()
+        .event(WebChatV2Event::KeepAlive.event_name())
+        .data(r#"{"type":"keep_alive"}"#)
+}
+
 fn build_sse_stream(
     services: std::sync::Arc<dyn ProductSurface>,
     caller: ProductSurfaceCaller,
@@ -1319,7 +1362,7 @@ fn build_sse_stream(
         let mut slot_guard = slot;
         let started_at = tokio::time::Instant::now();
         let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
-        let surface = ironclaw_host_api::BoundProductSurface::new(services, caller);
+        let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(services, caller);
 
         let mut idle_polls = 0_u32;
         loop {
@@ -1337,7 +1380,7 @@ fn build_sse_stream(
                 _ = slot_guard.cancelled() => return,
                 result = tokio::time::timeout(
                     remaining,
-                    surface.stream_events(ironclaw_host_api::ProductSurfaceStreamRequest {
+                    surface.stream_events(ironclaw_product_contracts::surface::ProductSurfaceStreamRequest {
                         stream_id: Some(thread_id.clone()),
                         after_cursor: after_cursor
                             .as_ref()
@@ -1359,7 +1402,8 @@ fn build_sse_stream(
                     );
                     return;
                 }
-                Ok(Ok(response)) => {
+                Ok(Ok(mut response)) => {
+                    let subscription = response.subscription.take();
                     let events = match decode_product_outbound_events(response.events) {
                         Ok(events) => events,
                         Err(error) => {
@@ -1376,11 +1420,63 @@ fn build_sse_stream(
                             yield Ok(event);
                         }
                     }
+                    if let Some(subscription) = subscription {
+                        loop {
+                            let remaining =
+                                SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+                            if remaining.is_zero() {
+                                return;
+                            }
+                            let next = tokio::select! {
+                                biased;
+                                _ = slot_guard.cancelled() => return,
+                                result = tokio::time::timeout(
+                                    remaining,
+                                    subscription.next(),
+                                ) => result,
+                                _ = tokio::time::sleep(SSE_KEEPALIVE_INTERVAL) => {
+                                    // Axum's comment keep-alive keeps proxies
+                                    // open, but parser packages do not surface
+                                    // comments to the browser watchdog. Emit a
+                                    // typed application frame as liveness proof
+                                    // while the projection is legitimately idle.
+                                    yield Ok(sse_keep_alive_event());
+                                    continue;
+                                }
+                            };
+                            let response = match next {
+                                Ok(Some(Ok(response))) => response,
+                                Ok(Some(Err(error))) => {
+                                    yield Ok(sse_error_event(error));
+                                    return;
+                                }
+                                Ok(None) => return,
+                                Err(_) => {
+                                    tracing::debug!(
+                                        target = "ironclaw_webui_v2::sse",
+                                        "stream_events subscription pending past SSE_MAX_LIFETIME; closing stream"
+                                    );
+                                    return;
+                                }
+                            };
+                            let events = match decode_product_outbound_events(response.events) {
+                                Ok(events) => events,
+                                Err(error) => {
+                                    yield Ok(sse_error_event(error));
+                                    return;
+                                }
+                            };
+                            for envelope in events {
+                                if let Some(event) = webchat_sse_event_from_envelope(envelope) {
+                                    yield Ok(event);
+                                }
+                            }
+                        }
+                    }
                     if had_events {
-                        // The production projection service waits on its live
-                        // subscription when no new item is replayable. Re-enter
-                        // it immediately after delivering a batch so assistant
-                        // text deltas are not delayed by the idle poll cadence.
+                        // Drain-only compatibility surfaces may have another
+                        // buffered batch ready. Re-enter immediately after
+                        // delivery before applying the idle poll cadence.
                         idle_polls = 0;
                         continue;
                     }
@@ -1532,6 +1628,46 @@ pub struct ListThreadsQuery {
     pub candidate_thread_id: Option<String>,
     #[serde(default)]
     pub needs_approval: bool,
+}
+
+/// `GET /api/webchat/v2/commands`
+pub async fn list_commands(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<RebornProductCommandListResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        PRODUCT_COMMAND_LIST_COMMAND,
+        EmptyProductCommandInput {},
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExecuteCommandBody {
+    pub text: String,
+}
+
+/// `POST /api/webchat/v2/threads/:thread_id/commands`
+pub async fn execute_command(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(thread_id): Path<String>,
+    Json(body): Json<ExecuteCommandBody>,
+) -> Result<Json<ironclaw_product::RebornExecuteProductCommandResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        PRODUCT_COMMAND_EXECUTE_COMMAND,
+        RebornExecuteProductCommandRequest {
+            thread_id,
+            text: body.text,
+        },
+    )
+    .await?;
+    Ok(Json(response))
 }
 
 /// `GET /api/webchat/v2/automations`
@@ -1787,6 +1923,78 @@ pub async fn set_outbound_preferences(
     Ok(Json(response))
 }
 
+/// HTTP disposition for a capability [`FailureKind`] surfaced through a
+/// product-surface mutation. One wildcard-free exhaustive match over the
+/// unified kind vocabulary — a new kind refuses to compile until its HTTP
+/// class is chosen here. Sites with kind-specific special cases
+/// (`OperationFailed`-as-validation, `GateDeclined`) match those explicitly
+/// before consulting this classifier.
+enum CapabilityFailureHttpClass {
+    /// The request itself was invalid (400).
+    BadRequest,
+    /// Authorization/policy refused it (403).
+    Forbidden,
+    /// The backing service hiccuped; retryable (503).
+    Unavailable,
+    /// Anything else is an internal fault (500).
+    Internal,
+}
+
+fn capability_failure_http_class(kind: FailureKind) -> CapabilityFailureHttpClass {
+    match kind {
+        FailureKind::InputEncode => CapabilityFailureHttpClass::BadRequest,
+        FailureKind::Authorization
+        | FailureKind::PolicyDenied
+        | FailureKind::NetworkDenied
+        | FailureKind::FilesystemDenied
+        | FailureKind::SecretDenied
+        | FailureKind::AuthRequired => CapabilityFailureHttpClass::Forbidden,
+        FailureKind::Backend
+        | FailureKind::Network
+        | FailureKind::Transient
+        | FailureKind::Unavailable
+        | FailureKind::StaleSurface => CapabilityFailureHttpClass::Unavailable,
+        // `Resource` is a quota/limit hit — `fate()` says ModelVisible, not
+        // retryable, so it must not ride the retryable-503 class: a caller
+        // retrying a quota failure can never succeed and only burns budget.
+        FailureKind::Resource
+        | FailureKind::MethodMissing
+        | FailureKind::UndeclaredCapability
+        | FailureKind::UnknownCapability
+        | FailureKind::UnknownProvider
+        | FailureKind::OperationFailed
+        | FailureKind::OutputTooLarge
+        | FailureKind::GateDeclined
+        | FailureKind::Guest
+        | FailureKind::ExitFailure
+        | FailureKind::OutputDecode
+        | FailureKind::InvalidResult
+        | FailureKind::Memory
+        | FailureKind::Manifest
+        | FailureKind::ExtensionRuntimeMismatch
+        | FailureKind::RuntimeMismatch
+        | FailureKind::MissingRuntimeBackend
+        | FailureKind::UnsupportedRunner
+        | FailureKind::MissingRuntime
+        | FailureKind::Client
+        | FailureKind::Executor
+        | FailureKind::Internal
+        | FailureKind::Unclassified
+        | FailureKind::Cancelled => CapabilityFailureHttpClass::Internal,
+    }
+}
+
+fn capability_failure_bad_request() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::InvalidRequest,
+        kind: ProductSurfaceErrorKind::Validation,
+        status_code: 400,
+        retryable: false,
+        field: None,
+        validation_code: Some(ProductSurfaceValidationCode::InvalidValue),
+    }
+}
+
 fn capability_resolution_succeeded(
     resolution: Resolution,
     label: &'static str,
@@ -1797,29 +2005,18 @@ fn capability_resolution_succeeded(
     match resolution {
         Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
         Resolution::Done(outcome) => match outcome.verdict.error_kind() {
-            Some(FailureKind::InvalidInput) => Err(ProductSurfaceError {
-                code: ProductSurfaceErrorCode::InvalidRequest,
-                kind: ProductSurfaceErrorKind::Validation,
-                status_code: 400,
-                retryable: false,
-                field: None,
-                validation_code: Some(ProductSurfaceValidationCode::InvalidValue),
-            }),
             Some(FailureKind::OperationFailed) if operation_failed_is_invalid_request => {
-                Err(ProductSurfaceError {
-                    code: ProductSurfaceErrorCode::InvalidRequest,
-                    kind: ProductSurfaceErrorKind::Validation,
-                    status_code: 400,
-                    retryable: false,
-                    field: None,
-                    validation_code: Some(ProductSurfaceValidationCode::InvalidValue),
-                })
+                Err(capability_failure_bad_request())
             }
-            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => Err(forbidden()),
-            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
-                Err(unavailable(true))
-            }
-            _ => Err(ProductSurfaceError::internal_from(format!(
+            Some(kind) => match capability_failure_http_class(*kind) {
+                CapabilityFailureHttpClass::BadRequest => Err(capability_failure_bad_request()),
+                CapabilityFailureHttpClass::Forbidden => Err(forbidden()),
+                CapabilityFailureHttpClass::Unavailable => Err(unavailable(true)),
+                CapabilityFailureHttpClass::Internal => Err(ProductSurfaceError::internal_from(
+                    format!("{label} capability did not complete successfully"),
+                )),
+            },
+            None => Err(ProductSurfaceError::internal_from(format!(
                 "{label} capability did not complete successfully"
             ))),
         },
@@ -2062,23 +2259,18 @@ fn skill_mutation_succeeded(resolution: Resolution) -> Result<(), ProductSurface
     match resolution {
         Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
         Resolution::Done(outcome) => match outcome.verdict.error_kind() {
-            Some(FailureKind::InvalidInput | FailureKind::OperationFailed) => {
-                Err(ProductSurfaceError {
-                    code: ProductSurfaceErrorCode::InvalidRequest,
-                    kind: ProductSurfaceErrorKind::Validation,
-                    status_code: 400,
-                    retryable: false,
-                    field: None,
-                    validation_code: Some(ProductSurfaceValidationCode::InvalidValue),
-                })
-            }
-            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
-                Err(skill_mutation_forbidden())
-            }
-            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
-                Err(skill_mutation_unavailable(true))
-            }
-            _ => Err(ProductSurfaceError::internal_from(
+            // Skill mutations treat a domain operation failure as an invalid
+            // request, alongside input-encode failures.
+            Some(FailureKind::OperationFailed) => Err(capability_failure_bad_request()),
+            Some(kind) => match capability_failure_http_class(*kind) {
+                CapabilityFailureHttpClass::BadRequest => Err(capability_failure_bad_request()),
+                CapabilityFailureHttpClass::Forbidden => Err(skill_mutation_forbidden()),
+                CapabilityFailureHttpClass::Unavailable => Err(skill_mutation_unavailable(true)),
+                CapabilityFailureHttpClass::Internal => Err(ProductSurfaceError::internal_from(
+                    "skill capability did not complete successfully",
+                )),
+            },
+            None => Err(ProductSurfaceError::internal_from(
                 "skill capability did not complete successfully",
             )),
         },
@@ -2151,6 +2343,46 @@ pub async fn install_extension(
     Ok(Json(response))
 }
 
+/// `POST /api/webchat/v2/extensions/register-hosted-mcp`
+///
+/// Accepts only admission inputs. Caller identity, package source, manifests,
+/// discovered tools, and credentials remain owned by the product lifecycle.
+pub async fn register_hosted_mcp_extension(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    body: Result<Json<RegisterHostedMcpBody>, JsonRejection>,
+) -> Result<Json<RegisterHostedMcpResponse>, WebUiV2HttpError> {
+    let Json(body) = body.map_err(|_| {
+        ProductSurfaceError::validation("request", ProductSurfaceValidationCode::InvalidValue)
+    })?;
+    let desired_name = bounded_hosted_mcp_name(body.desired_name)?;
+    let package_ref = extension_package_ref_for_request(
+        hosted_mcp_extension_id(&body.desired_id).and_then(|extension_id| {
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id.as_str())
+        }),
+        "desired_id",
+    )?;
+    let request = RegisterHostedMcpRequest {
+        desired_id: body.desired_id,
+        desired_name,
+        endpoint: body.endpoint,
+        auth_selection: body.auth_selection,
+    };
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller,
+        EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY,
+        request,
+    )
+    .await?;
+    extension_lifecycle_mutation_succeeded(resolution)?;
+    Ok(Json(RegisterHostedMcpResponse {
+        success: true,
+        message: "Custom MCP registered.".to_string(),
+        package_ref,
+    }))
+}
+
 /// `POST /api/webchat/v2/extensions/import` — admin-only: upload a standalone
 /// tool bundle (a zip with manifest.toml + wasm/ + schemas/ + prompts/). The
 /// bundle is unpacked, validated, written under `/system/extensions/<id>/`, and
@@ -2216,14 +2448,8 @@ fn extension_lifecycle_mutation_succeeded(
     match resolution {
         Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
         Resolution::Done(outcome) => match outcome.verdict.error_kind() {
-            Some(FailureKind::InvalidInput) => Err(ProductSurfaceError {
-                code: ProductSurfaceErrorCode::InvalidRequest,
-                kind: ProductSurfaceErrorKind::Validation,
-                status_code: 400,
-                retryable: false,
-                field: None,
-                validation_code: Some(ProductSurfaceValidationCode::InvalidValue),
-            }),
+            // Lifecycle mutations report a domain operation failure as an
+            // invalid request, without a per-field validation code.
             Some(FailureKind::OperationFailed) => Err(ProductSurfaceError {
                 code: ProductSurfaceErrorCode::InvalidRequest,
                 kind: ProductSurfaceErrorKind::Validation,
@@ -2232,13 +2458,17 @@ fn extension_lifecycle_mutation_succeeded(
                 field: None,
                 validation_code: None,
             }),
-            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
-                Err(extension_lifecycle_forbidden())
-            }
-            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
-                Err(extension_lifecycle_unavailable(true))
-            }
-            _ => Err(ProductSurfaceError::internal_from(
+            Some(kind) => match capability_failure_http_class(*kind) {
+                CapabilityFailureHttpClass::BadRequest => Err(capability_failure_bad_request()),
+                CapabilityFailureHttpClass::Forbidden => Err(extension_lifecycle_forbidden()),
+                CapabilityFailureHttpClass::Unavailable => {
+                    Err(extension_lifecycle_unavailable(true))
+                }
+                CapabilityFailureHttpClass::Internal => Err(ProductSurfaceError::internal_from(
+                    "extension lifecycle capability did not complete successfully",
+                )),
+            },
+            None => Err(ProductSurfaceError::internal_from(
                 "extension lifecycle capability did not complete successfully",
             )),
         },
@@ -2262,16 +2492,7 @@ async fn extension_install_succeeded(
                     services,
                     caller.clone(),
                     package_ref,
-                    |extension| {
-                        matches!(
-                            extension.installation_state,
-                            InstallationState::Active
-                                | InstallationState::Installed
-                                | InstallationState::Configured
-                                | InstallationState::Disabled
-                                | InstallationState::Failed
-                        )
-                    },
+                    membership_is_visible,
                 )
                 .await;
             } else if matches!(
@@ -2282,15 +2503,7 @@ async fn extension_install_succeeded(
                     services,
                     caller.clone(),
                     package_ref,
-                    |extension| {
-                        extension.needs_setup
-                            || matches!(
-                                extension.installation_state,
-                                InstallationState::Installed
-                                    | InstallationState::Configured
-                                    | InstallationState::Failed
-                            )
-                    },
+                    membership_landed_pending_setup,
                 )
                 .await;
                 match readback {
@@ -2302,19 +2515,34 @@ async fn extension_install_succeeded(
             }
         }
         Resolution::Blocked(Blocked::Auth(_)) => {
-            ensure_extension_inventory_readback(services, caller, package_ref, |extension| {
-                extension.needs_setup
-                    || matches!(
-                        extension.installation_state,
-                        InstallationState::Installed
-                            | InstallationState::Configured
-                            | InstallationState::Failed
-                    )
-            })
+            ensure_extension_inventory_readback(
+                services,
+                caller,
+                package_ref,
+                membership_landed_pending_setup,
+            )
             .await
         }
         other => extension_lifecycle_mutation_succeeded(other),
     }
+}
+
+/// The install landed: the caller can see their membership, in any resting
+/// public state. `Uninstalled` is never a listed entry, so this rejects only a
+/// projection that somehow reports the caller as a non-member.
+fn membership_is_visible(extension: &ironclaw_product::RebornExtensionInfo) -> bool {
+    matches!(
+        extension.installation_state,
+        LifecyclePublicState::Active | LifecyclePublicState::SetupNeeded
+    )
+}
+
+/// The install landed but the caller still owes setup (credentials, personal
+/// auth, or channel pairing). This is the expected readback when the mutation
+/// reported a blocked-auth or transient outcome: membership exists, readiness
+/// does not.
+fn membership_landed_pending_setup(extension: &ironclaw_product::RebornExtensionInfo) -> bool {
+    extension.installation_state == LifecyclePublicState::SetupNeeded
 }
 
 async fn ensure_extension_inventory_readback(
@@ -2610,8 +2838,10 @@ async fn invoke_product_capability_with_activity_id<T>(
 where
     T: Serialize,
 {
-    let surface =
-        ironclaw_host_api::BoundProductSurface::new(std::sync::Arc::clone(services), caller);
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
+        std::sync::Arc::clone(services),
+        caller,
+    );
     capability.invoke_on(&surface, input, activity_id).await
 }
 
@@ -2627,8 +2857,10 @@ where
 {
     let input_value = serde_json::to_value(&input).map_err(ProductSurfaceError::internal_from)?;
     let activity_id = product_surface_activity_id(&caller, command.id, &input_value)?;
-    let surface =
-        ironclaw_host_api::BoundProductSurface::new(std::sync::Arc::clone(services), caller);
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
+        std::sync::Arc::clone(services),
+        caller,
+    );
     command.invoke_on(&surface, input, activity_id).await
 }
 
@@ -2780,15 +3012,19 @@ async fn query_product_page(
     caller: ProductSurfaceCaller,
     query: RebornViewQuery,
 ) -> Result<RebornViewPage, ProductSurfaceError> {
-    let surface =
-        ironclaw_host_api::BoundProductSurface::new(std::sync::Arc::clone(services), caller);
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
+        std::sync::Arc::clone(services),
+        caller,
+    );
     let page = surface
-        .query(ironclaw_host_api::ProductSurfaceQueryRequest {
-            view_id: query.view_id,
-            input: query.params,
-            cursor: query.cursor,
-            limit: None,
-        })
+        .query(
+            ironclaw_product_contracts::surface::ProductSurfaceQueryRequest {
+                view_id: query.view_id,
+                input: query.params,
+                cursor: query.cursor,
+                limit: None,
+            },
+        )
         .await?;
     let payload = page
         .items
@@ -2959,46 +3195,30 @@ fn admin_configuration_unavailable(retryable: bool) -> ProductSurfaceError {
     }
 }
 
+fn admin_configuration_forbidden() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Forbidden,
+        kind: ProductSurfaceErrorKind::ParticipantDenied,
+        status_code: 403,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+}
+
 fn admin_configuration_done_failure(error_kind: Option<&FailureKind>) -> ProductSurfaceError {
     match error_kind {
-        Some(FailureKind::InvalidInput) => ProductSurfaceError {
-            code: ProductSurfaceErrorCode::InvalidRequest,
-            kind: ProductSurfaceErrorKind::Validation,
-            status_code: 400,
-            retryable: false,
-            field: None,
-            validation_code: Some(ProductSurfaceValidationCode::InvalidValue),
+        // Admin configuration treats a user-declined gate as forbidden, unlike
+        // the generic mutation helpers where a declined gate is an internal
+        // wiring fault — preserve that special case ahead of the classifier.
+        Some(FailureKind::GateDeclined) => admin_configuration_forbidden(),
+        Some(kind) => match capability_failure_http_class(*kind) {
+            CapabilityFailureHttpClass::BadRequest => capability_failure_bad_request(),
+            CapabilityFailureHttpClass::Forbidden => admin_configuration_forbidden(),
+            CapabilityFailureHttpClass::Unavailable => admin_configuration_unavailable(true),
+            CapabilityFailureHttpClass::Internal => ProductSurfaceError::internal(),
         },
-        Some(
-            FailureKind::Backend
-            | FailureKind::Network
-            | FailureKind::Resource
-            | FailureKind::Transient
-            | FailureKind::Unavailable,
-        ) => admin_configuration_unavailable(true),
-        Some(
-            FailureKind::Authorization | FailureKind::PolicyDenied | FailureKind::GateDeclined,
-        ) => ProductSurfaceError {
-            code: ProductSurfaceErrorCode::Forbidden,
-            kind: ProductSurfaceErrorKind::ParticipantDenied,
-            status_code: 403,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        },
-        Some(
-            FailureKind::Cancelled
-            | FailureKind::Dispatcher
-            | FailureKind::InvalidOutput
-            | FailureKind::MissingRuntime
-            | FailureKind::OperationFailed
-            | FailureKind::OutputTooLarge
-            | FailureKind::Process
-            | FailureKind::Internal
-            | FailureKind::Permanent
-            | FailureKind::Unknown(_),
-        )
-        | None => ProductSurfaceError::internal(),
+        None => ProductSurfaceError::internal(),
     }
 }
 
@@ -3695,6 +3915,35 @@ pub struct InstallExtensionBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterHostedMcpBody {
+    pub desired_id: LifecyclePackageId,
+    pub desired_name: String,
+    pub endpoint: HostedMcpEndpoint,
+    #[serde(default)]
+    pub auth_selection: Option<HostedMcpAuthSelection>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegisterHostedMcpResponse {
+    pub success: bool,
+    pub message: String,
+    pub package_ref: LifecyclePackageRef,
+}
+
+fn bounded_hosted_mcp_name(name: String) -> Result<String, ProductSurfaceError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 256 || trimmed.chars().any(char::is_control)
+    {
+        return Err(ProductSurfaceError::validation(
+            "desired_name",
+            ProductSurfaceValidationCode::InvalidValue,
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+#[derive(Debug, Deserialize)]
 pub struct RemoveExtensionBody {
     /// Client gesture id (#6520): one distinct remove gesture = one stable
     /// ActivityId; a response-lost retry replays the same gesture. Required —
@@ -3811,7 +4060,7 @@ async fn ws_drain_loop(
     let mut slot_guard = slot;
     let started_at = tokio::time::Instant::now();
     let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
-    let surface = ironclaw_host_api::BoundProductSurface::new(services, caller);
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(services, caller);
 
     let mut idle_polls = 0_u32;
     loop {
@@ -3821,12 +4070,14 @@ async fn ws_drain_loop(
                 ws_send_with_timeout(&mut socket, None, std::time::Duration::from_millis(0)).await;
             return;
         }
-        let service_call = surface.stream_events(ironclaw_host_api::ProductSurfaceStreamRequest {
-            stream_id: Some(thread_id.clone()),
-            after_cursor: after_cursor
-                .as_ref()
-                .map(|cursor| cursor.as_str().to_string()),
-        });
+        let service_call = surface.stream_events(
+            ironclaw_product_contracts::surface::ProductSurfaceStreamRequest {
+                stream_id: Some(thread_id.clone()),
+                after_cursor: after_cursor
+                    .as_ref()
+                    .map(|cursor| cursor.as_str().to_string()),
+            },
+        );
         let outcome = tokio::select! {
             biased;
             _ = slot_guard.cancelled() => {
@@ -4006,6 +4257,33 @@ async fn ws_send_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression (#6684 review): the HTTP classifier must agree with
+    /// `FailureKind::fate()` on retryability — a kind that `fate()` says is
+    /// not retryable must never ride the retryable-503 `Unavailable` class
+    /// (a caller retrying a quota/limit failure can never succeed).
+    #[test]
+    fn http_class_retryability_agrees_with_failure_kind_fate() {
+        for &kind in FailureKind::ALL {
+            if matches!(
+                capability_failure_http_class(kind),
+                CapabilityFailureHttpClass::Unavailable
+            ) {
+                // StaleSurface is the one deliberate exception: the loop
+                // handles it model-visibly, but at the HTTP seam a re-issued
+                // request races a refreshed surface and can succeed.
+                assert!(
+                    kind.is_retryable() || kind == FailureKind::StaleSurface,
+                    "{kind:?} is not retryable per fate() but classified as retryable 503"
+                );
+            }
+        }
+        // The quota kind specifically must not be the retryable 503 class.
+        assert!(matches!(
+            capability_failure_http_class(FailureKind::Resource),
+            CapabilityFailureHttpClass::Internal
+        ));
+    }
 
     #[test]
     fn sse_poll_interval_backs_off_only_after_repeated_idle_drains() {

@@ -16,13 +16,31 @@ layer = "products"
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+ironclaw_attachments = { path = "../ironclaw_attachments", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version = "0.1.0" }
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Form-encoded Slack slash-command / ssl_check payloads (PR-3 native
+# dispatcher). Already resolved workspace-wide via axum's `Form` extractor
+# (used in ironclaw_webui's OAuth callbacks), so this adds zero new compiled
+# crates to the dependency graph.
+serde_urlencoded = "0.7"
 thiserror = "2"
 tokio = { version = "1", features = ["time"] }
+url = "2"
 
 [dev-dependencies]
-ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0", features = ["test-support", "host-auth-mint"] }
-tokio = { version = "1", features = ["macros", "rt", "sync"] }
+# Property testing for the ingress boundary (#6524 workstream 9).
+proptest = "1"
+# `test-support` exposes the shared fakes used by the `adapter::tests` mod and
+# `ProtocolAuthEvidence::test_verified`, the sanctioned seam for a test standing
+# in for the host. WS1.5 removed the `host-auth-mint` opt-in: minting is now
+# witness-gated and an adapter crate holds no grant, in tests or in production.
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0", features = ["test-support"] }
+# The exported channel-adapter conformance suite moved here with
+# `ChannelAdapter` (WS1.4); `tests/channel_conformance.rs` runs it.
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0", features = ["test-support"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "test-util"] }
 uuid = { version = "1", features = ["v4", "serde"] }

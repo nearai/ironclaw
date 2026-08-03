@@ -2,8 +2,11 @@ use super::super::github as github_support;
 use async_trait::async_trait;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_host_api::{
-    CapabilityDescriptor, Decision, ExecutionContext, ExtensionId, Obligation, Obligations,
-    ResourceEstimate, SecretHandle, VendorId,
+    capability::CapabilityDescriptor,
+    decision::{Decision, Obligation, Obligations},
+    ids::{ExtensionId, SecretHandle, VendorId},
+    resource::ResourceEstimate,
+    scope::ExecutionContext,
 };
 use ironclaw_trust::TrustDecision;
 
@@ -23,7 +26,8 @@ impl GithubHarnessAuthorizer {
                 Obligation::InjectCredentialAccountOnce {
                     handle: SecretHandle::new("github_runtime_token")?,
                     provider: VendorId::new("github")?,
-                    setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+                    setup:
+                        ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
                     provider_scopes: Vec::new(),
                     requester_extension: ExtensionId::new("github")?,
                 },

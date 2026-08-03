@@ -1,10 +1,20 @@
-//! Conversation binding and session-thread contracts for IronClaw Reborn.
+//! Conversation binding and inbound-message contracts for IronClaw Reborn.
 //!
 //! This crate is the adapter-safe boundary between product/channel adapters and
 //! `ironclaw_turns::TurnCoordinator`. It resolves external actor/conversation
 //! identifiers into canonical tenant/thread/message/binding references without
 //! asking the turn coordinator to parse raw channel payloads or store message
 //! content.
+//!
+//! **It is not the transcript.** `ironclaw_threads` owns canonical threads and
+//! their message content; this crate owns the *binding* from an external
+//! conversation to one of them, plus inbound idempotency. The two used to share
+//! five type names — including a `SessionThreadService` on each side with the
+//! same `accept_inbound_message` signature and a different store behind it —
+//! which is why everything here is spelled `…Conversation…`
+//! ([`InboundConversationService`], [`AcceptedConversationMessage`],
+//! [`ConversationMessageRecord`], …). Keep it that way:
+//! `reborn_conversations_threads_attachments.rs` fails on any new shared name.
 //!
 //! Durable persistence is provided by [`ConversationStateStore`]
 //! over a [`ScopedFilesystem`](ironclaw_filesystem::ScopedFilesystem). The
@@ -18,27 +28,35 @@ mod ids;
 mod inbound;
 mod memory;
 mod state_store;
+mod stored_refs;
 mod traits;
 mod trusted_trigger;
 mod types;
 
 pub use conversation_state_store::{ConversationStateStore, RebornFilesystemConversationServices};
 pub use error::InboundTurnError;
+// `ExternalActorRef` / `ExternalConversationRef` are deliberately **not**
+// re-exported. Their one home is
+// `ironclaw_extension_contracts::external`; consumers import them from there,
+// so this crate never becomes a second import path for channel vocabulary
+// (PROPOSAL §11.2.4, and the rule `reborn_extension_contract_location_scan`
+// enforces).
 pub use ids::{
-    AdapterInstallationId, AdapterKind, ExternalActorRef, ExternalConversationIdentity,
-    ExternalConversationRef, ExternalEventId, InboundMessageContentRef,
+    AdapterInstallationId, AdapterKind, ExternalConversationIdentity, ExternalEventId,
+    InboundMessageContentRef,
 };
 pub use inbound::{InboundTurnService, trusted_trigger_fire_submitter};
 pub use memory::InMemoryConversationServices;
 pub use traits::{
-    ConversationActorPairingService, ConversationBindingService, SessionThreadService,
+    ConversationActorPairingService, ConversationBindingService, InboundConversationService,
 };
 pub use types::{
-    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
-    AcceptedInboundMessageReplay, ConditionalUnpairOutcome, ConversationBindingResolution,
-    ConversationRouteKind, ExpectedExternalActorOwner, ExternalActorBindingEpoch,
-    InboundTurnRequest, InboundTurnResponse, LinkConversationRequest, LinkedConversationBinding,
-    MessageIdempotencyStatus, ReplyTargetBinding, ResolveConversationRequest,
-    ResolveStoredReplyTargetRequest, StoredReplyTargetAccess, StoredReplyTargetBinding,
-    ThreadAccessDecision, ThreadMessageRecord, ValidateReplyTargetRequest,
+    AcceptConversationMessageRequest, AcceptedConversationMessage,
+    AcceptedConversationMessageLookup, AcceptedConversationMessageReplay, ConditionalUnpairOutcome,
+    ConversationBindingResolution, ConversationMessageRecord, ConversationRouteKind,
+    ExpectedExternalActorOwner, ExternalActorBindingEpoch, InboundTurnRequest, InboundTurnResponse,
+    LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
+    ReplyTargetBinding, ResolveConversationRequest, ResolveStoredReplyTargetRequest,
+    StoredReplyTargetAccess, StoredReplyTargetBinding, ThreadAccessDecision,
+    ValidateReplyTargetRequest,
 };

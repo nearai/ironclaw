@@ -9,9 +9,13 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, Blocked, CapabilityDisplayOutputPreview, CapabilityId, ExtensionId,
-    FailureKind, ProcessId, Resolution, ResourceEstimate, RuntimeCredentialAuthRequirement,
-    RuntimeKind, VendorId,
+    decision::RuntimeCredentialAuthRequirement,
+    dispatch::CapabilityDisplayOutputPreview,
+    ids::{ApprovalRequestId, CapabilityId, ExtensionId, ProcessId, VendorId},
+    resolution::{Blocked, Resolution},
+    resource::ResourceEstimate,
+    result_meta::FailureKind,
+    runtime::RuntimeKind,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntime, HostRuntimeError,
@@ -21,10 +25,10 @@ use ironclaw_host_runtime::{
     RuntimeInvocation, RuntimeProcessHandle, RuntimeResourceGate, RuntimeStatusRequest,
     VisibleCapabilitySurface,
 };
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
-    CapabilityFailureKind, CapabilityInputRef, CapabilityResumeToken, LoopCapabilityPort,
-    LoopHostMilestoneSink, LoopRequestBatch, LoopRunContext, RegisterProviderToolCallRequest,
+    CapabilityInputRef, CapabilityResumeToken, LoopCapabilityPort, LoopHostMilestoneSink,
+    LoopRequestBatch, LoopRunContext, RegisterProviderToolCallRequest,
 };
 
 #[tokio::test]
@@ -32,7 +36,7 @@ async fn runtime_capability_invocation_emits_dispatch_lifecycle_milestones() {
     let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
     let provider_id = ExtensionId::new("demo").expect("valid provider id");
     let milestone_sink =
-        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
     let port = runtime_capability_port(
         &capability_id,
         &provider_id,
@@ -54,14 +58,14 @@ async fn runtime_capability_invocation_emits_dispatch_lifecycle_milestones() {
     let milestones = milestone_sink.milestones();
     assert!(matches!(
         &milestones[0].kind,
-        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityInvoked {
+        ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityInvoked {
             activity_id: _,
             capability_id: actual
         } if actual == &capability_id
     ));
     assert!(matches!(
         &milestones[1].kind,
-        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityCompleted {
+        ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityCompleted {
             activity_id: _,
             capability_id: actual,
             provider,
@@ -78,7 +82,7 @@ async fn runtime_capability_emits_completion_after_result_write_retry_succeeds()
     let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
     let provider_id = ExtensionId::new("demo").expect("valid provider id");
     let milestone_sink =
-        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
     let result_writer = Arc::new(FailOnceResultWriter::default());
     let port = runtime_capability_port(
         &capability_id,
@@ -114,7 +118,7 @@ async fn runtime_capability_emits_completion_after_result_write_retry_succeeds()
     assert_eq!(milestones.len(), 2);
     assert!(matches!(
         &milestones[1].kind,
-        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityCompleted {
+        ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityCompleted {
             activity_id: _,
             capability_id: actual,
             provider,
@@ -132,7 +136,7 @@ async fn runtime_completed_display_preview_is_forwarded_to_result_writer() {
     let provider_id = ExtensionId::new("demo").expect("valid provider id");
     let result_writer = Arc::new(RecordingResultWriter::default());
     let milestone_sink =
-        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
     let port = runtime_capability_port(
         &capability_id,
         &provider_id,
@@ -218,7 +222,7 @@ async fn runtime_capability_terminal_milestone_failure_is_retryable_without_rewr
     assert_eq!(milestones.len(), 2);
     assert!(matches!(
         &milestones[1].kind,
-        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityCompleted {
+        ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityCompleted {
             activity_id: _,
             capability_id: actual,
             provider,
@@ -235,7 +239,7 @@ async fn runtime_capability_batch_returns_runtime_unavailable_as_failed_outcome(
     let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
     let provider_id = ExtensionId::new("demo").expect("valid provider id");
     let milestone_sink =
-        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
     let port = runtime_capability_port(
         &capability_id,
         &provider_id,
@@ -275,7 +279,7 @@ async fn runtime_capability_batch_returns_runtime_unavailable_as_failed_outcome(
     assert_eq!(milestones.len(), 2);
     assert!(matches!(
         &milestones[1].kind,
-        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+        ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed {
             activity_id: _,
             capability_id: actual,
             provider: Some(provider),
@@ -284,7 +288,7 @@ async fn runtime_capability_batch_returns_runtime_unavailable_as_failed_outcome(
             ..
         } if actual == &capability_id
             && provider == &provider_id
-            && reason_kind == &CapabilityFailureKind::Unavailable
+            && reason_kind == &FailureKind::Unavailable
     ));
 }
 
@@ -293,7 +297,7 @@ async fn runtime_capability_batch_continues_after_runtime_failure_outcome() {
     let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
     let provider_id = ExtensionId::new("demo").expect("valid provider id");
     let milestone_sink =
-        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
     let port = runtime_capability_port(
         &capability_id,
         &provider_id,
@@ -376,7 +380,7 @@ async fn runtime_capability_batch_continues_after_runtime_failure_outcome() {
     assert_eq!(milestones.len(), 4);
     assert!(matches!(
         &milestones[1].kind,
-        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+        ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed {
             capability_id: actual,
             provider: Some(provider),
             runtime: Some(RuntimeKind::FirstParty),
@@ -384,11 +388,11 @@ async fn runtime_capability_batch_continues_after_runtime_failure_outcome() {
             ..
         } if actual == &capability_id
             && provider == &provider_id
-            && reason_kind == &CapabilityFailureKind::Unavailable
+            && reason_kind == &FailureKind::Unavailable
     ));
     assert!(matches!(
         &milestones[3].kind,
-        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityCompleted {
+        ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityCompleted {
             capability_id: actual,
             provider,
             runtime: RuntimeKind::FirstParty,
@@ -403,10 +407,10 @@ async fn runtime_capability_failed_and_unknown_outcomes_emit_failure_milestones(
         (
             RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
                 CapabilityId::new("demo.echo").expect("valid capability id"),
-                RuntimeFailureKind::InvalidInput,
+                FailureKind::InputEncode,
                 Some("invalid input".to_string()),
             )),
-            CapabilityFailureKind::InvalidInput,
+            FailureKind::InputEncode,
         ),
         (
             RuntimeCapabilityOutcome::Unknown(RuntimeCapabilityUnknown {
@@ -414,7 +418,10 @@ async fn runtime_capability_failed_and_unknown_outcomes_emit_failure_milestones(
                 kind: "custom_failure".to_string(),
                 message: Some("custom failure".to_string()),
             }),
-            capability_failure_kind("custom_failure").expect("valid custom failure kind"),
+            // Unrecognized legacy open-set tag: the closed vocabulary's total
+            // `from_tag` fallback lands on the non-retryable `Unclassified`
+            // sink.
+            FailureKind::Unclassified,
         ),
     ];
 
@@ -422,7 +429,7 @@ async fn runtime_capability_failed_and_unknown_outcomes_emit_failure_milestones(
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
         let milestone_sink =
-            Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+            Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
         let port = runtime_capability_port(
             &capability_id,
             &provider_id,
@@ -451,7 +458,7 @@ async fn runtime_capability_failed_and_unknown_outcomes_emit_failure_milestones(
         assert_eq!(milestones.len(), 2);
         assert!(matches!(
             &milestones[1].kind,
-            ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+            ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed {
                 activity_id: _,
                 capability_id: actual,
                 provider: Some(provider),
@@ -469,7 +476,7 @@ async fn runtime_capability_mismatched_outcome_does_not_emit_terminal_milestone(
     let provider_id = ExtensionId::new("demo").expect("valid provider id");
     let other_capability_id = CapabilityId::new("demo.other").expect("valid capability id");
     let milestone_sink =
-        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
     let port = runtime_capability_port(
         &capability_id,
         &provider_id,
@@ -502,7 +509,7 @@ async fn runtime_capability_mismatched_outcome_does_not_emit_terminal_milestone(
     assert_eq!(milestones.len(), 1);
     assert!(matches!(
         &milestones[0].kind,
-        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityInvoked {
+        ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityInvoked {
             activity_id: _,
             capability_id: actual
         } if actual == &capability_id
@@ -540,7 +547,7 @@ async fn runtime_capability_suspension_outcomes_do_not_emit_terminal_lifecycle_m
     for outcome in cases {
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
         let milestone_sink =
-            Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+            Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
         let port = runtime_capability_port(
             &capability_id,
             &provider_id,
@@ -565,7 +572,7 @@ async fn runtime_capability_suspension_outcomes_do_not_emit_terminal_lifecycle_m
         assert_eq!(milestones.len(), 1);
         assert!(matches!(
             &milestones[0].kind,
-            ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityInvoked {
+            ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityInvoked {
                 activity_id: _,
                 capability_id: actual
             } if actual == &capability_id
@@ -602,7 +609,7 @@ async fn runtime_auth_gate_forwards_credential_requirements() {
             ))],
         )),
         Arc::new(RecordingResultWriter::default()),
-        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default()),
+        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default()),
         "thread-runtime-auth-requirement",
     )
     .await;
@@ -683,7 +690,7 @@ async fn auth_resume_uses_replay_input_without_resolving_stale_input_ref() {
         )])),
         resolver.clone(),
         Arc::new(RecordingResultWriter::default()),
-        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default()),
+        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default()),
     )
     .with_replay_payload_store(replay_store.clone())
     .port_for_run_context(run_context);
@@ -770,7 +777,7 @@ async fn denied_auth_resume_terminalizes_through_runtime_without_dispatch() {
             Ok(RuntimeCapabilityOutcome::Failed(
                 RuntimeCapabilityFailure::new(
                     capability_id.clone(),
-                    RuntimeFailureKind::GateDeclined,
+                    FailureKind::GateDeclined,
                     Some("auth gate denied by user".to_string()),
                 ),
             )),
@@ -778,7 +785,7 @@ async fn denied_auth_resume_terminalizes_through_runtime_without_dispatch() {
     );
     let result_writer = Arc::new(RecordingResultWriter::default());
     let milestone_sink =
-        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
     let port = runtime_capability_port(
         &capability_id,
         &provider_id,
@@ -820,7 +827,7 @@ async fn denied_auth_resume_terminalizes_through_runtime_without_dispatch() {
     assert!(
         !milestone_sink.milestones().iter().any(|milestone| matches!(
             &milestone.kind,
-            ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed { .. }
+            ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed { .. }
         )),
         "transient decline failure must not record a terminal milestone"
     );
@@ -850,10 +857,10 @@ async fn denied_auth_resume_terminalizes_through_runtime_without_dispatch() {
     assert!(failure_previews[0].2.contains("denied"));
     assert!(milestone_sink.milestones().iter().any(|milestone| matches!(
         &milestone.kind,
-        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+        ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed {
             activity_id,
             capability_id: failed_capability_id,
-            reason_kind: CapabilityFailureKind::GateDeclined,
+            reason_kind: FailureKind::GateDeclined,
             ..
         } if *activity_id == ironclaw_turns::CapabilityActivityId::from_uuid(
             expected_invocation_id.as_uuid()
@@ -862,7 +869,7 @@ async fn denied_auth_resume_terminalizes_through_runtime_without_dispatch() {
 
     let replay = LoopRequest {
         activity_id,
-        surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion::new(
+        surface_version: ironclaw_loop_contracts::CapabilitySurfaceVersion::new(
             "surface-after-removal",
         )
         .expect("valid surface version"),
@@ -902,7 +909,7 @@ async fn denied_auth_resume_rejects_mismatched_optional_token_before_runtime() {
         &provider_id,
         runtime.clone(),
         Arc::new(RecordingResultWriter::default()),
-        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default()),
+        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default()),
         "thread-auth-decline-token-mismatch",
     )
     .await;
@@ -952,12 +959,17 @@ async fn host_runtime_default_auth_decline_fails_closed_as_unavailable() {
     assert!(matches!(error, HostRuntimeError::Unavailable { .. }));
 }
 
+/// The unified `FailureKind` vocabulary is closed and `from_tag` is total, so
+/// a wild/unsafe unknown-outcome tag no longer aborts the run with an internal
+/// "could not be represented" host error — it lands in the non-retryable
+/// `Unclassified` sink, emits the failure milestone, and returns a
+/// model-visible failed resolution.
 #[tokio::test]
-async fn runtime_capability_unknown_outcome_with_invalid_kind_does_not_emit_failure_milestone() {
+async fn runtime_capability_unknown_outcome_with_wild_kind_maps_to_unclassified_failure() {
     let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
     let provider_id = ExtensionId::new("demo").expect("valid provider id");
     let milestone_sink =
-        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
     let port = runtime_capability_port(
         &capability_id,
         &provider_id,
@@ -980,19 +992,29 @@ async fn runtime_capability_unknown_outcome_with_invalid_kind_does_not_emit_fail
     )
     .await;
 
-    let error = invoke_visible_runtime_capability(&port)
+    let outcome = invoke_visible_runtime_capability(&port)
         .await
-        .expect_err("invalid unknown kind is rejected");
+        .expect("wild unknown-outcome kind becomes a model-visible failure");
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
-    let milestones = milestone_sink.milestones();
-    assert_eq!(milestones.len(), 1);
     assert!(matches!(
-        &milestones[0].kind,
-        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityInvoked {
+        &outcome,
+        Resolution::Done(o)
+            if o.verdict.error_kind() == Some(&FailureKind::Unclassified)
+    ));
+    let milestones = milestone_sink.milestones();
+    assert_eq!(milestones.len(), 2);
+    assert!(matches!(
+        &milestones[1].kind,
+        ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed {
             activity_id: _,
-            capability_id: actual
+            capability_id: actual,
+            provider: Some(provider),
+            runtime: Some(RuntimeKind::FirstParty),
+            reason_kind,
+            ..
         } if actual == &capability_id
+            && provider == &provider_id
+            && reason_kind == &FailureKind::Unclassified
     ));
 }
 
@@ -1001,7 +1023,7 @@ async fn runtime_capability_unavailable_returns_failed_outcome_and_emits_failure
     let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
     let provider_id = ExtensionId::new("demo").expect("valid provider id");
     let milestone_sink =
-        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
     let port = runtime_capability_port(
         &capability_id,
         &provider_id,
@@ -1031,7 +1053,7 @@ async fn runtime_capability_unavailable_returns_failed_outcome_and_emits_failure
     assert_eq!(milestones.len(), 2);
     assert!(matches!(
         &milestones[1].kind,
-        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+        ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed {
             activity_id: _,
             capability_id: actual,
             provider: Some(provider),
@@ -1040,7 +1062,7 @@ async fn runtime_capability_unavailable_returns_failed_outcome_and_emits_failure
             ..
         } if actual == &capability_id
             && provider == &provider_id
-            && reason_kind == &CapabilityFailureKind::Unavailable
+            && reason_kind == &FailureKind::Unavailable
     ));
 }
 
@@ -1049,7 +1071,7 @@ async fn runtime_capability_invalid_request_preserves_host_error_and_emits_failu
     let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
     let provider_id = ExtensionId::new("demo").expect("valid provider id");
     let milestone_sink =
-        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
     let port = runtime_capability_port(
         &capability_id,
         &provider_id,
@@ -1075,7 +1097,7 @@ async fn runtime_capability_invalid_request_preserves_host_error_and_emits_failu
     assert_eq!(milestones.len(), 2);
     assert!(matches!(
         &milestones[1].kind,
-        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+        ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed {
             activity_id: _,
             capability_id: actual,
             provider: Some(provider),
@@ -1084,7 +1106,7 @@ async fn runtime_capability_invalid_request_preserves_host_error_and_emits_failu
             ..
         } if actual == &capability_id
             && provider == &provider_id
-            && reason_kind.as_str() == AgentLoopHostErrorKind::InvalidInvocation.as_str()
+            && reason_kind == &FailureKind::InputEncode
     ));
 }
 
@@ -1171,7 +1193,7 @@ async fn approval_resume_metadata_invokes_runtime_resume_with_original_invocatio
         )])),
         Arc::new(InputRefEchoResolver),
         Arc::new(RecordingResultWriter::default()),
-        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default()),
+        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default()),
     )
     .with_replay_payload_store(replay_store.clone())
     .port_for_run_context(run_context);
@@ -1200,7 +1222,7 @@ async fn approval_resume_metadata_invokes_runtime_resume_with_original_invocatio
     // The fresh gate raise must have persisted the host-private replay payload
     // keyed by the invocation id encoded in the resume token — the loop-facing
     // outcome deliberately no longer carries raw input/estimate.
-    let raised_invocation_id = ironclaw_host_api::InvocationId::parse(resume_token.as_str())
+    let raised_invocation_id = ironclaw_host_api::ids::InvocationId::parse(resume_token.as_str())
         .expect("resume token carries original invocation id");
     let persisted = replay_store
         .get(raised_invocation_id)
@@ -1225,7 +1247,7 @@ async fn approval_resume_metadata_invokes_runtime_resume_with_original_invocatio
             activity_id: first_invocation.activity_id,
             surface_version: surface.version,
             capability_id: capability_id.clone(),
-            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new(
+            input_ref: ironclaw_loop_contracts::CapabilityInputRef::new(
                 "input:approval-resume-replayed-call",
             )
             .expect("valid input ref"),
@@ -1240,8 +1262,9 @@ async fn approval_resume_metadata_invokes_runtime_resume_with_original_invocatio
     let resume_requests = runtime.resume_requests();
     assert_eq!(resume_requests.len(), 1);
     assert_eq!(resume_requests[0].1, approval_request_id);
-    let resume_invocation_id = ironclaw_host_api::InvocationId::parse(resume.resume_token.as_str())
-        .expect("resume token carries original invocation id");
+    let resume_invocation_id =
+        ironclaw_host_api::ids::InvocationId::parse(resume.resume_token.as_str())
+            .expect("resume token carries original invocation id");
     assert_eq!(resume_requests[0].0.invocation_id, resume_invocation_id);
     assert_eq!(
         resume_requests[0].0.resource_scope.invocation_id,
@@ -1295,7 +1318,7 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
         )])),
         Arc::new(InputRefEchoResolver),
         Arc::new(RecordingResultWriter::default()),
-        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default()),
+        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default()),
     )
     .with_replay_payload_store(replay_store.clone())
     .port_for_run_context(run_context);
@@ -1318,7 +1341,7 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
             .as_str(),
     )
     .expect("valid resume token");
-    let raised_invocation_id = ironclaw_host_api::InvocationId::parse(resume_token.as_str())
+    let raised_invocation_id = ironclaw_host_api::ids::InvocationId::parse(resume_token.as_str())
         .expect("resume token carries original invocation id");
     let persisted = replay_store
         .get(raised_invocation_id)
@@ -1366,7 +1389,7 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
                 disposition: None,
                 // Carry the prior approval so the port restores the original
                 // correlation identifier onto the invocation context.
-                prior_approval: Some(ironclaw_turns::run_profile::AuthResumeApprovalIdentity {
+                prior_approval: Some(ironclaw_loop_contracts::AuthResumeApprovalIdentity {
                     approval_request_id,
                     correlation_id: original_correlation_id,
                 }),
@@ -1382,7 +1405,7 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
     // Auth re-dispatch must reuse the original invocation identifier so that
     // fingerprinted approval leases (scoped to the original invocation) remain matchable.
     let original_invocation_id =
-        ironclaw_host_api::InvocationId::parse(resume.resume_token.as_str())
+        ironclaw_host_api::ids::InvocationId::parse(resume.resume_token.as_str())
             .expect("resume token carries original invocation id");
     let auth_resume_requests = runtime.auth_resume_requests();
     assert_eq!(auth_resume_requests.len(), 1);
@@ -1419,7 +1442,7 @@ async fn approval_resume_host_error_returns_failed_outcome_and_emits_failure_mil
         vec![Err(HostRuntimeError::unavailable("runtime unavailable"))],
     ));
     let milestone_sink =
-        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
     let mut context = execution_context("thread-approval-resume-host-error");
     let run_context = loop_run_context(&context).await;
     let loop_driver_extension =
@@ -1464,7 +1487,7 @@ async fn approval_resume_host_error_returns_failed_outcome_and_emits_failure_mil
                 .as_str(),
         )
         .expect("valid resume token"),
-        correlation_id: ironclaw_host_api::CorrelationId::new(),
+        correlation_id: ironclaw_host_api::ids::CorrelationId::new(),
         input_ref: first_invocation.input_ref.clone(),
     };
 
@@ -1497,7 +1520,7 @@ async fn approval_resume_host_error_returns_failed_outcome_and_emits_failure_mil
     assert_eq!(milestones.len(), 3);
     assert!(matches!(
         &milestones[2].kind,
-        ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+        ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed {
             capability_id: actual,
             provider: Some(provider),
             runtime: Some(RuntimeKind::FirstParty),
@@ -1505,7 +1528,7 @@ async fn approval_resume_host_error_returns_failed_outcome_and_emits_failure_mil
             ..
         } if actual == &capability_id
             && provider == &provider_id
-            && reason_kind == &CapabilityFailureKind::Unavailable
+            && reason_kind == &FailureKind::Unavailable
     ));
 }
 
@@ -1838,11 +1861,11 @@ impl HostRuntime for QueuedHostRuntime {
 #[derive(Default)]
 struct FailOnceTerminalMilestoneSink {
     failures: AtomicUsize,
-    milestones: Mutex<Vec<ironclaw_turns::run_profile::LoopHostMilestone>>,
+    milestones: Mutex<Vec<ironclaw_loop_contracts::LoopHostMilestone>>,
 }
 
 impl FailOnceTerminalMilestoneSink {
-    fn milestones(&self) -> Vec<ironclaw_turns::run_profile::LoopHostMilestone> {
+    fn milestones(&self) -> Vec<ironclaw_loop_contracts::LoopHostMilestone> {
         self.milestones.lock().expect("milestones lock").clone()
     }
 }
@@ -1851,12 +1874,12 @@ impl FailOnceTerminalMilestoneSink {
 impl LoopHostMilestoneSink for FailOnceTerminalMilestoneSink {
     async fn publish_loop_milestone(
         &self,
-        milestone: ironclaw_turns::run_profile::LoopHostMilestone,
+        milestone: ironclaw_loop_contracts::LoopHostMilestone,
     ) -> Result<(), AgentLoopHostError> {
         let is_terminal = matches!(
             &milestone.kind,
-            ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityCompleted { .. }
-                | ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed { .. }
+            ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityCompleted { .. }
+                | ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed { .. }
         );
         if is_terminal && self.failures.fetch_add(1, Ordering::SeqCst) == 0 {
             return Err(AgentLoopHostError::new(

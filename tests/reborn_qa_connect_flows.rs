@@ -16,10 +16,11 @@ mod parity_qa_support;
 mod reborn_support;
 mod support;
 
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_host_runtime::WRITE_FILE_CAPABILITY_ID;
+use ironclaw_loop_contracts::LoopHostMilestoneKind;
 use ironclaw_loop_host::HostManagedModelResponse;
-use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
+use ironclaw_turns::TurnStatus;
 use parity_qa_support::binary_e2e::{RebornBinaryE2EHarness, assert_milestone_order};
 use parity_qa_support::model_replay::{
     RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
@@ -85,7 +86,7 @@ async fn run_connect_flow(case: ConnectFlowCase) {
     );
 
     let resolved = harness
-        .approve_and_resume_local_dev_gate(submitted.run_id)
+        .approve_and_resume_standalone_gate(submitted.run_id)
         .await
         .expect("approve connect auth gate");
     assert_eq!(resolved, gate_ref);

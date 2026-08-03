@@ -3,8 +3,8 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{Resolution, ResolutionBatch};
-use ironclaw_turns::run_profile::{
+use ironclaw_host_api::resolution::{Resolution, ResolutionBatch};
+use ironclaw_loop_contracts::{
     AgentLoopHostError, CapabilityCallCandidate, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
     ProviderToolCall, ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
@@ -29,7 +29,7 @@ impl LoopCapabilityPort for RecordingDelegatingCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        request: ironclaw_turns::run_profile::RegisterProviderToolCallRequest,
+        request: ironclaw_loop_contracts::RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         self.inner.register_provider_tool_call(request).await
     }

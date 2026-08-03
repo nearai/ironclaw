@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     AgentLoopHostErrorKind, LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelPolicyGuard,
     LoopRunContext, LoopSafeSummary, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput,
     SystemInferenceError, SystemInferencePort, SystemInferenceRequest, SystemInferenceResponse,
@@ -151,10 +151,12 @@ where
                 },
             ],
             surface_version: None,
+            fallback_index: 0,
             resolved_model_route: self.run_context.resolved_model_route.clone(),
             run_id: self.run_context.run_id,
             turn_id: self.run_context.turn_id,
         };
+        let requested_fallback_index = model_request.fallback_index;
 
         let response = tokio::time::timeout(
             std::time::Duration::from_millis(request.deadline_ms),
@@ -163,6 +165,12 @@ where
         .await
         .map_err(|_| SystemInferenceError::Timeout)?
         .map_err(|error| map_model_error(error.kind))?;
+
+        if response.effective_fallback_index != Some(requested_fallback_index) {
+            return Err(SystemInferenceError::Failed {
+                safe_summary: safe("system inference model route evidence is invalid"),
+            });
+        }
 
         let output_text = match response.output {
             ParentLoopOutput::AssistantReply(reply) => reply.content,
@@ -184,7 +192,10 @@ where
 fn map_model_error(kind: HostManagedModelErrorKind) -> SystemInferenceError {
     let safe_summary = match kind {
         HostManagedModelErrorKind::Cancelled => return SystemInferenceError::Cancelled,
-        HostManagedModelErrorKind::BudgetExceeded => "system inference budget exceeded",
+        HostManagedModelErrorKind::BudgetExceeded
+        | HostManagedModelErrorKind::SpendBudgetExceeded => "system inference budget exceeded",
+        HostManagedModelErrorKind::ContextOverflow => "system inference context exceeded",
+        HostManagedModelErrorKind::OutputTruncated => "system inference output truncated",
         HostManagedModelErrorKind::BudgetAccountingFailed => {
             "system inference resource accounting unavailable"
         }
@@ -204,11 +215,17 @@ fn map_model_error(kind: HostManagedModelErrorKind) -> SystemInferenceError {
 fn map_gateway_error(error: LoopModelGatewayError) -> SystemInferenceError {
     match error.kind {
         AgentLoopHostErrorKind::Cancelled => SystemInferenceError::Cancelled,
-        AgentLoopHostErrorKind::BudgetExceeded | AgentLoopHostErrorKind::BudgetApprovalRequired => {
-            SystemInferenceError::Failed {
-                safe_summary: safe("system inference budget exceeded"),
-            }
-        }
+        AgentLoopHostErrorKind::BudgetExceeded
+        | AgentLoopHostErrorKind::SpendBudgetExceeded
+        | AgentLoopHostErrorKind::BudgetApprovalRequired => SystemInferenceError::Failed {
+            safe_summary: safe("system inference budget exceeded"),
+        },
+        AgentLoopHostErrorKind::ContextOverflow => SystemInferenceError::Failed {
+            safe_summary: safe("system inference context exceeded"),
+        },
+        AgentLoopHostErrorKind::OutputTruncated => SystemInferenceError::Failed {
+            safe_summary: safe("system inference output truncated"),
+        },
         AgentLoopHostErrorKind::BudgetAccountingFailed => SystemInferenceError::Failed {
             safe_summary: safe("system inference resource accounting unavailable"),
         },
@@ -245,16 +262,14 @@ fn system_inference_ref(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
-    use ironclaw_turns::{
-        RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
-        run_profile::{
-            AgentLoopHostErrorKind, InMemoryRunProfileResolver, LoopModelBudgetAccountant,
-            LoopModelGatewayError, LoopModelPolicyGuard, ModelWorkOutcome, ModelWorkRequest,
-            NoOpBudgetAccountant, NoOpPolicyGuard, SystemInferenceIdentity, SystemInferenceTaskId,
-            SystemPromptSource, SystemTaskKind,
-        },
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_loop_contracts::{
+        AgentLoopHostErrorKind, InMemoryRunProfileResolver, LoopModelBudgetAccountant,
+        LoopModelGatewayError, LoopModelPolicyGuard, ModelWorkOutcome, ModelWorkRequest,
+        NoOpBudgetAccountant, NoOpPolicyGuard, RunProfileResolutionRequest, RunProfileResolver,
+        SystemInferenceIdentity, SystemInferenceTaskId, SystemPromptSource, SystemTaskKind,
     };
+    use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
     use std::sync::Mutex;
     use tokio::sync::Notify;
 
@@ -356,7 +371,7 @@ mod tests {
         ) -> Result<(), LoopModelGatewayError> {
             assert!(matches!(
                 request.kind,
-                ironclaw_turns::run_profile::ModelWorkKind::SystemInference { .. }
+                ironclaw_loop_contracts::ModelWorkKind::SystemInference { .. }
             ));
             Err(LoopModelGatewayError::new(
                 AgentLoopHostErrorKind::PolicyDenied,
@@ -377,7 +392,7 @@ mod tests {
         ) -> Result<(), LoopModelGatewayError> {
             assert!(matches!(
                 request.kind,
-                ironclaw_turns::run_profile::ModelWorkKind::SystemInference { .. }
+                ironclaw_loop_contracts::ModelWorkKind::SystemInference { .. }
             ));
             Err(LoopModelGatewayError::new(
                 AgentLoopHostErrorKind::BudgetExceeded,
@@ -411,7 +426,7 @@ mod tests {
         ) -> Result<(), LoopModelGatewayError> {
             assert!(matches!(
                 request.kind,
-                ironclaw_turns::run_profile::ModelWorkKind::SystemInference { .. }
+                ironclaw_loop_contracts::ModelWorkKind::SystemInference { .. }
             ));
             *self.pre_called.lock().expect("lock") = true;
             Ok(())
@@ -425,7 +440,7 @@ mod tests {
         ) -> Result<(), LoopModelGatewayError> {
             assert!(matches!(
                 request.kind,
-                ironclaw_turns::run_profile::ModelWorkKind::SystemInference { .. }
+                ironclaw_loop_contracts::ModelWorkKind::SystemInference { .. }
             ));
             self.post_outcomes.lock().expect("lock").push(outcome);
             Ok(())
@@ -503,6 +518,28 @@ mod tests {
                 .content_ref
                 .as_str()
                 .starts_with("msg:system-inference.input.")
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_mismatched_gateway_route_evidence_before_using_output() {
+        let context = test_run_context("system-inference-route-mismatch").await;
+        let gateway = Arc::new(RecordingGateway::new(
+            crate::HostManagedModelResponse::assistant_reply("must not be accepted")
+                .with_effective_fallback_index(1),
+        ));
+        let port = ModelGatewayBackedSystemInferencePort::new(gateway, context);
+
+        let error = port
+            .call_system_inference(system_request("transcript"))
+            .await
+            .expect_err("mismatched route evidence must fail closed");
+
+        assert_eq!(
+            error,
+            SystemInferenceError::Failed {
+                safe_summary: safe("system inference model route evidence is invalid"),
+            }
         );
     }
 

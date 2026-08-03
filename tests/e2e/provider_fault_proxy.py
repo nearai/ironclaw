@@ -107,6 +107,38 @@ PROVIDER_FAULT_PROFILES = {
         body=_json_error(503, "Service Unavailable"),
         headers={"Retry-After": "1"},
     ),
+    # Provider-originated credential faults. A bare http_401 says only
+    # "rejected"; the RFC 6750 challenge distinguishes an expired token from
+    # one that lacks the required scope. Missing credentials are intentionally
+    # absent: host auth preflight blocks them before provider dispatch.
+    "expired_credential": ProviderFaultProfile(
+        name="expired_credential",
+        action="respond",
+        status=401,
+        body=_json_error(401, "Bad credentials"),
+        headers={
+            "WWW-Authenticate": (
+                'Bearer realm="provider", error="invalid_token", '
+                'error_description="The access token expired"'
+            )
+        },
+    ),
+    # Authenticated, but not for this operation. The scope headers mirror what
+    # GitHub returns, so a client can see both what it has and what it needed.
+    "wrong_scope": ProviderFaultProfile(
+        name="wrong_scope",
+        action="respond",
+        status=403,
+        body=_json_error(403, "Resource not accessible by integration"),
+        headers={
+            "WWW-Authenticate": (
+                'Bearer realm="provider", error="insufficient_scope", '
+                'scope="repo"'
+            ),
+            "X-Accepted-OAuth-Scopes": "repo",
+            "X-OAuth-Scopes": "read:user",
+        },
+    ),
     "timeout": ProviderFaultProfile(
         name="timeout",
         action="delay_before_disconnect",
@@ -214,6 +246,10 @@ class ProviderFaultProxy:
         return {
             "rules": [dict(rule) for rule in self._rules],
             "requests": [dict(request) for request in self._requests],
+            # A delay profile parks a task that aborts its request later. One
+            # left running past a reset keeps firing during whatever case runs
+            # next, so the count is part of "is this proxy actually clean".
+            "pending_faults": len(self._delayed_requests),
         }
 
     def _take_rule(self, method: str, path: str) -> dict | None:
@@ -233,6 +269,24 @@ class ProviderFaultProxy:
         if authorization is None:
             return None
         return hashlib.sha256(authorization.encode()).hexdigest()[:12]
+
+    @staticmethod
+    def _issued_bearer_fingerprint(response: web.Response) -> str | None:
+        try:
+            payload = json.loads(response.body or b"")
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        authenticated_user = payload.get("authed_user")
+        access_token = (
+            authenticated_user.get("access_token")
+            if isinstance(authenticated_user, dict)
+            else None
+        ) or payload.get("access_token")
+        if not isinstance(access_token, str) or not access_token:
+            return None
+        return hashlib.sha256(f"Bearer {access_token}".encode()).hexdigest()[:12]
 
     @staticmethod
     def _abort_transport(request: web.Request) -> None:
@@ -284,6 +338,7 @@ class ProviderFaultProxy:
             "path": request.path,
             "query": request.query_string,
             "credential_fingerprint": self._credential_fingerprint(request.headers),
+            "issued_credential_fingerprint": None,
             "body_sha256": hashlib.sha256(body).hexdigest(),
             "fault": None if rule is None else rule["name"],
             "forwarded": False,
@@ -316,6 +371,9 @@ class ProviderFaultProxy:
         upstream = await self._forward(request, body)
         entry["forwarded"] = True
         entry["upstream_status"] = upstream.status
+        entry["issued_credential_fingerprint"] = self._issued_bearer_fingerprint(
+            upstream
+        )
 
         if rule is not None and rule["action"] == "disconnect_after_forward":
             self._abort_transport(request)

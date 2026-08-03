@@ -32,8 +32,9 @@ from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 import httpx
+import pytest
 from playwright.async_api import expect
-from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
+from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, capture_native_dialogs
 from reborn_webui_harness import (
     USER_ID,
     create_thread as _create_thread,
@@ -104,6 +105,78 @@ async def _assert_readable(locator, label: str) -> dict[str, list[float]]:
     return colors
 
 
+async def _typography_metrics(page, selectors: dict[str, str]) -> dict:
+    return await page.evaluate(
+        """selectors => {
+          const semanticSize = getComputedStyle(document.documentElement)
+            .getPropertyValue("--text-ui").trim();
+          if (!semanticSize) {
+            throw new Error("Semantic typography token --text-ui is not defined");
+          }
+          const probe = document.createElement("span");
+          probe.style.cssText =
+            "position:absolute;visibility:hidden;font-size:var(--text-ui)";
+          document.body.append(probe);
+          const expectedFontSize = getComputedStyle(probe).fontSize;
+          probe.remove();
+
+          const controls = Object.fromEntries(
+            Object.entries(selectors).map(([name, selector]) => {
+              const element = document.querySelector(selector);
+              if (!element) {
+                throw new Error(`Typography target not found: ${name} (${selector})`);
+              }
+              const style = getComputedStyle(element);
+              const rect = element.getBoundingClientRect();
+              return [name, {
+                className: element.className,
+                clientHeight: element.clientHeight,
+                clientWidth: element.clientWidth,
+                expectedFontSize,
+                fontFamily: style.fontFamily,
+                fontSize: style.fontSize,
+                height: rect.height,
+                semanticSize,
+                scrollHeight: element.scrollHeight,
+                scrollWidth: element.scrollWidth,
+              }];
+            })
+          );
+          return {
+            controls,
+            rootFontSize: getComputedStyle(document.documentElement).fontSize,
+            viewport: {
+              documentWidth: document.documentElement.scrollWidth,
+              viewportWidth: window.innerWidth,
+            },
+          };
+        }""",
+        selectors,
+    )
+
+
+def _assert_control_typography(
+    metrics: dict,
+    label: str,
+    *,
+    expected_height: float | None = None,
+) -> None:
+    assert metrics["fontSize"] == metrics["expectedFontSize"], (
+        f"{label} font size was {metrics['fontSize']}, "
+        f"expected semantic --text-ui size {metrics['expectedFontSize']}: {metrics}"
+    )
+    assert metrics["scrollWidth"] <= metrics["clientWidth"] + 1, (
+        f"{label} clipped horizontally: {metrics}"
+    )
+    assert metrics["scrollHeight"] <= metrics["clientHeight"] + 1, (
+        f"{label} clipped vertically: {metrics}"
+    )
+    if expected_height is not None:
+        assert abs(metrics["height"] - expected_height) <= 1, (
+            f"{label} height was {metrics['height']}px, expected {expected_height}px"
+        )
+
+
 async def _wait_for_automation_named(
     client: httpx.AsyncClient,
     base_url: str,
@@ -131,57 +204,130 @@ async def _wait_for_automation_named(
         ) from None
 
 
-async def _install_fake_v2_event_source(page) -> None:
-    await page.add_init_script(
-        """
+async def _install_fake_v2_event_stream(page) -> None:
+    script = """
         (() => {
+          const nativeFetch = window.fetch.bind(window);
+          const encoder = new TextEncoder();
+          const expectedAuthorization = __EXPECTED_AUTHORIZATION__;
           let activeStream = null;
+          let holdNextConnection = false;
+
           const currentStream = () => {
-            if (!activeStream || activeStream.readyState === 2) {
-              throw new Error("no EventSource stream is open");
+            if (!activeStream || activeStream.closed) {
+              throw new Error("no event stream is open");
             }
             return activeStream;
           };
-          class FakeEventSource extends EventTarget {
-            constructor(url) {
-              super();
-              this.url = url;
-              this.readyState = 0;
-              if (activeStream && activeStream.readyState !== 2) {
-                activeStream.close();
+
+          const closeStream = (stream, error = null) => {
+            if (!stream || stream.closed) return;
+            stream.closed = true;
+            if (stream.controller) {
+              if (error) {
+                stream.controller.error(error);
+              } else {
+                stream.controller.close();
               }
-              activeStream = this;
-              setTimeout(() => {
-                if (activeStream !== this || this.readyState === 2) return;
-                this.readyState = 1;
-                if (typeof this.onopen === "function") this.onopen(new Event("open"));
-              }, 0);
             }
-            close() {
-              this.readyState = 2;
-              if (activeStream === this) activeStream = null;
+            if (activeStream === stream) activeStream = null;
+          };
+
+          const openStreamResponse = (signal) => {
+            const stream = { closed: false, controller: null };
+            const body = new ReadableStream({
+              start(controller) {
+                stream.controller = controller;
+              },
+              cancel() {
+                stream.closed = true;
+                if (activeStream === stream) activeStream = null;
+              },
+            });
+            if (activeStream && !activeStream.closed) {
+              closeStream(activeStream);
             }
-          }
-          window.EventSource = FakeEventSource;
+            activeStream = stream;
+            signal?.addEventListener(
+              "abort",
+              () => closeStream(stream),
+              { once: true },
+            );
+            return new Response(body, {
+              status: 200,
+              headers: { "content-type": "text/event-stream" },
+            });
+          };
+
+          window.fetch = async (input, init = {}) => {
+            const request = new Request(input, init);
+            const url = new URL(request.url, window.location.href);
+            if (!url.pathname.endsWith("/events")) {
+              return nativeFetch(input, init);
+            }
+            if (url.searchParams.has("token")) {
+              return new Response("", { status: 400 });
+            }
+            if (request.headers.get("Authorization") !== expectedAuthorization) {
+              return new Response("", { status: 401 });
+            }
+            if (!holdNextConnection) {
+              return openStreamResponse(request.signal);
+            }
+            return new Promise((resolve, reject) => {
+              const stream = {
+                closed: false,
+                controller: null,
+                resolve,
+                reject,
+              };
+              activeStream = stream;
+              request.signal?.addEventListener(
+                "abort",
+                () => {
+                  if (stream.closed) return;
+                  stream.closed = true;
+                  if (activeStream === stream) activeStream = null;
+                  reject(new DOMException("Aborted", "AbortError"));
+                },
+                { once: true },
+              );
+            });
+          };
+
           window.__emitV2Sse = (type, frame, id = crypto.randomUUID()) => {
             const stream = currentStream();
-            const event = new MessageEvent(type, {
-              data: JSON.stringify({ type, ...frame }),
-              lastEventId: id,
-            });
-            stream.dispatchEvent(event);
+            if (!stream.controller) throw new Error("event stream is reconnecting");
+            stream.controller.enqueue(encoder.encode(
+              `id: ${id}\\nevent: ${type}\\ndata: ${
+                JSON.stringify({ type, ...frame })
+              }\\n\\n`
+            ));
           };
+
           window.__failLatestV2Sse = (readyState = 2) => {
             const stream = currentStream();
-            stream.readyState = readyState;
-            if (readyState === 2 && activeStream === stream) activeStream = null;
-            if (typeof stream.onerror !== "function") {
-              throw new Error("EventSource has no error handler");
+            if (readyState === 0) {
+              holdNextConnection = true;
+              closeStream(stream, new TypeError("event stream interrupted"));
+              return;
             }
-            stream.onerror(new Event("error"));
+            holdNextConnection = false;
+            if (stream.resolve) {
+              stream.closed = true;
+              if (activeStream === stream) activeStream = null;
+              stream.resolve(new Response("", { status: 401 }));
+              return;
+            }
+            closeStream(stream, new TypeError("event stream interrupted"));
           };
         })();
         """
+    await page.add_init_script(
+        script.replace(
+            "__EXPECTED_AUTHORIZATION__",
+            json.dumps(f"Bearer {REBORN_V2_AUTH_TOKEN}"),
+        )
     )
 
 
@@ -208,6 +354,156 @@ async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2
         assert urlparse(anon_page.url).path == "/login"
     finally:
         await anon_ctx.close()
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected_lang", "connect_label"),
+    [
+        pytest.param("en-US", "en", "Connect", id="english"),
+        pytest.param("zh-CN", "zh-CN", "连接", id="simplified-chinese"),
+    ],
+)
+@pytest.mark.parametrize("width", [375, 768, 1024, 1440])
+async def test_reborn_v2_shared_control_typography_is_stable(
+    reborn_v2_server,
+    reborn_v2_browser,
+    locale,
+    expected_lang,
+    connect_label,
+    width,
+):
+    """Shared controls keep one size without viewport or locale clipping."""
+    context = await reborn_v2_browser.new_context(
+        locale=locale,
+        viewport={"width": width, "height": 900},
+    )
+    page = await context.new_page()
+
+    async def handle_tools(route) -> None:
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "entries": [
+                        {
+                            "key": "agent.auto_approve_tools",
+                            "value": False,
+                            "mutable": True,
+                            "source": "default",
+                        },
+                        {
+                            "key": "tool.typography_check",
+                            "value": {
+                                "name": "typography_check",
+                                "description": "Shared control typography.",
+                                "state": "ask_each_time",
+                                "default_state": "ask_each_time",
+                                "locked": False,
+                                "effective_source": "default",
+                            },
+                            "mutable": True,
+                            "source": "default",
+                        },
+                    ]
+                }
+            ),
+        )
+
+    try:
+        await page.goto(f"{reborn_v2_server}/")
+        token_input = page.locator(SEL_V2["login_token"])
+        connect_button = page.locator("form button[type='submit']")
+        token_label = page.locator("label[for='v2-token']")
+        await expect(token_input).to_be_visible(timeout=15000)
+        await expect(connect_button).to_have_text(connect_label, timeout=15000)
+        await expect(page.locator("html")).to_have_attribute(
+            "lang", expected_lang
+        )
+
+        expected_height = 44 if width < 768 else 50
+        login_page_metrics = await _typography_metrics(
+            page,
+            {
+                "tokenInput": SEL_V2["login_token"],
+                "connectButton": "form button[type='submit']",
+                "tokenLabel": "label[for='v2-token']",
+            },
+        )
+        login_metrics = login_page_metrics["controls"]
+        _assert_control_typography(
+            login_metrics["tokenInput"],
+            f"{locale} token input at {width}px",
+            expected_height=expected_height,
+        )
+        _assert_control_typography(
+            login_metrics["connectButton"],
+            f"{locale} connect button at {width}px",
+            expected_height=expected_height,
+        )
+        _assert_control_typography(
+            login_metrics["tokenLabel"],
+            f"{locale} token label at {width}px",
+        )
+        assert login_page_metrics["rootFontSize"] == "16px"
+
+        tools_route = "**/api/webchat/v2/settings/tools"
+        await page.route(tools_route, handle_tools)
+        try:
+            await page.goto(
+                f"{reborn_v2_server}/settings/tools"
+                f"?token={REBORN_V2_AUTH_TOKEN}"
+            )
+            tool_row_selector = SEL_V2["settings_tool_row_for"].format(
+                name="typography_check"
+            )
+            permission = page.locator(tool_row_selector).locator(
+                SEL_V2["settings_tool_permission"]
+            )
+            await expect(permission).to_be_visible(timeout=15000)
+            permission_metrics = (
+                await _typography_metrics(
+                    page,
+                    {
+                        "permission": (
+                            f"{tool_row_selector} "
+                            f"{SEL_V2['settings_tool_permission']}"
+                        )
+                    },
+                )
+            )["controls"]["permission"]
+        finally:
+            await page.unroute(tools_route, handle_tools)
+
+        _assert_control_typography(
+            permission_metrics,
+            f"{locale} SelectMenu at {width}px",
+        )
+        assert "Mono" not in permission_metrics["fontFamily"], (
+            f"SelectMenu defaulted to monospace: {permission_metrics['fontFamily']}"
+        )
+
+        await page.goto(
+            f"{reborn_v2_server}/settings/skills"
+            f"?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        skill_content = page.locator("textarea").first
+        await expect(skill_content).to_be_visible(timeout=15000)
+        skills_metrics = await _typography_metrics(
+            page,
+            {"skillContent": "textarea"},
+        )
+        _assert_control_typography(
+            skills_metrics["controls"]["skillContent"],
+            f"{locale} textarea at {width}px",
+        )
+
+        viewport_metrics = skills_metrics["viewport"]
+        assert viewport_metrics["documentWidth"] <= viewport_metrics["viewportWidth"], (
+            f"{locale} layout overflowed at {width}px: {viewport_metrics}"
+        )
+    finally:
+        await context.close()
 
 
 async def test_reborn_v2_lazy_routes_preserve_direct_navigation(
@@ -532,7 +828,7 @@ async def test_reborn_v2_light_theme_semantic_colors_have_readable_contrast(
 
 
 async def test_reborn_v2_appearance_theme_selection_persists(reborn_v2_page):
-    """Appearance controls update the live theme and preserve it across reloads."""
+    """Appearance controls preserve the live theme across SPA navigation and reloads."""
     origin = await reborn_v2_page.evaluate("location.origin")
     await reborn_v2_page.goto(
         f"{origin}/v2/settings/appearance?token={REBORN_V2_AUTH_TOKEN}"
@@ -545,6 +841,34 @@ async def test_reborn_v2_appearance_theme_selection_persists(reborn_v2_page):
 
     await dark_option.click()
     await expect(dark_option).to_be_checked()
+    await expect(reborn_v2_page.locator("html")).to_have_attribute(
+        "data-theme", "dark"
+    )
+    await reborn_v2_page.wait_for_function(
+        'localStorage.getItem("ironclaw:v2-theme") === "dark"'
+    )
+
+    await reborn_v2_page.locator(SEL_V2["nav_chat"]).first.click()
+    await expect(
+        reborn_v2_page.locator(SEL_V2["chat_composer"])
+    ).to_be_visible(timeout=15000)
+    await expect(reborn_v2_page.locator("html")).to_have_attribute(
+        "data-theme", "dark"
+    )
+    await reborn_v2_page.wait_for_function(
+        'localStorage.getItem("ironclaw:v2-theme") === "dark"'
+    )
+
+    await reborn_v2_page.locator(SEL_V2["nav_settings_inference"]).first.click()
+    await expect(
+        reborn_v2_page.locator(SEL_V2["settings_search_input"])
+    ).to_be_visible(timeout=15000)
+    await reborn_v2_page.wait_for_function(
+        'localStorage.getItem("ironclaw:v2-theme") === "dark"'
+    )
+    await reborn_v2_page.locator(SEL_V2["nav_settings_appearance"]).first.click()
+    dark_option = reborn_v2_page.locator(SEL_V2["appearance_theme_dark"])
+    await expect(dark_option).to_be_checked(timeout=15000)
     await expect(reborn_v2_page.locator("html")).to_have_attribute(
         "data-theme", "dark"
     )
@@ -1261,7 +1585,7 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
     thread_id = "thread-disconnected-run"
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
-    await _install_fake_v2_event_source(page)
+    await _install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body, status=200) -> None:
         await route.fulfill(
@@ -1387,7 +1711,7 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
     send_requests: list[dict] = []
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
-    await _install_fake_v2_event_source(page)
+    await _install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body, status=200) -> None:
         await route.fulfill(
@@ -1515,7 +1839,7 @@ async def test_reborn_v2_unscoped_activity_stays_with_previous_reply(
     release_second_send = asyncio.Event()
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
-    await _install_fake_v2_event_source(page)
+    await _install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body, status=200) -> None:
         await route.fulfill(
@@ -1752,14 +2076,99 @@ async def test_reborn_v2_response_links_open_in_new_tab(reborn_v2_page):
 async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
     reborn_v2_page, reborn_v2_server
 ):
-    """The browser logs route passes URL scope to the API and renders scoped entries."""
+    """The browser logs route scopes, paginates, retries, and preserves older entries."""
     requested_queries: list[dict[str, list[str]]] = []
+    pagination_cursors: list[str] = []
     logs_requested = asyncio.Event()
+    polled_after_pagination = asyncio.Event()
+    pagination_attempts = 0
+    pagination_loaded = False
 
     async def handle_operator_logs(route) -> None:
+        nonlocal pagination_attempts, pagination_loaded
         parsed = urlparse(route.request.url)
-        requested_queries.append(parse_qs(parsed.query))
+        query = parse_qs(parsed.query)
+        requested_queries.append(query)
         logs_requested.set()
+        cursor = query.get("cursor", [None])[0]
+        if cursor == "older-page-1":
+            pagination_cursors.append(cursor)
+            pagination_attempts += 1
+            if pagination_attempts == 1:
+                await route.fulfill(
+                    status=503,
+                    content_type="application/json",
+                    body=json.dumps({"error": "older logs temporarily unavailable"}),
+                )
+                return
+            pagination_loaded = True
+            entries = [
+                {
+                    "id": "ui-log-1",
+                    "timestamp": "2026-06-12T10:11:12.123Z",
+                    "level": "info",
+                    "target": "ironclaw::ui::logs",
+                    "message": "scoped log from browser fixture",
+                    "thread_id": "thread-ui",
+                    "run_id": "run-ui",
+                    "tool_call_id": "tool-call-ui",
+                    "tool_name": "shell",
+                    "source": "slack",
+                },
+                {
+                    "id": "ui-log-older",
+                    "timestamp": "2026-06-12T10:10:12.123Z",
+                    "level": "debug",
+                    "target": "ironclaw::ui::logs",
+                    "message": "older paginated log from browser fixture",
+                    "thread_id": "thread-ui",
+                    "run_id": "run-ui",
+                },
+            ]
+            next_cursor = None
+        else:
+            if pagination_loaded:
+                polled_after_pagination.set()
+            entries = []
+            if pagination_loaded:
+                entries.append(
+                    {
+                        "id": "ui-log-poll",
+                        "timestamp": "2026-06-12T10:12:12.123Z",
+                        "level": "info",
+                        "target": "ironclaw::ui::logs",
+                        "message": "new log from polling refresh",
+                        "thread_id": "thread-ui",
+                        "run_id": "run-ui",
+                    }
+                )
+            entries.append(
+                {
+                    "id": "ui-log-1",
+                    "timestamp": "2026-06-12T10:11:12.123Z",
+                    "level": "info",
+                    "target": "ironclaw::ui::logs",
+                    "message": "scoped log from browser fixture",
+                    "thread_id": "thread-ui",
+                    "run_id": "run-ui",
+                    "tool_call_id": "tool-call-ui",
+                    "tool_name": "shell",
+                    "source": "slack",
+                }
+            )
+            if not pagination_loaded:
+                entries.append(
+                    {
+                        "id": "ui-log-boundary",
+                        "timestamp": "2026-06-12T10:10:42.123Z",
+                        "level": "info",
+                        "target": "ironclaw::ui::logs",
+                        "message": "latest-page boundary log",
+                        "thread_id": "thread-ui",
+                        "run_id": "run-ui",
+                    }
+                )
+            next_cursor = "older-page-1"
         await route.fulfill(
             status=200,
             content_type="application/json",
@@ -1768,21 +2177,8 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
                     "status": "available",
                     "logs": {
                         "source": "in_memory_tracing",
-                        "entries": [
-                            {
-                                "id": "ui-log-1",
-                                "timestamp": "2026-06-12T10:11:12.123Z",
-                                "level": "info",
-                                "target": "ironclaw::ui::logs",
-                                "message": "scoped log from browser fixture",
-                                "thread_id": "thread-ui",
-                                "run_id": "run-ui",
-                                "tool_call_id": "tool-call-ui",
-                                "tool_name": "shell",
-                                "source": "slack",
-                            }
-                        ],
-                        "next_cursor": None,
+                        "entries": entries,
+                        "next_cursor": next_cursor,
                         "tail_supported": True,
                         "follow_supported": False,
                     },
@@ -1830,6 +2226,48 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
     await expect(
         context.locator(SEL_V2["logs_context_chip"].format(key="source"))
     ).to_contain_text("slack")
+
+    load_older = reborn_v2_page.locator(SEL_V2["logs_load_older"])
+    await expect(load_older).to_be_visible()
+    await load_older.click()
+    await expect(
+        reborn_v2_page.locator(SEL_V2["logs_load_older_error"])
+    ).to_be_visible()
+    await expect(load_older).to_have_text("Retry")
+    assert pagination_attempts == 1
+    assert pagination_cursors == ["older-page-1"]
+
+    await load_older.click()
+    await expect(
+        reborn_v2_page.get_by_text("older paginated log from browser fixture")
+    ).to_be_visible()
+    assert pagination_attempts == 2
+    assert pagination_cursors == ["older-page-1", "older-page-1"]
+    await expect(reborn_v2_page.locator(SEL_V2["logs_pagination"])).to_have_count(0)
+
+    await asyncio.wait_for(polled_after_pagination.wait(), timeout=10)
+    await expect(reborn_v2_page.get_by_text("new log from polling refresh")).to_be_visible()
+    await expect(reborn_v2_page.get_by_text("latest-page boundary log")).to_be_visible()
+    await expect(
+        reborn_v2_page.get_by_text("older paginated log from browser fixture")
+    ).to_be_visible()
+    await expect(reborn_v2_page.locator(SEL_V2["logs_pagination"])).to_have_count(0)
+
+    native_dialogs = capture_native_dialogs(reborn_v2_page)
+    clear_button = reborn_v2_page.get_by_role("button", name="Clear", exact=True)
+    await clear_button.click()
+    confirmation = reborn_v2_page.get_by_role(
+        "dialog", name="Clear all log entries?"
+    )
+    await expect(confirmation).to_be_visible()
+    await confirmation.locator(SEL_V2["confirm_dialog_cancel"]).click()
+    await expect(entry).to_be_visible()
+
+    await clear_button.click()
+    await expect(confirmation).to_be_visible()
+    await confirmation.locator(SEL_V2["confirm_dialog_confirm"]).click()
+    await expect(entry).to_have_count(0)
+    assert native_dialogs == []
 
 
 async def test_reborn_v2_logs_deep_link_loads_scoped_conversation_on_first_open(
@@ -2053,13 +2491,7 @@ async def test_reborn_v2_thread_delete_uses_shared_confirmation_dialog(
     async with httpx.AsyncClient(headers=headers) as client:
         thread_id = await _create_thread(client, reborn_v2_server)
 
-    native_dialogs: list[str] = []
-
-    async def dismiss_native_dialog(dialog) -> None:
-        native_dialogs.append(dialog.type)
-        await dialog.dismiss()
-
-    reborn_v2_page.on("dialog", dismiss_native_dialog)
+    native_dialogs = capture_native_dialogs(reborn_v2_page)
     await reborn_v2_page.goto(
         f"{reborn_v2_server}/chat?token={REBORN_V2_AUTH_TOKEN}"
     )
@@ -2196,7 +2628,7 @@ async def test_reborn_v2_loading_older_messages_preserves_viewport(
         viewport={"width": 1280, "height": 720}
     )
     page = await context.new_page()
-    await _install_fake_v2_event_source(page)
+    await _install_fake_v2_event_stream(page)
 
     async def fulfill_json(route, body) -> None:
         await route.fulfill(

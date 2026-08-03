@@ -32,6 +32,8 @@ pub enum HostApiError {
     InvalidRuntimeCredentialTarget { value: String, reason: String },
     #[error("invalid safe summary: {reason}")]
     InvalidSafeSummary { reason: String },
+    #[error("invalid model diagnostic: {reason}")]
+    InvalidModelDiagnostic { reason: String },
     #[error("invalid host remediation: {reason}")]
     InvalidHostRemediation { reason: String },
     #[error("host API invariant violation: {reason}")]
@@ -39,7 +41,12 @@ pub enum HostApiError {
 }
 
 impl HostApiError {
-    pub(crate) fn invalid_id(
+    /// Public because contracts crates carved out of this one keep reporting
+    /// their validation failures as `HostApiError` — `ironclaw_extension_contracts`
+    /// is the first, and re-inlining the variant at every carve-out is how the
+    /// message text drifts apart. The variant itself is public already; this is
+    /// its canonical constructor, not new surface area.
+    pub fn invalid_id(
         kind: &'static str,
         value: impl Into<String>,
         reason: impl Into<String>,
@@ -91,7 +98,7 @@ impl HostApiError {
         }
     }
 
-    /// Validation failure for a [`crate::SafeSummary`]. Deliberately carries only
+    /// Validation failure for a [`crate::safe_summary::SafeSummary`]. Deliberately carries only
     /// the reason, never the rejected value — the value may hold exactly the raw
     /// payload/credential material the redaction rule caught.
     pub(crate) fn invalid_safe_summary(reason: impl Into<String>) -> Self {
@@ -100,7 +107,16 @@ impl HostApiError {
         }
     }
 
-    /// Validation failure for a [`crate::HostRemediation`]. Carries only the
+    /// Validation failure for a [`crate::result_meta::ModelDiagnostic`]. Deliberately carries
+    /// only the reason: the rejected value may be the backend text this
+    /// model-only contract is preventing from crossing unsafely.
+    pub(crate) fn invalid_model_diagnostic(reason: impl Into<String>) -> Self {
+        Self::InvalidModelDiagnostic {
+            reason: reason.into(),
+        }
+    }
+
+    /// Validation failure for a [`crate::host_remediation::HostRemediation`]. Carries only the
     /// reason for the same rationale as [`Self::invalid_safe_summary`]: the
     /// rejected value may hold the very credential material the guard caught.
     pub(crate) fn invalid_host_remediation(reason: impl Into<String>) -> Self {

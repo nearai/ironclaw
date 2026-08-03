@@ -1,0 +1,57 @@
+name: "PR: History Check"
+
+# A branch with no common ancestor with `main` grafts a second root into the
+# repository when it merges. Everything it touches loses its history: `git
+# blame` and `git log --follow` stop at the graft, permanently, for every file
+# in the branch. It is not reversible after the fact without rewriting main.
+#
+# The usual cause is accidental rather than malicious — a fresh `git init` in
+# a working copy, a squashed export, or a clone that lost its remote — so the
+# branch looks entirely normal in a diff. This check is the only thing that
+# distinguishes it.
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: history-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  common-ancestor:
+    name: Shares history with main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          # pull_request defaults to GitHub's synthetic merge commit, which
+          # always has main as an ancestor and would make this check vacuous.
+          ref: ${{ github.event.pull_request.head.sha }}
+          # Required: the default shallow clone has no ancestry to compare.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require a common ancestor with main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --quiet origin main
+
+          if base="$(git merge-base origin/main HEAD)" && [ -n "$base" ]; then
+            echo "common ancestor with main: $base"
+            exit 0
+          fi
+
+          echo "::error::This branch shares no commit history with main."
+          echo "Merging it would graft a second root into the repository and" >&2
+          echo "permanently break 'git blame' and 'git log --follow' for every" >&2
+          echo "file it touches." >&2
+          echo >&2
+          echo "Fix: rebase the work onto main rather than merging as-is." >&2
+          echo "  git fetch origin main" >&2
+          echo "  git rebase --onto origin/main --root   # or cherry-pick the commits" >&2
+          exit 1

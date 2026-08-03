@@ -6,6 +6,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use ironclaw_approvals::LeaseApproval;
+use ironclaw_approvals::{ApprovalRequestStore, ApprovalRequestStorePort};
 use ironclaw_authorization::{
     CapabilityLeaseStatus, CapabilityLeaseStore, CapabilityLeaseStorePort, GrantAuthorizer,
     TrustAwareCapabilityDispatchAuthorizer,
@@ -16,23 +17,38 @@ use ironclaw_events::{
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::*;
+use ironclaw_host_api::result_meta::FailureKind;
+use ironclaw_host_api::{
+    action::{Action, NetworkPolicy},
+    approval::ApprovalRequest,
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+    },
+    decision::{Decision, Obligation, Obligations},
+    host_port::HostPortCatalog,
+    ids::{
+        AgentId, ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId,
+        InvocationId, MissionId, PackageId, ProcessId, ProjectId, RunId, TenantId, ThreadId,
+        UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{HostPath, MountAlias, VirtualPath},
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
-    RuntimeFailureKind,
 };
 use ironclaw_processes::{
-    ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor, ProcessManager,
-    ProcessResultStore, ProcessServices, ProcessStart, ProcessStatus, ProcessStore,
-    ProcessStorePort,
+    ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor, ProcessInvocationStatePort,
+    ProcessInvocationStatus, ProcessInvocationStore, ProcessJournalStore, ProcessManager,
+    ProcessRuntimePort, ProcessServices, ProcessStart, ProcessStatus, capability_process_record,
 };
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornEventStores, RebornProfile, build_reborn_event_stores,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_run_state::{
-    ApprovalRequestStore, ApprovalRequestStorePort, RunStateStore, RunStateStorePort, RunStatus,
-};
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
@@ -129,7 +145,7 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
         .await
         .unwrap()
         .expect("run state must survive restart");
-    assert_eq!(completed_run.status, RunStatus::Completed);
+    assert_eq!(completed_run.status, ProcessInvocationStatus::Completed);
     assert_eq!(
         third
             .capability_leases
@@ -178,7 +194,7 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
         ))
         .await
         .unwrap();
-    assert_failed_outcome(second_resume, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(second_resume, FailureKind::Authorization);
 }
 
 /// PR #5234 review (Medium): the test above shares one `Arc<InMemoryBackend>`
@@ -277,7 +293,7 @@ async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once(
         .await
         .unwrap()
         .expect("run state must survive durable libsql reopen");
-    assert_eq!(completed_run.status, RunStatus::Completed);
+    assert_eq!(completed_run.status, ProcessInvocationStatus::Completed);
     assert_eq!(
         third
             .capability_leases
@@ -326,14 +342,14 @@ async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once(
         ))
         .await
         .unwrap();
-    assert_failed_outcome(second_resume, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(second_resume, FailureKind::Authorization);
 }
 
 #[tokio::test]
 async fn process_result_and_output_survive_filesystem_service_restart_with_scope_filtering() {
     let temp = tempfile::tempdir().unwrap();
-    let engine_root = temp.path().join("engine");
-    let first_services = filesystem_process_services(&engine_root);
+    let db_path = temp.path().join("processes.db");
+    let first_services = libsql_process_services(&db_path).await;
     let manager = first_services.background_manager(Arc::new(SuccessProcessExecutor));
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id);
@@ -344,14 +360,14 @@ async fn process_result_and_output_survive_filesystem_service_restart_with_scope
         .await
         .unwrap();
     wait_for_status(
-        first_services.process_store().as_ref(),
+        first_services.process_runtime().as_ref(),
         &scope,
         process_id,
         ProcessStatus::Completed,
     )
     .await;
 
-    let restarted_services = filesystem_process_services(&engine_root);
+    let restarted_services = libsql_process_services(&db_path).await;
     let host = restarted_services.host();
     let status = host
         .status(&scope, process_id)
@@ -469,22 +485,16 @@ async fn jsonl_event_and_audit_replay_survive_reopen_without_raw_sentinels() {
     }
 }
 
-type DurableProcessServices =
-    ProcessServices<ProcessStore<DiskFilesystem>, ProcessResultStore<DiskFilesystem>>;
+type DurableProcessServices = ProcessServices;
 
-type DurableHostRuntimeServices = HostRuntimeServices<
-    DiskFilesystem,
-    InMemoryResourceGovernor,
-    ProcessStore<DiskFilesystem>,
-    ProcessResultStore<DiskFilesystem>,
->;
+type DurableHostRuntimeServices = HostRuntimeServices<DiskFilesystem, InMemoryResourceGovernor>;
 
 struct DurableServices<F = InMemoryBackend>
 where
     F: RootFilesystem,
 {
     services: DurableHostRuntimeServices,
-    run_state: Arc<RunStateStore<F>>,
+    run_state: Arc<ProcessInvocationStore>,
     approval_requests: Arc<ApprovalRequestStore<F>>,
     capability_leases: Arc<CapabilityLeaseStore<DiskFilesystem>>,
     events: RebornEventStores,
@@ -504,6 +514,11 @@ where
     Arc::new(ScopedFilesystem::with_fixed_view(
         backend,
         MountView::new(vec![
+            MountGrant::new(
+                MountAlias::new("/processes").unwrap(),
+                VirtualPath::new("/processes").unwrap(),
+                MountPermissions::read_write_list_delete(),
+            ),
             MountGrant::new(
                 MountAlias::new("/run-state").unwrap(),
                 VirtualPath::new("/run-state").unwrap(),
@@ -527,7 +542,9 @@ async fn durable_services(
     let event_stores = jsonl_event_stores(event_root).await;
     let scoped_fs = scoped_engine_filesystem(engine_root);
     let run_state_fs = scoped_run_state_filesystem(shared_run_state_backend);
-    let run_state = Arc::new(RunStateStore::new(Arc::clone(&run_state_fs)));
+    let run_state = Arc::new(ProcessInvocationStore::new(Arc::new(
+        ProcessJournalStore::new(Arc::clone(&run_state_fs)),
+    )));
     let approval_requests = Arc::new(ApprovalRequestStore::new(Arc::clone(&run_state_fs)));
     let capability_leases = Arc::new(CapabilityLeaseStore::new(Arc::clone(&scoped_fs)));
     let services = base_services(
@@ -535,7 +552,7 @@ async fn durable_services(
         event_stores.clone(),
         Arc::new(ApprovalThenGrantAuthorizer),
     )
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases));
 
@@ -563,7 +580,9 @@ async fn durable_services_with_libsql_run_state(
     let event_stores = jsonl_event_stores(event_root).await;
     let scoped_fs = scoped_engine_filesystem(engine_root);
     let run_state_fs = scoped_libsql_run_state_filesystem(db_path).await;
-    let run_state = Arc::new(RunStateStore::new(Arc::clone(&run_state_fs)));
+    let run_state = Arc::new(ProcessInvocationStore::new(Arc::new(
+        ProcessJournalStore::new(Arc::clone(&run_state_fs)),
+    )));
     let approval_requests = Arc::new(ApprovalRequestStore::new(Arc::clone(&run_state_fs)));
     let capability_leases = Arc::new(CapabilityLeaseStore::new(Arc::clone(&scoped_fs)));
     let services = base_services(
@@ -571,7 +590,7 @@ async fn durable_services_with_libsql_run_state(
         event_stores.clone(),
         Arc::new(ApprovalThenGrantAuthorizer),
     )
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases));
 
@@ -593,7 +612,7 @@ async fn scoped_libsql_run_state_filesystem(
     db_path: &Path,
 ) -> Arc<ScopedFilesystem<LibSqlRootFilesystem>> {
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let filesystem = LibSqlRootFilesystem::new(db);
+    let filesystem = LibSqlRootFilesystem::new(db).expect("filesystem runtime");
     filesystem.run_migrations().await.unwrap();
     scoped_run_state_filesystem(Arc::new(filesystem))
 }
@@ -626,7 +645,7 @@ fn base_services(
 
 async fn jsonl_event_stores(event_root: &Path) -> RebornEventStores {
     build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root: event_root.to_path_buf(),
             accept_single_node_durable: false,
@@ -639,6 +658,17 @@ async fn jsonl_event_stores(event_root: &Path) -> RebornEventStores {
 fn filesystem_process_services(engine_root: &Path) -> DurableProcessServices {
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
         Arc::new(mounted_engine_filesystem(engine_root)),
+        durable_mount_view(),
+    ));
+    ProcessServices::filesystem(scoped)
+}
+
+async fn libsql_process_services(db_path: &Path) -> DurableProcessServices {
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let filesystem = LibSqlRootFilesystem::new(db).expect("libSQL filesystem runtime");
+    filesystem.run_migrations().await.unwrap();
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(filesystem),
         durable_mount_view(),
     ));
     ProcessServices::filesystem(scoped)
@@ -759,7 +789,7 @@ async fn approve_dispatch_for_services(
 }
 
 async fn assert_blocked_run(
-    run_state: &dyn RunStateStorePort,
+    run_state: &dyn ProcessInvocationStatePort,
     scope: &ResourceScope,
     invocation_id: InvocationId,
     approval_request_id: ApprovalRequestId,
@@ -769,18 +799,20 @@ async fn assert_blocked_run(
         .await
         .unwrap()
         .expect("run state should exist");
-    assert_eq!(run.status, RunStatus::BlockedApproval);
+    assert_eq!(run.status, ProcessInvocationStatus::BlockedApproval);
     assert_eq!(run.approval_request_id, Some(approval_request_id));
 }
 
 async fn wait_for_status(
-    store: &dyn ProcessStorePort,
+    processes: &dyn ProcessRuntimePort,
     scope: &ResourceScope,
     process_id: ProcessId,
     status: ProcessStatus,
 ) {
     for _ in 0..100 {
-        if let Some(record) = store.get(scope, process_id).await.unwrap()
+        if let Some(record) = capability_process_record(processes, scope, process_id)
+            .await
+            .unwrap()
             && record.status == status
         {
             return;
@@ -790,7 +822,7 @@ async fn wait_for_status(
     panic!("process {process_id} did not reach {status:?}");
 }
 
-fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected: RuntimeFailureKind) {
+fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected: FailureKind) {
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => assert_eq!(failure.kind, expected),
         other => panic!("expected failed outcome, got {other:?}"),

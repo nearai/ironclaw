@@ -1,6 +1,6 @@
 //! Shared credential-redaction primitives for the model-visible result
-//! vocabulary — the single definition used by both [`crate::SafeSummary`] (the
-//! bounded caption) and [`crate::ModelResultPreview`] (the bounded tool-result
+//! vocabulary — the single definition used by both [`crate::safe_summary::SafeSummary`] (the
+//! bounded caption) and [`crate::model_result_preview::ModelResultPreview`] (the bounded tool-result
 //! CONTENT preview).
 //!
 //! Two independent scans:
@@ -82,6 +82,87 @@ pub(crate) fn contains_secret_like_token(lower: &str) -> bool {
             !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_' | '.')
         })
         .any(has_secret_like_prefix)
+}
+
+/// True when diagnostic text contains a credential assignment with a value or
+/// URL userinfo. Credential vocabulary by itself remains valid diagnostic
+/// context (`password field is required`).
+pub(crate) fn contains_unredacted_credential_value(lower: &str) -> bool {
+    const LABELS: &[&str] = &[
+        "access token",
+        "access-token",
+        "access_token",
+        "api key",
+        "api-key",
+        "api_key",
+        "authorization",
+        "client secret",
+        "client-secret",
+        "client_secret",
+        "cookie",
+        "credential",
+        "password",
+        "passwd",
+        "private key",
+        "private-key",
+        "private_key",
+        "refresh token",
+        "refresh-token",
+        "refresh_token",
+        "secret",
+        "token",
+    ];
+
+    LABELS.iter().any(|label| {
+        lower.match_indices(label).any(|(start, _)| {
+            let end = start + label.len();
+            let before_ok = lower
+                .get(..start)
+                .is_none_or(|prefix| !prefix.ends_with(is_identifier_character));
+            let after_ok = lower
+                .get(end..)
+                .is_none_or(|suffix| !suffix.starts_with(is_identifier_character));
+            if !before_ok || !after_ok {
+                return false;
+            }
+            let suffix = lower[end..]
+                .trim_start()
+                .trim_start_matches(['"', '\'', '`'])
+                .trim_start();
+            let Some(value) = suffix
+                .strip_prefix('=')
+                .or_else(|| suffix.strip_prefix(':'))
+            else {
+                return false;
+            };
+            let value = value
+                .trim_start()
+                .trim_start_matches(['"', '\'', '`'])
+                .trim_start();
+            !value.is_empty() && !value.starts_with("[redacted]")
+        })
+    }) || contains_url_userinfo(lower)
+}
+
+fn is_identifier_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+}
+
+fn contains_url_userinfo(value: &str) -> bool {
+    let mut remainder = value;
+    while let Some(scheme_end) = remainder.find("://") {
+        let authority_start = scheme_end + 3;
+        let authority_end = remainder[authority_start..]
+            .find(|character: char| {
+                matches!(character, '/' | '?' | '#') || character.is_whitespace()
+            })
+            .map_or(remainder.len(), |index| authority_start + index);
+        if remainder[authority_start..authority_end].contains('@') {
+            return true;
+        }
+        remainder = &remainder[authority_end..];
+    }
+    false
 }
 
 /// True when a credential-shaped prefix starts this token or any interior
@@ -174,6 +255,32 @@ mod tests {
         assert!(contains_credential_marker("the password is hunter2"));
         // `passwordless` is a different word — not a standalone `password`.
         assert!(!contains_credential_marker("passwordless login enabled"));
+    }
+
+    #[test]
+    fn diagnostic_credential_guard_distinguishes_vocabulary_from_values() {
+        for safe in [
+            "password field is required",
+            "token bucket exhausted",
+            "secret sharing failed",
+            "credential setup is unavailable",
+            r#"{"password":"[REDACTED]"}"#,
+        ] {
+            assert!(
+                !contains_unredacted_credential_value(&safe.to_ascii_lowercase()),
+                "safe vocabulary was treated as a value: {safe}"
+            );
+        }
+        for unsafe_text in [
+            "password=hunter2",
+            r#"{"api_key":"opaque"}"#,
+            "https://user:pass@example.com/path",
+        ] {
+            assert!(
+                contains_unredacted_credential_value(&unsafe_text.to_ascii_lowercase()),
+                "credential value was not detected: {unsafe_text}"
+            );
+        }
     }
 
     #[test]

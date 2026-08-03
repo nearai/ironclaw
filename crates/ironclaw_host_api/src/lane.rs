@@ -17,13 +17,13 @@
 //! branched on in *zero* places past the composition edge, so it stays data, not
 //! a type.)
 //!
-//! ## `RuntimeLane` is not [`crate::RuntimeKind`]
+//! ## `RuntimeLane` is not [`crate::runtime::RuntimeKind`]
 //!
 //! They look similar but are different concepts the doc deliberately separates
 //! (§5.10): `RuntimeLane` is the **execution/trust boundary** — the untrusted
 //! surface `dispatch()` hands mediated handles to (§5.4) — a closed set of four.
-//! [`crate::RuntimeKind`] is a **loading detail / taxonomy** (`Wasm`/`Mcp`/
-//! `Script`/`FirstParty`/`System`); e.g. a `Script` runtime executes *on* the
+//! [`crate::runtime::RuntimeKind`] is a **loading detail / taxonomy** (`Wasm`/`Mcp`/
+//! `Script`/`Sandbox`/`FirstParty`/`System`); e.g. a `Script` runtime executes *on* the
 //! `Process` lane, and `System` is host-internal, not an untrusted lane. WASM
 //! extensions are *data behind* the `Wasm` lane, not new lanes — so the closed
 //! set costs no real extensibility (§4.2). Introduced additively ahead of the
@@ -81,7 +81,7 @@ runtime_lanes! {
 }
 
 impl RuntimeLane {
-    /// Resolve the execution lane for a descriptor's [`crate::RuntimeKind`]
+    /// Resolve the execution lane for a descriptor's [`crate::runtime::RuntimeKind`]
     /// (the loading taxonomy, §5.10). This is the one place the two axes meet:
     /// `authorize()` reads the descriptor's kind and binds the resolved lane into
     /// the `Authorized` witness so `dispatch()` routes without re-deriving it.
@@ -94,12 +94,16 @@ impl RuntimeLane {
     ///   `System` capability is not dispatched to a `RuntimeLane` at all. Callers
     ///   must treat `None` as "host-internal, no untrusted lane", never as a
     ///   default.
-    pub fn from_runtime_kind(kind: crate::RuntimeKind) -> Option<RuntimeLane> {
-        use crate::RuntimeKind;
+    pub fn from_runtime_kind(kind: crate::runtime::RuntimeKind) -> Option<RuntimeLane> {
+        use crate::runtime::RuntimeKind;
         match kind {
             RuntimeKind::Wasm => Some(RuntimeLane::Wasm),
             RuntimeKind::Mcp => Some(RuntimeLane::Mcp),
             RuntimeKind::Script => Some(RuntimeLane::Process),
+            // The sandboxed-shell lane is an OS process under the tenant
+            // sandbox — the same `Process` lane `Script` runs on (see the
+            // module doc above and `.claude/rules/safety-and-sandbox.md`).
+            RuntimeKind::Sandbox => Some(RuntimeLane::Process),
             RuntimeKind::FirstParty => Some(RuntimeLane::FirstParty),
             RuntimeKind::System => None,
         }
@@ -160,7 +164,7 @@ mod tests {
 
     #[test]
     fn from_runtime_kind_maps_the_loading_taxonomy_to_lanes() {
-        use crate::RuntimeKind;
+        use crate::runtime::RuntimeKind;
         assert_eq!(
             RuntimeLane::from_runtime_kind(RuntimeKind::Wasm),
             Some(RuntimeLane::Wasm)
@@ -176,6 +180,12 @@ mod tests {
         // Script executes on the Process lane (§4.2).
         assert_eq!(
             RuntimeLane::from_runtime_kind(RuntimeKind::Script),
+            Some(RuntimeLane::Process)
+        );
+        // Sandbox is the sandboxed-shell lane — same Process lane as Script
+        // (module doc above).
+        assert_eq!(
+            RuntimeLane::from_runtime_kind(RuntimeKind::Sandbox),
             Some(RuntimeLane::Process)
         );
         // System is host-internal — no untrusted execution lane.

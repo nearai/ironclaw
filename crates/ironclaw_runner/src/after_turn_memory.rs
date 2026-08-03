@@ -20,7 +20,10 @@
 
 use std::sync::Arc;
 
-use ironclaw_host_api::{CorrelationId, InvocationId, ResourceScope};
+use ironclaw_host_api::{
+    ids::{CorrelationId, InvocationId},
+    resource::ResourceScope,
+};
 use ironclaw_memory::{
     MemoryInteractionMessage, MemoryInteractionRole, MemoryInvocation, MemoryService,
     MemoryServiceRecordRequest,
@@ -32,7 +35,7 @@ use ironclaw_threads::{
 use ironclaw_turns::{TurnActor, TurnRunState};
 use tracing::debug;
 
-use crate::thread_scope::ThreadScopeResolver;
+use ironclaw_loop_host::ThreadScopeResolver;
 
 /// Records a completed run's full ordered transcript into memory.
 ///
@@ -233,7 +236,7 @@ mod tests {
     ) -> ThreadMessageRecord {
         ThreadMessageRecord {
             message_id: ThreadMessageId::new(),
-            thread_id: ironclaw_host_api::ThreadId::new("thread-after-turn-test")
+            thread_id: ironclaw_host_api::ids::ThreadId::new("thread-after-turn-test")
                 .expect("valid thread id"),
             sequence,
             kind,

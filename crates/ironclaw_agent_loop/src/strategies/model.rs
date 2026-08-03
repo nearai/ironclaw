@@ -22,9 +22,8 @@ fn _assert_object_safe(_: &dyn ModelStrategy) {}
 /// Reference baseline `ModelStrategy`: track the executor-managed fallback
 /// index in `state.model_state.fallback_index`.
 ///
-/// In the skeleton the executor never advances `fallback_index`, so this
-/// always returns `Primary`. The `Fallback` arm is wired through for a future
-/// model-route-chain implementation.
+/// The executor advances `fallback_index` only after an explicit recovery
+/// alteration, and the host returns authoritative route evidence on success.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultModelStrategy;
 
@@ -40,8 +39,7 @@ impl ModelStrategy for DefaultModelStrategy {
 
 /// Strategy hint to the host about which already-resolved route to use.
 ///
-/// In the skeleton, `Primary` is the only value strategies produce. `Fallback`
-/// is reserved for the deferred `ModelRouteChain` follow-up.
+/// `Fallback` selects a pre-resolved entry from the host's ordered chain.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ModelPreference {
@@ -58,16 +56,14 @@ pub(crate) enum ModelPreference {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{TenantId, ThreadId};
-    use ironclaw_turns::{
-        AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
-        run_profile::{
-            CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId,
-            ConcurrencyClass, ContextProfileId, LoopDriverId, LoopRunContext, ModelProfileId,
-            RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
-            ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
-            SchedulingClass, SteeringPolicy,
-        },
+    use ironclaw_host_api::ids::{TenantId, ThreadId};
+    use ironclaw_host_api::turn::{RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope};
+    use ironclaw_loop_contracts::{
+        AgentLoopDriverDescriptor, CancellationPolicy, CapabilitySurfaceProfileId,
+        CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
+        LoopRunContext, ModelProfileId, RedactedRunProfileProvenance, ResolvedRunProfile,
+        ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+        RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
     };
 
     use super::{DefaultModelStrategy, ModelPreference, ModelStrategy};
@@ -131,7 +127,7 @@ mod tests {
                 max_model_calls: 32,
                 max_capability_invocations: 64,
             },
-            personal_context_policy: ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
+            personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
             runtime_constraints: RuntimeProfileConstraints {
                 allow_raw_runtime_backend_selection: false,
                 allow_broad_capability_surface: false,

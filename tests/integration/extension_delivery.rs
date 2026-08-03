@@ -17,7 +17,7 @@
 //!
 //! Pinned here, matrixed over libSQL and PostgreSQL (a provisioning failure
 //! is a test failure, never a skip):
-//! - The Slack proof: a signed DM event yields a `FinalReply` coordinated
+//! - The Slack proof: a signed threaded channel event yields a `FinalReply` coordinated
 //!   through the REAL coordinator to `chat.postMessage`, with the §11
 //!   bridged bot token injected host-side (OUT-1/2/5, ING-11 read half).
 //!   The Slack lane still owns its ingress registration in production
@@ -48,6 +48,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -56,19 +57,27 @@ use axum::http::{Request, StatusCode};
 use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
+use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
 use ironclaw_extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
-    ExtensionIngressParts, GenericChannelInboundSink, PostAdmissionObserver, StaticIngressSecrets,
-    VerifiedEvidenceMint, extension_ingress_route_mount,
+    ExtensionIngressParts, GenericChannelInboundSink, PostAdmissionObserver,
+    StaticIngressConfiguration, StaticIngressSecrets, VerifiedEvidenceMint,
+    extension_ingress_route_mount,
 };
-use ironclaw_host_api::ChannelInboundProductSurface;
-use ironclaw_host_api::ProductSurfaceCaller;
+use ironclaw_extension_host::ingress::{
+    InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError,
+};
+use ironclaw_host_api::product_adapter::auth::AuthRequirement;
 use ironclaw_host_api::{
-    CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, CorrelationId, EffectKind,
-    ExecutionContext, ExtensionId, GrantConstraints, InvocationId, InvocationOrigin, MountView,
-    NetworkPolicy, Principal, ProductKind, ResourceEstimate, ResourceScope, RuntimeKind,
-    TrustClass,
+    action::NetworkPolicy,
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+    ids::{CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProductKind},
+    invocation::InvocationOrigin,
+    mount::MountView,
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::RuntimeCapabilityOutcome;
 use ironclaw_loop_host::{
@@ -77,15 +86,19 @@ use ironclaw_loop_host::{
 };
 use ironclaw_outbound::OutboundDeliveryStatus;
 use ironclaw_product::{
-    AdapterInstallationId, ChannelAdapter, InboundOutcome, ParsedProductInbound, ProductAdapterId,
+    AdapterInstallationId, InboundOutcome, ParsedProductInbound, ProductAdapterId,
     ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProtocolAuthEvidence,
     UserMessagePayload, VerifiedInbound,
 };
 use ironclaw_product::{
-    ChannelConnectionNoticePolicy, ConversationBindingService, ResolveBindingRequest,
-    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+    ConversationBindingService, ResolveBindingRequest, RunDeliveryObserver, RunDeliveryServices,
+    RunDeliverySettings,
 };
+use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_reborn_composition::{ChannelHostAssemblyTestWiring, RebornRuntime};
+use ironclaw_threads::FinalizedAssistantMessageByRunRequest;
 use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnRunId, TurnScope, TurnStatus};
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
 use reborn_support::group::RebornIntegrationGroup;
@@ -109,6 +122,21 @@ const TELEGRAM_INSTALLATION: &str = "telegram";
 const TELEGRAM_WEBHOOK_SECRET: &str = "itest-telegram-webhook-secret";
 const TELEGRAM_BOT_TOKEN: &str = "123456:itest-telegram-token";
 const TELEGRAM_REPLY: &str = "Here is the coordinated Telegram reply.";
+
+struct UnexpectedAdmissionSink {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl InboundSink for UnexpectedAdmissionSink {
+    async fn admit(
+        &self,
+        _admission: InboundAdmission,
+    ) -> Result<InboundAdmissionAck, InboundSinkError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(InboundAdmissionAck::Accepted)
+    }
+}
 
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
@@ -147,6 +175,19 @@ async fn wait_for_run_status_in_scope(
             state.status
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn thread_scope_for_turn(scope: &TurnScope) -> ironclaw_threads::ThreadScope {
+    ironclaw_threads::ThreadScope {
+        tenant_id: scope.tenant_id.clone(),
+        agent_id: scope
+            .agent_id
+            .clone()
+            .expect("vendor turn scope carries an agent id"),
+        project_id: scope.project_id.clone(),
+        owner_user_id: scope.explicit_owner_user_id().cloned(),
+        mission_id: None,
     }
 }
 
@@ -308,7 +349,7 @@ fn delivery_run_services(
     services: &RebornRuntime,
     extension_id: &str,
 ) -> RunDeliveryServices {
-    let (outbound_store, route_store, communication_preferences) = services
+    let (outbound_store, route_store, communication_preferences, _) = services
         .outbound_delivery_stores_for_test()
         .expect("composed runtime exposes the coordinator's outbound stores");
     let coordinator = services
@@ -318,7 +359,7 @@ fn delivery_run_services(
         harness.binding.tenant_id.clone(),
         harness.binding.agent_id.clone(),
         harness.binding.project_id.clone(),
-        ironclaw_host_api::ThreadId::new(format!("{extension_id}-itest-channel-notices"))
+        ironclaw_host_api::ids::ThreadId::new(format!("{extension_id}-itest-channel-notices"))
             .expect("notice thread id"),
         harness.binding.subject_user_id.clone(),
     );
@@ -333,6 +374,7 @@ fn delivery_run_services(
         outbound_store,
         route_store,
         communication_preferences,
+        project_filesystem: Arc::new(ironclaw_product::NoProjectFilesystem),
         coordinator,
         extension_id: extension_id.to_string(),
         fallback_notice_scope,
@@ -353,13 +395,15 @@ async fn preresolve_vendor_turn_scope(
     adapter: &dyn ChannelAdapter,
     adapter_id: &str,
     installation_id: &str,
+    non_secret_config: &[(String, String)],
     evidence: &ProtocolAuthEvidence,
     body: &str,
-) -> TurnScope {
+) -> (TurnScope, ironclaw_host_api::ids::UserId) {
     let outcome = adapter
         .inbound(VerifiedInbound {
             extension_id: adapter_id,
             installation_id,
+            config: non_secret_config,
             body: body.as_bytes(),
             headers: &[],
         })
@@ -393,12 +437,15 @@ async fn preresolve_vendor_turn_scope(
         .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
         .await
         .expect("vendor conversation binding resolves");
-    TurnScope::new_with_owner(
-        binding.tenant_id.clone(),
-        binding.agent_id.clone(),
-        binding.project_id.clone(),
-        binding.thread_id.clone(),
-        binding.subject_user_id.clone(),
+    (
+        TurnScope::new_with_owner(
+            binding.tenant_id.clone(),
+            binding.agent_id.clone(),
+            binding.project_id.clone(),
+            binding.thread_id.clone(),
+            binding.subject_user_id.clone(),
+        ),
+        binding.actor_user_id,
     )
 }
 
@@ -424,7 +471,6 @@ impl VendorIngress {
         let sink = Arc::new(GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id: ProductAdapterId::new(extension_id).expect("adapter id"),
             evidence,
-            classifier: None,
             surface,
             observer: Some(observer as Arc<dyn PostAdmissionObserver>),
         }));
@@ -437,6 +483,7 @@ impl VendorIngress {
                         secret: secret.to_vec(),
                     },
                 ])),
+                configuration: Arc::new(StaticIngressConfiguration::default()),
                 sink: sink.clone() as Arc<dyn ironclaw_extension_host::ingress::InboundSink>,
                 drain: Some(sink as Arc<dyn ChannelIngressDrain>),
             },
@@ -551,7 +598,7 @@ async fn activate_slack(group: &RebornIntegrationGroup) {
 /// terminal `Delivered`, and none is stranded mid-lifecycle
 /// (`Prepared`/`Sending` — persist-before-egress must settle terminally).
 async fn assert_delivered_attempt(services: &RebornRuntime, scope: &TurnScope) {
-    let (outbound_store, _, _) = services
+    let (outbound_store, _, _, _) = services
         .outbound_delivery_stores_for_test()
         .expect("outbound stores");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -609,6 +656,64 @@ async fn assert_delivered_attempt(services: &RebornRuntime, scope: &TurnScope) {
     );
 }
 
+fn assert_slack_thread_delivery_evidence(messages: &[serde_json::Value]) {
+    let expected_conversation_id = "C777";
+    let expected_thread_anchor = Some("1710000200.000050");
+    let expected_count = 1;
+    let matching = messages.iter().filter(|message| {
+        message["channel"] == expected_conversation_id
+            && message.get("thread_ts").and_then(serde_json::Value::as_str)
+                == expected_thread_anchor
+            && message["text"]
+                .as_str()
+                .is_some_and(|text| text.contains(SLACK_REPLY))
+    });
+    assert_eq!(
+        matching.count(),
+        expected_count,
+        "the coordinated Slack reply must reach the exact channel thread once: {messages:?}"
+    );
+}
+
+fn assert_telegram_topic_delivery_evidence(messages: &[serde_json::Value]) {
+    let expected_conversation_id = "-1008675309";
+    let expected_thread_anchor = Some(77);
+    let expected_count = 1;
+    let matching = messages.iter().filter(|message| {
+        message["chat_id"] == expected_conversation_id
+            && message
+                .get("message_thread_id")
+                .and_then(serde_json::Value::as_i64)
+                == expected_thread_anchor
+            && message["text"]
+                .as_str()
+                .is_some_and(|text| text.contains(TELEGRAM_REPLY))
+    });
+    assert_eq!(
+        matching.count(),
+        expected_count,
+        "the coordinated Telegram reply must reach the exact forum topic once: {messages:?}"
+    );
+}
+
+fn assert_telegram_chat_delivery_evidence(messages: &[serde_json::Value]) {
+    let expected_conversation_id = "515151";
+    let expected_thread_anchor: Option<&serde_json::Value> = None;
+    let expected_count = 1;
+    let matching = messages.iter().filter(|message| {
+        message["chat_id"] == expected_conversation_id
+            && message.get("message_thread_id") == expected_thread_anchor
+            && message["text"]
+                .as_str()
+                .is_some_and(|text| text.contains(TELEGRAM_REPLY))
+    });
+    assert_eq!(
+        matching.count(),
+        expected_count,
+        "the coordinated Telegram reply must reach the exact unthreaded chat once: {messages:?}"
+    );
+}
+
 /// Await the production assembly's reconcile: deployment discovery or an
 /// active-snapshot change registers the extension's inbound wiring, and the
 /// per-extension binding service becomes readable. Bounded — a missing
@@ -656,8 +761,9 @@ async fn configure_admin_group(
     // label as the tenant operator. Its ordinary capability executor uses a
     // distinct user to prove caller scoping, so admin ingress must deliberately
     // use the composition owner rather than that executor identity.
-    let operator_user_id = ironclaw_host_api::UserId::new("reborn-e2e-extension-lifecycle-tools")
-        .expect("delivery profile operator user id");
+    let operator_user_id =
+        ironclaw_host_api::ids::UserId::new("reborn-e2e-extension-lifecycle-tools")
+            .expect("delivery profile operator user id");
     let capability_id = CapabilityId::new("builtin.admin_configuration_replace")
         .expect("admin configuration capability id");
     let product_ingress = ExtensionId::new("ironclaw_webui").expect("product ingress id");
@@ -1004,7 +1110,94 @@ async fn admin_configured_telegram_unconnected_dm_gets_connect_notice_without_in
     assert_extension_has_no_user_installation(services, "telegram").await;
 }
 
-/// The Slack outbound proof (OUT-1/2/5 + ING-11 read half): a signed DM
+#[tokio::test]
+async fn telegram_identity_configuration_errors_are_retryable_on_the_real_router_path() {
+    let group = RebornIntegrationGroup::extension_delivery()
+        .await
+        .expect("delivery group builds");
+    let services = reborn_services(&group);
+    let parts = services
+        .extension_ingress_parts()
+        .expect("composition built generic ingress");
+    let ingress = VendorIngress::production(parts.clone());
+    let sink_calls = Arc::new(AtomicUsize::new(0));
+    let body = json!({
+        "update_id": 7101,
+        "message": {
+            "message_id": 7111,
+            "date": 1710000000,
+            "text": "configuration must be ready before this can be admitted",
+            "from": {"id": 710710, "is_bot": false, "first_name": "Pat"},
+            "chat": {"id": 710710, "type": "private"}
+        }
+    })
+    .to_string();
+
+    let configurations = [
+        Vec::new(),
+        vec![(
+            ironclaw_telegram_extension::TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+            "configured_identity".to_string(),
+        )],
+    ];
+    let mut responses = Vec::new();
+    for config in configurations {
+        parts.registry.register(
+            "telegram",
+            ChannelIngressRegistration {
+                secrets: Arc::new(StaticIngressSecrets::new(vec![
+                    ironclaw_extension_host::ingress::VerificationCandidate {
+                        installation_id: TELEGRAM_INSTALLATION.to_string(),
+                        secret: TELEGRAM_WEBHOOK_SECRET.as_bytes().to_vec(),
+                    },
+                ])),
+                configuration: Arc::new(StaticIngressConfiguration::new(config)),
+                sink: Arc::new(UnexpectedAdmissionSink {
+                    calls: Arc::clone(&sink_calls),
+                }),
+                drain: None,
+            },
+        );
+        responses.push(
+            ingress
+                .post_with_body(
+                    TELEGRAM_ROUTE,
+                    &body,
+                    vec![(
+                        "X-Telegram-Bot-Api-Secret-Token",
+                        TELEGRAM_WEBHOOK_SECRET.to_string(),
+                    )],
+                )
+                .await,
+        );
+    }
+
+    assert_eq!(
+        responses
+            .iter()
+            .map(|(status, _)| *status)
+            .collect::<Vec<_>>(),
+        vec![
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::SERVICE_UNAVAILABLE
+        ],
+        "missing and invalid host identity configuration must be retryable"
+    );
+    assert!(
+        responses
+            .iter()
+            .all(|(_, body)| body.contains("temporarily_unavailable")),
+        "configuration failures must not be reported as malformed vendor payloads: {responses:?}"
+    );
+    assert_eq!(
+        sink_calls.load(Ordering::SeqCst),
+        0,
+        "host configuration failure must stop before durable admission"
+    );
+}
+
+/// The Slack outbound proof (OUT-1/2/5 + ING-11 read half): a signed threaded
+/// channel
 /// event on the production mount becomes a real turn whose `FinalReply` is
 /// coordinated through the REAL factory-built `DeliveryCoordinator` to
 /// `chat.postMessage`, with the §11 bridged bot token injected host-side —
@@ -1062,30 +1255,37 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
         "event_id": "Ev-delivery-slack-1",
         "team_id": "T-A",
         "event": {
-            "type": "message",
+            "type": "app_mention",
             "user": "U777",
-            "channel": "D777",
-            "channel_type": "im",
-            "text": "please reply through the coordinator",
+            "channel": "C777",
+            "text": "<@UBOT> please reply through the coordinator",
+            "thread_ts": "1710000200.000050",
             "ts": "1710000300.000100"
         }
     })
     .to_string();
     // The run's scope is the vendor conversation's binding, not this harness
     // thread's — register its scripted model before the POST admits the turn.
-    let evidence = ironclaw_product::auth::mark_request_signature_verified(
-        "X-Slack-Signature".to_string(),
-        Some("X-Slack-Request-Timestamp".to_string()),
+    // `test_verified` is the `test-support` seam standing in for the ingress
+    // verifier: minting is witness-gated (PROPOSAL §11.2.5) and the harness
+    // holds no `VerifiedInboundGrant`. Value-identical to the pre-WS1.5
+    // `mark_request_signature_verified` call this replaced.
+    let evidence = ProtocolAuthEvidence::test_verified(
+        AuthRequirement::RequestSignature {
+            header_name: "X-Slack-Signature".to_string(),
+            timestamp_header_name: Some("X-Slack-Request-Timestamp".to_string()),
+        },
         SLACK_INSTALLATION,
     );
     let slack_binding_service = inbound
         .binding_service_for_test()
         .expect("group binding service");
-    let vendor_scope = preresolve_vendor_turn_scope(
+    let (vendor_scope, vendor_actor_user_id) = preresolve_vendor_turn_scope(
         &slack_binding_service,
         &ironclaw_slack_extension::SlackChannelAdapter,
         "slack",
         SLACK_INSTALLATION,
+        &[],
         &evidence,
         &body,
     )
@@ -1112,7 +1312,7 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
     assert_eq!(
         observer.accepted_count(),
         1,
-        "the signed DM must be admitted as a turn (errors: {:?})",
+        "the signed threaded channel message must be admitted as a turn (errors: {:?})",
         observer.errors()
     );
     let run_id = observer
@@ -1129,9 +1329,33 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
         .expect("completed Slack run remains readable");
     let actor = completed.actor.clone().expect("completed Slack run actor");
     assert_eq!(
-        Some(&actor.user_id),
-        vendor_scope.explicit_owner_user_id(),
-        "the admitted run actor must remain the exact user paired to the source route"
+        actor.user_id, vendor_actor_user_id,
+        "the admitted Slack run actor must remain the normalized external account"
+    );
+    assert_eq!(
+        vendor_scope
+            .explicit_owner_user_id()
+            .map(ironclaw_host_api::ids::UserId::as_str),
+        Some("host-user"),
+        "the shared Slack route must retain its configured subject account"
+    );
+    let durable_reply = inbound
+        .thread_service_for_test()
+        .expect("group thread service")
+        .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+            scope: thread_scope_for_turn(&vendor_scope),
+            thread_id: vendor_scope.thread_id.clone(),
+            turn_run_id: run_id.to_string(),
+        })
+        .await
+        .expect("Slack thread history remains readable")
+        .expect("Slack reply is durable");
+    assert!(
+        durable_reply
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains(SLACK_REPLY)),
+        "durable Slack reply must retain important content: {durable_reply:?}"
     );
     assert_delivered_attempt(services, &vendor_scope).await;
 
@@ -1156,11 +1380,14 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
     let post_message = &requests[post_message_position];
-    let posted_body = String::from_utf8_lossy(&post_message.body);
-    assert!(
-        posted_body.contains("\"channel\":\"D777\""),
-        "the reply must target the originating DM conversation; got {posted_body}"
-    );
+    let posted_messages = requests
+        .iter()
+        .filter(|request| request.url.ends_with("/api/chat.postMessage"))
+        .map(|request| {
+            serde_json::from_slice(&request.body).expect("Slack chat.postMessage body is JSON")
+        })
+        .collect::<Vec<_>>();
+    assert_slack_thread_delivery_evidence(&posted_messages);
     let authorization = post_message
         .headers
         .iter()
@@ -1276,7 +1503,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
             .any(|requirement| matches!(
                 (&requirement.setup, requirement.provider.as_str()),
                 (
-                    ironclaw_host_api::RuntimeCredentialAccountSetup::Pairing,
+                    ironclaw_host_api::capability::RuntimeCredentialAccountSetup::Pairing,
                     "telegram"
                 )
             )),
@@ -1339,7 +1566,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
             ("user", "9911", None, "8675309"),
             (
                 lifecycle.turn_coordinator_for_test(),
-                lifecycle.turn_state_store_for_test(),
+                lifecycle.process_gates_for_test(),
                 inbound.binding.tenant_id.clone(),
             ),
         )
@@ -1422,25 +1649,35 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         "update_id": 501,
         "message": {
             "message_id": 11,
+            "message_thread_id": 77,
             "date": 1710000000,
-            "text": "please reply through the coordinator",
+            "text": "@itest_delivery_bot please reply through the coordinator",
+            "entities": [{"type": "mention", "offset": 0, "length": 19}],
             "from": {"id": 9911, "is_bot": false, "first_name": "Ada"},
-            "chat": {"id": 8675309, "type": "private"}
+            "chat": {"id": -1008675309_i64, "type": "supergroup"}
         }
     })
     .to_string();
-    let evidence = ironclaw_product::auth::mark_shared_secret_header_verified(
-        "X-Telegram-Bot-Api-Secret-Token".to_string(),
+    // Same `test-support` seam as above; value-identical to the pre-WS1.5
+    // `mark_shared_secret_header_verified` call this replaced.
+    let evidence = ProtocolAuthEvidence::test_verified(
+        AuthRequirement::SharedSecretHeader {
+            header_name: "X-Telegram-Bot-Api-Secret-Token".to_string(),
+        },
         TELEGRAM_INSTALLATION,
     );
     // Pre-resolve through the SAME binding service the production-registered
     // sink resolves with, so the scripted gateway lands on the exact scope
     // the admitted run executes under.
-    let vendor_scope = preresolve_vendor_turn_scope(
+    let (vendor_scope, vendor_actor_user_id) = preresolve_vendor_turn_scope(
         &telegram_binding_service,
         &ironclaw_telegram_extension::TelegramChannelAdapter::default(),
         "telegram",
         TELEGRAM_INSTALLATION,
+        &[(
+            ironclaw_telegram_extension::TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+            "itest_delivery_bot".to_string(),
+        )],
         &evidence,
         &body,
     )
@@ -1515,13 +1752,57 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
                 && String::from_utf8_lossy(&request.body).contains("Ironclaw is thinking...")
         })
         .expect("a running Telegram turn must post the generic working indicator");
-    assert!(String::from_utf8_lossy(&working.body).contains("8675309"));
+    let working_body: serde_json::Value =
+        serde_json::from_slice(&working.body).expect("working sendMessage body is JSON");
+    assert_eq!(working_body["chat_id"], "-1008675309");
+    assert_eq!(
+        working_body["message_thread_id"], 77,
+        "the working indicator must stay inside the originating forum topic"
+    );
 
     let run_id = paused_gateway.wait_for_run_id().await;
     paused_gateway.release();
     ingress.drain().await;
     let coordinator = inbound.turn_coordinator_for_test();
     wait_for_run_status_in_scope(&coordinator, &vendor_scope, run_id, TurnStatus::Completed).await;
+    let completed = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: vendor_scope.clone(),
+            run_id,
+        })
+        .await
+        .expect("completed Telegram topic run remains readable");
+    let actor = completed
+        .actor
+        .as_ref()
+        .expect("completed Telegram topic run actor");
+    assert_eq!(
+        actor.user_id, vendor_actor_user_id,
+        "the Telegram topic run must retain the normalized external account actor"
+    );
+    assert_eq!(
+        vendor_scope.explicit_owner_user_id(),
+        Some(&paired_user),
+        "the Telegram topic's shared route must retain its configured subject account"
+    );
+    let durable_reply = inbound
+        .thread_service_for_test()
+        .expect("group thread service")
+        .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+            scope: thread_scope_for_turn(&vendor_scope),
+            thread_id: vendor_scope.thread_id.clone(),
+            turn_run_id: run_id.to_string(),
+        })
+        .await
+        .expect("Telegram topic thread history remains readable")
+        .expect("Telegram topic reply is durable");
+    assert!(
+        durable_reply
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains(TELEGRAM_REPLY)),
+        "durable Telegram topic reply must retain important content: {durable_reply:?}"
+    );
     assert_delivered_attempt(services, &vendor_scope).await;
     // Wire seam: the coordinated reply reached sendMessage on the Bot API
     // with the token substituted host-side. #6520 delivery is event-driven,
@@ -1557,17 +1838,21 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         send_message.url,
         format!("https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage")
     );
-    assert!(
-        String::from_utf8_lossy(&send_message.body).contains("8675309"),
-        "the reply must target the originating chat"
-    );
+    let sent_messages: Vec<serde_json::Value> = requests
+        .iter()
+        .filter(|request| request.url.ends_with("/sendMessage"))
+        .map(|request| {
+            serde_json::from_slice(&request.body).expect("Telegram sendMessage body is JSON")
+        })
+        .collect::<Vec<_>>();
+    assert_telegram_topic_delivery_evidence(&sent_messages);
     let delete_message = requests
         .iter()
         .find(|request| request.url.ends_with("/deleteMessage"))
         .expect("the final reply must retract the Telegram working indicator");
     let delete_body: serde_json::Value =
         serde_json::from_slice(&delete_message.body).expect("deleteMessage body is JSON");
-    assert_eq!(delete_body["chat_id"], "8675309");
+    assert_eq!(delete_body["chat_id"], "-1008675309");
     assert_eq!(
         delete_body["message_id"], 4242,
         "cleanup uses the authoritative message_id returned by sendMessage"
@@ -1606,6 +1891,302 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         String::from_utf8_lossy(&last_set_webhook.body).contains(updated_url),
         "the refreshed adapter must register the new webhook URL"
     );
+
+    // ── Channel attachment journey (relocated from the composition-resident
+    // attachment_journey_tests): a document update on the production mount
+    // fetches bytes through the manifest's path-constrained `getFile` +
+    // `/file/bot{token}/` egress AFTER durable admission, lands them through
+    // the canonical project-filesystem authority, and starts a byte-free turn
+    // whose transcript message carries `/workspace/attachments/...` refs. A
+    // transient provider failure releases the ledger attempt (503) so the
+    // vendor retry refetches; a duplicate replay after success does no
+    // vendor I/O and does not reland.
+    let attachment_body = json!({
+        "update_id": 502,
+        "message": {
+            "message_id": 12,
+            "date": 1710000300,
+            "caption": "review the attached report",
+            "document": {
+                "file_id": "doc-file-1",
+                "file_unique_id": "doc-unique-1",
+                "file_name": "report.pdf",
+                "mime_type": "application/pdf",
+                "file_size": 4
+            },
+            "from": {"id": 9911, "is_bot": false, "first_name": "Ada"},
+            "chat": {"id": 8675309, "type": "private"}
+        }
+    })
+    .to_string();
+    // This private DM is a distinct provider conversation from the earlier
+    // supergroup topic. Resolve and register its own model scope so the
+    // transcript assertion cannot accidentally read the topic thread.
+    let (attachment_scope, attachment_actor_user_id) = preresolve_vendor_turn_scope(
+        &telegram_binding_service,
+        &ironclaw_telegram_extension::TelegramChannelAdapter::default(),
+        "telegram",
+        TELEGRAM_INSTALLATION,
+        &[(
+            ironclaw_telegram_extension::TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+            "itest_delivery_bot".to_string(),
+        )],
+        &evidence,
+        &attachment_body,
+    )
+    .await;
+    let attachment_gateway = Arc::new(PausedReplyGateway::new("Attachment received."));
+    inbound.register_scope_gateway_for_test(
+        attachment_scope.clone(),
+        Arc::clone(&attachment_gateway) as Arc<dyn HostManagedModelGateway>,
+    );
+    attachment_gateway.release();
+    let get_file_urls = |requests: &[ironclaw_network::NetworkHttpRequest]| {
+        requests
+            .iter()
+            .filter(|request| request.url.ends_with("/getFile"))
+            .count()
+    };
+    let download_urls = |requests: &[ironclaw_network::NetworkHttpRequest]| {
+        requests
+            .iter()
+            .filter(|request| request.url.contains("api.telegram.org/file/"))
+            .count()
+    };
+
+    // First delivery: the scripted transient `getFile` failure must release
+    // the ledger attempt and surface a retryable 503 to the vendor — never a
+    // durable acceptance.
+    let status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &attachment_body,
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a retryable transfer failure must ask the vendor to redeliver"
+    );
+    ingress.drain().await;
+
+    // Vendor redelivery: the fresh ledger attempt refetches — `getFile` on
+    // the exact declared path and the download through the manifest's
+    // `/file/bot{token}/` prefix, both with the token injected host-side —
+    // then admission commits and the turn starts byte-free.
+    let status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &attachment_body,
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "the redelivered update is accepted");
+    ingress.drain().await;
+    let attachment_run_id = attachment_gateway.wait_for_run_id().await;
+    let coordinator = inbound.turn_coordinator_for_test();
+    wait_for_run_status_in_scope(
+        &coordinator,
+        &attachment_scope,
+        attachment_run_id,
+        TurnStatus::Completed,
+    )
+    .await;
+    let attachment_run = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: attachment_scope.clone(),
+            run_id: attachment_run_id,
+        })
+        .await
+        .expect("completed Telegram attachment run remains readable");
+    assert_eq!(
+        attachment_run
+            .actor
+            .as_ref()
+            .expect("attachment run actor")
+            .user_id,
+        attachment_actor_user_id
+    );
+
+    let requests = inbound.captured_network_requests_for_test();
+    assert_eq!(
+        get_file_urls(&requests),
+        2,
+        "the released attempt plus the successful retry each look the file up once"
+    );
+    assert!(requests.iter().any(|request| {
+        request.url == format!("https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile")
+    }));
+    assert_eq!(download_urls(&requests), 1);
+    assert!(
+        requests.iter().any(|request| {
+            request.url
+                == format!(
+                    "https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/documents/report.pdf"
+                )
+        }),
+        "the byte download must ride the manifest's path-prefixed egress with the injected token"
+    );
+
+    // The accepted transcript message carries the canonical byte-free
+    // workspace ref the agent's file tools resolve.
+    let history = inbound
+        .thread_service_for_test()
+        .expect("group thread service")
+        .list_thread_history(ironclaw_threads::ThreadHistoryRequest {
+            scope: thread_scope_for_turn(&attachment_scope),
+            thread_id: attachment_scope.thread_id.clone(),
+        })
+        .await
+        .expect("vendor thread history");
+    let attachment_messages: Vec<_> = history
+        .messages
+        .iter()
+        .filter(|message| !message.attachments.is_empty())
+        .collect();
+    assert_eq!(
+        attachment_messages.len(),
+        1,
+        "the retry and the duplicate must not reland the attachment"
+    );
+    let storage_key = attachment_messages[0].attachments[0]
+        .storage_key
+        .as_deref()
+        .expect("landed attachment carries a canonical workspace ref");
+    assert!(
+        storage_key.starts_with("/workspace/attachments/"),
+        "unexpected storage key {storage_key}"
+    );
+
+    // Duplicate replay after durable success: acknowledged without any
+    // vendor I/O.
+    let status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &attachment_body,
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "duplicate replay is acknowledged");
+    ingress.drain().await;
+    let requests = inbound.captured_network_requests_for_test();
+    assert_eq!(
+        get_file_urls(&requests),
+        2,
+        "duplicate replay must not refetch"
+    );
+    assert_eq!(
+        download_urls(&requests),
+        1,
+        "duplicate replay must not redownload"
+    );
+
+    // ── Outbound half: a final reply in a NEW conversation (same paired
+    // actor, so the same project workspace) explicitly invokes the generic
+    // reply-attachment capability for the landed file. Transcript finalization
+    // seals that run-scoped intent into the assistant message; the coordinator
+    // materializes the bytes through the real project-scoped reader and the
+    // adapter delivers them natively as `sendDocument`.
+    let outbound_body = json!({
+        "update_id": 503,
+        "message": {
+            "message_id": 13,
+            "date": 1710000400,
+            "text": "send me the report back",
+            "from": {"id": 9911, "is_bot": false, "first_name": "Ada"},
+            "chat": {"id": 424242, "type": "private"}
+        }
+    })
+    .to_string();
+    let (outbound_scope, _) = preresolve_vendor_turn_scope(
+        &telegram_binding_service,
+        &ironclaw_telegram_extension::TelegramChannelAdapter::default(),
+        "telegram",
+        TELEGRAM_INSTALLATION,
+        &[(
+            ironclaw_telegram_extension::TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+            "itest_delivery_bot".to_string(),
+        )],
+        &evidence,
+        &outbound_body,
+    )
+    .await;
+    group
+        .register_scope_script_for_test(
+            outbound_scope,
+            "telegram-outbound-reply-attachment",
+            [
+                RebornScriptedReply::tool_call(
+                    ironclaw_host_runtime::ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
+                    json!({"path": storage_key}),
+                ),
+                RebornScriptedReply::text("Here is the report."),
+            ],
+        )
+        .await
+        .expect("outbound attachment scope uses the real scripted provider chain");
+    let status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &outbound_body,
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    ingress.drain().await;
+
+    let wire_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let send_document = loop {
+        let requests = inbound.captured_network_requests_for_test();
+        if let Some(request) = requests
+            .iter()
+            .find(|request| request.url.ends_with("/sendDocument"))
+        {
+            break request.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < wire_deadline,
+            "sendDocument must land on the wire; got {:?}",
+            requests.iter().map(|r| r.url.clone()).collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(
+        send_document.url,
+        format!("https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument")
+    );
+    let multipart = String::from_utf8_lossy(&send_document.body);
+    assert!(
+        multipart.contains("DATA"),
+        "the delivered document must carry the landed workspace bytes"
+    );
+    // The landed segment is `<message_id>-<index>-report.pdf`; the delivered
+    // filename is derived from that path segment.
+    assert!(
+        multipart.contains("report.pdf\""),
+        "the delivered document keeps the landed filename; got {multipart}"
+    );
+    assert!(
+        multipart.contains("424242"),
+        "the document targets the replying conversation"
+    );
+    inbound
+        .assert_tool_invoked(ironclaw_host_runtime::ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID)
+        .await
+        .expect("Telegram file delivery was sourced from the explicit reply-attachment tool");
 }
 
 /// §5.5 WebGeneratedCode pairing on the generic route (the P2 seam, DEL-10
@@ -1723,7 +2304,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
                 ("user", "activation-bootstrap", None, "activation-bootstrap"),
                 (
                     lifecycle.turn_coordinator_for_test(),
-                    lifecycle.turn_state_store_for_test(),
+                    lifecycle.process_gates_for_test(),
                     inbound.binding.tenant_id.clone(),
                 ),
             )
@@ -1744,8 +2325,12 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
             .extension_ingress_parts()
             .expect("composition built the generic ingress"),
     );
-    let evidence = ironclaw_product::auth::mark_shared_secret_header_verified(
-        "X-Telegram-Bot-Api-Secret-Token".to_string(),
+    // Same `test-support` seam as above; value-identical to the pre-WS1.5
+    // `mark_shared_secret_header_verified` call this replaced.
+    let evidence = ProtocolAuthEvidence::test_verified(
+        AuthRequirement::SharedSecretHeader {
+            header_name: "X-Telegram-Bot-Api-Secret-Token".to_string(),
+        },
         TELEGRAM_INSTALLATION,
     );
 
@@ -1756,6 +2341,25 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
                 "message_id": update_id + 10,
                 "date": 1710000000,
                 "text": text,
+                "from": {"id": 424242, "is_bot": false, "first_name": "Pat"},
+                "chat": {"id": chat_id, "type": "private"}
+            }
+        })
+        .to_string()
+    };
+    let targeted_start_body = |update_id: u64, chat_id: u64, code: &str| {
+        let command = "/start@itest_pairing_bot";
+        json!({
+            "update_id": update_id,
+            "message": {
+                "message_id": update_id + 10,
+                "date": 1710000000,
+                "text": format!("{command} {code}"),
+                "entities": [{
+                    "type": "bot_command",
+                    "offset": 0,
+                    "length": command.encode_utf16().count()
+                }],
                 "from": {"id": 424242, "is_bot": false, "first_name": "Pat"},
                 "chat": {"id": chat_id, "type": "private"}
             }
@@ -1841,7 +2445,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     let status = ingress
         .post(
             TELEGRAM_ROUTE,
-            &dm_body(604, 515151, &format!("/start {code}")),
+            &targeted_start_body(604, 515151, &code),
             vec![(
                 "X-Telegram-Bot-Api-Secret-Token",
                 TELEGRAM_WEBHOOK_SECRET.to_string(),
@@ -1888,11 +2492,15 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     //    binding: a real turn admits under the paired user's scope and the
     //    reply coordinates back over sendMessage.
     let chat_body = dm_body(605, 515151, "what can you do now that we're paired?");
-    let vendor_scope = preresolve_vendor_turn_scope(
+    let (vendor_scope, _) = preresolve_vendor_turn_scope(
         &telegram_binding_service,
         &ironclaw_telegram_extension::TelegramChannelAdapter::default(),
         "telegram",
         TELEGRAM_INSTALLATION,
+        &[(
+            ironclaw_telegram_extension::TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+            "itest_pairing_bot".to_string(),
+        )],
         &evidence,
         &chat_body,
     )
@@ -1937,6 +2545,15 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    let delivered_messages = inbound
+        .captured_network_requests_for_test()
+        .into_iter()
+        .filter(|request| request.url.ends_with("/sendMessage"))
+        .map(|request| {
+            serde_json::from_slice(&request.body).expect("Telegram sendMessage body is JSON")
+        })
+        .collect::<Vec<_>>();
+    assert_telegram_chat_delivery_evidence(&delivered_messages);
     assert_delivered_attempt(services, &vendor_scope).await;
 
     // 5. Exercise the real protected HTTP unpair handler. It must revoke both
@@ -1952,9 +2569,34 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         inbound.binding.agent_id.clone(),
         inbound.binding.project_id.clone(),
     );
-    let unpair_response = pairing_mount
-        .router
-        .layer(axum::Extension(pairing_caller))
+    let pairing_router = pairing_mount.router.layer(axum::Extension(pairing_caller));
+    let connected_status_response = pairing_router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/webchat/v2/extensions/telegram/pairing/status")
+                .body(Body::empty())
+                .expect("pairing status request"),
+        )
+        .await
+        .expect("pairing router responds");
+    assert_eq!(connected_status_response.status(), StatusCode::OK);
+    let connected_status_body = connected_status_response
+        .into_body()
+        .collect()
+        .await
+        .expect("pairing status body collects")
+        .to_bytes();
+    let connected_status: serde_json::Value =
+        serde_json::from_slice(&connected_status_body).expect("pairing status body is JSON");
+    assert_eq!(
+        connected_status["connected"], true,
+        "the protected status route must read back the durable pairing"
+    );
+
+    let unpair_response = pairing_router
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -1972,6 +2614,29 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         Some(false),
         "HTTP unpair must revoke the caller's durable pairing"
     );
+    let disconnected_status_response = pairing_router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/webchat/v2/extensions/telegram/pairing/status")
+                .body(Body::empty())
+                .expect("pairing status request"),
+        )
+        .await
+        .expect("pairing router responds");
+    assert_eq!(disconnected_status_response.status(), StatusCode::OK);
+    let disconnected_status_body = disconnected_status_response
+        .into_body()
+        .collect()
+        .await
+        .expect("pairing status body collects")
+        .to_bytes();
+    let disconnected_status: serde_json::Value =
+        serde_json::from_slice(&disconnected_status_body).expect("pairing status body is JSON");
+    assert_eq!(
+        disconnected_status["connected"], false,
+        "the protected status route must read back the durable unpair"
+    );
 
     // 6. Mint through the web-side pairing service and consume through the
     // real verified webhook again. No direct store/service mutation repairs
@@ -1983,7 +2648,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     let status = ingress
         .post(
             TELEGRAM_ROUTE,
-            &dm_body(606, 515151, &format!("/start {repaired_code}")),
+            &targeted_start_body(606, 515151, &repaired_code),
             vec![(
                 "X-Telegram-Bot-Api-Secret-Token",
                 TELEGRAM_WEBHOOK_SECRET.to_string(),
@@ -2005,11 +2670,15 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     // binding seam and catches unpair implementations that delete only the
     // identity or DM target while leaving actor-thread state behind.
     let repaired_chat_body = dm_body(607, 515151, "do we have a fresh conversation now?");
-    let repaired_scope = preresolve_vendor_turn_scope(
+    let (repaired_scope, _) = preresolve_vendor_turn_scope(
         &telegram_binding_service,
         &ironclaw_telegram_extension::TelegramChannelAdapter::default(),
         "telegram",
         TELEGRAM_INSTALLATION,
+        &[(
+            ironclaw_telegram_extension::TELEGRAM_BOT_USERNAME_CONFIG.to_string(),
+            "itest_pairing_bot".to_string(),
+        )],
         &evidence,
         &repaired_chat_body,
     )

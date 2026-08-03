@@ -2,10 +2,12 @@
 import {
   cancelRun as cancelRunRequest,
   createThread as createThreadRequest,
+  executeChatCommand,
   resolveGate as resolveGateRequest,
   sendMessage,
   submitManualToken,
 } from "../../../lib/api";
+import { renderCommandResultMarkdown } from "../lib/chat-commands";
 import {
   completionMatchesGate,
   readLatestProductAuthOAuthCompletion,
@@ -450,6 +452,7 @@ export function useChat(threadId) {
     threadId,
     onEvent: handleEvent,
     enabled: Boolean(threadId),
+    activityExpected: isProcessing,
   });
 
   React.useEffect(() => {
@@ -1091,6 +1094,67 @@ export function useChat(threadId) {
     [send, seedThreadMessages, setMessages, threadId],
   );
 
+  // Execute composer slash text server-side and append the rendered outcome
+  // as a local SYSTEM notice. Commands are not turns: no optimistic user
+  // bubble, no run, no SSE — the response is the whole exchange.
+  //
+  // Commands are thread-scoped: chat.tsx only calls this when
+  // `activeThreadId` is set (the landing composer intentionally does not
+  // offer commands — see the interception guard there), so `threadId` is
+  // always a real id here and this never needs to create one.
+  //
+  // Identity fence: a thread switch mid-flight must not paint the
+  // destination conversation with this command's result. `threadIdRef`
+  // reflects whichever thread is on screen *right now* (kept current by
+  // the layout effect above), so the notice renders locally only when
+  // we're still viewing the thread the command executed against;
+  // otherwise it's seeded into that thread's own cache instead of being
+  // lost, exactly like `send`'s busy-notice handling below.
+  const runCommand = React.useCallback(
+    async (text) => {
+      const appendNotice = (content, executedThreadId, meta) => {
+        const notice = {
+          id: `system-command-${pendingSeqRef.current++}`,
+          role: CHAT_MESSAGE_ROLES.SYSTEM,
+          content,
+          timestamp: new Date().toISOString(),
+          isOptimistic: false,
+          ...meta,
+        };
+        const appendToPrev = (prev) => [...prev, notice];
+        if (
+          !threadIdRef.current ||
+          threadIdRef.current === executedThreadId
+        ) {
+          setMessages(appendToPrev);
+        } else {
+          seedThreadMessages(executedThreadId, appendToPrev);
+        }
+      };
+      try {
+        const response = await executeChatCommand({ threadId, text });
+        // `commandResult` is the raw server response — the ephemeral,
+        // client-only structured payload `CommandResult`
+        // (components/command-result.tsx) reads to render the rich
+        // title/fields/lines (or command-list/denial) presentation.
+        // `content` keeps rendering the legacy markdown string, unchanged, as
+        // the fallback for any consumer that only reads plain text.
+        appendNotice(renderCommandResultMarkdown(response), threadId, {
+          commandResult: response,
+        });
+        return { ...response, thread_id: threadId };
+      } catch {
+        // A thrown error here has no server-shaped `result`/`rejection` to
+        // render (network failure, timeout, or an unexpected client-side
+        // exception) — show one generic, localized notice instead of a raw
+        // (and potentially unlocalized) error message.
+        appendNotice(t("chat.commandFailed"), threadId);
+        return null;
+      }
+    },
+    [threadId, setMessages, seedThreadMessages, t],
+  );
+
   return {
     // v2-native
     messages,
@@ -1105,6 +1169,7 @@ export function useChat(threadId) {
     hasMore,
     cooldownSeconds,
     send,
+    runCommand,
     resolveGate,
     submitAuthToken,
     startOnboardingOAuth,

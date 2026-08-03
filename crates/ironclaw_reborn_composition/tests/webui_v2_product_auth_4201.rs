@@ -21,10 +21,11 @@ use ironclaw_auth::{
 use ironclaw_auth::{AuthProviderId, CredentialAccountId, CredentialAccountService};
 use ironclaw_auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
 use ironclaw_host_api::{
-    AgentId, InvocationId, ProductSurfaceCaller, ProductSurfaceError, ProjectId, ResourceScope,
-    TenantId, UserId,
+    ids::{AgentId, InvocationId, ProjectId, TenantId, UserId},
+    resource::ResourceScope,
 };
 use ironclaw_product::rejecting_product_surface_error;
+use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
 use ironclaw_webui::{
     ProductAuthRouteState, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
     product_auth_route_mount, webui_v2_app,
@@ -73,28 +74,35 @@ impl RebornAuthContinuationDispatcher for NoopAuthDispatcher {
 struct UnusedServices;
 
 #[async_trait]
-impl ironclaw_host_api::ProductSurface for UnusedServices {
+impl ironclaw_product_contracts::surface::ProductSurface for UnusedServices {
     async fn invoke(
         &self,
         _caller: ProductSurfaceCaller,
-        _request: ironclaw_host_api::ProductSurfaceInvokeRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        _request: ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
+        ProductSurfaceError,
+    > {
         Err(rejecting_product_surface_error())
     }
 
     async fn query(
         &self,
         _caller: ProductSurfaceCaller,
-        _request: ironclaw_host_api::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        _request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_product_contracts::surface::ProductSurfaceQueryPage, ProductSurfaceError>
+    {
         Err(rejecting_product_surface_error())
     }
 
     async fn stream_events(
         &self,
         _caller: ProductSurfaceCaller,
-        _request: ironclaw_host_api::ProductSurfaceStreamRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        _request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
+        ProductSurfaceError,
+    > {
         Err(rejecting_product_surface_error())
     }
 }
@@ -149,7 +157,7 @@ fn caller_scope_with_invocation(invocation_id: InvocationId) -> AuthProductScope
 
 fn caller_scope_with_invocation_and_thread(
     invocation_id: InvocationId,
-    thread_id: ironclaw_host_api::ThreadId,
+    thread_id: ironclaw_host_api::ids::ThreadId,
 ) -> AuthProductScope {
     AuthProductScope::new(
         ResourceScope {
@@ -1161,7 +1169,7 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
     .unwrap();
     let expires_at = Utc::now() + chrono::Duration::hours(1);
 
-    use ironclaw_host_api::ThreadId;
+    use ironclaw_host_api::ids::ThreadId;
     use ironclaw_turns::{TurnRunId, TurnScope};
     let thread_id = ThreadId::new("thread-4112".to_string()).expect("thread id");
     let turn_run_id = TurnRunId::new();
@@ -1174,6 +1182,7 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
             scope: caller_scope_with_invocation_and_thread(InvocationId::new(), thread_id.clone()),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("google".to_string()).unwrap(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: auth_url,
                 expires_at,
@@ -1274,7 +1283,7 @@ async fn challenge_for_gate_cancelled_flow_returns_none() {
         AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthGateRef,
         InMemoryAuthProductServices, NewAuthFlow, OAuthAuthorizationUrl, TurnRunRef,
     };
-    use ironclaw_host_api::ThreadId;
+    use ironclaw_host_api::ids::ThreadId;
     use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Arc;
 
@@ -1301,6 +1310,7 @@ async fn challenge_for_gate_cancelled_flow_returns_none() {
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("google".to_string()).unwrap(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: auth_url,
                 expires_at,
@@ -1355,7 +1365,7 @@ async fn challenge_for_gate_threadless_flow_returns_none_for_thread_scope() {
         AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthGateRef,
         InMemoryAuthProductServices, NewAuthFlow, OAuthAuthorizationUrl, TurnRunRef,
     };
-    use ironclaw_host_api::ThreadId;
+    use ironclaw_host_api::ids::ThreadId;
     use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Arc;
 
@@ -1377,6 +1387,7 @@ async fn challenge_for_gate_threadless_flow_returns_none_for_thread_scope() {
             scope: caller_scope_with_invocation(InvocationId::new()),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("google".to_string()).unwrap(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new(
                     "https://accounts.google.com/o/oauth2/auth".to_string(),
@@ -1430,7 +1441,7 @@ async fn challenge_for_gate_wrong_tenant_returns_none() {
         AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthGateRef,
         InMemoryAuthProductServices, NewAuthFlow, OAuthAuthorizationUrl, TurnRunRef,
     };
-    use ironclaw_host_api::ThreadId;
+    use ironclaw_host_api::ids::ThreadId;
     use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Arc;
 
@@ -1457,6 +1468,7 @@ async fn challenge_for_gate_wrong_tenant_returns_none() {
             scope: caller_scope_with_invocation(InvocationId::new()),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("google".to_string()).unwrap(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: auth_url,
                 expires_at,
@@ -1509,7 +1521,7 @@ async fn challenge_for_gate_returns_manual_token_view_for_seeded_flow() {
         AuthInteractionId, CredentialAccountLabel, InMemoryAuthProductServices, NewAuthFlow,
         TurnRunRef,
     };
-    use ironclaw_host_api::ThreadId;
+    use ironclaw_host_api::ids::ThreadId;
     use ironclaw_product::AuthPromptChallengeKind;
     use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Arc;
@@ -1534,6 +1546,7 @@ async fn challenge_for_gate_returns_manual_token_view_for_seeded_flow() {
             scope: caller_scope_with_invocation_and_thread(InvocationId::new(), thread_id.clone()),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("slack".to_string()).unwrap(),
+            requester_extension: None,
             challenge: AuthChallenge::ManualTokenRequired {
                 interaction_id: AuthInteractionId::new(),
                 provider: AuthProviderId::new("slack".to_string()).unwrap(),
@@ -1590,7 +1603,7 @@ async fn challenge_for_gate_returns_other_kind_view_for_setup_required_flow() {
         AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthGateRef,
         InMemoryAuthProductServices, NewAuthFlow, TurnRunRef,
     };
-    use ironclaw_host_api::ThreadId;
+    use ironclaw_host_api::ids::ThreadId;
     use ironclaw_product::AuthPromptChallengeKind;
     use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Arc;
@@ -1615,6 +1628,7 @@ async fn challenge_for_gate_returns_other_kind_view_for_setup_required_flow() {
             scope: caller_scope_with_invocation_and_thread(InvocationId::new(), thread_id.clone()),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("github".to_string()).unwrap(),
+            requester_extension: None,
             challenge: AuthChallenge::SetupRequired {
                 provider: AuthProviderId::new("github".to_string()).unwrap(),
                 message: "GitHub app not installed".to_string(),

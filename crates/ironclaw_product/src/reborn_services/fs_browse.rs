@@ -25,120 +25,16 @@
 //!   sole mutation path.
 
 use async_trait::async_trait;
-use ironclaw_host_api::{ProjectId, ResourceScope};
-use serde::{Deserialize, Serialize};
+use ironclaw_host_api::resource::ResourceScope;
 
-use super::project_fs::{ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat};
+use ironclaw_product_contracts::workspace_views::{
+    ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat,
+};
 
-/// A logical, browsable filesystem mount exposed by the read-only file viewer.
-///
-/// Deliberately a small logical enum: the concrete alias (`/memory`,
-/// `/workspace`, …) and physical target are composition concerns and never
-/// cross this product boundary. New mounts (e.g. a future engine-internals or
-/// secrets-metadata surface) extend this enum; the wire form is the stable
-/// snake_case discriminant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FsMount {
-    /// Persistent memory store (identity files, daily logs, curated memory).
-    Memory,
-    /// Project working directory the agent's file tools read/write, including
-    /// agent-produced and landed attachment files.
-    Workspace,
-    /// Installed and user-placed skills.
-    Skills,
-}
-
-impl FsMount {
-    /// All mounts known to the product layer, in display order. Which of these
-    /// a given deployment actually serves is reported by
-    /// [`FilesystemBrowseReader::available_mounts`] — a mount may be known here
-    /// but unwired in a particular composition.
-    pub const ALL: &'static [FsMount] = &[FsMount::Memory, FsMount::Workspace, FsMount::Skills];
-
-    /// Stable, human-facing default label. The frontend may localize via its
-    /// own i18n; this is the server-side fallback.
-    pub fn label(self) -> &'static str {
-        match self {
-            FsMount::Memory => "Memory",
-            FsMount::Workspace => "Workspace files",
-            FsMount::Skills => "Skills",
-        }
-    }
-}
-
-/// Metadata describing one browsable mount for the WebUI mount picker.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornFsMountInfo {
-    pub mount: FsMount,
-    pub label: String,
-}
-
-/// Response listing the mounts this deployment can browse.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornFsMountsResponse {
-    pub mounts: Vec<RebornFsMountInfo>,
-}
-
-/// Request to list browsable mounts.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornFsMountsRequest {}
-
-/// Request to list a directory under a browsable mount.
-///
-/// `path` is mount-relative (`""` or `"/"` for the mount root). The
-/// implementation composes the concrete scoped path from the mount alias plus
-/// this value; the browser never supplies an alias or host path.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornFsListRequest {
-    pub mount: FsMount,
-    #[serde(default)]
-    pub path: String,
-    /// Optional project selector. When absent, the authenticated caller's
-    /// default project scope is preserved.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<ProjectId>,
-}
-
-/// Directory listing response. Echoes the requested `mount`/`path` so the
-/// browser can reconcile out-of-order responses, and carries mount-relative
-/// entry paths.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornFsListResponse {
-    pub mount: FsMount,
-    pub path: String,
-    pub entries: Vec<ProjectFsEntry>,
-}
-
-/// Request to stat a path under a browsable mount.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornFsStatRequest {
-    pub mount: FsMount,
-    #[serde(default)]
-    pub path: String,
-    /// Optional project selector. The service authorizes it before resolving
-    /// the browse scope.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<ProjectId>,
-}
-
-/// Path metadata response.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornFsStatResponse {
-    pub stat: ProjectFsStat,
-}
-
-/// Request to read (preview/download) a file under a browsable mount.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornFsReadRequest {
-    pub mount: FsMount,
-    #[serde(default)]
-    pub path: String,
-    /// Optional project selector. The service authorizes it before resolving
-    /// the browse scope.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<ProjectId>,
-}
+pub use ironclaw_product_contracts::workspace_views::{
+    FsMount, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsRequest,
+    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
+};
 
 /// Read-only navigation + download access to the agent's internal filesystem
 /// across multiple logical mounts.

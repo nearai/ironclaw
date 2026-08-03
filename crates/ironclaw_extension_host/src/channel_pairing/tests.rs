@@ -9,16 +9,22 @@ use std::{
 };
 
 use ironclaw_auth::{AuthProductError, RebornAuthContinuationDispatcher};
-use ironclaw_conversations::{
-    ConditionalUnpairOutcome, ExternalActorRef as ConversationActorRef, InboundTurnError,
+use ironclaw_conversations::{ConditionalUnpairOutcome, InboundTurnError};
+use ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind;
+use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
 use ironclaw_extension_host::ingress::{InboundAdmission, InboundAdmissionAck, InboundSink};
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_host_api::RebornUserIdentityLookupError;
-use ironclaw_product::ChannelConnectionNoticePolicy;
-use ironclaw_product::{
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, NormalizedInboundMessage,
-    ProductAdapterId, ProductTriggerReason,
+use ironclaw_host_api::product_adapter::ProductAdapterId;
+use ironclaw_host_api::user_identity::RebornUserIdentityLookupError;
+use ironclaw_product::RebornChannelConnectStrategy;
+use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement;
+use ironclaw_product_contracts::prompt_source::{
+    BlockedAuthPromptRequest, BlockedAuthPromptSource,
 };
 use tokio::sync::Notify;
 
@@ -41,6 +47,20 @@ impl ChannelPairingInstallationSource for StaticInstallation {
         _caller: &UserId,
     ) -> Result<Option<AdapterInstallationId>, String> {
         Ok(self.0.clone())
+    }
+}
+
+/// An installation source whose backend is down. Used to drive the one
+/// `AccountConnectionStatusSource::connected` path that must sanitize.
+struct UnavailableInstallation;
+
+#[async_trait]
+impl ChannelPairingInstallationSource for UnavailableInstallation {
+    async fn current_installation(
+        &self,
+        _caller: &UserId,
+    ) -> Result<Option<AdapterInstallationId>, String> {
+        Err("postgres: connection refused at 10.0.0.7:5432".to_string())
     }
 }
 
@@ -225,11 +245,11 @@ impl RebornAuthContinuationDispatcher for FailOnceIdempotentFanout {
 struct UnexpectedWorkflow;
 
 #[async_trait::async_trait]
-impl ironclaw_host_api::ChannelInboundProductSurface for UnexpectedWorkflow {
+impl ironclaw_product_contracts::surface::ChannelInboundProductSurface for UnexpectedWorkflow {
     async fn admit_channel_inbound(
         &self,
-        _request: ironclaw_host_api::ChannelInboundSurfaceRequest,
-    ) -> ironclaw_host_api::ChannelInboundSurfaceOutcome {
+        _request: ironclaw_product_contracts::surface::ChannelInboundSurfaceRequest,
+    ) -> ironclaw_product_contracts::surface::ChannelInboundSurfaceOutcome {
         panic!("pairing tests must not reach channel admission");
     }
 }
@@ -246,7 +266,7 @@ impl ConversationActorPairingService for RecordingActorPairings {
         _tenant_id: TenantId,
         _adapter_kind: AdapterKind,
         _adapter_installation_id: ironclaw_conversations::AdapterInstallationId,
-        _external_actor_ref: ConversationActorRef,
+        _external_actor_ref: ExternalActorRef,
         _user_id: UserId,
     ) -> Result<(), InboundTurnError> {
         Ok(())
@@ -257,7 +277,7 @@ impl ConversationActorPairingService for RecordingActorPairings {
         _tenant_id: TenantId,
         _adapter_kind: AdapterKind,
         _adapter_installation_id: ironclaw_conversations::AdapterInstallationId,
-        _external_actor_ref: ConversationActorRef,
+        _external_actor_ref: ExternalActorRef,
         _user_id: UserId,
         _epoch: ironclaw_conversations::ExternalActorBindingEpoch,
     ) -> Result<(), InboundTurnError> {
@@ -269,7 +289,7 @@ impl ConversationActorPairingService for RecordingActorPairings {
         _tenant_id: TenantId,
         _adapter_kind: AdapterKind,
         _adapter_installation_id: ironclaw_conversations::AdapterInstallationId,
-        _external_actor_ref: ConversationActorRef,
+        _external_actor_ref: ExternalActorRef,
     ) -> Result<(), InboundTurnError> {
         Ok(())
     }
@@ -279,7 +299,7 @@ impl ConversationActorPairingService for RecordingActorPairings {
         _tenant_id: &TenantId,
         _adapter_kind: &AdapterKind,
         adapter_installation_id: &ironclaw_conversations::AdapterInstallationId,
-        external_actor_ref: &ConversationActorRef,
+        external_actor_ref: &ExternalActorRef,
         expected: &ExpectedExternalActorOwner,
     ) -> Result<ConditionalUnpairOutcome, InboundTurnError> {
         self.unpairs.lock().expect("unpairs lock").push((
@@ -308,6 +328,22 @@ fn fixture_with_prefixes(
     template_values: BTreeMap<String, String>,
     inbound_code_prefixes: &[&str],
 ) -> Fixture {
+    fixture_with_installation_source(
+        Arc::new(StaticInstallation(installation.map(|id| {
+            AdapterInstallationId::new(id).expect("installation id")
+        }))),
+        deep_link_template,
+        template_values,
+        inbound_code_prefixes,
+    )
+}
+
+fn fixture_with_installation_source(
+    installation_source: Arc<dyn ChannelPairingInstallationSource>,
+    deep_link_template: Option<&str>,
+    template_values: BTreeMap<String, String>,
+    inbound_code_prefixes: &[&str],
+) -> Fixture {
     let backend: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
     let tenant = TenantId::new("tenant-alpha").expect("tenant");
     let operator = UserId::new("operator").expect("operator");
@@ -330,19 +366,18 @@ fn fixture_with_prefixes(
     ));
     let service = ChannelPairingService::new(ChannelPairingServiceParts {
         tenant_id: tenant,
-        agent_id: ironclaw_host_api::AgentId::new("agent-a").expect("agent"),
+        agent_id: ironclaw_host_api::ids::AgentId::new("agent-a").expect("agent"),
         project_id: None,
         extension_id,
         connection_notices: ChannelConnectionNoticePolicy::generic("Vendor X"),
+        connection_requirement: connection_requirement(),
         deep_link_template: deep_link_template.map(str::to_string),
         inbound_code_prefixes: inbound_code_prefixes
             .iter()
             .map(|prefix| (*prefix).to_string())
             .collect(),
         store,
-        installation: Arc::new(StaticInstallation(
-            installation.map(|id| AdapterInstallationId::new(id).expect("installation id")),
-        )),
+        installation: installation_source,
         template_values: Arc::new(StaticTemplateValues(template_values)),
         identity_bind: Arc::clone(&identity) as Arc<dyn RebornUserIdentityBindingStore>,
         identity_lookup: Arc::clone(&identity) as Arc<dyn RebornUserIdentityLookup>,
@@ -389,7 +424,6 @@ fn pairing_ingress(service: Arc<ChannelPairingService>) -> Arc<GenericChannelInb
             evidence: VerifiedEvidenceMint::SharedSecretHeader {
                 header: "X-Vendor-Secret".to_string(),
             },
-            classifier: None,
             surface: Arc::new(UnexpectedWorkflow),
             observer: None,
         })
@@ -410,15 +444,16 @@ fn pairing_ingress_with_outcomes(
             evidence: VerifiedEvidenceMint::SharedSecretHeader {
                 header: "X-Vendor-Secret".to_string(),
             },
-            classifier: None,
             surface: Arc::new(UnexpectedWorkflow),
             observer: None,
         })
         .with_pairing(
             service as Arc<dyn ChannelPairingInterceptor>,
-            Some(ChannelPairingOutcomeObserver::Recording(Arc::clone(
-                &outcomes,
-            ))),
+            Some(
+                Arc::new(crate::test_support::RecordingPairingOutcomeObserver {
+                    outcomes: Arc::clone(&outcomes),
+                }) as Arc<dyn ChannelPairingOutcomeObserver>,
+            ),
         ),
     );
     (sink, outcomes)
@@ -434,6 +469,8 @@ fn pairing_admission_for(
     actor_id: &str,
 ) -> InboundAdmission {
     InboundAdmission {
+        channel_adapter: Arc::new(crate::test_support::FakeChannelAdapter::default()),
+        channel_egress: None,
         extension_id: EXT.to_string(),
         installation_id: installation_id.to_string(),
         message: direct_message(&format!("/start {}", code.as_str()), actor_id),
@@ -446,6 +483,18 @@ fn install() -> AdapterInstallationId {
 
 fn user(id: &str) -> UserId {
     UserId::new(id).expect("user")
+}
+
+fn connection_requirement() -> ChannelConnectionRequirement {
+    ChannelConnectionRequirement {
+        channel: EXT.to_string(),
+        display_name: "Vendor X".to_string(),
+        strategy: RebornChannelConnectStrategy::WebGeneratedCode,
+        instructions: "Send the generated code to Vendor X.".to_string(),
+        input_placeholder: "Pairing code".to_string(),
+        submit_label: "Connect".to_string(),
+        error_message: "Pairing failed.".to_string(),
+    }
 }
 
 #[tokio::test]
@@ -504,6 +553,84 @@ async fn mint_rotates_to_a_single_live_code_and_resolves_the_deep_link() {
         .expect("status");
     assert!(!status.connected);
     assert_eq!(status.pending.expect("pending issue").code, second.code);
+}
+
+#[tokio::test]
+async fn recipe_auth_prompt_reuses_the_live_pairing_code_and_connection_recipe() {
+    let Fixture { service, .. } = fixture();
+    let registry = Arc::new(ChannelPairingRegistry::default());
+    registry.register(Arc::new(service));
+    let provider =
+        crate::run_delivery_ports::RecipeAuthChallengeProvider::compose(None, Some(registry))
+            .expect("pairing registry composes an auth challenge provider");
+    let source = crate::run_delivery_ports::ProductAuthBlockedAuthPromptSource::new(Some(provider));
+    let owner = user("alice");
+    let scope = ironclaw_turns::TurnScope::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        Some(AgentId::new("agent-a").expect("agent")),
+        None,
+        ironclaw_host_api::ids::ThreadId::new("thread-pairing-prompt").expect("thread"),
+    );
+    let run_id = ironclaw_turns::TurnRunId::new();
+    let requirements = [
+        ironclaw_host_api::decision::RuntimeCredentialAuthRequirement {
+            provider: ironclaw_host_api::ids::VendorId::new(EXT).expect("provider"),
+            setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::Pairing,
+            requester_extension: ExtensionId::new(EXT).expect("extension"),
+            provider_scopes: Vec::new(),
+        },
+    ];
+
+    let first = source
+        .auth_prompt_for_blocked_run(BlockedAuthPromptRequest {
+            fallback_owner_user_id: &owner,
+            scope: &scope,
+            run_id,
+            gate_ref: "gate:pairing-prompt",
+            invocation_id: None,
+            body: "Pair the channel to continue.".to_string(),
+            credential_requirements: &requirements,
+        })
+        .await
+        .expect("first pairing prompt");
+    let second = source
+        .auth_prompt_for_blocked_run(BlockedAuthPromptRequest {
+            fallback_owner_user_id: &owner,
+            scope: &scope,
+            run_id,
+            gate_ref: "gate:pairing-prompt",
+            invocation_id: None,
+            body: "Pair the channel to continue.".to_string(),
+            credential_requirements: &requirements,
+        })
+        .await
+        .expect("re-rendered pairing prompt");
+
+    assert_eq!(first.challenge_kind, Some(AuthPromptChallengeKind::Pairing));
+    let first_connection = first
+        .connection
+        .as_ref()
+        .expect("pairing prompt carries manifest connection context");
+    assert_eq!(first_connection.channel, EXT);
+    assert_eq!(
+        first_connection.strategy.as_deref(),
+        Some("web_generated_code")
+    );
+    let first_pairing = first
+        .pairing
+        .as_ref()
+        .expect("pairing prompt carries a host-issued code");
+    assert_eq!(first_pairing.channel, EXT);
+    assert_eq!(first_pairing.display_name, "Vendor X");
+    assert_eq!(
+        second
+            .pairing
+            .as_ref()
+            .expect("re-rendered prompt carries the pairing issue")
+            .code,
+        first_pairing.code,
+        "prompt rendering must reuse a live code instead of rotating it",
+    );
 }
 
 #[tokio::test]
@@ -1125,5 +1252,61 @@ async fn interceptor_accepts_another_manifest_declared_prefix() {
         ChannelPairingInterception::Consumed(ChannelPairingConsumeOutcome::Paired {
             user_id: user("alice"),
         })
+    );
+}
+
+/// The activation-preflight probe is the one place a pairing backend failure
+/// crosses into product-facing vocabulary, so it must fail **closed** and
+/// **sanitized**: activation cannot be allowed to proceed on an unknown
+/// connection state, and the concrete backend string (host, port, driver) must
+/// not ride out on the error a product surface renders.
+#[tokio::test]
+async fn connection_probe_fails_closed_and_sanitizes_the_backend_error() {
+    use ironclaw_product_contracts::account_setup::AccountConnectionStatusSource;
+
+    let fixture = fixture_with_installation_source(
+        Arc::new(UnavailableInstallation),
+        None,
+        BTreeMap::new(),
+        &[],
+    );
+    let caller = UserId::new("user-1").expect("user");
+
+    let error = fixture
+        .service
+        .connected(&caller)
+        .await
+        .expect_err("an unavailable pairing backend must not answer 'not connected'");
+
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("channel pairing status unavailable"),
+        "probe must report the sanitized reason: {rendered}"
+    );
+    for leak in ["postgres", "10.0.0.7", "5432", "connection refused"] {
+        assert!(
+            !rendered.contains(leak),
+            "backend detail {leak:?} leaked into the product-facing error: {rendered}"
+        );
+    }
+}
+
+/// The success half of the same probe: a resolvable installation answers with
+/// the pairing state itself, so an unpaired caller reports `false` rather than
+/// erroring — activation must be able to tell "not connected yet" apart from
+/// "cannot tell".
+#[tokio::test]
+async fn connection_probe_reports_not_connected_for_an_unpaired_caller() {
+    use ironclaw_product_contracts::account_setup::AccountConnectionStatusSource;
+
+    let fixture = fixture_with(Some(INSTALL), None, BTreeMap::new());
+    let caller = UserId::new("user-1").expect("user");
+
+    assert!(
+        !fixture
+            .service
+            .connected(&caller)
+            .await
+            .expect("a resolvable installation answers rather than erroring"),
     );
 }

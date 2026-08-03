@@ -1,12 +1,16 @@
+use ironclaw_product_contracts::operator_tools::RebornOperatorToolInfo;
 use std::sync::Arc;
 
 use super::{
     OutboundPreferencesProductService, ProductSurfaceCaller, ProductSurfaceError,
-    RebornOperatorToolInfo, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornSetOutboundPreferencesRequest,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundPreferencesResponse, RebornSetOutboundPreferencesRequest,
 };
-use ironclaw_host_api::{EffectKind, ExtensionId, HostApiError, PermissionMode};
+use ironclaw_host_api::{
+    capability::{EffectKind, PermissionMode},
+    error::HostApiError,
+    ids::ExtensionId,
+};
 use thiserror::Error;
 
 pub const OUTBOUND_DELIVERY_SYNTHETIC_PROVIDER_ID: &str = "builtin";
@@ -30,7 +34,7 @@ pub fn outbound_delivery_target_set_operator_tool_info(
     provider: ExtensionId,
 ) -> Result<RebornOperatorToolInfo, HostApiError> {
     Ok(RebornOperatorToolInfo {
-        capability_id: ironclaw_host_api::CapabilityId::new(
+        capability_id: ironclaw_host_api::ids::CapabilityId::new(
             OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
         )?,
         provider,

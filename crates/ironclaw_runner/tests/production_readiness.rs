@@ -1,6 +1,11 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use ironclaw_loop_contracts::{
+    AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverHost,
+    AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, CheckpointSchemaId, LoopDriverId,
+    LoopExit,
+};
 use ironclaw_runner::{
     driver_registry::{DriverKind, DriverRegistry, DriverRequirements, LoopDriverRegistryKey},
     production_readiness::{
@@ -12,11 +17,7 @@ use ironclaw_runner::{
         validate_reborn_loop_production_readiness,
     },
 };
-use ironclaw_turns::{
-    AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
-    AgentLoopDriverRunRequest, LoopExit, RunProfileId, RunProfileVersion, TurnStatus,
-    run_profile::{AgentLoopDriverHost, CheckpointSchemaId, LoopDriverId},
-};
+use ironclaw_turns::{RunProfileId, RunProfileVersion, TurnStatus};
 
 #[test]
 fn production_readiness_rejects_missing_selected_driver() {
@@ -59,19 +60,22 @@ fn production_readiness_rejects_reference_driver() {
 }
 
 #[test]
-fn local_dev_allows_reference_driver_with_degraded_status() {
+fn non_production_allows_reference_driver_with_degraded_status() {
     let mut registry = DriverRegistry::new();
     let key = register_driver(&mut registry, "reference_echo", DriverKind::Reference);
 
     let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::LocalDevTest,
+        mode: RebornLoopReadinessMode::NonProduction,
         driver_registry: &registry,
         component_graph: RebornLoopComponentGraphReadiness::production_verified(),
         configured_profiles: vec![selected_profile(key)],
         active_runs: Vec::new(),
     });
 
-    assert_eq!(report.status, RebornLoopProductionStatus::LocalDevDegraded);
+    assert_eq!(
+        report.status,
+        RebornLoopProductionStatus::NonProductionDegraded
+    );
     assert_eq!(report.blocking_issues().count(), 0);
     assert!(report.contains(
         RebornLoopProductionComponent::LoopDriver,
@@ -84,7 +88,7 @@ fn production_readiness_rejects_in_memory_checkpoint_store() {
     let mut registry = DriverRegistry::new();
     let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
     let mut graph = RebornLoopComponentGraphReadiness::production_verified();
-    graph.checkpoint_state_store =
+    graph.process_checkpoint_port =
         RebornComponentReadiness::non_durable(RebornComponentRequirement::Required);
 
     let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
@@ -97,30 +101,7 @@ fn production_readiness_rejects_in_memory_checkpoint_store() {
 
     assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
     assert!(report.contains(
-        RebornLoopProductionComponent::CheckpointStateStorePort,
-        RebornLoopProductionIssueKind::NonDurableImplementation
-    ));
-}
-
-#[test]
-fn production_readiness_rejects_non_durable_subagent_goal_store() {
-    let mut registry = DriverRegistry::new();
-    let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
-    let mut graph = RebornLoopComponentGraphReadiness::production_verified();
-    graph.subagent_goal_store =
-        RebornComponentReadiness::non_durable(RebornComponentRequirement::Required);
-
-    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
-        mode: RebornLoopReadinessMode::Production,
-        driver_registry: &registry,
-        component_graph: graph,
-        configured_profiles: vec![selected_profile(key)],
-        active_runs: Vec::new(),
-    });
-
-    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
-    assert!(report.contains(
-        RebornLoopProductionComponent::SubagentGoalStorePort,
+        RebornLoopProductionComponent::ProcessCheckpointPort,
         RebornLoopProductionIssueKind::NonDurableImplementation
     ));
 }

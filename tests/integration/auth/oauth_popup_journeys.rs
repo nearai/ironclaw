@@ -63,8 +63,10 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
     };
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
-        ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-        ResourceScope, SecretHandle, UserId, VirtualPath,
+        ids::{ExtensionId, InvocationId, SecretHandle, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+        resource::ResourceScope,
     };
     use ironclaw_reborn_composition::{
         RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
@@ -106,7 +108,7 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
         async fn delete_user_identity_bindings_for_user(
             &self,
             provider: &str,
-            user_id: &ironclaw_host_api::UserId,
+            user_id: &ironclaw_host_api::ids::UserId,
             provider_user_id_prefix: Option<&str>,
         ) -> Result<usize, RebornUserIdentityBindingError> {
             let mut bindings = self.bindings.lock().unwrap();
@@ -231,6 +233,7 @@ app_id = "/app_id"
         &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
         None,
         &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+        None,
     )
     .expect("fixture manifest parses");
     let admin_descriptors = record.resolved().admin_configuration.clone();
@@ -345,6 +348,8 @@ app_id = "/app_id"
                     opaque_state_hash: Some(state_hash.clone()),
                     pkce_verifier_hash: Some(PkceVerifierHash::new(hex64(fill)).unwrap()),
                     expires_at,
+                    // User-driven connect flow in this fixture, not extension-owned.
+                    requester_extension: None,
                 })
                 .await
                 .expect("create_flow must succeed");

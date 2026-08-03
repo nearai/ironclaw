@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::HostApiError;
+use crate::error::HostApiError;
 
 fn has_forbidden_control(value: &str) -> bool {
     value.chars().any(|c| c == '\0' || c.is_control())
@@ -58,7 +58,7 @@ fn validate_scope_id(kind: &'static str, value: &str) -> Result<(), HostApiError
 }
 
 /// Scope-id namespace reserved for host-minted sentinel identities (e.g.
-/// [`crate::TENANT_SHARED_MANAGED_USER_ID`]). Rejected by [`validate_scope_id`]
+/// [`crate::resource::TENANT_SHARED_MANAGED_USER_ID`]). Rejected by [`validate_scope_id`]
 /// so no caller-supplied identifier — env bearer, SSO directory, OIDC claims,
 /// request payloads — can ever collide with a sentinel; sentinels are minted
 /// exclusively via `from_trusted`.
@@ -125,7 +125,7 @@ macro_rules! string_id {
 
             /// Construct without validation. Reserved for sentinel values
             /// that intentionally contain bytes the validator rejects (e.g.
-            /// [`crate::SYSTEM_RESERVED_ID`]), so no caller-supplied
+            /// [`crate::resource::SYSTEM_RESERVED_ID`]), so no caller-supplied
             /// identifier can collide with them.
             pub fn from_trusted(value: String) -> Self {
                 Self(value)
@@ -247,10 +247,10 @@ uuid_id!(GateRef);
 
 impl GateRef {
     /// The canonical [`GateRef`] under which an approval gate's
-    /// [`GateRecord`](crate::GateRecord) is persisted and later resolved.
+    /// [`GateRecord`](crate::gate_record::GateRecord) is persisted and later resolved.
     ///
     /// Derived from the approval request's uuid so the host persist side
-    /// (`ironclaw_capabilities` authorize, the local-dev synthetic approval
+    /// (`ironclaw_capabilities` authorize, the standalone synthetic approval
     /// producer, and any future host-side gate rendering per §5.2.9) and the
     /// product read model derive the SAME record key from the one shared
     /// [`ApprovalRequestId`]. The two must never diverge or a persisted gate is
@@ -259,13 +259,13 @@ impl GateRef {
     /// This is the typed GateRecord key — a uuid, per this ref family's
     /// no-caller-composed-string contract above — and is deliberately distinct
     /// from the loop-facing `gate:approval-{id}` routing ref
-    /// (`ironclaw_turns::GateRef`), which stays string-encoded so the
+    /// ([`TurnGateRef`](crate::turn::TurnGateRef)), which stays string-encoded so the
     /// `is_approval_gate_ref` prefix predicate keeps routing approvals vs auth.
     pub fn for_approval_request(approval_request_id: ApprovalRequestId) -> Self {
         Self::from_uuid(approval_request_id.as_uuid())
     }
 
-    /// The canonical [`GateRecord`](crate::GateRecord) key for an **auth** gate,
+    /// The canonical [`GateRecord`](crate::gate_record::GateRecord) key for an **auth** gate,
     /// derived from the runtime auth gate id so the loop-host persist seam and the
     /// runner's blocked-exit render-from-record read derive the SAME key from the
     /// one shared gate id (§5.2.9 / §5.3 Stage 2 — the auth analogue of

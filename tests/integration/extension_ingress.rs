@@ -32,10 +32,11 @@ use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
 use ironclaw_extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
-    ExtensionIngressParts, GenericChannelInboundSink, PostAdmissionObserver, StaticIngressSecrets,
-    VerifiedEvidenceMint, extension_ingress_route_mount,
+    ExtensionIngressParts, GenericChannelInboundSink, PostAdmissionObserver,
+    StaticIngressConfiguration, StaticIngressSecrets, VerifiedEvidenceMint,
+    extension_ingress_route_mount,
 };
-use ironclaw_host_api::ChannelInboundProductSurface;
+use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 use reborn_support::builder::StorageMode;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
@@ -126,7 +127,6 @@ impl AcmeIngress {
                 signature_header: "X-Acme-Signature".to_string(),
                 timestamp_header: Some("X-Acme-Request-Timestamp".to_string()),
             },
-            classifier: None,
             surface,
             observer: Some(Arc::clone(&observer) as Arc<dyn PostAdmissionObserver>),
         }));
@@ -139,6 +139,7 @@ impl AcmeIngress {
                         secret: ACME_SECRET.to_vec(),
                     },
                 ])),
+                configuration: Arc::new(StaticIngressConfiguration::default()),
                 sink: sink.clone() as Arc<dyn ironclaw_extension_host::ingress::InboundSink>,
                 drain: Some(sink as Arc<dyn ChannelIngressDrain>),
             },

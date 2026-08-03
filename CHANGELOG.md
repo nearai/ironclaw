@@ -7,12 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Extension persistence:** normalize filesystem-backed extension lifecycle
+  state into typed installation (with the embedded, hash-pinned manifest
+  definition), user-membership, and credential-binding records with bounded
+  CAS updates, a CAS-protected mutation lease for membership and removal
+  transitions, `removed_at` soft-removal tombstones, legacy aggregate
+  compatibility views, and restart repair. Retires the per-installation
+  diagnostic health snapshot: it was always `healthy`, never read, and never
+  surfaced, while the host's activation record already owns extension failure
+  state. Rows written by the previous release keep deserializing.
+
 ### Fixed
+
+- **libSQL prefix queries scanned the whole table:** record reads, subtree
+  deletes, and FTS backfill matched descendants with `path LIKE ? ESCAPE '!'`,
+  which cannot use the primary key, so every one of them scanned all of
+  `root_filesystem_entries`. Their cost therefore grew with the total size of
+  the database — threads, turns, memory, events — rather than with what the
+  caller asked for. They now use the same `path >= ? AND path < ?` bounds the
+  Postgres backend and libSQL's own `list_dir` already used, so each seeks the
+  path index. Measured end-to-end on a 200k-row database:
+  `/api/webchat/v2/extensions` 260ms -> 28ms and `.../extensions/registry`
+  380ms -> 20ms. This is what made the hosted Extensions page take seconds and
+  left removed extensions on screen until a manual refresh: the page's
+  post-removal refetch was aborted before the server answered.
+
+- **Extension list issued a query per installation:** normalizing the
+  aggregate into child rows made `list_installations` read each installation's
+  membership and credential-binding rows separately, costing `1 + 2N` round
+  trips. Both child collections are now read once and joined in memory (`3`
+  queries regardless of installation count).
 
 - **Agent-loop termination recovery:** tell the model when no-progress or the
   iteration limit would otherwise stop a run, preserve that one-shot warning
   across checkpoints, and allow one normal capability-enabled recovery turn
   before taking the existing typed failure path.
+- **Recoverable capability errors:** carry the complete producer-scrubbed cause
+  through the bounded model diagnostic channel, including path-shaped context,
+  and emit an explicit fallback when a runtime supplies no usable detail.
 - **Skill selection:** instruct the model to review visible skills before
   answering and clarify that `skill_activate` loads full instructions for
   relevant skills selected by exact listed name.

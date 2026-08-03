@@ -1,11 +1,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_approvals::{ApprovalRequestStorePort, ApprovalStatus, ApprovalStoreError};
 use ironclaw_approvals::{ApprovalResolutionError, ApprovalResolver, DenyApproval, LeaseApproval};
 use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStorePort};
 use ironclaw_events::AuditSink;
-use ironclaw_host_api::{Action, ApprovalRequestId, CapabilityId, ResourceScope};
-use ironclaw_run_state::{ApprovalRequestStorePort, ApprovalStatus, RunStateError};
+use ironclaw_host_api::{
+    action::Action,
+    ids::{ApprovalRequestId, CapabilityId},
+    resource::ResourceScope,
+};
 
 use super::{ApprovalGateRecord, ApprovalInteractionRejectionKind, approval_rejected};
 use crate::error::ProductSurfaceFailure;
@@ -109,7 +113,7 @@ impl ApprovalResolverPort {
             .get(scope, request_id)
             .await
             .map_err(|error| {
-                map_approval_resolution_error(ApprovalResolutionError::RunState(error))
+                map_approval_resolution_error(ApprovalResolutionError::ApprovalStore(error))
             })?
             .ok_or_else(|| approval_rejected(ApprovalInteractionRejectionKind::MissingGate))?;
         if record.status != ApprovalStatus::Approved {
@@ -240,10 +244,12 @@ fn capability_for_action(
 
 fn map_approval_resolution_error(error: ApprovalResolutionError) -> ProductSurfaceFailure {
     match error {
-        ApprovalResolutionError::RunState(RunStateError::UnknownApprovalRequest { .. }) => {
-            approval_rejected(ApprovalInteractionRejectionKind::MissingGate)
-        }
-        ApprovalResolutionError::RunState(RunStateError::ApprovalNotPending { .. })
+        ApprovalResolutionError::ApprovalStore(ApprovalStoreError::UnknownApprovalRequest {
+            ..
+        }) => approval_rejected(ApprovalInteractionRejectionKind::MissingGate),
+        ApprovalResolutionError::ApprovalStore(ApprovalStoreError::ApprovalNotPending {
+            ..
+        })
         | ApprovalResolutionError::NotPending { .. }
         | ApprovalResolutionError::NotApproved { .. } => {
             approval_rejected(ApprovalInteractionRejectionKind::StaleGate)
@@ -254,7 +260,7 @@ fn map_approval_resolution_error(error: ApprovalResolutionError) -> ProductSurfa
         ApprovalResolutionError::MissingInvocationFingerprint => {
             approval_rejected(ApprovalInteractionRejectionKind::StaleGate)
         }
-        ApprovalResolutionError::RunState(_) | ApprovalResolutionError::Lease(_) => {
+        ApprovalResolutionError::ApprovalStore(_) | ApprovalResolutionError::Lease(_) => {
             ProductSurfaceFailure::Transient {
                 reason: "approval resolver unavailable".to_string(),
             }
@@ -264,18 +270,21 @@ fn map_approval_resolution_error(error: ApprovalResolutionError) -> ProductSurfa
 
 #[cfg(test)]
 mod tests {
+    use ironclaw_approvals::ApprovalRequestStorePort;
     use ironclaw_authorization::in_memory_backed_capability_lease_store;
     use ironclaw_host_api::{
-        Action, ApprovalRequest, CapabilityId, CorrelationId, InvocationId, Principal,
-        ResourceEstimate, UserId,
+        action::Action,
+        approval::ApprovalRequest,
+        ids::{CapabilityId, CorrelationId, InvocationId, UserId},
+        resource::ResourceEstimate,
+        scope::Principal,
     };
-    use ironclaw_run_state::ApprovalRequestStorePort;
 
     use super::*;
 
     #[tokio::test]
     async fn matching_lease_exists_rejects_pending_approval_as_stale() {
-        let approvals = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+        let approvals = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
         let leases = Arc::new(in_memory_backed_capability_lease_store());
         let scope = resource_scope();
         let request = approval_request(None);
@@ -301,7 +310,7 @@ mod tests {
 
     #[tokio::test]
     async fn matching_lease_exists_rejects_approved_request_without_fingerprint_as_stale() {
-        let approvals = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+        let approvals = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
         let leases = Arc::new(in_memory_backed_capability_lease_store());
         let scope = resource_scope();
         let request = approval_request(None);
@@ -334,7 +343,7 @@ mod tests {
     }
 
     fn approval_request(
-        invocation_fingerprint: Option<ironclaw_host_api::InvocationFingerprint>,
+        invocation_fingerprint: Option<ironclaw_host_api::approval::InvocationFingerprint>,
     ) -> ApprovalRequest {
         ApprovalRequest {
             id: ApprovalRequestId::new(),

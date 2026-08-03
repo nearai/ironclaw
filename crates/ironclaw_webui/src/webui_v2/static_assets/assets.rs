@@ -9,6 +9,7 @@
 pub(crate) struct Asset {
     pub bytes: &'static [u8],
     pub content_type: &'static str,
+    pub etag: &'static str,
 }
 
 include!(concat!(env!("OUT_DIR"), "/assets_generated.rs"));
@@ -62,32 +63,19 @@ mod tests {
     }
 
     #[test]
-    fn project_file_download_chips_are_wired() {
-        // The download UI: message bubble renders chips fed by extracted
-        // workspace paths. Each chip is the shared `AttachmentChip` fed a
-        // descriptor whose `fetch_url` targets the bearer-authenticated v2
-        // `/files/content` endpoint, so clicking opens the same
-        // `AttachmentPreviewModal` (image/pdf/text preview + Download) as a
-        // message attachment.
-        let chips = source_text("pages/chat/components/project-file-chips.tsx");
-        assert!(chips.contains("extractWorkspaceFilePaths"));
-        assert!(chips.contains("statProjectFile"));
-        assert!(chips.contains("projectFileContentUrl"));
-        assert!(chips.contains("AttachmentChip"));
-        assert!(chips.contains("AttachmentPreviewModal"));
-        // The chip passes the e2e selector hooks through to the shared chip,
-        // including the inline one-click download icon.
-        assert!(chips.contains("project-file-chip"));
-        assert!(chips.contains("project-file-download"));
-        assert!(chips.contains("dataPath"));
-
+    fn durable_message_attachment_chips_are_wired_without_prose_inference() {
+        // Assistant attachments are rendered only from the structured
+        // `message.attachments` projection. A workspace-looking string in
+        // prose must never mint semantic attachment state in the browser.
         let bubble = source_text("pages/chat/components/message-bubble.tsx");
-        assert!(bubble.contains("ProjectFileChips"));
-        assert!(bubble.contains("threadId"));
+        assert!(bubble.contains("attachments && attachments.length > 0"));
+        assert!(bubble.contains("attachments.map"));
+        assert!(bubble.contains("AttachmentChip"));
+        assert!(!bubble.contains("ProjectFileChips"));
+        assert!(!bubble.contains("extractWorkspaceFilePaths"));
 
-        // Both surfaces share the chip + preview implementation, so message
-        // attachments and project files cannot drift. The shared chip renders
-        // the stable e2e selector attributes.
+        // The shared chip renders stable selector attributes and fetches only
+        // an authorized URL supplied by the attachment projection.
         let chip = source_text("pages/chat/components/attachment-chip.tsx");
         assert!(chip.contains("export function AttachmentChip"));
         assert!(chip.contains("export function AttachmentThumbnail"));
@@ -98,8 +86,6 @@ mod tests {
         assert!(chip.contains("data-testid={downloadTestId}"));
         assert!(chip.contains("fetchAttachmentBlob"));
         assert!(chip.contains("saveBlob"));
-        assert!(bubble.contains("AttachmentChip"));
-
         // The preview modal fetches the blob (bearer-authenticated, via the
         // shared `fetchAttachmentBlob`) and offers a Download action with a
         // stable test hook.
@@ -107,24 +93,21 @@ mod tests {
         assert!(preview.contains("fetchAttachmentBlob"));
         assert!(preview.contains("data-testid=\"attachment-download\""));
 
-        // The api client exposes a same-origin content URL helper and keeps the
-        // bearer-authenticated blob fetch; it does no DOM (object URLs live in
-        // the preview modal / `download.js`).
+        // History projection maps durable refs to the message-scoped,
+        // bearer-authenticated attachment route.
+        let history = source_text("pages/chat/lib/history-messages.ts");
+        assert!(history.contains("record.attachments"));
+        assert!(history.contains("attachmentUrl"));
+
+        // The API client keeps the bearer-authenticated blob fetch; it does no
+        // DOM (object URLs live in the preview modal / `download.js`).
         let api = source_text("lib/api.ts");
-        assert!(api.contains("projectFilesBase"));
-        assert!(api.contains("/content"));
-        assert!(api.contains("projectFileContentUrl"));
+        assert!(api.contains("attachmentUrl"));
         assert!(api.contains("Authorization"));
         assert!(!api.contains("createObjectURL"));
 
-        // Frontend source modules live under `frontend/src`; neither source nor
-        // test files are served as raw browser assets.
-        assert!(
-            source_text("pages/chat/lib/project-file-paths.ts")
-                .contains("extractWorkspaceFilePaths")
-        );
-        assert!(lookup("pages/chat/lib/project-file-paths.ts").is_none());
-        assert!(lookup("pages/chat/lib/project-file-paths.test.ts").is_none());
+        assert!(lookup("pages/chat/lib/history-messages.ts").is_none());
+        assert!(lookup("pages/chat/lib/history-messages.test.ts").is_none());
     }
 
     #[test]

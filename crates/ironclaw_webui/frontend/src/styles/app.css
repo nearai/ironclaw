@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @source "../";
+@source "../../node_modules/streamdown/dist/*.js";
 
 @theme {
   --font-sans: "Geist", "Inter", "SF Pro Display", "Helvetica Neue",
@@ -7,6 +8,10 @@
   --font-serif: "Newsreader", "Lyon Text", "Instrument Serif", georgia, serif;
   --font-mono: "Geist Mono", "SF Mono", "JetBrains Mono", ui-monospace,
     monospace;
+  /* Semantic type scale for shared controls. Keep these viewport-independent. */
+  --text-ui-sm: 0.75rem;
+  --text-ui: 0.8125rem;
+  --text-ui-lg: 1rem;
   --color-iron-950: var(--v2-canvas-strong);
   --color-iron-900: var(--v2-surface);
   --color-iron-800: var(--v2-surface-soft);
@@ -65,6 +70,10 @@
   --v2-accent-strong:#1678bd;
   --v2-accent-soft:  rgba(76, 167, 230, 0.12);
   --v2-accent-text:  #10649e;
+
+  /* NEAR AI primary brand blue (near.ai/brand) — the process indicator mark.
+     A brand constant, defined once and inherited by every theme. */
+  --near-blue: #0091fd;
 
   /* Semantic colours */
   --v2-positive-soft: rgba(32, 210, 154, 0.13);
@@ -135,12 +144,8 @@
 
 html {
   background: var(--v2-canvas);
+  font-size: 16px;
   scroll-behavior: auto;
-}
-
-/* Slightly tighter type scale on large screens */
-@media (min-width: 1024px) {
-  html { font-size: 15px; }
 }
 
 body {
@@ -152,8 +157,10 @@ body {
 }
 
 /* Font inheritance for form elements */
-button, input, select, textarea {
-  font: inherit;
+@layer base {
+  button, input, select, textarea {
+    font: inherit;
+  }
 }
 
 button {
@@ -367,24 +374,10 @@ input:focus, select:focus, textarea:focus {
   transition: none !important;
 }
 
-/* The typing indicator is the single intentional exception: the three dots
-   loop to signal the assistant is working. The class selector outranks the
-   universal `*` rule above (both !important), so the animation survives.
-   Suppressed again under prefers-reduced-motion to respect that opt-out. */
-@keyframes v2-typing-bounce {
-  0%, 80%, 100% { transform: translateY(0);    opacity: 0.45; }
-  40%           { transform: translateY(-4px); opacity: 1; }
-}
-.v2-typing-dot {
-  animation: v2-typing-bounce 1.4s ease-in-out infinite !important;
-}
-.v2-typing-dot:nth-child(2) { animation-delay: 0.15s !important; }
-.v2-typing-dot:nth-child(3) { animation-delay: 0.3s  !important; }
-
-/* Refresh / in-flight spinner. Like the typing dots, this is an intentional
-   exception to the static-motion policy above: the class selector + !important
-   outranks the universal `animation: none` rule so a loading control can spin.
-   Suppressed under prefers-reduced-motion. */
+/* Refresh / in-flight spinner. This is an intentional exception to the
+   static-motion policy above: the class selector + !important outranks the
+   universal `animation: none` rule so a loading control can spin. Suppressed
+   under prefers-reduced-motion. */
 @keyframes v2-spin {
   to { transform: rotate(360deg); }
 }
@@ -392,9 +385,81 @@ input:focus, select:focus, textarea:focus {
   animation: v2-spin 0.8s linear infinite !important;
 }
 
+/* NEAR "N" process indicator (see pages/chat/components/near-process-indicator.tsx).
+   Another intentional motion-policy exception: while the agent is working, a
+   light chases the N's spine (`near-chase`) and the glyph does a quick spin +
+   heartbeat (`near-pulse`). Both use a class selector + !important so they
+   outrank the universal `animation: none` rule, and both are suppressed under
+   prefers-reduced-motion below. */
+.near-process {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 2px;
+  font-size: 13px;
+}
+.near-process-icon {
+  color: var(--near-blue);
+  overflow: visible;
+  transform-box: fill-box;
+  transform-origin: center;
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+.near-process-label {
+  color: var(--v2-text-muted);
+  font-weight: 400;
+}
+.near-process.is-busy .near-process-label {
+  color: var(--v2-text-strong);
+  font-weight: 560;
+}
+.near-process-elapsed {
+  color: var(--v2-text-faint);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.near-process-icon .near-base { fill: currentcolor; }
+.near-process.is-busy .near-base { opacity: 0.24; }
+.near-process-icon .near-comet {
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  /* Short lit segment (~15% of the ~66px spine) + long gap so a single comet
+     travels the mark; the keyframe shifts one full period for a seamless loop. */
+  stroke-dasharray: 10 56;
+  stroke-dashoffset: 0;
+  filter: drop-shadow(0 0 1.5px currentcolor);
+}
+.near-process.is-busy .near-process-icon {
+  animation: near-pulse 2s ease-in-out infinite !important;
+}
+.near-process.is-busy .near-process-icon .near-comet {
+  animation: near-chase 1.1s linear infinite !important;
+}
+@keyframes near-chase {
+  to { stroke-dashoffset: -66; }
+}
+@keyframes near-pulse {
+  0%   { transform: rotate(0deg)   scale(1); }
+  22%  { transform: rotate(360deg) scale(1); }
+  50%  { transform: rotate(360deg) scale(1); }
+  58%  { transform: rotate(360deg) scale(1.28); }
+  66%  { transform: rotate(360deg) scale(0.98); }
+  74%  { transform: rotate(360deg) scale(1.16); }
+  82%  { transform: rotate(360deg) scale(1); }
+  100% { transform: rotate(360deg) scale(1); }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .v2-typing-dot { animation: none !important; }
   .v2-spin { animation: none !important; }
+  .near-process.is-busy .near-process-icon,
+  .near-process.is-busy .near-process-icon .near-comet { animation: none !important; }
+  .near-process .near-comet { display: none !important; }
 }
 
 /* ── Markdown body ───────────────────────────────────────────────── */

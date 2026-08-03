@@ -15,7 +15,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
-use ironclaw_host_api::{
+use ironclaw_extension_contracts::recipe::{
     HmacSha256VerificationRecipe, IngressVerificationRecipe, SharedSecretHeaderRecipe,
     SignatureEncoding, SignedPayloadSegment,
 };
@@ -335,7 +335,7 @@ mod tests {
     /// (`tests/fixtures/extensions/acme-messenger/manifest.toml`): hex
     /// HMAC-SHA256 over `v0:{timestamp}:{body}` with a `v0=` prefix and a
     /// 300s replay window.
-    fn acme_recipe() -> IngressVerificationRecipe {
+    pub(super) fn acme_recipe() -> IngressVerificationRecipe {
         toml::from_str(
             r#"
 kind = "hmac_sha256"
@@ -367,28 +367,36 @@ header = "X-Vendor-Secret-Token"
         .expect("shared secret recipe parses")
     }
 
-    fn candidate(id: &str, secret: &[u8]) -> VerificationCandidate {
+    pub(super) fn candidate(id: &str, secret: &[u8]) -> VerificationCandidate {
         VerificationCandidate {
             installation_id: id.to_string(),
             secret: secret.to_vec(),
         }
     }
 
-    fn sign_acme(secret: &[u8], timestamp: &str, body: &[u8]) -> String {
+    /// Length of the signatures `sign_acme` produces: `v0=` plus a SHA-256
+    /// digest as 64 hex characters.
+    ///
+    /// Prefix-truncation properties derive their range from this, so a
+    /// forged signature sharing any prefix length is generated -- not just
+    /// the short ones a round-number bound happens to cover.
+    pub(super) const SIGNATURE_LEN: usize = 3 + 64;
+
+    pub(super) fn sign_acme(secret: &[u8], timestamp: &str, body: &[u8]) -> String {
         let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
         mac.update(format!("v0:{timestamp}:").as_bytes());
         mac.update(body);
         format!("v0={}", hex_encode(&mac.finalize().into_bytes()))
     }
 
-    fn headers(entries: &[(&str, &str)]) -> Vec<(String, Vec<u8>)> {
+    pub(super) fn headers(entries: &[(&str, &str)]) -> Vec<(String, Vec<u8>)> {
         entries
             .iter()
             .map(|(name, value)| (name.to_string(), value.as_bytes().to_vec()))
             .collect()
     }
 
-    const NOW: u64 = 1_700_000_000;
+    pub(super) const NOW: u64 = 1_700_000_000;
 
     #[test]
     fn hmac_recipe_verifies_the_exact_acme_byte_construction() {
@@ -865,5 +873,186 @@ signed_payload = [ { body = true } ]
             .unwrap_err(),
             VerificationFailure::Ambiguous
         );
+    }
+}
+
+/// Property tests for the shared ingress verifier (#6524 workstream 9).
+///
+/// This is the chokepoint every channel extension passes through, present and
+/// future, so it matters more than any single channel's payload parser: a
+/// bypass here is a bypass everywhere. The example tests above pin specific
+/// tampering cases; these state the universal versions, which is the only way
+/// to say anything about the shapes nobody thought to write down.
+#[cfg(test)]
+mod verifier_properties {
+    use super::tests::{NOW, SIGNATURE_LEN, acme_recipe, candidate, headers, sign_acme};
+    use super::*;
+    use proptest::prelude::*;
+
+    const SECRET: &[u8] = b"acme-signing-secret";
+
+    proptest! {
+        /// A correctly signed request always verifies, whatever the body.
+        ///
+        /// The direction that keeps the others honest: a verifier that
+        /// rejected everything would satisfy every "must not accept" property
+        /// below while breaking the product entirely.
+        #[test]
+        fn a_correct_signature_verifies_for_any_body(body in proptest::collection::vec(any::<u8>(), 0..512)) {
+            let timestamp = NOW.to_string();
+            let signature = sign_acme(SECRET, &timestamp, &body);
+            let entries = headers(&[
+                ("X-Acme-Signature", &signature),
+                ("X-Acme-Request-Timestamp", &timestamp),
+            ]);
+            let verified = verify_recipe(
+                &acme_recipe(),
+                &IngressHeaders::new(&entries),
+                &body,
+                NOW,
+                &[candidate("install-1", SECRET)],
+            );
+            prop_assert!(verified.is_ok(), "correctly signed body rejected: {verified:?}");
+        }
+
+        /// No arbitrary signature value verifies.
+        ///
+        /// The forged value is compared against the real one and skipped on
+        /// the astronomically unlikely collision, so the property cannot pass
+        /// by accidentally generating a valid signature.
+        #[test]
+        fn an_arbitrary_signature_never_verifies(
+            body in proptest::collection::vec(any::<u8>(), 0..256),
+            forged in "\\PC{0,80}",
+        ) {
+            let timestamp = NOW.to_string();
+            prop_assume!(forged != sign_acme(SECRET, &timestamp, &body));
+            let entries = headers(&[
+                ("X-Acme-Signature", &forged),
+                ("X-Acme-Request-Timestamp", &timestamp),
+            ]);
+            let verified = verify_recipe(
+                &acme_recipe(),
+                &IngressHeaders::new(&entries),
+                &body,
+                NOW,
+                &[candidate("install-1", SECRET)],
+            );
+            prop_assert!(verified.is_err(), "forged signature {forged:?} verified");
+        }
+
+        /// Changing one byte of the body always invalidates the signature.
+        ///
+        /// Signing covers the whole body, so no position is exempt — the
+        /// example test tampers at one place, this tampers everywhere.
+        #[test]
+        fn tampering_with_any_body_byte_invalidates_it(
+            body in proptest::collection::vec(any::<u8>(), 1..256),
+            index in 0usize..256,
+            delta in 1u8..=255,
+        ) {
+            let timestamp = NOW.to_string();
+            let signature = sign_acme(SECRET, &timestamp, &body);
+            let mut tampered = body.clone();
+            let position = index % tampered.len();
+            tampered[position] = tampered[position].wrapping_add(delta);
+            prop_assume!(tampered != body);
+
+            let entries = headers(&[
+                ("X-Acme-Signature", &signature),
+                ("X-Acme-Request-Timestamp", &timestamp),
+            ]);
+            let verified = verify_recipe(
+                &acme_recipe(),
+                &IngressHeaders::new(&entries),
+                &tampered,
+                NOW,
+                &[candidate("install-1", SECRET)],
+            );
+            prop_assert!(
+                verified.is_err(),
+                "a body tampered at byte {position} still verified"
+            );
+        }
+
+        /// A signature sharing a PREFIX with the real one never verifies.
+        ///
+        /// This is the property the others could not reach, and it was found
+        /// by sabotage rather than by reasoning. Weakening the comparison to
+        /// `expected[..8] == presented[..8]` — an ordinary truncation bug —
+        /// left all nine example tests AND the three properties above green,
+        /// because a randomly generated forgery never shares a prefix with the
+        /// real signature. Nothing in the suite could see it.
+        ///
+        /// So the forgery is built from the real signature with its tail
+        /// replaced, which is precisely the shape a prefix comparison accepts.
+        #[test]
+        fn a_signature_matching_only_a_prefix_never_verifies(
+            body in proptest::collection::vec(any::<u8>(), 0..128),
+            keep in 1usize..SIGNATURE_LEN,
+        ) {
+            let timestamp = NOW.to_string();
+            let real = sign_acme(SECRET, &timestamp, &body);
+            // The bound is the signature's own length, not a round number.
+            // `keep in 1..40` left prefixes 40..67 ungenerated, so a
+            // comparison truncated anywhere in that range would authenticate a
+            // forged signature while this property still passed -- the exact
+            // failure it exists to catch.
+            assert_eq!(
+                real.len(),
+                SIGNATURE_LEN,
+                "the prefix range is derived from this length; update both together"
+            );
+            prop_assume!(keep < real.len());
+
+            // Same leading `keep` characters, different tail.
+            let mut forged: String = real.chars().take(keep).collect();
+            for character in real.chars().skip(keep) {
+                forged.push(if character == 'a' { 'b' } else { 'a' });
+            }
+            prop_assume!(forged != real);
+
+            let entries = headers(&[
+                ("X-Acme-Signature", &forged),
+                ("X-Acme-Request-Timestamp", &timestamp),
+            ]);
+            let verified = verify_recipe(
+                &acme_recipe(),
+                &IngressHeaders::new(&entries),
+                &body,
+                NOW,
+                &[candidate("install-1", SECRET)],
+            );
+            prop_assert!(
+                verified.is_err(),
+                "a signature matching only the first {keep} characters verified"
+            );
+        }
+
+        /// A signature from the wrong secret never verifies, whatever it signs.
+        ///
+        /// This is the multi-tenant case: one installation's secret must not
+        /// authenticate another's traffic.
+        #[test]
+        fn a_signature_from_another_secret_never_verifies(
+            body in proptest::collection::vec(any::<u8>(), 0..256),
+            other_secret in proptest::collection::vec(any::<u8>(), 1..64),
+        ) {
+            prop_assume!(other_secret.as_slice() != SECRET);
+            let timestamp = NOW.to_string();
+            let signature = sign_acme(&other_secret, &timestamp, &body);
+            let entries = headers(&[
+                ("X-Acme-Signature", &signature),
+                ("X-Acme-Request-Timestamp", &timestamp),
+            ]);
+            let verified = verify_recipe(
+                &acme_recipe(),
+                &IngressHeaders::new(&entries),
+                &body,
+                NOW,
+                &[candidate("install-1", SECRET)],
+            );
+            prop_assert!(verified.is_err(), "another installation's secret verified");
+        }
     }
 }

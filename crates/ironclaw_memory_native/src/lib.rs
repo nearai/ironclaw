@@ -8,7 +8,6 @@ mod backend;
 mod chunking;
 #[cfg(any(test, feature = "test-support"))]
 pub mod contract_tests;
-mod embedding;
 mod events;
 mod filesystem;
 mod indexer;
@@ -21,47 +20,18 @@ mod search;
 mod service;
 mod write_metadata;
 
-pub use backend::{
-    MemoryBackend, MemoryBackendCapabilities, MemoryContext, RepositoryMemoryBackend,
-};
-pub use chunking::{
-    ChunkConfig, MemoryChunkWrite, chunk_document, content_bytes_sha256, content_sha256,
-};
-pub use embedding::{EmbeddingError, EmbeddingProvider};
-pub use events::{
-    MemoryAuditContext, MemoryEventSinkError, MemorySignificantEvent, MemorySignificantEventKind,
-    MemorySignificantEventSink, MemorySignificantEventSource, MemorySignificantEventStatus,
-};
+pub use backend::{MemoryBackend, MemoryBackendCapabilities, RepositoryMemoryBackend};
+pub use chunking::{ChunkConfig, MemoryChunkWrite, chunk_document};
 pub use filesystem::{MemoryBackendFilesystemAdapter, MemoryDocumentFilesystem};
 pub use indexer::{
     ChunkingMemoryDocumentIndexer, MemoryChunkReplaceOutcome, MemoryDocumentIndexRepository,
     MemoryDocumentIndexer,
 };
-pub use metadata::{
-    CONFIG_FILE_NAME, DocumentMetadata, HygieneMetadata, MemoryBackendWriteOptions,
-    MemoryWriteOptions,
-};
-pub use path::{MemoryDocumentPath, MemoryDocumentScope};
+pub use metadata::{MemoryBackendWriteOptions, MemoryWriteOptions};
 pub use repo::{
     FilesystemMemoryDocumentRepository, InMemoryMemoryDocumentRepository, MemoryAppendOutcome,
     MemoryDocumentRepository, MemoryWriteOutcome,
 };
-pub use safety::{
-    DEFAULT_PROMPT_PROTECTED_PATHS, DefaultPromptWriteSafetyPolicy, PromptProtectedPathClass,
-    PromptProtectedPathRegistry, PromptSafetyAllowanceId, PromptSafetyPolicyVersion,
-    PromptSafetyReason, PromptSafetyReasonCode, PromptSafetySeverity, PromptSafetySummary,
-    PromptWriteOperation, PromptWriteSafetyDecision, PromptWriteSafetyError,
-    PromptWriteSafetyEvent, PromptWriteSafetyEventKind, PromptWriteSafetyEventSink,
-    PromptWriteSafetyPolicy, PromptWriteSafetyRequest, PromptWriteSource,
-};
+pub use safety::DefaultPromptWriteSafetyPolicy;
 pub use search::{FusionStrategy, MemorySearchRequest, MemorySearchResult};
-pub use service::{
-    MemoryContextProfileId, MemoryInteractionMessage, MemoryInteractionRole, MemoryInvocation,
-    MemoryProfileSetStatus, MemoryService, MemoryServiceContextRequest,
-    MemoryServiceContextSnippet, MemoryServiceError, MemoryServiceErrorKind,
-    MemoryServiceProfileSetRequest, MemoryServiceProfileSetResponse, MemoryServiceReadRequest,
-    MemoryServiceReadResponse, MemoryServiceRecordRequest, MemoryServiceRecordResponse,
-    MemoryServiceSearchRequest, MemoryServiceSearchResponse, MemoryServiceSearchResult,
-    MemoryServiceTreeRequest, MemoryServiceTreeResponse, MemoryServiceWriteRequest,
-    MemoryServiceWriteResponse, MemoryWriteStatus, NativeMemoryService,
-};
+pub use service::NativeMemoryService;

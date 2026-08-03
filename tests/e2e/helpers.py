@@ -227,6 +227,19 @@ EMULATE_GITHUB_SECONDARY_BEARER = "ghp_emulate_github_secondary_token"
 # which targets the legacy `ironclaw` web channel.
 REBORN_V2_AUTH_TOKEN = "e2e-reborn-v2-bearer-token-0123456789abcdef"
 
+
+def capture_native_dialogs(page) -> list[str]:
+    """Dismiss and record browser-native dialogs opened by a page."""
+    native_dialogs: list[str] = []
+
+    async def dismiss_native_dialog(dialog) -> None:
+        native_dialogs.append(dialog.type)
+        await dialog.dismiss()
+
+    page.on("dialog", dismiss_native_dialog)
+    return native_dialogs
+
+
 # Selectors for the Reborn WebUI v2 React SPA (served at /). The shell
 # DOM differs entirely from the legacy gateway in SEL, so keep these separate.
 SEL_V2 = {
@@ -252,6 +265,9 @@ SEL_V2 = {
     "admin_suspended_status_name": "Suspended",
     "admin_suspend_button_name": "Suspend",
     "admin_activate_button_name": "Activate",
+    "admin_users_load_more": "[data-testid='admin-users-load-more']",
+    "admin_users_load_more_error": "[data-testid='admin-users-load-more-error']",
+    "admin_user_detail_delete": "[data-testid='admin-user-detail-delete']",
     "admin_configuration_group_test_id": "admin-configuration-group",
     "admin_extension_configuration_heading_name": "Extension configuration",
     "admin_slack_configuration_heading_name": "Slack deployment configuration",
@@ -292,6 +308,7 @@ SEL_V2 = {
     "sign_out_button": "button[title='Sign out']",
     "nav_chat": "a[href='/chat']",
     "nav_settings_inference": "a[href='/settings/inference']",
+    "nav_settings_appearance": "a[href='/settings/appearance']",
     "settings_search_input": "input[type='search'][placeholder='Search settings...']",
     "appearance_theme_light": "[data-testid='appearance-theme-light']",
     "appearance_theme_dark": "[data-testid='appearance-theme-dark']",
@@ -348,6 +365,8 @@ SEL_V2 = {
     "pairing_success": "[data-testid='pairing-success']",
     "pairing_error": "[data-testid='pairing-error']",
     "approval_card":  "[data-testid='approval-card']",  # approval gate card
+    "approval_always": "[data-testid='approval-always']",
+    "approval_primary_action": "[data-testid='approval-primary-action']",
     "busy_gate_notice": "[data-testid='busy-gate-notice']",  # gate busy notice
     "activity_run":   "[data-testid='activity-run']",
     "activity_run_toggle": "[data-testid='activity-run-toggle']",
@@ -370,6 +389,9 @@ SEL_V2 = {
     # Download chip for an agent-produced workspace file; `{path}` selects one.
     # Clicking a chip opens the shared attachment preview modal, whose footer
     # carries the Download action.
+    "workspace_file_link_for": (
+        "a[data-workspace-path='{path}']"
+    ),
     "project_file_chip": "[data-testid='project-file-chip']",
     "project_file_chip_for": "[data-testid='project-file-chip'][data-file-path='{path}']",
     # Inline one-click download icon on a project-file chip; `{path}` scopes it
@@ -380,6 +402,8 @@ SEL_V2 = {
     ),
     # Download action inside the shared attachment preview modal.
     "attachment_download": "[data-testid='attachment-download']",
+    "attachment_open_workspace": "[data-testid='attachment-open-workspace']",
+    "attachment_preview_pdf_frame_for": "iframe[title='{filename}']",
     "logs_scope_toolbar": "[data-testid='logs-scope-toolbar']",
     "logs_scope_chip": "[data-testid='logs-scope-chip'][data-scope-key='{key}']",
     "logs_entry": "[data-testid='logs-entry']",
@@ -387,6 +411,9 @@ SEL_V2 = {
     "logs_entry_message": "[data-testid='logs-entry-message']",
     "logs_entry_context": "[data-testid='logs-entry-context']",
     "logs_context_chip": "[data-testid='logs-context-chip'][data-context-key='{key}']",
+    "logs_pagination": "[data-testid='logs-pagination']",
+    "logs_load_older": "[data-testid='logs-load-older']",
+    "logs_load_older_error": "[data-testid='logs-load-older-error']",
     "settings_search_placeholder": "Search settings...",
     "settings_import_file": 'input[type="file"][accept=".json,application/json"]',
     "settings_tool_row_for": (

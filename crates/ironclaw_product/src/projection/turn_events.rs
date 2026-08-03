@@ -1,3 +1,4 @@
+use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
@@ -12,27 +13,33 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
-use ironclaw_host_api::{
-    Action, ApprovalRequest, InvocationId, NetworkMethod, NetworkScheme, UserId,
+use ironclaw_approvals::ApprovalRequestStorePort;
+use ironclaw_host_api::turn::{
+    ModelInvalidOutputDetailReason, SanitizedFailure, TurnActor, TurnGateRef, TurnRunId, TurnScope,
+    TurnStatus,
 };
-use ironclaw_run_state::ApprovalRequestStorePort;
+use ironclaw_host_api::{
+    action::{Action, NetworkMethod, NetworkScheme},
+    approval::ApprovalRequest,
+    ids::{InvocationId, UserId},
+};
+use ironclaw_loop_contracts::{
+    SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest, SystemInferenceTaskId,
+    SystemPromptId, SystemPromptSource, SystemTaskKind, sanitize_model_visible_text,
+};
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, ModelInvalidOutputDetailReason, SanitizedFailure, TurnActor,
-    TurnBlockedGateKind, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
-    TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionSource,
-    TurnEventReducerService, TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
-    run_profile::{
-        SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
-        SystemInferenceTaskId, SystemPromptId, SystemPromptSource, SystemTaskKind,
-        sanitize_model_visible_text,
-    },
+    GetRunStateRequest, TurnBlockedGateKind, TurnCoordinator, TurnError, TurnEventKind,
+    TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
+    TurnEventProjectionSource, TurnEventReducerService, TurnLifecycleEvent,
 };
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use crate::AuthChallengeProvider;
-use crate::{BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth};
-use ironclaw_runner::failure_summary::{
-    pinned_failure_summary_for_category, reborn_failure_summary_for_category_and_detail,
+use crate::auth_prompt_view_for_blocked_auth;
+use ironclaw_host_api::failure::categories::CHECKPOINT_REJECTED_CATEGORY;
+use ironclaw_host_api::failure::summary::{
+    checkpoint_rejection_host_explanation_from_detail, pinned_failure_summary_for_category,
+    reborn_failure_summary_for_category_and_detail,
 };
 
 pub(super) const WEBUI_TURN_EVENT_PAGE_LIMIT: usize = 256;
@@ -160,7 +167,7 @@ impl TurnEventBridge {
 
     pub(super) async fn drain(
         &self,
-        caller_user_id: &ironclaw_host_api::UserId,
+        caller_user_id: &ironclaw_host_api::ids::UserId,
         scope: &TurnScope,
         after: Option<TurnEventProjectionCursor>,
         auth_challenges: Option<&dyn AuthChallengeProvider>,
@@ -244,7 +251,7 @@ impl TurnEventBridge {
 }
 
 async fn turn_event_payloads_for_page(
-    caller_user_id: &ironclaw_host_api::UserId,
+    caller_user_id: &ironclaw_host_api::ids::UserId,
     coordinator: &dyn TurnCoordinator,
     failure_explainer: &dyn FailureExplanationProvider,
     failure_explanation_cache: &Arc<Mutex<FailureExplanationCache>>,
@@ -286,7 +293,7 @@ async fn turn_event_payloads_for_page(
 }
 
 async fn turn_event_payloads(
-    caller_user_id: &ironclaw_host_api::UserId,
+    caller_user_id: &ironclaw_host_api::ids::UserId,
     coordinator: &dyn TurnCoordinator,
     failure_explainer: &dyn FailureExplanationProvider,
     failure_explanation_cache: &Arc<Mutex<FailureExplanationCache>>,
@@ -370,7 +377,7 @@ impl FailureExplanationProvider for ModelFailureExplanationProvider {
 }
 
 async fn blocked_prompt_payload(
-    caller_user_id: &ironclaw_host_api::UserId,
+    caller_user_id: &ironclaw_host_api::ids::UserId,
     coordinator: &dyn TurnCoordinator,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
     approval_requests: Option<&dyn ApprovalRequestStorePort>,
@@ -464,7 +471,7 @@ async fn approval_gate_prompt(
     caller_user_id: &UserId,
     approval_requests: Option<&dyn ApprovalRequestStorePort>,
     event: &TurnLifecycleEvent,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
     gate_ref_string: String,
 ) -> Result<ProductOutboundPayload, ProductAdapterError> {
     let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
@@ -500,7 +507,7 @@ async fn approval_gate_prompt(
 /// the request is missing, or the lookup fails.
 pub async fn approval_prompt_context_view(
     approval_requests: Option<&dyn ApprovalRequestStorePort>,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
 ) -> Option<ApprovalPromptContextView> {
@@ -518,10 +525,10 @@ struct ApprovalPromptLookup {
 
 async fn approval_prompt_lookup(
     approval_requests: Option<&dyn ApprovalRequestStorePort>,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
-) -> Result<ApprovalPromptLookup, ironclaw_run_state::RunStateError> {
+) -> Result<ApprovalPromptLookup, ironclaw_approvals::ApprovalStoreError> {
     let (store, request_id) =
         match approval_requests.zip(approval_request_id_from_gate_ref(gate_ref).ok()) {
             Some(value) => value,
@@ -931,6 +938,10 @@ async fn failure_summary_for_turn_event(
     fallback_summary: String,
     detail: Option<String>,
 ) -> String {
+    if category == CHECKPOINT_REJECTED_CATEGORY {
+        return checkpoint_rejection_host_explanation_from_detail(detail.as_deref())
+            .unwrap_or(fallback_summary);
+    }
     if let Some(summary) = pinned_failure_summary_for_category(category) {
         return summary.to_string();
     }
@@ -984,9 +995,19 @@ fn failure_explanation_request(input: &FailureExplanationInput) -> Option<System
     })
 }
 
+/// The failure-explainer system prompt.
+///
+/// The asset is product-owned (WS1.7): this projection is its only consumer,
+/// and prompt *content* is explicitly out of charter for the loop tier
+/// (PROPOSAL §6.1.4/§6.7.2), where it used to live as
+/// `ironclaw_loop_host::FAILURE_EXPLANATION_SYSTEM_PROMPT`.
 fn failure_explanation_system_prompt() -> &'static str {
-    ironclaw_loop_host::FAILURE_EXPLANATION_SYSTEM_PROMPT
+    FAILURE_EXPLANATION_SYSTEM_PROMPT
 }
+
+/// Product-owned prompt asset; see [`failure_explanation_system_prompt`].
+const FAILURE_EXPLANATION_SYSTEM_PROMPT: &str =
+    include_str!("../../prompts/failure_explanation.md");
 
 pub(super) fn failure_explanation_user_prompt(input: &FailureExplanationInput) -> String {
     let mut prompt = format!(

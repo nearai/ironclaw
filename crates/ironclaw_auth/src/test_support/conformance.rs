@@ -32,7 +32,7 @@ use crate::{
     CredentialAccountLabel, NewAuthFlow, OAuthAuthorizationUrl, OAuthCallbackInput,
     OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash, ProviderCallbackOutcome,
 };
-use ironclaw_host_api::SecretHandle;
+use ironclaw_host_api::ids::SecretHandle;
 
 /// Deterministic 64-hex digest for conformance hash newtypes.
 fn digest(tag: &str) -> String {
@@ -63,6 +63,7 @@ fn new_flow(
         scope: scope.clone(),
         kind: AuthFlowKind::IntegrationCredential,
         provider: provider.clone(),
+        requester_extension: None,
         challenge: AuthChallenge::OAuthUrl {
             authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                 .expect("conformance authorization url is valid"),

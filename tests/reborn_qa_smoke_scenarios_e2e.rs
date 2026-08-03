@@ -15,7 +15,7 @@ mod support;
 
 use std::{future::Future, time::Duration};
 
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
     SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
@@ -1057,7 +1057,7 @@ fn call(
     RebornScriptedProviderToolCall::new(capability_id.clone(), call_id, arguments)
 }
 
-fn capability_order(invocations: &[ironclaw_turns::run_profile::LoopRequest]) -> Vec<&str> {
+fn capability_order(invocations: &[ironclaw_loop_contracts::LoopRequest]) -> Vec<&str> {
     invocations
         .iter()
         .map(|invocation| invocation.capability_id.as_str())

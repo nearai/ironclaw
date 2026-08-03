@@ -1,15 +1,13 @@
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef,
     SubmitTurnResponse, TurnActor, TurnScope,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    AdapterInstallationId, AdapterKind, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    InboundMessageContentRef,
-};
+use crate::{AdapterInstallationId, AdapterKind, ExternalEventId, InboundMessageContentRef};
+use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String")]
@@ -198,7 +196,7 @@ pub enum MessageIdempotencyStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AcceptedInboundMessageLookup {
+pub struct AcceptedConversationMessageLookup {
     pub tenant_id: TenantId,
     pub adapter_kind: AdapterKind,
     pub adapter_installation_id: AdapterInstallationId,
@@ -208,13 +206,13 @@ pub struct AcceptedInboundMessageLookup {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AcceptedInboundMessageReplay {
+pub struct AcceptedConversationMessageReplay {
     pub resolution: ConversationBindingResolution,
-    pub accepted_message: AcceptedInboundMessage,
+    pub accepted_message: AcceptedConversationMessage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AcceptInboundMessageRequest {
+pub struct AcceptConversationMessageRequest {
     pub tenant_id: TenantId,
     pub thread_id: ThreadId,
     pub actor: TurnActor,
@@ -232,7 +230,7 @@ pub struct AcceptInboundMessageRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AcceptedInboundMessage {
+pub struct AcceptedConversationMessage {
     pub tenant_id: TenantId,
     pub thread_id: ThreadId,
     pub actor: TurnActor,
@@ -245,8 +243,8 @@ pub struct AcceptedInboundMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ThreadMessageRecord {
-    pub accepted: AcceptedInboundMessage,
+pub struct ConversationMessageRecord {
+    pub accepted: AcceptedConversationMessage,
     pub actor: TurnActor,
     pub external_event_id: ExternalEventId,
     pub content_ref: InboundMessageContentRef,
@@ -317,7 +315,7 @@ impl TrustedInboundTurnRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InboundTurnResponse {
     pub resolution: ConversationBindingResolution,
-    pub accepted_message: AcceptedInboundMessage,
+    pub accepted_message: AcceptedConversationMessage,
     pub turn_submission: Option<SubmitTurnResponse>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replayed_turn_submission: bool,

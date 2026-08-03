@@ -18,18 +18,18 @@ use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::{DashMap, DashSet};
 use ironclaw_host_api::{
-    InvocationId, ResourceEstimate, ResourceReservationId, ResourceScope, ResourceUsage,
-    SYSTEM_RESERVED_ID, UserId,
+    ids::{InvocationId, ResourceReservationId, UserId},
+    resource::{ResourceEstimate, ResourceScope, ResourceUsage, SYSTEM_RESERVED_ID},
+};
+use ironclaw_loop_contracts::{
+    AgentLoopHostErrorKind, LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelRequest,
+    LoopModelResponse, LoopModelUsage, LoopRunContext, ModelCallOutcome, ModelProfileId,
+    ModelWorkOutcome, ModelWorkRequest,
 };
 use ironclaw_resources::{
     BudgetApprovalGate, BudgetEvent, BudgetEventSink, BudgetGateId, BudgetGateStatus,
     BudgetGateStorePort, NoOpBudgetEventSink, ResourceAccount, ResourceApprovalNeeded,
     ResourceError, ResourceGovernor, ResourceLimits,
-};
-use ironclaw_turns::run_profile::{
-    AgentLoopHostErrorKind, LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelRequest,
-    LoopModelResponse, LoopRunContext, ModelCallOutcome, ModelProfileId, ModelWorkOutcome,
-    ModelWorkRequest,
 };
 use ironclaw_turns::{LoopGateRef, TurnRunId};
 use rust_decimal::Decimal;
@@ -492,7 +492,7 @@ impl GovernorBackedAccountant {
                 Err(error)
             }
             Err(ResourceError::LimitExceeded { denial, .. }) => Err(LoopModelGatewayError::new(
-                AgentLoopHostErrorKind::BudgetExceeded,
+                AgentLoopHostErrorKind::SpendBudgetExceeded,
                 format!("budget exhausted for {}", denial.dimension),
             )
             .map_err(internal_summary_error)?),
@@ -587,7 +587,7 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
     async fn post_model_call(
         &self,
         context: &LoopRunContext,
-        _request: &LoopModelRequest,
+        request: &LoopModelRequest,
         outcome: ModelCallOutcome<'_>,
     ) -> Result<(), LoopModelGatewayError> {
         let entry = match self.in_flight.get(&context.run_id) {
@@ -609,7 +609,22 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
                 );
                 PendingAccounting::Reconcile(usage)
             }
-            ModelCallOutcome::Failure(_) => PendingAccounting::Release,
+            ModelCallOutcome::Failure(error) => match error.usage {
+                Some(usage) => {
+                    let effective_model = request
+                        .model_preference
+                        .as_ref()
+                        .unwrap_or(&context.resolved_run_profile.model_profile_id);
+                    PendingAccounting::Reconcile(usage_for_reported_usage(
+                        usage,
+                        0,
+                        self.cost_table.as_ref(),
+                        effective_model,
+                        &self.default_cost,
+                    ))
+                }
+                None => PendingAccounting::Release,
+            },
         };
         let Some(entry) = self.mark_pending(context, pending) else {
             return Ok(());
@@ -693,20 +708,13 @@ fn usage_for_response(
         .map(|chunk| chunk.safe_text_delta.len() as u64)
         .sum();
     if let Some(usage) = response.usage {
-        let cost = cost_table
-            .cost_for(effective_model)
-            .unwrap_or(*default_cost);
-        let actual_usd = Decimal::from(usage.input_tokens) * cost.input_per_token
-            + Decimal::from(usage.output_tokens) * cost.output_per_token;
-        return ResourceUsage {
-            usd: actual_usd,
-            input_tokens: u64::from(usage.input_tokens),
-            output_tokens: u64::from(usage.output_tokens),
-            wall_clock_ms: 0,
+        return usage_for_reported_usage(
+            usage,
             output_bytes,
-            network_egress_bytes: 0,
-            process_count: 0,
-        };
+            cost_table,
+            effective_model,
+            default_cost,
+        );
     }
     let chunks = response.chunks.len() as u64;
     ResourceUsage {
@@ -720,8 +728,31 @@ fn usage_for_response(
     }
 }
 
+fn usage_for_reported_usage(
+    usage: LoopModelUsage,
+    output_bytes: u64,
+    cost_table: &dyn ModelCostTable,
+    effective_model: &ModelProfileId,
+    default_cost: &ModelCost,
+) -> ResourceUsage {
+    let cost = cost_table
+        .cost_for(effective_model)
+        .unwrap_or(*default_cost);
+    let actual_usd = Decimal::from(usage.input_tokens) * cost.input_per_token
+        + Decimal::from(usage.output_tokens) * cost.output_per_token;
+    ResourceUsage {
+        usd: actual_usd,
+        input_tokens: u64::from(usage.input_tokens),
+        output_tokens: u64::from(usage.output_tokens),
+        wall_clock_ms: 0,
+        output_bytes,
+        network_egress_bytes: 0,
+        process_count: 0,
+    }
+}
+
 fn usage_for_model_work(
-    usage: ironclaw_turns::run_profile::ModelWorkUsage,
+    usage: ironclaw_loop_contracts::ModelWorkUsage,
     estimate: &ResourceEstimate,
 ) -> ResourceUsage {
     // Provider-supplied token counts and USD have not yet been threaded into
@@ -775,22 +806,24 @@ mod tests {
     use super::*;
     use crate::budget_cost_table::ZeroCostTable;
     use chrono::Utc;
-    use ironclaw_host_api::{ResourceReceipt, ResourceReservation, TenantId, ThreadId};
+    use ironclaw_host_api::{
+        ids::{TenantId, ThreadId},
+        resource::{ResourceReceipt, ResourceReservation},
+    };
+    use ironclaw_loop_contracts::{
+        AgentLoopDriverDescriptor, CancellationPolicy, CapabilitySurfaceProfileId,
+        CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
+        LoopModelRequest, LoopModelResponse, LoopRunContext, ModelCallOutcome, ModelProfileId,
+        PersonalContextPolicy, RedactedRunProfileProvenance, ResolvedRunProfile,
+        ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+        RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
+    };
     use ironclaw_resources::{
         AccountSnapshot, BudgetPeriod, BudgetThresholds, FakeClock, InMemoryResourceGovernor,
         ReservationOutcome, ResourceAccount, ResourceLimits,
     };
     use ironclaw_turns::{
-        AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnActor, TurnId, TurnRunId,
-        TurnScope,
-        run_profile::{
-            CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId,
-            ConcurrencyClass, ContextProfileId, LoopDriverId, LoopModelRequest, LoopModelResponse,
-            LoopRunContext, ModelCallOutcome, ModelProfileId, PersonalContextPolicy,
-            RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
-            ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
-            SchedulingClass, SteeringPolicy,
-        },
+        RunProfileId, RunProfileVersion, TurnActor, TurnId, TurnRunId, TurnScope,
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
@@ -865,6 +898,7 @@ mod tests {
             messages: vec![],
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         }
     }
@@ -971,7 +1005,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pre_model_call_returns_budget_exceeded_when_limit_zero_but_negative() {
+    async fn pre_model_call_returns_spend_budget_exceeded_when_hard_limit_is_crossed() {
         // A negative-USD estimate would be invalid input, but our default
         // path always produces non-negative estimates. Instead verify that
         // a very tight USD limit hard-denies.
@@ -998,7 +1032,7 @@ mod tests {
             .pre_model_call(&context, &request)
             .await
             .unwrap_err();
-        assert_eq!(err.kind, AgentLoopHostErrorKind::BudgetExceeded);
+        assert_eq!(err.kind, AgentLoopHostErrorKind::SpendBudgetExceeded);
     }
 
     #[tokio::test]
@@ -1024,10 +1058,7 @@ mod tests {
         let cost = ModelCost {
             input_per_token: dec!(0.10),
             output_per_token: dec!(0.10),
-            // 100 tokens × $0.10 = $10 × 1.20 factor = $12 → over 90% of $10
-            // but the hard cap is also exceeded. Adjust to push into the
-            // approval band by sizing max_output to land at ~$9.
-            max_output_tokens: 75,
+            max_output_tokens: 27,
         };
         let accountant = GovernorBackedAccountant::new(governor, Arc::new(CostStub(cost)))
             .with_overestimate_factor(dec!(1.0));
@@ -1036,14 +1067,9 @@ mod tests {
             .pre_model_call(&context, &request)
             .await
             .unwrap_err();
-        // 75 × 0.10 = $7.50; input_tokens=64*0.10=$6.40; total=$13.90 → over hard cap.
-        // We expect BudgetExceeded since utilization > 100%, OR
-        // BudgetApprovalRequired if just below. Either is acceptable —
-        // confirm we got a budget-class outcome, not Internal.
-        assert!(matches!(
-            err.kind,
-            AgentLoopHostErrorKind::BudgetExceeded | AgentLoopHostErrorKind::BudgetApprovalRequired
-        ));
+        // 27 × $0.10 + 64 × $0.10 = $9.10: above the 90% pause threshold,
+        // below the $10 hard cap.
+        assert_eq!(err.kind, AgentLoopHostErrorKind::BudgetApprovalRequired);
     }
 
     #[tokio::test]
@@ -1061,8 +1087,8 @@ mod tests {
         let response = LoopModelResponse {
             chunks: vec![],
             safe_reasoning_deltas: Vec::new(),
-            output: ironclaw_turns::run_profile::ParentLoopOutput::AssistantReply(
-                ironclaw_turns::run_profile::AssistantReply {
+            output: ironclaw_loop_contracts::ParentLoopOutput::AssistantReply(
+                ironclaw_loop_contracts::AssistantReply {
                     content: "ok".to_string(),
                 },
             ),
@@ -1255,8 +1281,8 @@ mod tests {
         let response = LoopModelResponse {
             chunks: vec![],
             safe_reasoning_deltas: Vec::new(),
-            output: ironclaw_turns::run_profile::ParentLoopOutput::AssistantReply(
-                ironclaw_turns::run_profile::AssistantReply {
+            output: ironclaw_loop_contracts::ParentLoopOutput::AssistantReply(
+                ironclaw_loop_contracts::AssistantReply {
                     content: "ok".to_string(),
                 },
             ),
@@ -1307,13 +1333,13 @@ mod tests {
         let response = LoopModelResponse {
             chunks: vec![],
             safe_reasoning_deltas: Vec::new(),
-            output: ironclaw_turns::run_profile::ParentLoopOutput::AssistantReply(
-                ironclaw_turns::run_profile::AssistantReply {
+            output: ironclaw_loop_contracts::ParentLoopOutput::AssistantReply(
+                ironclaw_loop_contracts::AssistantReply {
                     content: "ok".to_string(),
                 },
             ),
             effective_model_profile_id: ModelProfileId::new("acct_model").unwrap(),
-            usage: Some(ironclaw_turns::run_profile::LoopModelUsage {
+            usage: Some(ironclaw_loop_contracts::LoopModelUsage {
                 input_tokens: 7,
                 output_tokens: 3,
                 ..Default::default()
@@ -1334,6 +1360,52 @@ mod tests {
         );
         assert_eq!(snapshot.ledger.spent.input_tokens, 7);
         assert_eq!(snapshot.ledger.spent.output_tokens, 3);
+    }
+
+    #[tokio::test]
+    async fn post_model_call_reconciles_provider_usage_when_call_fails() {
+        let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
+        let context = run_context();
+        let user_account = ResourceAccount::user(
+            context.scope.tenant_id.clone(),
+            UserId::new("acct-user").unwrap(),
+        );
+        governor
+            .set_limit(
+                user_account.clone(),
+                ResourceLimits::default()
+                    .set_max_usd(dec!(10_000.00))
+                    .set_period(BudgetPeriod::Rolling24h),
+            )
+            .unwrap();
+        let cost = ModelCost {
+            input_per_token: dec!(0.01),
+            output_per_token: dec!(0.10),
+            max_output_tokens: 1024,
+        };
+        let accountant = GovernorBackedAccountant::new(governor.clone(), Arc::new(CostStub(cost)));
+        let request = sample_request();
+        accountant.pre_model_call(&context, &request).await.unwrap();
+        let failure = LoopModelGatewayError::new(
+            AgentLoopHostErrorKind::OutputTruncated,
+            "model response was truncated",
+        )
+        .unwrap()
+        .with_usage(LoopModelUsage {
+            input_tokens: 11,
+            output_tokens: 7,
+            ..Default::default()
+        });
+
+        accountant
+            .post_model_call(&context, &request, ModelCallOutcome::Failure(&failure))
+            .await
+            .unwrap();
+
+        let snapshot = governor.account_snapshot(&user_account).unwrap().unwrap();
+        assert_eq!(snapshot.ledger.spent.usd, dec!(0.81));
+        assert_eq!(snapshot.ledger.spent.input_tokens, 11);
+        assert_eq!(snapshot.ledger.spent.output_tokens, 7);
     }
 
     #[tokio::test]
@@ -1586,13 +1658,13 @@ mod tests {
         let response = LoopModelResponse {
             chunks: vec![],
             safe_reasoning_deltas: Vec::new(),
-            output: ironclaw_turns::run_profile::ParentLoopOutput::AssistantReply(
-                ironclaw_turns::run_profile::AssistantReply {
+            output: ironclaw_loop_contracts::ParentLoopOutput::AssistantReply(
+                ironclaw_loop_contracts::AssistantReply {
                     content: "ok".to_string(),
                 },
             ),
             effective_model_profile_id: ModelProfileId::new("acct_model").unwrap(),
-            usage: Some(ironclaw_turns::run_profile::LoopModelUsage {
+            usage: Some(ironclaw_loop_contracts::LoopModelUsage {
                 input_tokens: 7,
                 output_tokens: 3,
                 ..Default::default()

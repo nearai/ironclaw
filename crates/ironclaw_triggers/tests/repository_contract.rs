@@ -1,13 +1,19 @@
 use chrono::{SecondsFormat, TimeZone, Utc};
-use ironclaw_common::AutomationName;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
+use ironclaw_filesystem::{LibSqlRootFilesystem, RootFilesystem, SeqNo};
+use ironclaw_host_api::turn::TurnRunId;
+use ironclaw_host_api::{
+    Timestamp,
+    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    path::VirtualPath,
+};
+use ironclaw_libsql_runtime::LibSqlRuntime;
+use ironclaw_triggers::AutomationName;
 use ironclaw_triggers::PostgresTriggerRepository;
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository,
     TriggerDeliveryTargetId, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
     TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
-use ironclaw_turns::TurnRunId;
 use {
     ironclaw_triggers::LibSqlTriggerRepository,
     libsql::params,
@@ -1131,7 +1137,7 @@ async fn build_libsql_repo_with_db() -> (
             .await
             .expect("build libsql db"),
     );
-    let repo = LibSqlTriggerRepository::new(db.clone());
+    let repo = LibSqlTriggerRepository::new(db.clone()).expect("trigger runtime");
     repo.run_migrations().await.expect("run migrations");
     (dir, db, repo)
 }
@@ -1139,6 +1145,81 @@ async fn build_libsql_repo() -> (tempfile::TempDir, LibSqlTriggerRepository) {
     let (dir, _db, repo) = build_libsql_repo_with_db().await;
     (dir, repo)
 }
+
+/// Break caught: independent adapter pools allow filesystem and trigger writes
+/// to contend inside one process instead of queuing on one admission lane.
+#[tokio::test]
+async fn libsql_filesystem_and_trigger_writes_share_one_runtime_lane() {
+    let dir = tempdir().expect("tempdir");
+    let db = Arc::new(
+        libsql::Builder::new_local(dir.path().join("shared-runtime.db"))
+            .build()
+            .await
+            .expect("build libsql db"),
+    );
+    let runtime = Arc::new(LibSqlRuntime::new(db).expect("libSQL runtime"));
+    let filesystem = Arc::new(LibSqlRootFilesystem::from_runtime(Arc::clone(&runtime)));
+    let repository = Arc::new(LibSqlTriggerRepository::from_runtime(Arc::clone(&runtime)));
+    filesystem
+        .run_migrations()
+        .await
+        .expect("filesystem migrations");
+    repository
+        .run_migrations()
+        .await
+        .expect("trigger migrations");
+
+    let held_writer = runtime.write().await.expect("hold shared writer");
+    let event_path = VirtualPath::new("/engine/shared-writer-test/events").expect("valid path");
+    let filesystem_write = {
+        let filesystem = Arc::clone(&filesystem);
+        let event_path = event_path.clone();
+        tokio::spawn(async move { filesystem.append(&event_path, b"filesystem".to_vec()).await })
+    };
+    let trigger_write = {
+        let repository = Arc::clone(&repository);
+        tokio::spawn(async move {
+            repository
+                .upsert_trigger(sample_record(
+                    TriggerId::parse("01J00000000000000000000002").expect("ulid"),
+                    tenant("tenant-shared-runtime"),
+                    ts(1_704_067_200),
+                ))
+                .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(
+        !filesystem_write.is_finished(),
+        "filesystem write must wait for the shared writer lane"
+    );
+    assert!(
+        !trigger_write.is_finished(),
+        "trigger write must wait for the shared writer lane"
+    );
+    let read_while_writer_waits = tokio::time::timeout(
+        Duration::from_millis(250),
+        filesystem.tail(&event_path, SeqNo::ZERO),
+    )
+    .await
+    .expect("reader lane remains available")
+    .expect("read empty event log");
+    assert!(read_while_writer_waits.is_empty());
+
+    drop(held_writer);
+    tokio::time::timeout(Duration::from_secs(1), filesystem_write)
+        .await
+        .expect("filesystem write released")
+        .expect("filesystem task joined")
+        .expect("filesystem write succeeded");
+    tokio::time::timeout(Duration::from_secs(1), trigger_write)
+        .await
+        .expect("trigger write released")
+        .expect("trigger task joined")
+        .expect("trigger write succeeded");
+}
+
 #[tokio::test]
 async fn libsql_repository_contract_parity() {
     let (_dir, repo) = build_libsql_repo().await;
@@ -1184,7 +1265,7 @@ async fn libsql_repository_run_migrations_is_idempotent() {
             .await
             .expect("build libsql db"),
     );
-    let repo = LibSqlTriggerRepository::new(db);
+    let repo = LibSqlTriggerRepository::new(db).expect("trigger runtime");
 
     repo.run_migrations().await.expect("first run migrations");
     repo.run_migrations().await.expect("second run migrations");
@@ -1205,7 +1286,7 @@ async fn libsql_repository_busy_timeout_waits_for_write_lock() {
         .await
         .expect("hold write lock");
 
-    let repo = LibSqlTriggerRepository::new(db);
+    let repo = LibSqlTriggerRepository::new(db).expect("trigger runtime");
     let started = Instant::now();
     let migration = tokio::spawn(async move { repo.run_migrations().await });
 
@@ -1812,7 +1893,7 @@ async fn libsql_utc_backfill_on_legacy_row_without_schedule_timezone() {
 
     // Run migrations — this adds schedule_timezone NOT NULL DEFAULT 'UTC',
     // which backfills the existing row with "UTC".
-    let repo = LibSqlTriggerRepository::new(db);
+    let repo = LibSqlTriggerRepository::new(db).expect("trigger runtime");
     repo.run_migrations()
         .await
         .expect("migration must succeed on pre-existing table");
@@ -4626,3 +4707,4 @@ async fn libsql_once_trigger_completes_on_clear_active_fire() {
         "once trigger must transition to Completed after clear_active_fire"
     );
 }
+// arch-exempt: large_file, fallible libSQL runtime construction only adjusts existing contract setup, plan #6175

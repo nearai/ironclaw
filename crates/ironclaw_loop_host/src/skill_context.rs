@@ -1,14 +1,14 @@
 use async_trait::async_trait;
-use ironclaw_skills::{ParsedSkill, SkillTrust, parse_skill_md};
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, InstalledSkillSnapshot, LoopContextSnippet,
     LoopRunContext, SkillActivationState, SkillContextError, SkillContextService,
     SkillContextSource, SkillRunSnapshot, SkillTrustLevel, SkillVisibility,
 };
-pub(crate) use ironclaw_turns::run_profile::{
+pub(crate) use ironclaw_loop_contracts::{
     is_skill_snippet_model_message_ref as is_snippet_model_message_ref,
     skill_snippet_model_message_ref as snippet_model_message_ref,
 };
+use ironclaw_skills::{ParsedSkill, SkillTrust, parse_skill_md};
 use thiserror::Error;
 
 use crate::SkillSourceKind;
@@ -162,7 +162,7 @@ impl HostSkillContextBuildError {
             Self::TrustDataMissing
             | Self::VisibilityDataMissing
             | Self::UnsafeModelVisibleContent => AgentLoopHostErrorKind::PolicyDenied,
-            Self::ContextBudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
+            Self::ContextBudgetExceeded => AgentLoopHostErrorKind::ContextOverflow,
             Self::BudgetMisconfigured | Self::Internal => AgentLoopHostErrorKind::Internal,
         };
         AgentLoopHostError::new(kind, self.to_string())

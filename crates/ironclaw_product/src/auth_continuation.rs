@@ -5,14 +5,19 @@
 //! boundary as the WebUI gate-resolution path. It intentionally does not define
 //! another auth-flow model or handle non-turn continuation variants.
 
+use ironclaw_product_contracts::lifecycle_service::{
+    LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
+};
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
+pub use ironclaw_auth::RebornAuthContinuationDispatcher as ProductAuthContinuationDispatcher;
 use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError};
+use ironclaw_host_api::turn::{IdempotencyKey, TurnGateRef, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_turns::{
-    GateRef, GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
-    ResumeTurnRequest, TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnScope,
-    TurnStatus,
+    GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
+    TurnCoordinator, TurnError, TurnErrorCategory,
 };
 use uuid::Uuid;
 
@@ -21,26 +26,8 @@ use crate::binding_ref::{
 };
 use crate::{
     AuthContinuationRejectionKind, LifecyclePackageKind, LifecyclePackageRef,
-    LifecycleProductAction, LifecycleProductContext, LifecycleProductService,
-    LifecycleProductSurfaceContext, ProductSurfaceFailure,
+    LifecycleProductAction, ProductSurfaceFailure,
 };
-
-/// Product-surface boundary for completing a durable auth continuation.
-///
-/// Implementations are idempotent on `flow_id`: the auth engine provides
-/// at-least-once delivery until the durable continuation fence is stamped.
-#[async_trait]
-pub trait ProductAuthContinuationDispatcher: Send + Sync {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError>;
-
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError>;
-}
 
 struct LifecycleAuthContinuationDispatcher {
     lifecycle: Arc<dyn LifecycleProductService>,
@@ -261,23 +248,6 @@ impl ProductAuthContinuationDispatcher for ProductAuthTurnGateResumeDispatcher {
     }
 }
 
-#[async_trait]
-impl ironclaw_auth::RebornAuthContinuationDispatcher for ProductAuthTurnGateResumeDispatcher {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        ProductAuthTurnGateResumeDispatcher::dispatch_auth_continuation(self, event).await
-    }
-
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        ProductAuthTurnGateResumeDispatcher::dispatch_canceled_auth_continuation(self, event).await
-    }
-}
-
 fn continuation_kind(continuation: &AuthContinuationRef) -> &'static str {
     match continuation {
         AuthContinuationRef::SetupOnly => "setup_only",
@@ -439,9 +409,11 @@ fn parse_turn_run_id(value: &str) -> Result<TurnRunId, ProductSurfaceFailure> {
         })
 }
 
-fn parse_gate_ref(value: &str) -> Result<GateRef, ProductSurfaceFailure> {
-    GateRef::new(value.to_string()).map_err(|_| ProductSurfaceFailure::AuthContinuationRejected {
-        kind: AuthContinuationRejectionKind::InvalidGateRef,
+fn parse_gate_ref(value: &str) -> Result<TurnGateRef, ProductSurfaceFailure> {
+    TurnGateRef::new(value.to_string()).map_err(|_| {
+        ProductSurfaceFailure::AuthContinuationRejected {
+            kind: AuthContinuationRejectionKind::InvalidGateRef,
+        }
     })
 }
 
@@ -468,17 +440,21 @@ mod tests {
         LifecyclePackageRef, TurnRunRef,
     };
     use ironclaw_host_api::{
-        AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+        ids::{AgentId, InvocationId, ProcessId, ProjectId, TenantId, ThreadId, UserId},
+        resource::ResourceScope,
+        turn::TurnGateRef,
     };
-    use ironclaw_turns::test_support::in_memory_turn_state_store;
+    use ironclaw_processes::{
+        ClaimProcessesRequest, ProcessCheckpointRef, ProcessKind, ProcessSuspension,
+        ProcessSuspensionKind, ProcessWorkerId, SuspendProcessRequest,
+    };
+    use ironclaw_turns::test_support::in_memory_agent_turn_process_system;
     use ironclaw_turns::{
-        AcceptedMessageRef, BlockedReason, CancelRunRequest, CancelRunResponse,
-        DefaultTurnCoordinator, EventCursor, GetRunStateRequest, IdempotencyKey,
-        LoopCheckpointStateRef, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
-        RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
-        SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator, TurnError, TurnId,
-        TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope, TurnStatus,
-        runner::{BlockRunRequest, ClaimRunRequest, TurnRunTransitionPort},
+        AcceptedMessageRef, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator,
+        EventCursor, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnRequest,
+        ResumeTurnResponse, RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef,
+        SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnId,
+        TurnRunId, TurnRunState, TurnScope, TurnStatus,
     };
 
     use super::*;
@@ -668,7 +644,7 @@ mod tests {
             model_usage: None,
             received_at: Utc::now(),
             checkpoint_id: None,
-            gate_ref: gate_ref.map(|value| GateRef::new(value).unwrap()),
+            gate_ref: gate_ref.map(|value| TurnGateRef::new(value).unwrap()),
             blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,
@@ -937,7 +913,9 @@ mod tests {
 
     #[tokio::test]
     async fn turn_gate_continuation_rejects_cross_scope_resume_through_real_coordinator() {
-        let store = Arc::new(in_memory_turn_state_store());
+        let process_system = in_memory_agent_turn_process_system();
+        let store = Arc::new(process_system.runtime());
+        let transitions = process_system.transitions();
         let coordinator = Arc::new(DefaultTurnCoordinator::new(store.clone()));
         let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
         let scope = TurnScope::new(
@@ -967,28 +945,40 @@ mod tests {
             .await
             .expect("submit turn");
         let SubmitTurnResponse::Accepted { run_id, .. } = submit;
-        let runner_id = TurnRunnerId::new();
-        let lease_token = TurnLeaseToken::new();
-        store
-            .claim_next_run(ClaimRunRequest {
-                runner_id,
-                lease_token,
-                scope_filter: Some(scope),
+        let worker_id = ProcessWorkerId::from_trusted(
+            ironclaw_turns::TurnRunnerId::new().as_uuid().to_string(),
+        );
+        let claimed = transitions
+            .claim_next_processes(ClaimProcessesRequest {
+                worker_id,
+                scope_filter: None,
+                process_id_filter: None,
+                process_kind_filter: Some(ProcessKind::AgentTurn),
+                max_processes: 1,
             })
             .await
             .expect("claim run")
+            .into_iter()
+            .next()
             .expect("queued run exists");
-        store
-            .block_run(BlockRunRequest {
-                run_id,
-                runner_id,
-                lease_token,
-                checkpoint_id: TurnCheckpointId::new(),
-                state_ref: LoopCheckpointStateRef::new("checkpoint:auth-real").unwrap(),
-                reason: BlockedReason::Auth {
-                    gate_ref: GateRef::new("gate:auth-real").unwrap(),
+        assert_eq!(
+            claimed.state.process_id,
+            ProcessId::from_uuid(run_id.as_uuid())
+        );
+        transitions
+            .suspend_process(SuspendProcessRequest {
+                process_id: claimed.state.process_id,
+                worker_id: claimed.worker_id,
+                lease_token: claimed.lease_token,
+                checkpoint_ref: ProcessCheckpointRef::new("checkpoint:auth-real").unwrap(),
+                suspension: ProcessSuspension {
+                    kind: ProcessSuspensionKind::Authorization,
+                    gate_ref: Some(TurnGateRef::new("gate:auth-real").unwrap()),
+                    activity_id: None,
                     credential_requirements: Vec::new(),
+                    detail: None,
                 },
+                metadata: None,
             })
             .await
             .expect("block auth gate");

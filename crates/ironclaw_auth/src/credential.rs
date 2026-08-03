@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fmt, sync::Arc, sync::Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{
+use ironclaw_host_api::ids::{
     AgentId, ExtensionId, MissionId, ProjectId, SecretHandle, TenantId, ThreadId, UserId,
 };
 use serde::{Deserialize, Serialize};
@@ -938,7 +938,15 @@ impl CredentialAccountService for ProviderBackedCredentialAccountService {
                 scopes: account.scopes.clone(),
             };
 
-            match self.provider.refresh_token(provider_request).await {
+            let requester_extension = match account.ownership {
+                CredentialOwnership::ExtensionOwned => account.owner_extension.clone(),
+                _ => None,
+            };
+            match self
+                .provider
+                .refresh_token_for_requester(requester_extension, provider_request)
+                .await
+            {
                 Ok(refresh) => {
                     let current = self
                         .accounts
@@ -1080,7 +1088,10 @@ mod tests {
         CredentialAccountStatus, ProviderScope, scope::AuthProductScope,
     };
     use chrono::Utc;
-    use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
+    use ironclaw_host_api::{
+        ids::{InvocationId, UserId},
+        resource::ResourceScope,
+    };
 
     /// Build a minimal CredentialAccount using the same idiom as domain.rs tests.
     fn make_account(scope: AuthProductScope) -> CredentialAccount {

@@ -4,7 +4,8 @@ set -euo pipefail
 # Run the deterministic Rust-side Reborn E2E gate.
 # Usage:
 #   scripts/reborn-e2e-rust.sh              # all groups
-#   scripts/reborn-e2e-rust.sh architecture # boundary + host runtime spine
+#   scripts/reborn-e2e-rust.sh architecture-boundaries # dependency and protocol boundaries
+#   scripts/reborn-e2e-rust.sh architecture-runtime    # host runtime and capability spine
 #   scripts/reborn-e2e-rust.sh runtimes     # dispatcher/runtime/process lanes
 #   scripts/reborn-e2e-rust.sh substrates   # event/network/secret substrates
 #
@@ -23,6 +24,22 @@ run_test() {
   echo "::endgroup::"
 }
 
+run_test_exact() {
+  local package="$1"
+  local test_target="$2"
+  local test_name="$3"
+  local listed
+  listed=$(cargo test -p "${package}" --test "${test_target}" "${test_name}" -- --exact --list)
+  if ! grep -Fqx "${test_name}: test" <<<"${listed}"; then
+    echo "error: exact test selector matched zero tests: ${package}/${test_target} ${test_name}" >&2
+    return 1
+  fi
+  echo "::group::cargo test -p ${package} --test ${test_target} ${test_name} ${extra_args} --exact"
+  # shellcheck disable=SC2086 # extra_args intentionally expands into cargo's trailing args.
+  cargo test -p "${package}" --test "${test_target}" "${test_name}" ${extra_args} --exact
+  echo "::endgroup::"
+}
+
 run_lib_test() {
   local package="$1"
   local test_filter="$2"
@@ -32,11 +49,56 @@ run_lib_test() {
   echo "::endgroup::"
 }
 
-run_architecture() {
+run_lib_test_exact() {
+  local package="$1"
+  local test_name="$2"
+  local listed
+  listed=$(cargo test -p "${package}" --lib "${test_name}" -- --exact --list)
+  if ! grep -Fqx "${test_name}: test" <<<"${listed}"; then
+    echo "error: exact library test selector matched zero tests: ${package} ${test_name}" >&2
+    return 1
+  fi
+  echo "::group::cargo test -p ${package} --lib ${test_name} ${extra_args} --exact"
+  # shellcheck disable=SC2086 # extra_args intentionally expands into cargo's trailing args.
+  cargo test -p "${package}" --lib "${test_name}" ${extra_args} --exact
+  echo "::endgroup::"
+}
+
+run_architecture_boundaries() {
   run_test ironclaw_architecture reborn_dependency_boundaries
+  # Pins docs/reborn/contracts/turns-agent-loop.md: terminal model
+  # provider authentication and transcript persistence failures remain durable,
+  # actionable, redacted, and never issue duplicate model/tool side effects.
+  run_test_exact ironclaw_reborn_integration_tests reborn_integration_cancel \
+    mid_turn_auth_provider_error_reaches_failed_with_credentials_category
+  run_test_exact ironclaw_reborn_integration_tests reborn_integration_model_recovery \
+    transcript_write_failure_stops_without_another_model_or_tool_side_effect
+  run_test_exact ironclaw_reborn_integration_tests reborn_integration_model_recovery \
+    tool_result_transcript_failure_stops_without_duplicate_model_or_tool_side_effect
+  # Keep protocol/recovery selectors with the targets already compiled by this
+  # lane instead of rebuilding them in the host-runtime lane.
+  run_test_exact ironclaw_runner llm_gateway \
+    gateway_maps_deterministic_provider_response_errors_to_invalid_output
+  run_test_exact ironclaw_reborn_integration_tests reborn_integration_model_recovery \
+    deterministic_provider_response_errors_use_bounded_invalid_output_recovery
   # Pins the retired-taxonomy Telegram identifiers and prevents v1 pairing
   # routes from re-entering the Reborn context.
   run_test ironclaw_architecture telegram_extension_gates
+  # Pins docs/reborn/contracts/host-api.md: every recoverable verdict carries
+  # an inline model diagnostic, and legacy omissions upgrade explicitly.
+  run_lib_test_exact ironclaw_host_api resolution::tests::recoverable_failure_carries_its_model_visible_diagnostic
+  run_lib_test_exact ironclaw_loop_contracts host::capability::tests::legacy_capability_failure_without_detail_rehydrates_explicit_fallback
+  # Pins docs/reborn/contracts/loop-exit.md: retired diagnostic_ref string/null
+  # payloads remain readable but the retired field is never written again.
+  run_lib_test_exact ironclaw_turns loop_exit::tests::loop_failed_accepts_retired_diagnostic_ref_but_does_not_serialize_it
+  # Pins docs/reborn/contracts/loop-exit.md and turn-runner.md: a rejected
+  # checkpoint remains terminal after projection into the process journal and
+  # cannot create a retry process.
+  run_lib_test_exact ironclaw_turns \
+    process_projection::runtime::tests::retry_rejects_checkpoint_rejection_without_creating_a_process
+}
+
+run_architecture_runtime() {
   run_test ironclaw_host_runtime host_runtime_contract
   run_test ironclaw_host_runtime host_runtime_services_contract
   run_test ironclaw_host_runtime reborn_e2e_gate
@@ -49,21 +111,24 @@ run_architecture() {
   run_test ironclaw_capabilities capability_host_contract
   run_test ironclaw_capabilities capability_host_dispatcher_integration
   run_test ironclaw_capabilities capability_host_process_integration
-  run_test ironclaw_capabilities capability_host_run_state_contract
+  run_test ironclaw_capabilities capability_host_invocation_state_contract
   run_test ironclaw_capabilities capability_host_spawn_contract
   run_test ironclaw_capabilities capability_obligation_handler_contract
-  # Pins docs/reborn/contracts/events.md: product snapshots and cursor resumes
-  # keep nested dispatcher failures attached to capability activity, not runs.
-  run_lib_test ironclaw_reborn_composition projection::tests::nested_dispatch_stream
+}
+
+run_architecture() {
+  run_architecture_boundaries
+  run_architecture_runtime
 }
 
 run_runtimes() {
-  run_test ironclaw_dispatcher boundary_contract
-  run_test ironclaw_dispatcher dispatch_contract
-  run_test ironclaw_dispatcher event_dispatch_contract
+  # These two suites pin `RuntimeDispatcher` and live with it in
+  # `ironclaw_capabilities`.
+  run_test ironclaw_capabilities runtime_dispatch_contract
+  run_test ironclaw_capabilities runtime_dispatch_event_contract
   # main's runtime_dispatcher_integration / vertical_slice_contract test the
   # retired RuntimeAdapter<F, G> architecture; the ToolResolver/BoundCapabilityAdapter
-  # pipeline is pinned by the three dispatcher contract suites above.
+  # pipeline is pinned by the two dispatch contract suites above.
   run_test ironclaw_wasm wasm_dispatch_integration
   run_test ironclaw_wasm wasm_http_adapter_contract
   run_test ironclaw_wasm wit_tool_runtime_contract
@@ -72,10 +137,13 @@ run_runtimes() {
   run_test ironclaw_scripts script_runner_contract
   run_test ironclaw_mcp mcp_adapter_contract
   run_test ironclaw_mcp mcp_dispatch_integration
-  run_test ironclaw_processes process_dispatch_integration
+  # Pins docs/reborn/contracts/trust-boundary-hardening.md through the whole
+  # turn: the scrubbed, bounded MCP cause reaches the next model request.
+  run_test_exact ironclaw_reborn_integration_tests reborn_integration_mcp mcp_tool_call_error_cause_is_scrubbed_and_bounded_in_next_model_request
   run_test ironclaw_processes process_host_contract
+  run_test ironclaw_processes process_journal_store_contract
+  run_test ironclaw_processes legacy_migration_backend_contract
   run_test ironclaw_processes process_services_contract
-  run_test ironclaw_processes process_store_contract
 }
 
 run_substrates() {
@@ -91,8 +159,7 @@ run_substrates() {
   run_test ironclaw_secrets boundary_contract
   run_test ironclaw_secrets secret_store_contract
   run_test ironclaw_resources resource_governor_contract
-  run_test ironclaw_run_state approval_resolution_contract
-  run_test ironclaw_run_state run_state_contract
+  run_test ironclaw_approvals approval_store_contract
   run_test ironclaw_approvals approval_resolution_contract
   run_test ironclaw_approvals boundary_contract
   run_test ironclaw_authorization boundary_contract
@@ -103,6 +170,12 @@ run_substrates() {
 case "${group}" in
   architecture)
     run_architecture
+    ;;
+  architecture-boundaries)
+    run_architecture_boundaries
+    ;;
+  architecture-runtime)
+    run_architecture_runtime
     ;;
   runtimes)
     run_runtimes
@@ -117,7 +190,7 @@ case "${group}" in
     ;;
   *)
     echo "unknown Reborn E2E group: ${group}" >&2
-    echo "expected one of: architecture, runtimes, substrates, all" >&2
+    echo "expected one of: architecture, architecture-boundaries, architecture-runtime, runtimes, substrates, all" >&2
     exit 2
     ;;
 esac

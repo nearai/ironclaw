@@ -283,6 +283,7 @@ GITHUB_REPO_PROVIDER_OPERATION_CASES = (
         },
         assert_baseline=_repo_baseline,
         assert_outcome=_create_branch_outcome,
+        expected_request_count=2,
     ),
     ProviderOperationCase(
         case_id="github_list_branches",

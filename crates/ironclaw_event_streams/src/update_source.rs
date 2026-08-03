@@ -5,7 +5,7 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_event_projections::ProjectionScope;
-use ironclaw_turns::TurnActor;
+use ironclaw_host_api::turn::TurnActor;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;

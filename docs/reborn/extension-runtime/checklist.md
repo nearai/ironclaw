@@ -75,7 +75,7 @@ Rules — kept short on purpose:
   caller-level test. Ticks with that caller-level test.
 - [x] MAN-8 `trigger`/`file` remain reserved kinds with no runtime binding. —
   `CapabilitySurfaceKind::{Trigger,File}` are reserved enum variants
-  (`crates/ironclaw_host_api/src/surface.rs`, doc "no manifest section projects
+  (`crates/ironclaw_extension_contracts/src/surface.rs`, doc "no manifest section projects
   this kind yet"), wire-pinned by
   `surface_kind_wire_shape_is_snake_case_and_matches_as_str`; nothing binds them
   at runtime by construction — the binding rule (LIFE-1) binds only
@@ -579,16 +579,21 @@ Rules — kept short on purpose:
   `multi_candidate_verification_resolves_exactly_one_installation`
   (`ingress_router_contract.rs`).
 - [x] ING-7 `adapter.inbound` receives bounded input, is panic-isolated, and
-  returns `Messages`/`Respond`/`Ignore` only. —
+  returns `Messages`/`BatchFragment`/`Respond`/`Ignore` only. —
   `adapter_panic_is_isolated_and_the_router_survives`,
   `adapter_never_observes_verification_headers_or_secret_material`
   (`ingress_router_contract.rs`; the outcome enum is the trait's only return
   shape, and out-of-bounds messages/responses are rejected host-side).
-- [x] ING-8 2xx is returned only after the durable dedupe/admission commit;
-  store failure returns retryable 5xx; crash/duplicate/restart replay
-  converges exactly once (both DBs). —
+- [x] ING-8 2xx is returned only after the outcome's durable boundary:
+  dedupe/admission for ordinary messages or tenant-scoped host-private
+  staging for provider-batch fragments. Store failure returns retryable 5xx;
+  crash/duplicate/restart replay converges exactly once (both DBs). —
   `two_hundred_only_after_durable_admission_commit`
   (`ingress_router_contract.rs`, scripted-sink leg);
+  `sequential_provider_batch_fragments_ack_before_settle_and_admit_once`,
+  `durably_staged_provider_batch_is_recovered_after_store_and_router_recreation`,
+  and `inbound_batches::tests` (revision, conflict, bound, lease, binding
+  fingerprint, terminal-tombstone legs);
   `duplicate_and_restart_replay_converge_exactly_once` matrixed over
   `StorageMode::{LibSql,Postgres}`
   (`tests/integration/extension_ingress.rs`, real durable idempotency
@@ -636,14 +641,26 @@ Rules — kept short on purpose:
   the SAME production mount, generic sink, and workflow caller — the
   registration is data (`ChannelIngressRegistration`), zero telegram host
   branches.
-- [ ] ING-13 Inbound attachments are references; any byte fetch happens
+- [x] ING-13 Inbound attachments are references; any byte fetch happens
   host-side through restricted egress with the channel credential — adapters
-  never fetch. — Reference half holds by construction (`AttachmentRef`
-  carries descriptor + vendor ref + mime hint; Slack/Telegram adapters map
-  descriptors without fetching —
-  `dm_message_normalizes_with_text_trigger_and_event_identity`). The
-  host-side fetch path is specified but deliberately unbuilt until a
-  consumer needs bytes (overview §4.2).
+  never fetch during normalization. — `ChannelAttachmentRef` carries
+  descriptor + vendor ref and redacts the vendor ref from `Debug`;
+  Slack/Telegram adapters map stable provider IDs without fetching. The shared
+  product workflow fetches only after policy through the generation-pinned
+  adapter and manifest-restricted egress, validates complete bytes, and lands
+  all attachments before message acceptance. Provider batches retain
+  references only in their bounded host-private staging snapshot.
+- [x] ING-14 Serialized provider batches acknowledge every verified fragment
+  after durable staging, never admit a quiet-window partial, preserve provider
+  order, include ambient fragments only when the merged batch is triggered,
+  reject inconsistent or over-limit batches atomically, absorb redelivery,
+  and recover expired claims after restart. —
+  `concurrent_provider_batch_fragments_admit_one_ordered_atomic_message`,
+  `sequential_provider_batch_fragments_ack_before_settle_and_admit_once`,
+  `untriggered_provider_batch_is_an_authenticated_noop`,
+  `inconsistent_provider_batch_fails_closed_without_partial_admission`,
+  `durably_staged_provider_batch_is_recovered_after_store_and_router_recreation`,
+  Telegram media-group parser tests, and `inbound_batches::tests`.
 
 ## 7. Channel outbound (OUT)
 
@@ -749,7 +766,7 @@ Rules — kept short on purpose:
   deleted. — no concrete channel branch remains in `ironclaw_llm`, and the
   manifest's `[channel.presentation]` (`supports_markdown`,
   `max_message_chars`) now feeds prompt construction per channel. The resolved
-  `ChannelPresentation` (`ironclaw_host_api::channel`) flows manifest →
+  `ChannelPresentation` (`ironclaw_extension_contracts::channel`) flows manifest →
   `LifecycleExtensionSummary.channel_presentation`
   (`available_extensions.rs::summary` / `channel_presentation_from_manifest_record`)
   → the communication provider → `ConnectedChannelSummary.presentation` →

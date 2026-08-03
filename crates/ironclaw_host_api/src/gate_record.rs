@@ -2,29 +2,29 @@
 //!
 //! Part of the capability-path result collapse
 //! (`docs/reborn/contracts/capability-access.md`
-//! §5.2.9). [`Resolution`](crate::Resolution)'s control-plane arms carry only
-//! *opaque* refs — [`GateRef`](crate::GateRef), [`DenyRef`](crate::DenyRef),
-//! [`ResultRef`](crate::ResultRef) — never inline content. The records in this
+//! §5.2.9). [`Resolution`](crate::resolution::Resolution)'s control-plane arms carry only
+//! *opaque* refs — [`GateRef`](crate::ids::GateRef), [`DenyRef`](crate::ids::DenyRef),
+//! [`ResultRef`](crate::ids::ResultRef) — never inline content. The records in this
 //! module are the durably-stored, model-visible payloads those refs point at:
 //! the loop renders a pending gate or a denial **from** the referenced record,
 //! and never reconstructs it from data it already had in hand.
 //!
 //! ## The rendering contract (§5.2.9)
 //!
-//! - A [`Resolution::Denied(DenyRef)`](crate::Resolution::Denied) renders its
+//! - A [`Resolution::Denied(DenyRef)`](crate::resolution::Resolution::Denied) renders its
 //!   model-visible denial from the [`DenyRecord`] keyed by that `DenyRef`.
-//! - A [`Blocked`](crate::Blocked) / gate-shaped
-//!   [`Suspension`](crate::Suspension) renders its pending-gate content from the
+//! - A [`Blocked`](crate::resolution::Blocked) / gate-shaped
+//!   [`Suspension`](crate::resolution::Suspension) renders its pending-gate content from the
 //!   [`GateRecord`] keyed by that `GateRef`. The `GateRecord` is also where the
 //!   resume/credential payload (the auth gate's
-//!   [`RuntimeCredentialAuthRequirement`](crate::RuntimeCredentialAuthRequirement)s,
+//!   [`RuntimeCredentialAuthRequirement`](crate::decision::RuntimeCredentialAuthRequirement)s,
 //!   G3) and the dependent-run staged result (G2) live — content that today
 //!   rides inline on the old `CapabilityOutcome` variants.
 //!
 //! ## Redaction invariant
 //!
 //! These records are **model-visible** and therefore MUST already be redacted:
-//! every one carries a [`SafeSummary`](crate::SafeSummary), never raw text. The
+//! every one carries a [`SafeSummary`](crate::safe_summary::SafeSummary), never raw text. The
 //! loop renders credential requirements FROM the [`GateRecord::Auth`] record —
 //! it never reconstructs a credential demand from model-visible data
 //! (`capability-access.md`, `safety-and-sandbox.md`). Keeping the requirement on the
@@ -36,17 +36,21 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{DenyReason, ResultRef, RuntimeCredentialAuthRequirement, SafeSummary};
+use crate::{
+    decision::{DenyReason, RuntimeCredentialAuthRequirement},
+    ids::ResultRef,
+    safe_summary::SafeSummary,
+};
 
 /// The model-visible denial content a [`Resolution::Denied(DenyRef)`] renders
-/// from (§5.2.9). Keyed by [`DenyRef`](crate::DenyRef); the ref rides the
+/// from (§5.2.9). Keyed by [`DenyRef`](crate::ids::DenyRef); the ref rides the
 /// sanitized boundary, this record stays host-owned.
 ///
 /// [`DenyReason`] is already a model-visible enum (`decision.rs`); the
 /// [`SafeSummary`] is redacted by construction. A denial is terminal, so there
 /// is no resume payload here — only what the model is allowed to see about why.
 ///
-/// [`Resolution::Denied(DenyRef)`]: crate::Resolution::Denied
+/// [`Resolution::Denied(DenyRef)`]: crate::resolution::Resolution::Denied
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DenyRecord {
     /// The structured, model-visible reason the action was denied.
@@ -57,7 +61,7 @@ pub struct DenyRecord {
 
 /// The content behind a pending gate — the record a gate ref renders from
 /// (§5.2.9), one enum over the gate kinds. Keyed by
-/// [`GateRef`](crate::GateRef).
+/// [`GateRef`](crate::ids::GateRef).
 ///
 /// This is where the resume/credential payload (G3) and the dependent-run staged
 /// result (G2) live — the inline cargo that today rides the old
@@ -91,7 +95,7 @@ pub enum GateRecord {
         /// later resume turn renders from. `None` on records persisted before
         /// this field existed (serde default keeps old rows rehydratable).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        result_origin: Option<crate::LoopRef>,
+        result_origin: Option<crate::result_meta::LoopRef>,
     },
     /// Awaiting a client-executed external tool the host does not run.
     ExternalTool { summary: SafeSummary },
@@ -124,7 +128,10 @@ impl GateRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExtensionId, RuntimeCredentialAccountSetup, VendorId};
+    use crate::{
+        capability::RuntimeCredentialAccountSetup,
+        ids::{ExtensionId, VendorId},
+    };
 
     fn summary() -> SafeSummary {
         SafeSummary::new("awaiting decision").unwrap()
@@ -157,7 +164,9 @@ mod tests {
                     summary: summary(),
                     result,
                     byte_len: 2048,
-                    result_origin: Some(crate::LoopRef::new("result:child-1").unwrap()),
+                    result_origin: Some(
+                        crate::result_meta::LoopRef::new("result:child-1").unwrap(),
+                    ),
                 },
                 "dependent_run",
             ),

@@ -15,12 +15,20 @@ use ironclaw_first_party_extensions::{
     google_provider_id, gsuite_package_specs,
 };
 use ironclaw_host_api::{
-    CapabilityId, DispatchFailureDetail, HostApiError, InvocationId, NetworkScheme,
-    NetworkTargetPattern, ResourceScope, RuntimeCredentialAccountSetup,
-    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
-    RuntimeCredentialRequirementSource, RuntimeCredentialSource, RuntimeCredentialTarget,
-    RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, SecretHandle, UserId,
+    action::{NetworkScheme, NetworkTargetPattern},
+    capability::{
+        RuntimeCredentialAccountSetup, RuntimeCredentialRequirement,
+        RuntimeCredentialRequirementSource,
+    },
+    decision::RuntimeCredentialAuthRequirement,
+    dispatch::{DispatchFailureDetail, RuntimeDispatchErrorKind},
+    error::HostApiError,
+    http::{
+        RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeHttpEgress,
+        RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    },
+    ids::{CapabilityId, InvocationId, SecretHandle, UserId},
+    resource::ResourceScope,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -130,7 +138,7 @@ fn gsuite_credential_requirements(
         find_gsuite_capability(capability_id.as_str()).ok_or_else(|| {
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::UndeclaredCapability)
         })?;
-    let requester_extension = ironclaw_host_api::ExtensionId::new(package.extension_id)
+    let requester_extension = ironclaw_host_api::ids::ExtensionId::new(package.extension_id)
         .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend))?;
     let requirements = gsuite_runtime_credentials(capability, package)
         .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend))?
@@ -160,7 +168,7 @@ fn gsuite_runtime_credentials(
     Ok(vec![RuntimeCredentialRequirement {
         handle: SecretHandle::new(spec.credential_handle)?,
         source: RuntimeCredentialRequirementSource::ProductAuthAccount {
-            provider: ironclaw_host_api::VendorId::new(GOOGLE_PROVIDER_ID)?,
+            provider: ironclaw_host_api::ids::VendorId::new(GOOGLE_PROVIDER_ID)?,
             setup: RuntimeCredentialAccountSetup::OAuth {
                 scopes: provider_scopes.clone(),
             },
@@ -288,9 +296,10 @@ fn asset_manifest(extension_id: &str) -> ironclaw_extensions::ExtensionManifest 
     let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
         manifest_toml,
         ManifestSource::HostBundled,
-        &ironclaw_host_api::HostPortCatalog::empty(),
+        &ironclaw_host_api::host_port::HostPortCatalog::empty(),
         None,
         &capability_provider_contracts(),
+        None,
     )
     .unwrap();
     ironclaw_extensions::ExtensionManifest::try_from(record.manifest().clone()).unwrap()

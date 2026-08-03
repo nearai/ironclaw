@@ -20,13 +20,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::recipe::RecipeSecretField;
 use ironclaw_extensions::{
     ExtensionInstallationStorePort, ExtensionManifestRecord, ResolvedExtensionManifest,
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    ExtensionId, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    RecipeSecretField, ResourceScope, SecretHandle,
+    ids::{ExtensionId, SecretHandle},
+    resource::ResourceScope,
 };
 use ironclaw_secrets::{SecretMaterial, SecretStorePort};
 
@@ -184,6 +185,20 @@ impl ChannelConfigService {
     ) -> Result<Vec<RecipeSecretField>, ChannelConfigError> {
         let record = self.manifest(extension_id).await?;
         Ok(channel_config_fields(record.resolved()))
+    }
+
+    /// Whether the installed manifest declares `[admin_configuration]`.
+    ///
+    /// `pub` for the manager-side product service (§6.8.3): the
+    /// `ChannelConfigProductService` projection suppresses the field list for
+    /// such an extension. Only this yes/no leaves the crate — the manifest
+    /// read itself stays internal.
+    pub async fn declares_admin_configuration(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<bool, ChannelConfigError> {
+        let manifest = self.resolved_manifest(extension_id).await?;
+        Ok(!manifest.admin_configuration.is_empty())
     }
 
     async fn resolved_manifest(
@@ -517,18 +532,24 @@ impl ChannelConfigService {
         Ok(None)
     }
 
-    /// Resolve the non-secret configuration passed to `ChannelAdapter::activate`.
-    /// Manifest-declared tenant admin values take precedence over the retired
-    /// per-installation configure surface while preserving it as a compatibility
-    /// fallback for manifests that do not declare administrator configuration.
+    /// Resolve the manifest-declared non-secret configuration passed to channel
+    /// lifecycle hooks and verified inbound normalization. When the manifest
+    /// declares administrator configuration, the administrator service is
+    /// required; silently substituting an empty configuration would let an
+    /// adapter run without its host-owned routing and identity settings.
     pub async fn effective_non_secret_config(
         &self,
         extension_id: &ExtensionId,
     ) -> Result<Vec<(String, String)>, ChannelConfigError> {
         let manifest = self.resolved_manifest(extension_id).await?;
+        if manifest.admin_configuration.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut effective = Vec::new();
         let Some(admin) = &self.admin_configuration else {
-            return Ok(effective);
+            return Err(ChannelConfigError::Storage {
+                reason: "administrator configuration service is unavailable".to_string(),
+            });
         };
         let channel_fields = channel_config_fields(&manifest);
         for descriptor in &manifest.admin_configuration {
@@ -653,100 +674,6 @@ fn channel_config_admin_idempotency_key(
     })
 }
 
-/// The production [`ironclaw_product::ChannelConfigProductService`] port
-/// over [`ChannelConfigService`] — the surface the WebUI setup service and
-/// the lifecycle configure action route through.
-pub struct RebornChannelConfigProductService {
-    service: Arc<ChannelConfigService>,
-}
-
-impl RebornChannelConfigProductService {
-    pub fn new(service: Arc<ChannelConfigService>) -> Self {
-        Self { service }
-    }
-}
-
-#[async_trait]
-impl ironclaw_product::ChannelConfigProductService for RebornChannelConfigProductService {
-    async fn field_status(
-        &self,
-        extension_id: &ExtensionId,
-    ) -> Result<Vec<ironclaw_product::RebornChannelConfigField>, ProductSurfaceError> {
-        if let Ok(manifest) = self.service.resolved_manifest(extension_id).await
-            && !manifest.admin_configuration.is_empty()
-        {
-            return Ok(Vec::new());
-        }
-        match self.service.status(extension_id).await {
-            Ok(statuses) => Ok(statuses
-                .into_iter()
-                .map(|status| ironclaw_product::RebornChannelConfigField {
-                    name: status.handle,
-                    label: status.label,
-                    secret: status.secret,
-                    provided: status.provided,
-                })
-                .collect()),
-            // A not-yet-installed extension has nothing to configure; the
-            // setup view renders for it, so this projection stays empty
-            // rather than erroring.
-            Err(ChannelConfigError::NotInstalled { .. }) => Ok(Vec::new()),
-            Err(error) => Err(map_channel_config_error(error)),
-        }
-    }
-
-    async fn save_values(
-        &self,
-        extension_id: &ExtensionId,
-        values: Vec<(String, String)>,
-    ) -> Result<(), ProductSurfaceError> {
-        self.service
-            .save(extension_id, values)
-            .await
-            .map_err(map_channel_config_error)
-    }
-}
-
-fn map_channel_config_error(error: ChannelConfigError) -> ProductSurfaceError {
-    match error {
-        ChannelConfigError::NotInstalled { .. } => ProductSurfaceError {
-            code: ProductSurfaceErrorCode::NotFound,
-            kind: ProductSurfaceErrorKind::NotFound,
-            status_code: 404,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        },
-        ChannelConfigError::UnknownField { .. } => ProductSurfaceError {
-            code: ProductSurfaceErrorCode::InvalidRequest,
-            kind: ProductSurfaceErrorKind::Validation,
-            status_code: 400,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        },
-        ChannelConfigError::Storage { .. } => ProductSurfaceError {
-            code: ProductSurfaceErrorCode::Unavailable,
-            kind: ProductSurfaceErrorKind::ServiceUnavailable,
-            status_code: 503,
-            retryable: true,
-            field: None,
-            validation_code: None,
-        },
-        // The save persisted but the §6.5 reactivate cycle failed: the host
-        // record is left per §6.1 with the typed reason; the operator fixes
-        // the value and saves again.
-        ChannelConfigError::Reactivation { .. } => ProductSurfaceError {
-            code: ProductSurfaceErrorCode::Conflict,
-            kind: ProductSurfaceErrorKind::Conflict,
-            status_code: 409,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -757,8 +684,9 @@ mod tests {
     };
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
-        InvocationId, MountAlias, MountGrant, MountPermissions, MountView, SecretHandle, UserId,
-        VirtualPath,
+        ids::{InvocationId, SecretHandle, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
     };
     use ironclaw_secrets::SecretStore;
 
@@ -887,7 +815,7 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
         let store = Arc::new(
             ExtensionInstallationStore::load_at(
                 Arc::new(InMemoryBackend::new()),
-                ironclaw_host_api::VirtualPath::new("/system/extensions/.installations/test")
+                ironclaw_host_api::path::VirtualPath::new("/system/extensions/.installations/test")
                     .expect("valid test path"),
                 ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
                 ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
@@ -901,6 +829,7 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
             &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
             None,
             &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            None,
         )
         .expect("fixture manifest parses");
         let extension_id = ExtensionId::new(id).expect("extension id");
@@ -1364,5 +1293,26 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
             .await
             .expect_err("uninstalled extension is a typed error");
         assert!(matches!(error, ChannelConfigError::NotInstalled { .. }));
+    }
+
+    #[tokio::test]
+    async fn effective_config_fails_closed_when_admin_configuration_is_unavailable() {
+        let installation_store = installed_store(CHANNEL_FIXTURE_MANIFEST, "acmechat").await;
+        let secrets = Arc::new(SecretStore::ephemeral());
+        let reactivation = Arc::new(RecordingReactivation::new());
+        let service = ChannelConfigService::new(
+            installation_store as Arc<dyn ExtensionInstallationStorePort>,
+            secrets as Arc<dyn SecretStorePort>,
+            test_scope(),
+            reactivation as Arc<dyn ChannelConfigReactivation>,
+        );
+        let extension_id = ExtensionId::new("acmechat").expect("extension id");
+
+        let error = service
+            .effective_non_secret_config(&extension_id)
+            .await
+            .expect_err("declared admin configuration must not degrade to an empty success");
+
+        assert!(matches!(error, ChannelConfigError::Storage { .. }));
     }
 }

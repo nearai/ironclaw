@@ -1,6 +1,9 @@
 use ironclaw_host_api::{
-    NetworkPolicy, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    RuntimeHttpSaveTarget,
+    action::NetworkPolicy,
+    http::{
+        RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+        RuntimeHttpSaveTarget,
+    },
 };
 use ironclaw_network::{NetworkHttpEgress, NetworkHttpRequest};
 use ironclaw_secrets::SecretStorePort;
@@ -226,6 +229,8 @@ where
 
     let scope = request.scope.clone();
     let capability_id = request.capability_id.clone();
+    let preserve_mcp_auth_metadata =
+        request.runtime == ironclaw_host_api::runtime::RuntimeKind::Mcp;
     let apply_credentials_started_at = latency_started_at();
     let redaction_values = match super::credential::apply_credential_injections(
         service.secrets(),
@@ -303,6 +308,7 @@ where
             response,
             &redaction_values,
             service.leak_detector(),
+            preserve_mcp_auth_metadata,
         ) {
             Ok(result) => {
                 trace_http_egress_latency_ok(

@@ -1,6 +1,6 @@
-use ironclaw_host_api::{ProductSurfaceError, ProductSurfaceErrorCode};
-use ironclaw_product::{ProductAdapterError, ProductSurfaceRejectionKind};
-use ironclaw_product::{ProductRejection, ProductRejectionKind};
+use ironclaw_host_api::product_adapter::{ProductAdapterError, ProductSurfaceRejectionKind};
+use ironclaw_product_contracts::inbound::{ProductRejection, ProductRejectionKind};
+use ironclaw_product_contracts::surface::{ProductSurfaceError, ProductSurfaceErrorCode};
 use serde::{Deserialize, Serialize};
 
 use crate::OpenAiCompatRefError;
@@ -476,7 +476,7 @@ fn contains_no_exposure_sentinel(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_product::{ProductRejection, ProductRejectionKind};
+    use ironclaw_product_contracts::inbound::{ProductRejection, ProductRejectionKind};
 
     use super::product_rejection_to_openai_error;
 

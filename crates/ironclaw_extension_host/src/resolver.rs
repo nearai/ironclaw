@@ -23,10 +23,14 @@ use ironclaw_capabilities::{
     BoundCapabilityAdapter, CapabilityDispatchRequest, ResolvedCapability, RuntimeAdapterResult,
     ToolResolver,
 };
+use ironclaw_extension_contracts::tool_adapter::{
+    ToolCall, ToolCallResources, ToolError, ToolPorts,
+};
 use ironclaw_host_api::{
-    CapabilityId, DispatchError, DispatchFailureDetail, ExtensionId, ReservationStatus,
-    ResourceReceipt, ResourceUsage, RuntimeDispatchErrorKind, RuntimeKind, ToolCall,
-    ToolCallResources, ToolError, ToolPorts,
+    dispatch::{DispatchError, DispatchFailureDetail, RuntimeDispatchErrorKind},
+    ids::{CapabilityId, ExtensionId},
+    resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
+    runtime::{DispatchErrorLane, RuntimeKind},
 };
 
 use crate::active::ResolvedToolBinding;
@@ -155,21 +159,21 @@ fn dispatch_error_for_kind(
     safe_summary: Option<String>,
     model_visible_cause: Option<String>,
 ) -> DispatchError {
-    match runtime {
+    match runtime.dispatch_error_lane() {
         // The lane variants carry the cause on `model_visible_cause` (#5965):
         // raw-or-better cause text, scrubbed downstream at the model-visible
         // Diagnostic seam. When an adapter supplied only a fixed host-authored
         // summary, that text is trivially cause-safe, so it rides the same
         // channel rather than being dropped.
-        RuntimeKind::Wasm => DispatchError::Wasm {
+        DispatchErrorLane::Wasm => DispatchError::Wasm {
             kind,
             model_visible_cause: model_visible_cause.or(safe_summary),
         },
-        RuntimeKind::Mcp => DispatchError::Mcp {
+        DispatchErrorLane::Mcp => DispatchError::Mcp {
             kind,
             model_visible_cause: model_visible_cause.or(safe_summary),
         },
-        RuntimeKind::Script => DispatchError::Script {
+        DispatchErrorLane::Script => DispatchError::Script {
             kind,
             model_visible_cause: model_visible_cause.or(safe_summary),
         },
@@ -178,7 +182,7 @@ fn dispatch_error_for_kind(
         // dropping it — the lane arms' `model_visible_cause` equivalent for the
         // detail-shaped variant. A fixed host-authored summary, if that is all
         // the adapter gave, still travels on `safe_summary`.
-        RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty {
+        DispatchErrorLane::FirstParty => DispatchError::FirstParty {
             kind,
             safe_summary,
             detail: model_visible_cause.map(|text| DispatchFailureDetail::Diagnostic { text }),

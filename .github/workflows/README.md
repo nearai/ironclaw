@@ -18,11 +18,39 @@ on `push` to main, the merge queue must run it in the same shape first
 instead). External/live checks (canaries, deploys, releases, benchmark
 thresholds) are exempt: they stay out of the queue by design.
 
+The canonical local composition of the deterministic Reborn gates is
+`scripts/ci/run-hermetic-deterministic-suite.sh all`. CI invokes the same
+checked-in stages through that runner so credentials, ambient behavior,
+mutable roots, clock/seed inputs, and non-loopback egress have one mechanical
+boundary. Setup and exclusions are documented in
+`docs/internal/hermetic-deterministic-suite.md`.
+
 The WASM WIT compatibility lane uses two risk scopes. Pull requests run it only
 for direct WIT, WASM host, extension, compatibility-test, or lane-workflow
 changes. Root `Cargo.toml` and `Cargo.lock` changes are broader workspace risk:
 they run the lane in the merge queue, before landing, without adding the full
 WASM build to ordinary PR feedback. Push and deep-CI runs remain exhaustive.
+
+`reborn-tests.yml` follows the same PR-versus-queue contract. Pull requests use
+`reborn_pr_test_plan.py` to run affected crate buckets and exact changed root,
+integration, and frontend suites without LLVM instrumentation. Recorded QA
+replay remains a baseline on every pull request because it detects ordering
+and cross-surface regressions that cannot be inferred from changed paths. The
+full transitive reverse workspace dependency closure is included in PR crate
+selection. Foundational-crate changes that span more than three canonical
+buckets coalesce every changed and dependent package into at most three PR
+jobs instead of omitting consumer tests. The merge queue and pushes to `main`
+still run every crate bucket, root
+partition, group suite, integration lane, frontend test, recorded replay, and
+coverage gate. Unknown paths, empty diffs, and recognized test-topology or
+workspace-topology changes fail closed to that same full plan on the pull
+request. A planner execution or schema failure also fails the required check
+loudly.
+The queue therefore preserves exhaustive deterministic evidence while
+ordinary PRs avoid consuming 20-plus runners for unrelated lanes. Pull-request
+parallelism is capped at three crate buckets, one root partition, and one
+integration lane; merge queue and main retain full matrix parallelism so this
+feedback optimization does not serialize the production gate.
 
 History: the slim-vs-full clippy matrix violated this — the queue linted only
 `--all-features` while push linted a broader matrix, so feature-gated dead code
@@ -48,6 +76,15 @@ roll-up **job names**, never individual matrix jobs):
 | `Reborn E2E` | `reborn-e2e.yml` | candidate — require once queue cost is confirmed |
 | `Platform & Compat` | `platform-and-compat.yml` | candidate — require once queue cost is confirmed |
 
+The 2026-07-30 queue-cost audit found only one retained `merge_group` sample
+for each candidate: Reborn E2E took 594 seconds and failed; Platform & Compat
+took 364 seconds and passed. Pull-request history was healthier (Reborn E2E
+p50/p95 877/1124 seconds; Platform & Compat 415/492 seconds), but one real queue
+sample—especially a failing E2E sample—is not enough evidence to alter the
+repository ruleset. Both checks therefore remain candidates. Refresh the
+workflow-run sample before promotion; a workflow being present on
+`merge_group` is not itself proof that it is safe to require.
+
 Rules for a roll-up job that is (or may become) required:
 
 1. Trigger on `merge_group` and report on every run (`if: always()`), so the
@@ -55,8 +92,16 @@ Rules for a roll-up job that is (or may become) required:
 2. Tolerate `skipped` only for jobs that are event- or scope-gated by design;
    anything that ran must have succeeded.
 3. Assert expected coverage where feasible — the Code Style roll-up fails if a
-   merge-queue/push run's clippy matrix is missing any of the three feature
-   lanes, so a "green but slim" regression cannot come back silently.
+   merge-queue/push run's clippy matrix is missing any required feature lane,
+   so a "green but slim" regression cannot come back silently.
+
+Code Style deliberately consolidates formatting, dependency policy, static
+guards, panic checks, and composition-budget checks into one
+`fast-checks` job. These checks complete in seconds to a few minutes and do not
+benefit from separate runners; keeping them together bounds a code-changing
+pull request to at most six active Code Style jobs while preserving every
+command. Clippy, WebUI checks, and CLI smoke remain separate because they are
+expensive or independently scope-gated.
 
 ## Reborn release and manual compile preflight
 
@@ -100,18 +145,63 @@ pull-request workflows.
 
 The cargo-dist release and manual preflight both build the `ironclaw` package
 and binary without backend feature flags; database backends compile
-unconditionally. In the manual preflight, each matrix entry performs a final
-`cargo build --locked --profile dist` link and executes that exact native binary
-with `--version`, `--help`, and `profile list --json`. Its musl entries also use
-`readelf` to reject a program interpreter or dynamic-library dependency, which
-prevents an installed musl loader on the build runner from hiding a non-portable
-artifact. This is shallow CLI startup coverage; it does not validate `serve` or
-external services.
+unconditionally. The tag publisher extracts each target's completed cargo-dist
+archive and runs the shared release smoke before the artifact can enter the
+upload set. The manual preflight runs the same smoke against its exact
+dist-profile binary before uploading compile evidence. The smoke uses an
+isolated home to verify CLI identity/help, the supported profile contract,
+production-derived bundled-extension discovery through a real local runtime
+assembly (including first-party, MCP-server, and WASM-tool runtime kinds), the
+non-empty libSQL database created after its migrations complete, and the
+migration-dry-run profile selection. Its catalog denominator is the shipping
+binary itself, so adding or removing a bundled package does not require a second
+hand-maintained CI list. The musl entries also use `readelf` to reject a program
+interpreter or dynamic-library dependency, which prevents an installed musl
+loader on the build runner from hiding a non-portable artifact.
+
+The scheduled Postgres capacity lane complements that portable gate by building
+the same canonical binary with `--profile dist`, starting `serve`, applying the
+Postgres-backed runtime migrations, and driving its authenticated API against a
+mock provider. Weekly live provider jobs build the bundled WASM extensions and
+exercise the Anthropic and OpenAI-compatible provider paths. The portable
+archive smoke itself does not invoke every WASM/MCP/script runtime lane or
+execute the generated shell/PowerShell/MSI installers; those remain separately
+owned evidence and a green portable smoke must not be read as proof of them.
 
 ## Deep tier (nightly)
 
 `nightly-deep-ci.yml` (04:00 UTC) reuses `platform-and-compat.yml`,
 `reborn-tests.yml`, and `reborn-e2e.yml` via `workflow_call` at full scope.
+`reborn-e2e.yml` owns the deterministic Reborn surface coverage used by pull
+requests, the merge queue candidate check, and main. The standalone
+`reborn-playwright.yml` schedule owns the broader generated four-shard browser
+matrix. `ws12-suite-shards.toml` records the source run, duration weights,
+provider-world affinities, and owned waivers; its generator refuses missing
+files, affinity splits, stale entries, and retry-enabled deterministic shards.
+It is post-merge nightly coverage, not a required merge check. Failed nightly
+shards upload server logs, Playwright traces, screenshots, and videos, and the
+nightly watchdog owns alerting for that workflow.
+
+The same deep reuse raises all existing property-test generators from 256 to
+2,048 random cases, runs the bounded mutation frontier, and replays the complete
+hermetic journey/provider-fault inventory. `ironclaw-stress.yml` adds a
+15-minute libSQL user-session soak alongside its libSQL ramps and
+shipping-profile Postgres API capacity lane. `live-canary.yml` keeps the
+three-hour Reborn WebUI cadence and runs the broader credentialed provider
+matrix weekly. Workflow-contract sabotage tests fail if any of these schedules,
+guards, merge/main triggers, or release gates disappear.
+
+The Reborn E2E job also publishes `product-surface-coverage-<sha>`. Its JSON and
+Markdown files join the shipped capability denominator with typed contract,
+journey, and fault registries. The generator fails on unclassified or
+unevidenced tested capabilities and lists owned gaps, waivers, and live-only
+rows separately. Reporting imports the existing registries; it does not own a
+duplicate CI capability or journey list. Provider journeys carry typed
+scheduled-live bindings to the exact `live-canary.yml` job, case id, and
+`results.json` artifact. The matrix reports those cells as `scheduled`, not
+`covered`: a recorded trace or declared cron is never presented as a passing
+live result.
+
 The legacy v1 suite (`test.yml`) is deliberately not invoked — see the
 freeze note in `nightly-deep-ci.yml`. Two hard-won gotchas are encoded in
 the configuration:
@@ -148,24 +238,32 @@ trail: the former in-run alert jobs and `nightly-alert-issue.sh` were removed
 in favor of this single external check, because an in-run alert dies with its
 own run on a startup_failure and can never see a cron that didn't fire.
 
-### Main branch alerting
+### Main branch and merge-queue alerting
 
 `main-ci-slack-alerts.yml` watches completed `workflow_run` events for the
-current `push` to `main` workflows: Code Style, Tests (Reborn), Reborn E2E,
-Platform & Compat, Replay Snapshot Gate, Code Coverage,
+current `push` to `main` and `merge_group` workflows: Code Style, Tests
+(Reborn), Reborn E2E, Platform & Compat, Replay Snapshot Gate, Code Coverage,
 nearai-bench dispatcher tests, and Release-plz. Any watched run that concludes
 `failure`, `timed_out`, `action_required`, or `startup_failure` posts a Slack
-message with the workflow, conclusion, failed job names, commit, actor, and run
-link.
+message with the workflow, conclusion, failed job and step names, available
+failure annotations, commit, actor, and run link. Merge-queue alerts also
+resolve the PR number from GitHub's `gh-readonly-queue/main/pr-<number>-...`
+ref and include the PR title, author, and link.
 
-Alerts go to `secrets.MAIN_CI_SLACK_WEBHOOK_URLS`; the value may be a single
-webhook URL or multiple URLs separated by newlines or commas. This is
-intentionally separate from the canary/nightly `SLACK_WEBHOOK_URL` so main CI
-alerts can target dedicated channels.
+Main-branch alerts go to `secrets.MAIN_CI_SLACK_WEBHOOK_URLS`; the value may be
+a single webhook URL or multiple URLs separated by newlines or commas.
+Merge-queue alerts go to `secrets.SLACK_WEBHOOK_URL`, the existing live-canary
+channel. This keeps post-merge CI alerts in their dedicated channels while
+making queue bounces visible alongside live-canary failures.
 When adding a new workflow that runs on `push` to `main`, add its workflow
 `name:` to the watched list in `main-ci-slack-alerts.yml`.
 
-## Reborn release policy
+Code Coverage uses same-ref concurrency with cancellation. When merges land
+faster than coverage completes, only the newest cumulative `main` commit keeps
+running; superseded post-merge coverage runs do not consume runners needed by
+pull requests.
+
+## Reborn-only release policy
 
 For #6160, `ironclaw-release.yml` uses cargo-dist to publish only the canonical Reborn
 `ironclaw` package. The active tag DAG consists of cargo-dist planning, the

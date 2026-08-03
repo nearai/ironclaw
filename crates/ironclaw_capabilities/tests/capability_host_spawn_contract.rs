@@ -5,9 +5,20 @@ use ironclaw_approvals::*;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::{Action, NetworkPolicy},
+    approval::{ApprovalRequest, InvocationFingerprint},
+    capability::{CapabilityDescriptor, CapabilitySet, EffectKind, GrantConstraints},
+    decision::{Decision, DenyReason, Obligations},
+    host_port::HostPortCatalog,
+    ids::{ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, UserId},
+    mount::MountView,
+    path::VirtualPath,
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::RuntimeKind,
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_processes::*;
-use ironclaw_run_state::*;
 use serde_json::json;
 
 mod support;
@@ -18,11 +29,11 @@ async fn capability_host_blocks_spawn_for_approval_without_starting_process() {
     let registry = registry_with_echo_capability();
     let dispatcher = recording_dispatcher();
     let process_manager = RecordingProcessManager::default();
-    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
-    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
+    let approval_requests = ironclaw_approvals::in_memory_backed_approval_request_store();
     let host = capability_host(&registry, &dispatcher, &SpawnApprovalAuthorizer)
         .with_process_manager(&process_manager)
-        .with_run_state(&run_state)
+        .with_invocation_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
     let scope = context.resource_scope.clone();
@@ -47,7 +58,7 @@ async fn capability_host_blocks_spawn_for_approval_without_starting_process() {
     assert!(dispatcher.call_count() == 0);
     assert!(!process_manager.has_start());
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
-    assert_eq!(run.status, RunStatus::BlockedApproval);
+    assert_eq!(run.status, ProcessInvocationStatus::BlockedApproval);
     let approval_id = run.approval_request_id.unwrap();
     let approval = approval_requests
         .get(&scope, approval_id)
@@ -108,11 +119,11 @@ output_schema_ref = "schemas/shell.output.v1.json"
     registry.insert(package).unwrap();
     let dispatcher = recording_dispatcher();
     let process_manager = RecordingProcessManager::default();
-    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
-    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
+    let approval_requests = ironclaw_approvals::in_memory_backed_approval_request_store();
     let host = capability_host(&registry, &dispatcher, &ShellSpawnApprovalAuthorizer)
         .with_process_manager(&process_manager)
-        .with_run_state(&run_state)
+        .with_invocation_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
     let scope = context.resource_scope.clone();
@@ -170,12 +181,12 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
     let registry = registry_with_echo_capability();
     let dispatcher = recording_dispatcher();
     let process_manager = RecordingProcessManager::default();
-    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
-    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
+    let approval_requests = ironclaw_approvals::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let block_host = capability_host(&registry, &dispatcher, &SpawnApprovalAuthorizer)
         .with_process_manager(&process_manager)
-        .with_run_state(&run_state)
+        .with_invocation_state(&run_state)
         .with_approval_requests(&approval_requests);
     let mut context = execution_context(CapabilitySet::default());
     context.authenticated_actor_user_id = Some(UserId::new("slack-alice").unwrap());
@@ -223,7 +234,7 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
     let resume_authorizer = GrantAuthorizer::new();
     let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer)
         .with_process_manager(&process_manager)
-        .with_run_state(&run_state)
+        .with_invocation_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
     let mut forged_context = context.clone();
@@ -254,7 +265,7 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
             .unwrap()
             .unwrap()
             .status,
-        RunStatus::BlockedApproval
+        ProcessInvocationStatus::BlockedApproval
     );
     assert_eq!(
         leases.get(&scope, lease.grant.id).await.unwrap().status,
@@ -293,7 +304,7 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
     );
     assert_eq!(result.process.process_id, start.process_id);
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
-    assert_eq!(run.status, RunStatus::Completed);
+    assert_eq!(run.status, ProcessInvocationStatus::Completed);
     let consumed = leases.get(&scope, lease.grant.id).await.unwrap();
     assert_eq!(consumed.status, CapabilityLeaseStatus::Consumed);
 }
@@ -345,7 +356,7 @@ async fn capability_host_returns_spawn_result_when_run_completion_fails_after_sp
     let authorizer = SpawnAuthorizer;
     let host = capability_host(&registry, &dispatcher, &authorizer)
         .with_process_manager(&process_manager)
-        .with_run_state(&run_state);
+        .with_invocation_state(&run_state);
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
     });
@@ -420,20 +431,23 @@ impl RecordingProcessManager {
 }
 
 struct FailCompleteRunStateStore {
-    inner: ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>,
+    inner: ironclaw_processes::ProcessInvocationStateStore<ironclaw_filesystem::InMemoryBackend>,
 }
 
 impl FailCompleteRunStateStore {
     fn new() -> Self {
         Self {
-            inner: ironclaw_run_state::in_memory_backed_run_state_store(),
+            inner: ironclaw_processes::in_memory_backed_process_invocation_state_store(),
         }
     }
 }
 
 #[async_trait]
-impl RunStateStorePort for FailCompleteRunStateStore {
-    async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
+impl ProcessInvocationStatePort for FailCompleteRunStateStore {
+    async fn start(
+        &self,
+        start: ProcessInvocationStart,
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.inner.start(start).await
     }
 
@@ -442,7 +456,7 @@ impl RunStateStorePort for FailCompleteRunStateStore {
         scope: &ResourceScope,
         invocation_id: InvocationId,
         approval: ApprovalRequest,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.inner
             .block_approval(scope, invocation_id, approval)
             .await
@@ -453,7 +467,7 @@ impl RunStateStorePort for FailCompleteRunStateStore {
         scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.inner
             .block_auth(scope, invocation_id, error_kind)
             .await
@@ -463,8 +477,8 @@ impl RunStateStorePort for FailCompleteRunStateStore {
         &self,
         _scope: &ResourceScope,
         _invocation_id: InvocationId,
-    ) -> Result<RunRecord, RunStateError> {
-        Err(RunStateError::Filesystem(
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
+        Err(ProcessInvocationError::Backend(
             "complete transition unavailable".to_string(),
         ))
     }
@@ -474,7 +488,7 @@ impl RunStateStorePort for FailCompleteRunStateStore {
         scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.inner.fail(scope, invocation_id, error_kind).await
     }
 
@@ -482,14 +496,14 @@ impl RunStateStorePort for FailCompleteRunStateStore {
         &self,
         scope: &ResourceScope,
         invocation_id: InvocationId,
-    ) -> Result<Option<RunRecord>, RunStateError> {
+    ) -> Result<Option<ProcessInvocationRecord>, ProcessInvocationError> {
         self.inner.get(scope, invocation_id).await
     }
 
     async fn records_for_scope(
         &self,
         scope: &ResourceScope,
-    ) -> Result<Vec<RunRecord>, RunStateError> {
+    ) -> Result<Vec<ProcessInvocationRecord>, ProcessInvocationError> {
         self.inner.records_for_scope(scope).await
     }
 }

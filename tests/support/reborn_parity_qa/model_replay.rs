@@ -5,15 +5,15 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, ProviderToolName};
-use ironclaw_loop_host::{
-    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
-};
-use ironclaw_turns::run_profile::{
+use ironclaw_host_api::ids::{CapabilityId, ProviderToolName};
+use ironclaw_loop_contracts::{
     AgentLoopHostError, CapabilityCallCandidate, CapabilityInputRef, CapabilitySurfaceVersion,
     LoopCapabilityPort, ParentLoopOutput, ProviderToolCall, ProviderToolCallReplay,
     ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+};
+use ironclaw_loop_host::{
+    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
 };
 use thiserror::Error;
 

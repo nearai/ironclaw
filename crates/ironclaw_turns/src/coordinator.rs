@@ -56,14 +56,13 @@ fn trace_coordinator_latency_error<E: ?Sized>(
 }
 
 use crate::{
-    AdmissionRejection, CancelRunRequest, CancelRunResponse, GetRunStateRequest,
-    InMemoryRunProfileResolver, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
-    RetryTurnResponse, RunProfileResolver, SubmitChildRunRequest, SubmitTurnRequest,
+    AdmissionRejection, AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort, CancelRunRequest,
+    CancelRunResponse, EventCursor, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
+    RetryTurnRequest, RetryTurnResponse, SubmitChildRunRequest, SubmitTurnRequest,
     SubmitTurnResponse, TurnCapacityResource, TurnError, TurnRunId, TurnRunState, TurnScope,
-    TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
-    events::EventCursor,
-    lifecycle::{LifecyclePublicationErrorPort, NoopLifecyclePublicationErrorPort},
+    TurnStatus, process_projection::AgentTurnProcessRuntime,
 };
+use ironclaw_loop_contracts::{InMemoryRunProfileResolver, RunProfileResolver};
 
 pub trait TurnAdmissionPolicy: Send + Sync {
     fn check_submit(&self, request: &SubmitTurnRequest) -> Result<(), AdmissionRejection>;
@@ -160,7 +159,7 @@ pub struct DefaultTurnCoordinator<S: ?Sized> {
     admission_policy: Arc<dyn TurnAdmissionPolicy>,
     run_profile_resolver: Arc<dyn RunProfileResolver>,
     wake_notifier: Arc<dyn TurnRunWakeNotifier>,
-    publication_error_port: Arc<dyn LifecyclePublicationErrorPort>,
+    process_runtime: Option<AgentTurnProcessRuntime>,
     // Per-coordinator binding of run ids handed out by `prepare_turn` to the
     // scope they were prepared under. `submit_turn` consumes the reservation
     // when `requested_run_id` is set and rejects cross-scope submission so a
@@ -170,7 +169,7 @@ pub struct DefaultTurnCoordinator<S: ?Sized> {
 
 impl<S> DefaultTurnCoordinator<S>
 where
-    S: TurnStateStore + ?Sized,
+    S: AgentTurnRuntimePort + ?Sized,
 {
     pub fn new(store: Arc<S>) -> Self {
         Self {
@@ -178,7 +177,7 @@ where
             admission_policy: Arc::new(AllowAllTurnAdmissionPolicy),
             run_profile_resolver: Arc::new(InMemoryRunProfileResolver::default()),
             wake_notifier: Arc::new(NoopTurnRunWakeNotifier),
-            publication_error_port: Arc::new(NoopLifecyclePublicationErrorPort),
+            process_runtime: None,
             prepared_run_id_scopes: Mutex::new(HashMap::new()),
         }
     }
@@ -198,11 +197,8 @@ where
         self
     }
 
-    pub fn with_lifecycle_publication_error_port(
-        mut self,
-        port: Arc<dyn LifecyclePublicationErrorPort>,
-    ) -> Self {
-        self.publication_error_port = port;
+    pub fn with_process_runtime(mut self, runtime: AgentTurnProcessRuntime) -> Self {
+        self.process_runtime = Some(runtime);
         self
     }
 
@@ -254,11 +250,6 @@ fn submit_wake(scope: TurnScope, response: &SubmitTurnResponse) -> TurnRunWake {
     wake_from(scope, *run_id, *status, *event_cursor)
 }
 
-fn submit_event_cursor(response: &SubmitTurnResponse) -> EventCursor {
-    let SubmitTurnResponse::Accepted { event_cursor, .. } = response;
-    *event_cursor
-}
-
 fn resume_wake(scope: TurnScope, response: &ResumeTurnResponse) -> TurnRunWake {
     wake_from(
         scope,
@@ -294,20 +285,10 @@ fn notify_queued_run_best_effort(notifier: &dyn TurnRunWakeNotifier, wake: TurnR
     }
 }
 
-fn deferred_publication_error(
-    port: &dyn LifecyclePublicationErrorPort,
-    cursor: EventCursor,
-) -> Result<(), TurnError> {
-    match port.take_lifecycle_publication_error(cursor) {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
-}
-
 #[async_trait]
 impl<S> TurnCoordinator for DefaultTurnCoordinator<S>
 where
-    S: TurnStateStore + ?Sized + 'static,
+    S: AgentTurnRuntimePort + ?Sized + 'static,
 {
     async fn prepare_turn(&self, scope: TurnScope) -> Result<TurnRunId, TurnError> {
         let run_id = TurnRunId::new();
@@ -340,15 +321,27 @@ where
             return Err(TurnError::Unauthorized);
         }
         let scope = request.scope.clone();
-        let response = match self
-            .store
-            .submit_turn(
-                request,
-                self.admission_policy.as_ref(),
-                self.run_profile_resolver.as_ref(),
-            )
-            .await
-        {
+        let response = match &self.process_runtime {
+            Some(runtime) => {
+                runtime
+                    .submit_turn(
+                        request,
+                        self.admission_policy.as_ref(),
+                        self.run_profile_resolver.as_ref(),
+                    )
+                    .await
+            }
+            None => {
+                self.store
+                    .submit_turn(
+                        request,
+                        self.admission_policy.as_ref(),
+                        self.run_profile_resolver.as_ref(),
+                    )
+                    .await
+            }
+        };
+        let response = match response {
             Ok(response) => {
                 let SubmitTurnResponse::Accepted { run_id, .. } = &response;
                 trace_coordinator_latency_ok(
@@ -390,10 +383,6 @@ where
             submit_wake(scope.clone(), &response),
         );
         trace_coordinator_latency_ok("notify_queued_run", &scope, Some(*run_id), wake_started_at);
-        deferred_publication_error(
-            self.publication_error_port.as_ref(),
-            submit_event_cursor(&response),
-        )?;
         Ok(response)
     }
 
@@ -403,7 +392,11 @@ where
     ) -> Result<ResumeTurnResponse, TurnError> {
         let started_at = live_latency_started_at();
         let scope = request.scope.clone();
-        let response = match self.store.resume_turn(request).await {
+        let response = match &self.process_runtime {
+            Some(runtime) => runtime.resume_turn(request).await,
+            None => self.store.resume_turn(request).await,
+        };
+        let response = match response {
             Ok(response) => {
                 trace_coordinator_latency_ok(
                     "store_resume_turn",
@@ -435,25 +428,30 @@ where
             Some(response.run_id),
             wake_started_at,
         );
-        deferred_publication_error(self.publication_error_port.as_ref(), response.event_cursor)?;
         Ok(response)
     }
 
     async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
         let scope = request.scope.clone();
-        let response = self.store.retry_turn(request).await?;
+        let response = match &self.process_runtime {
+            Some(runtime) => runtime.retry_turn(request).await?,
+            None => self.store.retry_turn(request).await?,
+        };
         notify_queued_run_best_effort(
             self.wake_notifier.as_ref(),
             retry_wake(scope.clone(), &response),
         );
-        deferred_publication_error(self.publication_error_port.as_ref(), response.event_cursor)?;
         Ok(response)
     }
 
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         let started_at = live_latency_started_at();
         let scope = request.scope.clone();
-        let response = match self.store.request_cancel(request).await {
+        let response = match &self.process_runtime {
+            Some(runtime) => runtime.cancel_run(request).await,
+            None => self.store.request_cancel(request).await,
+        };
+        let response = match response {
             Ok(response) => {
                 trace_coordinator_latency_ok(
                     "store_cancel_run",
@@ -491,24 +489,21 @@ where
                 wake_started_at,
             );
         }
-        if !response.already_terminal {
-            deferred_publication_error(
-                self.publication_error_port.as_ref(),
-                response.event_cursor,
-            )?;
-        }
         Ok(response)
     }
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        self.store.get_run_state(request).await
+        match &self.process_runtime {
+            Some(runtime) => runtime.get_run_state(&request.scope, request.run_id).await,
+            None => self.store.get_run_state(request).await,
+        }
     }
 }
 
 #[async_trait]
 impl<S> TurnSpawnTreePort for DefaultTurnCoordinator<S>
 where
-    S: TurnSpawnTreeStateStore + ?Sized + 'static,
+    S: AgentTurnSpawnTreeRuntimePort + ?Sized + 'static,
 {
     async fn submit_child_run(
         &self,
@@ -516,15 +511,27 @@ where
     ) -> Result<SubmitTurnResponse, TurnError> {
         let started_at = live_latency_started_at();
         let child_scope = request.child_scope.clone();
-        let response = match self
-            .store
-            .submit_child_turn(
-                request,
-                self.admission_policy.as_ref(),
-                self.run_profile_resolver.as_ref(),
-            )
-            .await
-        {
+        let response = match &self.process_runtime {
+            Some(runtime) => {
+                runtime
+                    .submit_child_turn(
+                        request,
+                        self.admission_policy.as_ref(),
+                        self.run_profile_resolver.as_ref(),
+                    )
+                    .await
+            }
+            None => {
+                self.store
+                    .submit_child_turn(
+                        request,
+                        self.admission_policy.as_ref(),
+                        self.run_profile_resolver.as_ref(),
+                    )
+                    .await
+            }
+        };
+        let response = match response {
             Ok(response) => {
                 let SubmitTurnResponse::Accepted { run_id, .. } = &response;
                 trace_coordinator_latency_ok(
@@ -558,10 +565,6 @@ where
             Some(*run_id),
             wake_started_at,
         );
-        deferred_publication_error(
-            self.publication_error_port.as_ref(),
-            submit_event_cursor(&response),
-        )?;
         Ok(response)
     }
 }

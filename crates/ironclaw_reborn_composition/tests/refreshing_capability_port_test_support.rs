@@ -22,9 +22,15 @@ use ironclaw_approvals::test_support::{
 };
 use ironclaw_authorization::in_memory_backed_capability_lease_store;
 use ironclaw_host_api::{
-    AgentId, CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, MountAlias, MountGrant,
-    MountPermissions, MountView, PermissionMode, ProjectId, ProviderToolName, Resolution,
-    ResourceEstimate, RuntimeKind, TenantId, ThreadId, ToolVerdict, UserId, VirtualPath,
+    capability::{CapabilityDescriptor, EffectKind, PermissionMode},
+    ids::{
+        AgentId, CapabilityId, ExtensionId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resolution::{Resolution, ToolVerdict},
+    resource::ResourceEstimate,
+    runtime::RuntimeKind,
 };
 use ironclaw_host_runtime::RuntimeCapabilityOutcome;
 use ironclaw_host_runtime::{
@@ -32,6 +38,12 @@ use ironclaw_host_runtime::{
     HostRuntimeError, HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalResume,
     RuntimeInvocation, RuntimeStatusRequest, VisibleCapability, VisibleCapabilityAccess,
     VisibleCapabilityRequest, VisibleCapabilitySurface,
+};
+use ironclaw_loop_contracts::RunProfileResolver;
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, InMemoryLoopHostMilestoneSink,
+    InMemoryRunProfileResolver, LoopRequest, LoopRunContext, ProviderToolCall,
+    RegisterProviderToolCallRequest, RunProfileResolutionRequest,
 };
 use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityWriteResult, LoopCapabilityInputResolver,
@@ -49,12 +61,7 @@ use ironclaw_reborn_composition::test_support::{
     PROJECT_CREATE_CAPABILITY_ID, RESULT_READ_CAPABILITY_ID, RefreshingCapabilityPortTestParts,
     create_refreshing_capability_port_for_test,
 };
-use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, InMemoryLoopHostMilestoneSink,
-    InMemoryRunProfileResolver, LoopRequest, LoopRunContext, ProviderToolCall,
-    RegisterProviderToolCallRequest, RunProfileResolutionRequest,
-};
-use ironclaw_turns::{RunProfileResolver, TurnId, TurnRunId, TurnScope};
+use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
 /// Echoes a runtime-visible capability for every grant in the request's
 /// context, so `capability_id_filter` narrowing (applied upstream of this
@@ -65,7 +72,7 @@ use ironclaw_turns::{RunProfileResolver, TurnId, TurnRunId, TurnScope};
 /// runtime (mount overrides, extra provider trust) rather than just that the
 /// port assembled.
 struct StubHostRuntime {
-    invocation_contexts: StdMutex<Vec<ironclaw_host_api::ExecutionContext>>,
+    invocation_contexts: StdMutex<Vec<ironclaw_host_api::scope::ExecutionContext>>,
     visible_provider_trust: StdMutex<Vec<BTreeMap<ExtensionId, ironclaw_trust::TrustDecision>>>,
 }
 
@@ -77,7 +84,7 @@ impl StubHostRuntime {
         }
     }
 
-    fn invocation_contexts(&self) -> Vec<ironclaw_host_api::ExecutionContext> {
+    fn invocation_contexts(&self) -> Vec<ironclaw_host_api::scope::ExecutionContext> {
         self.invocation_contexts
             .lock()
             .expect("invocation contexts lock")
@@ -107,7 +114,7 @@ impl HostRuntime for StubHostRuntime {
                 capability_id: request.1,
                 output: serde_json::json!({"ok": true}),
                 display_preview: None,
-                usage: ironclaw_host_api::ResourceUsage::default(),
+                usage: ironclaw_host_api::resource::ResourceUsage::default(),
             },
         )))
     }
@@ -139,7 +146,7 @@ impl HostRuntime for StubHostRuntime {
                     id: grant.capability.clone(),
                     provider: ExtensionId::new("builtin").expect("static provider id is valid"),
                     runtime: RuntimeKind::FirstParty,
-                    trust_ceiling: ironclaw_host_api::TrustClass::UserTrusted,
+                    trust_ceiling: ironclaw_host_api::runtime::TrustClass::UserTrusted,
                     description: format!("stub capability {}", grant.capability.as_str()),
                     parameters_schema: serde_json::json!({"type": "object", "properties": {}}),
                     effects: vec![EffectKind::ReadFilesystem],
@@ -150,6 +157,7 @@ impl HostRuntime for StubHostRuntime {
                     resource_profile: None,
                     origin_gate_matrix: None,
                 },
+                description_trust: Default::default(),
                 access: VisibleCapabilityAccess::Available,
                 estimated_resources: ResourceEstimate::default(),
             })
@@ -382,17 +390,20 @@ fn test_parts(
     runtime: Arc<StubHostRuntime>,
     shared_io: Arc<SharedStubCapabilityIo>,
     capability_id_filter: Option<HashSet<CapabilityId>>,
-    capability_execution_mount_overrides: HashMap<CapabilityId, ironclaw_host_api::MountView>,
+    capability_execution_mount_overrides: HashMap<
+        CapabilityId,
+        ironclaw_host_api::mount::MountView,
+    >,
     additional_provider_trust: BTreeMap<ExtensionId, ironclaw_trust::TrustDecision>,
 ) -> RefreshingCapabilityPortTestParts {
     RefreshingCapabilityPortTestParts {
         runtime,
         run_context,
         fallback_user_id: UserId::new("user-stub").expect("user id"),
-        workspace_mounts: ironclaw_host_api::MountView::default(),
-        skill_mounts: ironclaw_host_api::MountView::default(),
-        memory_mounts: ironclaw_host_api::MountView::default(),
-        system_extensions_lifecycle_mounts: ironclaw_host_api::MountView::default(),
+        workspace_mounts: ironclaw_host_api::mount::MountView::default(),
+        skill_mounts: ironclaw_host_api::mount::MountView::default(),
+        memory_mounts: ironclaw_host_api::mount::MountView::default(),
+        system_extensions_lifecycle_mounts: ironclaw_host_api::mount::MountView::default(),
         input_resolver: shared_io.clone(),
         result_writer: shared_io,
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -405,9 +416,9 @@ fn test_parts(
         tool_permission_overrides: Arc::new(in_memory_backed_capability_permission_override_store()),
         auto_approve_settings: Arc::new(in_memory_backed_auto_approve_setting_store()),
         persistent_approval_policies: Arc::new(in_memory_backed_persistent_approval_policy_store()),
-        approval_requests: Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store()),
+        approval_requests: Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store()),
         capability_leases: Arc::new(in_memory_backed_capability_lease_store()),
-        gate_record_store: Arc::new(ironclaw_run_state::GateRecordStore::new(
+        gate_record_store: Arc::new(ironclaw_approvals::GateRecordStore::new(
             ironclaw_reborn_composition::wrap_scoped(Arc::new(
                 ironclaw_filesystem::InMemoryBackend::new(),
             )),
@@ -753,7 +764,7 @@ async fn additional_provider_trust_is_forwarded_to_visible_request() {
     // Construction already triggers one `visible_capabilities` refresh; drive
     // a second one explicitly through the public port API so the assertion
     // exercises the same seam a real loop run would.
-    port.visible_capabilities(ironclaw_turns::run_profile::VisibleCapabilityRequest)
+    port.visible_capabilities(ironclaw_loop_contracts::VisibleCapabilityRequest)
         .await
         .expect("visible capabilities refresh");
 
@@ -847,7 +858,7 @@ async fn multi_entry_collection_knobs_round_trip() {
     // capability_execution_mount_overrides: invoke both and check each one's
     // ExecutionContext carries ITS OWN override mount, not the other's.
     async fn invoke(
-        port: &dyn ironclaw_turns::run_profile::LoopCapabilityPort,
+        port: &dyn ironclaw_loop_contracts::LoopCapabilityPort,
         provider_tool_name: &str,
     ) {
         let tool_call = ProviderToolCall {
@@ -895,7 +906,7 @@ async fn multi_entry_collection_knobs_round_trip() {
 
     // additional_provider_trust: both entries land in the observed
     // visible_capabilities provider-trust map.
-    port.visible_capabilities(ironclaw_turns::run_profile::VisibleCapabilityRequest)
+    port.visible_capabilities(ironclaw_loop_contracts::VisibleCapabilityRequest)
         .await
         .expect("visible capabilities refresh");
     let observed = runtime.visible_provider_trust();

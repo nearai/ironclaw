@@ -12,6 +12,7 @@ use std::{
 };
 
 use chrono::{Duration as ChronoDuration, Utc};
+use ironclaw_approvals::ApprovalRequestStorePort;
 use ironclaw_approvals::LeaseApproval;
 use ironclaw_authorization::{
     CapabilityLeaseStatus, CapabilityLeaseStorePort, GrantAuthorizer,
@@ -32,16 +33,37 @@ use ironclaw_events::{
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, FilesystemOperation, RootFilesystem};
-use ironclaw_host_api::*;
+use ironclaw_host_api::result_meta::FailureKind;
+use ironclaw_host_api::{
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    approval::ApprovalRequest,
+    audit::AuditStage,
+    capability::{EffectKind, GrantConstraints},
+    decision::Obligation,
+    http::RuntimeCredentialTarget,
+    ids::{
+        ApprovalRequestId, CapabilityId, CorrelationId, InvocationId, ProcessId, ProjectId,
+        ResourceReservationId, SecretHandle, ThreadId, UserId,
+    },
+    mount::{MountPermissions, MountView},
+    path::VirtualPath,
+    resource::{ReservationStatus, ResourceEstimate, ResourceScope},
+    runtime::RuntimeKind,
+    runtime_policy::{FilesystemBackendKind, NetworkMode, ProcessBackendKind, SecretMode},
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceVersion,
     HostRuntime, HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig,
-    ProductionWiringIssueKind, RuntimeCapabilityOutcome, RuntimeFailureKind, RuntimeStatusRequest,
-    RuntimeWorkId, TenantSandboxProcessPort, builtin_first_party_handlers,
+    ProductionWiringIssueKind, RuntimeCapabilityOutcome, RuntimeStatusRequest, RuntimeWorkId,
+    TenantSandboxProcessPort, builtin_first_party_handlers,
 };
+use ironclaw_loop_contracts::InMemoryRunProfileResolver;
 use ironclaw_processes::{
-    BackgroundProcessManager, ProcessError, ProcessHost, ProcessManager, ProcessResultStore,
-    ProcessResultStorePort, ProcessStatus, ProcessStore, ProcessStorePort,
+    BackgroundProcessManager, ProcessError, ProcessInvocationError, ProcessInvocationRecord,
+    ProcessInvocationStart, ProcessInvocationStatePort, ProcessInvocationStatus,
+    ProcessJournalStore, ProcessManager, ProcessResultStore, ProcessRuntimePort, ProcessServices,
+    ProcessStatus, capability_process_record, submit_capability_process,
 };
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornEventStoreError, RebornProfile, build_reborn_event_stores,
@@ -50,17 +72,11 @@ use ironclaw_resources::{
     InMemoryResourceGovernor, JsonFileResourceGovernorStore, PersistentResourceGovernor,
     ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits, ResourceTally,
 };
-use ironclaw_run_state::{
-    ApprovalRequestStorePort, RunRecord, RunStart, RunStateError, RunStateStorePort, RunStatus,
-};
 use ironclaw_scripts::{ScriptRuntime, ScriptRuntimeConfig};
 use ironclaw_secrets::{InMemoryCredentialBroker, SecretMaterial, SecretStore, SecretStorePort};
 use ironclaw_triggers::InMemoryTriggerRepository;
 use ironclaw_turns::NoopTurnRunWakeNotifier;
-use ironclaw_turns::TurnStateRowStore;
-use ironclaw_turns::{
-    InMemoryRunProfileResolver, SubmitTurnResponse, TurnCoordinator, TurnStateStore,
-};
+use ironclaw_turns::{AgentTurnProcessRuntime, SubmitTurnResponse, TurnCoordinator};
 use ironclaw_wasm::{
     RecordingWasmHostHttp, WasmHttpResponse, WasmStagedRuntimeCredential,
     WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
@@ -79,7 +95,7 @@ fn with_authenticated_actor(
 fn assert_actor_policy_denied(outcome: RuntimeCapabilityOutcome) {
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+            assert_eq!(failure.kind, FailureKind::Authorization);
             assert!(
                 failure
                     .message
@@ -92,11 +108,25 @@ fn assert_actor_policy_denied(outcome: RuntimeCapabilityOutcome) {
     }
 }
 
+fn process_backed_turn_state<F>(
+    filesystem: Arc<ironclaw_filesystem::ScopedFilesystem<F>>,
+) -> Arc<AgentTurnProcessRuntime>
+where
+    F: RootFilesystem + Send + Sync + 'static,
+{
+    let store = Arc::new(ProcessJournalStore::new(filesystem));
+    Arc::new(AgentTurnProcessRuntime::from_process_runtime(
+        store as Arc<dyn ProcessRuntimePort>,
+    ))
+}
+
 async fn assert_alice_run_status(
-    run_state: &ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>,
+    run_state: &ironclaw_processes::ProcessInvocationStateStore<
+        ironclaw_filesystem::InMemoryBackend,
+    >,
     scope: &ResourceScope,
     invocation_id: InvocationId,
-    expected_status: RunStatus,
+    expected_status: ProcessInvocationStatus,
 ) {
     let record = run_state
         .get(scope, invocation_id)
@@ -145,7 +175,7 @@ async fn production_wiring_validation_rejects_missing_components_and_local_only_
     );
     assert!(
         report.contains(
-            ProductionWiringComponent::RunState,
+            ProductionWiringComponent::InvocationState,
             ProductionWiringIssueKind::Missing
         ),
         "missing run-state store should be reported: {report:?}"
@@ -222,7 +252,7 @@ async fn production_wiring_validation_rejects_missing_components_and_local_only_
     );
     assert!(
         report.contains(
-            ProductionWiringComponent::ProcessStorePort,
+            ProductionWiringComponent::ProcessRuntimePort,
             ProductionWiringIssueKind::LocalOnlyImplementation
         ),
         "in-memory process store should be reported as local-only: {report:?}"
@@ -246,11 +276,11 @@ async fn production_wiring_validation_rejects_local_only_runtime_policy() {
         ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_runtime_policy(local_dev_runtime_policy());
+    .with_runtime_policy(standalone_runtime_policy());
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([]))
-        .expect_err("local-dev runtime policy must not pass production validation");
+        .expect_err("standalone runtime policy must not pass production validation");
 
     assert!(
         report.contains(
@@ -348,7 +378,10 @@ async fn production_wiring_validation_accepts_persistent_resource_governor_compo
 #[tokio::test]
 async fn with_filesystem_resource_governor_persists_reservations_across_handles() {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
 
     let backend = Arc::new(InMemoryBackend::new());
     let mounts = MountView::new(vec![MountGrant::new(
@@ -390,7 +423,10 @@ async fn with_filesystem_resource_governor_persists_reservations_across_handles(
 #[tokio::test]
 async fn with_filesystem_resource_governor_closes_process_reservations_on_cancel() {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
 
     let backend = Arc::new(InMemoryBackend::new());
     let mounts = MountView::new(vec![MountGrant::new(
@@ -404,7 +440,7 @@ async fn with_filesystem_resource_governor_closes_process_reservations_on_cancel
         mounts,
     ));
     let process_services = ironclaw_processes::in_memory_backed_process_services();
-    let process_store = process_services.process_store();
+    let process_runtime = process_services.process_runtime();
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -433,7 +469,9 @@ async fn with_filesystem_resource_governor_closes_process_reservations_on_cancel
     let mut start = process_start(process_id, scope.invocation_id, scope.clone());
     start.estimated_resources = estimate;
     start.resource_reservation_id = Some(reservation_id);
-    process_store.start(start).await.unwrap();
+    submit_capability_process(process_runtime.as_ref(), start)
+        .await
+        .unwrap();
 
     let runtime = services.host_runtime_for_local_testing();
     let outcome = runtime
@@ -457,54 +495,6 @@ async fn with_filesystem_resource_governor_closes_process_reservations_on_cancel
             ..
         }
     ));
-}
-
-#[tokio::test]
-async fn production_wiring_validation_classifies_combined_store_as_run_state_and_approvals() {
-    let services = HostRuntimeServices::new(
-        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(DiskFilesystem::new()),
-        Arc::new(InMemoryResourceGovernor::new()),
-        Arc::new(GrantAuthorizer::new()),
-        ironclaw_processes::in_memory_backed_process_services(),
-        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    )
-    .with_local_only_run_state_approval_store(Arc::new(
-        InMemoryRecordingCombinedRunStateApprovalStore::new(),
-    ));
-
-    let report = services
-        .validate_production_wiring(&ProductionWiringConfig::new([]))
-        .expect_err("local/test combined store must not pass production validation");
-
-    assert!(
-        report.contains(
-            ProductionWiringComponent::RunState,
-            ProductionWiringIssueKind::LocalOnlyImplementation,
-        ),
-        "combined store should be classified for run-state guardrails: {report:?}"
-    );
-    assert!(
-        report.contains(
-            ProductionWiringComponent::ApprovalRequests,
-            ProductionWiringIssueKind::LocalOnlyImplementation,
-        ),
-        "combined store should be classified for approval guardrails: {report:?}"
-    );
-    assert!(
-        !report.contains(
-            ProductionWiringComponent::RunState,
-            ProductionWiringIssueKind::Missing,
-        ),
-        "combined store should satisfy run-state presence: {report:?}"
-    );
-    assert!(
-        !report.contains(
-            ProductionWiringComponent::ApprovalRequests,
-            ProductionWiringIssueKind::Missing,
-        ),
-        "combined store should satisfy approval-store presence: {report:?}"
-    );
 }
 
 #[tokio::test]
@@ -550,17 +540,17 @@ async fn production_wiring_validation_classifies_in_memory_backed_lease_store_as
 }
 
 #[tokio::test]
-async fn production_wiring_validation_classifies_in_memory_backed_run_state_and_approval_stores_as_local_only()
+async fn production_wiring_validation_classifies_in_memory_backed_invocation_and_approval_stores_as_local_only()
  {
     // Regression guard for arch-simplification §4.3 (deleting
-    // `InMemoryRunStateStore` / `InMemoryApprovalRequestStore`): the classifier
+    // parallel in-memory invocation/approval stores): the classifier
     // keyed the now-deleted stores as explicit `LocalOnly` types, and unknown
     // component types default to `ProductionCandidate`. Their replacements — the
     // production `Filesystem*Store<InMemoryBackend>` pair the no-durable build
     // and every test seam wire — must classify the same way, or volatile
-    // in-memory run-state/approval stores could silently satisfy production
+    // in-memory invocation/approval stores could silently satisfy production
     // readiness. Drive the real `HostRuntimeServices` caller so classification
-    // is exercised through the monomorphized `with_run_state::<T>` /
+    // is exercised through the monomorphized `with_invocation_state::<T>` /
     // `with_approval_requests::<T>` type capture, not just the classifier
     // helper (the combined-store path hard-codes `LocalOnly` and bypasses it).
     let services = HostRuntimeServices::new(
@@ -571,21 +561,21 @@ async fn production_wiring_validation_classifies_in_memory_backed_run_state_and_
         ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_run_state(Arc::new(
-        ironclaw_run_state::in_memory_backed_run_state_store(),
+    .with_invocation_state(Arc::new(
+        ironclaw_processes::in_memory_backed_process_invocation_state_store(),
     ))
     .with_approval_requests(Arc::new(
-        ironclaw_run_state::in_memory_backed_approval_request_store(),
+        ironclaw_approvals::in_memory_backed_approval_request_store(),
     ));
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([]))
         .expect_err(
-            "in-memory-backed run-state/approval stores must not pass production validation",
+            "in-memory-backed invocation/approval stores must not pass production validation",
         );
 
     for component in [
-        ProductionWiringComponent::RunState,
+        ProductionWiringComponent::InvocationState,
         ProductionWiringComponent::ApprovalRequests,
     ] {
         assert!(
@@ -641,7 +631,7 @@ async fn production_wiring_validation_rejects_unsupported_runtime_requirements()
 //
 // The equivalent guardrail surface for the filesystem-backed wiring is
 // exercised by `tests/reborn_durable_restart_integration.rs` (services
-// graph restart over `DiskFilesystem`) and the `ironclaw_run_state`
+// graph restart over `DiskFilesystem`) and the `ironclaw_approvals`
 // contract suite.
 
 #[tokio::test]
@@ -649,7 +639,7 @@ async fn production_root_filesystem_selection_accepts_libsql_root_filesystem() {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("root-filesystem.db");
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
     filesystem.run_migrations().await.unwrap();
 
     let services = HostRuntimeServices::new(
@@ -679,11 +669,11 @@ async fn production_root_filesystem_selection_accepts_libsql_root_filesystem() {
 }
 
 #[tokio::test]
-async fn production_turn_state_selection_accepts_filesystem_turn_state_store() {
+async fn production_turn_state_selection_accepts_process_backed_turn_state() {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("turn-state.db");
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let scoped = libsql_scoped_turns_fs(Arc::clone(&db)).await;
+    let scoped = libsql_scoped_processes_fs(Arc::clone(&db)).await;
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -693,7 +683,7 @@ async fn production_turn_state_selection_accepts_filesystem_turn_state_store() {
         ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_filesystem_turn_state_store(scoped);
+    .with_turn_state(process_backed_turn_state(scoped));
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([]))
@@ -703,14 +693,14 @@ async fn production_turn_state_selection_accepts_filesystem_turn_state_store() {
             ProductionWiringComponent::TurnState,
             ProductionWiringIssueKind::Missing
         ),
-        "TurnStateRowStore must satisfy production turn-state presence: {report:?}"
+        "process-backed turn projection must satisfy production turn-state presence: {report:?}"
     );
     assert!(
         !report.contains(
             ProductionWiringComponent::TurnState,
             ProductionWiringIssueKind::LocalOnlyImplementation
         ),
-        "TurnStateRowStore over LibSqlRootFilesystem must not be classified local-only: {report:?}"
+        "process-backed turn projection over LibSqlRootFilesystem must not be classified local-only: {report:?}"
     );
 }
 
@@ -720,7 +710,7 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
     let db_path = db_dir.path().join("turn-coordinator.db");
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
     let notifier = Arc::new(RecordingTurnRunWakeNotifier::default());
-    let scoped = libsql_scoped_turns_fs(Arc::clone(&db)).await;
+    let scoped = libsql_scoped_processes_fs(Arc::clone(&db)).await;
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -730,7 +720,7 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
         ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_filesystem_turn_state_store(Arc::clone(&scoped))
+    .with_turn_state(process_backed_turn_state(Arc::clone(&scoped)))
     .with_run_profile_resolver(Arc::new(InMemoryRunProfileResolver::default()))
     .with_turn_run_wake_notifier(Arc::clone(&notifier));
 
@@ -741,12 +731,9 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
     let response = coordinator.submit_turn(request.clone()).await.unwrap();
     let SubmitTurnResponse::Accepted { run_id, .. } = response;
 
-    let reopened = TurnStateRowStore::new(scoped);
+    let reopened = process_backed_turn_state(scoped);
     let state = reopened
-        .get_run_state(ironclaw_turns::GetRunStateRequest {
-            scope: request.scope,
-            run_id,
-        })
+        .get_run_state(&request.scope, run_id)
         .await
         .unwrap();
     assert_eq!(state.run_id, run_id);
@@ -759,7 +746,7 @@ async fn production_turn_coordinator_requires_explicit_run_profile_resolver() {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("turn-coordinator-missing-resolver.db");
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let scoped = libsql_scoped_turns_fs(Arc::clone(&db)).await;
+    let scoped = libsql_scoped_processes_fs(Arc::clone(&db)).await;
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -769,7 +756,7 @@ async fn production_turn_coordinator_requires_explicit_run_profile_resolver() {
         ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_filesystem_turn_state_store(scoped)
+    .with_turn_state(process_backed_turn_state(scoped))
     .with_turn_run_wake_notifier(Arc::new(RecordingTurnRunWakeNotifier::default()));
 
     let report = match services.turn_coordinator_for_production() {
@@ -877,7 +864,7 @@ async fn local_reborn_event_store_config_does_not_satisfy_production_wiring() {
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_reborn_event_store_config(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root: temp.path().join("local-reborn-event-store"),
             accept_single_node_durable: false,
@@ -888,21 +875,21 @@ async fn local_reborn_event_store_config_does_not_satisfy_production_wiring() {
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([]))
-        .expect_err("LocalDev stores are not production-verified event/audit sinks");
+        .expect_err("Standalone stores are not production-verified event/audit sinks");
 
     assert!(
         report.contains(
             ProductionWiringComponent::EventSink,
             ProductionWiringIssueKind::UnverifiedProductionImplementation
         ),
-        "LocalDev Reborn event store must not satisfy production event sink guardrail: {report:?}"
+        "Standalone Reborn event store must not satisfy production event sink guardrail: {report:?}"
     );
     assert!(
         report.contains(
             ProductionWiringComponent::AuditSink,
             ProductionWiringIssueKind::UnverifiedProductionImplementation
         ),
-        "LocalDev Reborn audit store must not satisfy production audit sink guardrail: {report:?}"
+        "Standalone Reborn audit store must not satisfy production audit sink guardrail: {report:?}"
     );
 }
 
@@ -1461,8 +1448,8 @@ async fn host_runtime_services_builds_dispatcher_runtime_and_health_from_registe
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
         Arc::new(GrantAuthorizer::new());
     let process_services = ironclaw_processes::in_memory_backed_process_services();
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let events = InMemoryEventSink::new();
     let script_runtime = Arc::new(ScriptRuntime::new(
@@ -1482,7 +1469,7 @@ async fn host_runtime_services_builds_dispatcher_runtime_and_health_from_registe
         "script",
         vec![EffectKind::DispatchCapability],
     )))
-    .with_run_state(run_state)
+    .with_invocation_state(run_state)
     .with_approval_requests(approval_requests)
     .with_capability_leases(capability_leases)
     .with_script_runtime(script_runtime)
@@ -1538,11 +1525,7 @@ async fn host_runtime_services_wires_combined_store_for_atomic_approval_block() 
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     );
 
-    assert_services_use_combined_store_for_atomic_approval_block(
-        services,
-        "approval from services",
-    )
-    .await;
+    assert_services_persist_approval_and_block_invocation(services, "approval from services").await;
 }
 
 #[tokio::test]
@@ -1552,7 +1535,7 @@ async fn host_runtime_services_preserves_combined_store_after_root_filesystem_se
         .path()
         .join("root-filesystem-preserves-combined-store.db");
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
     filesystem.run_migrations().await.unwrap();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -1564,7 +1547,7 @@ async fn host_runtime_services_preserves_combined_store_after_root_filesystem_se
     )
     .with_libsql_root_filesystem(filesystem);
 
-    assert_services_use_combined_store_for_atomic_approval_block(
+    assert_services_persist_approval_and_block_invocation(
         services,
         "approval after root filesystem selection",
     )
@@ -1670,7 +1653,7 @@ async fn host_runtime_services_writes_runtime_events_to_durable_event_log_metada
 async fn host_runtime_services_consumes_reborn_jsonl_event_store_without_v1_composition() {
     let temp = tempfile::tempdir().unwrap();
     let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root: temp.path().join("reborn-event-store"),
             accept_single_node_durable: false,
@@ -2028,7 +2011,7 @@ async fn host_runtime_services_jsonl_event_store_projects_same_runtime_sequence_
     let temp = tempfile::tempdir().unwrap();
     let store_root = temp.path().join("reborn-event-store");
     let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root: store_root.clone(),
             accept_single_node_durable: false,
@@ -2125,8 +2108,8 @@ async fn host_runtime_services_jsonl_event_store_projects_same_runtime_sequence_
 
 #[tokio::test]
 async fn host_runtime_services_approval_resolution_projects_durable_audit_metadata_only() {
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let audit_log = Arc::new(InMemoryDurableAuditLog::new());
     let services = HostRuntimeServices::new(
@@ -2141,7 +2124,7 @@ async fn host_runtime_services_approval_resolution_projects_durable_audit_metada
         "script",
         vec![EffectKind::DispatchCapability],
     )))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_durable_audit_log(Arc::clone(&audit_log))
@@ -2224,7 +2207,7 @@ async fn host_runtime_services_jsonl_approval_audit_projection_rejects_foreign_c
     let temp = tempfile::tempdir().unwrap();
     let store_root = temp.path().join("reborn-event-store");
     let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root: store_root.clone(),
             accept_single_node_durable: false,
@@ -2233,8 +2216,8 @@ async fn host_runtime_services_jsonl_approval_audit_projection_rejects_foreign_c
     .await
     .unwrap();
     let audit_log = Arc::clone(&stores.audit);
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -2248,7 +2231,7 @@ async fn host_runtime_services_jsonl_approval_audit_projection_rejects_foreign_c
         "script",
         vec![EffectKind::DispatchCapability],
     )))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_audit_sink(Arc::new(ironclaw_events::DurableAuditSink::new(
@@ -2333,24 +2316,32 @@ async fn host_runtime_services_jsonl_approval_audit_projection_rejects_foreign_c
 async fn process_lifecycle_projects_through_durable_replay_without_output_leaks() {
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     let processes_filesystem = ironclaw_processes::in_memory_backed_processes_filesystem();
-    let inner_process_store = Arc::new(ProcessStore::new(Arc::clone(&processes_filesystem)));
+    let inner_process_store = Arc::new(ProcessJournalStore::new(Arc::clone(&processes_filesystem)));
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
         Arc::new(SecretStore::ephemeral()),
         Arc::new(InMemoryResourceGovernor::new()),
     );
-    let process_store =
-        Arc::new(obligation_services.process_obligation_lifecycle_store(inner_process_store));
+    let process_store = Arc::new(
+        obligation_services.process_obligation_lifecycle_store(Arc::clone(&inner_process_store)),
+    );
+    process_store
+        .register_journal_observer(process_store.process_runtime().as_ref())
+        .unwrap();
     let durable_event_log: Arc<dyn DurableEventLog> = event_log.clone();
     process_store.set_event_sink(Arc::new(DurableEventSink::new(durable_event_log)));
     let result_store = Arc::new(ProcessResultStore::new(processes_filesystem));
+    let process_services =
+        ProcessServices::new(Arc::clone(&inner_process_store), Arc::clone(&result_store));
+    let submission_lifecycle: Arc<dyn ironclaw_processes::ProcessSubmissionLifecycle> =
+        process_store.clone();
     let manager = BackgroundProcessManager::new(
-        Arc::clone(&process_store),
+        process_services.clone(),
         Arc::new(BackgroundExecutor::success_with_output(json!({
             "result": "PROCESS_OUTPUT_SENTINEL_3022 /tmp/process-output-private"
         }))),
     )
-    .with_result_store(Arc::clone(&result_store));
+    .with_submission_lifecycle(submission_lifecycle);
     let process_id = ProcessId::new();
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id);
@@ -2367,8 +2358,7 @@ async fn process_lifecycle_projects_through_durable_replay_without_output_leaks(
     )
     .await;
 
-    let host =
-        ProcessHost::new(process_store.as_ref()).with_result_store(Arc::clone(&result_store));
+    let host = process_services.host();
     let output = host
         .output(&scope, process.process_id)
         .await
@@ -2451,7 +2441,7 @@ async fn process_lifecycle_projects_through_durable_replay_without_output_leaks(
 async fn host_runtime_services_cancel_projects_kill_event_from_configured_event_sink() {
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     let process_services = ironclaw_processes::in_memory_backed_process_services();
-    let process_store = process_services.process_store();
+    let process_runtime = process_services.process_runtime();
     let result_store = process_services.result_store();
     let runtime = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -2470,7 +2460,9 @@ async fn host_runtime_services_cancel_projects_kill_event_from_configured_event_
     start.input = json!({
         "message": "KILL_PROCESS_INPUT_SENTINEL_3022 /tmp/process-kill-private"
     });
-    process_store.start(start).await.unwrap();
+    submit_capability_process(process_runtime.as_ref(), start)
+        .await
+        .unwrap();
 
     let outcome = runtime
         .cancel_work(CancelRuntimeWorkRequest::new(
@@ -2604,7 +2596,7 @@ async fn host_runtime_services_resumes_approved_capability_and_consumes_lease_on
         .await
         .unwrap();
 
-    assert_failed_outcome(second, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(second, FailureKind::Authorization);
     assert_eq!(
         fixture.events.events().len(),
         3,
@@ -2614,8 +2606,8 @@ async fn host_runtime_services_resumes_approved_capability_and_consumes_lease_on
 
 #[tokio::test]
 async fn host_runtime_services_resume_missing_runtime_secret_returns_auth_gate() {
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let secret_store = Arc::new(SecretStore::ephemeral());
     let secret_handle = SecretHandle::new("approval_resume_token").unwrap();
@@ -2634,7 +2626,7 @@ async fn host_runtime_services_resume_missing_runtime_secret_returns_auth_gate()
         "script",
         vec![EffectKind::DispatchCapability],
     )))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_secret_store(Arc::clone(&secret_store))
@@ -2675,7 +2667,7 @@ async fn host_runtime_services_resume_missing_runtime_secret_returns_auth_gate()
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(run.status, RunStatus::BlockedAuth);
+    assert_eq!(run.status, ProcessInvocationStatus::BlockedAuth);
     assert_eq!(run.error_kind.as_deref(), Some("AuthRequired"));
     // A missing-credential bounce parks the run at BlockedAuth (non-terminal):
     // the claimed approval lease is intentionally preserved, not revoked, so the
@@ -2720,7 +2712,7 @@ async fn host_runtime_services_resume_changed_input_fails_before_lease_claim_or_
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(outcome, FailureKind::Authorization);
     assert!(fixture.events.events().is_empty());
     // The approval request stores the original invocation fingerprint; changed input
     // computes a different resume fingerprint, so no matching lease is claimable.
@@ -2767,7 +2759,7 @@ async fn host_runtime_services_resume_wrong_user_scope_is_hidden_before_dispatch
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+    assert_failed_outcome(outcome, FailureKind::Backend);
     assert!(fixture.events.events().is_empty());
     let original_run = fixture
         .run_state
@@ -2775,7 +2767,10 @@ async fn host_runtime_services_resume_wrong_user_scope_is_hidden_before_dispatch
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(original_run.status, RunStatus::BlockedApproval);
+    assert_eq!(
+        original_run.status,
+        ProcessInvocationStatus::BlockedApproval
+    );
     assert_eq!(
         original_run.approval_request_id,
         Some(gate.approval_request_id)
@@ -2820,7 +2815,7 @@ async fn host_runtime_services_resume_expired_lease_fails_before_dispatch() {
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(outcome, FailureKind::Authorization);
     assert!(fixture.events.events().is_empty());
     assert_eq!(
         fixture
@@ -2863,7 +2858,7 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
         ))
         .await
         .unwrap();
-    assert_failed_outcome(wrong_scope_outcome, RuntimeFailureKind::MissingRuntime);
+    assert_failed_outcome(wrong_scope_outcome, FailureKind::MissingRuntime);
     assert_blocked_approval_run(
         &fixture,
         &scope,
@@ -2906,7 +2901,7 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
         ))
         .await
         .unwrap();
-    assert_failed_outcome(matching_outcome, RuntimeFailureKind::MissingRuntime);
+    assert_failed_outcome(matching_outcome, FailureKind::MissingRuntime);
 
     let failed_run = fixture
         .run_state
@@ -2914,7 +2909,7 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(failed_run.status, RunStatus::Failed);
+    assert_eq!(failed_run.status, ProcessInvocationStatus::Failed);
     assert_eq!(failed_run.approval_request_id, None);
     assert_eq!(failed_run.error_kind.as_deref(), Some("unknown_capability"));
     assert_eq!(
@@ -2959,14 +2954,14 @@ async fn host_runtime_services_resume_runtime_policy_denial_fails_matching_block
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(outcome, FailureKind::Authorization);
     let failed_run = fixture
         .run_state
         .get(&scope, context.invocation_id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(failed_run.status, RunStatus::Failed);
+    assert_eq!(failed_run.status, ProcessInvocationStatus::Failed);
     assert_eq!(failed_run.approval_request_id, None);
     assert_eq!(
         failed_run.error_kind.as_deref(),
@@ -3026,7 +3021,7 @@ async fn host_runtime_services_resume_rejects_changed_actor_before_preflight_mut
             fixture.run_state.as_ref(),
             &scope,
             invocation_id,
-            RunStatus::BlockedApproval,
+            ProcessInvocationStatus::BlockedApproval,
         )
         .await;
         assert_eq!(
@@ -3057,12 +3052,12 @@ async fn host_runtime_services_resume_rejects_changed_actor_before_preflight_mut
         .await
         .unwrap();
 
-    assert_failed_outcome(valid_alice_outcome, RuntimeFailureKind::MissingRuntime);
+    assert_failed_outcome(valid_alice_outcome, FailureKind::MissingRuntime);
     assert_alice_run_status(
         fixture.run_state.as_ref(),
         &scope,
         invocation_id,
-        RunStatus::Failed,
+        ProcessInvocationStatus::Failed,
     )
     .await;
 }
@@ -3078,7 +3073,7 @@ async fn host_runtime_services_auth_resume_rejects_changed_actor_before_prefligh
     let input = json!({"message": "actor-sealed auth resume"});
     fixture
         .run_state
-        .start(RunStart {
+        .start(ProcessInvocationStart {
             invocation_id,
             scope: scope.clone(),
             capability_id: script_capability_id(),
@@ -3111,7 +3106,7 @@ async fn host_runtime_services_auth_resume_rejects_changed_actor_before_prefligh
             fixture.run_state.as_ref(),
             &scope,
             invocation_id,
-            RunStatus::BlockedAuth,
+            ProcessInvocationStatus::BlockedAuth,
         )
         .await;
         assert!(
@@ -3125,12 +3120,12 @@ async fn host_runtime_services_auth_resume_rejects_changed_actor_before_prefligh
         .await
         .unwrap();
 
-    assert_failed_outcome(valid_alice_outcome, RuntimeFailureKind::MissingRuntime);
+    assert_failed_outcome(valid_alice_outcome, FailureKind::MissingRuntime);
     assert_alice_run_status(
         fixture.run_state.as_ref(),
         &scope,
         invocation_id,
-        RunStatus::Failed,
+        ProcessInvocationStatus::Failed,
     )
     .await;
 }
@@ -3143,7 +3138,7 @@ async fn host_runtime_services_auth_decline_terminalizes_matching_blocked_invoca
     let invocation_id = context.invocation_id;
     fixture
         .run_state
-        .start(RunStart {
+        .start(ProcessInvocationStart {
             invocation_id,
             scope: scope.clone(),
             capability_id: script_capability_id(),
@@ -3163,14 +3158,14 @@ async fn host_runtime_services_auth_decline_terminalizes_matching_blocked_invoca
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::GateDeclined);
+    assert_failed_outcome(outcome, FailureKind::GateDeclined);
     let record = fixture
         .run_state
         .get(&scope, invocation_id)
         .await
         .unwrap()
         .expect("blocked invocation remains durably recorded");
-    assert_eq!(record.status, RunStatus::Failed);
+    assert_eq!(record.status, ProcessInvocationStatus::Failed);
     assert_eq!(record.error_kind.as_deref(), Some("GateDeclined"));
     assert!(
         fixture.events.events().is_empty(),
@@ -3179,13 +3174,16 @@ async fn host_runtime_services_auth_decline_terminalizes_matching_blocked_invoca
 }
 
 struct FailOnceAuthDeclineRunStateStore {
-    inner: Arc<ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    inner:
+        Arc<ironclaw_processes::ProcessInvocationStateStore<ironclaw_filesystem::InMemoryBackend>>,
     fail_attempts: AtomicUsize,
 }
 
 impl FailOnceAuthDeclineRunStateStore {
     fn new(
-        inner: Arc<ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>>,
+        inner: Arc<
+            ironclaw_processes::ProcessInvocationStateStore<ironclaw_filesystem::InMemoryBackend>,
+        >,
     ) -> Self {
         Self {
             inner,
@@ -3195,8 +3193,11 @@ impl FailOnceAuthDeclineRunStateStore {
 }
 
 #[async_trait::async_trait]
-impl RunStateStorePort for FailOnceAuthDeclineRunStateStore {
-    async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
+impl ProcessInvocationStatePort for FailOnceAuthDeclineRunStateStore {
+    async fn start(
+        &self,
+        start: ProcessInvocationStart,
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.inner.start(start).await
     }
 
@@ -3205,7 +3206,7 @@ impl RunStateStorePort for FailOnceAuthDeclineRunStateStore {
         scope: &ResourceScope,
         invocation_id: InvocationId,
         approval: ApprovalRequest,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.inner
             .block_approval(scope, invocation_id, approval)
             .await
@@ -3216,7 +3217,7 @@ impl RunStateStorePort for FailOnceAuthDeclineRunStateStore {
         scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.inner
             .block_auth(scope, invocation_id, error_kind)
             .await
@@ -3226,7 +3227,7 @@ impl RunStateStorePort for FailOnceAuthDeclineRunStateStore {
         &self,
         scope: &ResourceScope,
         invocation_id: InvocationId,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.inner.complete(scope, invocation_id).await
     }
 
@@ -3235,9 +3236,9 @@ impl RunStateStorePort for FailOnceAuthDeclineRunStateStore {
         scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         if self.fail_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-            return Err(RunStateError::Filesystem(
+            return Err(ProcessInvocationError::Backend(
                 "simulated transient decline failure at /tmp/runstate.db".to_string(),
             ));
         }
@@ -3248,14 +3249,14 @@ impl RunStateStorePort for FailOnceAuthDeclineRunStateStore {
         &self,
         scope: &ResourceScope,
         invocation_id: InvocationId,
-    ) -> Result<Option<RunRecord>, RunStateError> {
+    ) -> Result<Option<ProcessInvocationRecord>, ProcessInvocationError> {
         self.inner.get(scope, invocation_id).await
     }
 
     async fn records_for_scope(
         &self,
         scope: &ResourceScope,
-    ) -> Result<Vec<RunRecord>, RunStateError> {
+    ) -> Result<Vec<ProcessInvocationRecord>, ProcessInvocationError> {
         self.inner.records_for_scope(scope).await
     }
 }
@@ -3268,7 +3269,7 @@ async fn host_runtime_services_auth_decline_keeps_run_blocked_when_store_is_unav
     let invocation_id = context.invocation_id;
     fixture
         .run_state
-        .start(RunStart {
+        .start(ProcessInvocationStart {
             invocation_id,
             scope: scope.clone(),
             capability_id: script_capability_id(),
@@ -3296,7 +3297,7 @@ async fn host_runtime_services_auth_decline_keeps_run_blocked_when_store_is_unav
         "script",
         vec![EffectKind::DispatchCapability],
     )))
-    .with_run_state(fail_once_run_state)
+    .with_invocation_state(fail_once_run_state)
     .host_runtime_for_local_testing();
 
     let first_error = runtime
@@ -3311,7 +3312,7 @@ async fn host_runtime_services_auth_decline_keeps_run_blocked_when_store_is_unav
         fixture.run_state.as_ref(),
         &scope,
         invocation_id,
-        RunStatus::BlockedAuth,
+        ProcessInvocationStatus::BlockedAuth,
     )
     .await;
 
@@ -3319,23 +3320,23 @@ async fn host_runtime_services_auth_decline_keeps_run_blocked_when_store_is_unav
         .decline_auth_capability((context, script_capability_id()))
         .await
         .expect("retry terminalizes the exact blocked invocation");
-    assert_failed_outcome(retry, RuntimeFailureKind::GateDeclined);
+    assert_failed_outcome(retry, FailureKind::GateDeclined);
     assert_alice_run_status(
         fixture.run_state.as_ref(),
         &scope,
         invocation_id,
-        RunStatus::Failed,
+        ProcessInvocationStatus::Failed,
     )
     .await;
 }
 
 #[tokio::test]
 async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_and_preflight() {
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let process_services = ironclaw_processes::in_memory_backed_process_services();
-    let process_store = process_services.process_store();
+    let process_runtime = process_services.process_runtime();
     let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_host_bundled_manifest(
@@ -3351,7 +3352,7 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
         "system.process_sandbox",
         process_sandbox_authority_effects(),
     )))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_process_sandbox_executor(Arc::clone(&sandbox_executor));
@@ -3389,7 +3390,7 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
         "system.process_sandbox",
         process_sandbox_authority_effects(),
     )))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_process_sandbox_executor(Arc::clone(&sandbox_executor))
@@ -3413,7 +3414,7 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
             run_state.as_ref(),
             &scope,
             scope.invocation_id,
-            RunStatus::BlockedApproval,
+            ProcessInvocationStatus::BlockedApproval,
         )
         .await;
         assert_eq!(
@@ -3427,8 +3428,8 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
         );
         assert!(sandbox_executor.requests().is_empty());
         assert!(
-            process_store
-                .records_for_scope(&scope)
+            process_runtime
+                .process_snapshots(&scope)
                 .await
                 .unwrap()
                 .is_empty(),
@@ -3451,7 +3452,7 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
         run_state.as_ref(),
         &scope,
         scope.invocation_id,
-        RunStatus::BlockedApproval,
+        ProcessInvocationStatus::BlockedApproval,
     )
     .await;
 
@@ -3466,18 +3467,18 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
         .await
         .unwrap();
 
-    assert_failed_outcome(valid_alice_outcome, RuntimeFailureKind::MissingRuntime);
+    assert_failed_outcome(valid_alice_outcome, FailureKind::MissingRuntime);
     assert_alice_run_status(
         run_state.as_ref(),
         &scope,
         scope.invocation_id,
-        RunStatus::Failed,
+        ProcessInvocationStatus::Failed,
     )
     .await;
     assert!(sandbox_executor.requests().is_empty());
     assert!(
-        process_store
-            .records_for_scope(&scope)
+        process_runtime
+            .process_snapshots(&scope)
             .await
             .unwrap()
             .is_empty()
@@ -3494,8 +3495,8 @@ async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
     // fires an approval gate, and the first resume (missing credential) bounces
     // to BlockedAuth.  After adding the credential we verify that
     // auth_resume_capability dispatches and completes the run.
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let secret_store = Arc::new(SecretStore::ephemeral());
     let secret_handle = SecretHandle::new("auth_resume_token").unwrap();
@@ -3514,7 +3515,7 @@ async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
         "script",
         vec![EffectKind::DispatchCapability],
     )))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_secret_store(Arc::clone(&secret_store))
@@ -3548,7 +3549,7 @@ async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(
         run.status,
-        RunStatus::BlockedAuth,
+        ProcessInvocationStatus::BlockedAuth,
         "pre-condition: run must be BlockedAuth"
     );
 
@@ -3584,7 +3585,7 @@ async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
     let completed_run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(
         completed_run.status,
-        RunStatus::Completed,
+        ProcessInvocationStatus::Completed,
         "auth_resume must complete the BlockedAuth run"
     );
     assert_eq!(
@@ -3620,7 +3621,7 @@ async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked
     // resume_json auth bounce: run is BlockedAuth).
     fixture
         .run_state
-        .start(RunStart {
+        .start(ProcessInvocationStart {
             invocation_id,
             scope: scope.clone(),
             capability_id: script_capability_id(),
@@ -3642,7 +3643,7 @@ async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked
         .unwrap();
     assert_eq!(
         run.status,
-        RunStatus::BlockedAuth,
+        ProcessInvocationStatus::BlockedAuth,
         "pre-condition: run must be BlockedAuth"
     );
 
@@ -3666,7 +3667,7 @@ async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked
         ))
         .await
         .unwrap();
-    assert_failed_outcome(wrong_outcome, RuntimeFailureKind::MissingRuntime);
+    assert_failed_outcome(wrong_outcome, FailureKind::MissingRuntime);
 
     // Matching run must still be BlockedAuth (wrong scope → guard skips it).
     let run_after_wrong = fixture
@@ -3677,7 +3678,7 @@ async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked
         .unwrap();
     assert_eq!(
         run_after_wrong.status,
-        RunStatus::BlockedAuth,
+        ProcessInvocationStatus::BlockedAuth,
         "wrong-scope preflight failure must not affect the matching BlockedAuth run"
     );
 
@@ -3694,7 +3695,7 @@ async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked
         ))
         .await
         .unwrap();
-    assert_failed_outcome(matching_outcome, RuntimeFailureKind::MissingRuntime);
+    assert_failed_outcome(matching_outcome, FailureKind::MissingRuntime);
 
     let failed_run = fixture
         .run_state
@@ -3704,7 +3705,7 @@ async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked
         .unwrap();
     assert_eq!(
         failed_run.status,
-        RunStatus::Failed,
+        ProcessInvocationStatus::Failed,
         "matching-scope auth-resume preflight failure must transition BlockedAuth run to Failed \
          (pre-fix: run was left as stale BlockedAuth)"
     );
@@ -3737,7 +3738,7 @@ async fn host_runtime_services_auth_resume_with_approval_id_fails_blocked_auth_r
     // (this mirrors what block_auth does: it always clears approval_request_id).
     fixture
         .run_state
-        .start(RunStart {
+        .start(ProcessInvocationStart {
             invocation_id,
             scope: scope.clone(),
             capability_id: script_capability_id(),
@@ -3759,7 +3760,7 @@ async fn host_runtime_services_auth_resume_with_approval_id_fails_blocked_auth_r
         .unwrap();
     assert_eq!(
         run.status,
-        RunStatus::BlockedAuth,
+        ProcessInvocationStatus::BlockedAuth,
         "pre-condition: run must be BlockedAuth"
     );
     assert_eq!(
@@ -3785,7 +3786,7 @@ async fn host_runtime_services_auth_resume_with_approval_id_fails_blocked_auth_r
         ))
         .await
         .unwrap();
-    assert_failed_outcome(outcome, RuntimeFailureKind::MissingRuntime);
+    assert_failed_outcome(outcome, FailureKind::MissingRuntime);
 
     // The BlockedAuth run must now be Failed, not stuck as BlockedAuth.
     let after = fixture
@@ -3796,7 +3797,7 @@ async fn host_runtime_services_auth_resume_with_approval_id_fails_blocked_auth_r
         .unwrap();
     assert_eq!(
         after.status,
-        RunStatus::Failed,
+        ProcessInvocationStatus::Failed,
         "approval-then-auth preflight failure must transition BlockedAuth run to Failed \
          even when the request carries approval_request_id = Some(id) \
          (pre-fix: run was left stuck as BlockedAuth)"
@@ -3834,7 +3835,7 @@ async fn host_runtime_services_resume_without_backing_stores_fails_closed() {
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+    assert_failed_outcome(outcome, FailureKind::Backend);
 }
 
 #[tokio::test]
@@ -3987,7 +3988,7 @@ async fn host_runtime_spawn_process_sandbox_rejects_invalid_plan_before_executor
 
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+            assert_eq!(failure.kind, FailureKind::InputEncode);
             assert_eq!(
                 failure.disposition(),
                 ironclaw_host_runtime::CapabilityFailureDisposition::ModelVisibleToolError,
@@ -4041,7 +4042,7 @@ async fn host_runtime_spawn_process_sandbox_runtime_policy_denial_fails_before_e
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(outcome, FailureKind::Authorization);
     assert!(
         sandbox_executor.requests().is_empty(),
         "runtime policy denial must fail before process spawn"
@@ -4075,7 +4076,7 @@ async fn host_runtime_spawn_process_sandbox_host_failure_fails_after_preflight()
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+    assert_failed_outcome(outcome, FailureKind::Backend);
     assert!(
         sandbox_executor.requests().is_empty(),
         "host spawn failure must not reach the process sandbox executor"
@@ -4084,8 +4085,8 @@ async fn host_runtime_spawn_process_sandbox_host_failure_fails_after_preflight()
 
 #[tokio::test]
 async fn host_runtime_spawn_process_sandbox_blocks_for_approval_before_executor() {
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let process_services = ironclaw_processes::in_memory_backed_process_services();
     let result_store = process_services.result_store();
@@ -4104,7 +4105,7 @@ async fn host_runtime_spawn_process_sandbox_blocks_for_approval_before_executor(
         "system.process_sandbox",
         process_sandbox_authority_effects(),
     )))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_process_sandbox_executor(Arc::clone(&sandbox_executor));
@@ -4158,8 +4159,8 @@ async fn host_runtime_spawn_process_sandbox_blocks_for_approval_before_executor(
 
 #[tokio::test]
 async fn host_runtime_spawn_process_sandbox_resume_changed_input_fails_before_executor() {
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
     let services = HostRuntimeServices::new(
@@ -4176,7 +4177,7 @@ async fn host_runtime_spawn_process_sandbox_resume_changed_input_fails_before_ex
         "system.process_sandbox",
         process_sandbox_authority_effects(),
     )))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_process_sandbox_executor(Arc::clone(&sandbox_executor));
@@ -4213,7 +4214,7 @@ async fn host_runtime_spawn_process_sandbox_resume_changed_input_fails_before_ex
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(outcome, FailureKind::Authorization);
     assert!(
         sandbox_executor.requests().is_empty(),
         "changed resume input must fail before process spawn"
@@ -4231,8 +4232,8 @@ async fn host_runtime_spawn_process_sandbox_resume_changed_input_fails_before_ex
 
 #[tokio::test]
 async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_executor() {
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
     let services = HostRuntimeServices::new(
@@ -4249,7 +4250,7 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
         "system.process_sandbox",
         process_sandbox_authority_effects(),
     )))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_process_sandbox_executor(Arc::clone(&sandbox_executor));
@@ -4291,7 +4292,7 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
 
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+            assert_eq!(failure.kind, FailureKind::InputEncode);
             assert_eq!(
                 failure.disposition(),
                 ironclaw_host_runtime::CapabilityFailureDisposition::ModelVisibleToolError,
@@ -4329,8 +4330,8 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
 
 #[tokio::test]
 async fn host_runtime_spawn_process_sandbox_resume_host_failure_fails_after_approval() {
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
     let services = HostRuntimeServices::new(
@@ -4347,7 +4348,7 @@ async fn host_runtime_spawn_process_sandbox_resume_host_failure_fails_after_appr
         "system.process_sandbox",
         process_sandbox_authority_effects(),
     )))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_process_sandbox_executor(Arc::clone(&sandbox_executor));
@@ -4386,7 +4387,7 @@ async fn host_runtime_spawn_process_sandbox_resume_host_failure_fails_after_appr
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+    assert_failed_outcome(outcome, FailureKind::Backend);
     assert!(
         sandbox_executor.requests().is_empty(),
         "host resume-spawn failure must not reach the process sandbox executor"
@@ -4469,7 +4470,7 @@ async fn host_runtime_services_maps_script_exit_failure_through_private_adapter(
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Process);
+    assert_failed_outcome(outcome, FailureKind::ExitFailure);
 }
 
 #[tokio::test]
@@ -4496,7 +4497,7 @@ async fn host_runtime_services_maps_mcp_client_failure_through_private_adapter()
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+    assert_failed_outcome(outcome, FailureKind::Client);
 }
 
 #[tokio::test]
@@ -4525,7 +4526,7 @@ async fn host_runtime_services_surfaces_invalid_mcp_catalog_without_retrying() {
 
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.kind, RuntimeFailureKind::InvalidOutput);
+            assert_eq!(failure.kind, FailureKind::OutputDecode);
             assert_eq!(
                 failure.disposition(),
                 ironclaw_host_runtime::CapabilityFailureDisposition::ModelVisibleToolError,
@@ -4630,7 +4631,7 @@ async fn host_runtime_services_rejects_broader_scoped_mount_before_dispatch() {
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Authorization);
+    assert_failed_outcome(outcome, FailureKind::Authorization);
     assert!(
         script_runtime.recorded_mounts().is_empty(),
         "broader mount obligation must fail before runtime dispatch"
@@ -4729,7 +4730,7 @@ async fn host_runtime_services_projects_resource_network_secret_obligation_audit
     let temp = tempfile::tempdir().unwrap();
     let store_root = temp.path().join("reborn-event-store");
     let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root: store_root.clone(),
             accept_single_node_durable: false,
@@ -4880,7 +4881,7 @@ async fn host_runtime_services_enforces_output_limit_and_reconciles_resource_usa
                 .set_max_output_bytes(10_000),
         )
         .unwrap();
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
     let reservation_id = ResourceReservationId::new();
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
         Arc::new(ObligatingAuthorizer::new(vec![
@@ -4899,7 +4900,7 @@ async fn host_runtime_services_enforces_output_limit_and_reconciles_resource_usa
         ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
         "script",
         vec![EffectKind::DispatchCapability],
@@ -4920,7 +4921,7 @@ async fn host_runtime_services_enforces_output_limit_and_reconciles_resource_usa
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::OutputTooLarge);
+    assert_failed_outcome(outcome, FailureKind::OutputTooLarge);
     assert_eq!(governor.reserved_for(&account), Default::default());
     assert!(
         governor.usage_for(&account).output_bytes > 8,
@@ -4931,7 +4932,7 @@ async fn host_runtime_services_enforces_output_limit_and_reconciles_resource_usa
         .await
         .unwrap()
         .expect("run state should record the failed invocation");
-    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.status, ProcessInvocationStatus::Failed);
     assert_eq!(run.error_kind.as_deref(), Some("ObligationFailed"));
 }
 
@@ -4947,7 +4948,7 @@ async fn host_runtime_services_releases_reservation_when_dispatch_preflight_fail
             ResourceLimits::default().set_max_concurrency_slots(1),
         )
         .unwrap();
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
     let reservation_id = ResourceReservationId::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -4959,7 +4960,7 @@ async fn host_runtime_services_releases_reservation_when_dispatch_preflight_fail
         ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
         "script",
         vec![EffectKind::DispatchCapability],
@@ -4976,7 +4977,7 @@ async fn host_runtime_services_releases_reservation_when_dispatch_preflight_fail
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::MissingRuntime);
+    assert_failed_outcome(outcome, FailureKind::MissingRuntimeBackend);
     assert_eq!(governor.reserved_for(&account), Default::default());
     assert!(matches!(
         governor.release(reservation_id).unwrap_err(),
@@ -4990,7 +4991,7 @@ async fn host_runtime_services_releases_reservation_when_dispatch_preflight_fail
         .await
         .unwrap()
         .expect("run state should record the failed invocation");
-    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.status, ProcessInvocationStatus::Failed);
     assert_eq!(run.error_kind.as_deref(), Some("Dispatch"));
 }
 
@@ -5029,7 +5030,7 @@ async fn host_runtime_services_fails_closed_when_durable_obligation_audit_append
 
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => {
-            assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+            assert_eq!(failure.kind, FailureKind::Backend);
             let message = failure.message.unwrap_or_default();
             assert!(message.contains("obligation handling failed: Audit"));
             assert!(
@@ -5493,7 +5494,7 @@ async fn host_runtime_services_wasm_input_encode_releases_prepared_reservation()
 #[tokio::test]
 async fn host_runtime_services_cancel_and_status_share_process_result_and_cancellation_graph() {
     let process_services = ironclaw_processes::in_memory_backed_process_services();
-    let process_store = process_services.process_store();
+    let process_runtime = process_services.process_runtime();
     let result_store = process_services.result_store();
     let cancellation_registry = process_services.cancellation_registry();
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
@@ -5510,10 +5511,12 @@ async fn host_runtime_services_cancel_and_status_share_process_result_and_cancel
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id);
     let token = cancellation_registry.register(&scope, process_id);
-    process_store
-        .start(process_start(process_id, invocation_id, scope.clone()))
-        .await
-        .unwrap();
+    submit_capability_process(
+        process_runtime.as_ref(),
+        process_start(process_id, invocation_id, scope.clone()),
+    )
+    .await
+    .unwrap();
 
     let status = runtime
         .runtime_status(RuntimeStatusRequest::new(
@@ -5546,7 +5549,7 @@ async fn host_runtime_services_cancel_and_status_share_process_result_and_cancel
 #[tokio::test]
 async fn host_runtime_services_cancel_writes_killed_result_when_reservation_is_stale() {
     let process_services = ironclaw_processes::in_memory_backed_process_services();
-    let process_store = process_services.process_store();
+    let process_runtime = process_services.process_runtime();
     let result_store = process_services.result_store();
     let cancellation_registry = process_services.cancellation_registry();
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
@@ -5566,7 +5569,9 @@ async fn host_runtime_services_cancel_writes_killed_result_when_reservation_is_s
     let token = cancellation_registry.register(&scope, process_id);
     let mut start = process_start(process_id, invocation_id, scope.clone());
     start.resource_reservation_id = Some(stale_reservation_id);
-    process_store.start(start).await.unwrap();
+    submit_capability_process(process_runtime.as_ref(), start)
+        .await
+        .unwrap();
 
     let outcome = runtime
         .cancel_work(CancelRuntimeWorkRequest::new(
@@ -5579,8 +5584,7 @@ async fn host_runtime_services_cancel_writes_killed_result_when_reservation_is_s
 
     assert_eq!(outcome.cancelled, vec![RuntimeWorkId::Process(process_id)]);
     assert!(token.is_cancelled());
-    let record = process_store
-        .get(&scope, process_id)
+    let record = capability_process_record(process_runtime.as_ref(), &scope, process_id)
         .await
         .unwrap()
         .unwrap();
@@ -5590,9 +5594,9 @@ async fn host_runtime_services_cancel_writes_killed_result_when_reservation_is_s
 }
 
 #[tokio::test]
-async fn host_runtime_services_cancel_records_kill_side_effects_when_cleanup_fails() {
+async fn host_runtime_services_cancel_does_not_reclassify_committed_kill_when_cleanup_fails() {
     let process_services = ironclaw_processes::in_memory_backed_process_services();
-    let process_store = process_services.process_store();
+    let process_runtime = process_services.process_runtime();
     let result_store = process_services.result_store();
     let cancellation_registry = process_services.cancellation_registry();
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
@@ -5611,23 +5615,25 @@ async fn host_runtime_services_cancel_records_kill_side_effects_when_cleanup_fai
     let token = cancellation_registry.register(&scope, process_id);
     let mut start = process_start(process_id, invocation_id, scope.clone());
     start.resource_reservation_id = Some(ResourceReservationId::new());
-    process_store.start(start).await.unwrap();
+    submit_capability_process(process_runtime.as_ref(), start)
+        .await
+        .unwrap();
 
-    let _error = runtime
+    let outcome = runtime
         .cancel_work(CancelRuntimeWorkRequest::new(
             scope.clone(),
             CorrelationId::new(),
             CancelReason::UserRequested,
         ))
         .await
-        .expect_err("cleanup failure should remain visible to callers");
+        .expect("post-commit cleanup failure must not reclassify the durable kill");
+    assert_eq!(outcome.cancelled, vec![RuntimeWorkId::Process(process_id)]);
 
     assert!(
         token.is_cancelled(),
         "cleanup errors after terminalization must not skip cooperative cancellation"
     );
-    let record = process_store
-        .get(&scope, process_id)
+    let record = capability_process_record(process_runtime.as_ref(), &scope, process_id)
         .await
         .unwrap()
         .unwrap();
@@ -5711,7 +5717,7 @@ async fn spawned_obligation_lifecycle_releases_resources_and_discards_handoffs_o
     .await;
 
     let process = fixture.spawn().await;
-    let host = ProcessHost::new(fixture.process_store.as_ref());
+    let host = fixture.process_services.host();
     host.kill(&fixture.scope, process.process_id).await.unwrap();
 
     assert!(matches!(
@@ -5755,7 +5761,9 @@ async fn process_obligation_lifecycle_cleans_record_started_before_wrapper_exist
     let mut start = process_start(process_id, invocation_id, scope.clone());
     start.estimated_resources = estimate;
     start.resource_reservation_id = Some(reservation_id);
-    inner_store.start(start).await.unwrap();
+    submit_capability_process(inner_store.as_ref(), start)
+        .await
+        .unwrap();
 
     let lifecycle_store = obligation_services.process_obligation_lifecycle_store(inner_store);
     lifecycle_store.kill(&scope, process_id).await.unwrap();
@@ -5790,10 +5798,12 @@ async fn process_obligation_lifecycle_cleans_legacy_handoffs_without_resource_re
     )
     .await;
     let process_id = ProcessId::new();
-    inner_store
-        .start(process_start(process_id, invocation_id, scope.clone()))
-        .await
-        .unwrap();
+    submit_capability_process(
+        inner_store.as_ref(),
+        process_start(process_id, invocation_id, scope.clone()),
+    )
+    .await
+    .unwrap();
 
     let lifecycle_store = obligation_services.process_obligation_lifecycle_store(inner_store);
     lifecycle_store.kill(&scope, process_id).await.unwrap();
@@ -6123,7 +6133,7 @@ async fn spawned_obligation_lifecycle_abort_cleans_up_when_process_start_fails()
         "script",
         vec![EffectKind::DispatchCapability, EffectKind::Network],
     );
-    let runtime_policy = local_dev_runtime_policy();
+    let runtime_policy = standalone_runtime_policy();
     let host = CapabilityHost::new(
         fixture.registry.as_ref(),
         fixture.dispatcher.as_ref(),
@@ -6178,7 +6188,7 @@ async fn host_runtime_services_wasm_operation_failed_reconciles_usage_after_host
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::OperationFailed);
+    assert_failed_outcome(outcome, FailureKind::OperationFailed);
     assert_eq!(runtime.http.requests().len(), 1);
     assert_eq!(
         runtime
@@ -6217,7 +6227,7 @@ async fn host_runtime_services_wasm_invalid_output_reconciles_usage_after_host_e
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::InvalidOutput);
+    assert_failed_outcome(outcome, FailureKind::OutputDecode);
     assert_eq!(runtime.http.requests().len(), 1);
     assert_eq!(
         runtime
@@ -6256,7 +6266,7 @@ async fn host_runtime_services_wasm_operation_failed_reconciles_wall_clock_after
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::OperationFailed);
+    assert_failed_outcome(outcome, FailureKind::OperationFailed);
     assert_eq!(runtime.http.requests().len(), 1);
     let usage = runtime.governor.usage_for(&sample_account());
     assert!(
@@ -6283,8 +6293,8 @@ async fn host_runtime_services_wasm_operation_failed_reconciles_wall_clock_after
 /// immediately, approval gate never fires.
 #[tokio::test]
 async fn invoke_capability_missing_credential_returns_auth_before_approval() {
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let secret_store = Arc::new(SecretStore::ephemeral());
     // Note: the secret "script_api_token" is deliberately NOT inserted.
@@ -6304,7 +6314,7 @@ async fn invoke_capability_missing_credential_returns_auth_before_approval() {
         "script",
         vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
     )))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_secret_store(Arc::clone(&secret_store))
@@ -6350,8 +6360,8 @@ async fn invoke_capability_missing_credential_returns_auth_before_approval() {
 /// gate as it did before Fix B — the pre-flight must not block happy-path flows.
 #[tokio::test]
 async fn invoke_capability_present_credential_proceeds_to_approval() {
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let secret_store = Arc::new(SecretStore::ephemeral());
     let secret_handle = SecretHandle::new("script_api_token").unwrap();
@@ -6387,7 +6397,7 @@ async fn invoke_capability_present_credential_proceeds_to_approval() {
         "script",
         vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
     )))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_secret_store(Arc::clone(&secret_store))
@@ -6425,8 +6435,8 @@ async fn invoke_capability_present_credential_proceeds_to_approval() {
 /// `ApprovalRequired` (not a false `AuthRequired`).
 #[tokio::test]
 async fn spawn_capability_present_credential_proceeds_to_approval() {
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let secret_store = Arc::new(SecretStore::ephemeral());
     let secret_handle = SecretHandle::new("script_api_token").unwrap();
@@ -6464,7 +6474,7 @@ async fn spawn_capability_present_credential_proceeds_to_approval() {
         "script",
         vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
     )))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_secret_store(Arc::clone(&secret_store))
@@ -6527,8 +6537,8 @@ async fn invoke_capability_no_credential_requirement_proceeds_normally() {
 /// path through the spawn dispatch lane.
 #[tokio::test]
 async fn spawn_capability_missing_credential_returns_auth_before_approval() {
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let secret_store = Arc::new(SecretStore::ephemeral());
     // Note: the secret "script_api_token" is deliberately NOT inserted.
@@ -6548,7 +6558,7 @@ async fn spawn_capability_missing_credential_returns_auth_before_approval() {
         "script",
         vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
     )))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_secret_store(Arc::clone(&secret_store))
@@ -6595,8 +6605,8 @@ async fn spawn_capability_missing_credential_returns_auth_before_approval() {
 /// approval gate normally.
 #[tokio::test]
 async fn invoke_capability_no_credential_requirement_with_wired_store_proceeds_normally() {
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     // SCRIPT_MANIFEST has no runtime_credentials; wire a secret store anyway to
     // confirm the is_empty() early-exit branch is taken, not the no-store branch.
@@ -6616,7 +6626,7 @@ async fn invoke_capability_no_credential_requirement_with_wired_store_proceeds_n
         "script",
         vec![EffectKind::DispatchCapability],
     )))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_secret_store(Arc::clone(&secret_store))
@@ -6665,7 +6675,7 @@ async fn invoke_capability_no_credential_requirement_with_wired_store_proceeds_n
 ///    (`secret_obligation_failed`), so the resumed call is `Failed`.
 ///
 /// To prove the resume failure comes from the obligation backstop and not from a
-/// premature authorization denial (both surface as `RuntimeFailureKind::Authorization`),
+/// premature authorization denial (both surface as `FailureKind::Authorization`),
 /// the store counts `metadata()` calls. The counter is reset after step 1, so a
 /// non-zero count after resume can only come from the obligation handler probing the
 /// store — `resume_capability` does not itself run the pre-flight. `ApprovalThenGrantAuthorizer`
@@ -6673,8 +6683,8 @@ async fn invoke_capability_no_credential_requirement_with_wired_store_proceeds_n
 /// `runtime_credentials` backstop.
 #[tokio::test]
 async fn invoke_capability_secret_store_error_skips_preflight() {
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let script_runtime = Arc::new(RecordingScriptExecutor::default());
     // Real secret store over a fault backend that fails every read; the backend
@@ -6696,7 +6706,7 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
         "script",
         vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
     )))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     // Wire the erroring store — the pre-flight must skip on Err (not return
@@ -6804,7 +6814,7 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
     // the store via `metadata()` at least once on the resume path. A premature
     // authorization denial (the wrong reason) would block BEFORE the obligation handler
     // and never probe the store — so this distinguishes the two even though both map to
-    // `RuntimeFailureKind::Authorization`.
+    // `FailureKind::Authorization`.
     assert!(
         secret_backend.count(FilesystemOperation::ReadFile) > read_probes_before_resume,
         "resume must reach the dispatch-time obligation backstop and re-probe the store; \

@@ -646,6 +646,14 @@ mod tests {
 
     // --- CopilotTokenManager ---
 
+    fn loopback_failure_client() -> reqwest::Client {
+        let proxy = reqwest::Proxy::all("http://127.0.0.1:1").expect("valid loopback proxy");
+        reqwest::Client::builder()
+            .proxy(proxy)
+            .build()
+            .expect("build test client")
+    }
+
     #[tokio::test]
     async fn token_manager_caches_token_and_returns_same_value() {
         // Pre-populate the cache with a token that expires far in the future.
@@ -691,7 +699,7 @@ mod tests {
 
     #[tokio::test]
     async fn token_manager_expired_token_triggers_refresh_path() {
-        let client = reqwest::Client::new();
+        let client = loopback_failure_client();
         let manager = CopilotTokenManager::new(client, "unused_oauth".to_string());
 
         // Set a token that is already expired (expires_at in the past).
@@ -715,7 +723,7 @@ mod tests {
 
     #[tokio::test]
     async fn token_manager_within_buffer_triggers_refresh() {
-        let client = reqwest::Client::new();
+        let client = loopback_failure_client();
         let manager = CopilotTokenManager::new(client, "unused_oauth".to_string());
 
         // Set a token that expires within the refresh buffer window.

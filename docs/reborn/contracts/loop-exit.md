@@ -23,10 +23,32 @@ AgentLoopDriver
   -> LoopExit claim
   -> TurnRunner validates evidence/policy
   -> TurnRunnerOutcome
-  -> TurnStateStore transition
+  -> ProcessTransitionPort
 ```
 
-`LoopExit` contains references only. It must not carry raw prompts, assistant text, tool inputs, approval payloads, secrets, host paths, provider errors, stack traces, or raw runtime output. Loop-owned refs use tight host-minted opaque prefixes (`exit:`, `msg:`, `result:`, `gate:`, `usage:`, `diag:`) to avoid accepting free-form payload text as evidence.
+`LoopExit` carries typed metadata, bounded host-minted references, and
+sanitized summaries; it never carries raw payloads. For example, `LoopFailed`
+contains a typed `reason_kind`, optional checkpoint and model-usage metadata,
+bounded exit/explanation references, and an optional sanitized `safe_summary`.
+It must not carry raw prompts, assistant text, tool inputs, approval payloads,
+secrets, host paths, provider errors, stack traces, or raw runtime output.
+Loop-owned refs use tight host-minted opaque prefixes (`exit:`, `msg:`,
+`result:`, `gate:`, `usage:`) to avoid accepting free-form payload text as
+evidence.
+
+For rolling compatibility, `LoopFailed` still accepts and ignores the retired
+`diagnostic_ref` JSON field (including the historical `null` form), but never
+serializes it. Older readers treated that field as optional, so exits written
+without it remain readable during rollback; no store migration is required.
+
+`crates/ironclaw_turns/src/loop_exit/tests/mod.rs` test
+`loop_exit::tests::loop_failed_accepts_retired_diagnostic_ref_but_does_not_serialize_it`
+owns this rolling-compatibility assertion, including both the historical string
+and `null` forms. Run:
+
+```bash
+cargo test -p ironclaw_turns --lib loop_exit::tests::loop_failed_accepts_retired_diagnostic_ref_but_does_not_serialize_it -- --exact
+```
 
 ---
 
@@ -56,6 +78,32 @@ The driver-facing variants are fixed for the MVP:
 - Ref lists are bounded and duplicate-free so a driver cannot force unbounded evidence verification work.
 - Usage/cost truth remains in host accounting/projection stores; `LoopExit` may carry only usage-summary refs.
 
+### 4.1 Checkpoint rejection before a trustworthy exit
+
+`CheckpointRejected` is the explicit exception to the model receiving a final
+word. A rejection while writing a pre-model checkpoint means the driver cannot
+produce a trustworthy `LoopExit` and must not run a model or capability from
+the uncheckpointed state. The staged private payload is not a resume point;
+only committed checkpoint metadata is authoritative.
+
+The runner preserves the distinct `checkpoint_rejected` category and records a
+bounded host-authored terminal explanation through the independent turn-state
+row and `Failed` lifecycle event. Product projection revalidates that
+host-authored envelope and never asks a failure-explainer model to paraphrase
+it. No assistant transcript message is created, no partial success is emitted,
+and the rejected run is not retryable. The explanation directs the user to
+start a new run and the operator to inspect checkpoint storage and run-profile
+compatibility.
+
+This contract is pinned by
+`turn_runner_worker_persists_checkpoint_rejection_without_running_uncheckpointed_work`
+in `crates/ironclaw_runner/tests/loop_driver_host.rs`:
+
+```bash
+cargo test -p ironclaw_runner --test loop_driver_host \
+  turn_runner_worker_persists_checkpoint_rejection_without_running_uncheckpointed_work
+```
+
 ---
 
 ## 5. Invalid exit handling
@@ -80,15 +128,26 @@ Later slices may add validation against transcript draft state, checkpoint fresh
 
 ## 6. Implemented slice
 
-`ironclaw_turns` currently provides contract types, a crate-private validator policy, and a trusted runner-side applicator:
+The claim vocabulary and the authority that validates it live in two crates,
+and the split is the contract: a driver can only ever hold the claim half.
+
+`ironclaw_loop_contracts` (contracts layer) provides the claim types:
 
 - `LoopExit`, `LoopCompleted`, `LoopBlocked`, `LoopCancelled`, `LoopFailed`;
-- bounded durable reference types for loop exit/message/result/usage/diagnostic refs;
+- bounded durable reference types for loop exit/message/result/usage refs.
+
+`ironclaw_turns` (kernel) provides the validator policy and the trusted
+runner-side applicator, and depends on the contracts crate — never the reverse:
+
 - `LoopExitEvidencePort` and evidence request DTOs for host-owned validation inputs;
 - crate-private `LoopExitValidationPolicy` construction plus public `LoopExitValidationDecision`;
 - one-way mapping to `TurnRunnerOutcome` (invalid exits always map to Failed; valid failed outcomes may carry verified explanation refs and a retry checkpoint id; `LoopExitMapping::RecoveryRequired` is a backward-compat shim);
-- `LoopExitApplier`, which derives validation policy from host-owned evidence and invokes the trusted `TurnRunTransitionPort` with an already-validated `LoopExitMapping`.
+- `LoopExitApplier`, which derives validation policy from host-owned evidence
+  and invokes `ProcessTransitionPort` with the neutral process outcome or
+  suspension produced from the validated exit.
 
-`ApplyValidatedLoopExitRequest` remains the transition-port DTO for already-validated mappings. Driver-facing code must not be able to supply `LoopExitValidationPolicy` directly.
+Driver-facing code must not be able to supply `LoopExitValidationPolicy`
+directly. Agent-loop validation remains outside the process kernel; only its
+validated lifecycle result crosses the process transition port.
 
 This slice deliberately does not wire durable exit-id idempotency storage, transcript draft validation, or product service-graph integration.

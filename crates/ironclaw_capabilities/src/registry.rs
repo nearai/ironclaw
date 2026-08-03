@@ -8,11 +8,18 @@ use std::collections::{BTreeMap, btree_map::Entry};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::extension::Extension;
+use ironclaw_extension_contracts::tool_adapter::{
+    ToolAdapter, ToolCall, ToolCallResources, ToolError, ToolPorts,
+};
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityDispatchRequest, CapabilityId, DispatchError,
-    DispatchFailureDetail, Extension, ExtensionId, ReservationStatus, ResourceReceipt,
-    ResourceUsage, RuntimeDispatchErrorKind, RuntimeKind, ToolAdapter, ToolCall, ToolCallResources,
-    ToolError, ToolPorts,
+    capability::CapabilityDescriptor,
+    dispatch::{
+        CapabilityDispatchRequest, DispatchError, DispatchFailureDetail, RuntimeDispatchErrorKind,
+    },
+    ids::{CapabilityId, ExtensionId},
+    resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
+    runtime::{DispatchErrorLane, RuntimeKind},
 };
 
 use crate::dispatch::{
@@ -188,20 +195,20 @@ fn runtime_dispatch_error(
     safe_summary: Option<String>,
     model_visible_cause: Option<String>,
 ) -> DispatchError {
-    match runtime {
-        RuntimeKind::Mcp => DispatchError::Mcp {
+    match runtime.dispatch_error_lane() {
+        DispatchErrorLane::Mcp => DispatchError::Mcp {
             kind,
             model_visible_cause,
         },
-        RuntimeKind::Wasm => DispatchError::Wasm {
+        DispatchErrorLane::Wasm => DispatchError::Wasm {
             kind,
             model_visible_cause,
         },
-        RuntimeKind::Script => DispatchError::Script {
+        DispatchErrorLane::Script => DispatchError::Script {
             kind,
             model_visible_cause,
         },
-        RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty {
+        DispatchErrorLane::FirstParty => DispatchError::FirstParty {
             kind,
             safe_summary,
             detail: model_visible_cause.map(|text| DispatchFailureDetail::Diagnostic { text }),
@@ -234,11 +241,18 @@ pub enum CapabilityRegistrationError {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
+    use ironclaw_extension_contracts::extension::{
+        Extension, ExtensionContract, ExtensionInstanceId, ExtensionRuntimeIdentity,
+    };
+    use ironclaw_extension_contracts::tool_adapter::{
+        ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
+    };
     use ironclaw_host_api::{
-        CapabilityDescriptor, CapabilityDispatchRequest, DispatchError, EffectKind, Extension,
-        ExtensionContract, ExtensionId, ExtensionInstanceId, ExtensionRuntimeIdentity,
-        PermissionMode, ResourceEstimate, ResourceProfile, RuntimeKind, ToolAdapter, ToolCall,
-        ToolError, ToolPorts, ToolResult, TrustClass,
+        capability::{CapabilityDescriptor, EffectKind, PermissionMode},
+        dispatch::{CapabilityDispatchRequest, DispatchError},
+        ids::ExtensionId,
+        resource::{ResourceEstimate, ResourceProfile},
+        runtime::{RuntimeKind, TrustClass},
     };
     use serde_json::json;
 

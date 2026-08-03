@@ -13,7 +13,7 @@ use std::{
     },
 };
 
-use ironclaw_host_api::{ProcessId, ResourceScope};
+use ironclaw_host_api::{ids::ProcessId, resource::ResourceScope};
 use tokio::sync::Notify;
 
 use crate::types::ProcessKey;
@@ -108,16 +108,17 @@ impl ProcessCancellationRegistry {
         scope: &ResourceScope,
         process_id: ProcessId,
     ) -> ProcessCancellationToken {
-        let token = ProcessCancellationToken::new();
         self.tokens_guard()
-            .insert(ProcessKey::new(scope, process_id), token.clone());
-        token
+            .entry(ProcessKey::new(scope, process_id))
+            .or_default()
+            .clone()
     }
 
     pub fn cancel(&self, scope: &ResourceScope, process_id: ProcessId) -> bool {
         let token = self
             .tokens_guard()
-            .remove(&ProcessKey::new(scope, process_id));
+            .get(&ProcessKey::new(scope, process_id))
+            .cloned();
         if let Some(token) = token {
             token.cancel();
             true

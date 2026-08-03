@@ -23,17 +23,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use ironclaw_host_api::ProductSurfaceCaller;
 use ironclaw_llm::registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 use ironclaw_llm::{
     NearWalletSignedMessage, OpenAiCodexConfig, OpenAiCodexSessionManager, default_nearai_base_url,
 };
-use ironclaw_product::{
+use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
     NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult,
     SetActiveLlmRequest, UpsertLlmProviderRequest,
 };
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_reborn_config::{LlmSlotSelection, RebornBootConfig};
 use secrecy::{ExposeSecret as _, SecretString};
 
@@ -1335,8 +1335,9 @@ mod tests {
         ScopedFilesystem,
     };
     use ironclaw_host_api::{
-        AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, UserId,
-        VirtualPath,
+        ids::{AgentId, ProjectId, TenantId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
     };
     use ironclaw_llm::NEARAI_CLOUD_DEFAULT_BASE_URL;
     use ironclaw_reborn_config::{RebornHome, RebornProfile};
@@ -1349,7 +1350,7 @@ mod tests {
             None,
         )
         .expect("valid reborn home");
-        RebornBootConfig::new(home, RebornProfile::LocalDev)
+        RebornBootConfig::new(home, RebornProfile::Standalone)
     }
 
     fn key_store() -> LlmKeyStore {

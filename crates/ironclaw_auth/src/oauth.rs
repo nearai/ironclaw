@@ -5,19 +5,10 @@
 //! durable flow state and credential storage stay with the product-auth
 //! services.
 
-// v1 compatibility surface: the monolith's `src/auth/oauth.rs` re-exports the
-// loopback callback transport under this historical path. The items live in
-// [`crate::loopback_oauth`] (v1-only; see its header). Delete this re-export
-// with v1.
-pub use crate::loopback_oauth::{
-    OAUTH_CALLBACK_PORT, OAuthCallbackError, bind_callback_listener, callback_host, callback_url,
-    is_loopback_host, landing_html, wait_for_callback,
-};
-
 use std::fmt;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ironclaw_host_api::ResourceScope;
+use ironclaw_host_api::resource::ResourceScope;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -471,13 +462,13 @@ mod tests {
     #[test]
     fn oauth_callback_state_round_trips_under_the_recipe_prefix() {
         let resource = ResourceScope {
-            tenant_id: ironclaw_host_api::TenantId::new("tenant-a").unwrap(),
-            user_id: ironclaw_host_api::UserId::new("user-a").unwrap(),
+            tenant_id: ironclaw_host_api::ids::TenantId::new("tenant-a").unwrap(),
+            user_id: ironclaw_host_api::ids::UserId::new("user-a").unwrap(),
             agent_id: None,
             project_id: None,
             mission_id: None,
             thread_id: None,
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         };
         let scope = AuthProductScope::new(resource, AuthSurface::Callback);
         let label = CredentialAccountLabel::new("acct").unwrap();

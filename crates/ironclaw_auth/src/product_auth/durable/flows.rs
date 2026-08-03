@@ -3,7 +3,7 @@ use chrono::{Duration, Utc};
 use ironclaw_filesystem::{
     CasApply, CasExpectation, CasUpdateError, ContentType, Entry, RootFilesystem, cas_update,
 };
-use ironclaw_host_api::{ResourceScope, ScopedPath};
+use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
 use serde::{Deserialize, Serialize};
 use std::time::Duration as StdDuration;
 
@@ -173,6 +173,7 @@ where
             kind: request.kind,
             status: AuthFlowStatus::AwaitingUser,
             provider: request.provider,
+            requester_extension: request.requester_extension,
             challenge: Some(request.challenge),
             continuation: request.continuation,
             credential_account_id: None,

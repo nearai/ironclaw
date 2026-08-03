@@ -10,12 +10,10 @@ use ironclaw_agent_loop::{
         compaction::{active_task_preserving_compaction_index, compaction_metadata},
     },
 };
-use ironclaw_turns::{
-    LoopBlockedKind, LoopExit, TurnRunId,
-    run_profile::{
-        CompactionInitiator, ConcurrencyHint, LoopCompactionResponse, LoopContextCompactionKind,
-        LoopProgressEvent, LoopRunInfoPort, LoopSummaryArtifactId,
-    },
+use ironclaw_host_api::turn::TurnRunId;
+use ironclaw_loop_contracts::{
+    CompactionInitiator, ConcurrencyHint, LoopBlockedKind, LoopCompactionResponse,
+    LoopContextCompactionKind, LoopExit, LoopProgressEvent, LoopRunInfoPort, LoopSummaryArtifactId,
 };
 
 #[tokio::test(start_paused = true)]
@@ -81,6 +79,7 @@ async fn compaction_success_updates_state_and_emits_progress() {
         .compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
+            redacted_leak_count: 0,
         }))
         .build();
     let mut state = LoopExecutionState::initial_for_run(host.run_context());
@@ -97,7 +96,7 @@ async fn compaction_success_updates_state_and_emits_progress() {
         matches!(
             event,
             LoopProgressEvent::CompactionStarted {
-                initiator: ironclaw_turns::run_profile::CompactionInitiator::Auto,
+                initiator: ironclaw_loop_contracts::CompactionInitiator::Auto,
                 ..
             }
         )
@@ -518,6 +517,7 @@ async fn executor_proactive_byte_cap_drives_full_compaction_cycle() {
         .compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-f14").unwrap(),
             compression_ratio_ppm: 250_000,
+            redacted_leak_count: 0,
         }))
         .build();
 

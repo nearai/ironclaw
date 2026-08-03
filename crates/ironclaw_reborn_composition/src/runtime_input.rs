@@ -24,7 +24,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
+use ironclaw_host_api::{
+    Timestamp,
+    ids::{AgentId, ProjectId, TenantId, UserId},
+};
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_loop_host::HostManagedModelGateway;
 use ironclaw_loop_host::HostSkillContextSource;
@@ -424,7 +427,7 @@ pub struct RebornRuntimeInput {
 impl RebornRuntimeInput {
     /// Start from a substrate build input. The substrate input must be
     /// provided — there is no in-memory-only fallback at this layer because
-    /// the substrate decisions (local-dev root, libsql handle, etc.) belong
+    /// the substrate decisions (standalone root, libsql handle, etc.) belong
     /// to the caller, not the assembly.
     pub fn from_build_input(services: RebornHostBindings) -> Self {
         Self {
@@ -524,7 +527,7 @@ impl RebornRuntimeInput {
     /// redaction/access control) must opt in via
     /// [`Self::with_raw_trajectory_observer`].
     ///
-    /// **Local-dev / bench only.** The observer is wired through the local-dev
+    /// **Standalone/bench only.** The observer is wired through the standalone
     /// capability path; it has no effect on production-profile runtimes, which
     /// have no capability/result hook to forward to. `build_reborn_runtime`
     /// fails fast with `InvalidArgument` if an observer is supplied for a
@@ -551,7 +554,7 @@ impl RebornRuntimeInput {
     /// benchmark harness rendering exact tool I/O) and owns its own redaction
     /// and access control for whatever sink it projects to.
     ///
-    /// **Local-dev / bench only**, with the same fail-fast contract as
+    /// **Standalone/bench only**, with the same fail-fast contract as
     /// [`Self::with_trajectory_observer`].
     pub fn with_raw_trajectory_observer(
         mut self,

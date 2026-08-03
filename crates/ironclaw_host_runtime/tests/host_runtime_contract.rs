@@ -13,6 +13,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_approvals::{ApprovalRecord, ApprovalRequestStorePort, ApprovalStoreError};
 use ironclaw_authorization::{
     GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer,
     in_memory_backed_capability_lease_store,
@@ -24,19 +25,38 @@ use ironclaw_filesystem::{
     Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
 };
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
-use ironclaw_host_api::*;
+use ironclaw_host_api::result_meta::FailureKind;
+use ironclaw_host_api::{
+    action::{Action, NetworkPolicy},
+    approval::ApprovalRequest,
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+    },
+    decision::{Decision, DenyReason},
+    dispatch::CapabilityDispatchResult,
+    host_port::HostPortCatalog,
+    ids::{
+        ApprovalRequestId, CapabilityGrantId, CapabilityId, ExtensionId, InvocationId, PackageId,
+        ProcessId, ResourceReservationId, RunId, UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::{
+        ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceScope, ResourceUsage,
+    },
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_host_runtime::{
     CancelReason, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
     DefaultHostRuntime, HostRuntime, HostRuntimeError, IdempotencyKey, RuntimeBackendHealth,
     RuntimeStatusRequest, RuntimeWorkId, SurfaceKind, VisibleCapabilityRequest,
 };
 use ironclaw_processes::{
-    ProcessCancellationRegistry, ProcessResultStore, ProcessResultStorePort, ProcessStart,
-    ProcessStatus, ProcessStore, ProcessStorePort,
-};
-use ironclaw_run_state::{
-    ApprovalRecord, ApprovalRequestStorePort, RunRecord, RunStart, RunStateApprovalStorePort,
-    RunStateError, RunStateStorePort,
+    ProcessCancellationRegistry, ProcessInvocationError, ProcessInvocationRecord,
+    ProcessInvocationStart, ProcessInvocationStatePort, ProcessJournalStore, ProcessResultStore,
+    ProcessResultStorePort, ProcessServices, ProcessStart, ProcessStatus,
+    capability_process_record, submit_capability_process,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -47,7 +67,7 @@ use serde_json::json;
 fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
     ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
         ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
-        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalDev,
+        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalHost,
     ))
     .unwrap()
 }
@@ -76,8 +96,8 @@ async fn default_runtime_returns_completed_outcome_for_authorized_dispatch() {
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
 
     let runtime = DefaultHostRuntime::new(
         registry.clone(),
@@ -87,7 +107,7 @@ async fn default_runtime_returns_completed_outcome_for_authorized_dispatch() {
         local_test_runtime_policy(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()))
-    .with_run_state(run_state.clone())
+    .with_invocation_state(run_state.clone())
     .with_approval_requests(approval_requests.clone());
 
     let context = execution_context_with_dispatch_grant();
@@ -115,8 +135,8 @@ async fn default_runtime_surfaces_approval_required_with_persisted_request_id() 
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(ApprovalAuthorizer);
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort> =
         Arc::new(in_memory_backed_capability_lease_store());
 
@@ -127,7 +147,7 @@ async fn default_runtime_surfaces_approval_required_with_persisted_request_id() 
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         local_test_runtime_policy(),
     )
-    .with_run_state(run_state.clone())
+    .with_invocation_state(run_state.clone())
     .with_approval_requests(approval_requests.clone())
     .with_capability_leases(leases);
 
@@ -156,11 +176,11 @@ async fn default_runtime_surfaces_approval_required_with_persisted_request_id() 
 }
 
 #[tokio::test]
-async fn default_runtime_uses_combined_store_for_atomic_approval_block() {
+async fn default_runtime_persists_approval_and_blocks_invocation() {
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(ApprovalAuthorizer);
-    let combined_store = Arc::new(RecordingCombinedRunStateApprovalStore::new());
+    let stores = Arc::new(RecordingInvocationApprovalStores::new());
     let leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort> =
         Arc::new(in_memory_backed_capability_lease_store());
 
@@ -171,7 +191,8 @@ async fn default_runtime_uses_combined_store_for_atomic_approval_block() {
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         local_test_runtime_policy(),
     )
-    .with_run_state_approval_store(combined_store.clone())
+    .with_invocation_state(stores.clone())
+    .with_approval_requests(stores.clone())
     .with_capability_leases(leases);
 
     let context = execution_context_with_dispatch_grant();
@@ -187,10 +208,9 @@ async fn default_runtime_uses_combined_store_for_atomic_approval_block() {
     match outcome {
         ironclaw_host_runtime::RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
             assert_eq!(gate.capability_id, capability_id());
-            assert_eq!(combined_store.combined_calls(), 1);
-            assert_eq!(combined_store.separate_save_calls(), 0);
-            let record = RunStateStorePort::get(
-                combined_store.as_ref(),
+            assert_eq!(stores.save_calls(), 1);
+            let record = ProcessInvocationStatePort::get(
+                stores.as_ref(),
                 &context.resource_scope,
                 context.invocation_id,
             )
@@ -200,7 +220,7 @@ async fn default_runtime_uses_combined_store_for_atomic_approval_block() {
             assert_eq!(record.approval_request_id, Some(gate.approval_request_id));
             assert!(
                 ApprovalRequestStorePort::get(
-                    combined_store.as_ref(),
+                    stores.as_ref(),
                     &context.resource_scope,
                     gate.approval_request_id,
                 )
@@ -215,7 +235,7 @@ async fn default_runtime_uses_combined_store_for_atomic_approval_block() {
 
 #[tokio::test]
 async fn default_runtime_propagates_unavailable_when_run_state_lookup_fails_during_approval() {
-    // Regression: an earlier implementation swallowed `RunStateError` from
+    // Regression: an earlier implementation swallowed `ApprovalStoreError` from
     // the approval-request lookup via `.ok().flatten()`, which masked storage
     // outages as a misleading "approval not persisted" Failed outcome. The
     // host runtime must instead surface persistence outages as
@@ -224,11 +244,12 @@ async fn default_runtime_propagates_unavailable_when_run_state_lookup_fails_duri
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(ApprovalAuthorizer);
-    let inner_run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let run_state: Arc<dyn RunStateStorePort> = Arc::new(FailingGetRunStateStore {
+    let inner_run_state =
+        Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let run_state: Arc<dyn ProcessInvocationStatePort> = Arc::new(FailingGetRunStateStore {
         inner: inner_run_state.clone(),
     });
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStorePort> =
         Arc::new(in_memory_backed_capability_lease_store());
 
@@ -239,7 +260,7 @@ async fn default_runtime_propagates_unavailable_when_run_state_lookup_fails_duri
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         local_test_runtime_policy(),
     )
-    .with_run_state(run_state)
+    .with_invocation_state(run_state)
     .with_approval_requests(approval_requests)
     .with_capability_leases(leases);
 
@@ -270,7 +291,7 @@ async fn default_runtime_returns_failed_for_unknown_capability() {
     let registry = Arc::new(ExtensionRegistry::new());
     let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
     let runtime = DefaultHostRuntime::new(
         registry,
         dispatcher.clone(),
@@ -278,7 +299,7 @@ async fn default_runtime_returns_failed_for_unknown_capability() {
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         local_test_runtime_policy(),
     )
-    .with_run_state(run_state.clone());
+    .with_invocation_state(run_state.clone());
 
     let context = execution_context_with_dispatch_grant();
     let scope = context.resource_scope.clone();
@@ -294,10 +315,7 @@ async fn default_runtime_returns_failed_for_unknown_capability() {
     match outcome {
         ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(failure) => {
             assert_eq!(failure.capability_id, capability_id());
-            assert_eq!(
-                failure.kind,
-                ironclaw_host_runtime::RuntimeFailureKind::MissingRuntime
-            );
+            assert_eq!(failure.kind, FailureKind::MissingRuntime);
         }
         other => panic!("expected Failed outcome, got {:?}", other),
     }
@@ -345,10 +363,7 @@ async fn default_runtime_surfaces_authorization_failure_when_authorizer_denies()
     match outcome {
         ironclaw_host_runtime::RuntimeCapabilityOutcome::Failed(failure) => {
             assert_eq!(failure.capability_id, capability_id());
-            assert_eq!(
-                failure.kind,
-                ironclaw_host_runtime::RuntimeFailureKind::Authorization
-            );
+            assert_eq!(failure.kind, FailureKind::Authorization);
         }
         other => panic!("expected Failed(Authorization), got {:?}", other),
     }
@@ -426,15 +441,16 @@ async fn default_runtime_status_returns_default_when_no_run_state_attached() {
 }
 
 #[tokio::test]
-async fn default_runtime_status_propagates_unavailable_on_run_state_error() {
+async fn default_runtime_status_propagates_unavailable_on_invocation_state_error() {
     // Parallel to the approval-lookup path: a records_for_scope outage must
     // surface as HostRuntimeError::Unavailable with a redacted reason, not
     // leak the underlying filesystem string.
     let registry = Arc::new(ExtensionRegistry::new());
     let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
-    let inner = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let run_state: Arc<dyn RunStateStorePort> = Arc::new(FailingRecordsRunStateStore { inner });
+    let inner = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let invocation_state: Arc<dyn ProcessInvocationStatePort> =
+        Arc::new(FailingRecordsRunStateStore { inner });
     let runtime = DefaultHostRuntime::new(
         registry,
         dispatcher,
@@ -442,7 +458,7 @@ async fn default_runtime_status_propagates_unavailable_on_run_state_error() {
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         local_test_runtime_policy(),
     )
-    .with_run_state(run_state);
+    .with_invocation_state(invocation_state);
 
     let context = execution_context_with_dispatch_grant();
     let error = runtime
@@ -459,7 +475,7 @@ async fn default_runtime_status_propagates_unavailable_on_run_state_error() {
                 !reason.contains("/private"),
                 "sanitized reason must not leak filesystem paths, got {reason:?}"
             );
-            assert_eq!(reason, "run-state filesystem unavailable");
+            assert_eq!(reason, "process invocation backend unavailable");
         }
         other => panic!("expected HostRuntimeError::Unavailable, got {:?}", other),
     }
@@ -471,7 +487,7 @@ async fn default_runtime_status_redacts_process_filesystem_errors() {
     let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     // Real process store over a fault backend armed to fail `records_for_scope`
-    // (its `query` op) with a leaky reason, so the test proves the host-runtime
+    // (its ordered row query) with a leaky reason, so the test proves the host-runtime
     // path maps `ProcessError::Filesystem` to the sanitized, path-free
     // "process filesystem unavailable" through the production store.
     let backend = Arc::new(
@@ -487,7 +503,11 @@ async fn default_runtime_status_redacts_process_filesystem_errors() {
     )])
     .unwrap();
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts));
-    let process_store: Arc<dyn ProcessStorePort> = Arc::new(ProcessStore::new(scoped));
+    let process_store = Arc::new(ProcessJournalStore::new(scoped));
+    let process_services = ProcessServices::new(
+        process_store,
+        Arc::new(ironclaw_processes::in_memory_backed_process_result_store()),
+    );
     let runtime = DefaultHostRuntime::new(
         registry,
         dispatcher,
@@ -495,7 +515,7 @@ async fn default_runtime_status_redacts_process_filesystem_errors() {
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         local_test_runtime_policy(),
     )
-    .with_process_store(process_store);
+    .with_process_services(process_services);
 
     let context = execution_context_with_dispatch_grant();
     let error = runtime
@@ -526,7 +546,7 @@ async fn default_runtime_status_filters_to_running_records_only() {
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
 
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -535,7 +555,7 @@ async fn default_runtime_status_filters_to_running_records_only() {
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         local_test_runtime_policy(),
     )
-    .with_run_state(run_state.clone());
+    .with_invocation_state(run_state.clone());
 
     let context = execution_context_with_dispatch_grant();
 
@@ -545,7 +565,7 @@ async fn default_runtime_status_filters_to_running_records_only() {
 
     for invocation_id in [running_id, completed_id, failed_id] {
         run_state
-            .start(ironclaw_run_state::RunStart {
+            .start(ironclaw_processes::ProcessInvocationStart {
                 invocation_id,
                 capability_id: capability_id(),
                 scope: context.resource_scope.clone(),
@@ -693,7 +713,7 @@ async fn default_runtime_status_reports_running_invocations_only() {
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
 
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -702,11 +722,11 @@ async fn default_runtime_status_reports_running_invocations_only() {
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         local_test_runtime_policy(),
     )
-    .with_run_state(run_state.clone());
+    .with_invocation_state(run_state.clone());
 
     let context = execution_context_with_dispatch_grant();
     run_state
-        .start(ironclaw_run_state::RunStart {
+        .start(ironclaw_processes::ProcessInvocationStart {
             invocation_id: context.invocation_id,
             capability_id: capability_id(),
             scope: context.resource_scope.clone(),
@@ -737,7 +757,7 @@ async fn default_runtime_cancel_reports_running_invocations_as_unsupported() {
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
     let runtime = DefaultHostRuntime::new(
         registry,
         dispatcher,
@@ -745,11 +765,11 @@ async fn default_runtime_cancel_reports_running_invocations_as_unsupported() {
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         local_test_runtime_policy(),
     )
-    .with_run_state(run_state.clone());
+    .with_invocation_state(run_state.clone());
 
     let context = execution_context_with_dispatch_grant();
     run_state
-        .start(RunStart {
+        .start(ProcessInvocationStart {
             invocation_id: context.invocation_id,
             capability_id: capability_id(),
             scope: context.resource_scope.clone(),
@@ -782,6 +802,11 @@ async fn default_runtime_cancel_kills_running_processes_and_cancels_tokens() {
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let process_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
     let cancellation_registry = Arc::new(ProcessCancellationRegistry::new());
+    let process_services = ProcessServices::from_parts(
+        process_store.clone(),
+        Arc::new(ironclaw_processes::in_memory_backed_process_result_store()),
+        cancellation_registry.clone(),
+    );
     let runtime = DefaultHostRuntime::new(
         registry,
         dispatcher,
@@ -789,13 +814,11 @@ async fn default_runtime_cancel_kills_running_processes_and_cancels_tokens() {
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         local_test_runtime_policy(),
     )
-    .with_process_store(process_store.clone())
-    .with_process_cancellation_registry(cancellation_registry.clone());
+    .with_process_services(process_services);
 
     let context = execution_context_with_dispatch_grant();
     let process_id = ProcessId::new();
-    process_store
-        .start(process_start(&context, process_id))
+    submit_capability_process(process_store.as_ref(), process_start(&context, process_id))
         .await
         .unwrap();
     let cancellation_token = cancellation_registry.register(&context.resource_scope, process_id);
@@ -813,11 +836,11 @@ async fn default_runtime_cancel_kills_running_processes_and_cancels_tokens() {
     assert!(outcome.already_terminal.is_empty());
     assert!(outcome.unsupported.is_empty());
     assert!(cancellation_token.is_cancelled());
-    let record = process_store
-        .get(&context.resource_scope, process_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let record =
+        capability_process_record(process_store.as_ref(), &context.resource_scope, process_id)
+            .await
+            .unwrap()
+            .unwrap();
     assert_eq!(record.status, ProcessStatus::Killed);
 }
 
@@ -852,6 +875,10 @@ async fn default_runtime_status_includes_running_processes_from_process_store() 
     let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let process_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
+    let process_services = ProcessServices::new(
+        process_store.clone(),
+        Arc::new(ironclaw_processes::in_memory_backed_process_result_store()),
+    );
     let runtime = DefaultHostRuntime::new(
         registry,
         dispatcher,
@@ -859,12 +886,11 @@ async fn default_runtime_status_includes_running_processes_from_process_store() 
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         local_test_runtime_policy(),
     )
-    .with_process_store(process_store.clone());
+    .with_process_services(process_services);
 
     let context = execution_context_with_dispatch_grant();
     let process_id = ProcessId::new();
-    process_store
-        .start(process_start(&context, process_id))
+    submit_capability_process(process_store.as_ref(), process_start(&context, process_id))
         .await
         .unwrap();
 
@@ -891,9 +917,14 @@ async fn default_runtime_cancel_writes_killed_process_result_record() {
     let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let processes_filesystem = ironclaw_processes::in_memory_backed_processes_filesystem();
-    let process_store = Arc::new(ProcessStore::new(Arc::clone(&processes_filesystem)));
+    let process_store = Arc::new(ProcessJournalStore::new(Arc::clone(&processes_filesystem)));
     let result_store = Arc::new(ProcessResultStore::new(processes_filesystem));
     let cancellation_registry = Arc::new(ProcessCancellationRegistry::new());
+    let process_services = ProcessServices::from_parts(
+        process_store.clone(),
+        result_store.clone(),
+        cancellation_registry.clone(),
+    );
     let runtime = DefaultHostRuntime::new(
         registry,
         dispatcher,
@@ -901,14 +932,11 @@ async fn default_runtime_cancel_writes_killed_process_result_record() {
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         local_test_runtime_policy(),
     )
-    .with_process_store(process_store.clone())
-    .with_process_result_store(result_store.clone())
-    .with_process_cancellation_registry(cancellation_registry.clone());
+    .with_process_services(process_services);
 
     let context = execution_context_with_dispatch_grant();
     let process_id = ProcessId::new();
-    process_store
-        .start(process_start(&context, process_id))
+    submit_capability_process(process_store.as_ref(), process_start(&context, process_id))
         .await
         .unwrap();
     cancellation_registry.register(&context.resource_scope, process_id);
@@ -939,8 +967,12 @@ async fn default_runtime_status_does_not_duplicate_process_backed_invocations() 
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
     let process_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
+    let process_services = ProcessServices::new(
+        process_store.clone(),
+        Arc::new(ironclaw_processes::in_memory_backed_process_result_store()),
+    );
     let runtime = DefaultHostRuntime::new(
         registry,
         dispatcher,
@@ -948,13 +980,13 @@ async fn default_runtime_status_does_not_duplicate_process_backed_invocations() 
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         local_test_runtime_policy(),
     )
-    .with_run_state(run_state.clone())
-    .with_process_store(process_store.clone());
+    .with_invocation_state(run_state.clone())
+    .with_process_services(process_services);
 
     let context = execution_context_with_dispatch_grant();
     let process_id = ProcessId::new();
     run_state
-        .start(RunStart {
+        .start(ProcessInvocationStart {
             invocation_id: context.invocation_id,
             capability_id: capability_id(),
             scope: context.resource_scope.clone(),
@@ -962,8 +994,7 @@ async fn default_runtime_status_does_not_duplicate_process_backed_invocations() 
         })
         .await
         .unwrap();
-    process_store
-        .start(process_start(&context, process_id))
+    submit_capability_process(process_store.as_ref(), process_start(&context, process_id))
         .await
         .unwrap();
 
@@ -1071,15 +1102,19 @@ fn process_start(context: &ExecutionContext, process_id: ProcessId) -> ProcessSt
     }
 }
 
-/// Wraps an [`ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>`] but fails every `records_for_scope`
+/// Wraps an [`ironclaw_processes::ProcessInvocationStateStore<ironclaw_filesystem::InMemoryBackend>`] but fails every `records_for_scope`
 /// call so we can exercise the runtime-status error-propagation path.
 struct FailingRecordsRunStateStore {
-    inner: Arc<ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    inner:
+        Arc<ironclaw_processes::ProcessInvocationStateStore<ironclaw_filesystem::InMemoryBackend>>,
 }
 
 #[async_trait]
-impl RunStateStorePort for FailingRecordsRunStateStore {
-    async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
+impl ProcessInvocationStatePort for FailingRecordsRunStateStore {
+    async fn start(
+        &self,
+        start: ProcessInvocationStart,
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.inner.start(start).await
     }
 
@@ -1087,8 +1122,8 @@ impl RunStateStorePort for FailingRecordsRunStateStore {
         &self,
         scope: &ResourceScope,
         invocation_id: InvocationId,
-        approval: ironclaw_host_api::ApprovalRequest,
-    ) -> Result<RunRecord, RunStateError> {
+        approval: ironclaw_host_api::approval::ApprovalRequest,
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.inner
             .block_approval(scope, invocation_id, approval)
             .await
@@ -1099,7 +1134,7 @@ impl RunStateStorePort for FailingRecordsRunStateStore {
         scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.inner
             .block_auth(scope, invocation_id, error_kind)
             .await
@@ -1109,7 +1144,7 @@ impl RunStateStorePort for FailingRecordsRunStateStore {
         &self,
         scope: &ResourceScope,
         invocation_id: InvocationId,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.inner.complete(scope, invocation_id).await
     }
 
@@ -1118,7 +1153,7 @@ impl RunStateStorePort for FailingRecordsRunStateStore {
         scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.inner.fail(scope, invocation_id, error_kind).await
     }
 
@@ -1126,31 +1161,35 @@ impl RunStateStorePort for FailingRecordsRunStateStore {
         &self,
         scope: &ResourceScope,
         invocation_id: InvocationId,
-    ) -> Result<Option<RunRecord>, RunStateError> {
+    ) -> Result<Option<ProcessInvocationRecord>, ProcessInvocationError> {
         self.inner.get(scope, invocation_id).await
     }
 
     async fn records_for_scope(
         &self,
         _scope: &ResourceScope,
-    ) -> Result<Vec<RunRecord>, RunStateError> {
-        Err(RunStateError::Filesystem(
+    ) -> Result<Vec<ProcessInvocationRecord>, ProcessInvocationError> {
+        Err(ProcessInvocationError::Backend(
             "simulated read failure: /private/users/secret/runstate.db".to_string(),
         ))
     }
 }
 
-/// Wraps an [`ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>`] but fails every `get` call so we can
+/// Wraps an [`ironclaw_processes::ProcessInvocationStateStore<ironclaw_filesystem::InMemoryBackend>`] but fails every `get` call so we can
 /// exercise the approval-lookup error-propagation path. Writes pass through
 /// to the inner store so the capability host can complete its own
 /// `start`/`block_approval` writes before we reach the broken read.
 struct FailingGetRunStateStore {
-    inner: Arc<ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    inner:
+        Arc<ironclaw_processes::ProcessInvocationStateStore<ironclaw_filesystem::InMemoryBackend>>,
 }
 
 #[async_trait]
-impl RunStateStorePort for FailingGetRunStateStore {
-    async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
+impl ProcessInvocationStatePort for FailingGetRunStateStore {
+    async fn start(
+        &self,
+        start: ProcessInvocationStart,
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.inner.start(start).await
     }
 
@@ -1159,7 +1198,7 @@ impl RunStateStorePort for FailingGetRunStateStore {
         scope: &ResourceScope,
         invocation_id: InvocationId,
         approval: ApprovalRequest,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.inner
             .block_approval(scope, invocation_id, approval)
             .await
@@ -1170,7 +1209,7 @@ impl RunStateStorePort for FailingGetRunStateStore {
         scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.inner
             .block_auth(scope, invocation_id, error_kind)
             .await
@@ -1180,7 +1219,7 @@ impl RunStateStorePort for FailingGetRunStateStore {
         &self,
         scope: &ResourceScope,
         invocation_id: InvocationId,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.inner.complete(scope, invocation_id).await
     }
 
@@ -1189,7 +1228,7 @@ impl RunStateStorePort for FailingGetRunStateStore {
         scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.inner.fail(scope, invocation_id, error_kind).await
     }
 
@@ -1197,8 +1236,8 @@ impl RunStateStorePort for FailingGetRunStateStore {
         &self,
         _scope: &ResourceScope,
         _invocation_id: InvocationId,
-    ) -> Result<Option<RunRecord>, RunStateError> {
-        Err(RunStateError::Filesystem(
+    ) -> Result<Option<ProcessInvocationRecord>, ProcessInvocationError> {
+        Err(ProcessInvocationError::Backend(
             "simulated read failure: /tmp/runstate.db connection refused".to_string(),
         ))
     }
@@ -1206,40 +1245,37 @@ impl RunStateStorePort for FailingGetRunStateStore {
     async fn records_for_scope(
         &self,
         scope: &ResourceScope,
-    ) -> Result<Vec<RunRecord>, RunStateError> {
+    ) -> Result<Vec<ProcessInvocationRecord>, ProcessInvocationError> {
         self.inner.records_for_scope(scope).await
     }
 }
 
-struct RecordingCombinedRunStateApprovalStore {
-    runs: ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>,
-    approvals: ironclaw_run_state::ApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
-    combined_calls: AtomicUsize,
-    separate_save_calls: AtomicUsize,
+struct RecordingInvocationApprovalStores {
+    runs: ironclaw_processes::ProcessInvocationStateStore<ironclaw_filesystem::InMemoryBackend>,
+    approvals: ironclaw_approvals::ApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
+    save_calls: AtomicUsize,
 }
 
-impl RecordingCombinedRunStateApprovalStore {
+impl RecordingInvocationApprovalStores {
     fn new() -> Self {
         Self {
-            runs: ironclaw_run_state::in_memory_backed_run_state_store(),
-            approvals: ironclaw_run_state::in_memory_backed_approval_request_store(),
-            combined_calls: AtomicUsize::new(0),
-            separate_save_calls: AtomicUsize::new(0),
+            runs: ironclaw_processes::in_memory_backed_process_invocation_state_store(),
+            approvals: ironclaw_approvals::in_memory_backed_approval_request_store(),
+            save_calls: AtomicUsize::new(0),
         }
     }
 
-    fn combined_calls(&self) -> usize {
-        self.combined_calls.load(Ordering::SeqCst)
-    }
-
-    fn separate_save_calls(&self) -> usize {
-        self.separate_save_calls.load(Ordering::SeqCst)
+    fn save_calls(&self) -> usize {
+        self.save_calls.load(Ordering::SeqCst)
     }
 }
 
 #[async_trait]
-impl RunStateStorePort for RecordingCombinedRunStateApprovalStore {
-    async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
+impl ProcessInvocationStatePort for RecordingInvocationApprovalStores {
+    async fn start(
+        &self,
+        start: ProcessInvocationStart,
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.runs.start(start).await
     }
 
@@ -1248,7 +1284,7 @@ impl RunStateStorePort for RecordingCombinedRunStateApprovalStore {
         scope: &ResourceScope,
         invocation_id: InvocationId,
         approval: ApprovalRequest,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.runs
             .block_approval(scope, invocation_id, approval)
             .await
@@ -1259,7 +1295,7 @@ impl RunStateStorePort for RecordingCombinedRunStateApprovalStore {
         scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.runs.block_auth(scope, invocation_id, error_kind).await
     }
 
@@ -1267,7 +1303,7 @@ impl RunStateStorePort for RecordingCombinedRunStateApprovalStore {
         &self,
         scope: &ResourceScope,
         invocation_id: InvocationId,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.runs.complete(scope, invocation_id).await
     }
 
@@ -1276,7 +1312,7 @@ impl RunStateStorePort for RecordingCombinedRunStateApprovalStore {
         scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.runs.fail(scope, invocation_id, error_kind).await
     }
 
@@ -1284,26 +1320,26 @@ impl RunStateStorePort for RecordingCombinedRunStateApprovalStore {
         &self,
         scope: &ResourceScope,
         invocation_id: InvocationId,
-    ) -> Result<Option<RunRecord>, RunStateError> {
+    ) -> Result<Option<ProcessInvocationRecord>, ProcessInvocationError> {
         self.runs.get(scope, invocation_id).await
     }
 
     async fn records_for_scope(
         &self,
         scope: &ResourceScope,
-    ) -> Result<Vec<RunRecord>, RunStateError> {
+    ) -> Result<Vec<ProcessInvocationRecord>, ProcessInvocationError> {
         self.runs.records_for_scope(scope).await
     }
 }
 
 #[async_trait]
-impl ApprovalRequestStorePort for RecordingCombinedRunStateApprovalStore {
+impl ApprovalRequestStorePort for RecordingInvocationApprovalStores {
     async fn save_pending(
         &self,
         scope: ResourceScope,
         request: ApprovalRequest,
-    ) -> Result<ApprovalRecord, RunStateError> {
-        self.separate_save_calls.fetch_add(1, Ordering::SeqCst);
+    ) -> Result<ApprovalRecord, ApprovalStoreError> {
+        self.save_calls.fetch_add(1, Ordering::SeqCst);
         self.approvals.save_pending(scope, request).await
     }
 
@@ -1311,7 +1347,7 @@ impl ApprovalRequestStorePort for RecordingCombinedRunStateApprovalStore {
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
-    ) -> Result<Option<ApprovalRecord>, RunStateError> {
+    ) -> Result<Option<ApprovalRecord>, ApprovalStoreError> {
         self.approvals.get(scope, request_id).await
     }
 
@@ -1319,7 +1355,7 @@ impl ApprovalRequestStorePort for RecordingCombinedRunStateApprovalStore {
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
-    ) -> Result<ApprovalRecord, RunStateError> {
+    ) -> Result<ApprovalRecord, ApprovalStoreError> {
         self.approvals.approve(scope, request_id).await
     }
 
@@ -1327,7 +1363,7 @@ impl ApprovalRequestStorePort for RecordingCombinedRunStateApprovalStore {
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
-    ) -> Result<ApprovalRecord, RunStateError> {
+    ) -> Result<ApprovalRecord, ApprovalStoreError> {
         self.approvals.deny(scope, request_id).await
     }
 
@@ -1335,33 +1371,15 @@ impl ApprovalRequestStorePort for RecordingCombinedRunStateApprovalStore {
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
-    ) -> Result<ApprovalRecord, RunStateError> {
+    ) -> Result<ApprovalRecord, ApprovalStoreError> {
         self.approvals.discard_pending(scope, request_id).await
     }
 
     async fn records_for_scope(
         &self,
         scope: &ResourceScope,
-    ) -> Result<Vec<ApprovalRecord>, RunStateError> {
+    ) -> Result<Vec<ApprovalRecord>, ApprovalStoreError> {
         self.approvals.records_for_scope(scope).await
-    }
-}
-
-#[async_trait]
-impl RunStateApprovalStorePort for RecordingCombinedRunStateApprovalStore {
-    async fn save_pending_and_block_approval(
-        &self,
-        scope: ResourceScope,
-        invocation_id: InvocationId,
-        approval: ApprovalRequest,
-    ) -> Result<RunRecord, RunStateError> {
-        self.combined_calls.fetch_add(1, Ordering::SeqCst);
-        self.approvals
-            .save_pending(scope.clone(), approval.clone())
-            .await?;
-        self.runs
-            .block_approval(&scope, invocation_id, approval)
-            .await
     }
 }
 

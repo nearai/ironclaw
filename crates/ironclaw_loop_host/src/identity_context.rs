@@ -1,12 +1,10 @@
 use async_trait::async_trait;
-use ironclaw_memory::DEFAULT_PROMPT_PROTECTED_PATHS;
-use ironclaw_turns::{
-    LoopMessageRef,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, LoopContextMessage, LoopRunContext,
-        PersonalContextPolicy, PromptMode,
-    },
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, LoopContextMessage, LoopRunContext,
+    PersonalContextPolicy, PromptMode,
 };
+use ironclaw_memory::DEFAULT_PROMPT_PROTECTED_PATHS;
+use ironclaw_turns::LoopMessageRef;
 use thiserror::Error;
 
 const DEFAULT_IDENTITY_TOKEN_CEILING: u32 = 8_000;
@@ -182,7 +180,7 @@ impl HostIdentityContextBuildError {
             Self::UnknownIdentityFile | Self::InvalidIdentityFile | Self::PolicyDenied => {
                 AgentLoopHostErrorKind::PolicyDenied
             }
-            Self::ContextBudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
+            Self::ContextBudgetExceeded => AgentLoopHostErrorKind::ContextOverflow,
             Self::BudgetMisconfigured | Self::Internal => AgentLoopHostErrorKind::Internal,
         };
         AgentLoopHostError::new(kind, self.to_string())
@@ -355,11 +353,12 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use ironclaw_host_api::{TenantId, ThreadId};
-    use ironclaw_turns::{
-        RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
-        run_profile::{InMemoryRunProfileResolver, LoopRunContext, PersonalContextPolicy},
+    use ironclaw_host_api::ids::{TenantId, ThreadId};
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, LoopRunContext, PersonalContextPolicy,
+        RunProfileResolutionRequest, RunProfileResolver,
     };
+    use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
     use super::*;
 

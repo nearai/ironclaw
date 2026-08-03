@@ -11,11 +11,12 @@ use async_trait::async_trait;
 use axum::body::Body;
 use http::Request;
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, ProductSurface, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product::{
     AuthRequirement, ProductInboundAck, ProductInboundPayload, ProductOutboundEnvelope,
     ProductRejection, ProductRejectionKind, ProjectionSubscriptionRequest, ProtocolAuthEvidence,
 };
+use ironclaw_product_contracts::surface::ProductSurface;
 use ironclaw_reborn_openai_compat::{
     OpenAiChatProjectionStreamRequest, OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller,
     OpenAiCompatBindInternalRefs, OpenAiCompatExternalToolResume,

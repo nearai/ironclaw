@@ -1,9 +1,13 @@
 use super::*;
+use crate::LifecycleProductAction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProductCommandHandler {
     ProductLifecycleCommand,
     ProductModelCommand,
+    ProductStatusCommand,
+    ProductCommandList,
+    ProductCommandExecute,
     CreateThread,
     SubmitTurn,
     CancelRun,
@@ -35,6 +39,9 @@ impl ProductCommandHandler {
         match capability.as_str() {
             PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID => Some(Self::ProductLifecycleCommand),
             PRODUCT_MODEL_COMMAND_OPERATION_ID => Some(Self::ProductModelCommand),
+            PRODUCT_STATUS_COMMAND_OPERATION_ID => Some(Self::ProductStatusCommand),
+            PRODUCT_COMMAND_LIST_COMMAND_ID => Some(Self::ProductCommandList),
+            PRODUCT_COMMAND_EXECUTE_COMMAND_ID => Some(Self::ProductCommandExecute),
             CREATE_THREAD_COMMAND_ID => Some(Self::CreateThread),
             SUBMIT_TURN_COMMAND_ID => Some(Self::SubmitTurn),
             CANCEL_RUN_COMMAND_ID => Some(Self::CancelRun),
@@ -106,6 +113,22 @@ impl ProductCommandHandler {
                         .await?,
                 )
             }
+            Self::ProductStatusCommand => {
+                let request: ProductStatusCommandInput = product_command_input(input)?;
+                command_output(
+                    services
+                        .execute_product_status_command(caller, request)
+                        .await?,
+                )
+            }
+            Self::ProductCommandList => {
+                let _: EmptyProductCommandInput = product_command_input(input)?;
+                command_output(services.list_product_commands(caller).await?)
+            }
+            Self::ProductCommandExecute => {
+                let request: RebornExecuteProductCommandRequest = product_command_input(input)?;
+                command_output(services.execute_product_command(caller, request).await?)
+            }
             Self::CreateThread => command_output(
                 services
                     .create_thread(caller, product_command_input(input)?)
@@ -155,11 +178,14 @@ impl ProductCommandHandler {
                 let _: EmptyProductCommandInput = product_command_input(input)?;
                 command_output(services.trace_account_login_link(caller).await?)
             }
-            Self::TraceHoldAuthorize => command_output(
-                services
-                    .authorize_trace_hold(caller, product_command_input(input)?)
-                    .await?,
-            ),
+            Self::TraceHoldAuthorize => {
+                let request: RebornTraceHoldAuthorizeProductRequest = product_command_input(input)?;
+                command_output(
+                    services
+                        .authorize_trace_hold(caller, request.submission_id)
+                        .await?,
+                )
+            }
             Self::OperatorConfigSetKey => {
                 let request: RebornOperatorConfigSetProductRequest = product_command_input(input)?;
                 command_output(
@@ -267,6 +293,7 @@ pub(super) enum ProductCapabilityHandler {
     LlmProviderUpsert,
     LlmProviderDelete,
     LlmActiveSet,
+    ExtensionRegisterHostedMcp,
     ExtensionImport,
     ExtensionSetupSubmit,
     ProjectUpdate,
@@ -294,6 +321,7 @@ impl ProductCapabilityHandler {
             LLM_PROVIDER_UPSERT_CAPABILITY_ID => Some(Self::LlmProviderUpsert),
             LLM_PROVIDER_DELETE_CAPABILITY_ID => Some(Self::LlmProviderDelete),
             LLM_ACTIVE_SET_CAPABILITY_ID => Some(Self::LlmActiveSet),
+            EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID => Some(Self::ExtensionRegisterHostedMcp),
             EXTENSION_IMPORT_CAPABILITY_ID => Some(Self::ExtensionImport),
             EXTENSION_SETUP_SUBMIT_CAPABILITY_ID => Some(Self::ExtensionSetupSubmit),
             PROJECT_UPDATE_CAPABILITY_ID => Some(Self::ProjectUpdate),
@@ -322,6 +350,7 @@ impl ProductCapabilityHandler {
             Self::LlmProviderUpsert => "llm provider updated",
             Self::LlmProviderDelete => "llm provider deleted",
             Self::LlmActiveSet => "llm active provider updated",
+            Self::ExtensionRegisterHostedMcp => "hosted MCP registration accepted",
             Self::ExtensionImport => "extension imported",
             Self::ExtensionSetupSubmit => "extension setup updated",
             Self::ProjectUpdate => "project updated",
@@ -361,6 +390,23 @@ impl ProductCapabilityHandler {
             }
             Self::LlmProviderDelete => services.invoke_llm_provider_delete(caller, input).await,
             Self::LlmActiveSet => services.invoke_llm_active_set(caller, input).await,
+            Self::ExtensionRegisterHostedMcp => {
+                let request: ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest =
+                    product_command_input(input)?;
+                services
+                    .lifecycle_service
+                    .execute(
+                        LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+                            tenant_id: caller.tenant_id,
+                            user_id: caller.user_id,
+                            agent_id: caller.agent_id,
+                            project_id: caller.project_id,
+                        }),
+                        LifecycleProductAction::ExtensionRegisterHostedMcp { request },
+                    )
+                    .await?;
+                Ok(())
+            }
             Self::ExtensionImport => {
                 extensions::import_extension_capability(
                     services.lifecycle_service.as_ref(),
@@ -522,6 +568,7 @@ mod tests {
             LLM_PROVIDER_UPSERT_CAPABILITY_ID,
             LLM_PROVIDER_DELETE_CAPABILITY_ID,
             LLM_ACTIVE_SET_CAPABILITY_ID,
+            EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
             EXTENSION_IMPORT_CAPABILITY_ID,
             EXTENSION_SETUP_SUBMIT_CAPABILITY_ID,
             PROJECT_UPDATE_CAPABILITY_ID,
@@ -545,6 +592,120 @@ mod tests {
             assert!(
                 ProductCapabilityHandler::parse(&capability).is_some(),
                 "{id} must be registry-backed"
+            );
+        }
+    }
+
+    #[test]
+    fn product_command_handler_parse_covers_every_registered_id() {
+        for (id, expected) in [
+            (
+                PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
+                ProductCommandHandler::ProductLifecycleCommand,
+            ),
+            (
+                PRODUCT_MODEL_COMMAND_OPERATION_ID,
+                ProductCommandHandler::ProductModelCommand,
+            ),
+            (
+                PRODUCT_STATUS_COMMAND_OPERATION_ID,
+                ProductCommandHandler::ProductStatusCommand,
+            ),
+            (
+                PRODUCT_COMMAND_LIST_COMMAND_ID,
+                ProductCommandHandler::ProductCommandList,
+            ),
+            (
+                PRODUCT_COMMAND_EXECUTE_COMMAND_ID,
+                ProductCommandHandler::ProductCommandExecute,
+            ),
+            (
+                CREATE_THREAD_COMMAND_ID,
+                ProductCommandHandler::CreateThread,
+            ),
+            (SUBMIT_TURN_COMMAND_ID, ProductCommandHandler::SubmitTurn),
+            (CANCEL_RUN_COMMAND_ID, ProductCommandHandler::CancelRun),
+            (RESOLVE_GATE_COMMAND_ID, ProductCommandHandler::ResolveGate),
+            (RETRY_RUN_COMMAND_ID, ProductCommandHandler::RetryRun),
+            (
+                PROJECT_CREATE_COMMAND_ID,
+                ProductCommandHandler::ProjectCreate,
+            ),
+            (
+                PROJECT_FS_READ_COMMAND_ID,
+                ProductCommandHandler::ProjectFsRead,
+            ),
+            (FS_READ_COMMAND_ID, ProductCommandHandler::FsRead),
+            (
+                ATTACHMENT_READ_COMMAND_ID,
+                ProductCommandHandler::AttachmentRead,
+            ),
+            (
+                TRACE_ACCOUNT_LOGIN_LINK_COMMAND_ID,
+                ProductCommandHandler::TraceAccountLoginLink,
+            ),
+            (
+                TRACE_HOLD_AUTHORIZE_COMMAND_ID,
+                ProductCommandHandler::TraceHoldAuthorize,
+            ),
+            (
+                OPERATOR_CONFIG_SET_KEY_COMMAND_ID,
+                ProductCommandHandler::OperatorConfigSetKey,
+            ),
+            (
+                OPERATOR_SERVICE_LIFECYCLE_COMMAND_ID,
+                ProductCommandHandler::OperatorServiceLifecycle,
+            ),
+            (
+                LLM_TEST_CONNECTION_COMMAND_ID,
+                ProductCommandHandler::LlmTestConnection,
+            ),
+            (
+                LLM_LIST_MODELS_COMMAND_ID,
+                ProductCommandHandler::LlmListModels,
+            ),
+            (
+                LLM_NEARAI_LOGIN_COMMAND_ID,
+                ProductCommandHandler::LlmNearAiLogin,
+            ),
+            (
+                LLM_NEARAI_WALLET_LOGIN_COMMAND_ID,
+                ProductCommandHandler::LlmNearAiWalletLogin,
+            ),
+            (
+                LLM_CODEX_LOGIN_COMMAND_ID,
+                ProductCommandHandler::LlmCodexLogin,
+            ),
+            (
+                ADMIN_USER_CREATE_COMMAND_ID,
+                ProductCommandHandler::AdminUserCreate,
+            ),
+            (
+                ADMIN_USER_DELETE_SECRET_COMMAND_ID,
+                ProductCommandHandler::AdminUserDeleteSecret,
+            ),
+            (
+                AUTOMATION_PAUSE_COMMAND_ID,
+                ProductCommandHandler::AutomationPause,
+            ),
+            (
+                AUTOMATION_RESUME_COMMAND_ID,
+                ProductCommandHandler::AutomationResume,
+            ),
+            (
+                AUTOMATION_RENAME_COMMAND_ID,
+                ProductCommandHandler::AutomationRename,
+            ),
+            (
+                AUTOMATION_DELETE_COMMAND_ID,
+                ProductCommandHandler::AutomationDelete,
+            ),
+        ] {
+            let capability = CapabilityId::new(id).expect("valid capability id");
+            assert_eq!(
+                ProductCommandHandler::parse(&capability),
+                Some(expected),
+                "{id} must be registry-backed as {expected:?}"
             );
         }
     }

@@ -1,8 +1,10 @@
 //! In-memory product workflow idempotency ledger.
 //!
-//! This implementation is suitable for local-dev composition and deterministic
+//! This implementation is suitable for standalone composition and deterministic
 //! integration tests. Durable production deployments should wire a database
 //! ledger with the same lease semantics.
+
+use ironclaw_product_contracts::action::ActionFingerprintKey;
 
 use std::{
     collections::HashMap,
@@ -13,10 +15,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 
-use crate::{
-    ActionFingerprintKey, IdempotencyDecision, IdempotencyLedger, ProductInboundAction,
-    ProductSurfaceFailure,
-};
+use crate::{IdempotencyDecision, IdempotencyLedger, ProductInboundAction, ProductSurfaceFailure};
 
 const DEFAULT_IN_FLIGHT_LEASE: Duration = Duration::seconds(60);
 
@@ -55,7 +54,7 @@ impl InMemoryIdempotencyLedger {
         }
     }
 
-    /// Reclaim expired non-terminal reservations. Exposed so local-dev hosts
+    /// Reclaim expired non-terminal reservations. Exposed so standalone hosts
     /// and tests can model the same recovery contract a durable ledger needs.
     pub fn expire_in_flight_before(
         &self,

@@ -3,18 +3,20 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation, RootFilesystem};
-use ironclaw_host_api::VirtualPath;
-use ironclaw_memory_native::{
-    ChunkConfig, DefaultPromptWriteSafetyPolicy, DocumentMetadata,
-    InMemoryMemoryDocumentRepository, MemoryAppendOutcome, MemoryBackend,
-    MemoryBackendCapabilities, MemoryBackendFilesystemAdapter, MemoryBackendWriteOptions,
-    MemoryContext, MemoryDocumentFilesystem, MemoryDocumentIndexer, MemoryDocumentPath,
-    MemoryDocumentRepository, MemoryDocumentScope, MemoryEventSinkError, MemorySearchRequest,
+use ironclaw_host_api::path::VirtualPath;
+use ironclaw_memory::{
+    DocumentMetadata, MemoryContext, MemoryDocumentPath, MemoryDocumentScope, MemoryEventSinkError,
     PromptProtectedPathRegistry, PromptSafetyAllowanceId, PromptSafetyPolicyVersion,
     PromptSafetyReasonCode, PromptSafetySeverity, PromptWriteOperation, PromptWriteSafetyDecision,
     PromptWriteSafetyError, PromptWriteSafetyEvent, PromptWriteSafetyEventKind,
     PromptWriteSafetyEventSink, PromptWriteSafetyPolicy, PromptWriteSafetyRequest,
-    PromptWriteSource, RepositoryMemoryBackend, chunk_document, content_sha256,
+    PromptWriteSource, content_sha256,
+};
+use ironclaw_memory_native::{
+    ChunkConfig, DefaultPromptWriteSafetyPolicy, InMemoryMemoryDocumentRepository,
+    MemoryAppendOutcome, MemoryBackend, MemoryBackendCapabilities, MemoryBackendFilesystemAdapter,
+    MemoryBackendWriteOptions, MemoryDocumentFilesystem, MemoryDocumentIndexer,
+    MemoryDocumentRepository, MemorySearchRequest, RepositoryMemoryBackend, chunk_document,
 };
 
 #[tokio::test]

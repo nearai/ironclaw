@@ -9,13 +9,13 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, LoopCancelReasonKind, LoopCancellationPort,
+    LoopCancellationSignal,
+};
 use ironclaw_turns::{
-    GetRunStateRequest, TurnRunId, TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnScope,
-    TurnStateStore, TurnStatus,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, LoopCancelReasonKind, LoopCancellationPort,
-        LoopCancellationSignal,
-    },
+    AgentTurnRuntimePort, GetRunStateRequest, TurnRunId, TurnRunState, TurnRunWake,
+    TurnRunWakeNotifier, TurnScope, TurnStatus,
 };
 use parking_lot::RwLock;
 use tokio::sync::Notify;
@@ -259,22 +259,22 @@ pub fn verify_product_live_cancellation_probe(
     }
 }
 
-/// Run cancellation factory backed by durable turn state.
+/// Run cancellation factory backed by the agent-turn process projection.
 ///
 /// Handles are seeded from the current run state before being returned and are
 /// registered for later wake-driven flips. A lightweight polling fallback
 /// covers runtimes that have not yet wired the wake notifier into their cancel
 /// path.
-pub struct TurnStateRunCancellationFactory {
-    store: Arc<dyn TurnStateStore>,
+pub struct AgentTurnRunCancellationFactory {
+    runtime: Arc<dyn AgentTurnRuntimePort>,
     handles: Arc<RwLock<HashMap<TurnRunId, Vec<RunCancellationRequester>>>>,
     poll_interval: Duration,
 }
 
-impl TurnStateRunCancellationFactory {
-    pub fn new(store: Arc<dyn TurnStateStore>) -> Self {
+impl AgentTurnRunCancellationFactory {
+    pub fn new(runtime: Arc<dyn AgentTurnRuntimePort>) -> Self {
         Self {
-            store,
+            runtime,
             handles: Arc::new(RwLock::new(HashMap::new())),
             poll_interval: DEFAULT_CANCEL_POLL_INTERVAL,
         }
@@ -302,8 +302,8 @@ impl TurnStateRunCancellationFactory {
         scope: &TurnScope,
         run_id: TurnRunId,
     ) -> Result<TurnStatus, AgentLoopHostError> {
-        self.store
-            .get_run_state_for_cancellation(GetRunStateRequest {
+        self.runtime
+            .get_run_state(GetRunStateRequest {
                 scope: scope.clone(),
                 run_id,
             })
@@ -352,7 +352,7 @@ impl TurnStateRunCancellationFactory {
         run_id: TurnRunId,
         requester: RunCancellationRequester,
     ) {
-        let store = Arc::clone(&self.store);
+        let runtime = Arc::clone(&self.runtime);
         let handles = Arc::clone(&self.handles);
         let base_interval = self.poll_interval;
         tokio::spawn(async move {
@@ -362,7 +362,7 @@ impl TurnStateRunCancellationFactory {
             const MAX_POLL_INTERVAL: Duration = Duration::from_secs(5);
             let mut interval = base_interval;
             while requester.is_owner_alive() && !requester.fired.load(Ordering::Acquire) {
-                let status = store
+                let status = runtime
                     .get_run_state(GetRunStateRequest {
                         scope: scope.clone(),
                         run_id,
@@ -387,7 +387,7 @@ impl TurnStateRunCancellationFactory {
 }
 
 #[async_trait]
-impl RunCancellationFactory for TurnStateRunCancellationFactory {
+impl RunCancellationFactory for AgentTurnRunCancellationFactory {
     async fn handle_for_run(
         &self,
         scope: &TurnScope,
@@ -443,7 +443,7 @@ impl RunCancellationFactory for TurnStateRunCancellationFactory {
     }
 }
 
-impl TurnRunWakeNotifier for TurnStateRunCancellationFactory {
+impl TurnRunWakeNotifier for AgentTurnRunCancellationFactory {
     fn notify_queued_run(
         &self,
         wake: TurnRunWake,

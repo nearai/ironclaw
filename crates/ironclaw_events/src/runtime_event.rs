@@ -1,7 +1,10 @@
 use chrono::Utc;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, INPUT_ENCODE_HUMAN_SUMMARY, InvocationId, ProcessId, ResourceScope,
-    RuntimeKind, Timestamp,
+    Timestamp,
+    dispatch::INPUT_ENCODE_HUMAN_SUMMARY,
+    ids::{CapabilityId, ExtensionId, InvocationId, ProcessId},
+    resource::ResourceScope,
+    runtime::RuntimeKind,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -14,6 +17,13 @@ pub struct RuntimeEventId(Uuid);
 impl RuntimeEventId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    /// Construct a stable event identity from caller-owned, domain-separated
+    /// bytes. Callers are responsible for deriving collision-resistant bytes
+    /// from typed durable identity rather than display strings.
+    pub fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(Uuid::from_bytes(bytes))
     }
 
     pub fn as_uuid(&self) -> Uuid {
@@ -56,6 +66,7 @@ pub enum RuntimeEventKind {
     HookDispatched,
     HookDecisionEmitted,
     HookFailed,
+    FailureRecovered,
 }
 
 /// Redacted runtime event payload.
@@ -112,6 +123,12 @@ pub struct RuntimeEvent {
     /// Closed-vocabulary failure disposition (`fail_closed`, `fail_isolated`).
     /// Present on [`RuntimeEventKind::HookFailed`].
     pub hook_failure_disposition: Option<String>,
+    /// Closed-vocabulary loop stage that applied recovery.
+    pub recovery_stage: Option<String>,
+    /// Closed-vocabulary failure class recovered at that stage.
+    pub recovery_class: Option<String>,
+    /// Closed-vocabulary recovery action (`retried` or `model_visible`).
+    pub recovery_disposition: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -147,6 +164,12 @@ struct RuntimeEventWire {
     hook_failure_category: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hook_failure_disposition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery_stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery_disposition: Option<String>,
 }
 
 impl Serialize for RuntimeEvent {
@@ -183,6 +206,12 @@ impl Serialize for RuntimeEvent {
                 .hook_failure_disposition
                 .clone()
                 .map(sanitize_hook_label),
+            recovery_stage: self.recovery_stage.clone().map(sanitize_telemetry_label),
+            recovery_class: self.recovery_class.clone().map(sanitize_telemetry_label),
+            recovery_disposition: self
+                .recovery_disposition
+                .clone()
+                .map(sanitize_telemetry_label),
         };
         wire.serialize(serializer)
     }
@@ -209,8 +238,11 @@ struct TrustedRuntimeEventWire {
     capability_id: CapabilityId,
     #[serde(default)]
     provider: Option<ExtensionId>,
-    #[serde(default)]
-    runtime: Option<TrustedRuntimeKindWire>,
+    #[serde(
+        default,
+        deserialize_with = "ironclaw_host_api::runtime::deserialize_trusted_optional_runtime_kind"
+    )]
+    runtime: Option<RuntimeKind>,
     #[serde(default)]
     process_id: Option<ProcessId>,
     #[serde(default)]
@@ -231,28 +263,12 @@ struct TrustedRuntimeEventWire {
     hook_failure_category: Option<String>,
     #[serde(default)]
     hook_failure_disposition: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum TrustedRuntimeKindWire {
-    Wasm,
-    Mcp,
-    Script,
-    FirstParty,
-    System,
-}
-
-impl From<TrustedRuntimeKindWire> for RuntimeKind {
-    fn from(value: TrustedRuntimeKindWire) -> Self {
-        match value {
-            TrustedRuntimeKindWire::Wasm => Self::Wasm,
-            TrustedRuntimeKindWire::Mcp => Self::Mcp,
-            TrustedRuntimeKindWire::Script => Self::Script,
-            TrustedRuntimeKindWire::FirstParty => Self::FirstParty,
-            TrustedRuntimeKindWire::System => Self::System,
-        }
-    }
+    #[serde(default)]
+    recovery_stage: Option<String>,
+    #[serde(default)]
+    recovery_class: Option<String>,
+    #[serde(default)]
+    recovery_disposition: Option<String>,
 }
 
 impl RuntimeEventWire {
@@ -280,6 +296,9 @@ impl RuntimeEventWire {
             hook_decision: self.hook_decision.map(sanitize_hook_label),
             hook_failure_category: self.hook_failure_category.map(sanitize_hook_label),
             hook_failure_disposition: self.hook_failure_disposition.map(sanitize_hook_label),
+            recovery_stage: self.recovery_stage.map(sanitize_telemetry_label),
+            recovery_class: self.recovery_class.map(sanitize_telemetry_label),
+            recovery_disposition: self.recovery_disposition.map(sanitize_telemetry_label),
         }
     }
 }
@@ -298,7 +317,7 @@ impl TrustedRuntimeEventWire {
             parent_invocation_id: self.parent_invocation_id,
             capability_id: self.capability_id,
             provider: self.provider,
-            runtime: self.runtime.map(Into::into),
+            runtime: self.runtime,
             process_id: self.process_id,
             output_bytes: self.output_bytes,
             error_kind: self.error_kind.map(sanitize_error_kind),
@@ -309,6 +328,9 @@ impl TrustedRuntimeEventWire {
             hook_decision: self.hook_decision.map(sanitize_hook_label),
             hook_failure_category: self.hook_failure_category.map(sanitize_hook_label),
             hook_failure_disposition: self.hook_failure_disposition.map(sanitize_hook_label),
+            recovery_stage: self.recovery_stage.map(sanitize_telemetry_label),
+            recovery_class: self.recovery_class.map(sanitize_telemetry_label),
+            recovery_disposition: self.recovery_disposition.map(sanitize_telemetry_label),
         }
     }
 }
@@ -639,6 +661,9 @@ impl RuntimeEvent {
             hook_decision: payload.hook_decision,
             hook_failure_category: payload.hook_failure_category,
             hook_failure_disposition: payload.hook_failure_disposition,
+            recovery_stage: None,
+            recovery_class: None,
+            recovery_disposition: None,
         }
     }
 
@@ -681,6 +706,25 @@ impl RuntimeEvent {
     pub fn with_error_summary(mut self, summary: impl AsRef<str>) -> Self {
         self.error_summary = sanitize_error_summary(summary);
         self
+    }
+
+    /// Construct a durable recovery numerator event from closed-vocabulary
+    /// labels supplied by the typed loop milestone contract.
+    pub fn failure_recovered(
+        event_id: RuntimeEventId,
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        stage: impl Into<String>,
+        class: impl Into<String>,
+        disposition: impl Into<String>,
+    ) -> Self {
+        let mut event =
+            Self::new_metadata_only(RuntimeEventKind::FailureRecovered, scope, capability_id);
+        event.event_id = event_id;
+        event.recovery_stage = Some(sanitize_telemetry_label(stage));
+        event.recovery_class = Some(sanitize_telemetry_label(class));
+        event.recovery_disposition = Some(sanitize_telemetry_label(disposition));
+        event
     }
 
     /// Construct a [`RuntimeEventKind::HookDispatched`] event.
@@ -1087,7 +1131,7 @@ fn is_error_kind_char(byte: u8) -> bool {
 /// telemetry rather than runtime error classification.
 pub const UNCLASSIFIED_HOOK_LABEL: &str = "unclassified";
 
-const MAX_HOOK_LABEL_LEN: usize = 48;
+const MAX_TELEMETRY_LABEL_LEN: usize = 48;
 const HOOK_ID_LEN: usize = 64;
 
 /// Collapse any hook label (point, trust class, decision kind, failure
@@ -1098,16 +1142,30 @@ const HOOK_ID_LEN: usize = 64;
 /// Accepts only lowercase ASCII letters, digits, and `_`. First character must
 /// be a lowercase ASCII letter. Maximum 48 bytes.
 pub fn sanitize_hook_label(label: impl Into<String>) -> String {
+    sanitize_telemetry_label(label)
+}
+
+/// Collapse an unsafe recovery stage, class, or disposition into the fixed
+/// `unclassified` token before it crosses a durable or projection boundary.
+///
+/// Recovery labels share the same bounded `lower_snake_case` vocabulary as
+/// hook telemetry, but this named entry point keeps ownership explicit for
+/// downstream projection consumers.
+pub fn sanitize_recovery_label(label: impl Into<String>) -> String {
+    sanitize_telemetry_label(label)
+}
+
+fn sanitize_telemetry_label(label: impl Into<String>) -> String {
     let value = label.into();
-    if is_safe_hook_label(&value) {
+    if is_safe_telemetry_label(&value) {
         value
     } else {
         UNCLASSIFIED_HOOK_LABEL.to_string()
     }
 }
 
-fn is_safe_hook_label(value: &str) -> bool {
-    if value.is_empty() || value.len() > MAX_HOOK_LABEL_LEN {
+fn is_safe_telemetry_label(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_TELEMETRY_LABEL_LEN {
         return false;
     }
     let first = value.as_bytes()[0];
@@ -1143,7 +1201,8 @@ fn is_safe_hook_id(value: &str) -> bool {
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        AgentId, INPUT_ENCODE_HUMAN_SUMMARY, InvocationId, ProjectId, TenantId, UserId,
+        dispatch::INPUT_ENCODE_HUMAN_SUMMARY,
+        ids::{AgentId, InvocationId, ProjectId, TenantId, UserId},
     };
 
     fn scope() -> ResourceScope {
@@ -1379,6 +1438,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn failure_recovered_round_trips_and_old_events_default_recovery_fields() {
+        let recovered = RuntimeEvent::failure_recovered(
+            RuntimeEventId::new(),
+            scope(),
+            capability(),
+            "capability",
+            "backend",
+            "retried",
+        );
+        let wire = serde_json::to_string(&recovered).expect("serialize recovery event");
+        let decoded: RuntimeEvent =
+            serde_json::from_str(&wire).expect("deserialize recovery event");
+        assert_eq!(decoded, recovered);
+        assert_eq!(decoded.kind, RuntimeEventKind::FailureRecovered);
+        assert_eq!(decoded.recovery_stage.as_deref(), Some("capability"));
+        assert_eq!(decoded.recovery_class.as_deref(), Some("backend"));
+        assert_eq!(decoded.recovery_disposition.as_deref(), Some("retried"));
+
+        let old_event = RuntimeEvent::model_completed(scope(), capability());
+        let mut old_wire = serde_json::to_value(old_event).expect("serialize old event shape");
+        old_wire
+            .as_object_mut()
+            .expect("runtime event must serialize as an object")
+            .retain(|key, _| {
+                !matches!(
+                    key.as_str(),
+                    "recovery_stage" | "recovery_class" | "recovery_disposition"
+                )
+            });
+        let decoded_old: RuntimeEvent =
+            serde_json::from_value(old_wire).expect("deserialize old event shape");
+        assert!(decoded_old.recovery_stage.is_none());
+        assert!(decoded_old.recovery_class.is_none());
+        assert!(decoded_old.recovery_disposition.is_none());
+    }
+
     /// PR #3640 finding D10: the round-trip tests above pass `None` for the
     /// `owning_extension` argument so they never exercise the `provider`
     /// projection on hook-meta events. This test pins the property that
@@ -1439,14 +1535,22 @@ mod tests {
         );
         event.runtime = Some(RuntimeKind::System);
 
-        for runtime in ["first_party", "system"] {
+        // `Sandbox` (the container-execution lane) is folded into this table
+        // alongside `first_party`/`system`: all three are host-assigned-only
+        // runtime kinds, so the untrusted path must reject them and the
+        // trusted (durable-log replay) path must still accept them. `Sandbox`
+        // used to be its own standalone round-trip test asserting the
+        // *opposite* — that untrusted decode accepted it — back when it
+        // wasn't gated; that was the open security question this table now
+        // closes.
+        for runtime in ["first_party", "system", "sandbox"] {
             let mut wire =
                 serde_json::to_value(&event).expect("runtime event should serialize to json");
             wire["runtime"] = serde_json::Value::String(runtime.to_string());
 
             assert!(
                 serde_json::from_value::<RuntimeEvent>(wire.clone()).is_err(),
-                "untrusted runtime event serde must not accept privileged runtime kind"
+                "untrusted runtime event serde must not accept privileged runtime kind {runtime}"
             );
             let decoded =
                 runtime_event_from_trusted_json_str(&serde_json::to_string(&wire).unwrap())
@@ -1456,6 +1560,7 @@ mod tests {
                 Some(match runtime {
                     "first_party" => RuntimeKind::FirstParty,
                     "system" => RuntimeKind::System,
+                    "sandbox" => RuntimeKind::Sandbox,
                     _ => unreachable!("test table only contains privileged runtime kinds"),
                 })
             );

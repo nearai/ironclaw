@@ -3,7 +3,8 @@ use super::*;
 use crate::{AuthChallengeProvider, AuthChallengeView, AuthPromptChallengeKind};
 use ironclaw_auth::{AuthProviderId, OAuthAuthorizationUrl};
 use ironclaw_host_api::{
-    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, VendorId,
+    capability::RuntimeCredentialAccountSetup, decision::RuntimeCredentialAuthRequirement,
+    ids::VendorId,
 };
 
 struct FakeAuthChallengeProvider {
@@ -41,6 +42,7 @@ impl AuthChallengeProvider for FakeAuthChallengeProvider {
                     .unwrap(),
             ),
             expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
+            pairing: None,
         }))
     }
 }
@@ -75,6 +77,24 @@ impl AuthChallengeProvider for FakePairingAuthChallengeProvider {
             account_label: None,
             authorization_url: None,
             expires_at: None,
+            pairing: Some(crate::PairingAuthChallengeView {
+                code: "ABCD2345".to_string(),
+                deep_link: Some("https://t.me/fixturebot?start=ABCD2345".to_string()),
+                expires_at: chrono::Utc::now() + chrono::Duration::minutes(15),
+                connection: crate::ChannelConnectionRequirement {
+                    channel: "telegram".to_string(),
+                    display_name: "Telegram".to_string(),
+                    strategy: crate::RebornChannelConnectStrategy::WebGeneratedCode,
+                    instructions: "Send this code to the bot.".to_string(),
+                    // Real Telegram ships `input_placeholder = ""` — its
+                    // web_generated_code pairing has no text input. Keep this
+                    // EMPTY: it is the production shape, and filling it in is
+                    // what previously hid a stream-breaking validation failure.
+                    input_placeholder: String::new(),
+                    submit_label: "Open pairing".to_string(),
+                    error_message: "Pairing failed.".to_string(),
+                },
+            }),
         }))
     }
 }
@@ -109,7 +129,7 @@ async fn product_event_stream_enriches_auth_prompt_through_projection_stream() {
                 status: TurnStatus::BlockedAuth,
                 kind: TurnEventKind::Blocked,
                 blocked_gate: Some(TurnBlockedGateMetadata {
-                    gate_ref: GateRef::new(gate_ref).unwrap(),
+                    gate_ref: TurnGateRef::new(gate_ref).unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
                     activity_id: None,
                     credential_requirements: Vec::new(),
@@ -170,7 +190,7 @@ async fn product_event_stream_enriches_auth_prompt_through_projection_stream() {
 }
 
 #[tokio::test]
-async fn product_event_stream_does_not_invent_pairing_prompt_context() {
+async fn product_event_stream_projects_pairing_prompt_connection_context() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -205,7 +225,7 @@ async fn product_event_stream_does_not_invent_pairing_prompt_context() {
                 status: TurnStatus::BlockedAuth,
                 kind: TurnEventKind::Blocked,
                 blocked_gate: Some(TurnBlockedGateMetadata {
-                    gate_ref: GateRef::new(gate_ref).unwrap(),
+                    gate_ref: TurnGateRef::new(gate_ref).unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
                     activity_id: None,
                     credential_requirements: credential_requirements.clone(),
@@ -217,7 +237,7 @@ async fn product_event_stream_does_not_invent_pairing_prompt_context() {
         }),
         Arc::new(FakeTurnCoordinator {
             state: TurnRunState {
-                gate_ref: Some(GateRef::new(gate_ref).unwrap()),
+                gate_ref: Some(TurnGateRef::new(gate_ref).unwrap()),
                 credential_requirements,
                 ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1))
             },
@@ -248,8 +268,31 @@ async fn product_event_stream_does_not_invent_pairing_prompt_context() {
         Some(AuthPromptChallengeKind::Pairing)
     );
     assert_eq!(prompt.provider.as_deref(), Some("telegram"));
-    assert!(prompt.connection.is_none());
-    assert!(prompt.pairing.is_none());
+    // A pairing challenge MUST carry its manifest connection recipe and the
+    // host-issued code. Without both, the WebUI card router
+    // (`channelConnectionFromGate`) falls through to the "unsupported
+    // challenge" card and the user is told to cancel and retry elsewhere.
+    // #6616 reverted this and rewrote these two lines to assert `is_none()`,
+    // which is why the regression shipped green.
+    let connection = prompt
+        .connection
+        .as_ref()
+        .expect("pairing prompt carries its channel-connection recipe");
+    assert_eq!(connection.channel, "telegram");
+    assert_eq!(connection.strategy.as_deref(), Some("web_generated_code"));
+    // A manifest field that is legitimately blank must project as ABSENT, not
+    // as an empty string: the projection validator rejects `Some("")` and the
+    // whole chat stream fails with "Validation".
+    assert_eq!(
+        connection.input_placeholder, None,
+        "a blank manifest placeholder must be None, never Some(\"\")"
+    );
+    let pairing = prompt
+        .pairing
+        .as_ref()
+        .expect("pairing prompt carries the host-issued code");
+    assert_eq!(pairing.code, "ABCD2345");
+    assert_eq!(pairing.channel, "telegram");
 
     let auth_context = events
         .iter()
@@ -267,8 +310,11 @@ async fn product_event_stream_does_not_invent_pairing_prompt_context() {
             _ => None,
         })
         .expect("projected pairing auth context");
-    assert!(auth_context.connection.is_none());
-    assert!(auth_context.pairing.is_none());
+    assert!(
+        auth_context.connection.is_some(),
+        "the projected gate must carry connection context so the card renders"
+    );
+    assert!(auth_context.pairing.is_some());
 }
 
 #[tokio::test]
@@ -307,7 +353,7 @@ async fn product_event_stream_uses_credential_requirement_for_manual_token_auth_
                 status: TurnStatus::BlockedAuth,
                 kind: TurnEventKind::Blocked,
                 blocked_gate: Some(TurnBlockedGateMetadata {
-                    gate_ref: GateRef::new(gate_ref).unwrap(),
+                    gate_ref: TurnGateRef::new(gate_ref).unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
                     activity_id: None,
                     credential_requirements: credential_requirements.clone(),
@@ -401,7 +447,7 @@ async fn product_event_stream_keeps_retired_channel_pairing_requirement_generic(
                 status: TurnStatus::BlockedAuth,
                 kind: TurnEventKind::Blocked,
                 blocked_gate: Some(TurnBlockedGateMetadata {
-                    gate_ref: GateRef::new(gate_ref).unwrap(),
+                    gate_ref: TurnGateRef::new(gate_ref).unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
                     activity_id: None,
                     credential_requirements: credential_requirements.clone(),
@@ -490,7 +536,7 @@ async fn product_event_stream_keeps_oauth_requirement_as_oauth_prompt_without_ur
                 status: TurnStatus::BlockedAuth,
                 kind: TurnEventKind::Blocked,
                 blocked_gate: Some(TurnBlockedGateMetadata {
-                    gate_ref: GateRef::new(gate_ref).unwrap(),
+                    gate_ref: TurnGateRef::new(gate_ref).unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
                     activity_id: None,
                     credential_requirements: credential_requirements.clone(),
@@ -563,7 +609,7 @@ async fn product_event_stream_surfaces_auth_challenge_lookup_failure() {
                 status: TurnStatus::BlockedAuth,
                 kind: TurnEventKind::Blocked,
                 blocked_gate: Some(TurnBlockedGateMetadata {
-                    gate_ref: GateRef::new(gate_ref).unwrap(),
+                    gate_ref: TurnGateRef::new(gate_ref).unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
                     activity_id: None,
                     credential_requirements: Vec::new(),
@@ -628,6 +674,7 @@ async fn product_event_stream_creates_vendor_oauth_prompt_for_runtime_credential
                     .unwrap(),
                 ),
                 expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
+                pairing: None,
             }))
         }
     }
@@ -646,7 +693,7 @@ async fn product_event_stream_creates_vendor_oauth_prompt_for_runtime_credential
     );
     let credential_requirements = vec![RuntimeCredentialAuthRequirement {
         provider: VendorId::new("vendorco").unwrap(),
-        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+        setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["items:read".to_string()],
         },
         requester_extension: ExtensionId::new("vendorco-tools").unwrap(),
@@ -669,7 +716,7 @@ async fn product_event_stream_creates_vendor_oauth_prompt_for_runtime_credential
                 status: TurnStatus::BlockedAuth,
                 kind: TurnEventKind::Blocked,
                 blocked_gate: Some(TurnBlockedGateMetadata {
-                    gate_ref: GateRef::new(gate_ref).unwrap(),
+                    gate_ref: TurnGateRef::new(gate_ref).unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
                     activity_id: None,
                     credential_requirements: credential_requirements.clone(),

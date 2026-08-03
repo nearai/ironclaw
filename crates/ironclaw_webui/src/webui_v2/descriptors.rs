@@ -4,13 +4,16 @@
 //! handler from [`crate::webui_v2::handlers`] under each descriptor's pattern. The
 //! descriptor is the contract: changing a route's policy here changes what
 //! host composition enforces before the handler runs.
+// arch-exempt: large_file, missing aggregation is a typed route-family registry that can assemble split descriptor modules into this canonical policy table, plan #6524
+
+// arch-exempt: large_file, one descriptor function per WebUI v2 route mirrors the handler/router split tracked for this whole module family, plan #5985
 
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
     IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
-use ironclaw_host_api::{IngressScopeSource, NetworkMethod};
+use ironclaw_host_api::{action::NetworkMethod, ingress::IngressScopeSource};
 use std::num::{NonZeroU32, NonZeroU64};
 
 mod run_action_descriptors;
@@ -30,9 +33,12 @@ pub const WEBUI_V2_ROUTE_SEND_MESSAGE: &str = "webui.v2.send_message";
 pub const WEBUI_V2_ROUTE_LIST_THREADS: &str = "webui.v2.list_threads";
 pub const WEBUI_V2_ROUTE_GET_TIMELINE: &str = "webui.v2.get_timeline";
 pub const WEBUI_V2_ROUTE_GET_RUN_ARTIFACT: &str = "webui.v2.get_run_artifact";
+pub const WEBUI_V2_ROUTE_GET_THREAD_ARTIFACT: &str = "webui.v2.get_thread_artifact";
 pub const WEBUI_V2_ROUTE_GET_ATTACHMENT: &str = "webui.v2.get_attachment";
 pub const WEBUI_V2_ROUTE_STREAM_EVENTS: &str = "webui.v2.stream_events";
 pub const WEBUI_V2_ROUTE_STREAM_EVENTS_WS: &str = "webui.v2.stream_events_ws";
+pub const WEBUI_V2_ROUTE_LIST_COMMANDS: &str = "webui.v2.list_commands";
+pub const WEBUI_V2_ROUTE_EXECUTE_COMMAND: &str = "webui.v2.execute_command";
 pub const WEBUI_V2_ROUTE_LIST_AUTOMATIONS: &str = "webui.v2.list_automations";
 pub const WEBUI_V2_ROUTE_PAUSE_AUTOMATION: &str = "webui.v2.pause_automation";
 pub const WEBUI_V2_ROUTE_RESUME_AUTOMATION: &str = "webui.v2.resume_automation";
@@ -49,6 +55,8 @@ pub const WEBUI_V2_ROUTE_LIST_OUTBOUND_DELIVERY_TARGETS: &str =
 pub const WEBUI_V2_ROUTE_LIST_EXTENSIONS: &str = "webui.v2.list_extensions";
 pub const WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY: &str = "webui.v2.list_extension_registry";
 pub const WEBUI_V2_ROUTE_INSTALL_EXTENSION: &str = "webui.v2.install_extension";
+pub const WEBUI_V2_ROUTE_REGISTER_HOSTED_MCP_EXTENSION: &str =
+    "webui.v2.register_hosted_mcp_extension";
 pub const WEBUI_V2_ROUTE_IMPORT_EXTENSION: &str = "webui.v2.import_extension";
 pub const WEBUI_V2_ROUTE_REMOVE_EXTENSION: &str = "webui.v2.remove_extension";
 pub const WEBUI_V2_ROUTE_GET_EXTENSION_SETUP: &str = "webui.v2.get_extension_setup";
@@ -126,11 +134,15 @@ pub const WEBUI_V2_PATTERN_SEND_MESSAGE: &str = "/api/webchat/v2/threads/{thread
 pub const WEBUI_V2_PATTERN_GET_TIMELINE: &str = "/api/webchat/v2/threads/{thread_id}/timeline";
 pub const WEBUI_V2_PATTERN_GET_RUN_ARTIFACT: &str =
     "/api/webchat/v2/threads/{thread_id}/runs/{run_id}/artifact";
+pub const WEBUI_V2_PATTERN_GET_THREAD_ARTIFACT: &str =
+    "/api/webchat/v2/threads/{thread_id}/artifact";
 pub const WEBUI_V2_PATTERN_LOGS: &str = "/api/webchat/v2/logs";
 pub const WEBUI_V2_PATTERN_GET_ATTACHMENT: &str =
     "/api/webchat/v2/threads/{thread_id}/messages/{message_id}/attachments/{attachment_id}";
 pub const WEBUI_V2_PATTERN_STREAM_EVENTS: &str = "/api/webchat/v2/threads/{thread_id}/events";
 pub const WEBUI_V2_PATTERN_STREAM_EVENTS_WS: &str = "/api/webchat/v2/threads/{thread_id}/ws";
+pub const WEBUI_V2_PATTERN_LIST_COMMANDS: &str = "/api/webchat/v2/commands";
+pub const WEBUI_V2_PATTERN_EXECUTE_COMMAND: &str = "/api/webchat/v2/threads/{thread_id}/commands";
 pub const WEBUI_V2_PATTERN_LIST_AUTOMATIONS: &str = "/api/webchat/v2/automations";
 pub const WEBUI_V2_PATTERN_PAUSE_AUTOMATION: &str =
     "/api/webchat/v2/automations/{automation_id}/pause";
@@ -158,6 +170,8 @@ pub const WEBUI_V2_PATTERN_ADMIN_USER_SECRET: &str =
 pub const WEBUI_V2_PATTERN_LIST_EXTENSIONS: &str = "/api/webchat/v2/extensions";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY: &str = "/api/webchat/v2/extensions/registry";
 pub const WEBUI_V2_PATTERN_INSTALL_EXTENSION: &str = "/api/webchat/v2/extensions/install";
+pub const WEBUI_V2_PATTERN_REGISTER_HOSTED_MCP_EXTENSION: &str =
+    "/api/webchat/v2/extensions/register-hosted-mcp";
 pub const WEBUI_V2_PATTERN_IMPORT_EXTENSION: &str = "/api/webchat/v2/extensions/import";
 pub const WEBUI_V2_PATTERN_REMOVE_EXTENSION: &str =
     "/api/webchat/v2/extensions/{package_id}/remove";
@@ -212,21 +226,34 @@ pub const WEBUI_V2_PATTERN_PROJECT_MEMBERS: &str = "/api/webchat/v2/projects/{pr
 pub const WEBUI_V2_PATTERN_PROJECT_MEMBER_DETAIL: &str =
     "/api/webchat/v2/projects/{project_id}/members/{user_id}";
 
-/// Return the canonical [`IngressRouteDescriptor`] set for the WebChat v2
-/// beta route surface.
+/// Return the default production [`IngressRouteDescriptor`] set for the
+/// WebChat v2 beta route surface.
 ///
 /// Host composition calls this once at startup, validates the descriptors
 /// against its own mount table, and refuses to bind any route whose policy
-/// the host cannot enforce.
+/// the host cannot enforce. QA-only regression artifact exports are omitted
+/// unless composition explicitly opts in through
+/// [`webui_v2_routes_with_regression_artifact_export`].
 pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
-    vec![
+    webui_v2_routes_with_regression_artifact_export(false)
+}
+
+/// Return the canonical descriptor set for the selected artifact-export
+/// deployment policy.
+///
+/// The same captured deployment flag must feed this table and
+/// [`crate::webui_v2::WebUiV2State`] so host middleware never advertises a
+/// route the inner router does not mount.
+pub fn webui_v2_routes_with_regression_artifact_export(
+    regression_artifact_export_enabled: bool,
+) -> Vec<IngressRouteDescriptor> {
+    let mut routes = vec![
         get_session_descriptor(),
         create_thread_descriptor(),
         delete_thread_descriptor(),
         send_message_descriptor(),
         list_threads_descriptor(),
         get_timeline_descriptor(),
-        get_run_artifact_descriptor(),
         logs_descriptor(),
         get_attachment_descriptor(),
         stream_events_descriptor(),
@@ -234,6 +261,8 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         cancel_run_descriptor(),
         resolve_gate_descriptor(),
         retry_run_descriptor(),
+        list_commands_descriptor(),
+        execute_command_descriptor(),
         list_automations_descriptor(),
         pause_automation_descriptor(),
         resume_automation_descriptor(),
@@ -249,6 +278,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         list_extensions_descriptor(),
         list_extension_registry_descriptor(),
         install_extension_descriptor(),
+        register_hosted_mcp_extension_descriptor(),
         import_extension_descriptor(),
         remove_extension_descriptor(),
         get_extension_setup_descriptor(),
@@ -311,7 +341,12 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         admin_list_user_secrets_descriptor(),
         admin_put_user_secret_descriptor(),
         admin_delete_user_secret_descriptor(),
-    ]
+    ];
+    if regression_artifact_export_enabled {
+        routes.push(get_run_artifact_descriptor());
+        routes.push(get_thread_artifact_descriptor());
+    }
+    routes
 }
 
 /// Returns whether a route id belongs to any operator-wide WebUI config surface.
@@ -802,6 +837,20 @@ fn get_run_artifact_descriptor() -> IngressRouteDescriptor {
     )
 }
 
+fn get_thread_artifact_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_GET_THREAD_ARTIFACT,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_GET_THREAD_ARTIFACT,
+        read_policy(
+            thread_artifact_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
 fn get_attachment_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_GET_ATTACHMENT,
@@ -856,6 +905,34 @@ fn stream_events_ws_descriptor() -> IngressRouteDescriptor {
             stream_rate_limit(),
             AuditTraceClass::StreamingSubscription,
             AllowedEffectPath::ProjectionOnly,
+        ),
+    )
+}
+
+fn list_commands_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_COMMANDS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_LIST_COMMANDS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn execute_command_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_EXECUTE_COMMAND,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_EXECUTE_COMMAND,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }
@@ -1065,6 +1142,20 @@ fn install_extension_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_INSTALL_EXTENSION,
         NetworkMethod::Post,
         WEBUI_V2_PATTERN_INSTALL_EXTENSION,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
+fn register_hosted_mcp_extension_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_REGISTER_HOSTED_MCP_EXTENSION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_REGISTER_HOSTED_MCP_EXTENSION,
         mutation_policy(
             body_limit_kib(16),
             mutation_rate_limit(),
@@ -1689,6 +1780,10 @@ fn mutation_rate_limit() -> RateLimitPolicy {
 
 fn read_rate_limit() -> RateLimitPolicy {
     rate_limit_per_caller(120, 60)
+}
+
+fn thread_artifact_rate_limit() -> RateLimitPolicy {
+    rate_limit_per_caller(6, 60)
 }
 
 fn stream_rate_limit() -> RateLimitPolicy {

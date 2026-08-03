@@ -14,7 +14,12 @@ use ironclaw_filesystem::{
     BackendCapabilities, DirEntry, FileStat, FileType, FilesystemError, RecordVersion,
     RootFilesystem, ScopedFilesystem,
 };
-use ironclaw_host_api::{HostApiError, MountView, ResourceScope, ScopedPath, VirtualPath};
+use ironclaw_host_api::{
+    error::HostApiError,
+    mount::MountView,
+    path::{ScopedPath, VirtualPath},
+    resource::ResourceScope,
+};
 
 mod install_bundle;
 #[cfg(test)]
@@ -247,6 +252,8 @@ pub struct SkillContentRequest<'a> {
 pub struct SkillContentResult {
     pub name: String,
     pub content: String,
+    pub source: SkillSource,
+    pub source_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -572,9 +579,25 @@ pub async fn read_skill_content(
     let content = read_skill_file(context, &skill_path)
         .await?
         .ok_or_else(|| SkillManagementError::new(SkillManagementErrorKind::NotFound))?;
+    let install_metadata = read_install_metadata_bytes(context, &skill_path).await?;
+    let source = install_metadata
+        .as_deref()
+        .map(|bytes| install_metadata_source(SkillSource::User, bytes))
+        .unwrap_or(SkillSource::User);
+    let source_url = install_metadata.and_then(|bytes| {
+        match serde_json::from_slice::<crate::InstalledSkillMetadata>(&bytes) {
+            Ok(metadata) => metadata.source_url,
+            Err(error) => {
+                tracing::debug!(%error, "skill install metadata source URL is unavailable");
+                None
+            }
+        }
+    });
     Ok(SkillContentResult {
         name: request.name.to_string(),
         content,
+        source,
+        source_url,
     })
 }
 

@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use ironclaw_host_api::{ResourceScope, SecretHandle};
+use ironclaw_host_api::{ids::SecretHandle, resource::ResourceScope};
 use ironclaw_secrets::{SecretMaterial, SecretStoreError};
 use thiserror::Error;
 

@@ -14,7 +14,10 @@ use ironclaw_auth::{
     PkceVerifierHash, PkceVerifierSecret, ProviderScope,
 };
 use ironclaw_auth::{RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest};
-use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
+use ironclaw_host_api::{
+    ids::{InvocationId, UserId},
+    resource::ResourceScope,
+};
 use secrecy::SecretString;
 
 /// Build a 64-character hex string from a repeated byte value.
@@ -55,6 +58,8 @@ pub fn new_flow_request(
         opaque_state_hash: Some(state_hash.clone()),
         pkce_verifier_hash: Some(pkce_hash.clone()),
         expires_at,
+        // User-driven connect flow in this fixture, not extension-owned.
+        requester_extension: None,
     }
 }
 

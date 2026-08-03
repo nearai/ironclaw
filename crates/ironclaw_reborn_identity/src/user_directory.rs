@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::ids::{TenantId, UserId};
 
 use crate::RebornIdentityError;
 

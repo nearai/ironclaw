@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 import pytest
 
+from hermetic_process import forward_hermetic_process_env
 from helpers import (
     AUTH_TOKEN,
     EMULATE_GITHUB_BEARER,
@@ -80,6 +81,22 @@ EMULATE_STARTUP_POLL_SECONDS = 0.5
 TEST_TOOLS_DIR = ROOT / "test-tools"
 BUILD_TEST_TOOLS_SCRIPT = ROOT / "scripts" / "build-test-tools.sh"
 TEST_TOOL_NAMES = ("ascii-renderer", "hacker-news", "market-data")
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Forward final pytest outcomes to the optional Reborn artifact recorder."""
+    outcome = yield
+    report = outcome.get_result()
+    from reborn_webui_harness import (
+        _finalize_registered_artifact_bundles,
+        _mark_registered_artifact_bundles_failed,
+    )
+
+    if report.failed:
+        _mark_registered_artifact_bundles_failed(item.nodeid)
+    if report.when == "teardown":
+        _finalize_registered_artifact_bundles(item.nodeid)
 
 
 def _latest_mtime(path: Path) -> float:
@@ -211,6 +228,45 @@ def _emulate_unavailable(reason: str) -> None:
     pytest.skip(reason)
 
 
+def emulate_build_label() -> str:
+    """Which Emulate this process talks to, for reporting."""
+    if globals()["EMULATE_CLI_PATH"]:
+        return f"pinned fork CLI at {EMULATE_CLI_PATH}"
+    return f"npm fallback {EMULATE_NPM_PACKAGE} (NOT what CI runs)"
+
+
+def skip_if_emulate_capability_absent(reason: str) -> None:
+    """Skip on the npm fallback; FAIL on the pinned build CI uses.
+
+    These guards exist because the npm package lacks endpoints the pinned
+    fork implements, so on the fallback a skip is the honest outcome. On the
+    pinned build the capability is expected to be there — a skip would mean
+    the fork regressed, and reporting that as "skipped" is how a coverage
+    loss hides in a green run.
+
+    Measured on `test_emulate_reborn_provider_contracts.py` against
+    unmodified main: the npm fallback gave 1 failed / 10 passed / 3 skipped,
+    the pinned fork gave 14 passed. A local run was quietly exercising less
+    than CI with nothing saying so.
+    """
+    if globals()["EMULATE_CLI_PATH"]:
+        pytest.fail(
+            f"{reason} — but this run uses the pinned Emulate fork, which is "
+            "expected to expose it. Treat as a capability regression in the "
+            "pinned build, not an environment quirk."
+        )
+    pytest.skip(f"{reason} (npm fallback; the pinned fork CI uses has it)")
+
+
+def pytest_report_header() -> str:
+    """Name the Emulate build in the pytest header.
+
+    Without this the fallback and the pinned fork produce identical-looking
+    runs, and "it passed locally" silently means something weaker than CI.
+    """
+    return f"emulate: {emulate_build_label()}"
+
+
 def _wasip2_target_missing() -> bool:
     try:
         installed = subprocess.run(
@@ -261,12 +317,13 @@ def test_tool_zips() -> dict[str, Path]:
 
 
 def _forward_coverage_env(env: dict[str, str]) -> None:
-    """Forward cargo-llvm-cov env vars into child processes when present."""
+    """Forward CI instrumentation and hermetic controls to child processes."""
     cov_env_prefixes = ("CARGO_LLVM_COV", "LLVM_")
     cov_env_extras = ("CARGO_ENCODED_RUSTFLAGS", "CARGO_INCREMENTAL")
     for key, val in os.environ.items():
         if key.startswith(cov_env_prefixes) or key in cov_env_extras:
             env[key] = val
+    forward_hermetic_process_env(env)
 
 
 def _build_gateway_env(
@@ -433,6 +490,32 @@ def ironclaw_reborn_binary():
                 "cargo", "build",
                 "-p", "ironclaw",
                 "--bin", "ironclaw",
+            ],
+            cwd=ROOT,
+            check=True,
+            timeout=600,
+        )
+    assert binary.exists(), (
+        f"Binary not found at {binary}. "
+        f"Cargo target dir resolved to: {target_dir}"
+    )
+    return str(binary)
+
+
+@pytest.fixture(scope="session")
+def ironclaw_reborn_sso_binary():
+    """Build the debug-only Reborn binary variant used by the SSO mock."""
+    target_dir = _cargo_target_dir() / "e2e-sso"
+    binary = target_dir / "debug" / "ironclaw"
+    if _binary_needs_rebuild(binary):
+        print("Building Reborn ironclaw with test support (this may take a while)...")
+        subprocess.run(
+            [
+                "cargo", "build",
+                "-p", "ironclaw",
+                "--bin", "ironclaw",
+                "--features", "test-support",
+                "--target-dir", str(target_dir),
             ],
             cwd=ROOT,
             check=True,

@@ -13,9 +13,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use ironclaw_auth::{AuthRecipeResolver, ResolvedVendorAuthRecipe};
-use ironclaw_extensions::ResolvedExtensionManifest;
-use ironclaw_host_api::VendorAuthRecipe;
+use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
+use ironclaw_extensions::{ExtensionInstallationStorePort, ResolvedExtensionManifest};
+use ironclaw_host_api::ids::ExtensionId;
 
 use crate::SnapshotWatch;
 
@@ -59,6 +61,9 @@ pub fn unified_vendor_recipes<'a>(
                                 vendor,
                                 recipe: recipe.clone(),
                                 token_exchange_resource: resource.clone(),
+                                protected_resource_metadata_url: surface
+                                    .protected_resource_metadata_url
+                                    .clone(),
                             },
                         ),
                     );
@@ -85,11 +90,82 @@ pub fn unified_vendor_recipes<'a>(
                     if existing.token_exchange_resource.is_none() {
                         existing.token_exchange_resource = resource.clone();
                     }
+                    if existing.protected_resource_metadata_url.is_none() {
+                        existing.protected_resource_metadata_url =
+                            surface.protected_resource_metadata_url.clone();
+                    }
                 }
             }
         }
     }
     Ok(unified.into_values().map(|(_, recipe)| recipe).collect())
+}
+
+/// Vendor-scoped resolver over the durable installation manifest source.
+///
+/// This deliberately reads the existing installation store instead of a
+/// recipe sidecar or a vendor-global registry. Store failures and missing
+/// manifests fail closed because a recipe is authorization-sensitive input.
+/// Resolution is scoped to the vendor, not to the requesting extension: see
+/// `resolve` for why a per-requester ceiling breaks extensions that share a
+/// provider account.
+#[derive(Clone)]
+pub struct InstalledManifestAuthRecipeResolver {
+    store: Arc<dyn ExtensionInstallationStorePort>,
+}
+
+impl std::fmt::Debug for InstalledManifestAuthRecipeResolver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InstalledManifestAuthRecipeResolver")
+            .finish_non_exhaustive()
+    }
+}
+
+impl InstalledManifestAuthRecipeResolver {
+    pub fn new(store: Arc<dyn ExtensionInstallationStorePort>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl AuthRecipeResolver for InstalledManifestAuthRecipeResolver {
+    async fn resolve(
+        &self,
+        requester_extension: Option<&ExtensionId>,
+        vendor: &str,
+    ) -> Option<ResolvedVendorAuthRecipe> {
+        // The scope ceiling is the UNION across every installed extension
+        // declaring this vendor, not just the requester's own manifest.
+        //
+        // This resolver is the path connect flows actually take: they run
+        // before activation completes, so the active snapshot is still empty
+        // and the snapshot resolver delegates here. Several extensions can
+        // share one credential account for a vendor, and that account holds a
+        // single scope set that each exchange replaces rather than merges — so
+        // a per-requester ceiling clamps the grant to the requester's own
+        // scopes and wipes every sibling's, leaving already-connected
+        // extensions reporting that setup is still needed.
+        //
+        // silent-ok: list_manifests read for recipe resolution; AuthRecipeResolver is Option-valued, so a store failure must fail closed (no recipe) rather than resolve to none.
+        let records = self.store.list_manifests().await.ok()?;
+        let manifests: Vec<&ResolvedExtensionManifest> =
+            records.iter().map(|record| record.resolved()).collect();
+        match unified_vendor_recipes(manifests) {
+            Ok(recipes) => recipes.into_iter().find(|recipe| recipe.vendor == vendor),
+            Err(conflict) => {
+                // Activation-time conflict checks should have prevented this;
+                // fail closed for the conflicting vendor rather than picking
+                // an arbitrary declaration.
+                tracing::warn!(
+                    %conflict,
+                    "installed manifests carry conflicting vendor recipes"
+                );
+                let _ = requester_extension;
+                None
+            }
+        }
+    }
 }
 
 /// [`AuthRecipeResolver`] over the live active snapshot, with a fallback
@@ -117,8 +193,24 @@ impl SnapshotAuthRecipeResolver {
     }
 }
 
+#[async_trait]
 impl AuthRecipeResolver for SnapshotAuthRecipeResolver {
-    fn recipe_for_vendor(&self, vendor: &str) -> Option<ResolvedVendorAuthRecipe> {
+    async fn resolve(
+        &self,
+        requester_extension: Option<&ExtensionId>,
+        vendor: &str,
+    ) -> Option<ResolvedVendorAuthRecipe> {
+        // The scope ceiling for a vendor is the UNION across every installed
+        // extension that uses it — not just the requesting extension's own
+        // declaration.
+        //
+        // Several extensions can share one credential account for a vendor,
+        // and that account stores a single scope set which each exchange
+        // *replaces* rather than merges. Resolving a narrower, per-extension
+        // ceiling therefore clamps the granted scopes to the requester's own
+        // and overwrites every sibling's — so completing setup for one
+        // extension silently strips the scopes of the ones already connected,
+        // and they fall back to reporting that setup is still needed.
         let snapshot = self.watch.current();
         let manifests: Vec<Arc<ResolvedExtensionManifest>> = snapshot
             .extension_ids()
@@ -139,7 +231,7 @@ impl AuthRecipeResolver for SnapshotAuthRecipeResolver {
                 tracing::warn!(%conflict, "active snapshot carries conflicting vendor recipes");
             }
         }
-        self.fallback.recipe_for_vendor(vendor)
+        self.fallback.resolve(requester_extension, vendor).await
     }
 }
 
@@ -147,7 +239,7 @@ impl AuthRecipeResolver for SnapshotAuthRecipeResolver {
 mod tests {
     use super::*;
     use ironclaw_extensions::ResolvedAuthSurface;
-    use ironclaw_host_api::{ExtensionId, RuntimeCredentialAccountSetup};
+    use ironclaw_host_api::{capability::RuntimeCredentialAccountSetup, ids::ExtensionId};
 
     fn oauth_recipe(scopes: &[&str], token_endpoint: &str) -> VendorAuthRecipe {
         serde_json::from_value(serde_json::json!({
@@ -172,19 +264,21 @@ mod tests {
             name: extension.to_string(),
             version: "0.1.0".to_string(),
             description: String::new(),
-            requested_trust: ironclaw_host_api::RequestedTrustClass::ThirdParty,
+            requested_trust: ironclaw_host_api::trust::RequestedTrustClass::ThirdParty,
             runtime: ironclaw_extensions::ExtensionRuntimeV2::FirstParty {
                 service: format!("{extension}/v1"),
             },
+            root_binding: ironclaw_extensions::PackageRootBinding::FabricateOnLoad,
             mcp: None,
             tools: Vec::new(),
             channel: None,
             memory: None,
             admin_configuration: Vec::new(),
             auth: vec![ResolvedAuthSurface {
-                vendor: ironclaw_host_api::VendorId::new(vendor).expect("vendor id"),
+                vendor: ironclaw_host_api::ids::VendorId::new(vendor).expect("vendor id"),
                 setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
                 recipe: Some(recipe),
+                protected_resource_metadata_url: None,
             }],
             host_apis: Vec::new(),
             section_surfaces: Vec::new(),
@@ -222,5 +316,24 @@ mod tests {
         assert_eq!(error.vendor, "vendorco");
         assert_eq!(error.first_extension, "mail-ext");
         assert_eq!(error.second_extension, "docs-ext");
+    }
+
+    /// Resolution is vendor-scoped: unioning ceilings across installed
+    /// extensions must never hand a caller a recipe for a different vendor.
+    #[test]
+    fn recipe_lookup_does_not_cross_vendor() {
+        let manifest = manifest_with_recipe(
+            "calendar-ext",
+            "calendar-vendor",
+            oauth_recipe(&["calendar:read"], "https://vendor.example/token"),
+        );
+        let recipes = unified_vendor_recipes([&manifest]).expect("single manifest unions cleanly");
+
+        assert!(
+            recipes
+                .iter()
+                .any(|recipe| recipe.vendor == "calendar-vendor")
+        );
+        assert!(!recipes.iter().any(|recipe| recipe.vendor == "other-vendor"));
     }
 }

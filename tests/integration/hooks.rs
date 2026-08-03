@@ -181,6 +181,13 @@ async fn hook_deny_blocks_capability_without_wedging_run() {
     h.assert_tool_error(ToolErrorClass::Denied, HOOK_TEST_DENY_REASON)
         .await
         .expect("hook deny reason must be reported in the persisted tool-error summary");
+    // #6284 item 4: the denial must also tell the model what to DO. A hook deny
+    // is a genuine policy refusal, so the honest advice is to change the plan
+    // rather than the arguments. Denials carried `model_observation: None`
+    // before #6792, so nothing actionable was persisted at all.
+    h.assert_denial_recovery_hint("revise_approach")
+        .await
+        .expect("a persisted denial must carry a recovery hint the model can act on");
     h.assert_security_audit_event_recorded(
         SecurityBoundary::HookDeny,
         SecurityDecision::Blocked,

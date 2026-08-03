@@ -10,28 +10,33 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{
-    CapabilityId, InvocationId, LoopRef, ProviderToolName, Resolution, ResolutionBatch,
-    RuntimeKind, Suspension, ThreadId,
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, CapabilityActivityId, IdempotencyKey, LoopGateRef, LoopResultRef,
+    ReplyTargetBindingRef, RunProfileRequest, SanitizedCancelReason, SourceBindingRef, TurnActor,
+    TurnGateRef, TurnRunId, TurnScope,
 };
+use ironclaw_host_api::{
+    ids::{CapabilityId, InvocationId, ProviderToolName, ThreadId},
+    resolution::{Resolution, ResolutionBatch, Suspension},
+    result_meta::{FailureKind, LoopRef},
+    runtime::RuntimeKind,
+};
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
+    CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailureDetail,
+    CapabilityInputRef, ConcurrencyHint, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
+    LoopRunContext, LoopSafeSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
+};
+use ironclaw_processes::{ProcessInputPayload, ProcessInputRef, ProcessInputSubmission};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, SessionThreadService,
     ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CapabilityActivityId, GateRef, IdempotencyKey,
-    LoopGateRef, LoopResultRef, ReplyTargetBindingRef, RunProfileRequest, SanitizedCancelReason,
-    SourceBindingRef, SubmitChildRunRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
-    TurnError, TurnErrorCategory, TurnRunId, TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
-        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailureKind,
-        CapabilityInputRef, ConcurrencyHint, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
-        LoopRunContext, LoopSafeSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
-        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
-        sanitize_model_visible_text,
-    },
+    AgentTurnSpawnTreeRuntimePort, CancelRunRequest, SubmitChildRunRequest, SubmitTurnResponse,
+    TurnCoordinator, TurnError, TurnErrorCategory, TurnSpawnTreePort,
 };
 use serde::{Deserialize, Serialize};
 
@@ -247,15 +252,16 @@ pub struct SubagentDefinition {
     pub requested_run_profile: RunProfileRequest,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubagentGoalRecord {
     pub task: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AwaitedChildSetRecord {
-    pub gate_ref: GateRef,
+    pub gate_ref: TurnGateRef,
     pub parent_run_context: LoopRunContext,
     pub tree_root_run_id: TurnRunId,
     pub child_scope: TurnScope,
@@ -294,7 +300,7 @@ pub struct SubagentThreadMetadata {
     /// The spawning parent's `LoopRunContext`, cached verbatim at spawn time
     /// (`finish_spawn` already has it in hand — no new store fetch). Lets
     /// `ironclaw_runner`'s `reconstruct_edge` rebuild a lost/never-opened
-    /// await-edge with zero live `turn_state_store` lookups for the parent,
+    /// await-edge with zero live `agent_turn_runtime` lookups for the parent,
     /// avoiding the re-entrant deadlock of querying the store from inside
     /// the child's own commit-observer callback. New field on fresh threads
     /// only — the capability is deny-filtered in prod, so no old-thread
@@ -303,7 +309,7 @@ pub struct SubagentThreadMetadata {
     /// The spawn-time gate ref (also computed in `finish_spawn`), including
     /// the shared D3 batch-gate value when this spawn is part of a group —
     /// reconstruction has no other way to recover that shared value.
-    pub gate_ref: GateRef,
+    pub gate_ref: TurnGateRef,
 }
 
 #[async_trait]
@@ -341,22 +347,6 @@ pub trait SubagentDefinitionResolver: Send + Sync {
     }
 }
 
-#[async_trait]
-pub trait SubagentSpawnGoalStore: Send + Sync {
-    async fn put_goal(
-        &self,
-        scope: &TurnScope,
-        run_id: TurnRunId,
-        goal: SubagentGoalRecord,
-    ) -> Result<(), AgentLoopHostError>;
-
-    async fn delete_goal(
-        &self,
-        scope: &TurnScope,
-        run_id: TurnRunId,
-    ) -> Result<(), AgentLoopHostError>;
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubagentSpawnLimits {
     pub max_depth: u32,
@@ -378,9 +368,8 @@ impl Default for SubagentSpawnLimits {
 pub struct SubagentSpawnDeps {
     pub coordinator: Arc<dyn TurnCoordinator>,
     pub child_runs: Arc<dyn TurnSpawnTreePort>,
-    pub turn_state_store: Arc<dyn TurnSpawnTreeStateStore>,
+    pub agent_turn_runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
     pub thread_service: Arc<dyn SessionThreadService>,
-    pub goal_store: Arc<dyn SubagentSpawnGoalStore>,
     pub await_edge_writer: Arc<dyn crate::AwaitEdgeWriter>,
     pub definition_resolver: Arc<dyn SubagentDefinitionResolver>,
     pub spawn_input_codec: Arc<dyn SpawnSubagentInputCodec>,
@@ -403,12 +392,11 @@ struct SpawnContext {
     child_scope: ThreadScope,
     child_run_id: TurnRunId,
     tree_root: TurnRunId,
-    gate_override: Option<GateRef>,
+    gate_override: Option<TurnGateRef>,
 }
 
 #[derive(Default)]
 struct SpawnCompensationState {
-    goal_written: Option<(TurnScope, TurnRunId)>,
     /// (child_scope, child_run_id) — the parent_run_id needed for
     /// `abandon_awaited_child` is the enclosing `run_context.run_id` at
     /// rollback time.
@@ -429,7 +417,7 @@ impl SpawnCompensationState {
             )) {
                 Ok(idempotency_key) => {
                     let _ = deps
-                        .turn_state_store
+                        .agent_turn_runtime
                         .request_cancel(CancelRunRequest {
                             scope: scope.clone(),
                             actor: actor.clone(),
@@ -455,9 +443,6 @@ impl SpawnCompensationState {
                 .abandon_awaited_child(child_scope, run_context.run_id, *child_run_id)
                 .await;
         }
-        if let Some((scope, run_id)) = self.goal_written.as_ref() {
-            let _ = deps.goal_store.delete_goal(scope, *run_id).await;
-        }
         if let Some((scope, tree_root)) = self.submitted_child_tree.as_ref() {
             // Idempotency key for the release-tree-descendants dedup guard
             // (§5.5 round-5/6): the just-submitted child's own run id, the
@@ -469,7 +454,7 @@ impl SpawnCompensationState {
                 .map(|(_, _, run_id)| *run_id)
                 .unwrap_or(*tree_root);
             let _ = deps
-                .turn_state_store
+                .agent_turn_runtime
                 .release_tree_descendants(scope, *tree_root, 1, idempotency_key)
                 .await;
         }
@@ -571,6 +556,7 @@ impl SubagentSpawnCapabilityPort {
             runtime: RuntimeKind::FirstParty,
             safe_name: self.spawn_id.as_str().to_string(),
             safe_description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
+            description_trust: Default::default(),
             concurrency_hint: ConcurrencyHint::Exclusive,
             parameters_schema: (*self.parameters_schema).clone(),
         }
@@ -697,7 +683,7 @@ impl SubagentSpawnCapabilityPort {
         &self,
         invocation: &LoopRequest,
         args: SpawnSubagentArgs,
-        gate_override: Option<GateRef>,
+        gate_override: Option<TurnGateRef>,
     ) -> Result<Resolution, AgentLoopHostError> {
         let mut compensation = SpawnCompensationState::default();
         self.handle_spawn_with_gate_recording(invocation, args, gate_override, &mut compensation)
@@ -708,7 +694,7 @@ impl SubagentSpawnCapabilityPort {
         &self,
         invocation: &LoopRequest,
         args: SpawnSubagentArgs,
-        gate_override: Option<GateRef>,
+        gate_override: Option<TurnGateRef>,
         compensation: &mut SpawnCompensationState,
     ) -> Result<Resolution, AgentLoopHostError> {
         let Some(spawn_slot) = self.reserve_spawn_slot() else {
@@ -724,7 +710,7 @@ impl SubagentSpawnCapabilityPort {
         let owner_user_id = actor.user_id.clone();
         let parent_record = self
             .deps
-            .turn_state_store
+            .agent_turn_runtime
             .get_run_record(&self.run_context.scope, self.run_context.run_id)
             .await
             .map_err(map_turn_error)?
@@ -880,7 +866,7 @@ impl SubagentSpawnCapabilityPort {
         let gate_ref = if let Some(gate_ref) = gate_override {
             gate_ref
         } else {
-            GateRef::new(format!("gate:subagent-{child_run_id}")).map_err(invalid_static_ref)?
+            TurnGateRef::new(format!("gate:subagent-{child_run_id}")).map_err(invalid_static_ref)?
         };
         let payload = spawn_result_payload(
             child_run_id,
@@ -963,46 +949,58 @@ impl SubagentSpawnCapabilityPort {
             .check_scope_recovered(&child_turn_scope)
             .await
         {
+            let cause = format!("subagent spawn scope recovery in progress: {error}");
             return Ok(resolution::failed(
-                CapabilityFailureKind::Transient,
-                format!("subagent spawn scope recovery in progress: {error}"),
-                None,
+                FailureKind::Transient,
+                cause.clone(),
+                CapabilityFailureDetail::Diagnostic {
+                    text: crate::scrub_model_visible_detail(cause),
+                },
             ));
         }
-        self.deps
-            .goal_store
-            .put_goal(
-                &child_turn_scope,
-                child_run_id,
-                SubagentGoalRecord {
-                    task: args.task.clone(),
-                    handoff: args.handoff.clone(),
-                },
+        let goal_payload = serde_json::to_vec(&SubagentGoalRecord {
+            task: args.task.clone(),
+            handoff: args.handoff.clone(),
+        })
+        .map_err(|error| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                format!("subagent goal serialization failed: {error}"),
             )
-            .await?;
-        compensation.goal_written = Some((child_turn_scope.clone(), child_run_id));
+        })?;
+        let process_input = ProcessInputSubmission {
+            input_ref: ProcessInputRef::from_trusted("subagent-goal:v1"),
+            payload: ProcessInputPayload::new(goal_payload).map_err(|error| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    format!("subagent goal is invalid: {error}"),
+                )
+            })?,
+        };
 
-        self.deps
-            .await_edge_writer
-            .record_awaited_child(AwaitedChildSetRecord {
-                gate_ref: gate_ref.clone(),
-                parent_run_context: self.run_context.clone(),
-                tree_root_run_id: tree_root,
-                child_scope: child_turn_scope.clone(),
+        let dependency_record = AwaitedChildSetRecord {
+            gate_ref: gate_ref.clone(),
+            parent_run_context: self.run_context.clone(),
+            tree_root_run_id: tree_root,
+            child_scope: child_turn_scope.clone(),
+            child_run_id,
+            child_thread_id: child_thread.thread_id.clone(),
+            source_binding_ref: source_binding_ref(self.run_context.run_id, child_run_id)?,
+            reply_target_binding_ref: reply_target_binding_ref(
+                self.run_context.run_id,
                 child_run_id,
-                child_thread_id: child_thread.thread_id.clone(),
-                source_binding_ref: source_binding_ref(self.run_context.run_id, child_run_id)?,
-                reply_target_binding_ref: reply_target_binding_ref(
-                    self.run_context.run_id,
-                    child_run_id,
-                )?,
-                subagent_kind: definition.subagent_kind.clone(),
-                spawn_capability_id: self.spawn_id.clone(),
-                result_ref: result_ref.clone(),
-                mode,
-            })
-            .await?;
-        compensation.edge_written = Some((child_turn_scope.clone(), child_run_id));
+            )?,
+            subagent_kind: definition.subagent_kind.clone(),
+            spawn_capability_id: self.spawn_id.clone(),
+            result_ref: result_ref.clone(),
+            mode,
+        };
+        let dependency_metadata = serde_json::to_value(&dependency_record).map_err(|error| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                format!("subagent dependency metadata serialization failed: {error}"),
+            )
+        })?;
 
         let accepted = self
             .deps
@@ -1044,11 +1042,23 @@ impl SubagentSpawnCapabilityPort {
                 received_at: Utc::now(),
                 requested_run_id: Some(child_run_id),
                 spawn_tree_descendant_cap: self.limits.max_tree_descendants,
+                process_dependency: Some(ironclaw_processes::ProcessDependencySubmission {
+                    dependent_process_id: ironclaw_host_api::ids::ProcessId::from_uuid(
+                        self.run_context.run_id.as_uuid(),
+                    ),
+                    root_process_id: ironclaw_host_api::ids::ProcessId::from_uuid(
+                        tree_root.as_uuid(),
+                    ),
+                    group_ref: Some(gate_ref.as_str().to_string()),
+                    metadata: dependency_metadata,
+                }),
+                process_input: Some(process_input),
             })
             .await
             .map_err(map_turn_error)?;
         compensation.submitted_child_tree = Some((self.run_context.scope.clone(), tree_root));
         compensation.submitted_child_run = Some((child_turn_scope.clone(), actor.clone(), run_id));
+        compensation.edge_written = Some((child_turn_scope.clone(), child_run_id));
         if let Err(error) = self
             .deps
             .thread_service
@@ -1166,11 +1176,15 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         if self.is_spawn(&request.capability_id) {
-            let args = self
+            let args = match self
                 .deps
                 .spawn_input_codec
                 .decode(&self.run_context, &request.input_ref)
-                .await?;
+                .await
+            {
+                Ok(args) => args,
+                Err(error) => return spawn_input_decode_outcome(error),
+            };
             if let Some(resolution) = self.authorize_spawn(&request).await? {
                 return Ok(resolution);
             }
@@ -1190,22 +1204,32 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         // from gate coalescing; otherwise the gate would be created and never
         // registered, wasting a TurnRunId.
         let mut spawn_args: HashMap<usize, SpawnSubagentArgs> = HashMap::new();
+        let mut spawn_input_denials: HashMap<usize, Resolution> = HashMap::new();
         let mut blocking_count = 0_usize;
         for (idx, invocation) in request.invocations.iter().enumerate() {
             if !self.is_spawn(&invocation.capability_id) {
                 continue;
             }
-            let args = self
+            match self
                 .deps
                 .spawn_input_codec
                 .decode(&self.run_context, &invocation.input_ref)
-                .await?;
-            blocking_count += 1;
-            spawn_args.insert(idx, args);
+                .await
+            {
+                Ok(args) => {
+                    blocking_count += 1;
+                    spawn_args.insert(idx, args);
+                }
+                // Model-supplied input problem: park the per-invocation denial
+                // for the main loop; genuine host faults still fail the batch.
+                Err(error) => {
+                    spawn_input_denials.insert(idx, spawn_input_decode_outcome(error)?);
+                }
+            }
         }
         let batch_blocking_gate = if blocking_count > 1 {
             Some(
-                GateRef::new(format!("gate:subagent-batch-{}", TurnRunId::new()))
+                TurnGateRef::new(format!("gate:subagent-batch-{}", TurnRunId::new()))
                     .map_err(invalid_static_ref)?,
             )
         } else {
@@ -1215,6 +1239,11 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         while index < request.invocations.len() {
             let invocation = &request.invocations[index];
             if self.is_spawn(&invocation.capability_id) {
+                if let Some(denial) = spawn_input_denials.remove(&index) {
+                    resolutions.push(denial);
+                    index += 1;
+                    continue;
+                }
                 let outcome = match self.authorize_spawn(invocation).await {
                     Ok(Some(outcome)) => outcome,
                     Ok(None) => {
@@ -1373,37 +1402,18 @@ impl SpawnSubagentInputCodec for JsonSpawnSubagentInputCodec {
 /// Lightweight in-memory [`crate::AwaitEdgeWriter`] test fixture — no
 /// filesystem/CAS/roster semantics. For `loop_host`'s own unit tests that
 /// just need a legal writer, not a durability test; production and any test
-/// that exercises real await-edge behavior use `ironclaw_runner`'s
-/// `AwaitEdgeStore`.
+/// that exercises real dependency behavior use the process journal.
 #[derive(Default)]
-pub struct InMemoryAwaitEdgeWriter {
-    inner: parking_lot::Mutex<HashMap<(TurnRunId, TurnRunId), AwaitedChildSetRecord>>,
-}
-
-impl InMemoryAwaitEdgeWriter {
-    pub fn records(&self) -> Vec<AwaitedChildSetRecord> {
-        self.inner.lock().values().cloned().collect()
-    }
-}
+pub struct InMemoryAwaitEdgeWriter;
 
 #[async_trait]
 impl crate::AwaitEdgeWriter for InMemoryAwaitEdgeWriter {
-    async fn record_awaited_child(
-        &self,
-        record: AwaitedChildSetRecord,
-    ) -> Result<(), AgentLoopHostError> {
-        let key = (record.parent_run_context.run_id, record.child_run_id);
-        self.inner.lock().insert(key, record);
-        Ok(())
-    }
-
     async fn abandon_awaited_child(
         &self,
         _child_scope: &TurnScope,
-        parent_run_id: TurnRunId,
-        child_run_id: TurnRunId,
+        _parent_run_id: TurnRunId,
+        _child_run_id: TurnRunId,
     ) -> Result<(), AgentLoopHostError> {
-        self.inner.lock().remove(&(parent_run_id, child_run_id));
         Ok(())
     }
 }
@@ -1415,6 +1425,29 @@ fn spawn_rejected(reason: &'static str) -> Resolution {
         format!("subagent spawn rejected: {reason}"),
     )
     .resolution
+}
+
+/// Classify a spawn-input decode failure onto its loop channel.
+///
+/// The spawn-args codec decodes MODEL-SUPPLIED JSON, so an
+/// `InvalidInvocation` failure (malformed JSON, schema-violating wire args,
+/// model-correctable rejections like requesting the disabled background mode)
+/// is the model's own mistake: surface it on the `spawn_rejected` `Denied`
+/// channel with the codec's sanitized summary so the model can correct the
+/// call. Propagating it as `Err(AgentLoopHostError)` instead lets the
+/// executor map it to a run-ending `HostUnavailable`, killing the run on
+/// malformed model output. Genuine host faults (input-store outages and every
+/// other error kind) still propagate as errors.
+fn spawn_input_decode_outcome(error: AgentLoopHostError) -> Result<Resolution, AgentLoopHostError> {
+    if error.kind != AgentLoopHostErrorKind::InvalidInvocation {
+        return Err(error);
+    }
+    Ok(resolution::denied(
+        CapabilityDeniedReasonKind::unknown("invalid_spawn_input")
+            .unwrap_or(CapabilityDeniedReasonKind::EmptySurface),
+        error.safe_summary,
+    )
+    .resolution)
 }
 
 fn background_subagents_disabled() -> AgentLoopHostError {

@@ -215,28 +215,15 @@ impl OpenAiCodexProvider {
                 });
 
             let body_text = response.text().await.unwrap_or_default();
-            if status == reqwest::StatusCode::UNAUTHORIZED {
-                return Err(LlmError::AuthFailed {
-                    provider: "openai_codex".to_string(),
-                });
-            }
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                return Err(LlmError::RateLimited {
-                    provider: "openai_codex".to_string(),
+            return Err(crate::error::map_provider_http_error(
+                crate::error::ProviderHttpError {
+                    adapter: crate::error::ProductionModelAdapter::OpenAiCodex,
+                    model: &self.model,
+                    status: status.as_u16(),
+                    body: &body_text,
                     retry_after,
-                });
-            }
-            // Context-overflow (HTTP 413, or a 400 whose body names a
-            // context-length error) must surface as ContextLengthExceeded so
-            // the loop's context-shrink recovery fires instead of a generic
-            // RequestFailed.
-            if let Some(error) = crate::error::context_length_error(status.as_u16(), &body_text) {
-                return Err(error);
-            }
-            return Err(LlmError::RequestFailed {
-                provider: "openai_codex".to_string(),
-                reason: format!("HTTP {status}: {body_text}"),
-            });
+                },
+            ));
         }
 
         // Read the full body and parse SSE events
@@ -255,6 +242,10 @@ impl OpenAiCodexProvider {
 
 #[async_trait]
 impl LlmProvider for OpenAiCodexProvider {
+    fn provider_id(&self) -> String {
+        "openai_codex".to_string()
+    }
+
     fn model_name(&self) -> &str {
         &self.model
     }
@@ -849,18 +840,17 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
     // `response.completed` (errors return early above). If the stream ended
     // without one, the connection was dropped mid-response. Returning the
     // partial content as a successful `Stop` would let a dropped connection
-    // masquerade as a normal completion, so surface a RETRYABLE error
-    // instead. `EmptyResponse` when nothing was produced; `InvalidResponse`
-    // when partial content/tool calls were captured.
+    // masquerade as a normal completion, so surface a typed retryable stream
+    // interruption instead.
     if !saw_completed {
-        if text_content.is_empty() && tool_calls.is_empty() {
-            return Err(LlmError::EmptyResponse {
-                provider: "openai_codex".to_string(),
-            });
-        }
-        return Err(LlmError::InvalidResponse {
+        let produced = if text_content.is_empty() && tool_calls.is_empty() {
+            "before any output"
+        } else {
+            "after partial output"
+        };
+        return Err(LlmError::StreamInterrupted {
             provider: "openai_codex".to_string(),
-            reason: "stream ended before response.completed".to_string(),
+            reason: format!("stream ended {produced} before response.completed"),
         });
     }
 
@@ -1193,7 +1183,7 @@ data: {"type":"response.output_text.delta","delta":" ignored"}
         );
         assert!(matches!(
             result.unwrap_err(),
-            LlmError::InvalidResponse { .. }
+            LlmError::StreamInterrupted { .. }
         ));
     }
 
@@ -1220,7 +1210,7 @@ data: {"type":"response.output_text.delta","delta":" ignored"}
     /// Regression: a stream that ends WITHOUT a terminal `response.completed`
     /// event (mid-stream disconnect) must NOT be reported as a successful
     /// `Stop`. Partial content that ends abruptly is a truncated stream and
-    /// must surface as a retryable `InvalidResponse` so the loop retries.
+    /// must surface as a typed retryable stream interruption.
     #[test]
     fn test_parse_sse_truncated_stream_with_partial_text_is_error() {
         let sse_body = r#"data: {"type":"response.output_item.added","item":{"type":"message","role":"assistant","id":"msg_1"}}
@@ -1234,18 +1224,18 @@ data: {"type":"response.output_text.delta","delta":"partial answer that got cut"
             "truncated stream must not be reported as success"
         );
         match result.unwrap_err() {
-            LlmError::InvalidResponse { reason, .. } => {
+            LlmError::StreamInterrupted { reason, .. } => {
                 assert!(
                     reason.contains("response.completed"),
                     "reason should explain the missing terminal event: {reason}"
                 );
             }
-            other => panic!("expected InvalidResponse, got {other:?}"),
+            other => panic!("expected StreamInterrupted, got {other:?}"),
         }
     }
 
     /// Regression: a stream with no events at all (no content, no terminal
-    /// completion) must surface as `EmptyResponse` so the caller can retry.
+    /// completion) must surface as a typed stream interruption.
     #[test]
     fn test_parse_sse_truncated_stream_empty_is_error() {
         let sse_body = ":keepalive\n\n";
@@ -1256,7 +1246,7 @@ data: {"type":"response.output_text.delta","delta":"partial answer that got cut"
         );
         assert!(matches!(
             result.unwrap_err(),
-            LlmError::EmptyResponse { .. }
+            LlmError::StreamInterrupted { .. }
         ));
     }
 
@@ -1277,7 +1267,7 @@ data: {"type":"response.output_item.done","item":{"type":"function_call","id":"f
         );
         assert!(matches!(
             result.unwrap_err(),
-            LlmError::InvalidResponse { .. }
+            LlmError::StreamInterrupted { .. }
         ));
     }
 

@@ -5,14 +5,14 @@
 //! a parallel encryption scheme.
 
 use aes_gcm::{
-    Aes256Gcm, KeyInit, Nonce,
-    aead::{Aead, AeadCore, OsRng, Payload},
+    Aes256Gcm, KeyInit,
+    aead::{Aead, Generate, Nonce, Payload},
 };
 use hkdf::Hkdf;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::Sha256;
 
-use ironclaw_host_api::{ResourceScope, SecretHandle};
+use ironclaw_host_api::{ids::SecretHandle, resource::ResourceScope};
 
 use crate::SecretError;
 use crate::legacy_store::DecryptedSecret;
@@ -40,11 +40,11 @@ pub struct SecretsCrypto {
 /// Validate raw master-key bytes against the same rules [`SecretsCrypto::new`]
 /// enforces, without constructing a crypto instance.
 ///
-/// Callers that resolve key material from a *named* source (a local-dev key
+/// Callers that resolve key material from a *named* source (a standalone key
 /// file, the `SECRETS_MASTER_KEY` env var) use this to fail loud with a
 /// source-naming error instead of the opaque [`SecretError::InvalidMasterKey`]
 /// that surfaces when an already-wrapped key reaches `new` several layers
-/// deep. See `ironclaw_reborn_composition::factory::resolve_local_dev_secret_master_key`.
+/// deep. See `ironclaw_reborn_composition::factory::resolve_standalone_secret_master_key`.
 pub fn validate_master_key_material(bytes: &[u8]) -> Result<(), SecretError> {
     if bytes.len() < KEY_SIZE {
         return Err(SecretError::InvalidMasterKey);
@@ -102,7 +102,7 @@ impl SecretsCrypto {
         let derived_key = self.derive_key(&salt)?;
         let cipher = Aes256Gcm::new_from_slice(&derived_key)
             .map_err(|error| SecretError::EncryptionFailed(error.to_string()))?;
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let nonce = Nonce::<Aes256Gcm>::generate();
         let ciphertext = cipher
             .encrypt(
                 &nonce,
@@ -137,10 +137,11 @@ impl SecretsCrypto {
         let cipher = Aes256Gcm::new_from_slice(&derived_key)
             .map_err(|error| SecretError::DecryptionFailed(error.to_string()))?;
         let (nonce_bytes, ciphertext) = encrypted_value.split_at(NONCE_SIZE);
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let nonce = Nonce::<Aes256Gcm>::try_from(nonce_bytes)
+            .map_err(|_| SecretError::DecryptionFailed("invalid nonce length".to_string()))?;
         let plaintext = cipher
             .decrypt(
-                nonce,
+                &nonce,
                 Payload {
                     msg: ciphertext,
                     aad,
@@ -375,4 +376,87 @@ fn distinct_byte_count(bytes: &[u8]) -> usize {
         seen[slot] |= 1u64 << bit;
     }
     seen.iter().map(|word| word.count_ones() as usize).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_host_api::{
+        ids::{AgentId, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId},
+        resource::ResourceScope,
+    };
+
+    use super::{SecretsCrypto, credential_account_aad};
+    use crate::CredentialAccountId;
+
+    #[test]
+    fn aes_gcm_nonce_generation_round_trips_plaintext() {
+        let crypto = SecretsCrypto::new("0123456789abcdef0123456789abcdef".into()).unwrap();
+        let aad = b"secret-aad";
+        let (ciphertext, salt) = crypto.encrypt(b"secret-payload", aad).unwrap();
+
+        assert_ne!(ciphertext, b"secret-payload");
+        assert_eq!(
+            crypto.decrypt(&ciphertext, &salt, aad).unwrap().expose(),
+            "secret-payload"
+        );
+    }
+
+    #[test]
+    fn credential_account_ciphertext_is_bound_to_owner_scope_and_account() {
+        let crypto = SecretsCrypto::ephemeral();
+        let scope = ResourceScope {
+            tenant_id: TenantId::new("tenant-a").unwrap(),
+            user_id: UserId::new("user-a").unwrap(),
+            agent_id: Some(AgentId::new("agent-a").unwrap()),
+            project_id: Some(ProjectId::new("project-a").unwrap()),
+            mission_id: Some(MissionId::new("mission-a").unwrap()),
+            thread_id: Some(ThreadId::new("thread-a").unwrap()),
+            invocation_id: InvocationId::new(),
+        };
+        let account_id = CredentialAccountId::new("google-primary").unwrap();
+        let aad = credential_account_aad(&scope, &account_id);
+        let (ciphertext, salt) = crypto.encrypt(b"credential payload", &aad).unwrap();
+
+        assert!(crypto.decrypt(&ciphertext, &salt, &aad).is_ok());
+
+        let mut unbound_scope = scope.clone();
+        unbound_scope.mission_id = Some(MissionId::new("mission-b").unwrap());
+        unbound_scope.thread_id = Some(ThreadId::new("thread-b").unwrap());
+        let unbound_aad = credential_account_aad(&unbound_scope, &account_id);
+        assert!(
+            crypto.decrypt(&ciphertext, &salt, &unbound_aad).is_ok(),
+            "mission and thread are deliberately excluded from credential account AAD"
+        );
+
+        let mut alternate_scopes = Vec::new();
+        let mut other_tenant = scope.clone();
+        other_tenant.tenant_id = TenantId::new("tenant-b").unwrap();
+        alternate_scopes.push(other_tenant);
+        let mut other_user = scope.clone();
+        other_user.user_id = UserId::new("user-b").unwrap();
+        alternate_scopes.push(other_user);
+        let mut other_agent = scope.clone();
+        other_agent.agent_id = Some(AgentId::new("agent-b").unwrap());
+        alternate_scopes.push(other_agent);
+        let mut other_project = scope.clone();
+        other_project.project_id = Some(ProjectId::new("project-b").unwrap());
+        alternate_scopes.push(other_project);
+
+        for alternate_scope in alternate_scopes {
+            let alternate_aad = credential_account_aad(&alternate_scope, &account_id);
+            assert!(
+                crypto.decrypt(&ciphertext, &salt, &alternate_aad).is_err(),
+                "credential ciphertext must not cross owner scope: {alternate_scope:?}"
+            );
+        }
+
+        let other_account_id = CredentialAccountId::new("google-secondary").unwrap();
+        let other_account_aad = credential_account_aad(&scope, &other_account_id);
+        assert!(
+            crypto
+                .decrypt(&ciphertext, &salt, &other_account_aad)
+                .is_err(),
+            "credential ciphertext must not cross account id"
+        );
+    }
 }

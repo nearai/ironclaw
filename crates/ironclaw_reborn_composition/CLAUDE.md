@@ -4,13 +4,14 @@
 - Expose service-shaped handles only: `HostRuntime`, `TurnCoordinator`, product-auth `RebornProductAuthServices`, WebUI `ProductSurface`, readiness.
 - Keep lower substrate handles private to factories and owning crates.
 - Substrate handles MAY be exposed via `#[cfg(any(test, feature = "test-support"))]` pub accessors on `RebornRuntime` when downstream integration tests need to drive production-shape state the service doesn't yet surface (e.g. seeding `TriggerRecord` rows, `pair_external_actor` calls). These seams ship zero bytes in production binaries. New test-support accessors must carry a doc-comment naming the production call site they mirror and an explicit note that the handle is for tests only.
-- Outbound state stores are composition-owned via `RebornRuntimeSubstrate`; do not construct `FilesystemOutboundStateStore` in consumer modules (lint-enforced via `clippy::disallowed-methods`).
+- Outbound state stores are composition-owned; do not construct `ironclaw_outbound::OutboundStateStore` in consumer modules (lint-enforced — see the `disallowed-methods` entry in the workspace `clippy.toml`).
 - Do not depend on the root `ironclaw` crate or `src/` modules.
 - Do not add legacy bridge modes here until an accepted migration contract exists.
 - Do not route live v1/product traffic here; callers must opt in through explicit Reborn adapters.
 - Production and migration-dry-run profiles must fail closed on local-only or missing required handles.
 - Product auth composition must only wire `RebornProductAuthServices` through
-  the composition runtime entrypoint (`assemble_runtime`/`RebornRuntime`) with
+  the composition runtime entrypoint (`build_reborn_runtime`/`RebornRuntime`,
+  `src/runtime.rs`) with
   configured stores, secrets, network clients, and generic runtime/product
   adapters. Product-auth contracts, durable services, continuations, refresh,
   cleanup, recipes, and fakes live in `ironclaw_auth`; HTTP route serving lives
@@ -49,9 +50,9 @@
   pre-authorizing the existing scoped account. Do not route raw token values
   through chat commands, model-visible messages, serializable DTOs,
   projections, or route-local pending maps.
-- `RebornProductAuthServices::flow_record_source` is an optional WebUI/local-dev
+- `RebornProductAuthServices::flow_record_source` is an optional WebUI/standalone
   read-projection port, not a required product-auth capability. Filesystem-backed
-  local-dev composition wires the durable product-auth service itself as this
+  standalone composition wires the durable product-auth service itself as this
   source so pending auth gates can be rendered from blocked turn state plus
   auth-flow records. If a supplied product-auth bundle
   omits it, runtime composition must expose the WebUI auth interaction surface
@@ -60,20 +61,25 @@
 - Blocked run-state approval/auth gate rendering and resume belongs to #3094;
   keep this crate's #3811 auth seam reusable by that layer without implementing
   a second gate-resolution path.
-- Local-dev/WebUI capability result plumbing may stage results in memory, but any
+- Standalone/WebUI capability result plumbing may stage results in memory, but any
   durable thread append keyed by `LoopRunContext` (for example capability display
   preview timeline messages) must resolve the thread scope through
-  `ironclaw_runner::thread_scope::ThreadScopeResolver::resolve_for_turn` before
+  `ironclaw_loop_host::ThreadScopeResolver::resolve_for_turn` before
   calling `SessionThreadService`; do not append with the runtime/base
   `ThreadScope` directly in multi-user WebUI paths.
 
 ## WebUI v2 native surface
 
-The Reborn-side host composition for the WebChat v2 HTTP gateway lives
-in this crate. Implements Path A of
-`docs/reborn/how-to-port-channel-to-reborn.md` (native host-owned
-surface entering `ProductSurface` directly) without sharing any
-middleware with v1's `src/channels/web/`.
+> **Moved (#6618).** The WebChat v2 HTTP gateway composition described in
+> this section no longer lives in this crate — `webui_v2_app`, the middleware
+> stack, and the serve loop are in **`crates/ironclaw_webui/src/`**. What
+> composition still owns is the `RebornRuntime` that the WebUI host consumes.
+> The section is kept because the seam contract below is still accurate; the
+> paths have been repointed. Verify with
+> `rg -n "fn webui_v2_app" crates/`.
+
+It is the native host-owned surface that enters `ProductSurface` directly
+(`docs/reborn/how-to-port-channel-to-reborn.md`, "Native host surface").
 
 ### Surface
 
@@ -81,7 +87,7 @@ middleware with v1's `src/channels/web/`.
 |---|---|
 | `RebornRuntime::product_surface(event_stream)` | Build the v2 `Arc<dyn ProductSurface>` from an already-built `RebornRuntime`; reuses the runtime's thread service / turn coordinator, product-auth services, and runtime-owned `EventStreamManager` projection stream unless a caller supplies a custom stream |
 | `RebornRuntime::product_auth_services()` / `RebornRuntime::readiness()` | Runtime-owned host handles consumed by the CLI/WebUI host when mounting auth routes and reporting readiness |
-| `RebornProjectionServices` (in `src/projection.rs`) | Runtime-owned projection/event-stream composition; owns the single local-dev `EventStreamManager` and creates product-specific `ProjectionStream` adapters over it |
+| `RebornProjectionServices` (in `crates/ironclaw_product/src/projection.rs`) | Runtime-owned projection/event-stream composition; owns the single standalone `EventStreamManager` and creates product-specific `ProjectionStream` adapters over it |
 | `WebuiAuthenticator` trait | Host-supplied bearer-token verifier; returns `Option<WebuiAuthentication>` so identity and request-scoped WebUI capabilities travel together |
 | `WebuiServeConfig { tenant_id, authenticator, max_body_bytes, allowed_origins, csp_header }` | Required config for `webui_v2_app`; no defaults that silently disable security |
 | `webui_v2_app(product_surface, config) -> Router` | Build the fully-composed axum `Router`. This is the seam between this product/API crate and host-owned HTTP ingress: tests drive it via `tower::ServiceExt::oneshot`; the `ironclaw serve` subcommand hands it to `axum::serve` from a host-owned listener |
@@ -263,8 +269,9 @@ public OAuth callback uses.
 
 This seam must NOT be used to re-introduce v1 `/auth/*` handlers
 into the v2 listener; the only intended consumer is the
-Reborn-native auth router. v1 gateway code remains untouched —
-`src/channels/web/` keeps its own bearer/OAuth stack.
+Reborn-native auth router. (The v1 gateway and its `src/channels/web/`
+bearer/OAuth stack have since been deleted; the constraint stands as a
+shape rule for any future public route mount.)
 
 ### Session transport decision (#4116)
 
@@ -275,7 +282,8 @@ immediately POSTs that ticket to `/auth/session/exchange` and stores
 the returned bearer in `sessionStorage`.
 Rationale:
 
-- **Matches the existing v2 SPA auth model.** `app/auth.js`
+- **Matches the existing v2 SPA auth model.**
+  `crates/ironclaw_webui/frontend/src/app/auth.ts`
   already stores the bearer in `sessionStorage` and sends it as
   `Authorization: Bearer` on every API call; SSE / WS use the
   `?token=` query-string shim that the composition layer's bearer
@@ -320,8 +328,8 @@ rows are inventoried here, not implemented in the current PR.
 | Extension import from zip (#5459) | (none — v2-only surface) | `POST /api/webchat/v2/extensions/import` | Admin-only (`operator_webui_config` capability on the matched bearer): uploads a standalone WASM tool bundle (zip with `manifest.toml` + `wasm/` + `schemas/` + `prompts/`). Validated as `ManifestSource::InstalledLocal` (never first-party/system trust or runtime, wasm runtime only, all manifest-declared assets required, duplicate zip entries rejected), then materialized under `/system/extensions/<id>/` and added to the catalog under the catalog-write + operation locks; duplicate installed/catalog ids are rejected. Restart-safe: startup filesystem discovery stamps everything it finds `InstalledLocal` (`HostBundled` is reserved for binary-compiled extensions), so a restart cannot relabel an upload into the first-party trust tier. 8 MiB body cap, mutation rate limit |
 | LLM provider config | v1 settings/provider config surface | `GET /api/webchat/v2/llm/providers`, `POST /api/webchat/v2/llm/providers`, `POST /api/webchat/v2/llm/providers/{provider_id}/delete`, `POST /api/webchat/v2/llm/active`, `POST /api/webchat/v2/llm/{test-connection,list-models}` | Mapped for trusted operator-token deployments; left unmounted for multi-user authenticators until an admin role boundary exists |
 | Operator status/readiness | v1 doctor/readiness surfaces | `GET /api/webchat/v2/operator/status` | Mapped to Reborn readiness projection through the product service; left unmounted with other operator routes for multi-user authenticators |
-| Operator logs | `src/cli/logs.rs` command path | `GET /api/webchat/v2/operator/logs` | Mapped to the in-process operator log buffer with bounded query, tail, follow, filter, cursor, and redaction behavior |
-| Operator service lifecycle | `src/cli/service.rs` command path | `POST /api/webchat/v2/operator/service` | Mapped to a Reborn composition lifecycle backend; launchd/systemd user services are supported, other OS targets report unsupported |
+| Operator logs | the CLI `logs` command path | `GET /api/webchat/v2/operator/logs` | Mapped to the in-process operator log buffer with bounded query, tail, follow, filter, cursor, and redaction behavior |
+| Operator service lifecycle | the CLI `service` command path | `POST /api/webchat/v2/operator/service` | Mapped to a Reborn composition lifecycle backend; launchd/systemd user services are supported, other OS targets report unsupported |
 | SSO login (Google) | `GET /auth/providers`, `GET /auth/login/{p}`, `GET /auth/callback/{p}`, `POST /auth/logout` | Same paths on the v2 listener via `ironclaw_webui::webui_v2_auth_router`, merged into `webui_v2_app` through [`WebuiServeConfig::with_public_route_mount`] (typed `{ router, descriptors }` so the per-route body-limit / rate-limit middleware applies) | Mapped (Google); GitHub + NEAR follow under #4116 |
 
 ### Security invariants on every "Mapped" row
@@ -378,37 +386,39 @@ Per Path A in `docs/reborn/how-to-port-channel-to-reborn.md`:
 - No `ProductAdapter` wrapper around browser sessions.
 - No fake `ExternalActorRef` / `ProtocolAuthEvidence` /
   `OutboundDeliverySink` / declared egress.
-- No shared middleware with v1's `src/channels/web/` —
-  `feat/webui-v2-gateway-composition-3580` deliberately keeps the v1
-  binary untouched.
+- No shared middleware with the deleted v1 `src/channels/web/` stack —
+  the v2 listener was built standalone and there is no v1 binary left to
+  share with.
 
 ### How the standalone `ironclaw serve` consumes this
 
-The `serve` subcommand builds a full local-dev `RebornRuntime`, asks
+The `serve` subcommand builds a full standalone `RebornRuntime`, asks
 `runtime.product_surface(None)` for the product surface, and hands
 the resulting router to the host-owned `ironclaw_webui`
 listener lifecycle. The default projection stream is backed by
 the runtime-owned durable event log plus `EventStreamManager`, so
 `/events` and `/ws` no longer advertise routes that only return
-`Unavailable`. In local-dev builds with `libsql` enabled, the log and
-runtime state stores sit behind the composed local-dev root filesystem
+`Unavailable`. In standalone builds with `libsql` enabled, the log and
+runtime state stores sit behind the composed standalone root filesystem
 (`reborn-local-dev.db` for durable records, `/projects` for workspace
 files). Production durable retention/live fanout still belongs in the
 host runtime/event-store follow-up rather than WebUI ingress.
 
-Live cumulative assistant-text projections are producer-coalesced: the first
-update is published immediately, rapid replacements publish the latest value
-at most once per 75 ms, and any non-text milestone flushes the pending value
-before that milestone is projected. Reasoning, capability, and lifecycle
-milestones remain ordered and uncoalesced. The in-memory source still records
-the latest projection for replay when no browser subscriber is active.
+Live cumulative assistant-text projections are published at provider cadence.
+The live-text publisher conflates only sub-frame microbursts within a 16 ms
+window before they reach the event-stream manager's bounded subscriber.
+Ordinary provider cadence remains incremental, while each microburst retains
+its latest cumulative snapshot. Reasoning, capability, and lifecycle milestones
+remain ordered. The in-memory source still records the latest projection for
+replay when no browser subscriber is active.
 
 The opaque WebUI projection cursor stamps its process-local live position with
 the projection-services epoch. On an epoch mismatch, resume preserves durable
 runtime and turn positions but clears the volatile live position so a browser
 cursor retained across a deployment cannot suppress the restarted process's
 interim updates. This is enforced by
-`ProductRuntimeProjectionStream::runtime_subscription` in `src/projection.rs`.
+`ProductRuntimeProjectionStream::runtime_subscription` in
+`crates/ironclaw_product/src/projection.rs`.
 
 ```rust
 // Inside a host-owned ingress crate / binary (NOT in this crate —
@@ -428,24 +438,23 @@ axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
 
 ### Tests
 
-- `src/runtime.rs::tests::local_dev_runtime_product_surface_reuses_thread_and_turn_services`
+- `src/runtime/tests/core.rs::standalone_runtime_webui_bundle_reuses_thread_and_turn_services`
   — regression guard that the product surface reuses the runtime turn/thread
   services.
-- `src/projection.rs::tests::product_event_stream_drains_run_status_projection_from_event_stream_manager`
+- `crates/ironclaw_product/src/projection/tests/runtime_stream.rs::product_event_stream_drains_run_status_projection_from_event_stream_manager`
   — regression guard that the product event stream drains the current
   run-status projection slice from a real `EventStreamManager` snapshot
   into product outbound envelopes.
-- `src/projection.rs::tests::product_event_stream_uses_request_actor_for_projection_scope`
+- `crates/ironclaw_product/src/projection/tests/turn_stream.rs::product_event_stream_uses_request_actor_for_projection_scope`
   — regression guard that the product projection adapter uses the service
   request actor when selecting the runtime event stream, rather than a
   hidden runtime owner actor.
-- `src/projection/tests/live_progress_stream.rs::live_assistant_text_coalescer_flushes_latest_update_on_timer`
-  — regression guard that rapid cumulative text still advances while the
-  model continues streaming.
-- `src/projection/tests/live_progress_stream.rs::live_assistant_text_burst_stays_subscribed_and_flushes_before_tool_activity`
-  — caller-level regression guard that a provider-rate text burst does not
-  terminate the bounded WebUI subscription and that the latest text is
-  published before the next capability milestone.
+- `crates/ironclaw_product/src/projection/tests/live_progress_stream.rs::live_text_microburst_keeps_latest_snapshot_and_precedes_tool_activity`
+  (with `provider_cadence_text_updates_are_not_visibly_batched` in the same file)
+  — caller-level regression guard that provider-rate cumulative text remains
+  smooth without terminating the bounded WebUI subscription, provider-cadence
+  snapshots precede the next capability milestone, and a sub-frame microburst
+  retains its latest cumulative snapshot before that milestone.
 - `tests/webui_v2_serve.rs` — caller-level tests driving the composed
   `Router` through `tower::ServiceExt::oneshot`: bearer happy path,
   missing/invalid bearer 401, SSE `?token=`, timeline rejects `?token=`,
@@ -463,18 +472,18 @@ axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
   `prefers-reduced-motion`). These lock source shape only; behavioral
   JS/`getComputedStyle` coverage needs a browser harness this workspace
   does not own and is deferred to the JS/e2e scaffold.
-- `src/webui/webui_serve.rs::tests` — unit tests for `is_v2_sse_event_request`
+- `crates/ironclaw_webui/src/webui_serve.rs::tests` — unit tests for `is_v2_sse_event_request`
   matcher and query-token extraction.
-- `src/webui/webui_route_match.rs::tests` — unit tests for the pattern
+- `crates/ironclaw_webui/src/webui_route_match.rs::tests` — unit tests for the pattern
   parser and segment matcher shared by both descriptor-driven
   middlewares.
-- `src/webui/webui_rate_limit.rs::tests` — unit tests for the sliding-window
+- `crates/ironclaw_webui/src/webui_rate_limit.rs::tests` — unit tests for the sliding-window
   policy resolver, a regression test that `build_rate_limit_state`
   accepts every descriptor returned by
   `ironclaw_webui::webui_v2_routes()`, and
   `unsupported_scope_is_rejected_at_composition` locking the
   fail-closed branch for non-`PerCaller` scopes.
-- `src/webui/webui_body_limit.rs::tests` — composition-time tests that
+- `crates/ironclaw_webui/src/webui_body_limit.rs::tests` — composition-time tests that
   `build_body_limit_state` accepts every v2 descriptor and preserves
   the per-route caps (regression guard against silently widening the
   `send_message` cap or relaxing a `NoBody` policy).

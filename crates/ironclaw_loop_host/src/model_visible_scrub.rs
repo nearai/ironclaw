@@ -9,7 +9,7 @@
 //! 1. **Secret-value redaction via the full [`LeakDetector`] pattern registry**
 //!    (GitHub, AWS, Stripe, Google, Slack, PEM/SSH keys, bearer/JWT, …) — not
 //!    just the whitespace/prefix matcher in
-//!    [`ironclaw_turns::run_profile::sanitize_model_visible_text`]. The registry
+//!    [`ironclaw_loop_contracts::sanitize_model_visible_text`]. The registry
 //!    pass covers credential patterns beyond provider-token prefixes and
 //!    *redacts in place* (it never blocks the whole string), so the descriptive
 //!    cause survives with only secret values masked.
@@ -32,8 +32,8 @@
 
 use std::sync::LazyLock;
 
+use ironclaw_loop_contracts::sanitize_model_visible_text;
 use ironclaw_safety::{InjectionScanner, LeakDetector, Sanitizer};
-use ironclaw_turns::run_profile::sanitize_model_visible_text;
 
 static LEAK_DETECTOR: LazyLock<LeakDetector> = LazyLock::new(LeakDetector::new);
 static INJECTION_SANITIZER: LazyLock<Sanitizer> = LazyLock::new(Sanitizer::new);

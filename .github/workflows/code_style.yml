@@ -26,6 +26,13 @@ env:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
+  # Pin wall-clock rendering inputs so a test cannot pass or fail on the
+  # runner's locale. Reborn renders model-visible time slices, and date/number
+  # formatting differs by locale, so an unpinned runner turns a formatting
+  # regression into an unreproducible flake. UTC also keeps recorded fixtures
+  # comparable with what a developer sees locally.
+  TZ: "UTC"
+  LANG: "C.UTF-8"
 
 jobs:
   changes:
@@ -34,13 +41,15 @@ jobs:
     outputs:
       has_code: ${{ steps.non_pr.outputs.has_code || steps.diff.outputs.has_code }}
       has_reborn_cli: ${{ steps.non_pr.outputs.has_reborn_cli || steps.diff.outputs.has_reborn_cli }}
+      clippy_matrix: ${{ steps.non_pr.outputs.clippy_matrix || steps.diff.outputs.clippy_matrix }}
     steps:
       - id: non_pr
         if: github.event_name == 'push'
         run: |
           echo "has_code=true" >> "$GITHUB_OUTPUT"
           echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+          echo 'clippy_matrix=[{"name":"all-features","flags":"--all-features"},{"name":"default","flags":""}]' >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
           fetch-depth: 0
@@ -53,58 +62,103 @@ jobs:
         run: |
           CHANGED_FILES="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|scripts/check_no_panics\.py$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/code_style\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|scripts/check_no_panics\.py$|scripts/no_panics_reborn_baseline\.txt$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/(code_style|main-ci-slack-alerts)\.yml$)'; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
             echo "No code changes — style checks will be skipped"
           fi
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_runner/|crates/ironclaw_reborn_cli/|crates/ironclaw_reborn_config/|crates/ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|Cargo\.toml$|Cargo\.lock$|\.github/dist-build-setup\.yml$|\.github/workflows/(code_style|ironclaw-release|docker|reborn-release-compile)\.yml$)'; then
+          # Crate scopes are matched by NAME at any depth: `crates/([^/]+/)*<name>/`
+          # keeps matching once crates move into family directories
+          # (crates/<family>/ironclaw_*, PROPOSAL §5). A flat `crates/<name>/`
+          # prefix stops matching there, `has_reborn_cli` goes false, and the
+          # dist-build lane silently skips — the WS10 failure mode (#6963).
+          # scripts/ci/ws12_workflow_contracts.py pins this regex against the
+          # real crate inventory, so a renamed or moved crate fails loudly here
+          # instead of quietly falling out of scope.
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/([^/]+/)*ironclaw_runner/|crates/([^/]+/)*ironclaw_reborn_cli/|crates/([^/]+/)*ironclaw_reborn_config/|crates/([^/]+/)*ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|scripts/ci/smoke-release-binary\.py$|tests/test_smoke_release_binary\.py$|Cargo\.toml$|Cargo\.lock$|\.github/dist-build-setup\.yml$|\.github/workflows/(code_style|ironclaw-release|docker|reborn-release-compile)\.yml$)'; then
             echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_reborn_cli=false" >> "$GITHUB_OUTPUT"
           fi
 
-  clippy-matrix:
-    name: Configure clippy matrix
-    needs: changes
-    if: needs.changes.outputs.has_code == 'true'
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set.outputs.matrix }}
-    steps:
-      - id: set
-        run: |
-          FULL='[{"name":"all-features","flags":"--all-features"},{"name":"default","flags":""}]'
-          SLIM='[{"name":"all-features","flags":"--all-features"}]'
-
-          # PRs get the fast single-lane matrix for quick feedback. The merge
-          # queue is the production gate: it must run the same full feature
-          # matrix as pushes to main, otherwise feature-gated lints can pass
-          # the queue and break main post-merge.
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "matrix=${SLIM}" >> "$GITHUB_OUTPUT"
+            echo 'clippy_matrix=[{"name":"all-features","flags":"--all-features"}]' >> "$GITHUB_OUTPUT"
           else
-            echo "matrix=${FULL}" >> "$GITHUB_OUTPUT"
+            echo 'clippy_matrix=[{"name":"all-features","flags":"--all-features"},{"name":"default","flags":""}]' >> "$GITHUB_OUTPUT"
           fi
 
-  format:
-    name: Formatting
+  fast-checks:
+    name: Fast deterministic checks
     needs: changes
     if: needs.changes.outputs.has_code == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: rustfmt
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Run cargo deny
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+      - name: Reject tracked files that match .gitignore
+        run: |
+          tracked_ignored="$(git ls-files -ci --exclude-standard)"
+          if [ -n "$tracked_ignored" ]; then
+            echo "Tracked files match .gitignore; remove them from source control or update .gitignore:"
+            printf '%s\n' "$tracked_ignored"
+            exit 1
+          fi
+      # Guards the #5603 Docker-outage class: every include_str! target must
+      # exist and be present in each Dockerfile build context.
+      - name: include_str! paths + Docker COPY coverage
+        run: scripts/ci/check-include-str-paths.sh
+      # The full checkout already contains the merge base needed by this
+      # diff-aware guard, so consolidating the jobs avoids another fetch.
+      - name: Hermetic env mutation guard
+        run: scripts/ci/check-hermetic-env.sh
+      - name: Static-check self-tests
+        run: |
+          scripts/ci/test-check-include-str-paths.sh
+          scripts/ci/test-check-hermetic-env.sh
+          scripts/ci/test-ci-comm-locale-pin.sh
+          scripts/ci/test-classify-test-scope.sh
+          scripts/ci/test-build-wasm-extensions.sh
+          scripts/ci/test-package-feature-flags.sh
+          scripts/ci/test-reborn-crate-test-buckets.sh
+          scripts/ci/test-main-ci-slack-alerts.sh
+          python3 scripts/ci/test_ws12_suite_shards.py
+          python3 scripts/ci/test_ws12_workflow_contracts.py
+          scripts/ci/test-hermetic-test-process.sh
+          bash .github/scripts/test-pr-labeler.sh
+      - name: Self-test panic checker
+        if: github.event_name != 'push'
+        run: python3 scripts/check_no_panics.py --self-test
+      - name: Check Reborn production panic baseline
+        if: github.event_name != 'push'
+        run: python3 scripts/check_no_panics.py --reborn-baseline
+      - name: Check changed production code for panic-style calls
+        if: github.event_name != 'push'
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: python3 scripts/check_no_panics.py --base "$BASE_SHA" --head HEAD
+      - name: Check composition mass budget
+        run: bash scripts/ci/check-composition-budget.sh
+      - name: Self-test the composition budget gate
+        run: bash scripts/ci/test-check-composition-budget.sh
+      - name: Unit-test the dev-metrics tool
+        run: python3 scripts/test_dev_metrics.py
 
   webui-v2-js-lint:
     name: WebUI v2 JS lint (no-undef)
@@ -113,13 +167,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
       - name: Enable pnpm
         run: corepack enable pnpm
       - name: Install Node.js
-        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
         with:
           node-version: "22"
           cache: "pnpm"
@@ -152,88 +206,18 @@ jobs:
         working-directory: crates/ironclaw_webui/frontend
         run: pnpm build
 
-  deny-check:
-    name: cargo-deny
-    needs: changes
-    if: needs.changes.outputs.has_code == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-      - name: Run cargo deny
-        uses: EmbarkStudios/cargo-deny-action@3fd3802e88374d3fe9159b834c7714ec57d6c979 # v2
-
-  tracked-ignored-files:
-    name: Tracked ignored files
-    needs: changes
-    if: needs.changes.outputs.has_code == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-      - name: Reject tracked files that match .gitignore
-        run: |
-          tracked_ignored="$(git ls-files -ci --exclude-standard)"
-          if [ -n "$tracked_ignored" ]; then
-            echo "Tracked files match .gitignore; remove them from source control or update .gitignore:"
-            printf '%s\n' "$tracked_ignored"
-            exit 1
-          fi
-
-  static-checks:
-    name: Static checks (include_str, hermetic env)
-    needs: changes
-    if: needs.changes.outputs.has_code == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-      # Guards the #5603 Docker-outage class: every include_str! target must
-      # exist and be present in each Dockerfile build context. Whole-repo scan,
-      # no compile — safe on a shallow checkout.
-      - name: include_str! paths + Docker COPY coverage
-        run: scripts/ci/check-include-str-paths.sh
-      # Guards the #6015 coverage-flake class on the actual PR diff (not just
-      # the synthetic self-tests below): a newly-added unguarded env mutation
-      # fails here. The checker diffs the working tree against the PR base, so
-      # fetch that base tip first (a shallow checkout lacks origin/<base>).
-      - name: Hermetic env mutation guard (PR diff)
-        env:
-          GITHUB_BASE_REF: ${{ github.base_ref }}
-        run: |
-          if [ -n "${GITHUB_BASE_REF:-}" ]; then
-            git fetch --no-tags --depth=1 origin \
-              "+refs/heads/${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}"
-          fi
-          scripts/ci/check-hermetic-env.sh
-      # Lock in the checkers' own behaviour (they build hermetic temp repos).
-      - name: Static-check self-tests
-        run: |
-          scripts/ci/test-check-include-str-paths.sh
-          scripts/ci/test-check-hermetic-env.sh
-          scripts/ci/test-classify-test-scope.sh
-          scripts/ci/test-package-feature-flags.sh
-          scripts/ci/test-reborn-crate-test-buckets.sh
-          bash .github/scripts/test-pr-labeler.sh
-
   clippy:
     name: Clippy (${{ matrix.name }})
-    needs: [changes, clippy-matrix]
+    needs: changes
     if: needs.changes.outputs.has_code == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.clippy-matrix.outputs.matrix) }}
+        include: ${{ fromJSON(needs.changes.outputs.clippy_matrix) }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
       - name: Install Rust
@@ -245,7 +229,7 @@ jobs:
         run: corepack enable pnpm
       - name: Install Node.js for WebUI bundle builds
         if: contains(matrix.flags, '--all-features')
-        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
         with:
           node-version: "22"
           cache: "pnpm"
@@ -280,16 +264,16 @@ jobs:
 
   clippy-windows:
     name: Clippy Windows (${{ matrix.name }})
-    needs: [changes, clippy-matrix]
+    needs: changes
     if: needs.changes.outputs.has_code == 'true' && github.event_name == 'push'
     runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.clippy-matrix.outputs.matrix) }}
+        include: ${{ fromJSON(needs.changes.outputs.clippy_matrix) }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
       - name: Install Rust
@@ -301,7 +285,7 @@ jobs:
         run: corepack enable pnpm
       - name: Install Node.js for WebUI bundle builds
         if: contains(matrix.flags, '--all-features')
-        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
         with:
           node-version: "22"
           cache: "pnpm"
@@ -328,11 +312,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: reborn-cli-smoke
@@ -353,59 +340,17 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Test Reborn boot config crate
         run: cargo test -p ironclaw_reborn_config
+      - name: Self-test exact release-binary smoke gate
+        run: python3 -m unittest tests/test_smoke_release_binary.py
       - name: Test Reborn CLI binary crate
         run: cargo test -p ironclaw
       - name: Test Reborn libSQL restart integration
         run: |
-          cargo test -p ironclaw_runner \
-            --test loop_driver_host \
-            turn_runner_worker_completes_after_libsql_turn_and_thread_services_reopen \
+          cargo test -p ironclaw_host_runtime \
+            --test reborn_durable_restart_integration \
             -- --nocapture
       - name: Test Reborn architecture boundaries
         run: cargo test -p ironclaw_architecture reborn
-
-  no-panics:
-    name: No panics in production code
-    needs: changes
-    if: needs.changes.outputs.has_code == 'true' && github.event_name != 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.12"
-      - name: Check for .unwrap(), .expect(), assert!() in production code
-        env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
-        run: python3 scripts/check_no_panics.py --base "$BASE_SHA" --head HEAD
-
-  composition-budget:
-    name: Composition mass ratchet
-    needs: changes
-    if: needs.changes.outputs.has_code == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-      # Gate: ironclaw_reborn_composition's share of production crate code must
-      # not grow past the committed ceiling (scripts/ci/composition-budget.toml).
-      # Pure bash over the working tree — no compile, seconds to run.
-      - name: Check composition mass budget
-        run: bash scripts/ci/check-composition-budget.sh
-      # Guardrails are code — self-test the gate whenever it or its budget changes.
-      - name: Self-test the composition budget gate
-        run: bash scripts/ci/test-check-composition-budget.sh
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.12"
-      - name: Unit-test the dev-metrics tool
-        run: python3 scripts/test_dev_metrics.py
 
   code-style:
     name: Code Style (fmt + clippy)
@@ -413,20 +358,14 @@ jobs:
     if: always()
     needs:
       - changes
-      - clippy-matrix
-      - format
+      - fast-checks
       - clippy
       - clippy-windows
-      - deny-check
-      - tracked-ignored-files
-      - static-checks
       - reborn-cli-smoke
-      - no-panics
-      - composition-budget
       - webui-v2-js-lint
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
       - run: |
@@ -446,12 +385,8 @@ jobs:
           fi
 
           for job_result in \
-            "format=${{ needs.format.result }}" \
+            "fast-checks=${{ needs.fast-checks.result }}" \
             "clippy=${{ needs.clippy.result }}" \
-            "deny-check=${{ needs.deny-check.result }}" \
-            "tracked-ignored-files=${{ needs.tracked-ignored-files.result }}" \
-            "static-checks=${{ needs.static-checks.result }}" \
-            "composition-budget=${{ needs.composition-budget.result }}" \
             "webui-v2-js-lint=${{ needs.webui-v2-js-lint.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"
@@ -462,7 +397,6 @@ jobs:
           done
 
           for job_result in \
-            "no-panics=${{ needs.no-panics.result }}" \
             "reborn-cli-smoke=${{ needs.reborn-cli-smoke.result }}" \
             "clippy-windows=${{ needs.clippy-windows.result }}"; do
             name="${job_result%%=*}"
@@ -475,7 +409,7 @@ jobs:
       - name: Assert the full clippy matrix ran (merge queue + push)
         if: needs.changes.outputs.has_code == 'true' && github.event_name != 'pull_request'
         env:
-          MATRIX_JSON: ${{ needs.clippy-matrix.outputs.matrix }}
+          MATRIX_JSON: ${{ needs.changes.outputs.clippy_matrix }}
         run: |
           # This roll-up is a required check. A green result must mean the full
           # feature matrix was linted, so fail loudly if the matrix config ever

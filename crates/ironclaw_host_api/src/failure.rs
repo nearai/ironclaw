@@ -19,9 +19,21 @@
 //! model-correctable error stays a recoverable outcome (`capability-access.md`), never a
 //! `HostFailure`.
 
+//! ## Failure-summary data (WS1.7)
+//!
+//! Beside the `HostFailure` channel this module also owns the **category
+//! vocabulary** ([`categories`]) and the **category→summary tables**
+//! ([`summary`]) that turn a failed run into a user-facing sentence. Both moved
+//! here from `ironclaw_turn_runner` under PROPOSAL §6.1.1 so the product
+//! projection can read them without depending on the runner. They are pure
+//! data; the classifiers that *assign* a category stay with the producer.
+
+pub mod categories;
+pub mod summary;
+
 use serde::{Deserialize, Serialize};
 
-use crate::ErrRef;
+use crate::ids::ErrRef;
 
 /// An infrastructure/host failure — the `Err` arm of the kernel capability fold
 /// (§3). The variant is the **sanitized recoverability class**; the raw cause is
@@ -160,7 +172,7 @@ mod tests {
         // host id's UUID verbatim.
         let minted = ErrRef::new();
         assert_eq!(ErrRef::parse(&minted.to_string()).unwrap(), minted);
-        let inv = crate::InvocationId::new();
+        let inv = crate::ids::InvocationId::new();
         assert_eq!(ErrRef::from_uuid(inv.as_uuid()).as_uuid(), inv.as_uuid());
     }
 }

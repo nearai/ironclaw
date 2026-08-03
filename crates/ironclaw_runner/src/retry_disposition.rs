@@ -57,7 +57,7 @@ impl RetryDisposition {
 /// store / provider / tool faults where re-running the *identical* request from
 /// the checkpoint is likely to succeed without any change. Conservative by
 /// design — anything not clearly transient falls to `UserInitiated`.
-fn is_auto_retriable_category(category: &str) -> bool {
+pub(crate) fn is_auto_retriable_category(category: &str) -> bool {
     matches!(
         category,
         // Host-stage transient outages
@@ -74,7 +74,6 @@ fn is_auto_retriable_category(category: &str) -> bool {
             | "route_snapshot_persistence_failed"
             | "exit_application_failed"
             | "host_creation_failed"
-            | "transcript_write_failed"
             | "checkpoint_unavailable"
             | "context_build_failed"
             // Model provider transients
@@ -141,7 +140,6 @@ mod tests {
             "model_unavailable",
             "model_stale_request",
             "capability_transient",
-            "transcript_write_failed",
             "context_build_failed",
         ] {
             assert_eq!(
@@ -158,8 +156,13 @@ mod tests {
             "model_error",
             "model_context_overflow",
             "model_content_filtered",
+            "model_output_truncated",
             "model_credits_exhausted",
             "model_credentials_unavailable",
+            "model_spend_budget_exhausted",
+            // Re-driving automatically would issue another model call before
+            // the transcript store is known to be writable again.
+            ironclaw_host_api::failure::categories::TRANSCRIPT_WRITE_FAILED_CATEGORY,
             "capability_input_invalid",
             "capability_policy_denied",
             "policy_denied",

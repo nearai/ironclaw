@@ -10,15 +10,18 @@ use crate::{
 use async_trait::async_trait;
 use ironclaw_event_projections::{CapabilityActivityProjection, CapabilityActivityStatus};
 use ironclaw_host_api::{
-    CapabilityDisplayOutputPreview, CapabilityDisplayText, CapabilityId, InvocationId,
-    truncate_capability_display_text,
+    dispatch::{
+        CapabilityDisplayOutputPreview, CapabilityDisplayText, truncate_capability_display_text,
+    },
+    ids::{CapabilityId, InvocationId},
 };
+use ironclaw_loop_contracts::CapabilityInputRef;
 use ironclaw_safety::{
     sanitize_display_text as safety_sanitize_text, sanitize_url_for_display,
     shell_command_display_text,
 };
 use ironclaw_threads::ThreadMessageId;
-use ironclaw_turns::{TurnRunId, run_profile::CapabilityInputRef};
+use ironclaw_turns::TurnRunId;
 
 use super::capability_activity_status_wire;
 

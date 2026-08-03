@@ -4,12 +4,14 @@ use crate::{
     ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
     ApprovalPromptDetailView, ApprovalPromptScopeView,
 };
+use ironclaw_approvals::ApprovalRequestStorePort;
+use ironclaw_approvals::ApprovalStoreError;
+use ironclaw_host_api::turn::{TurnActor, TurnGateRef, TurnScope};
 use ironclaw_host_api::{
-    Action, ApprovalRequest, InvocationId, NetworkMethod, NetworkScheme, UserId,
+    action::{Action, NetworkMethod, NetworkScheme},
+    approval::ApprovalRequest,
+    ids::{InvocationId, UserId},
 };
-use ironclaw_run_state::ApprovalRequestStorePort;
-use ironclaw_run_state::RunStateError;
-use ironclaw_turns::{GateRef, TurnActor, TurnScope};
 use thiserror::Error;
 
 use crate::{ApprovalInteractionScope, approval_request_id_from_gate_ref};
@@ -24,12 +26,12 @@ pub struct ApprovalPromptLookup {
 #[error("approval prompt context is temporarily unavailable")]
 pub struct ApprovalPromptLookupError {
     #[source]
-    source: RunStateError,
+    source: ApprovalStoreError,
 }
 
 pub async fn approval_prompt_lookup(
     approval_requests: Option<&dyn ApprovalRequestStorePort>,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
 ) -> Result<ApprovalPromptLookup, ApprovalPromptLookupError> {
@@ -53,7 +55,7 @@ pub async fn approval_prompt_lookup(
 
 pub async fn approval_prompt_context_view(
     approval_requests: Option<&dyn ApprovalRequestStorePort>,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
 ) -> Result<Option<ApprovalPromptContextView>, ApprovalPromptLookupError> {

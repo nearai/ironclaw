@@ -23,7 +23,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use ironclaw_host_api::HostApiError;
+use ironclaw_host_api::error::HostApiError;
 use serde::{Deserialize, Serialize};
 
 use crate::index::{IndexKey, IndexValue};
@@ -344,7 +344,7 @@ impl Entry {
 /// `entry.indexed` (PR #3659 review fix).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionedEntry {
-    pub path: ironclaw_host_api::VirtualPath,
+    pub path: ironclaw_host_api::path::VirtualPath,
     pub entry: Entry,
     pub version: RecordVersion,
 }

@@ -13,33 +13,36 @@ use ironclaw_turns::{
     TurnCoordinator, TurnError, TurnSurfaceType,
 };
 
+use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
+
+use crate::ids::map_external_ref_error;
 use crate::trusted_trigger::{TrustedTriggerInboundFailureKind, classify_inbound_error};
 use crate::types::{TrustedInboundKind, TrustedInboundTurnRequest};
 use crate::{
-    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
-    AdapterInstallationId, AdapterKind, ConversationBindingResolution, ConversationBindingService,
-    ConversationRouteKind, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    InboundMessageContentRef, InboundTurnError, InboundTurnRequest, InboundTurnResponse,
-    MessageIdempotencyStatus, ResolveConversationRequest, SessionThreadService,
+    AcceptConversationMessageRequest, AcceptedConversationMessage,
+    AcceptedConversationMessageLookup, AdapterInstallationId, AdapterKind,
+    ConversationBindingResolution, ConversationBindingService, ConversationRouteKind,
+    ExternalEventId, InboundConversationService, InboundMessageContentRef, InboundTurnError,
+    InboundTurnRequest, InboundTurnResponse, MessageIdempotencyStatus, ResolveConversationRequest,
 };
 
 #[derive(Clone)]
 pub struct InboundTurnService<B, S, C: ?Sized> {
     binding_service: B,
-    session_thread_service: S,
+    conversation_service: S,
     turn_coordinator: Arc<C>,
 }
 
 impl<B, S, C> InboundTurnService<B, S, C>
 where
     B: ConversationBindingService,
-    S: SessionThreadService,
+    S: InboundConversationService,
     C: TurnCoordinator + ?Sized,
 {
-    pub fn new(binding_service: B, session_thread_service: S, turn_coordinator: Arc<C>) -> Self {
+    pub fn new(binding_service: B, conversation_service: S, turn_coordinator: Arc<C>) -> Self {
         Self {
             binding_service,
-            session_thread_service,
+            conversation_service,
             turn_coordinator,
         }
     }
@@ -121,7 +124,7 @@ where
             }
         })?;
 
-        let replay_lookup = AcceptedInboundMessageLookup {
+        let replay_lookup = AcceptedConversationMessageLookup {
             tenant_id: tenant_id.clone(),
             adapter_kind: adapter_kind.clone(),
             adapter_installation_id: adapter_installation_id.clone(),
@@ -130,7 +133,7 @@ where
             external_event_id: external_event_id.clone(),
         };
         if let Some(replay) = self
-            .session_thread_service
+            .conversation_service
             .replay_accepted_inbound_message(replay_lookup)
             .await?
         {
@@ -183,8 +186,8 @@ where
             }
         };
         let accepted_message = self
-            .session_thread_service
-            .accept_inbound_message(AcceptInboundMessageRequest {
+            .conversation_service
+            .accept_inbound_message(AcceptConversationMessageRequest {
                 tenant_id: resolution.tenant_id.clone(),
                 thread_id: resolution.turn_scope.thread_id.clone(),
                 actor: resolution.actor.clone(),
@@ -215,7 +218,7 @@ where
     async fn submit_or_replay(
         &self,
         mut resolution: ConversationBindingResolution,
-        accepted_message: AcceptedInboundMessage,
+        accepted_message: AcceptedConversationMessage,
         classification: ironclaw_turns::product_context::InboundClassification,
         run_adapter: RunOriginAdapter,
         surface_type: Option<TurnSurfaceType>,
@@ -224,7 +227,7 @@ where
 
         if accepted_message.idempotency == MessageIdempotencyStatus::Duplicate
             && let Some(turn_submission) = self
-                .session_thread_service
+                .conversation_service
                 .inbound_message_turn_submission(&accepted_message.message_ref)
                 .await?
         {
@@ -237,7 +240,7 @@ where
         }
 
         let idempotency_key = self
-            .session_thread_service
+            .conversation_service
             .inbound_message_turn_submission_key(&accepted_message.message_ref)
             .await?;
         let turn_submission_result = self
@@ -268,14 +271,14 @@ where
             Ok(response) => response,
             Err(error) => {
                 if should_rotate_submit_key(&error) {
-                    self.session_thread_service
+                    self.conversation_service
                         .rotate_inbound_message_turn_submission_key(&accepted_message.message_ref)
                         .await?;
                 }
                 return Err(InboundTurnError::TurnSubmissionFailed { error });
             }
         };
-        self.session_thread_service
+        self.conversation_service
             .mark_inbound_message_turn_submitted(
                 &accepted_message.message_ref,
                 turn_submission.clone(),
@@ -300,18 +303,18 @@ pub(crate) struct ConversationTrustedTriggerSubmitter<B, S, C: ?Sized> {
 impl<B, S, C> ConversationTrustedTriggerSubmitter<B, S, C>
 where
     B: ConversationBindingService,
-    S: SessionThreadService,
+    S: InboundConversationService,
     C: TurnCoordinator + ?Sized,
 {
     pub(crate) fn new(
         binding_service: B,
-        session_thread_service: S,
+        conversation_service: S,
         turn_coordinator: Arc<C>,
     ) -> Self {
         Self {
             inbound: InboundTurnService::new(
                 binding_service,
-                session_thread_service,
+                conversation_service,
                 turn_coordinator,
             ),
             prompt_safety: Arc::new(Sanitizer::new()),
@@ -327,17 +330,17 @@ where
 /// worker, not in this public function.
 pub fn trusted_trigger_fire_submitter<B, S, C>(
     binding_service: B,
-    session_thread_service: S,
+    conversation_service: S,
     turn_coordinator: Arc<C>,
 ) -> Arc<dyn TrustedTriggerFireSubmitter>
 where
     B: ConversationBindingService + 'static,
-    S: SessionThreadService + 'static,
+    S: InboundConversationService + 'static,
     C: TurnCoordinator + ?Sized + 'static,
 {
     Arc::new(ConversationTrustedTriggerSubmitter::new(
         binding_service,
-        session_thread_service,
+        conversation_service,
         turn_coordinator,
     ))
 }
@@ -346,7 +349,7 @@ where
 impl<B, S, C> TrustedTriggerFireSubmitter for ConversationTrustedTriggerSubmitter<B, S, C>
 where
     B: ConversationBindingService,
-    S: SessionThreadService,
+    S: InboundConversationService,
     C: TurnCoordinator + ?Sized,
 {
     async fn submit_trusted_trigger_fire(
@@ -386,13 +389,17 @@ fn trusted_inbound_request_from_trigger(
             external_actor_ref: ExternalActorRef::new(
                 trusted_inbound_binding.external_actor_namespace(),
                 trusted_inbound_binding.external_actor_id(),
-            )?,
+                // A trigger fire has no human display name to carry.
+                None::<String>,
+            )
+            .map_err(map_external_ref_error)?,
             external_conversation_ref: ExternalConversationRef::new(
                 None,
                 trusted_inbound_binding.external_conversation_id(),
                 Some(trusted_inbound_binding.route_thread_id()),
                 None,
-            )?,
+            )
+            .map_err(map_external_ref_error)?,
             external_event_id: ExternalEventId::new(trusted_inbound_binding.external_event_id())?,
             route_kind: ConversationRouteKind::Direct,
             content_ref: InboundMessageContentRef::new(content_ref.as_str())?,
@@ -424,9 +431,9 @@ fn trusted_inbound_request_from_trigger(
 enum BindingResolutionPolicy {
     Untrusted,
     Trusted {
-        trusted_agent_id: Option<ironclaw_host_api::AgentId>,
-        trusted_project_id: Option<ironclaw_host_api::ProjectId>,
-        trusted_owner_user_id: Option<ironclaw_host_api::UserId>,
+        trusted_agent_id: Option<ironclaw_host_api::ids::AgentId>,
+        trusted_project_id: Option<ironclaw_host_api::ids::ProjectId>,
+        trusted_owner_user_id: Option<ironclaw_host_api::ids::UserId>,
         kind: TrustedInboundKind,
     },
 }
@@ -534,7 +541,7 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_triggers::{
         TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
         TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerFire, TriggerFireIdentity, TriggerId,
@@ -556,14 +563,14 @@ mod tests {
     };
     use crate::types::{TrustedInboundKind, TrustedInboundTurnRequest};
     use crate::{
-        AcceptedInboundMessage, AdapterInstallationId, AdapterKind, ConversationBindingResolution,
-        ConversationBindingService, ConversationRouteKind, ExternalActorRef,
-        ExternalConversationRef, ExternalEventId, InMemoryConversationServices,
-        InboundMessageContentRef, InboundTurnError, InboundTurnRequest, InboundTurnResponse,
-        InboundTurnService, LinkConversationRequest, LinkedConversationBinding,
-        MessageIdempotencyStatus, ReplyTargetBinding, ThreadAccessDecision,
-        ValidateReplyTargetRequest,
+        AcceptedConversationMessage, AdapterInstallationId, AdapterKind,
+        ConversationBindingResolution, ConversationBindingService, ConversationRouteKind,
+        ExternalEventId, InMemoryConversationServices, InboundMessageContentRef, InboundTurnError,
+        InboundTurnRequest, InboundTurnResponse, InboundTurnService, LinkConversationRequest,
+        LinkedConversationBinding, MessageIdempotencyStatus, ReplyTargetBinding,
+        ThreadAccessDecision, ValidateReplyTargetRequest,
     };
+    use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
 
     #[tokio::test]
     async fn trusted_inbound_with_real_services_creates_binding_records_message_and_replays_submission()
@@ -1074,7 +1081,7 @@ mod tests {
                 reply_target_binding_ref: reply_target_binding_ref.clone(),
                 access: ThreadAccessDecision::Allowed,
             },
-            accepted_message: AcceptedInboundMessage {
+            accepted_message: AcceptedConversationMessage {
                 tenant_id,
                 thread_id,
                 actor,
@@ -1178,7 +1185,12 @@ mod tests {
     }
 
     fn external_actor(value: &str) -> ExternalActorRef {
-        ExternalActorRef::new(TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, value).unwrap()
+        ExternalActorRef::new(
+            TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+            value,
+            None::<String>,
+        )
+        .unwrap()
     }
 
     fn user(value: &str) -> UserId {
@@ -1568,7 +1580,7 @@ mod tests {
     async fn trusted_non_trigger_adapter_records_inbound_origin() {
         let slack = AdapterKind::new("slack").unwrap();
         let slack_install = AdapterInstallationId::new("slack-install").unwrap();
-        let slack_actor = ExternalActorRef::new("slack", "alice").unwrap();
+        let slack_actor = ExternalActorRef::new("slack", "alice", None::<String>).unwrap();
         let services = InMemoryConversationServices::default();
         services
             .pair_external_actor(
@@ -1700,7 +1712,7 @@ mod tests {
     async fn shared_route_kind_records_channel_surface_type() {
         let slack = AdapterKind::new("slack").unwrap();
         let slack_install = AdapterInstallationId::new("slack-install").unwrap();
-        let slack_actor = ExternalActorRef::new("slack", "user-alice").unwrap();
+        let slack_actor = ExternalActorRef::new("slack", "user-alice", None::<String>).unwrap();
         let services = InMemoryConversationServices::default();
         services
             .pair_external_actor(
@@ -1764,7 +1776,8 @@ mod tests {
     async fn ordinary_inbound_adapter_records_product_inbound_with_adapter_name() {
         let telegram = AdapterKind::new("telegram").unwrap();
         let telegram_install = AdapterInstallationId::new("telegram-install").unwrap();
-        let telegram_actor = ExternalActorRef::new("telegram", "user-alice").unwrap();
+        let telegram_actor =
+            ExternalActorRef::new("telegram", "user-alice", None::<String>).unwrap();
         let services = InMemoryConversationServices::default();
         services
             .pair_external_actor(
@@ -1836,7 +1849,7 @@ mod tests {
         let long_adapter = AdapterKind::new(&long_name)
             .expect("300-byte adapter kind must be valid — AdapterKind allows up to 512 bytes");
         let long_install = AdapterInstallationId::new("long-adapter-install").unwrap();
-        let long_actor = ExternalActorRef::new("long", "user-alice").unwrap();
+        let long_actor = ExternalActorRef::new("long", "user-alice", None::<String>).unwrap();
         let services = InMemoryConversationServices::default();
         services
             .pair_external_actor(

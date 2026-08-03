@@ -6,14 +6,12 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_loop_contracts::{LoopRunContext, PromptMode};
 use ironclaw_loop_host::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostIdentityMessageContent, IdentityApplicability, IdentityFileName, identity_message_ref,
 };
-use ironclaw_turns::{
-    LoopMessageRef,
-    run_profile::{LoopRunContext, PromptMode},
-};
+use ironclaw_turns::LoopMessageRef;
 
 const DEFAULT_SYSTEM_PROMPT_NAME: &str = "SYSTEM.md";
 const DEFAULT_SYSTEM_PROMPT_EMBEDDED: &str = include_str!("../../assets/prompts/default-system.md");
@@ -26,6 +24,24 @@ const DEFAULT_SYSTEM_PROMPT_EMBEDDED: &str = include_str!("../../assets/prompts/
 /// disclosure is off (no bridges exist on that surface).
 const TOOL_DISCLOSURE_PROTOCOL_EMBEDDED: &str =
     include_str!("../../assets/prompts/tool-disclosure-protocol.md");
+/// Docs-grounding self-knowledge protocol, appended to the system prompt
+/// unconditionally. This is ground knowledge about the running system, not a
+/// user preference: without it the model answers questions about IronClaw's own
+/// capabilities from training data instead of the published docs. Seeding it
+/// into the user-editable file would only reach fresh installs, so it is
+/// appended in memory on every resolve — the same mechanism the tool-disclosure
+/// protocol uses.
+const SELF_KNOWLEDGE_PROTOCOL_EMBEDDED: &str =
+    include_str!("../../assets/prompts/self-knowledge.md");
+/// Appended only when benchmarking mode is active (see
+/// `DefaultSystemPromptIdentitySource::benchmarking_mode_active`). Tells the
+/// model there is no human to ask, overriding the "ask the user...a product
+/// decision" escape valve in the base prompt's Tool Continuation section —
+/// that escape valve is correct for real product usage but causes an agent
+/// running unattended dataset evaluation to stall a turn on a clarifying
+/// question no one will ever answer.
+const BENCHMARKING_MODE_PROTOCOL_EMBEDDED: &str =
+    include_str!("../../assets/prompts/benchmarking-mode.md");
 const MAX_DEFAULT_SYSTEM_PROMPT_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -51,8 +67,14 @@ pub(crate) struct DefaultSystemPromptIdentitySource {
     /// When true, the progressive tool-disclosure protocol is appended to the
     /// system prompt so the model is told to discover deferred tools via
     /// `tool_search`. Set from the resolved tool-disclosure mode at build time;
-    /// off ⇒ the prompt content is byte-identical to the seeded file.
+    /// off ⇒ the prompt carries the file plus the unconditional self-knowledge
+    /// section, and nothing that references the bridge tools.
     disclosure_protocol_active: bool,
+    /// When true, the benchmarking-mode protocol is appended, telling the
+    /// model no human is available to answer clarifying questions. Set from
+    /// the `BENCHMARKING_MODE` env var at build time (see `runtime.rs`); off
+    /// by default, so normal product usage is unaffected.
+    benchmarking_mode_active: bool,
     loaded_identity_content: Arc<RwLock<HashMap<LoopMessageRef, HostIdentityMessageContent>>>,
 }
 
@@ -61,30 +83,30 @@ impl DefaultSystemPromptIdentitySource {
         storage_root: PathBuf,
         prompt_path: PathBuf,
         disclosure_protocol_active: bool,
+        benchmarking_mode_active: bool,
     ) -> Result<Self, DefaultSystemPromptError> {
         read_default_system_prompt(&storage_root, &prompt_path)?;
         Ok(Self {
             storage_root,
             prompt_path,
             disclosure_protocol_active,
+            benchmarking_mode_active,
             loaded_identity_content: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
     fn prompt_content(&self) -> Result<String, DefaultSystemPromptError> {
-        let base = read_default_system_prompt(&self.storage_root, &self.prompt_path)?;
-        if !self.disclosure_protocol_active {
-            return Ok(base);
+        // Append in memory (not to the seeded, user-editable file) so these
+        // sections are system invariants independent of user edits to SYSTEM.md
+        // — and so existing installs get them, not just freshly seeded ones.
+        let mut content = read_default_system_prompt(&self.storage_root, &self.prompt_path)?;
+        append_section(&mut content, SELF_KNOWLEDGE_PROTOCOL_EMBEDDED);
+        if self.disclosure_protocol_active {
+            append_section(&mut content, TOOL_DISCLOSURE_PROTOCOL_EMBEDDED);
         }
-        // Append in memory (not to the seeded, user-editable file) so the
-        // disclosure protocol is a system invariant whenever disclosure is on,
-        // independent of user edits to SYSTEM.md.
-        let mut content = base;
-        if !content.ends_with('\n') {
-            content.push('\n');
+        if self.benchmarking_mode_active {
+            append_section(&mut content, BENCHMARKING_MODE_PROTOCOL_EMBEDDED);
         }
-        content.push('\n');
-        content.push_str(TOOL_DISCLOSURE_PROTOCOL_EMBEDDED);
         Ok(content)
     }
 
@@ -147,6 +169,17 @@ pub(crate) fn seed_default_system_prompt(
     Ok(())
 }
 
+/// Append an embedded prompt section after `content`, separated by a blank line
+/// so the markdown heading always starts its own block regardless of how the
+/// user's file ends.
+fn append_section(content: &mut String, section: &str) {
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push('\n');
+    content.push_str(section);
+}
+
 fn read_default_system_prompt(
     storage_root: &Path,
     path: &Path,
@@ -173,7 +206,7 @@ fn validate_default_system_prompt(
     if !path.starts_with(storage_root) {
         return Err(DefaultSystemPromptError::InvalidFile {
             path: path.to_path_buf(),
-            reason: "path is outside the local-dev storage root".to_string(),
+            reason: "path is outside the standalone storage root".to_string(),
         });
     }
     let metadata = path
@@ -204,7 +237,7 @@ fn validate_default_system_prompt(
     if !canonical_path.starts_with(&canonical_root) {
         return Err(DefaultSystemPromptError::InvalidFile {
             path: path.to_path_buf(),
-            reason: "canonical path escapes the local-dev storage root".to_string(),
+            reason: "canonical path escapes the standalone storage root".to_string(),
         });
     }
     if metadata.len() > MAX_DEFAULT_SYSTEM_PROMPT_BYTES {
@@ -224,7 +257,7 @@ fn ensure_prompt_parent(
     if !parent.starts_with(storage_root) {
         return Err(DefaultSystemPromptError::InvalidFile {
             path: parent.to_path_buf(),
-            reason: "parent is outside the local-dev storage root".to_string(),
+            reason: "parent is outside the standalone storage root".to_string(),
         });
     }
     let relative_parent =
@@ -232,7 +265,7 @@ fn ensure_prompt_parent(
             .strip_prefix(storage_root)
             .map_err(|_| DefaultSystemPromptError::InvalidFile {
                 path: parent.to_path_buf(),
-                reason: "parent is outside the local-dev storage root".to_string(),
+                reason: "parent is outside the standalone storage root".to_string(),
             })?;
     let mut current = storage_root.to_path_buf();
     for component in relative_parent.components() {
@@ -306,11 +339,11 @@ impl HostIdentityContextSource for DefaultSystemPromptIdentitySource {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{TenantId, ThreadId};
-    use ironclaw_turns::{
-        RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
-        run_profile::{InMemoryRunProfileResolver, LoopRunContext},
+    use ironclaw_host_api::ids::{TenantId, ThreadId};
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest, RunProfileResolver,
     };
+    use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
     use super::*;
 
@@ -334,9 +367,13 @@ mod tests {
         let storage_root = root.path().canonicalize().expect("canonical root");
         let prompt_path = storage_root.join("system/prompts/default-system.md");
         seed_default_system_prompt(&storage_root, &prompt_path).expect("prompt seeds");
-        let source =
-            DefaultSystemPromptIdentitySource::try_new(storage_root, prompt_path.clone(), false)
-                .expect("prompt loads");
+        let source = DefaultSystemPromptIdentitySource::try_new(
+            storage_root,
+            prompt_path.clone(),
+            false,
+            false,
+        )
+        .expect("prompt loads");
         let context = test_run_context().await;
 
         let candidates = source
@@ -348,7 +385,7 @@ mod tests {
         assert_eq!(candidates[0].name.as_str(), DEFAULT_SYSTEM_PROMPT_NAME);
         assert!(
             prompt_path.exists(),
-            "source should seed the editable local-dev prompt file"
+            "source should seed the editable standalone prompt file"
         );
 
         let content = source
@@ -368,6 +405,28 @@ mod tests {
                 .content
                 .contains("When a tool result is partial, truncated, failed")
         );
+        // Self-knowledge must be grounded in the published docs site rather than
+        // recalled from training data (#6734): the prompt has to name the
+        // llms.txt index and the `.md` raw-markdown suffix, or the model has no
+        // way to look its own capabilities up. The guidance is ground knowledge
+        // about the runtime, so it is appended in memory rather than seeded into
+        // the user-editable file — otherwise only fresh installs would get it.
+        assert!(
+            !std::fs::read_to_string(&prompt_path)
+                .expect("seeded prompt reads")
+                .contains("docs.ironclaw.com"),
+            "docs grounding must not be seeded into the user-editable prompt file"
+        );
+        assert!(
+            content
+                .content
+                .contains("https://docs.ironclaw.com/llms.txt"),
+            "prompt must point capability questions at the docs index"
+        );
+        assert!(
+            content.content.contains(".md"),
+            "prompt must teach the raw-markdown `.md` suffix for docs pages"
+        );
         assert!(
             !content.content.contains("tool_search"),
             "disclosure-off prompt must not mention the bridge tools"
@@ -385,9 +444,10 @@ mod tests {
             storage_root.clone(),
             prompt_path.clone(),
             false,
+            false,
         )
         .expect("off source loads");
-        let on = DefaultSystemPromptIdentitySource::try_new(storage_root, prompt_path, true)
+        let on = DefaultSystemPromptIdentitySource::try_new(storage_root, prompt_path, true, false)
             .expect("on source loads");
         let context = test_run_context().await;
 
@@ -425,6 +485,66 @@ mod tests {
         assert!(on_content.contains("tool_describe"));
         assert!(on_content.contains("tool_call"));
         assert!(on_content.contains("Tool Discovery"));
+        assert!(
+            on_content.contains("When `tool_search` is present"),
+            "bridged-mode guidance must be conditional on the outgoing surface actually advertising tool_search"
+        );
+        assert!(
+            on_content.contains("When `tool_search` is absent"),
+            "below-threshold guidance must direct the model to use the complete direct surface"
+        );
+    }
+
+    #[tokio::test]
+    async fn benchmarking_mode_active_appends_no_human_protocol_to_system_prompt() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().canonicalize().expect("canonical root");
+        let prompt_path = storage_root.join("system/prompts/default-system.md");
+        seed_default_system_prompt(&storage_root, &prompt_path).expect("prompt seeds");
+
+        let off = DefaultSystemPromptIdentitySource::try_new(
+            storage_root.clone(),
+            prompt_path.clone(),
+            false,
+            false,
+        )
+        .expect("off source loads");
+        let on = DefaultSystemPromptIdentitySource::try_new(storage_root, prompt_path, false, true)
+            .expect("on source loads");
+        let context = test_run_context().await;
+
+        async fn resolve_content(
+            source: &DefaultSystemPromptIdentitySource,
+            context: &LoopRunContext,
+        ) -> String {
+            let candidates = source
+                .load_identity_candidates(context, PromptMode::TextOnly)
+                .await
+                .expect("candidates load");
+            source
+                .resolve_identity_message_content(
+                    context,
+                    candidates[0]
+                        .message_ref
+                        .as_ref()
+                        .expect("trusted identity has ref"),
+                )
+                .await
+                .expect("resolve content")
+                .expect("content exists")
+                .content
+        }
+
+        let off_content = resolve_content(&off, &context).await;
+        let on_content = resolve_content(&on, &context).await;
+
+        // The base prompt is preserved verbatim, and only the active source
+        // adds the no-human protocol — real product usage (mode off) is
+        // byte-identical to today's prompt.
+        assert!(on_content.starts_with(off_content.trim_end()));
+        assert!(!off_content.contains("Automated Evaluation Mode"));
+        assert!(on_content.contains("Automated Evaluation Mode"));
+        assert!(on_content.contains("no one to answer a clarifying question"));
     }
 
     #[tokio::test]
@@ -437,6 +557,7 @@ mod tests {
             storage_root.clone(),
             prompt_path.clone(),
             false,
+            false,
         )
         .expect("prompt loads");
         let context = test_run_context().await;
@@ -445,7 +566,7 @@ mod tests {
             .await
             .expect("first candidates load");
 
-        std::fs::write(&prompt_path, "edited local-dev prompt").expect("prompt edits");
+        std::fs::write(&prompt_path, "edited standalone prompt").expect("prompt edits");
         let edited_candidates = source
             .load_identity_candidates(&context, PromptMode::TextOnly)
             .await
@@ -467,7 +588,30 @@ mod tests {
             .expect("resolve edited content")
             .expect("edited content exists");
 
-        assert_eq!(content.content, "edited local-dev prompt");
+        // The user's edited base is preserved verbatim and stays first, but the
+        // docs-grounding self-knowledge section is ground knowledge about the
+        // runtime (#6734): it is appended unconditionally, so an install whose
+        // SYSTEM.md predates the guidance (or was edited to drop it) still tells
+        // the model to look its own capabilities up instead of guessing.
+        assert!(content.content.starts_with("edited standalone prompt"));
+        assert!(
+            content.content.contains("## Self-Knowledge"),
+            "self-knowledge guidance must be appended even when SYSTEM.md omits it"
+        );
+        assert!(
+            content
+                .content
+                .contains("https://docs.ironclaw.com/llms.txt"),
+            "appended guidance must point capability questions at the docs index"
+        );
+        assert!(
+            content.content.contains(".md"),
+            "appended guidance must teach the raw-markdown `.md` suffix for docs pages"
+        );
+        assert!(
+            !content.content.contains("tool_search"),
+            "disclosure-off prompt must not mention the bridge tools"
+        );
     }
 
     #[cfg(unix)]

@@ -22,7 +22,7 @@ use bollard::{
     models::HostConfig,
 };
 use futures_util::StreamExt;
-use ironclaw_host_api::ResourceScope;
+use ironclaw_host_api::resource::ResourceScope;
 
 use crate::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
@@ -30,21 +30,47 @@ use crate::{
 };
 
 mod broker;
+mod ca;
+mod connect;
 mod container_identity;
+mod credential_firewall;
+mod key_codec;
 mod mounts;
+mod network_allowlist;
 mod scope_key;
+pub(crate) mod shell_limits;
+
+// `attribution`, `registry`, and `user_key` are the persistent per-user
+// sandbox container model's identity/registry primitives: container naming,
+// label-based identity, and Docker-network connection attribution. Their
+// consumers are the exec-based transport's per-user container reuse and the
+// egress proxy's credential-injection path. `user_key` is `pub`/re-exported
+// for cross-crate composition wiring to construct directly; `registry` and
+// `attribution` stay crate-private, with per-item `#[allow(dead_code)]`
+// comments naming the future consumer where one isn't wired yet.
+mod attribution;
+mod registry;
+mod user_key;
 
 use mounts::RebornSandboxMountSources;
 
 pub use broker::{RebornSandboxNetworkBroker, RebornSandboxSecretBroker};
+pub use connect::{SandboxDockerReadiness, connect_docker_with_retry, sandbox_docker_readiness};
 pub use container_identity::{RebornSandboxContainerIdentity, RebornSandboxWorkspaceMode};
+pub use network_allowlist::{
+    DEFAULT_SANDBOX_ALLOWED_DOMAINS, DEFAULT_SANDBOX_MAX_EGRESS_BYTES,
+    SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, SANDBOX_MAX_EGRESS_BYTES_ENV, sandbox_allowed_domains,
+    sandbox_extra_allowed_domains, sandbox_max_egress_bytes, sandbox_network_policy,
+};
+pub use registry::SandboxActivityRegistry;
 pub use scope_key::RebornSandboxScopeKey;
+pub use user_key::RebornSandboxUserKey;
 
 const DEFAULT_IMAGE: &str = "ironclaw-worker:latest";
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(shell_limits::SHELL_TIMEOUT_DEFAULT_SECS);
 const DEFAULT_MEMORY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DEFAULT_CPU_SHARES: u32 = 1024;
-const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+const DEFAULT_MAX_OUTPUT_BYTES: usize = shell_limits::SHELL_OUTPUT_LIMIT_DEFAULT_BYTES as usize;
 const CONTAINER_WORKSPACE_ROOT: &str = "/workspace";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,7 +185,7 @@ impl RebornSandboxConfig {
 
     pub fn with_local_mount_source(
         mut self,
-        virtual_root: ironclaw_host_api::VirtualPath,
+        virtual_root: ironclaw_host_api::path::VirtualPath,
         host_root: impl Into<PathBuf>,
     ) -> Result<Self, RuntimeProcessError> {
         self.mount_sources
@@ -624,7 +650,10 @@ fn validate_relative_workdir(path: &Path) -> Result<(), RuntimeProcessError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
 
     #[test]
     fn relative_workdir_rejects_escape() {

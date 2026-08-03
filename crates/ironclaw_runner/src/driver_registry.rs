@@ -7,10 +7,10 @@
 
 use std::{borrow::Borrow, collections::HashMap, error::Error, fmt, sync::Arc};
 
-use ironclaw_turns::{
-    AgentLoopDriver, AgentLoopDriverDescriptor, RunProfileVersion, TurnStatus,
-    run_profile::{CheckpointSchemaId, LoopDriverId},
+use ironclaw_loop_contracts::{
+    AgentLoopDriver, AgentLoopDriverDescriptor, CheckpointSchemaId, LoopDriverId,
 };
+use ironclaw_turns::{RunProfileVersion, TurnStatus};
 
 /// Exact persisted identity for a registered loop driver.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -107,7 +107,7 @@ impl Default for DriverRequirements {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriverKind {
     Production,
-    /// Fake/reference drivers are allowed only in explicit local-dev/test readiness.
+    /// Fake/reference drivers are allowed only in explicit standalone/test readiness.
     Reference,
 }
 
@@ -295,7 +295,7 @@ impl DriverRegistry {
         let status = if diagnostics.iter().any(|diagnostic| diagnostic.blocks_ready) {
             DriverReadinessStatus::NotReady
         } else if has_reference_driver {
-            DriverReadinessStatus::LocalDevDegradedReference
+            DriverReadinessStatus::NonProductionDegradedReference
         } else {
             DriverReadinessStatus::ProductionReady
         };
@@ -310,7 +310,7 @@ impl DriverRegistry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriverReadinessMode {
     Production,
-    LocalDevTest,
+    NonProduction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -404,7 +404,7 @@ impl HostGraphReadiness {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriverReadinessStatus {
     ProductionReady,
-    LocalDevDegradedReference,
+    NonProductionDegradedReference,
     NotReady,
 }
 
@@ -419,7 +419,7 @@ pub enum DriverReadinessDiagnosticCode {
     MissingConfiguredDriver,
     MissingNonTerminalRunDriver,
     ReferenceDriverNotProductionReady,
-    ReferenceDriverAllowedForLocalDev,
+    ReferenceDriverAllowedForNonProduction,
     MissingRequiredDriverRequirement,
 }
 
@@ -501,13 +501,13 @@ fn validate_entry_readiness(
                 "fake/reference loop driver cannot satisfy production readiness",
             ))
         }
-        (DriverReadinessMode::LocalDevTest, DriverKind::Reference) => {
+        (DriverReadinessMode::NonProduction, DriverKind::Reference) => {
             *has_reference_driver = true;
             diagnostics.push(DriverReadinessDiagnostic::non_blocking(
-                DriverReadinessDiagnosticCode::ReferenceDriverAllowedForLocalDev,
+                DriverReadinessDiagnosticCode::ReferenceDriverAllowedForNonProduction,
                 subject.to_string(),
                 Some(driver_identity.clone()),
-                "fake/reference loop driver allowed only for explicit local-dev/test readiness",
+                "fake/reference loop driver allowed only for explicit standalone/test readiness",
             ));
         }
         (_, DriverKind::Production) => {}

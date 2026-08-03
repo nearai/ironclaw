@@ -6,19 +6,29 @@ use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_host_api::result_meta::FailureKind;
 use ironclaw_host_api::{
-    AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet,
-    CorrelationId, CredentialStageError, Decision, EffectKind, ExecutionContext, ExtensionId,
-    GrantConstraints, HostPath, InvocationId, MissionId, MountView, NetworkMethod, NetworkPolicy,
-    NetworkScheme, NetworkTargetPattern, Obligation, Obligations, PackageId, Principal, ProjectId,
-    ResourceEstimate, ResourceScope, RunId, RuntimeKind, SecretHandle, TenantId, TrustClass,
-    UserId, VendorId, VirtualPath,
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+    },
+    decision::{Decision, Obligation, Obligations},
+    dispatch::CredentialStageError,
+    ids::{
+        AgentId, CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId, InvocationId,
+        MissionId, PackageId, ProjectId, RunId, SecretHandle, TenantId, UserId, VendorId,
+    },
+    mount::MountView,
+    path::{HostPath, VirtualPath},
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
     RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
-    RuntimeCredentialAccountResolver, RuntimeFailureKind, RuntimeInvocation,
-    default_host_api_contract_registry, default_host_port_catalog,
+    RuntimeCredentialAccountResolver, RuntimeInvocation, default_host_api_contract_registry,
+    default_host_port_catalog,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -54,7 +64,8 @@ macro_rules! github_wasm_services_for_test {
                 Obligation::InjectCredentialAccountOnce {
                     handle: SecretHandle::new("github_runtime_token").unwrap(),
                     provider: VendorId::new("github").unwrap(),
-                    setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+                    setup:
+                        ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
                     provider_scopes: Vec::new(),
                     requester_extension: ExtensionId::new("github").unwrap(),
                 },
@@ -97,7 +108,7 @@ macro_rules! google_wasm_services_for_test {
                 Obligation::InjectCredentialAccountOnce {
                     handle: SecretHandle::new("google_runtime_token").unwrap(),
                     provider: VendorId::new("google").unwrap(),
-                    setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                    setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                         scopes: required_scopes.clone(),
                     },
                     provider_scopes: required_scopes.clone(),
@@ -124,15 +135,46 @@ macro_rules! google_wasm_services_for_test {
 }
 
 #[tokio::test]
-async fn host_runtime_services_routes_structured_github_wasm_search_through_runtime_http_egress() {
-    let capability_id = CapabilityId::new("github.search_issues").unwrap();
+async fn host_runtime_services_compact_github_search_preserves_pagination_and_egress() {
+    let capability_id = CapabilityId::new("github.search_issues_pull_requests").unwrap();
     let scope = sample_scope(InvocationId::new());
-    let expected_url =
-        "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20is%3Aissue&per_page=1";
+    let expected_url = "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20is%3Apr&per_page=30&page=2";
     let policy = github_policy();
-    let network = RecordingNetworkHttpEgress::with_body(
-        br#"{"total_count":0,"incomplete_results":false,"items":[]}"#.to_vec(),
-    );
+    let large_body = "x".repeat(24 * 1024);
+    let items = (0..30)
+        .map(|index| {
+            json!({
+                "number": 7_000 + index,
+                "title": format!("Prioritize search result {index}"),
+                "body": large_body,
+                "state": "open",
+                "draft": false,
+                "html_url": format!("https://github.com/nearai/ironclaw/pull/{}", 7_000 + index),
+                "repository_url": "https://api.github.com/repos/nearai/ironclaw",
+                "user": {"login": format!("author-{index}"), "avatar_url": "https://example.test/avatar"},
+                "labels": [{"name": "priority/high", "description": large_body}],
+                "assignees": [{"login": "review-owner", "avatar_url": "https://example.test/avatar"}],
+                "comments": 23,
+                "created_at": "2026-07-01T00:00:00Z",
+                "updated_at": "2026-07-31T00:00:00Z",
+                "pull_request": {
+                    "url": format!("https://api.github.com/repos/nearai/ironclaw/pulls/{}", 7_000 + index),
+                    "html_url": format!("https://github.com/nearai/ironclaw/pull/{}", 7_000 + index),
+                    "diff_url": "https://example.test/large.diff"
+                },
+                "reactions": {"url": "https://api.github.com/large"},
+                "score": 1.0
+            })
+        })
+        .collect::<Vec<_>>();
+    let provider_body = json!({
+        "total_count": 5_000,
+        "incomplete_results": false,
+        "items": items
+    })
+    .to_string();
+    assert!(provider_body.len() > 1024 * 1024);
+    let network = RecordingNetworkHttpEgress::with_body(provider_body.into_bytes());
     let secret_store = Arc::new(SecretStore::ephemeral());
     let slot_handle = SecretHandle::new("github_runtime_token").unwrap();
     let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
@@ -147,7 +189,7 @@ async fn host_runtime_services_routes_structured_github_wasm_search_through_runt
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: VendorId::new("github").unwrap(),
-                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+                setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
                 provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("github").unwrap(),
             },
@@ -179,7 +221,7 @@ async fn host_runtime_services_routes_structured_github_wasm_search_through_runt
         .invoke_capability(wasm_runtime_request_for_scope(
             capability_id.clone(),
             scope,
-            json!({"repo": "nearai/ironclaw", "type": "issue", "limit": 1}),
+            json!({"repo": "nearai/ironclaw", "type": "pr", "limit": 30, "page": 2}),
         ))
         .await
         .unwrap();
@@ -187,9 +229,17 @@ async fn host_runtime_services_routes_structured_github_wasm_search_through_runt
     match outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
             assert_eq!(completed.capability_id, capability_id);
+            assert_eq!(completed.output["total_count"], 5_000);
+            assert_eq!(completed.output["items"].as_array().map(Vec::len), Some(30));
             assert_eq!(
-                completed.output,
-                json!({"total_count":0,"incomplete_results":false,"items":[]})
+                completed.output["items"][0]["user"],
+                json!({"login": "author-0"})
+            );
+            assert!(completed.output["items"][0].get("body").is_none());
+            assert!(completed.output["items"][0].get("reactions").is_none());
+            assert!(
+                completed.output.to_string().len() < 30 * 1024,
+                "host-visible search output should remain compact"
             );
         }
         other => panic!("expected completed outcome, got {other:?}"),
@@ -209,6 +259,100 @@ async fn host_runtime_services_routes_structured_github_wasm_search_through_runt
             "authorization".to_string(),
             "Bearer ghp_fake_fixture_token".to_string(),
         ))
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_services_compact_github_pull_list_preserves_page_shape() {
+    let capability_id = CapabilityId::new("github.list_pull_requests").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let large_body = "x".repeat(16 * 1024);
+    let provider_items = (0..30)
+        .map(|index| {
+            json!({
+                "number": 8_000 + index,
+                "title": format!("Prioritize pull request {index}"),
+                "body": large_body,
+                "state": "open",
+                "draft": index % 2 == 0,
+                "html_url": format!("https://github.com/nearai/ironclaw/pull/{}", 8_000 + index),
+                "user": {"login": format!("author-{index}"), "avatar_url": "https://example.test/avatar"},
+                "labels": [{"name": "priority/high", "description": large_body}],
+                "assignees": [{"login": "review-owner", "avatar_url": "https://example.test/avatar"}],
+                "requested_reviewers": [{"login": "maintainer", "avatar_url": "https://example.test/avatar"}],
+                "requested_teams": [{"slug": "core", "description": large_body}],
+                "created_at": "2026-07-01T00:00:00Z",
+                "updated_at": "2026-07-31T00:00:00Z",
+                "head": {
+                    "ref": format!("feature/{index}"),
+                    "sha": format!("{index:040x}"),
+                    "repo": {"full_name": "nearai/ironclaw", "description": large_body}
+                },
+                "base": {
+                    "ref": "main",
+                    "sha": "1111111111111111111111111111111111111111",
+                    "repo": {"full_name": "nearai/ironclaw", "description": large_body}
+                },
+                "_links": {"self": {"href": "https://api.github.com/large"}}
+            })
+        })
+        .collect::<Vec<_>>();
+    let provider_body = serde_json::to_string(&provider_items).expect("provider fixture JSON");
+    assert!(provider_body.len() > 2 * 1024 * 1024);
+    let network = RecordingNetworkHttpEgress::with_body(provider_body.into_bytes());
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
+    let services = github_wasm_services_for_test!(
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "page": 3,
+                "limit": 30
+            }),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            let items = completed.output.as_array().expect("list remains an array");
+            assert_eq!(items.len(), 30);
+            assert_eq!(items[0]["number"], 8_000);
+            assert_eq!(items[0]["labels"], json!([{"name": "priority/high"}]));
+            assert!(items[0].get("body").is_none());
+            assert!(items[0]["head"].get("repo").is_none());
+            assert!(
+                completed.output.to_string().len() < 30 * 1024,
+                "host-visible pull list output should remain compact"
+            );
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/repos/nearai/ironclaw/pulls?state=open&per_page=30&page=3"
     );
 }
 
@@ -235,7 +379,7 @@ async fn host_runtime_services_restages_github_product_auth_for_multi_request_wa
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: VendorId::new("github").unwrap(),
-                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+                setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
                 provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("github").unwrap(),
             },
@@ -328,7 +472,7 @@ async fn host_runtime_services_routes_google_drive_wasm_list_files_with_scoped_g
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: VendorId::new("google").unwrap(),
-                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                     scopes: required_scopes.clone(),
                 },
                 provider_scopes: required_scopes.clone(),
@@ -530,7 +674,7 @@ async fn host_runtime_services_maps_google_drive_wasm_401_to_auth_required() {
             assert_eq!(requirement.provider, VendorId::new("google").unwrap());
             assert_eq!(
                 requirement.setup,
-                ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                     scopes: vec!["https://www.googleapis.com/auth/drive.readonly".to_string()]
                 }
             );
@@ -603,7 +747,7 @@ async fn host_runtime_services_maps_google_drive_upload_wasm_401_to_auth_require
             assert_eq!(requirement.provider, VendorId::new("google").unwrap());
             assert_eq!(
                 requirement.setup,
-                ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                     scopes: vec!["https://www.googleapis.com/auth/drive".to_string()]
                 }
             );
@@ -832,7 +976,7 @@ async fn host_runtime_services_maps_github_wasm_input_errors_to_invalid_input() 
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::InvalidInput);
+    assert_failed_outcome(outcome, FailureKind::InputEncode);
     assert!(
         network.requests().is_empty(),
         "guest validation failures must block before HTTP egress"
@@ -874,7 +1018,7 @@ async fn host_runtime_services_maps_github_search_validation_status_to_invalid_i
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::InvalidInput);
+    assert_failed_outcome(outcome, FailureKind::InputEncode);
     assert_eq!(network.requests().len(), 1);
 }
 
@@ -914,7 +1058,7 @@ async fn host_runtime_services_keeps_github_non_validation_422_as_operation_fail
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::OperationFailed);
+    assert_failed_outcome(outcome, FailureKind::OperationFailed);
     assert_eq!(network.requests().len(), 1);
 }
 
@@ -938,7 +1082,7 @@ async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: VendorId::new("github").unwrap(),
-                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+                setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
                 provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("github").unwrap(),
             },
@@ -1016,7 +1160,7 @@ async fn host_runtime_services_injects_personal_xoxp_token_for_slack_user_search
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: VendorId::new("slack").unwrap(),
-                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                     scopes: slack_user_scopes(),
                 },
                 provider_scopes: slack_user_scopes(),
@@ -1122,7 +1266,7 @@ async fn host_runtime_services_missing_slack_account_blocks_slack_user_on_auth()
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: VendorId::new("slack").unwrap(),
-                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                     scopes: slack_user_scopes(),
                 },
                 provider_scopes: slack_user_scopes(),
@@ -1180,9 +1324,16 @@ async fn bundled_github_wasm_executes_search_get_and_comment_operations() {
         Arc::clone(&search_http),
     );
     assert_eq!(search.error, None);
+    let search_output: serde_json::Value = serde_json::from_str(
+        search
+            .output_json
+            .as_deref()
+            .expect("search should return compact JSON"),
+    )
+    .expect("compact search output should be valid JSON");
     assert_eq!(
-        search.output_json.as_deref(),
-        Some(r#"{"total_count":0,"incomplete_results":false,"items":[]}"#)
+        search_output,
+        json!({"total_count": 0, "incomplete_results": false, "items": []})
     );
     assert_single_wasm_request(
         &search_http,
@@ -1715,8 +1866,8 @@ async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
 #[tokio::test]
 async fn bundled_github_wasm_leaves_success_json_for_host_output_decode() {
     let execution = execute_bundled_github_wasm(
-        "github.search_issues",
-        json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
+        "github.get_issue",
+        json!({"owner": "nearai", "repo": "ironclaw", "issue_number": 1}),
         Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
             status: 200,
             headers_json: "{}".to_string(),
@@ -1726,6 +1877,25 @@ async fn bundled_github_wasm_leaves_success_json_for_host_output_decode() {
 
     assert_eq!(execution.output_json.as_deref(), Some("not-json"));
     assert_eq!(execution.error, None);
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_rejects_malformed_compacted_search_response() {
+    let execution = execute_bundled_github_wasm(
+        "github.search_issues",
+        json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
+        Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+            status: 200,
+            headers_json: "{}".to_string(),
+            body: b"not-json".to_vec(),
+        })),
+    );
+
+    assert_eq!(execution.output_json, None);
+    assert_eq!(
+        structured_wasm_error_code(&execution).as_deref(),
+        Some("github_api_invalid_response")
+    );
 }
 
 #[test]
@@ -1775,7 +1945,7 @@ fn bundled_google_drive_wasm_rejects_invalid_context_derived_dispatch_inputs() {
     );
 }
 
-fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected_kind: RuntimeFailureKind) {
+fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected_kind: FailureKind) {
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => assert_eq!(failure.kind, expected_kind),
         other => panic!("expected failed outcome {expected_kind:?}, got {other:?}"),
@@ -2027,20 +2197,18 @@ impl RuntimeCredentialAccountResolver for FixedSlackRuntimeCredentialAccountReso
 fn registry_with_slack_user_package() -> ExtensionRegistry {
     // Parse through the single record entry point (the bundled asset is a
     // manifest v3 document).
+    let root = VirtualPath::new("/system/extensions/slack").unwrap();
     let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
         std::fs::read_to_string(slack_user_asset_root().join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),
         None,
         &default_host_api_contract_registry().unwrap(),
+        Some(root.clone()),
     )
     .unwrap();
     let manifest = ExtensionManifest::try_from(record.manifest().clone()).unwrap();
-    let package = ExtensionPackage::from_manifest(
-        manifest,
-        VirtualPath::new("/system/extensions/slack").unwrap(),
-    )
-    .unwrap();
+    let package = ExtensionPackage::from_manifest(manifest, root).unwrap();
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
     registry
@@ -2126,20 +2294,18 @@ fn slack_user_first_party_trust_policy() -> HostTrustPolicy {
 fn registry_with_github_package() -> ExtensionRegistry {
     // Parse through the single record entry point (the bundled asset is a
     // manifest v3 document).
+    let root = VirtualPath::new("/system/extensions/github").unwrap();
     let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
         std::fs::read_to_string(github_asset_root().join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),
         None,
         &default_host_api_contract_registry().unwrap(),
+        Some(root.clone()),
     )
     .unwrap();
     let manifest = ExtensionManifest::try_from(record.manifest().clone()).unwrap();
-    let package = ExtensionPackage::from_manifest(
-        manifest,
-        VirtualPath::new("/system/extensions/github").unwrap(),
-    )
-    .unwrap();
+    let package = ExtensionPackage::from_manifest(manifest, root).unwrap();
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
     registry
@@ -2167,20 +2333,18 @@ fn filesystem_with_google_drive_package() -> DiskFilesystem {
 fn registry_with_google_package(package_id: &str) -> ExtensionRegistry {
     // Parse through the single record entry point (the bundled asset is a
     // manifest v3 document).
+    let root = VirtualPath::new(format!("/system/extensions/{package_id}")).unwrap();
     let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
         std::fs::read_to_string(google_asset_root(package_id).join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),
         None,
         &default_host_api_contract_registry().unwrap(),
+        Some(root.clone()),
     )
     .unwrap();
     let manifest = ExtensionManifest::try_from(record.manifest().clone()).unwrap();
-    let package = ExtensionPackage::from_manifest(
-        manifest,
-        VirtualPath::new(format!("/system/extensions/{package_id}")).unwrap(),
-    )
-    .unwrap();
+    let package = ExtensionPackage::from_manifest(manifest, root).unwrap();
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
     registry
@@ -2627,7 +2791,7 @@ macro_rules! slack_enrichment_services_for_test {
                 Obligation::InjectCredentialAccountOnce {
                     handle: SecretHandle::new("slack_user_token").unwrap(),
                     provider: VendorId::new("slack").unwrap(),
-                    setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                    setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                         scopes: $scopes,
                     },
                     provider_scopes: $scopes,
@@ -3031,7 +3195,7 @@ async fn slack_get_conversation_info_rejects_missing_conversation_identity() {
     };
     assert_eq!(
         failure.kind,
-        RuntimeFailureKind::OperationFailed,
+        FailureKind::OperationFailed,
         "malformed exact lookup must fail instead of returning an empty conversation: {failure:?}"
     );
 }
@@ -3067,7 +3231,7 @@ async fn slack_get_conversation_info_rejects_dm_without_counterpart() {
     };
     assert_eq!(
         failure.kind,
-        RuntimeFailureKind::OperationFailed,
+        FailureKind::OperationFailed,
         "a DM without its authoritative counterpart must fail: {failure:?}"
     );
 }
@@ -3532,7 +3696,7 @@ async fn slack_channel_not_found_surfaces_code_in_model_visible_failure() {
     };
     assert_eq!(
         failure.kind,
-        RuntimeFailureKind::InvalidInput,
+        FailureKind::InputEncode,
         "channel_not_found is a model-fixable input error: {failure:?}"
     );
     let message = failure.message.as_deref().unwrap_or_default();

@@ -17,17 +17,17 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::TenantId;
-use ironclaw_prompt_envelope::{EnvelopeSource, EnvelopeTrust, wrap_untrusted};
-use ironclaw_turns::LoopMessageRef;
-use ironclaw_turns::run_profile::{
+use ironclaw_host_api::ids::TenantId;
+use ironclaw_host_api::turn::LoopMessageRef;
+use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, LoopModelMessage, LoopPromptBundle,
     LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
 };
+use ironclaw_prompt_envelope::{EnvelopeSource, EnvelopeTrust, wrap_untrusted};
 
 /// Narrow seam for materializing hook-emitted `msg:hook.*` content refs so
 /// the downstream model resolver can find them. Production deployments
-/// adapter-wrap [`ironclaw_turns::run_profile::InstructionMaterializationStore`]
+/// adapter-wrap [`ironclaw_loop_contracts::InstructionMaterializationStore`]
 /// (Reborn does this in `loop_driver_host.rs`); tests can supply a no-op
 /// or in-memory recorder.
 ///
@@ -66,7 +66,7 @@ pub struct HookedLoopPromptPort {
     /// the hook messages and the request fails with
     /// `model message reference is unavailable`. Required for production
     /// wiring (Reborn's factory installs an adapter delegating to
-    /// [`ironclaw_turns::run_profile::InstructionMaterializationStore`]);
+    /// [`ironclaw_loop_contracts::InstructionMaterializationStore`]);
     /// tests can use any [`HookPromptMaterializationSink`] impl.
     materialization_sink: Option<Arc<dyn HookPromptMaterializationSink>>,
     /// Authority + run-context pair used to re-issue the prompt bundle grant
@@ -380,7 +380,7 @@ mod tests {
     };
     use crate::trust::HookTrustClass;
     use async_trait::async_trait;
-    use ironclaw_turns::run_profile::{LoopPromptBundle, LoopPromptBundleRef, PromptMode};
+    use ironclaw_loop_contracts::{LoopPromptBundle, LoopPromptBundleRef, PromptMode};
     use std::collections::HashMap;
     use std::sync::Mutex;
 

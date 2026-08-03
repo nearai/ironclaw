@@ -1,15 +1,23 @@
 //! Slack Events API payload normalization.
+// arch-exempt: large_file, split into Events-API vs slash-form parsing vs shared normalization modules, plan #6894
 //!
 //! Inputs are raw Slack webhook event bytes. Event callbacks become
 //! [`ParsedProductInbound`] values; URL-verification payloads are exposed for
 //! the host to echo before normal ProductSurface admission. The host stamps
 //! trusted context outside this crate after verifying Slack request signatures.
 
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelAttachmentRef, NormalizedInboundMessage, ProductTriggerReason,
+};
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
+    ProductAttachmentKind,
+};
 use ironclaw_host_api::product_adapter::{
-    AdapterInstallationId, AttachmentRef, ChannelInboundClassification, ExternalActorRef,
-    ExternalConversationRef, ExternalEventId, NormalizedInboundMessage, ParsedProductInbound,
-    ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind, ProductInboundPayload,
-    ProductTriggerReason, ProtocolAuthEvidence, UserMessagePayload,
+    AdapterInstallationId, ProductAdapterError, ProtocolAuthEvidence,
+};
+use ironclaw_product_contracts::inbound::{
+    ChannelInboundClassification, ParsedProductInbound, ProductInboundPayload, UserMessagePayload,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -61,6 +69,8 @@ pub fn parse_slack_url_verification_challenge(
 pub enum SlackPayloadParseError {
     #[error("invalid Slack event JSON: {reason}")]
     InvalidJson { reason: String },
+    #[error("invalid Slack slash-command form: {reason}")]
+    InvalidForm { reason: String },
     #[error("invalid external reference: {kind}: {reason}")]
     InvalidExternalRef { kind: &'static str, reason: String },
     #[error(
@@ -117,7 +127,13 @@ pub fn parse_slack_event(
 /// the shared host sink applies the channel-neutral interaction grammar.
 #[derive(Debug)]
 pub enum SlackInboundEvent {
-    UrlVerification { challenge: String },
+    UrlVerification {
+        challenge: String,
+    },
+    /// Slack's one-time endpoint-verification probe for a native slash
+    /// command (distinct from the Events API's `UrlVerification` challenge).
+    /// Any 200 response satisfies it; the body is ignored.
+    SslCheck,
     Ignore,
     Message(Box<NormalizedInboundMessage>),
 }
@@ -189,9 +205,8 @@ pub fn normalize_slack_event(
             let attachments = message
                 .attachments
                 .into_iter()
-                .map(|descriptor| AttachmentRef {
+                .map(|descriptor| ChannelAttachmentRef {
                     vendor_ref: descriptor.external_file_id.clone(),
-                    mime_hint: Some(descriptor.mime_type.clone()),
                     descriptor,
                 })
                 .collect();
@@ -214,6 +229,134 @@ pub fn normalize_slack_event(
         // NoOp — authenticated no-ops for the channel contract.
         _ => Ok(SlackInboundEvent::Ignore),
     }
+}
+
+/// Parse one host-verified Slack inbound request that may be EITHER the
+/// Events API's JSON envelope or a native slash-command form POST — Slack
+/// registers both against the identical Request URL (one ingress route per
+/// extension), distinguished only by the (host-forwarded, verification-
+/// exempt) Content-Type header. The JSON branch delegates verbatim to
+/// [`normalize_slack_event`] so the two entry points share exactly one JSON
+/// parsing implementation; this function adds no new behavior to that path.
+pub(crate) fn normalize_slack_inbound(
+    raw_payload: &[u8],
+    headers: &[(String, String)],
+    installation_id: &AdapterInstallationId,
+) -> Result<SlackInboundEvent, SlackPayloadParseError> {
+    if is_form_urlencoded_content_type(headers) {
+        return normalize_slack_slash_command(raw_payload, installation_id);
+    }
+    normalize_slack_event(raw_payload, installation_id)
+}
+
+/// Case-insensitive Content-Type match for Slack's slash-command / ssl_check
+/// form encoding. Absent or non-matching headers fall through to the JSON
+/// path — the pre-existing default behavior.
+fn is_form_urlencoded_content_type(headers: &[(String, String)]) -> bool {
+    headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("content-type")
+            && value
+                .to_ascii_lowercase()
+                .contains("application/x-www-form-urlencoded")
+    })
+}
+
+/// Parse one native Slack slash-command form POST (`ssl_check` handshake or
+/// a real `/ironclaw ...` invocation) into its normalized channel form.
+fn normalize_slack_slash_command(
+    raw_payload: &[u8],
+    installation_id: &AdapterInstallationId,
+) -> Result<SlackInboundEvent, SlackPayloadParseError> {
+    if raw_payload.len() > MAX_SLACK_PAYLOAD_BYTES {
+        return Err(SlackPayloadParseError::InvalidForm {
+            reason: "payload exceeds size limit".into(),
+        });
+    }
+
+    // Slack's ssl_check verification probe carries ONLY `ssl_check` +
+    // `token` — never the slash command's mandatory fields. Check for it
+    // via a minimal, all-Option probe BEFORE parsing the full form (which
+    // requires channel_id/user_id/command/trigger_id), or the probe would
+    // always fail mandatory-field validation.
+    let probe: SlackSlashCommandProbe =
+        serde_urlencoded::from_bytes(raw_payload).map_err(|err| {
+            SlackPayloadParseError::InvalidForm {
+                reason: err.to_string(),
+            }
+        })?;
+    if probe.ssl_check.is_some() {
+        return Ok(SlackInboundEvent::SslCheck);
+    }
+
+    let form: SlackSlashCommandForm = serde_urlencoded::from_bytes(raw_payload).map_err(|err| {
+        SlackPayloadParseError::InvalidForm {
+            reason: err.to_string(),
+        }
+    })?;
+
+    let event_id = build_slash_event_id(installation_id, &form.trigger_id)?;
+    let actor = build_actor_ref(Some(&form.user_id))?;
+    let conversation =
+        build_conversation_ref(form.team_id.as_deref(), Some(&form.channel_id), None, None)?;
+    let is_dm = form.channel_name.as_deref() == Some("directmessage")
+        || is_dm_channel(&form.channel_id, None);
+    let trigger = if is_dm {
+        ProductTriggerReason::DirectChat
+    } else {
+        ProductTriggerReason::BotCommand
+    };
+    let text = slash_command_dispatch_text(&form.command, form.text.as_deref());
+
+    Ok(SlackInboundEvent::Message(Box::new(
+        NormalizedInboundMessage {
+            actor,
+            conversation,
+            event_id,
+            text,
+            trigger,
+            attachments: Vec::new(),
+            reply_context: None,
+        },
+    )))
+}
+
+/// Map a slash command's `command` + `text` fields to the dispatcher's
+/// invocation text. `/ironclaw` is this extension's own registered command:
+/// empty or `help` text becomes `/help`; otherwise the text becomes the
+/// dispatched command, defensively stripped of a leading `/` first so a
+/// user typing `/ironclaw /status` does not double it to `//status`. A
+/// DIFFERENT registered command name (an app-config mistake pointing a
+/// second slash command at this same URL) is passed through verbatim as
+/// `"{command} {text}"` — the generic classifier/admission layer rejects it
+/// as undeclared, with help, rather than this adapter guessing intent.
+fn slash_command_dispatch_text(command: &str, text: Option<&str>) -> String {
+    let text = text.unwrap_or_default().trim();
+    if command != "/ironclaw" {
+        return format!("{command} {text}").trim().to_string();
+    }
+    if text.is_empty() || text.eq_ignore_ascii_case("help") {
+        return "/help".to_string();
+    }
+    let stripped = text.strip_prefix('/').unwrap_or(text);
+    format!("/{stripped}")
+}
+
+fn build_slash_event_id(
+    installation_id: &AdapterInstallationId,
+    trigger_id: &str,
+) -> Result<ExternalEventId, SlackPayloadParseError> {
+    // Namespaced separately from the Events API's `event_callback` id space
+    // (same defensive rationale as build_event_id's own `-noop-` namespace):
+    // a slash invocation and an Events API callback must never collide on
+    // dedup key even if some future id happened to coincide.
+    ExternalEventId::new(format!(
+        "slack-{}-slash-{trigger_id}",
+        installation_id.as_str()
+    ))
+    .map_err(|err| SlackPayloadParseError::InvalidExternalRef {
+        kind: "external_event_id",
+        reason: err.to_string(),
+    })
 }
 
 /// Classify a normalized message's text as a gate-resolution interaction
@@ -490,13 +633,16 @@ fn parse_interaction_resolution(
 ) -> Result<Option<ProductInboundPayload>, SlackPayloadParseError> {
     // Slack-specific normalization (mentions may wrap or sit inside the
     // pasted inline code) in front of the channel-neutral grammar owned by
-    // `ironclaw_host_api::product_adapter::interaction_commands` — one grammar for
+    // `ironclaw_product_contracts::interaction_commands` — one grammar for
     // every channel whose busy/prompt copy advertises these commands.
     let text = strip_leading_slack_mentions(text);
-    let text = ironclaw_host_api::product_adapter::strip_wrapping_inline_code(text);
+    let text = ironclaw_product_contracts::interaction_commands::strip_wrapping_inline_code(text);
     let text = strip_leading_slack_mentions(text);
-    ironclaw_host_api::product_adapter::parse_interaction_resolution_text(text, source_trigger)
-        .map_err(adapter_error_to_payload_error)
+    ironclaw_product_contracts::interaction_commands::parse_interaction_resolution_text(
+        text,
+        source_trigger,
+    )
+    .map_err(adapter_error_to_payload_error)
 }
 
 fn strip_leading_slack_mentions(text: &str) -> &str {
@@ -717,20 +863,56 @@ struct SlackFile {
     size: Option<u64>,
 }
 
+/// Minimal probe for Slack's `ssl_check` endpoint-verification POST, which
+/// carries only `ssl_check` + `token` — never a slash command's mandatory
+/// fields. Parsed before [`SlackSlashCommandForm`] so the probe never trips
+/// that struct's required-field validation.
+#[derive(Debug, Clone, Deserialize)]
+struct SlackSlashCommandProbe {
+    ssl_check: Option<String>,
+}
+
+/// One native Slack slash-command form POST
+/// (`application/x-www-form-urlencoded`). Liberal on purpose — Slack adds
+/// fields across API versions and this is a public untrusted-ingress
+/// boundary — so only the fields the dispatcher mapping cannot proceed
+/// without are mandatory; everything else is `Option`. There is no
+/// `deny_unknown_fields`, so fields this crate does not yet consume
+/// (`response_url` — future out-of-DM delivery; `ssl_check` — already
+/// resolved by [`SlackSlashCommandProbe`] before this struct is parsed;
+/// `token` — Slack's legacy verification field, superseded here by HMAC
+/// signing) arrive and are silently dropped rather than declared dead.
+#[derive(Debug, Clone, Deserialize)]
+struct SlackSlashCommandForm {
+    channel_id: String,
+    user_id: String,
+    command: String,
+    trigger_id: String,
+    text: Option<String>,
+    channel_name: Option<String>,
+    team_id: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::product_adapter::ProductInboundPayload;
-    use ironclaw_host_api::product_adapter::auth::mark_request_signature_verified;
+    use ironclaw_host_api::product_adapter::auth::AuthRequirement;
+    use ironclaw_product_contracts::inbound::ProductInboundPayload;
 
     fn installation_id() -> AdapterInstallationId {
         AdapterInstallationId::new("slack_install_beta").expect("valid")
     }
 
     fn verified() -> ProtocolAuthEvidence {
-        mark_request_signature_verified(
-            "X-Slack-Signature",
-            Some("X-Slack-Request-Timestamp".to_string()),
+        // `test_verified` is the `test-support` seam standing in for the host:
+        // an adapter crate holds no `VerifiedInboundGrant` and must not be able
+        // to mint in production (PROPOSAL §12.1a). Value-identical to the
+        // pre-WS1.5 `mark_request_signature_verified` call this replaced.
+        ProtocolAuthEvidence::test_verified(
+            AuthRequirement::RequestSignature {
+                header_name: "X-Slack-Signature".to_string(),
+                timestamp_header_name: Some("X-Slack-Request-Timestamp".to_string()),
+            },
             "T123",
         )
     }
@@ -1281,6 +1463,268 @@ mod tests {
                 assert_eq!(payload.trigger, ProductTriggerReason::BotMention);
             }
             other => panic!("expected user message, got {other:?}"),
+        }
+    }
+
+    // ── native slash-command form transport (PR-3) ──────────────────────────
+
+    fn form_headers() -> Vec<(String, String)> {
+        vec![(
+            "content-type".to_string(),
+            "application/x-www-form-urlencoded".to_string(),
+        )]
+    }
+
+    #[test]
+    fn normalize_slack_inbound_maps_dm_slash_command_to_direct_chat_message() {
+        let body = b"command=%2Fironclaw&text=status&channel_id=D123&channel_name=directmessage&user_id=U123&team_id=T1&trigger_id=111.222.abc";
+        let event = normalize_slack_inbound(body, &form_headers(), &installation_id())
+            .expect("slash command form parses");
+        let SlackInboundEvent::Message(message) = event else {
+            panic!("expected Message, got {event:?}");
+        };
+        assert_eq!(message.text, "/status");
+        assert_eq!(message.trigger, ProductTriggerReason::DirectChat);
+        assert_eq!(message.actor.id(), "U123");
+        assert_eq!(
+            message.event_id.as_str(),
+            "slack-slack_install_beta-slash-111.222.abc"
+        );
+        assert_eq!(message.conversation.conversation_id(), "D123");
+        assert_eq!(message.conversation.space_id(), Some("T1"));
+    }
+
+    #[test]
+    fn normalize_slack_inbound_non_dm_channel_maps_to_bot_command_trigger() {
+        let body = b"command=%2Fironclaw&text=status&channel_id=C777&channel_name=general&user_id=U123&team_id=T1&trigger_id=111.222.def";
+        let event = normalize_slack_inbound(body, &form_headers(), &installation_id())
+            .expect("slash command form parses");
+        let SlackInboundEvent::Message(message) = event else {
+            panic!("expected Message, got {event:?}");
+        };
+        assert_eq!(message.trigger, ProductTriggerReason::BotCommand);
+    }
+
+    #[test]
+    fn normalize_slack_inbound_ssl_check_short_circuits_before_mandatory_field_validation() {
+        // Slack's ssl_check probe carries ONLY ssl_check + token — none of the
+        // slash command's mandatory fields (channel_id/user_id/command/trigger_id).
+        // This must succeed anyway: the ssl_check test has to run before the
+        // mandatory-field validation, not after it.
+        let body = b"ssl_check=1&token=deprecated-verification-token";
+        let event = normalize_slack_inbound(body, &form_headers(), &installation_id())
+            .expect("ssl_check probe parses even without mandatory slash fields");
+        assert!(matches!(event, SlackInboundEvent::SslCheck));
+    }
+
+    #[test]
+    fn normalize_slack_inbound_malformed_form_missing_user_id_is_typed_parse_error() {
+        let body = b"command=%2Fironclaw&text=status&channel_id=D123&channel_name=directmessage&team_id=T1&trigger_id=111.222.ghi";
+        let err = normalize_slack_inbound(body, &form_headers(), &installation_id())
+            .expect_err("missing user_id must fail");
+        assert!(matches!(err, SlackPayloadParseError::InvalidForm { .. }));
+    }
+
+    #[test]
+    fn normalize_slack_inbound_oversized_slash_form_is_rejected() {
+        let mut oversized = Vec::with_capacity(MAX_SLACK_PAYLOAD_BYTES + 32);
+        oversized.extend_from_slice(b"command=%2Fironclaw&text=");
+        oversized.resize(MAX_SLACK_PAYLOAD_BYTES + 16, b'a');
+        let err = normalize_slack_inbound(&oversized, &form_headers(), &installation_id())
+            .expect_err("an over-limit slash form must be rejected");
+        assert!(matches!(err, SlackPayloadParseError::InvalidForm { .. }));
+    }
+
+    #[test]
+    fn normalize_slack_inbound_json_content_type_is_byte_identical_to_normalize_slack_event() {
+        let body = br#"{
+            "type": "event_callback",
+            "event_id": "Ev123",
+            "team_id": "T-A",
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "channel": "D123",
+                "channel_type": "im",
+                "text": "hello there",
+                "ts": "1710000000.000100"
+            }
+        }"#;
+        let json_headers = vec![("content-type".to_string(), "application/json".to_string())];
+        let via_inbound = normalize_slack_inbound(body, &json_headers, &installation_id())
+            .expect("json parses through the header-aware helper");
+        let via_event =
+            normalize_slack_event(body, &installation_id()).expect("json parses directly");
+        let (SlackInboundEvent::Message(a), SlackInboundEvent::Message(b)) =
+            (via_inbound, via_event)
+        else {
+            panic!("expected both paths to normalize to Message");
+        };
+        assert_eq!(a, b);
+
+        // No Content-Type header at all must also fall through to the JSON
+        // path (the default when the header is absent, not just when it's
+        // explicitly "application/json").
+        let via_no_headers = normalize_slack_inbound(body, &[], &installation_id())
+            .expect("json parses with no content-type header");
+        let SlackInboundEvent::Message(c) = via_no_headers else {
+            panic!("expected Message");
+        };
+        assert_eq!(c, a);
+    }
+
+    #[test]
+    fn slash_command_dispatch_text_mapping() {
+        let cases: &[(&str, Option<&str>, &str)] = &[
+            (
+                "/ironclaw",
+                Some("model set-provider openai"),
+                "/model set-provider openai",
+            ),
+            ("/ironclaw", Some("/status"), "/status"),
+            ("/ironclaw", Some(""), "/help"),
+            ("/ironclaw", None, "/help"),
+            ("/ironclaw", Some("help"), "/help"),
+            ("/ironclaw", Some("HELP"), "/help"),
+            ("/ironclaw", Some("  "), "/help"),
+            ("/somethingelse", Some("hi"), "/somethingelse hi"),
+        ];
+        for (command, text, expected) in cases {
+            assert_eq!(
+                &slash_command_dispatch_text(command, *text),
+                expected,
+                "command={command:?} text={text:?}"
+            );
+        }
+    }
+}
+
+/// Property tests for the Slack ingress boundary (#6524 workstream 9:
+/// "focused fuzzing for untrusted ingress").
+///
+/// Everything here arrives over the public webhook endpoint before any
+/// signature has been trusted, so these functions see whatever the internet
+/// sends. The example tests above cover payload shapes Slack documents; these
+/// cover the ones it does not.
+#[cfg(test)]
+mod ingress_properties {
+    use super::*;
+    use ironclaw_host_api::product_adapter::auth::AuthRequirement;
+    use proptest::prelude::*;
+
+    fn verified_evidence() -> ProtocolAuthEvidence {
+        // `test_verified` is the `test-support` seam standing in for the host:
+        // an adapter crate holds no `VerifiedInboundGrant` and must not be able
+        // to mint in production (PROPOSAL §12.1a). Value-identical to the
+        // pre-WS1.5 `mark_request_signature_verified` call this replaced.
+        ProtocolAuthEvidence::test_verified(
+            AuthRequirement::RequestSignature {
+                header_name: "X-Slack-Signature".to_string(),
+                timestamp_header_name: Some("X-Slack-Request-Timestamp".to_string()),
+            },
+            "T123",
+        )
+    }
+
+    fn unverified_evidence() -> ProtocolAuthEvidence {
+        ProtocolAuthEvidence::failed(
+            ironclaw_host_api::product_adapter::ProtocolAuthFailure::Missing,
+        )
+    }
+
+    fn install() -> AdapterInstallationId {
+        AdapterInstallationId::new("slack_install_property").expect("valid")
+    }
+
+    /// Payload bytes: mostly Slack-shaped, plus arbitrary noise.
+    ///
+    /// Biased on purpose. Uniform random bytes are rejected by the JSON parser
+    /// almost immediately, so they exercise only the outermost guard — the
+    /// interesting branches need input that parses far enough to reach them.
+    fn payload_bytes() -> impl Strategy<Value = Vec<u8>> {
+        prop_oneof![
+            proptest::collection::vec(any::<u8>(), 0..256),
+            "\\PC{0,200}".prop_map(|s| s.into_bytes()),
+            (
+                "[a-z_]{0,16}",
+                "[A-Za-z0-9]{0,12}",
+                "[A-Za-z0-9]{0,12}",
+                "\\PC{0,40}"
+            )
+                .prop_map(|(kind, event_id, channel, text)| {
+                    serde_json::json!({
+                        "type": kind,
+                        "event_id": event_id,
+                        "event": {
+                            "type": "message",
+                            "channel": channel,
+                            "text": text,
+                        }
+                    })
+                    .to_string()
+                    .into_bytes()
+                }),
+            "\\{[^}]{0,80}".prop_map(|s| s.into_bytes()),
+        ]
+    }
+
+    proptest! {
+        /// No payload whatsoever is parsed without verified auth evidence.
+        ///
+        /// This is the security property of the pair: the signature check is
+        /// what stops anyone who can reach the endpoint from injecting a turn.
+        /// A parser that inspected the body first and only then checked the
+        /// evidence would still pass every example test in this file.
+        #[test]
+        fn unverified_evidence_rejects_every_payload(raw in payload_bytes()) {
+            let outcome = parse_slack_event(&raw, &unverified_evidence(), &install());
+            prop_assert!(
+                matches!(outcome, Err(SlackPayloadParseError::UnauthenticatedPayload)),
+                "unverified payload was not rejected: {outcome:?}"
+            );
+        }
+
+        /// Same for the URL-verification handshake, which runs before setup
+        /// completes and is therefore the most exposed entry point of all.
+        #[test]
+        fn unverified_evidence_rejects_every_challenge(raw in payload_bytes()) {
+            let outcome = parse_slack_url_verification_challenge(&raw, &unverified_evidence());
+            prop_assert!(
+                matches!(outcome, Err(SlackPayloadParseError::UnauthenticatedPayload)),
+                "unverified challenge was not rejected: {outcome:?}"
+            );
+        }
+
+        /// Verified evidence plus arbitrary bytes parses or errors, never panics.
+        #[test]
+        fn verified_evidence_never_panics(raw in payload_bytes()) {
+            let _ = parse_slack_event(&raw, &verified_evidence(), &install());
+            let _ = parse_slack_url_verification_challenge(&raw, &verified_evidence());
+            let _ = normalize_slack_event(&raw, &install());
+        }
+    }
+
+    /// Oversized bodies are refused on length, before any parsing.
+    ///
+    /// Checked with a real over-limit buffer rather than a generated one: the
+    /// limit is 1 MB, and a strategy that produced megabyte payloads would
+    /// dominate the runtime of the whole suite for one boundary.
+    #[test]
+    fn payloads_over_the_size_limit_are_rejected() {
+        let mut oversized = Vec::with_capacity(MAX_SLACK_PAYLOAD_BYTES + 32);
+        oversized.extend_from_slice(br#"{"type":"event_callback","event_id":"Ev1","padding":""#);
+        oversized.resize(MAX_SLACK_PAYLOAD_BYTES + 16, b'a');
+        oversized.extend_from_slice(br#""}"#);
+
+        for outcome in [
+            parse_slack_event(&oversized, &verified_evidence(), &install()).err(),
+            normalize_slack_event(&oversized, &install()).err(),
+        ] {
+            let err = outcome.expect("an over-limit payload must be rejected");
+            assert!(
+                matches!(err, SlackPayloadParseError::InvalidJson { .. }),
+                "unexpected rejection reason: {err:?}"
+            );
         }
     }
 }

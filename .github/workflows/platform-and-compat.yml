@@ -50,6 +50,13 @@ env:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
+  # Pin wall-clock rendering inputs so a test cannot pass or fail on the
+  # runner's locale. Reborn renders model-visible time slices, and date/number
+  # formatting differs by locale, so an unpinned runner turns a formatting
+  # regression into an unreproducible flake. UTC also keeps recorded fixtures
+  # comparable with what a developer sees locally.
+  TZ: "UTC"
+  LANG: "C.UTF-8"
 
 jobs:
   changes:
@@ -72,7 +79,7 @@ jobs:
           echo "has_direct_wasm_abi_risk=true" >> "$GITHUB_OUTPUT"
           echo "has_wasm_abi_risk=true" >> "$GITHUB_OUTPUT"
           echo "has_docker_risk=true" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
           fetch-depth: 0
@@ -99,7 +106,18 @@ jobs:
           printf '%s\n' "$CHANGED_FILES" | scripts/ci/classify-test-scope.sh >> "$GITHUB_OUTPUT"
 
           has_direct_wasm_abi_risk=false
-          if has_match '^(wit/|crates/ironclaw_common/|crates/ironclaw_wasm/|crates/ironclaw_wasm_product_adapters/|crates/ironclaw_first_party_extensions/assets/.*/(manifest\.toml|wasm-src/)|registry/|scripts/build-wasm-extensions\.sh$|scripts/check-version-bumps\.sh$|\.github/workflows/(platform-and-compat|nightly-deep-ci)\.yml$)'; then
+          # Crate scopes are matched by NAME at any depth: `crates/([^/]+/)*<name>/`
+          # keeps matching once crates move into family directories
+          # (crates/<family>/ironclaw_*, PROPOSAL §5). A flat `crates/<name>/`
+          # prefix stops matching there, `has_direct_wasm_abi_risk` goes false,
+          # and every WASM ABI check silently skips — the WS10 failure mode
+          # (#6963). `crates/ironclaw_wasm_product_adapters/` was also dropped:
+          # that crate no longer exists, so the alternative had been matching
+          # nothing. scripts/ci/ws12_workflow_contracts.py pins this regex
+          # against the real crate inventory and against a real first-party
+          # extension manifest path, so a renamed, moved or deleted crate fails
+          # loudly here instead of quietly falling out of scope.
+          if has_match '^(wit/|crates/([^/]+/)*ironclaw_common/|crates/([^/]+/)*ironclaw_wasm/|crates/([^/]+/)*ironclaw_first_party_extensions/assets/.*/(manifest\.toml|wasm-src/)|registry/|scripts/build-wasm-extensions\.sh$|scripts/check-version-bumps\.sh$|\.github/workflows/(platform-and-compat|nightly-deep-ci)\.yml$)'; then
             has_direct_wasm_abi_risk=true
           fi
           echo "has_direct_wasm_abi_risk=$has_direct_wasm_abi_risk" >> "$GITHUB_OUTPUT"
@@ -145,7 +163,7 @@ jobs:
       IRONCLAW_REQUIRE_POSTGRES: "1"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
@@ -195,7 +213,7 @@ jobs:
             flags: ""
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
@@ -226,7 +244,7 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
@@ -242,7 +260,7 @@ jobs:
       - name: Enable pnpm for setup-node cache
         run: corepack enable pnpm
       - name: Install Node.js for WebUI bundle builds
-        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
         with:
           node-version: "22"
           cache: "pnpm"
@@ -279,7 +297,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
@@ -288,7 +306,7 @@ jobs:
       - name: Enable pnpm for setup-node cache
         run: corepack enable pnpm
       - name: Install Node.js for WebUI bundle builds
-        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
         with:
           node-version: "22"
           cache: "pnpm"
@@ -324,7 +342,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
@@ -345,7 +363,7 @@ jobs:
       issues: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
@@ -420,7 +438,7 @@ jobs:
       - version-check
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
       - name: Check Platform & Compat jobs

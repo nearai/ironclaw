@@ -4,59 +4,13 @@
 //! authority-bearing workflow context and the service boundary that decides
 //! whether a command may execute from that context.
 
-use crate::{
-    AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ProductAdapterId,
-    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductRejectionKind,
-    ProductTriggerReason, VerifiedAuthClaim,
-};
+use crate::{ProductRejection, ProductRejectionKind};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use ironclaw_product_contracts::command::ProductCommandContext;
+use ironclaw_product_contracts::surface::ProductSurfaceError;
 use serde::{Deserialize, Serialize};
 
-use crate::action::{ActionFingerprintKey, ProductActionId};
 use crate::commands::ProductCommand;
-use ironclaw_host_api::{ProductSurfaceError, ProductSurfaceErrorCode};
-
-/// Authority-bearing command dispatch context built by the workflow.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ProductCommandContext {
-    pub action_id: ProductActionId,
-    pub fingerprint: ActionFingerprintKey,
-    pub adapter_id: ProductAdapterId,
-    pub installation_id: AdapterInstallationId,
-    pub external_actor_ref: ExternalActorRef,
-    pub external_conversation_ref: ExternalConversationRef,
-    pub auth_claim: VerifiedAuthClaim,
-    pub trigger: ProductTriggerReason,
-    pub received_at: DateTime<Utc>,
-}
-
-impl ProductCommandContext {
-    pub fn from_envelope(
-        envelope: &ProductInboundEnvelope,
-        action_id: ProductActionId,
-        fingerprint: ActionFingerprintKey,
-    ) -> Result<Self, ProductSurfaceError> {
-        let ProductInboundPayload::Command(command) = envelope.payload() else {
-            return Err(ProductSurfaceError::from_status(
-                ProductSurfaceErrorCode::InvalidRequest,
-                400,
-                false,
-            ));
-        };
-        Ok(Self {
-            action_id,
-            fingerprint,
-            adapter_id: envelope.adapter_id().clone(),
-            installation_id: envelope.installation_id().clone(),
-            external_actor_ref: envelope.external_actor_ref().clone(),
-            external_conversation_ref: envelope.external_conversation_ref().clone(),
-            auth_claim: envelope.auth_claim().clone(),
-            trigger: command.trigger,
-            received_at: envelope.received_at(),
-        })
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

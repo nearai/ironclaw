@@ -1,16 +1,11 @@
 import { Card } from "../../../design-system/card";
 import { Icon } from "../../../design-system/icons";
+import { Switch } from "../../../design-system/switch";
 import type { InterfaceTheme } from "../../../design-system/theme";
 import { useT } from "../../../lib/i18n";
 import { useInterfacePreferences } from "../../../lib/interface-preferences";
 import { matchesSearch } from "../lib/settings-search";
 import { SettingsSearchEmpty } from "./settings-search-empty";
-
-type SwitchProps = {
-  checked: boolean;
-  label: string;
-  onChange: (checked: boolean) => void;
-};
 
 type ThemeOptionProps = {
   checked: boolean;
@@ -25,33 +20,6 @@ type AppearanceTabProps = {
   theme: InterfaceTheme;
   onThemeChange: (theme: InterfaceTheme) => void;
 };
-
-function Switch({ checked, label, onChange }: SwitchProps) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      onClick={() => onChange(!checked)}
-      className={[
-        "relative inline-flex h-7 w-12 shrink-0 items-center rounded-full border transition",
-        checked
-          ? "border-[color-mix(in_srgb,var(--v2-accent)_45%,transparent)] bg-[color-mix(in_srgb,var(--v2-accent)_22%,transparent)]"
-          : "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]",
-      ].join(" ")}
-    >
-      <span
-        className={[
-          "pointer-events-none inline-block h-5 w-5 rounded-full transition",
-          checked
-            ? "translate-x-5 bg-[var(--v2-accent-text)]"
-            : "translate-x-1 bg-[var(--v2-text-muted)]",
-        ].join(" ")}
-      />
-    </button>
-  );
-}
 
 export function ThemeOption({
   checked,
@@ -171,7 +139,7 @@ export function AppearanceTab({
           </div>
           <Switch
             checked={showChatLogsShortcut}
-            label={label}
+            aria-label={label}
             onChange={setShowChatLogsShortcut}
           />
         </div>

@@ -423,10 +423,10 @@ pub fn validate_window(window: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::identity::{ExtensionId, HookLocalId, HookVersion};
-    use ironclaw_host_api::TenantId;
+    use ironclaw_host_api::ids::TenantId;
 
-    fn tenant() -> ironclaw_host_api::TenantId {
-        ironclaw_host_api::TenantId::new("alpha").expect("ok")
+    fn tenant() -> ironclaw_host_api::ids::TenantId {
+        ironclaw_host_api::ids::TenantId::new("alpha").expect("ok")
     }
 
     fn ctx(capability: &str) -> BeforeCapabilityHookContext {
@@ -998,8 +998,8 @@ mod tests {
         };
 
         let now = base();
-        let alpha = ironclaw_host_api::TenantId::new("alpha").expect("ok");
-        let beta = ironclaw_host_api::TenantId::new("beta").expect("ok");
+        let alpha = ironclaw_host_api::ids::TenantId::new("alpha").expect("ok");
+        let beta = ironclaw_host_api::ids::TenantId::new("beta").expect("ok");
 
         let ctx_alpha =
             BeforeCapabilityHookContext::new_unresolved(alpha, "cap.x".to_string(), [0u8; 32]);

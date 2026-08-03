@@ -1,3 +1,4 @@
+// arch-exempt: large_file, process-journal invocation projection migration, plan #6168
 //! Production composition of the [`HostRuntime`] contract.
 //!
 //! [`DefaultHostRuntime`] is the contract-level service that upper turn/loop
@@ -16,6 +17,7 @@
 use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
+use ironclaw_approvals::{ApprovalRequestStorePort, ApprovalStoreError};
 use ironclaw_approvals::{
     PersistentApprovalAction, PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort,
     PersistentApprovalScope,
@@ -28,26 +30,28 @@ use ironclaw_capabilities::{
 use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDispatcher, CapabilityId, DenyReason, DispatchFailureKind,
-    InvocationId, Principal, ResourceScope, RuntimeCredentialAuthRequirement,
-    RuntimeDispatchErrorKind, RuntimeKind, SecretHandle, runtime_policy::EffectiveRuntimePolicy,
-    sha256_digest_token,
+    approval::sha256_digest_token,
+    decision::{DenyReason, RuntimeCredentialAuthRequirement},
+    dispatch::CapabilityDispatcher,
+    ids::{ApprovalRequestId, CapabilityId, InvocationId, SecretHandle},
+    resource::ResourceScope,
+    result_meta::FailureKind,
+    runtime::RuntimeKind,
+    runtime_policy::EffectiveRuntimePolicy,
+    scope::Principal,
 };
+use ironclaw_loop_contracts::LoopSafeSummary;
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_process_sandbox::{
     PROCESS_SANDBOX_CAPABILITY_ID, SandboxProcessPlan, ValidatedSandboxProcessPlan,
 };
 use ironclaw_processes::{
-    ProcessCancellationRegistry, ProcessError, ProcessHost, ProcessManager, ProcessResultStorePort,
-    ProcessStart, ProcessStatus, ProcessStorePort,
-};
-use ironclaw_run_state::{
-    ApprovalRequestStorePort, RunStateApprovalStorePort, RunStateError, RunStateStorePort,
-    RunStatus,
+    ProcessError, ProcessInvocationError, ProcessInvocationStatePort, ProcessInvocationStatus,
+    ProcessKind, ProcessManager, ProcessRuntimePort, ProcessServices, ProcessStart, ProcessStatus,
+    map_process_journal_error, process_record_from_snapshot,
 };
 use ironclaw_secrets::SecretStorePort;
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
-use ironclaw_turns::run_profile::LoopSafeSummary;
 
 fn trace_capability_latency_ok(
     operation: &'static str,
@@ -100,10 +104,10 @@ use crate::{
     CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime, HostRuntimeError,
     HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeApprovalResume,
     RuntimeAuthGate, RuntimeAuthResume, RuntimeBackendHealth, RuntimeBlockedReason,
-    RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
-    RuntimeFailureKind, RuntimeGateId, RuntimeInvocation, RuntimeStatusRequest, RuntimeWorkId,
-    RuntimeWorkSummary, VisibleCapabilityRequest, VisibleCapabilitySurface,
-    obligations::secret_owner_scope, surface::CapabilityCatalog,
+    RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeGateId,
+    RuntimeInvocation, RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, obligations::secret_owner_scope,
+    surface::CapabilityCatalog,
 };
 
 /// Default production wiring for [`HostRuntime`].
@@ -113,22 +117,16 @@ pub struct DefaultHostRuntime {
     authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
     trust_policy: Arc<dyn TrustPolicy>,
     // arch-exempt: optional_arc, store ports are absent in minimal/test runtime graphs, plan #4539
-    run_state: Option<Arc<dyn RunStateStorePort>>,
+    invocation_state: Option<Arc<dyn ProcessInvocationStatePort>>,
     // arch-exempt: optional_arc, store ports are absent in minimal/test runtime graphs, plan #4539
     approval_requests: Option<Arc<dyn ApprovalRequestStorePort>>,
-    // arch-exempt: optional_arc, combined store port is absent in minimal/test runtime graphs, plan #4539
-    run_state_approval_store: Option<Arc<dyn RunStateApprovalStorePort>>,
     // arch-exempt: optional_arc, capability leases are absent in minimal/test runtime graphs, plan #4539
     capability_leases: Option<Arc<dyn CapabilityLeaseStorePort>>,
     // arch-exempt: optional_arc, minimal/test compositions intentionally disable persistent approval replay, plan #4539
     // Until the product revoke control plane is split out.
     persistent_approval_policies: Option<Arc<dyn PersistentApprovalPolicyStorePort>>,
     process_manager: Option<Arc<dyn ProcessManager>>,
-    // arch-exempt: optional_arc, process stores are absent unless process execution is wired, plan #4539
-    process_store: Option<Arc<dyn ProcessStorePort>>,
-    // arch-exempt: optional_arc, process stores are absent unless process execution is wired, plan #4539
-    process_result_store: Option<Arc<dyn ProcessResultStorePort>>,
-    process_cancellation_registry: Option<Arc<ProcessCancellationRegistry>>,
+    process_services: Option<ProcessServices>,
     surface_filesystem: Option<Arc<dyn RootFilesystem>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     obligation_handler: Option<Arc<dyn CapabilityObligationHandler>>,
@@ -160,10 +158,8 @@ impl DefaultHostRuntime {
     /// capability dispatch is denied until composition attaches a concrete
     /// policy with [`Self::with_trust_policy`] or [`Self::with_trust_policy_dyn`].
     ///
-    /// Callers must additionally attach either a combined
-    /// [`RunStateApprovalStorePort`] via
-    /// [`with_run_state_approval_store`](Self::with_run_state_approval_store),
-    /// or separate stores via [`with_run_state`](Self::with_run_state) and
+    /// Callers must additionally attach invocation and approval stores via
+    /// [`with_invocation_state`](Self::with_invocation_state) and
     /// [`with_approval_requests`](Self::with_approval_requests), before
     /// invoking any capability whose authorizer may return
     /// `RequireApproval`. Without those stores the capability host fails
@@ -198,15 +194,12 @@ impl DefaultHostRuntime {
             dispatcher,
             authorizer,
             trust_policy: Arc::new(HostTrustPolicy::fail_closed()),
-            run_state: None,
+            invocation_state: None,
             approval_requests: None,
-            run_state_approval_store: None,
             capability_leases: None,
             persistent_approval_policies: None,
             process_manager: None,
-            process_store: None,
-            process_result_store: None,
-            process_cancellation_registry: None,
+            process_services: None,
             surface_filesystem: None,
             runtime_health: None,
             obligation_handler: None,
@@ -244,11 +237,13 @@ impl DefaultHostRuntime {
         self
     }
 
-    /// Attaches the run-state store used to record invocation lifecycle.
+    /// Attaches the process invocation-state port used to record lifecycle.
     // arch-exempt: optional_arc, store ports are absent in minimal/test runtime graphs, plan #4539
-    pub fn with_run_state(mut self, run_state: Arc<dyn RunStateStorePort>) -> Self {
-        self.run_state = Some(run_state);
-        self.run_state_approval_store = None;
+    pub fn with_invocation_state(
+        mut self,
+        invocation_state: Arc<dyn ProcessInvocationStatePort>,
+    ) -> Self {
+        self.invocation_state = Some(invocation_state);
         self
     }
 
@@ -259,20 +254,6 @@ impl DefaultHostRuntime {
         approval_requests: Arc<dyn ApprovalRequestStorePort>,
     ) -> Self {
         self.approval_requests = Some(approval_requests);
-        self.run_state_approval_store = None;
-        self
-    }
-
-    /// Attaches a combined durable run-state/approval-request store with an
-    /// atomic approval-block transition.
-    // arch-exempt: optional_arc, combined store port is absent in minimal/test runtime graphs, plan #4539
-    pub fn with_run_state_approval_store(
-        mut self,
-        store: Arc<dyn RunStateApprovalStorePort>,
-    ) -> Self {
-        self.run_state = Some(store.clone());
-        self.approval_requests = Some(store.clone());
-        self.run_state_approval_store = Some(store);
         self
     }
 
@@ -303,30 +284,8 @@ impl DefaultHostRuntime {
         self
     }
 
-    /// Attaches the process store used for status and cancellation fanout.
-    // arch-exempt: optional_arc, process stores are absent unless process execution is wired, plan #4539
-    pub fn with_process_store(mut self, process_store: Arc<dyn ProcessStorePort>) -> Self {
-        self.process_store = Some(process_store);
-        self
-    }
-
-    /// Attaches the process result store used to persist cancellation results.
-    // arch-exempt: optional_arc, process stores are absent unless process execution is wired, plan #4539
-    pub fn with_process_result_store(
-        mut self,
-        process_result_store: Arc<dyn ProcessResultStorePort>,
-    ) -> Self {
-        self.process_result_store = Some(process_result_store);
-        self
-    }
-
-    /// Attaches the process cancellation registry used to notify running
-    /// background executors when `cancel_work` kills a process record.
-    pub fn with_process_cancellation_registry(
-        mut self,
-        registry: Arc<ProcessCancellationRegistry>,
-    ) -> Self {
-        self.process_cancellation_registry = Some(registry);
+    pub fn with_process_services(mut self, process_services: ProcessServices) -> Self {
+        self.process_services = Some(process_services);
         self
     }
 
@@ -708,16 +667,19 @@ impl HostRuntime for DefaultHostRuntime {
             Ok(()) => Ok(RuntimeCapabilityOutcome::Failed(
                 RuntimeCapabilityFailure::new(
                     capability_id,
-                    RuntimeFailureKind::GateDeclined,
+                    FailureKind::GateDeclined,
                     Some("auth gate denied by user".to_string()),
                 ),
             )),
-            Err(CapabilityInvocationError::RunState(error)) => {
-                Err(unavailable_from_run_state(*error))
+            Err(CapabilityInvocationError::InvocationState(error)) => {
+                Err(unavailable_from_invocation_state(*error))
             }
-            Err(CapabilityInvocationError::ResumeStoreMissing { .. }) => {
-                Err(HostRuntimeError::unavailable("run-state store unavailable"))
+            Err(CapabilityInvocationError::ApprovalStore(error)) => {
+                Err(unavailable_from_approval_store(*error))
             }
+            Err(CapabilityInvocationError::ResumeStoreMissing { .. }) => Err(
+                HostRuntimeError::unavailable("invocation-state store unavailable"),
+            ),
             Err(error) => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
                 error,
                 capability_id,
@@ -832,18 +794,12 @@ impl HostRuntime for DefaultHostRuntime {
         let mut outcome = CancelRuntimeWorkOutcome::default();
         let mut process_invocations = Vec::new();
 
-        if let Some(process_store) = &self.process_store {
-            let records = process_store
-                .records_for_scope(&request.scope)
+        if let Some(process_services) = &self.process_services {
+            let process_runtime = process_services.process_runtime();
+            let records = capability_process_records(process_runtime.as_ref(), &request.scope)
                 .await
                 .map_err(unavailable_from_process_error)?;
-            let mut process_host = ProcessHost::new(process_store.as_ref());
-            if let Some(registry) = &self.process_cancellation_registry {
-                process_host = process_host.with_cancellation_registry(Arc::clone(registry));
-            }
-            if let Some(result_store) = &self.process_result_store {
-                process_host = process_host.with_result_store_dyn(Arc::clone(result_store));
-            }
+            let process_host = process_services.host();
 
             for record in records {
                 if record.status != ProcessStatus::Running {
@@ -863,15 +819,15 @@ impl HostRuntime for DefaultHostRuntime {
             }
         }
 
-        if let Some(run_state) = &self.run_state {
-            let records = run_state
+        if let Some(invocation_state) = &self.invocation_state {
+            let records = invocation_state
                 .records_for_scope(&request.scope)
                 .await
-                .map_err(unavailable_from_run_state)?;
+                .map_err(unavailable_from_invocation_state)?;
             outcome.unsupported.extend(
                 records
                     .into_iter()
-                    .filter(|record| record.status == RunStatus::Running)
+                    .filter(|record| record.status == ProcessInvocationStatus::Running)
                     .filter(|record| !process_invocations.contains(&record.invocation_id))
                     .map(|record| RuntimeWorkId::Invocation(record.invocation_id)),
             );
@@ -893,16 +849,16 @@ impl HostRuntime for DefaultHostRuntime {
         let mut active_work = Vec::new();
         let registry = self.registry.snapshot();
 
-        if let Some(run_state) = &self.run_state {
-            let records = run_state
+        if let Some(invocation_state) = &self.invocation_state {
+            let records = invocation_state
                 .records_for_scope(&request.scope)
                 .await
-                .map_err(unavailable_from_run_state)?;
+                .map_err(unavailable_from_invocation_state)?;
 
             active_work.extend(
                 records
                     .into_iter()
-                    .filter(|record| record.status == RunStatus::Running)
+                    .filter(|record| record.status == ProcessInvocationStatus::Running)
                     .map(|record| {
                         let runtime = registry
                             .get_capability(&record.capability_id)
@@ -916,9 +872,9 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        if let Some(process_store) = &self.process_store {
-            let records = process_store
-                .records_for_scope(&request.scope)
+        if let Some(process_services) = &self.process_services {
+            let process_runtime = process_services.process_runtime();
+            let records = capability_process_records(process_runtime.as_ref(), &request.scope)
                 .await
                 .map_err(unavailable_from_process_error)?;
             let mut process_invocations = Vec::new();
@@ -988,15 +944,11 @@ impl DefaultHostRuntime {
             // coerces to `&dyn HostPolicyFacts`.
             self,
         );
-        if let Some(run_state_approval_store) = &self.run_state_approval_store {
-            host = host.with_run_state_approval_store(run_state_approval_store.as_ref());
-        } else {
-            if let Some(run_state) = &self.run_state {
-                host = host.with_run_state(run_state.as_ref());
-            }
-            if let Some(approval_requests) = &self.approval_requests {
-                host = host.with_approval_requests(approval_requests.as_ref());
-            }
+        if let Some(invocation_state) = &self.invocation_state {
+            host = host.with_invocation_state(invocation_state.as_ref());
+        }
+        if let Some(approval_requests) = &self.approval_requests {
+            host = host.with_approval_requests(approval_requests.as_ref());
         }
         if let Some(capability_leases) = &self.capability_leases {
             host = host.with_capability_leases(capability_leases.as_ref());
@@ -1016,19 +968,19 @@ impl DefaultHostRuntime {
     /// claiming leases or dispatching.
     async fn resume_actor_preflight_guard(
         &self,
-        context: &ironclaw_host_api::ExecutionContext,
+        context: &ironclaw_host_api::scope::ExecutionContext,
         capability_id: &CapabilityId,
     ) -> Result<Option<RuntimeCapabilityOutcome>, HostRuntimeError> {
         context
             .validate()
             .map_err(|error| HostRuntimeError::invalid_request(error.to_string()))?;
-        let Some(run_state) = self.run_state.as_ref() else {
+        let Some(invocation_state) = self.invocation_state.as_ref() else {
             return Ok(None);
         };
-        let Some(record) = run_state
+        let Some(record) = invocation_state
             .get(&context.resource_scope, context.invocation_id)
             .await
-            .map_err(unavailable_from_run_state)?
+            .map_err(unavailable_from_invocation_state)?
         else {
             return Ok(None);
         };
@@ -1067,7 +1019,7 @@ impl DefaultHostRuntime {
                     Ok(None) => Ok(RuntimeCapabilityOutcome::Failed(
                         RuntimeCapabilityFailure::new(
                             capability,
-                            RuntimeFailureKind::Authorization,
+                            FailureKind::Authorization,
                             Some(
                                 "approval required but no approval request was persisted"
                                     .to_string(),
@@ -1116,10 +1068,10 @@ impl DefaultHostRuntime {
         scope: &ResourceScope,
         invocation_id: InvocationId,
     ) {
-        let Some(run_state) = self.run_state.as_ref() else {
+        let Some(invocation_state) = self.invocation_state.as_ref() else {
             return;
         };
-        if let Err(error) = run_state
+        if let Err(error) = invocation_state
             .fail(scope, invocation_id, "Dispatch".to_string())
             .await
         {
@@ -1127,7 +1079,7 @@ impl DefaultHostRuntime {
                 invocation_id = %invocation_id,
                 capability_id = %failure.capability_id,
                 failure_kind = failure.kind.as_str(),
-                transition_error = %unavailable_from_run_state(error),
+                transition_error = %unavailable_from_invocation_state(error),
                 "terminal dispatch failure could not transition run state; failure is returned to caller",
             );
         }
@@ -1138,13 +1090,13 @@ impl DefaultHostRuntime {
         scope: &ResourceScope,
         invocation_id: InvocationId,
     ) -> Result<Option<ApprovalRequestId>, HostRuntimeError> {
-        let Some(run_state) = self.run_state.as_ref() else {
+        let Some(invocation_state) = self.invocation_state.as_ref() else {
             return Ok(None);
         };
-        let record = run_state
+        let record = invocation_state
             .get(scope, invocation_id)
             .await
-            .map_err(unavailable_from_run_state)?;
+            .map_err(unavailable_from_invocation_state)?;
         Ok(record.and_then(|record| record.approval_request_id))
     }
 }
@@ -1228,9 +1180,9 @@ impl ironclaw_capabilities::HostPolicyFacts for DefaultHostRuntime {
     async fn persistent_grants(
         &self,
         capability_id: &CapabilityId,
-        context: &ironclaw_host_api::ExecutionContext,
+        context: &ironclaw_host_api::scope::ExecutionContext,
         action: ironclaw_capabilities::PolicyAction,
-    ) -> Vec<ironclaw_host_api::CapabilityGrant> {
+    ) -> Vec<ironclaw_host_api::capability::CapabilityGrant> {
         let Some(policies) = self.persistent_approval_policies.as_ref() else {
             return Vec::new();
         };
@@ -1280,26 +1232,39 @@ impl ironclaw_capabilities::HostPolicyFacts for DefaultHostRuntime {
     }
 }
 
-/// Maps a [`RunStateError`] to a sanitized [`HostRuntimeError::Unavailable`].
+/// Maps a [`ProcessInvocationError`] to a sanitized [`HostRuntimeError::Unavailable`].
+fn unavailable_from_invocation_state(error: ProcessInvocationError) -> HostRuntimeError {
+    let reason = match error {
+        ProcessInvocationError::UnknownInvocation { .. } => "process invocation not found",
+        ProcessInvocationError::InvocationAlreadyExists { .. } => {
+            "process invocation already exists"
+        }
+        ProcessInvocationError::Serialization(_) => "process invocation serialization failed",
+        ProcessInvocationError::Deserialization(_) => "process invocation deserialization failed",
+        ProcessInvocationError::Backend(_) => "process invocation backend unavailable",
+    };
+    HostRuntimeError::unavailable(reason)
+}
+
+/// Maps an approval-store error to a sanitized [`HostRuntimeError::Unavailable`].
 ///
-/// `RunStateError::InvalidPath` and `Filesystem` carry raw filesystem
+/// `ApprovalStoreError::InvalidPath` and `Filesystem` carry raw filesystem
 /// strings; `Serialization`/`Deserialization` carry serde internals. Forward
 /// the redacted variant discriminator instead of `error.to_string()` so the
 /// boundary stays infrastructure-opaque to upper services.
-// arch-exempt: large_file, host runtime production wiring; +1 arm for RunStateError::GateRecordAlreadyExists (#6243 left this match non-exhaustive), plan #6175
-fn unavailable_from_run_state(error: RunStateError) -> HostRuntimeError {
+fn unavailable_from_approval_store(error: ApprovalStoreError) -> HostRuntimeError {
     let reason = match error {
-        RunStateError::UnknownInvocation { .. } => "run-state record not found",
-        RunStateError::InvocationAlreadyExists { .. } => "run-state record already exists",
-        RunStateError::UnknownApprovalRequest { .. } => "approval request not found",
-        RunStateError::ApprovalRequestAlreadyExists { .. } => "approval request already exists",
-        RunStateError::GateRecordAlreadyExists { .. } => "gate record already exists",
-        RunStateError::ApprovalNotPending { .. } => "approval request not pending",
-        RunStateError::InvalidPath(_) => "run-state storage path invalid",
-        RunStateError::Filesystem(_) => "run-state filesystem unavailable",
-        RunStateError::Serialization(_) => "run-state serialization failed",
-        RunStateError::Deserialization(_) => "run-state deserialization failed",
-        RunStateError::Backend(_) => "run-state backend unavailable",
+        ApprovalStoreError::UnknownApprovalRequest { .. } => "approval request not found",
+        ApprovalStoreError::ApprovalRequestAlreadyExists { .. } => {
+            "approval request already exists"
+        }
+        ApprovalStoreError::GateRecordAlreadyExists { .. } => "gate record already exists",
+        ApprovalStoreError::ApprovalNotPending { .. } => "approval request not pending",
+        ApprovalStoreError::InvalidPath(_) => "approval storage path invalid",
+        ApprovalStoreError::Filesystem(_) => "approval filesystem unavailable",
+        ApprovalStoreError::Serialization(_) => "approval-store serialization failed",
+        ApprovalStoreError::Deserialization(_) => "approval-store deserialization failed",
+        ApprovalStoreError::Backend(_) => "approval-store backend unavailable",
     };
     HostRuntimeError::unavailable(reason)
 }
@@ -1319,7 +1284,6 @@ fn unavailable_from_process_error(error: ProcessError) -> HostRuntimeError {
         }
         ProcessError::Resource(_) => "process resource lifecycle failed",
         ProcessError::ResourceCleanupFailed { .. } => "process resource cleanup failed",
-        ProcessError::ProcessResultStoreUnavailable => "process result store unavailable",
         ProcessError::ProcessResultUnavailable { .. } => "process result unavailable",
         ProcessError::InvalidStoredRecord { .. } => "process stored record invalid",
         ProcessError::InvalidPath(_) => "process storage path invalid",
@@ -1328,6 +1292,20 @@ fn unavailable_from_process_error(error: ProcessError) -> HostRuntimeError {
         ProcessError::Deserialization(_) => "process deserialization failed",
     };
     HostRuntimeError::unavailable(reason)
+}
+
+async fn capability_process_records(
+    processes: &dyn ProcessRuntimePort,
+    scope: &ResourceScope,
+) -> Result<Vec<ironclaw_processes::ProcessRecord>, ProcessError> {
+    processes
+        .process_snapshots(scope)
+        .await
+        .map_err(map_process_journal_error)?
+        .into_iter()
+        .filter(|snapshot| snapshot.process_kind == ProcessKind::CapabilityInvocation)
+        .map(process_record_from_snapshot)
+        .collect()
 }
 
 fn required_runtime_backends(registry: &ExtensionRegistry) -> Vec<RuntimeKind> {
@@ -1360,8 +1338,9 @@ fn runtime_kind_rank(runtime: RuntimeKind) -> u8 {
         RuntimeKind::Wasm => 0,
         RuntimeKind::Mcp => 1,
         RuntimeKind::Script => 2,
-        RuntimeKind::FirstParty => 3,
-        RuntimeKind::System => 4,
+        RuntimeKind::Sandbox => 3,
+        RuntimeKind::FirstParty => 4,
+        RuntimeKind::System => 5,
     }
 }
 
@@ -1398,10 +1377,10 @@ fn completed_outcome_from(
 /// a false-positive `AuthRequired` for capabilities whose product-auth account
 /// is already connected.
 pub(crate) fn capability_credential_requirements(
-    descriptor: &ironclaw_host_api::CapabilityDescriptor,
+    descriptor: &ironclaw_host_api::capability::CapabilityDescriptor,
 ) -> (
     Vec<SecretHandle>,
-    Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
+    Vec<ironclaw_host_api::decision::RuntimeCredentialAuthRequirement>,
 ) {
     let provider = descriptor.provider.clone();
     let mut required_secrets = Vec::new();
@@ -1424,7 +1403,7 @@ pub(crate) fn capability_credential_requirements(
         // for capabilities whose product-auth account is already connected.
         if matches!(
             cred.source,
-            ironclaw_host_api::RuntimeCredentialRequirementSource::SecretHandle
+            ironclaw_host_api::capability::RuntimeCredentialRequirementSource::SecretHandle
         ) {
             required_secrets.push(cred.handle.clone());
         }
@@ -1438,7 +1417,7 @@ pub(crate) fn capability_credential_requirements(
 fn auth_required_outcome(
     capability_id: CapabilityId,
     required_secrets: Vec<SecretHandle>,
-    credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
+    credential_requirements: Vec<ironclaw_host_api::decision::RuntimeCredentialAuthRequirement>,
 ) -> RuntimeCapabilityOutcome {
     RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate {
         gate_id: stable_auth_gate_id(&capability_id, &required_secrets, &credential_requirements),
@@ -1501,8 +1480,10 @@ fn stable_auth_gate_id(
 /// `RuntimeCredentialAccountSetup` variant fails the build here rather than
 /// silently hashing to an existing token. OAuth setup scopes use the same
 /// injective [`canonical_scope_list`] encoding as `provider_scopes`.
-fn stable_setup_token(setup: &ironclaw_host_api::RuntimeCredentialAccountSetup) -> String {
-    use ironclaw_host_api::RuntimeCredentialAccountSetup as Setup;
+fn stable_setup_token(
+    setup: &ironclaw_host_api::capability::RuntimeCredentialAccountSetup,
+) -> String {
+    use ironclaw_host_api::capability::RuntimeCredentialAccountSetup as Setup;
     match setup {
         Setup::ManualToken => "manual_token".to_string(),
         Setup::OAuth { scopes } => format!("oauth:{}", canonical_scope_list(scopes)),
@@ -1537,7 +1518,9 @@ fn spawned_process_outcome_from(
     }
 }
 
-fn persistent_approval_grantees(context: &ironclaw_host_api::ExecutionContext) -> Vec<Principal> {
+fn persistent_approval_grantees(
+    context: &ironclaw_host_api::scope::ExecutionContext,
+) -> Vec<Principal> {
     let mut grantees = vec![
         Principal::Extension(context.extension_id.clone()),
         Principal::User(context.user_id.clone()),
@@ -1581,7 +1564,7 @@ fn persistent_approval_lookup_scopes(scope: &ResourceScope) -> Vec<PersistentApp
 /// A malformed or invalid process-sandbox plan is a *model-fixable* condition:
 /// the model chose bad arguments and can correct them on a retry. It must
 /// surface as a recoverable, model-visible tool error
-/// ([`RuntimeFailureKind::InvalidInput`] → `ModelVisibleToolError`), never as a
+/// ([`FailureKind::InputEncode`] → `ModelVisibleToolError`), never as a
 /// terminal [`HostRuntimeError`] that ends the whole run. Genuine host-side
 /// faults (serializing the validated host struct back to JSON) remain errors.
 enum SpawnInputPreparation {
@@ -1604,7 +1587,7 @@ fn host_runtime_spawn_input_for_capability(
             return Ok(SpawnInputPreparation::ModelInputRejected(
                 RuntimeCapabilityFailure::new(
                     capability_id.clone(),
-                    RuntimeFailureKind::InvalidInput,
+                    FailureKind::InputEncode,
                     Some(
                         "process sandbox capability input must be a SandboxProcessPlan".to_string(),
                     ),
@@ -1622,7 +1605,7 @@ fn host_runtime_spawn_input_for_capability(
             return Ok(SpawnInputPreparation::ModelInputRejected(
                 RuntimeCapabilityFailure::new(
                     capability_id.clone(),
-                    RuntimeFailureKind::InvalidInput,
+                    FailureKind::InputEncode,
                     Some(
                         "process sandbox capability input failed SandboxProcessPlan validation"
                             .to_string(),
@@ -1658,31 +1641,57 @@ fn failure_from(
 ) -> RuntimeCapabilityFailure {
     let kind = failure_kind_from(&error);
     let raw_cause = raw_failure_cause(&error);
+    let raw_cause_needs_detail = raw_cause
+        .as_ref()
+        .is_some_and(|cause| LoopSafeSummary::new(cause.clone()).is_err());
     let message = sanitized_failure_message(&error);
     let detail = match error {
         CapabilityInvocationError::Dispatch {
             detail: Some(detail),
             ..
         } => Some(detail),
-        CapabilityInvocationError::Dispatch {
-            detail: None,
-            safe_summary: Some(summary),
-            ..
-        } => rejected_summary_diagnostic(summary),
         _ => None,
     };
     let mut failure = RuntimeCapabilityFailure::new(capability_id, kind, message);
     if let Some(detail) = detail {
         failure = failure.with_detail(detail);
     }
-    if let Some(raw_cause) = raw_cause {
-        // Registry-scrubbed here (belt); the loop-support Diagnostic seam
-        // re-scrubs and injection-fences fail-closed (suspenders). Never
-        // rendered in Debug, run-state rows, or runtime events.
-        let (scrubbed, _) = model_visible_cause_scrubber().redact_all_secrets(&raw_cause);
-        failure = failure.with_model_visible_cause(scrubbed);
+    match raw_cause {
+        Some(raw_cause) => {
+            // Registry-scrubbed here (belt); the loop-support Diagnostic seam
+            // re-scrubs and injection-fences fail-closed (suspenders). Never
+            // rendered in Debug, run-state rows, or runtime events.
+            let (scrubbed, _) = model_visible_cause_scrubber().redact_all_secrets(&raw_cause);
+            if failure.detail.is_none() && raw_cause_needs_detail {
+                failure = failure.with_detail(
+                    ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic {
+                        text: bounded_diagnostic_text(&scrubbed),
+                    },
+                );
+            }
+            failure = failure.with_model_visible_cause(scrubbed);
+        }
+        None if failure.detail.is_none() => {
+            failure = failure.with_detail(
+                ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic {
+                    text: ironclaw_host_api::result_meta::ModelDiagnostic::unavailable()
+                        .into_inner(),
+                },
+            );
+        }
+        None => {}
     }
     failure
+}
+
+fn bounded_diagnostic_text(value: &str) -> String {
+    let mut end = value
+        .len()
+        .min(ironclaw_host_api::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES);
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string() // safety: `end` is moved to a UTF-8 boundary above.
 }
 
 /// The raw descriptive cause for the model-visible Diagnostic channel, before
@@ -1693,35 +1702,6 @@ fn raw_failure_cause(error: &CapabilityInvocationError) -> Option<String> {
         Dispatch { safe_summary, .. } => safe_summary.clone(),
         _ => None,
     }
-}
-
-/// Preserve a host-authored failure reason that the strict loop safe-summary
-/// validator rejects (paths, payload delimiters, newlines).
-///
-/// [`dispatch_failure_message`] degrades such reasons to the fixed category
-/// sentence, which is correct for the summary — but the reason itself is what
-/// the model needs to repair its call (e.g. which path was out of scope), so
-/// it must ride the model-visible diagnostic detail channel instead of being
-/// dropped. Secret VALUES are scrubbed and disallowed control characters
-/// normalized at the loop boundary before the model observes the text.
-fn rejected_summary_diagnostic(
-    summary: String,
-) -> Option<ironclaw_host_api::DispatchFailureDetail> {
-    if LoopSafeSummary::new(summary.clone()).is_ok() {
-        // The reason survives into `message`; the loop layer derives the
-        // model-visible diagnostic from it directly, so attaching it here
-        // would only duplicate it.
-        return None;
-    }
-    const MAX_DIAGNOSTIC_CHARS: usize = 512;
-    let text = if summary.chars().count() <= MAX_DIAGNOSTIC_CHARS {
-        summary
-    } else {
-        let mut text: String = summary.chars().take(MAX_DIAGNOSTIC_CHARS - 3).collect();
-        text.push_str("...");
-        text
-    };
-    Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text })
 }
 
 /// Returns a stable, redacted summary message for a capability invocation
@@ -1762,14 +1742,15 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
         } => Some(dispatch_failure_message(safe_summary.as_deref(), *kind)),
         InvocationFingerprint { .. } => Some("invocation fingerprint failed".to_string()),
         Lease(_) => Some("capability lease store unavailable".to_string()),
-        RunState(_) => Some("run-state store unavailable".to_string()),
+        ApprovalStore(_) => Some("approval store unavailable".to_string()),
+        InvocationState(_) => Some("process invocation store unavailable".to_string()),
         Process(_) => Some("process manager unavailable".to_string()),
     }
 }
 
 fn dispatch_failure_message(
     safe_summary: Option<&str>,
-    kind: ironclaw_host_api::DispatchFailureKind,
+    kind: ironclaw_host_api::dispatch::DispatchFailureKind,
 ) -> String {
     // This message is the PUBLIC label: persisted into run-state rows and
     // published on the runtime event sink before any downstream validation
@@ -1780,19 +1761,15 @@ fn dispatch_failure_message(
     // sentence. The full descriptive cause is NOT lost — it rides the private
     // `model_visible_cause` channel to the model-visible Diagnostic seam.
     safe_summary
-        .and_then(|summary| {
-            ironclaw_turns::run_profile::LoopSafeSummary::new(summary.to_string()).ok()
-        })
+        .and_then(|summary| ironclaw_loop_contracts::LoopSafeSummary::new(summary.to_string()).ok())
         .map(|summary| summary.as_str().to_string())
         .unwrap_or_else(|| kind.human_summary().to_string())
 }
 
-pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFailureKind {
+pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> FailureKind {
     match error {
-        CapabilityInvocationError::UnknownCapability { .. } => RuntimeFailureKind::MissingRuntime,
-        CapabilityInvocationError::AuthorizationRequiresAuth { .. } => {
-            RuntimeFailureKind::Authorization
-        }
+        CapabilityInvocationError::UnknownCapability { .. } => FailureKind::MissingRuntime,
+        CapabilityInvocationError::AuthorizationRequiresAuth { .. } => FailureKind::Authorization,
         CapabilityInvocationError::AuthorizationDenied { .. }
         | CapabilityInvocationError::UnsupportedObligations { .. }
         | CapabilityInvocationError::AuthorizationRequiresApproval { .. }
@@ -1801,117 +1778,45 @@ pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFai
         | CapabilityInvocationError::ApprovalNotApproved { .. }
         | CapabilityInvocationError::ApprovalLeaseMissing { .. }
         | CapabilityInvocationError::ResumeNotBlocked { .. }
-        | CapabilityInvocationError::ResumeContextMismatch { .. } => {
-            RuntimeFailureKind::Authorization
-        }
+        | CapabilityInvocationError::ResumeContextMismatch { .. } => FailureKind::Authorization,
         CapabilityInvocationError::ObligationFailed { kind, .. } => match kind {
-            ironclaw_capabilities::CapabilityObligationFailureKind::Audit => {
-                RuntimeFailureKind::Backend
-            }
+            ironclaw_capabilities::CapabilityObligationFailureKind::Audit => FailureKind::Backend,
             ironclaw_capabilities::CapabilityObligationFailureKind::Mount => {
-                RuntimeFailureKind::Authorization
+                FailureKind::Authorization
             }
+            // Every Network obligation failure is deterministic policy/config
+            // (duplicate ApplyNetworkPolicy, empty allowed_targets, missing
+            // policy store) — never a transport fault, so it must not ride
+            // the retryable transport `Network` kind and burn retry budget.
             ironclaw_capabilities::CapabilityObligationFailureKind::Network => {
-                RuntimeFailureKind::Network
+                FailureKind::NetworkDenied
             }
             ironclaw_capabilities::CapabilityObligationFailureKind::Output => {
-                RuntimeFailureKind::OutputTooLarge
+                FailureKind::OutputTooLarge
             }
             ironclaw_capabilities::CapabilityObligationFailureKind::Resource => {
-                RuntimeFailureKind::Resource
+                FailureKind::Resource
             }
             ironclaw_capabilities::CapabilityObligationFailureKind::Secret => {
-                RuntimeFailureKind::Authorization
+                FailureKind::Authorization
             }
         },
-        CapabilityInvocationError::InvocationFingerprint { .. } => RuntimeFailureKind::InvalidInput,
+        // The invocation fingerprint could not be computed from the supplied
+        // input — model-fixable request-shape fault, same family as an input
+        // that fails to encode.
+        CapabilityInvocationError::InvocationFingerprint { .. } => FailureKind::InputEncode,
         CapabilityInvocationError::ApprovalStoreMissing { .. }
         | CapabilityInvocationError::ResumeStoreMissing { .. }
-        | CapabilityInvocationError::ProcessManagerMissing { .. } => RuntimeFailureKind::Backend,
+        | CapabilityInvocationError::ProcessManagerMissing { .. } => FailureKind::Backend,
         CapabilityInvocationError::Lease(_)
-        | CapabilityInvocationError::RunState(_)
-        | CapabilityInvocationError::Process(_) => RuntimeFailureKind::Backend,
-        CapabilityInvocationError::Dispatch { kind, .. } => RuntimeFailureKind::from(*kind),
-    }
-}
-
-impl From<DispatchFailureKind> for RuntimeFailureKind {
-    fn from(kind: DispatchFailureKind) -> Self {
-        match kind {
-            DispatchFailureKind::UnknownCapability | DispatchFailureKind::UnknownProvider => {
-                RuntimeFailureKind::InvalidOutput
-            }
-            DispatchFailureKind::MissingRuntimeBackend
-            | DispatchFailureKind::UnsupportedRuntime => RuntimeFailureKind::MissingRuntime,
-            DispatchFailureKind::AuthRequired => RuntimeFailureKind::Authorization,
-            DispatchFailureKind::RuntimeMismatch => RuntimeFailureKind::Backend,
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExtensionRuntimeMismatch) => {
-                RuntimeFailureKind::MissingRuntime
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Memory)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource) => {
-                RuntimeFailureKind::Resource
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied) => {
-                RuntimeFailureKind::Network
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied) => {
-                RuntimeFailureKind::PolicyDenied
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge) => {
-                RuntimeFailureKind::OutputTooLarge
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::FilesystemDenied) => {
-                RuntimeFailureKind::Authorization
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::SecretDenied) => {
-                RuntimeFailureKind::Authorization
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExitFailure) => {
-                RuntimeFailureKind::Process
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode) => {
-                RuntimeFailureKind::InvalidInput
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputDecode)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InvalidResult) => {
-                RuntimeFailureKind::InvalidOutput
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed) => {
-                RuntimeFailureKind::OperationFailed
-            }
-            // A method or capability the model named that does not exist is a
-            // model-fixable request error, not an infra fault: classify it as
-            // InvalidInput so it surfaces as an immediate model-visible tool
-            // error instead of burning the retry budget on a call that can
-            // never resolve by retrying.
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::MethodMissing)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability) => {
-                RuntimeFailureKind::InvalidInput
-            }
-            // A guest trap is an extension-local execution failure. It can be
-            // an extension defect or a call-specific failure, but retrying the
-            // same guest invocation as host infrastructure cannot repair it.
-            // Surface it as an operation failure so the model can change
-            // approach or report the broken extension.
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest) => {
-                RuntimeFailureKind::OperationFailed
-            }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Manifest)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UnsupportedRunner) => {
-                RuntimeFailureKind::Backend
-            }
-            // The fail-safe "uncategorized" redaction bucket collapses to a
-            // concrete internal failure rather than propagating a dedicated
-            // `Unknown` category downstream. `Internal` is retryable and
-            // surfaces to the model/user, so an unclassified dispatch error is
-            // no longer an opaque run-ending dead-end. See
-            // `docs/plans/2026-06-28-reborn-error-recoverability-audit.md`.
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Unknown) => Self::Internal,
-        }
+        | CapabilityInvocationError::ApprovalStore(_)
+        | CapabilityInvocationError::InvocationState(_)
+        | CapabilityInvocationError::Process(_) => FailureKind::Backend,
+        // The dispatch lane carries the unified vocabulary losslessly: every
+        // precise mechanism name (MethodMissing, NetworkDenied, Guest, …)
+        // survives 1:1 via host_api's `From` injections instead of the retired
+        // 22→12 coarsening fold.
+        CapabilityInvocationError::Dispatch { kind, .. } => FailureKind::from(*kind),
     }
 }
 
@@ -1921,7 +1826,7 @@ mod tests {
     //! mappings.
     //!
     //! The dispatch failure kinds come from typed
-    //! [`ironclaw_host_api::DispatchFailureKind`] values. Their display
+    //! [`ironclaw_host_api::dispatch::DispatchFailureKind`] values. Their display
     //! strings remain part of the public observability contract, but runtime
     //! failure mapping stays type-directed instead of reparsing strings.
 
@@ -1932,9 +1837,11 @@ mod tests {
     };
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
     use ironclaw_host_api::{
-        CapabilityId, DispatchFailureKind, ExtensionId, HostPortCatalog,
-        RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, SecretHandle, VendorId,
-        VirtualPath,
+        decision::RuntimeCredentialAuthRequirement,
+        dispatch::{DispatchFailureKind, RuntimeDispatchErrorKind},
+        host_port::HostPortCatalog,
+        ids::{CapabilityId, ExtensionId, SecretHandle, VendorId},
+        path::VirtualPath,
     };
 
     fn cap() -> CapabilityId {
@@ -1952,7 +1859,7 @@ mod tests {
     fn auth_requirement(scopes: &[&str]) -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
             provider: VendorId::new("notion").unwrap(),
-            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+            setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                 scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
             },
             requester_extension: ExtensionId::new("notion").unwrap(),
@@ -2008,7 +1915,7 @@ mod tests {
         // record produced the same gate id; the write-once gate-record store
         // then reported `GateRecordAlreadyExists`, kept the stale record, and
         // the runner reloaded and rendered the wrong authentication flow.
-        use ironclaw_host_api::RuntimeCredentialAccountSetup as Setup;
+        use ironclaw_host_api::capability::RuntimeCredentialAccountSetup as Setup;
         let requirement_with = |setup: Setup| RuntimeCredentialAuthRequirement {
             provider: VendorId::new("notion").unwrap(),
             setup,
@@ -2087,104 +1994,83 @@ mod tests {
 
     #[test]
     fn dispatch_kind_to_failure_pins_every_runtime_dispatch_error_kind() {
-        // Every RuntimeDispatchErrorKind variant must map to a non-Unknown
-        // failure kind so upstream additions are surfaced explicitly.
-        let cases: &[(RuntimeDispatchErrorKind, RuntimeFailureKind)] = &[
-            (
-                RuntimeDispatchErrorKind::Backend,
-                RuntimeFailureKind::Backend,
-            ),
-            (
-                RuntimeDispatchErrorKind::Client,
-                RuntimeFailureKind::Backend,
-            ),
-            (
-                RuntimeDispatchErrorKind::Executor,
-                RuntimeFailureKind::Backend,
-            ),
+        // The dispatch lane's precise mechanism names survive 1:1 into the
+        // unified vocabulary (host_api's lossless `From` injection) — this
+        // replaces the retired 22->12 coarsening fold. The single non-identity
+        // edge is the redaction bucket `Unknown` -> `Internal`.
+        let cases: &[(RuntimeDispatchErrorKind, FailureKind)] = &[
+            (RuntimeDispatchErrorKind::Backend, FailureKind::Backend),
+            (RuntimeDispatchErrorKind::Client, FailureKind::Client),
+            (RuntimeDispatchErrorKind::Executor, FailureKind::Executor),
             (
                 RuntimeDispatchErrorKind::ExitFailure,
-                RuntimeFailureKind::Process,
+                FailureKind::ExitFailure,
             ),
             (
                 RuntimeDispatchErrorKind::ExtensionRuntimeMismatch,
-                RuntimeFailureKind::MissingRuntime,
+                FailureKind::ExtensionRuntimeMismatch,
             ),
             (
                 RuntimeDispatchErrorKind::FilesystemDenied,
-                RuntimeFailureKind::Authorization,
+                FailureKind::FilesystemDenied,
             ),
-            (
-                RuntimeDispatchErrorKind::Guest,
-                RuntimeFailureKind::OperationFailed,
-            ),
+            (RuntimeDispatchErrorKind::Guest, FailureKind::Guest),
             (
                 RuntimeDispatchErrorKind::InputEncode,
-                RuntimeFailureKind::InvalidInput,
+                FailureKind::InputEncode,
             ),
             (
                 RuntimeDispatchErrorKind::InvalidResult,
-                RuntimeFailureKind::InvalidOutput,
+                FailureKind::InvalidResult,
             ),
-            (
-                RuntimeDispatchErrorKind::Manifest,
-                RuntimeFailureKind::Backend,
-            ),
-            (
-                RuntimeDispatchErrorKind::Memory,
-                RuntimeFailureKind::Resource,
-            ),
+            (RuntimeDispatchErrorKind::Manifest, FailureKind::Manifest),
+            (RuntimeDispatchErrorKind::Memory, FailureKind::Memory),
             (
                 RuntimeDispatchErrorKind::MethodMissing,
-                RuntimeFailureKind::InvalidInput,
+                FailureKind::MethodMissing,
             ),
             (
                 RuntimeDispatchErrorKind::NetworkDenied,
-                RuntimeFailureKind::Network,
+                FailureKind::NetworkDenied,
             ),
             (
                 RuntimeDispatchErrorKind::OperationFailed,
-                RuntimeFailureKind::OperationFailed,
+                FailureKind::OperationFailed,
             ),
             (
                 RuntimeDispatchErrorKind::OutputDecode,
-                RuntimeFailureKind::InvalidOutput,
+                FailureKind::OutputDecode,
             ),
             (
                 RuntimeDispatchErrorKind::OutputTooLarge,
-                RuntimeFailureKind::OutputTooLarge,
+                FailureKind::OutputTooLarge,
             ),
             (
                 RuntimeDispatchErrorKind::PolicyDenied,
-                RuntimeFailureKind::PolicyDenied,
+                FailureKind::PolicyDenied,
             ),
-            (
-                RuntimeDispatchErrorKind::Resource,
-                RuntimeFailureKind::Resource,
-            ),
+            (RuntimeDispatchErrorKind::Resource, FailureKind::Resource),
             (
                 RuntimeDispatchErrorKind::SecretDenied,
-                RuntimeFailureKind::Authorization,
+                FailureKind::SecretDenied,
             ),
             (
                 RuntimeDispatchErrorKind::UndeclaredCapability,
-                RuntimeFailureKind::InvalidInput,
+                FailureKind::UndeclaredCapability,
             ),
             (
                 RuntimeDispatchErrorKind::UnsupportedRunner,
-                RuntimeFailureKind::Backend,
+                FailureKind::UnsupportedRunner,
             ),
-            // The fail-safe "uncategorized" redaction bucket collapses to a
-            // concrete, surfacing `Internal` rather than a dedicated `Unknown`
-            // category (which no longer exists on `RuntimeFailureKind`).
-            (
-                RuntimeDispatchErrorKind::Unknown,
-                RuntimeFailureKind::Internal,
-            ),
+            // The fail-safe "uncategorized" redaction bucket routes to the
+            // explicit non-retryable `Unclassified` sink: an unclassifiable
+            // failure may be permanent, so it surfaces model-visibly instead
+            // of consuming retry budget in the retryable `Internal` bucket.
+            (RuntimeDispatchErrorKind::Unknown, FailureKind::Unclassified),
         ];
         for (variant, expected) in cases {
             let kind = DispatchFailureKind::Runtime(*variant);
-            let actual = RuntimeFailureKind::from(kind);
+            let actual = FailureKind::from(kind);
             assert_eq!(
                 actual, *expected,
                 "dispatch kind {kind:?} should map to {expected:?}, got {actual:?}"
@@ -2194,50 +2080,62 @@ mod tests {
 
     #[test]
     fn dispatch_kind_to_failure_pins_dispatch_error_top_level_kinds() {
-        let cases: &[(DispatchFailureKind, RuntimeFailureKind)] = &[
+        // Control-plane siblings also survive 1:1 (previously coarsened into
+        // InvalidOutput/MissingRuntime/Authorization/Backend).
+        let cases: &[(DispatchFailureKind, FailureKind)] = &[
             (
                 DispatchFailureKind::UnknownCapability,
-                RuntimeFailureKind::InvalidOutput,
+                FailureKind::UnknownCapability,
             ),
             (
                 DispatchFailureKind::UnknownProvider,
-                RuntimeFailureKind::InvalidOutput,
+                FailureKind::UnknownProvider,
             ),
             (
                 DispatchFailureKind::MissingRuntimeBackend,
-                RuntimeFailureKind::MissingRuntime,
+                FailureKind::MissingRuntimeBackend,
             ),
             (
                 DispatchFailureKind::UnsupportedRuntime,
-                RuntimeFailureKind::MissingRuntime,
+                FailureKind::UnsupportedRunner,
             ),
             (
                 DispatchFailureKind::RuntimeMismatch,
-                RuntimeFailureKind::Backend,
+                FailureKind::RuntimeMismatch,
             ),
-            (
-                DispatchFailureKind::AuthRequired,
-                RuntimeFailureKind::Authorization,
-            ),
+            (DispatchFailureKind::AuthRequired, FailureKind::AuthRequired),
         ];
         for (kind, expected) in cases {
-            assert_eq!(RuntimeFailureKind::from(*kind), *expected, "kind {kind:?}");
+            assert_eq!(FailureKind::from(*kind), *expected, "kind {kind:?}");
         }
     }
 
     #[test]
-    fn failure_kind_from_dispatch_unknown_capability_maps_to_invalid_output() {
+    fn failure_kind_from_dispatch_unknown_capability_maps_to_unknown_capability() {
         let error = dispatch(DispatchFailureKind::UnknownCapability);
-        assert_eq!(failure_kind_from(&error), RuntimeFailureKind::InvalidOutput);
+        assert_eq!(failure_kind_from(&error), FailureKind::UnknownCapability);
     }
 
     #[test]
     fn failure_kind_from_unknown_capability_variant_maps_to_missing_runtime() {
         let error = CapabilityInvocationError::UnknownCapability { capability: cap() };
-        assert_eq!(
-            failure_kind_from(&error),
-            RuntimeFailureKind::MissingRuntime
-        );
+        assert_eq!(failure_kind_from(&error), FailureKind::MissingRuntime);
+    }
+
+    /// Regression (#6684 review): a Network obligation failure is deterministic
+    /// policy/config (duplicate policy obligation, empty allowed_targets,
+    /// missing policy store) — it must map to the never-retryable
+    /// `NetworkDenied`, not the retryable transport `Network` kind, or retries
+    /// burn budget on a call that cannot succeed.
+    #[test]
+    fn failure_kind_from_network_obligation_failure_is_not_retryable() {
+        let error = CapabilityInvocationError::ObligationFailed {
+            capability: cap(),
+            kind: ironclaw_capabilities::CapabilityObligationFailureKind::Network,
+        };
+        let kind = failure_kind_from(&error);
+        assert_eq!(kind, FailureKind::NetworkDenied);
+        assert!(!kind.is_retryable());
     }
 
     #[test]
@@ -2276,7 +2174,7 @@ mod tests {
 
         match output {
             SpawnInputPreparation::ModelInputRejected(failure) => {
-                assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+                assert_eq!(failure.kind, FailureKind::InputEncode);
                 assert_eq!(
                     failure.disposition(),
                     crate::CapabilityFailureDisposition::ModelVisibleToolError
@@ -2309,7 +2207,7 @@ mod tests {
 
         match output {
             SpawnInputPreparation::ModelInputRejected(failure) => {
-                assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+                assert_eq!(failure.kind, FailureKind::InputEncode);
                 assert_eq!(
                     failure.disposition(),
                     crate::CapabilityFailureDisposition::ModelVisibleToolError
@@ -2431,13 +2329,16 @@ mod tests {
     }
 
     #[test]
-    fn failure_from_carries_rejected_safe_summary_on_the_diagnostic_detail() {
+    fn failure_from_inlines_bounded_rejected_summary_and_keeps_complete_private_cause() {
         // A path-bearing (or newline-bearing) failure reason fails the strict
         // loop safe-summary validator, so the message degrades to the fixed
-        // category sentence. The raw reason must NOT be dropped: it rides the
-        // model-visible diagnostic detail channel, which is exactly how the
-        // model learns what to repair (e.g. which path was denied).
-        let raw = "shell execution failed: cannot read /etc/passwd\nsecond line".to_string();
+        // category sentence. The complete reason must ride the private cause
+        // channel until the loop applies the 4096-byte diagnostic bound.
+        let raw = format!(
+            "shell execution failed: cannot read /workspace/{}\nsecond line",
+            "segment/".repeat(600)
+        );
+        assert!(raw.len() > ironclaw_host_api::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES);
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor),
             safe_summary: Some(raw.clone()),
@@ -2451,16 +2352,26 @@ mod tests {
             Some("the tool executor failed"),
             "message must stay the fixed category sentence"
         );
+        let Some(ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic { text }) =
+            failure.detail.as_ref()
+        else {
+            panic!("rejected public summary must ride the diagnostic detail");
+        };
         assert_eq!(
-            failure.detail,
-            Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text: raw }),
-            "the raw reason must ride the diagnostic detail"
+            text,
+            &raw[..ironclaw_host_api::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES],
+            "the inline diagnostic uses the shared model-observation byte cap"
+        );
+        assert_eq!(
+            failure.model_visible_cause(),
+            Some(raw.as_str()),
+            "the cause must not be pre-truncated before the 4096-byte model boundary"
         );
     }
 
     #[test]
-    fn failure_from_bounds_rejected_summary_diagnostic_on_char_boundaries() {
-        let raw = format!("/{}", "é".repeat(600));
+    fn failure_from_bounds_rejected_summary_diagnostic_on_utf8_boundary() {
+        let raw = format!("/workspace/{}tail", "é".repeat(3_000));
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor),
             safe_summary: Some(raw),
@@ -2468,12 +2379,30 @@ mod tests {
         };
 
         let failure = failure_from(error, cap());
-        let Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text }) = failure.detail
+        let Some(ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic { text }) =
+            failure.detail
         else {
-            panic!("expected bounded diagnostic detail");
+            panic!("expected a bounded diagnostic");
         };
-        assert_eq!(text.chars().count(), 512);
-        assert!(text.ends_with("..."));
+        assert!(text.len() <= ironclaw_host_api::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES);
+        assert!(text.ends_with('é'));
+    }
+
+    #[test]
+    fn failure_from_inlines_unavailable_detail_when_no_cause_exists() {
+        let failure = failure_from(
+            CapabilityInvocationError::UnknownCapability { capability: cap() },
+            cap(),
+        );
+        assert_eq!(
+            failure.detail,
+            Some(
+                ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic {
+                    text: ironclaw_host_api::result_meta::ModelDiagnostic::unavailable()
+                        .into_inner(),
+                }
+            )
+        );
     }
 
     #[test]
@@ -2501,17 +2430,19 @@ mod tests {
 
     #[test]
     fn failure_from_preserves_dispatch_detail() {
-        let issue = ironclaw_host_api::DispatchInputIssue::new(
+        let issue = ironclaw_host_api::dispatch::DispatchInputIssue::new(
             "schedule.kind",
-            ironclaw_host_api::DispatchInputIssueCode::MissingRequired,
+            ironclaw_host_api::dispatch::DispatchInputIssueCode::MissingRequired,
         )
         .expected("cron or once");
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
             safe_summary: Some("trigger_create input failed validation".to_string()),
-            detail: Some(ironclaw_host_api::DispatchFailureDetail::InvalidInput {
-                issues: vec![issue.clone()],
-            }),
+            detail: Some(
+                ironclaw_host_api::dispatch::DispatchFailureDetail::InvalidInput {
+                    issues: vec![issue.clone()],
+                },
+            ),
         };
 
         let failure = failure_from(
@@ -2519,70 +2450,64 @@ mod tests {
             CapabilityId::new("builtin.trigger_create").expect("valid capability id"),
         );
 
-        assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+        assert_eq!(failure.kind, FailureKind::InputEncode);
         assert_eq!(
             failure.detail,
-            Some(ironclaw_host_api::DispatchFailureDetail::InvalidInput {
-                issues: vec![issue]
-            })
+            Some(
+                ironclaw_host_api::dispatch::DispatchFailureDetail::InvalidInput {
+                    issues: vec![issue]
+                }
+            )
         );
     }
 
     #[test]
-    fn runtime_failure_kind_as_str_is_stable_snake_case() {
-        // Pin the public metric/tracing tokens; renaming any of these is a
-        // breaking observability contract change.
-        assert_eq!(RuntimeFailureKind::Authorization.as_str(), "authorization");
-        assert_eq!(RuntimeFailureKind::Backend.as_str(), "backend");
-        assert_eq!(RuntimeFailureKind::Cancelled.as_str(), "cancelled");
-        assert_eq!(RuntimeFailureKind::Dispatcher.as_str(), "dispatcher");
-        assert_eq!(RuntimeFailureKind::Internal.as_str(), "internal");
-        assert_eq!(RuntimeFailureKind::InvalidInput.as_str(), "invalid_input");
-        assert_eq!(RuntimeFailureKind::InvalidOutput.as_str(), "invalid_output");
-        assert_eq!(
-            RuntimeFailureKind::MissingRuntime.as_str(),
-            "missing_runtime"
-        );
-        assert_eq!(RuntimeFailureKind::Network.as_str(), "network");
-        assert_eq!(
-            RuntimeFailureKind::OperationFailed.as_str(),
-            "operation_failed"
-        );
-        assert_eq!(
-            RuntimeFailureKind::OutputTooLarge.as_str(),
-            "output_too_large"
-        );
-        assert_eq!(RuntimeFailureKind::PolicyDenied.as_str(), "policy_denied");
-        assert_eq!(RuntimeFailureKind::Process.as_str(), "process");
-        assert_eq!(RuntimeFailureKind::Resource.as_str(), "resource");
-        assert_eq!(RuntimeFailureKind::Transient.as_str(), "transient");
-        assert_eq!(RuntimeFailureKind::Unavailable.as_str(), "unavailable");
+    fn failure_kind_as_str_is_stable_snake_case() {
+        // Pin the public metric/tracing tokens this crate emits; renaming any
+        // of these is a breaking observability contract change. (host_api pins
+        // the full tag round-trip over `FailureKind::ALL`; this pins the exact
+        // spellings host-runtime events/metrics rely on, including the precise
+        // names that replaced the retired coarse tokens invalid_input/
+        // invalid_output/process/dispatcher.)
+        assert_eq!(FailureKind::Authorization.as_str(), "authorization");
+        assert_eq!(FailureKind::Backend.as_str(), "backend");
+        assert_eq!(FailureKind::Cancelled.as_str(), "cancelled");
+        assert_eq!(FailureKind::Internal.as_str(), "internal");
+        assert_eq!(FailureKind::InputEncode.as_str(), "input_encode");
+        assert_eq!(FailureKind::OutputDecode.as_str(), "output_decode");
+        assert_eq!(FailureKind::InvalidResult.as_str(), "invalid_result");
+        assert_eq!(FailureKind::MethodMissing.as_str(), "method_missing");
+        assert_eq!(FailureKind::MissingRuntime.as_str(), "missing_runtime");
+        assert_eq!(FailureKind::Network.as_str(), "network");
+        assert_eq!(FailureKind::NetworkDenied.as_str(), "network_denied");
+        assert_eq!(FailureKind::OperationFailed.as_str(), "operation_failed");
+        assert_eq!(FailureKind::OutputTooLarge.as_str(), "output_too_large");
+        assert_eq!(FailureKind::PolicyDenied.as_str(), "policy_denied");
+        assert_eq!(FailureKind::ExitFailure.as_str(), "exit_failure");
+        assert_eq!(FailureKind::GateDeclined.as_str(), "gate_declined");
+        assert_eq!(FailureKind::Resource.as_str(), "resource");
+        assert_eq!(FailureKind::Transient.as_str(), "transient");
+        assert_eq!(FailureKind::Unavailable.as_str(), "unavailable");
     }
 
     #[test]
     fn capability_failure_disposition_maps_failure_kinds_once() {
         use crate::CapabilityFailureDisposition::*;
 
-        let cases = [
-            (RuntimeFailureKind::Authorization, ModelVisibleToolError),
-            (RuntimeFailureKind::Backend, RetrySameCall),
-            (RuntimeFailureKind::Cancelled, ModelVisibleToolError),
-            (RuntimeFailureKind::Dispatcher, ModelVisibleToolError),
-            (RuntimeFailureKind::Internal, RetrySameCall),
-            (RuntimeFailureKind::InvalidInput, ModelVisibleToolError),
-            (RuntimeFailureKind::InvalidOutput, ModelVisibleToolError),
-            (RuntimeFailureKind::MissingRuntime, ModelVisibleToolError),
-            (RuntimeFailureKind::Network, RetrySameCall),
-            (RuntimeFailureKind::OperationFailed, ModelVisibleToolError),
-            (RuntimeFailureKind::OutputTooLarge, ModelVisibleToolError),
-            (RuntimeFailureKind::PolicyDenied, ModelVisibleToolError),
-            (RuntimeFailureKind::Process, ModelVisibleToolError),
-            (RuntimeFailureKind::Resource, ModelVisibleToolError),
-            (RuntimeFailureKind::Transient, RetrySameCall),
-            (RuntimeFailureKind::Unavailable, RetrySameCall),
-        ];
-
-        for (kind, expected) in cases {
+        // Exactly the Retry-fated kinds are retried before the model sees
+        // anything; everything else — model-visible mechanism names, policy
+        // denials, config faults, park/terminal fates — surfaces as a
+        // model-visible tool error. Exhaustive over the closed vocabulary so
+        // a new variant fails this pin until deliberately classified.
+        for &kind in FailureKind::ALL {
+            let expected = match kind {
+                FailureKind::Network
+                | FailureKind::Transient
+                | FailureKind::Unavailable
+                | FailureKind::Backend
+                | FailureKind::Internal => RetrySameCall,
+                _ => ModelVisibleToolError,
+            };
             assert_eq!(
                 crate::capability_failure_disposition(kind),
                 expected,
@@ -2595,11 +2520,11 @@ mod tests {
     fn capability_failure_disposition_retries_retryable_kinds_before_exhaustion() {
         use crate::CapabilityFailureDisposition::*;
         for kind in [
-            RuntimeFailureKind::Backend,
-            RuntimeFailureKind::Internal,
-            RuntimeFailureKind::Network,
-            RuntimeFailureKind::Transient,
-            RuntimeFailureKind::Unavailable,
+            FailureKind::Backend,
+            FailureKind::Internal,
+            FailureKind::Network,
+            FailureKind::Transient,
+            FailureKind::Unavailable,
         ] {
             assert_eq!(
                 crate::capability_failure_disposition(kind),
@@ -2607,6 +2532,34 @@ mod tests {
                 "{kind:?}"
             );
         }
+    }
+
+    /// Regression: a `NetworkDenied` dispatch failure is a POLICY denial —
+    /// the policy does not change between attempts, so retrying can never
+    /// succeed and only burns the loop's retry budget. It must NOT be
+    /// retried; it surfaces to the model as a tool error so the loop can
+    /// route around the denied egress. The retired coarsening fold mapped
+    /// `NetworkDenied` onto the retryable `Network` bucket, so this test
+    /// would have failed against it (disposition was `RetrySameCall`).
+    #[test]
+    fn network_denied_dispatch_failure_is_model_visible_not_retried() {
+        let failure = failure_from(
+            dispatch(DispatchFailureKind::Runtime(
+                RuntimeDispatchErrorKind::NetworkDenied,
+            )),
+            cap(),
+        );
+
+        assert_eq!(failure.kind, FailureKind::NetworkDenied);
+        assert_eq!(
+            failure.disposition(),
+            crate::CapabilityFailureDisposition::ModelVisibleToolError,
+            "a policy egress denial must surface model-visibly, never retry"
+        );
+        assert!(
+            !FailureKind::NetworkDenied.is_retryable(),
+            "NetworkDenied must not be in the quiet-retry set"
+        );
     }
 
     // ─── capability_credential_requirements unit tests ──────────────────────────
@@ -2618,7 +2571,7 @@ mod tests {
 
     fn build_descriptor_for_manifest(
         manifest_toml: &str,
-    ) -> ironclaw_host_api::CapabilityDescriptor {
+    ) -> ironclaw_host_api::capability::CapabilityDescriptor {
         let manifest = ExtensionManifest::parse(
             manifest_toml,
             ManifestSource::InstalledLocal,
@@ -2835,69 +2788,59 @@ required = true
 
     #[test]
     fn runtime_failure_summary_is_bounded_and_blank_messages_are_not_safe() {
-        let blank = RuntimeCapabilityFailure::new(
-            cap(),
-            RuntimeFailureKind::InvalidInput,
-            Some("   ".to_string()),
-        );
+        let blank =
+            RuntimeCapabilityFailure::new(cap(), FailureKind::InputEncode, Some("   ".to_string()));
         assert!(blank.safe_summary().is_none());
         assert_eq!(
             blank.disposition(),
             crate::CapabilityFailureDisposition::ModelVisibleToolError
         );
 
-        let long = RuntimeCapabilityFailure::new(
-            cap(),
-            RuntimeFailureKind::InvalidInput,
-            Some("x".repeat(3000)),
-        );
+        let long =
+            RuntimeCapabilityFailure::new(cap(), FailureKind::InputEncode, Some("x".repeat(3000)));
         let summary = long.safe_summary().expect("long message is still safe");
         assert_eq!(summary.chars().count(), 512);
         assert!(summary.ends_with("..."));
 
-        let multibyte = RuntimeCapabilityFailure::new(
-            cap(),
-            RuntimeFailureKind::InvalidInput,
-            Some("é".repeat(3000)),
-        );
+        let multibyte =
+            RuntimeCapabilityFailure::new(cap(), FailureKind::InputEncode, Some("é".repeat(3000)));
         let summary = multibyte
             .safe_summary()
             .expect("long multibyte message is still safe");
         assert_eq!(summary.chars().count(), 512);
         assert!(summary.ends_with("..."));
 
-        let exact = RuntimeCapabilityFailure::new(
-            cap(),
-            RuntimeFailureKind::InvalidInput,
-            Some("x".repeat(512)),
-        );
+        let exact =
+            RuntimeCapabilityFailure::new(cap(), FailureKind::InputEncode, Some("x".repeat(512)));
         assert_eq!(exact.safe_summary(), Some("x".repeat(512)));
     }
 
     #[test]
-    fn unavailable_from_run_state_uses_redacted_reasons() {
-        let error = RunStateError::InvalidPath("/private/users/secret/database.sqlite".to_string());
-        let host_error = unavailable_from_run_state(error);
+    fn unavailable_from_approval_store_uses_redacted_reasons() {
+        let error =
+            ApprovalStoreError::InvalidPath("/private/users/secret/database.sqlite".to_string());
+        let host_error = unavailable_from_approval_store(error);
         match host_error {
             HostRuntimeError::Unavailable { reason } => {
                 assert!(
                     !reason.contains("/private/"),
                     "sanitized reason must not leak filesystem paths, got {reason:?}"
                 );
-                assert_eq!(reason, "run-state storage path invalid");
+                assert_eq!(reason, "approval storage path invalid");
             }
             other => panic!("expected Unavailable, got {other:?}"),
         }
 
-        let error = RunStateError::Filesystem("connection refused at /tmp/runstate.db".to_string());
-        let host_error = unavailable_from_run_state(error);
+        let error =
+            ApprovalStoreError::Filesystem("connection refused at /tmp/approvals.db".to_string());
+        let host_error = unavailable_from_approval_store(error);
         match host_error {
             HostRuntimeError::Unavailable { reason } => {
                 assert!(
                     !reason.contains("/tmp"),
                     "sanitized reason must not leak filesystem paths, got {reason:?}"
                 );
-                assert_eq!(reason, "run-state filesystem unavailable");
+                assert_eq!(reason, "approval filesystem unavailable");
             }
             other => panic!("expected Unavailable, got {other:?}"),
         }

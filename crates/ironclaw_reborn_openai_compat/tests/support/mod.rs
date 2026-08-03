@@ -4,21 +4,32 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_extension_contracts::external::{
+    ExternalEventId, ProductAttachmentDescriptor, ProductAttachmentKind,
+};
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
-use ironclaw_host_api::{
-    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-    ProductSurfaceErrorKind, ThreadId,
-};
+use ironclaw_host_api::ids::ThreadId;
+use ironclaw_host_api::product_adapter::ProductAdapterId;
 use ironclaw_product::{
-    CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, ProductCancelRunRequest, ProductCreateThreadRequest,
-    ProductSubmitTurnRequest, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    SUBMIT_TURN_COMMAND,
+    CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, DecodeInboundAttachments,
+    RebornCreateThreadResponse, SUBMIT_TURN_COMMAND,
 };
-use ironclaw_product::{
-    ExternalEventId, ProductAdapterId, ProductAttachmentDescriptor, ProductAttachmentKind,
+use ironclaw_product_contracts::inbound::{
     ProductInboundAck, ProductInboundPayload, ProductRejection, ProductRejectionKind,
-    ProductTriggerReason, ProjectionReadRequest, UserMessagePayload,
+    UserMessagePayload,
+};
+use ironclaw_product_contracts::inbound_requests::{
+    ProductCancelRunRequest, ProductCreateThreadRequest, ProductSubmitTurnRequest,
+};
+use ironclaw_product_contracts::product_wire::{
+    RebornCancelRunResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse,
+};
+use ironclaw_product_contracts::projection::ProjectionReadRequest;
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind,
 };
 use ironclaw_reborn_openai_compat::{OPENAI_COMPAT_ADAPTER_ID, OpenAiCompatRefStore};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
@@ -321,8 +332,11 @@ impl ProductSurface for FakeProductSurface {
     async fn invoke(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        request: ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
+        ProductSurfaceError,
+    > {
         let output = if request.operation_id.as_str() == CREATE_THREAD_COMMAND.id {
             let input = serde_json::from_value::<ProductCreateThreadRequest>(request.input)
                 .map_err(ProductSurfaceError::internal_from)?;
@@ -341,22 +355,26 @@ impl ProductSurface for FakeProductSurface {
         } else {
             return Err(invalid_request());
         };
-        Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
+        Ok(ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output })
     }
 
     async fn query(
         &self,
         _caller: ProductSurfaceCaller,
-        _request: ironclaw_host_api::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        _request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_product_contracts::surface::ProductSurfaceQueryPage, ProductSurfaceError>
+    {
         Err(invalid_request())
     }
 
     async fn stream_events(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceStreamRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
+        ProductSurfaceError,
+    > {
         let thread_id = request.stream_id.ok_or_else(invalid_request)?;
         let after_cursor = request
             .after_cursor
@@ -378,10 +396,13 @@ impl ProductSurface for FakeProductSurface {
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()
             .map_err(ProductSurfaceError::internal_from)?;
-        Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
-            events,
-            next_cursor: None,
-        })
+        Ok(
+            ironclaw_product_contracts::surface::ProductSurfaceStreamResponse {
+                events,
+                next_cursor: None,
+                subscription: None,
+            },
+        )
     }
 }
 
@@ -459,7 +480,7 @@ fn thread_record(caller: &ProductSurfaceCaller, thread_id: ThreadId) -> SessionT
             agent_id: caller
                 .agent_id
                 .clone()
-                .unwrap_or_else(|| ironclaw_host_api::AgentId::new("agent-a").expect("agent")),
+                .unwrap_or_else(|| ironclaw_host_api::ids::AgentId::new("agent-a").expect("agent")),
             project_id: caller.project_id.clone(),
             owner_user_id: Some(caller.user_id.clone()),
             mission_id: None,

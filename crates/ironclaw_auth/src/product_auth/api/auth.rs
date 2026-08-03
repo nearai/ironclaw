@@ -25,11 +25,11 @@ use crate::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_events::{SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision};
-use ironclaw_host_api::ExtensionId;
+use ironclaw_host_api::ids::ExtensionId;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
-use ironclaw_turns::{TurnRunId, TurnScope};
+use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 
 use crate::product_auth::credentials::manual_token_flow::{
     PortBackedManualTokenFlowService, RebornManualTokenFlowService,
@@ -130,6 +130,10 @@ pub struct RebornOAuthStartFlowRequest {
     pub flow_id: Option<AuthFlowId>,
     pub scope: AuthProductScope,
     pub provider: AuthProviderId,
+    /// Extension whose manifest supplied the recipe. Ordinary product OAuth
+    /// leaves this absent; extension-owned setup must retain it durably so
+    /// callback and refresh resolve the same manifest-local recipe.
+    pub requester_extension: Option<ExtensionId>,
     pub authorization_url: OAuthAuthorizationUrl,
     pub opaque_state_hash: OpaqueStateHash,
     pub pkce_verifier_hash: PkceVerifierHash,
@@ -140,6 +144,13 @@ pub struct RebornOAuthStartFlowRequest {
     pub update_binding: Option<CredentialAccountUpdateBinding>,
     pub continuation: AuthContinuationRef,
     pub expires_at: crate::Timestamp,
+}
+
+/// Minimum durable identity needed before a callback may resolve recipe data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebornOAuthCallbackFlowIdentity {
+    pub provider: AuthProviderId,
+    pub requester_extension: Option<ExtensionId>,
 }
 
 /// Host-route OAuth callback parse result.
@@ -532,7 +543,7 @@ pub struct RebornProductAuthServices {
     auth_engine: Option<Arc<crate::AuthEngine>>,
     /// One recipe-driven blocked-gate OAuth driver covering every vendor.
     oauth_gate_driver: Option<Arc<OAuthGateFlowDriver>>,
-    /// Optional read projection for WebUI/local-dev auth interactions.
+    /// Optional read projection for WebUI/standalone auth interactions.
     ///
     /// `RebornProductAuthServices` may still support OAuth callbacks,
     /// manual-token setup, credential refresh, and continuation dispatch
@@ -894,7 +905,7 @@ impl RebornProductAuthServices {
     /// silently start failing the moment any caller clones the `Arc` first).
     ///
     /// `scope` must be the process's own boot-time owner scope (composition
-    /// derives it from `local_dev_nearai_mcp_owner_scope`), never a
+    /// derives it from `standalone_nearai_mcp_owner_scope`), never a
     /// per-request, per-thread, or per-user scope — the fallback selector
     /// reuses it as the credential lookup target for every matching SSO
     /// caller. This rejects a mission/thread-scoped value as a fail-closed
@@ -920,12 +931,12 @@ impl RebornProductAuthServices {
         Ok(self)
     }
 
-    /// Enable WebUI/local-dev/composition auth-flow projection source.
+    /// Enable WebUI/standalone/composition auth-flow projection source.
     ///
     /// Exported `pub` so integration-test harnesses outside the crate can wire
     /// an in-memory fake, and so the production composition factory can attach
     /// its configured flow projection. Not part of the stable product API;
-    /// callers outside WebUI/local-dev or composition adapter wiring should use
+    /// callers outside WebUI/standalone or composition adapter wiring should use
     /// higher-level product-auth surfaces instead.
     #[doc(hidden)]
     pub fn with_flow_record_source(mut self, source: Arc<dyn AuthFlowRecordSource>) -> Self {
@@ -938,7 +949,7 @@ impl RebornProductAuthServices {
     pub async fn cancel_blocked_auth_flow(
         &self,
         scope: &TurnScope,
-        owner_user_id: &ironclaw_host_api::UserId,
+        owner_user_id: &ironclaw_host_api::ids::UserId,
         run_id: TurnRunId,
         gate_ref: &str,
     ) -> Result<(), AuthProductError> {
@@ -1105,7 +1116,8 @@ impl RebornProductAuthServices {
                 } else {
                     let exchange = match self
                         .provider_client
-                        .exchange_callback(
+                        .exchange_callback_for_requester(
+                            claimed.requester_extension.clone(),
                             OAuthProviderExchangeContext {
                                 scope: request.scope.clone(),
                                 flow_id: request.flow_id,
@@ -1278,7 +1290,7 @@ impl RebornProductAuthServices {
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
         state_hash: &OpaqueStateHash,
-    ) -> Result<AuthProviderId, RebornOAuthCallbackError> {
+    ) -> Result<RebornOAuthCallbackFlowIdentity, RebornOAuthCallbackError> {
         let Some(record) = self
             .flow_manager
             .get_flow(scope, flow_id)
@@ -1310,7 +1322,10 @@ impl RebornProductAuthServices {
         {
             return Err(AuthProductError::CrossScopeDenied.into());
         }
-        Ok(record.provider)
+        Ok(RebornOAuthCallbackFlowIdentity {
+            provider: record.provider,
+            requester_extension: record.requester_extension,
+        })
     }
 
     /// Read a scoped flow's durable lifecycle status for the origin-independent
@@ -1432,6 +1447,7 @@ impl RebornProductAuthServices {
                 scope: request.scope.clone(),
                 kind: AuthFlowKind::IntegrationCredential,
                 provider: request.provider,
+                requester_extension: request.requester_extension,
                 challenge: AuthChallenge::OAuthUrl {
                     authorization_url: request.authorization_url,
                     expires_at: request.expires_at,
@@ -1455,17 +1471,16 @@ impl RebornProductAuthServices {
 
     fn setup_pkce_secret_handle(
         flow_id: AuthFlowId,
-    ) -> Result<ironclaw_host_api::SecretHandle, AuthProductError> {
-        ironclaw_host_api::SecretHandle::new(format!("product-auth-setup-pkce-{flow_id}")).map_err(
-            |error| {
+    ) -> Result<ironclaw_host_api::ids::SecretHandle, AuthProductError> {
+        ironclaw_host_api::ids::SecretHandle::new(format!("product-auth-setup-pkce-{flow_id}"))
+            .map_err(|error| {
                 tracing::warn!(
                     flow_id = %flow_id,
                     error = %error,
                     "failed to build setup PKCE secret handle"
                 );
                 AuthProductError::BackendUnavailable
-            },
-        )
+            })
     }
 
     /// Durably store a setup flow's raw PKCE verifier under its per-flow
@@ -1850,7 +1865,7 @@ impl RebornProductAuthServices {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn local_dev_in_memory(
+    pub fn in_memory_for_test(
         continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
     ) -> Self {
         let services = Arc::new(crate::InMemoryAuthProductServices::new());

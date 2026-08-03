@@ -81,7 +81,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use ironclaw_host_api::{ResourceScope, ScopedPath};
+use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
 
 use crate::{
     BackendCapabilities, Capability, CasExpectation, Entry, FilesystemError, FilesystemOperation,
@@ -299,7 +299,13 @@ where
         return Err(CasUpdateError::CasUnsupported);
     }
 
-    let loop_future = cas_update_loop(
+    // Boxed so the retry loop's state (snapshot clones, encode/apply
+    // captures) lives on the heap instead of inlining into every caller's
+    // future. Stores that chain many `cas_update` calls sequentially (the
+    // extension installation store's aggregate writers, startup repair)
+    // otherwise accumulate enough inline state to overflow default test
+    // stacks in debug builds.
+    let loop_future = Box::pin(cas_update_loop(
         filesystem,
         scope,
         path,
@@ -307,7 +313,7 @@ where
         &decode,
         &encode,
         &mut apply,
-    );
+    ));
     match tokio::time::timeout(FILESYSTEM_APPLY_TIMEOUT, loop_future).await {
         Ok(result) => result,
         Err(_) => Err(CasUpdateError::Timeout),

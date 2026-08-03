@@ -130,8 +130,8 @@ Recommended meaning:
 | `/processes` | background-process records and result/output blobs (consumer-store mount alias under `ironclaw_processes`) |
 | `/authorization` | capability lease records (consumer-store mount alias under `ironclaw_authorization`) |
 | `/outbound` | outbound delivery policy/subscription/attempt records (consumer-store mount alias under `ironclaw_outbound`) |
-| `/run-state` | invocation-lifecycle run-state records (consumer-store mount alias under `ironclaw_run_state`) |
-| `/approvals` | approval-request lifecycle records (sibling consumer-store mount alias under `ironclaw_run_state`) |
+| `/run-state` | read-only compatibility input for invocation lifecycle migration into `/processes` |
+| `/approvals` | approval-request lifecycle records owned by `ironclaw_approvals` |
 | `/threads` | canonical session-thread and transcript records (consumer-store mount alias under `ironclaw_threads`) |
 | `/conversations` | conversation binding and session-thread state records (consumer-store mount alias under `ironclaw_conversations`) |
 | `/turns` | turn-coordination persistence snapshot (consumer-store mount alias under `ironclaw_turns`) |
@@ -209,6 +209,13 @@ Rules:
 8. Symlinks may be read or traversed only if final canonical target remains inside the backend root.
 9. Symlink writes that would create or follow an escape outside the root are denied.
 10. Returned errors must identify virtual/scoped paths, not raw host paths.
+
+**Leaf-scoped local mounts (`mount_local_per_leaf`).** Multiple callers can share one `host_root` while each is confined to its own first-path-segment leaf (`host_root/<leaf>`), for the persistent per-user sandbox container model where one shared workspace directory hosts every user's leaf:
+
+- a request for the bare mount root (no leaf segment) is denied, not silently rooted at `host_root`
+- a leaf that does not yet exist on disk is bootstrapped on first write — the containment check accepts `host_root` itself as the nearest *existing* ancestor for a brand-new leaf, rather than rejecting it as an escape
+- containment is enforced per leaf, not just per `host_root`: a symlink inside `leaf-a` that resolves to a path physically under `host_root` but outside `leaf-a` (e.g. into `leaf-b`) is rejected on both the read and write paths, even though a plain `mount_local` (host_root-only) containment check would let it resolve
+- a *dangling* final symlink (the directory entry exists but its target does not) is rejected on the write path rather than treated as a brand-new file: existence is checked via `lstat` semantics (which see the symlink itself), not by following it, so a pre-planted dangling symlink cannot redirect a write outside its leaf
 
 ---
 
@@ -335,6 +342,14 @@ Memory/test backends as needed
 
 The PostgreSQL/libSQL backends store file contents by canonical `VirtualPath` in `root_filesystem_entries`; directories are inferred from path prefixes. They are database-backed `RootFilesystem` implementations for generic file-shaped content, not a mandate that every durable service becomes files.
 
+Production libSQL adapters for one database share one
+`ironclaw_libsql_runtime::LibSqlRuntime`. The runtime has a bounded concurrent
+reader pool and exactly one writer connection. Filesystem writes hold that
+writer lease through the complete immediate transaction, including
+precondition reads, commit, or rollback. Standalone constructors may create a
+private runtime, but production composition must pass the same runtime to every
+adapter that targets the database. PostgreSQL retains its concurrent pool.
+
 Catalog metadata distinguishes file-shaped content from structured records and derived indexes:
 
 ```rust
@@ -395,6 +410,7 @@ pub enum FilesystemError {
     PathOutsideMount { path: VirtualPath },
     SymlinkEscape { path: VirtualPath },
     MountConflict { path: VirtualPath },
+    BackendBusy { path: VirtualPath, operation: FilesystemOperation },
     Backend { path: VirtualPath, operation: FilesystemOperation, reason: String },
     NotFound { path: VirtualPath, operation: FilesystemOperation },
     VersionMismatch { path: VirtualPath, expected: Option<RecordVersion>, found: Option<RecordVersion> },
@@ -403,6 +419,13 @@ pub enum FilesystemError {
 ```
 
 Backend errors may keep raw errors for logs, but public/display errors should use scoped or virtual paths. `NotFound`/`VersionMismatch`/`Unsupported` back `delete_if_version` (§14.1) — absent path, stale version, and unsupported-backend cases respectively.
+
+`BackendBusy` is the backend-neutral, replay-safe contention outcome. An
+adapter may return it only when the complete operation is atomic and no partial
+side effect committed. Generic consumers may retry the whole operation; they
+must not decode SQLite or PostgreSQL driver errors themselves. libSQL maps
+SQLite `BUSY`/`LOCKED`; PostgreSQL maps serialization failure, deadlock-victim,
+and lock-not-available SQLSTATEs without changing its concurrency policy.
 
 ---
 
@@ -498,6 +521,7 @@ Add tests through the caller-facing filesystem APIs, not only helper functions:
 - path traversal in scoped path is rejected before backend access
 - local backend denies symlink escape
 - local backend does not leak raw host path in display error
+- `mount_local_per_leaf` denies a bare mount-root request, bootstraps a brand-new leaf on first write, rejects a same-`host_root` cross-leaf symlink escape on both read and write, and rejects a dangling final symlink on write
 - `CompositeRootFilesystem` routes operations by longest virtual mount prefix
 - `CompositeRootFilesystem::describe_path` reports matched root, backend identity, content kind, and index policy
 - exact duplicate composite mount roots fail closed

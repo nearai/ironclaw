@@ -1,0 +1,25 @@
+[package]
+name = "ironclaw_libsql_runtime"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Shared libSQL connection admission runtime for IronClaw Reborn"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "substrates"
+
+[dependencies]
+deadpool = { version = "0.13", default-features = false, features = ["managed", "rt_tokio_1"] }
+libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

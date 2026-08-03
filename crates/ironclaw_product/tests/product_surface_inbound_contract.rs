@@ -1,14 +1,17 @@
 //! Contract tests for route-independent WebUI inbound DTOs.
 
 use base64::Engine;
-use ironclaw_host_api::{
-    AgentId, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode, ProjectId,
-    TenantId, ThreadId, UserId,
-};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product::{
+    DecodeInboundAttachments, IntoProductInboundCommand, ProductInboundCommand,
+};
+use ironclaw_product_contracts::inbound_requests::{
     ProductCancelReason, ProductCancelRunRequest, ProductCreateThreadRequest,
-    ProductGateResolution, ProductInboundAttachment, ProductInboundCommand,
-    ProductResolveGateRequest, ProductRetryRunRequest, ProductSubmitTurnRequest,
+    ProductGateResolution, ProductInboundAttachment, ProductResolveGateRequest,
+    ProductRetryRunRequest, ProductSubmitTurnRequest,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode,
 };
 use ironclaw_turns::SanitizedCancelReason;
 use serde_json::json;

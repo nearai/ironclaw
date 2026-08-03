@@ -15,14 +15,14 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
   - `src/webui_v2/descriptors.rs` + `tests/webui_v2_descriptors_contract.rs` — the route contract.
   - `src/webui_v2/handlers.rs` + `tests/webui_v2_handlers_contract.rs` — handler dispatch.
   - `src/webui_serve.rs` — the `webui_v2_app` gateway assembly + middleware order.
-  - `Cargo.toml` — feature gates (`openai-compat-beta`,
-    `dev-in-memory-session`) and the (deliberately narrow) dependency shape.
+  - `Cargo.toml` — the single feature gate (`test-support`) and the
+    (deliberately narrow) dependency shape.
 
 ## What this crate owns (composed subsystems)
 
 1. **WebChat v2 route surface + SPA** (`src/webui_v2/`, folded from the former
    `ironclaw_webui_v2` crate): axum handlers dispatching to
-   `ironclaw_host_api::ProductSurface`, the `webui_v2_router` builder,
+   `ironclaw_product_contracts::surface::ProductSurface`, the `webui_v2_router` builder,
    the `webui_v2_routes()` descriptor table, the `WebUiV2HttpError` redacted wire
    shape, SSE + WebSocket streaming with a shared `SseCapacity` budget, and the
    Vite SPA under `frontend/` (built by `build.rs`, served from
@@ -32,7 +32,7 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
    config)` composes the full `axum::Router` and layers the fixed middleware
    stack — ws-origin → body limit → bearer auth → rate limit → handler — plus the
    `WebuiAuthenticator` / `WebuiAuthentication` host-auth vocabulary and the
-   feature-gated OpenAI-compat mounts.
+   OpenAI-compat mounts (unconditional — this crate's only feature is `test-support`).
 3. **Serve loop + host authentication** (`src/lib.rs`, `src/auth/`,
    `src/session.rs`, `src/oidc.rs`, `src/signed_session_login.rs`):
    `serve_webui_v2` (listener bind + `axum::serve` + graceful shutdown), the
@@ -55,7 +55,7 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
   workflow services, facades, lower substrates, runtime, or DB crates; reach
   execution through `ProductSurface` supplied by host assembly. The architecture
   boundary test enforces this DTO/descriptor-only edge.
-- **v1 anything** — no `src/` (monolith) import, no `ironclaw_engine`, no v1
+- **v1 anything** — the monolith `src/` tree and `ironclaw_engine` are gone, so there is nothing to import; likewise no v1
   channel code, no v1 secrets / settings / DB. This is a Path A native host
   surface (`docs/reborn/how-to-port-channel-to-reborn.md`).
 - **Business/durable state.** Everything the gateway needs flows through
@@ -63,14 +63,17 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 
 ## Allowed dependencies
 
-`ironclaw_host_ingress` (Axum route-mount carriers),
 `ironclaw_auth` (product-auth service facade and route DTOs),
 `ironclaw_common` (shared hashing primitive used to redact auth-token samples),
 `ironclaw_product` (wire DTOs and product command/view descriptors),
 `ironclaw_host_api` (`ProductSurface`, caller/error vocabulary, identity
 newtypes, and ingress descriptors), `ironclaw_host_ingress` (Axum route-mount
-carriers), and `ironclaw_reborn_openai_compat`. Plus infra crates: `axum`, `tokio`, `tower*`,
-`tracing`, `thiserror`, `async-trait`, `secrecy`, `subtle`, `jsonwebtoken`, etc.
+carriers), `ironclaw_reborn_openai_compat`, and `ironclaw_attachments` (the
+advertised attachment ceilings only — WS5 gave the size limits one home, so the
+transport reads the same constants the landing routine enforces rather than
+keeping a second copy; PROPOSAL §6.4.9). Plus infra crates: `axum`, `tokio`,
+`tower*`, `tracing`, `thiserror`, `async-trait`, `secrecy`, `subtle`,
+`jsonwebtoken`, etc.
 
 Any other workspace-crate edge requires an `ironclaw_architecture` boundary-test
 update (`tests/reborn_dependency_boundaries.rs`) plus explicit PR rationale.

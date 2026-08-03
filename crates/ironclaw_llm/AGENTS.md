@@ -34,7 +34,7 @@
 
 ## Agent Notes
 
-- `RigAdapter` ignores per-request model overrides; only providers that explicitly support overrides should honor them.
+- `RigAdapter` forwards per-request model overrides through rig-core's typed request model field; do not add a second `model` entry through flattened provider parameters.
 - `complete_with_tools()` is never cached because tool calls can have side effects.
 - OpenAI strict schema normalization rewrites optional object fields into required-nullable strict mode where required.
 - 401 handling differs by auth mode; preserve provider-specific semantics from `CLAUDE.md`.

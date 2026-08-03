@@ -15,12 +15,13 @@
 
 - Product-facing Reborn workflow orchestration between product adapters and host-layer services.
 - Binding resolution, inbound message staging, turn submission, idempotency, busy/deferred handling, gate routing, and product-safe acknowledgements.
+- Project access workflow, runtime communication-context assembly, and blocked-auth resume fanout over typed host ports.
 - The WebUI-facing Reborn service over thread, turn, and projection ports.
 - Crate-local public API, tests, and fakes needed to prove that ownership.
 
 ## Do Not Move In Here
 
-- Dispatcher, extensions, host runtime, MCP, WASM, scripts, network, engine, or gateway dependencies.
+- Extensions, host runtime, MCP, WASM, scripts, or network dependencies.
 - Product adapter transport/rendering logic, host runtime execution, capability dispatch, or storage backend details.
 - Raw secrets, raw host paths, backend error details, or unredacted user content in errors, events, snapshots, logs, or docs.
 

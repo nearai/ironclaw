@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use ironclaw_auth::{SecretCleanupReport, SecretCleanupRequest};
-use ironclaw_host_api::ProductSurfaceError;
+use ironclaw_product_contracts::surface::ProductSurfaceError;
 use std::sync::Arc;
 
 use ironclaw_auth::RebornProductAuthServices;

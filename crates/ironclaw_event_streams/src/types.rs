@@ -4,11 +4,12 @@ use ironclaw_event_projections::{
     CapabilityActivityStatus, ProjectionCursor, ProjectionReplay, ProjectionScope,
     ProjectionSnapshot,
 };
+use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, InvocationId, MissionId, ProcessId, RuntimeKind, ThreadId,
+    ids::{CapabilityId, ExtensionId, InvocationId, MissionId, ProcessId, ThreadId},
+    runtime::RuntimeKind,
 };
 use ironclaw_outbound::{OutboundPushKind, ProjectionUpdateRef};
-use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 

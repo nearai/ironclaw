@@ -1,5 +1,22 @@
 use ironclaw_authorization::*;
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+        PermissionMode, RuntimeCredentialAccountSetup, RuntimeCredentialRequirement,
+        RuntimeCredentialRequirementSource,
+    },
+    decision::{Decision, DenyReason, Obligation},
+    http::RuntimeCredentialTarget,
+    ids::{
+        CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProjectId,
+        SecretHandle, TenantId, UserId, VendorId,
+    },
+    mount::MountView,
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+};
 use serde_json::json;
 
 #[tokio::test]

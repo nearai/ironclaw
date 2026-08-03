@@ -4,10 +4,10 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount, CredentialAccountStatus,
     CredentialAccountUpdateBinding,
 };
-use ironclaw_extension_host::ExtensionActivationMode;
+use ironclaw_extension_contracts::state::InstallationState;
 use ironclaw_host_api::{
-    ExtensionId, InstallationState, InvocationId, ProductSurfaceError, ProductSurfaceErrorCode,
-    ProductSurfaceErrorKind, ResourceScope,
+    ids::{ExtensionId, InvocationId},
+    resource::ResourceScope,
 };
 use ironclaw_operator::llm_admin::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpBootstrapOutcome, durable_product_auth_storage_enabled,
@@ -16,12 +16,15 @@ use ironclaw_product::{
     ExtensionCredentialSetupService, ExtensionCredentialSubmitRequest, LifecyclePackageKind,
     LifecyclePackageRef, LifecycleProductPayload,
 };
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+};
 
 use crate::RebornBuildError;
 use ironclaw_auth::RebornProductAuthServices;
 use ironclaw_extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
 use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
-use ironclaw_extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
+use ironclaw_extension_manager::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
 
 pub(crate) async fn bootstrap_nearai_mcp(
     config: Option<NearAiMcpBootstrapConfig>,
@@ -167,14 +170,15 @@ pub(crate) async fn bootstrap_nearai_mcp(
             InstallationState::Installed | InstallationState::Configured
         )
     {
+        let credential_gate = RuntimeExtensionActivationCredentialGate::new(
+            resource_scope.clone(),
+            product_auth.runtime_credential_account_selection_service(),
+        );
         extension_management
             .activate_with_credential_gate(
                 package_ref,
-                ExtensionActivationMode::Static,
-                RuntimeExtensionActivationCredentialGate::new(
-                    resource_scope,
-                    product_auth.runtime_credential_account_selection_service(),
-                ),
+                resource_scope.clone(),
+                &credential_gate,
                 &bootstrap_caller,
             )
             .await
@@ -245,7 +249,7 @@ fn is_nearai_mcp_product_auth_temporarily_unavailable(error: &ProductSurfaceErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{InvocationId, UserId};
+    use ironclaw_host_api::ids::{InvocationId, UserId};
 
     fn account_for_bootstrap_decision(
         requester_extension: &ExtensionId,
@@ -266,8 +270,9 @@ mod tests {
             ownership: ironclaw_auth::CredentialOwnership::ExtensionOwned,
             owner_extension: Some(requester_extension.clone()),
             granted_extensions: Vec::new(),
-            access_secret: access_secret
-                .map(|handle| ironclaw_host_api::SecretHandle::new(handle).expect("secret handle")),
+            access_secret: access_secret.map(|handle| {
+                ironclaw_host_api::ids::SecretHandle::new(handle).expect("secret handle")
+            }),
             refresh_secret: None,
             scopes: Vec::new(),
             provider_identity: None,

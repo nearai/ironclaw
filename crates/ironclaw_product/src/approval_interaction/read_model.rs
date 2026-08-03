@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::ResourceScope;
-use ironclaw_run_state::{ApprovalRequestStorePort, RunStateError};
-use ironclaw_turns::{GateRef, TurnRunId};
+use ironclaw_approvals::{ApprovalRequestStorePort, ApprovalStoreError};
+use ironclaw_host_api::resource::ResourceScope;
+use ironclaw_host_api::turn::{TurnGateRef, TurnRunId};
 
 use super::gate_ref::{approval_gate_ref, approval_request_id_from_gate_ref};
 use super::{ApprovalGateRecord, ApprovalInteractionScope};
@@ -12,7 +12,7 @@ use crate::error::ProductSurfaceFailure;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalBlockedTurnRun {
     pub run_id: TurnRunId,
-    pub gate_ref: GateRef,
+    pub gate_ref: TurnGateRef,
 }
 
 #[async_trait]
@@ -25,7 +25,7 @@ pub trait ApprovalTurnRunLocator: Send + Sync {
     async fn blocked_approval_run(
         &self,
         scope: &ApprovalInteractionScope,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> Result<Option<TurnRunId>, ProductSurfaceFailure> {
         Ok(self
             .blocked_approval_runs(scope)
@@ -38,7 +38,7 @@ pub trait ApprovalTurnRunLocator: Send + Sync {
     async fn approval_run_for_gate(
         &self,
         scope: &ApprovalInteractionScope,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> Result<Option<TurnRunId>, ProductSurfaceFailure> {
         self.blocked_approval_run(scope, gate_ref).await
     }
@@ -55,7 +55,7 @@ pub trait ApprovalInteractionReadModel: Send + Sync {
         &self,
         scope: &ApprovalInteractionScope,
         run_id_hint: Option<TurnRunId>,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> Result<Option<ApprovalGateRecord>, ProductSurfaceFailure>;
 }
 
@@ -113,7 +113,7 @@ impl ApprovalInteractionReadModel for RunStateApprovalInteractionReadModel {
         &self,
         scope: &ApprovalInteractionScope,
         run_id_hint: Option<TurnRunId>,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> Result<Option<ApprovalGateRecord>, ProductSurfaceFailure> {
         let request_id = approval_request_id_from_gate_ref(gate_ref)?;
         let owner_scope = resource_scope_for_interaction(scope);
@@ -164,7 +164,7 @@ fn same_interaction_owner(left: &ResourceScope, right: &ResourceScope) -> bool {
         && left.thread_id == right.thread_id
 }
 
-fn map_approval_read_error(_error: RunStateError) -> ProductSurfaceFailure {
+fn map_approval_read_error(_error: ApprovalStoreError) -> ProductSurfaceFailure {
     ProductSurfaceFailure::Transient {
         reason: "approval read model unavailable".to_string(),
     }

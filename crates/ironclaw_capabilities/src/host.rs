@@ -1,21 +1,34 @@
 // arch-exempt: large_file, Slice-C `authorize()` extraction is a behavior-preserving step in the capability-path collapse (doc §9); net additions are transitional and shrink as later slices route dispatch through the sealed `Authorized` witness and retire the mirror request DTOs, plan #6175
 use chrono::Utc;
+use ironclaw_approvals::{ApprovalRequestStorePort, ApprovalStatus, ApprovalStoreError};
 use ironclaw_authorization::{
     CapabilityLease, CapabilityLeaseStorePort, TrustAwareCapabilityDispatchAuthorizer,
 };
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
-    ActivityId, Actor, ApprovalRequestId, AuthorizeResult, Authorized, Blocked,
-    CapabilityAuthorizer, CapabilityDescriptor, CapabilityDispatchResult, CapabilityDispatcher,
-    CapabilityGrantId, CapabilityId, Decision, DenyReason, DenyRef, DispatchError,
-    EffectiveRuntimePolicy, ExecutionContext, GateRef, GateWaypoint, Invocation,
-    InvocationFingerprint, InvocationId, Obligation, PermissionMode, ProcessAuthorizedContinuation,
-    ProcessId, ResourceEstimate, ResourceScope, RuntimeKind, RuntimeLane, Timestamp,
+    Timestamp,
+    approval::InvocationFingerprint,
+    authorized::{
+        AuthorizeResult, Authorized, CapabilityAuthorizer, ProcessAuthorizedContinuation,
+    },
+    capability::{CapabilityDescriptor, PermissionMode},
+    decision::{Decision, DenyReason, Obligation},
+    dispatch::{CapabilityDispatchResult, CapabilityDispatcher, DispatchError},
+    ids::{
+        ActivityId, ApprovalRequestId, CapabilityGrantId, CapabilityId, DenyRef, GateRef,
+        InvocationId, ProcessId,
+    },
+    invocation::{Actor, Invocation},
+    lane::RuntimeLane,
+    resolution::{Blocked, GateWaypoint},
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::RuntimeKind,
+    runtime_policy::EffectiveRuntimePolicy,
+    scope::ExecutionContext,
 };
-use ironclaw_processes::{ProcessManager, ProcessStart};
-use ironclaw_run_state::{
-    ApprovalRequestStorePort, ApprovalStatus, RunStart, RunStateApprovalStorePort, RunStateError,
-    RunStateStorePort, RunStatus,
+use ironclaw_processes::{
+    ProcessInvocationError, ProcessInvocationStart, ProcessInvocationStatePort,
+    ProcessInvocationStatus, ProcessManager, ProcessStart,
 };
 use ironclaw_runtime_policy::{PlannerError, plan_capability};
 use ironclaw_safety::shell_command_display_text;
@@ -25,12 +38,13 @@ use tracing::{debug, warn};
 use crate::trust::{TrustEvaluationError, evaluate_invocation_trust};
 
 use crate::helpers::{
-    CapabilityActionKind, CapabilityRunStateTransition, apply_run_state_transition_if_configured,
-    approval_not_approved_error_kind, capability_lease_error_kind,
-    claim_error_may_be_concurrent_resume, complete_run_after_side_effect, fail_run_if_configured,
-    invocation_fingerprint_for_kind, matching_approval_lease,
+    CapabilityActionKind, CapabilityInvocationStateTransition,
+    apply_invocation_state_transition_if_configured, approval_not_approved_error_kind,
+    capability_lease_error_kind, claim_error_may_be_concurrent_resume,
+    complete_invocation_after_side_effect, fail_invocation_if_configured,
+    invocation_fingerprint_for_kind, invocation_state_error_kind, matching_approval_lease,
     matching_claimed_approval_lease_for_auth_resume, resume_context_mismatch_kind,
-    run_state_error_kind, validate_approval_request_matches_invocation,
+    validate_approval_request_matches_invocation,
 };
 use crate::obligations::post_dispatch_obligations;
 use crate::ports::{CredentialPresence, HostPolicyFacts, PolicyAction};
@@ -61,9 +75,8 @@ where
     /// relocation of host_runtime's `credential_preflight_check`. Facts only:
     /// the kernel maps them to the verdict; the port never decides.
     policy_facts: &'a dyn HostPolicyFacts,
-    run_state: Option<&'a dyn RunStateStorePort>,
+    invocation_state: Option<&'a dyn ProcessInvocationStatePort>,
     approval_requests: Option<&'a dyn ApprovalRequestStorePort>,
-    run_state_approval_store: Option<&'a dyn RunStateApprovalStorePort>,
     capability_leases: Option<&'a dyn CapabilityLeaseStorePort>,
     process_manager: Option<&'a dyn ProcessManager>,
     obligation_handler: Option<&'a dyn CapabilityObligationHandler>,
@@ -132,7 +145,7 @@ enum ResumedLeaseState<'r> {
 /// and `auth_resume_json`.  All fields are resolved by the respective
 /// method preamble before the shared tail begins.
 struct ResumedDispatchParams<'r> {
-    run_state: &'r dyn RunStateStorePort,
+    invocation_state: &'r dyn ProcessInvocationStatePort,
     scope: ResourceScope,
     invocation_id: InvocationId,
     capability_id: CapabilityId,
@@ -286,25 +299,26 @@ where
             trust_policy,
             runtime_policy,
             policy_facts,
-            run_state: None,
+            invocation_state: None,
             approval_requests: None,
-            run_state_approval_store: None,
             capability_leases: None,
             process_manager: None,
             obligation_handler: None,
         }
     }
 
-    /// Attaches the run-state store used to record invocation lifecycle.
+    /// Attaches the process-invocation store used to record invocation lifecycle.
     ///
     /// Required for `resume_json`. Strongly recommended for `invoke_json` and
     /// `spawn_json` so denials, obligation rejections, and dispatch failures
-    /// transition the run record to `Failed` instead of being silently
+    /// transition the invocation record to `Failed` instead of being silently
     /// dropped. Without it, error paths still return the right user-facing
-    /// error but no run record is persisted.
-    pub fn with_run_state(mut self, run_state: &'a dyn RunStateStorePort) -> Self {
-        self.run_state = Some(run_state);
-        self.run_state_approval_store = None;
+    /// error but no invocation record is persisted.
+    pub fn with_invocation_state(
+        mut self,
+        invocation_state: &'a dyn ProcessInvocationStatePort,
+    ) -> Self {
+        self.invocation_state = Some(invocation_state);
         self
     }
 
@@ -319,21 +333,6 @@ where
         approval_requests: &'a dyn ApprovalRequestStorePort,
     ) -> Self {
         self.approval_requests = Some(approval_requests);
-        self.run_state_approval_store = None;
-        self
-    }
-
-    /// Attaches a combined durable run-state/approval store that can persist a
-    /// pending approval and transition the invocation to `BlockedApproval` in one
-    /// transaction. Production composition should prefer this over separate
-    /// stores when both records live in the same backend.
-    pub fn with_run_state_approval_store(
-        mut self,
-        store: &'a dyn RunStateApprovalStorePort,
-    ) -> Self {
-        self.run_state = Some(store);
-        self.approval_requests = Some(store);
-        self.run_state_approval_store = Some(store);
         self
     }
 
@@ -394,7 +393,7 @@ where
         let scope = request.context.resource_scope.clone();
 
         // The whole pre-dispatch authority fold — context validation,
-        // fingerprint, run-state start, capability lookup, trust-aware
+        // fingerprint, process-invocation start, capability lookup, trust-aware
         // authorization, obligation preparation, and (Slice C) minting the
         // sealed `Authorized` witness — is one method. `invoke_json` maps its
         // `AuthorizeResult` back to today's exact dispatch and error behavior.
@@ -423,8 +422,8 @@ where
                             &obligation_outcome,
                         )
                         .await;
-                        apply_run_state_transition_if_configured(
-                            self.run_state,
+                        apply_invocation_state_transition_if_configured(
+                            self.invocation_state,
                             &scope,
                             invocation_id,
                             &error,
@@ -485,8 +484,8 @@ where
                 let error =
                     enrich_dispatch_error_credential_requirements(error, obligations.as_slice());
                 let invocation_error = CapabilityInvocationError::from(error);
-                apply_run_state_transition_if_configured(
-                    self.run_state,
+                apply_invocation_state_transition_if_configured(
+                    self.invocation_state,
                     &scope,
                     invocation_id,
                     &invocation_error,
@@ -523,8 +522,8 @@ where
                     &cleanup_outcome,
                 )
                 .await;
-                fail_run_if_configured(
-                    self.run_state,
+                fail_invocation_if_configured(
+                    self.invocation_state,
                     &scope,
                     invocation_id,
                     obligation_invocation_error_kind(&error),
@@ -534,16 +533,16 @@ where
             }
         };
 
-        if let Some(run_state) = self.run_state {
-            complete_run_after_side_effect(
-                run_state,
+        if let Some(invocation_state) = self.invocation_state {
+            complete_invocation_after_side_effect(
+                invocation_state,
                 &scope,
                 invocation_id,
                 &capability_id,
                 "dispatch",
             )
             .await;
-            debug!("capability run state completed");
+            debug!("capability invocation state completed");
         }
 
         debug!("capability invocation completed");
@@ -552,10 +551,10 @@ where
 
     /// The pre-dispatch authority fold for `invoke_json`, extracted per
     /// arch-simplification §9 step 2 / §5.3.2: validate the context, fingerprint
-    /// the invocation, start the run record, resolve the descriptor, run
+    /// the invocation, start the invocation record, resolve the descriptor, run
     /// trust-aware authorization, and on `Allow` prepare obligations and mint
     /// the sealed [`Authorized`] witness. Every side effect that today's inline
-    /// fold performed — run-state `start`/`fail`/`block`, approval
+    /// fold performed — process-invocation `start`/`fail`/`block`, approval
     /// persist-and-rollback, obligation `prepare`, and each early error return —
     /// stays here, verbatim; `invoke_json` only maps the returned
     /// [`AuthorizeFold`] back to today's outcome.
@@ -697,10 +696,10 @@ where
             source,
         })?;
 
-        // Resolve the descriptor BEFORE starting a run record: an unknown
-        // capability must short-circuit without creating a run record (restoring
+        // Resolve the descriptor BEFORE starting a invocation record: an unknown
+        // capability must short-circuit without creating a invocation record (restoring
         // the behavior host_runtime's deleted pre-check provided). Neither the
-        // fingerprint above nor `run_state.start` below needs the descriptor, so
+        // fingerprint above nor `invocation_state.start` below needs the descriptor, so
         // hoisting this lookup is safe; everything from `start` onward keeps its
         // original order (the credential pre-flight still runs after `start`).
         let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
@@ -710,9 +709,9 @@ where
             });
         };
 
-        if let Some(run_state) = self.run_state {
-            run_state
-                .start(RunStart {
+        if let Some(invocation_state) = self.invocation_state {
+            invocation_state
+                .start(ProcessInvocationStart {
                     invocation_id,
                     capability_id: request.capability_id.clone(),
                     scope: scope.clone(),
@@ -722,7 +721,7 @@ where
                         .clone(),
                 })
                 .await?;
-            debug!("capability run state started");
+            debug!("capability invocation state started");
         }
 
         // Kernel-computed trust + in-fold runtime-policy planning (§5.3.2/§9),
@@ -732,8 +731,8 @@ where
         let trust_decision = match self.evaluate_trust(&request.capability_id) {
             Ok(d) => d,
             Err(error) => {
-                apply_run_state_transition_if_configured(
-                    self.run_state,
+                apply_invocation_state_transition_if_configured(
+                    self.invocation_state,
                     &scope,
                     invocation_id,
                     &error,
@@ -743,8 +742,13 @@ where
             }
         };
         if let Err(error) = self.enforce_runtime_policy(descriptor) {
-            apply_run_state_transition_if_configured(self.run_state, &scope, invocation_id, &error)
-                .await;
+            apply_invocation_state_transition_if_configured(
+                self.invocation_state,
+                &scope,
+                invocation_id,
+                &error,
+            )
+            .await;
             return Err(error);
         }
 
@@ -771,8 +775,8 @@ where
                     required_secrets,
                     credential_requirements: requirements,
                 };
-                apply_run_state_transition_if_configured(
-                    self.run_state,
+                apply_invocation_state_transition_if_configured(
+                    self.invocation_state,
                     &scope,
                     invocation_id,
                     &error,
@@ -833,8 +837,8 @@ where
                             error_kind = obligation_invocation_error_kind(&error),
                             "capability invoke obligation preparation failed"
                         );
-                        apply_run_state_transition_if_configured(
-                            self.run_state,
+                        apply_invocation_state_transition_if_configured(
+                            self.invocation_state,
                             &scope,
                             invocation_id,
                             &error,
@@ -864,8 +868,8 @@ where
                     reason = ?reason,
                     "capability authorization denied dispatch"
                 );
-                fail_run_if_configured(
-                    self.run_state,
+                fail_invocation_if_configured(
+                    self.invocation_state,
                     &scope,
                     invocation_id,
                     "AuthorizationDenied",
@@ -900,8 +904,8 @@ where
                         approval_request_id = %approval_request_id,
                         "capability approval request did not match invocation"
                     );
-                    fail_run_if_configured(
-                        self.run_state,
+                    fail_invocation_if_configured(
+                        self.invocation_state,
                         &scope,
                         invocation_id,
                         "ApprovalRequestMismatch",
@@ -916,8 +920,8 @@ where
                             approval_request_id = %approval_request_id,
                             "capability approval fingerprint mismatch"
                         );
-                        fail_run_if_configured(
-                            self.run_state,
+                        fail_invocation_if_configured(
+                            self.invocation_state,
                             &scope,
                             invocation_id,
                             "InvocationFingerprintMismatch",
@@ -931,94 +935,67 @@ where
                     approval.invocation_fingerprint = Some(invocation_fingerprint);
                 }
 
-                match (self.run_state, self.approval_requests) {
-                    (Some(run_state), Some(approval_requests)) => {
-                        if let Some(combined_store) = self.run_state_approval_store {
-                            if let Err(error) = combined_store
-                                .save_pending_and_block_approval(
-                                    scope.clone(),
-                                    invocation_id,
-                                    approval,
-                                )
-                                .await
-                            {
-                                debug!(
-                                    approval_request_id = %approval_request_id,
-                                    "capability approval block failed in combined store"
-                                );
-                                fail_run_if_configured(
-                                    Some(run_state),
-                                    &scope,
-                                    invocation_id,
-                                    "ApprovalBlock",
-                                )
-                                .await;
-                                return Err(CapabilityInvocationError::from(error));
-                            }
-                            debug!(
-                                approval_request_id = %approval_request_id,
-                                "capability approval persisted and run state blocked"
-                            );
-                        } else {
-                            let approval_id = approval.id;
-                            if let Err(error) = approval_requests
-                                .save_pending(scope.clone(), approval.clone())
-                                .await
-                            {
-                                debug!(
-                                    approval_request_id = %approval_id,
-                                    "capability approval request persistence failed"
-                                );
-                                fail_run_if_configured(
-                                    Some(run_state),
-                                    &scope,
-                                    invocation_id,
-                                    "ApprovalStore",
-                                )
-                                .await;
-                                return Err(CapabilityInvocationError::from(error));
-                            }
-                            if let Err(error) = run_state
-                                .block_approval(&scope, invocation_id, approval)
-                                .await
-                            {
-                                debug!(
-                                    approval_request_id = %approval_id,
-                                    "capability run state approval block failed"
-                                );
-                                if let Err(discard_error) =
-                                    approval_requests.discard_pending(&scope, approval_id).await
-                                {
-                                    warn!(
-                                        approval_request_id = %approval_id,
-                                        invocation_id = %invocation_id,
-                                        transition_error_kind = run_state_error_kind(&discard_error),
-                                        "approval rollback failed after run-state block transition failed",
-                                    );
-                                }
-                                fail_run_if_configured(
-                                    Some(run_state),
-                                    &scope,
-                                    invocation_id,
-                                    "ApprovalBlock",
-                                )
-                                .await;
-                                return Err(CapabilityInvocationError::from(error));
-                            }
+                match (self.invocation_state, self.approval_requests) {
+                    (Some(invocation_state), Some(approval_requests)) => {
+                        let approval_id = approval.id;
+                        if let Err(error) = approval_requests
+                            .save_pending(scope.clone(), approval.clone())
+                            .await
+                        {
                             debug!(
                                 approval_request_id = %approval_id,
-                                "capability approval persisted and run state blocked"
+                                "capability approval request persistence failed"
                             );
+                            fail_invocation_if_configured(
+                                Some(invocation_state),
+                                &scope,
+                                invocation_id,
+                                "ApprovalStore",
+                            )
+                            .await;
+                            return Err(CapabilityInvocationError::from(error));
                         }
+                        if let Err(error) = invocation_state
+                            .block_approval(&scope, invocation_id, approval)
+                            .await
+                        {
+                            debug!(
+                                approval_request_id = %approval_id,
+                                "capability invocation approval block failed"
+                            );
+                            if let Err(discard_error) =
+                                approval_requests.discard_pending(&scope, approval_id).await
+                            {
+                                warn!(
+                                    approval_request_id = %approval_id,
+                                    invocation_id = %invocation_id,
+                                    transition_error_kind = "ApprovalStore",
+                                    error = %discard_error,
+                                    "approval rollback failed after invocation block transition failed",
+                                );
+                            }
+                            fail_invocation_if_configured(
+                                Some(invocation_state),
+                                &scope,
+                                invocation_id,
+                                "ApprovalBlock",
+                            )
+                            .await;
+                            return Err(CapabilityInvocationError::from(error));
+                        }
+                        debug!(
+                            approval_request_id = %approval_id,
+                            "capability approval persisted and invocation blocked"
+                        );
                     }
-                    (Some(run_state), None) => {
+                    (Some(invocation_state), None) => {
                         debug!(
                             approval_request_id = %approval_request_id,
                             store = "approval_requests",
                             "capability approval cannot block because store is missing"
                         );
-                        fail_run_if_configured(
-                            Some(run_state),
+                        fail_invocation_if_configured(
+                            Some(invocation_state),
                             &scope,
                             invocation_id,
                             "ApprovalStoreMissing",
@@ -1032,23 +1009,23 @@ where
                     (None, Some(_)) => {
                         debug!(
                             approval_request_id = %approval_request_id,
-                            store = "run_state",
+                            store = "invocation_state",
                             "capability approval cannot block because store is missing"
                         );
                         return Err(CapabilityInvocationError::ApprovalStoreMissing {
                             capability: request.capability_id.clone(),
-                            store: "run_state",
+                            store: "invocation_state",
                         });
                     }
                     (None, None) => {
                         debug!(
                             approval_request_id = %approval_request_id,
-                            store = "run_state and approval_requests",
+                            store = "invocation_state and approval_requests",
                             "capability approval cannot block because stores are missing"
                         );
                         return Err(CapabilityInvocationError::ApprovalStoreMissing {
                             capability: request.capability_id.clone(),
-                            store: "run_state and approval_requests",
+                            store: "invocation_state and approval_requests",
                         });
                     }
                 }
@@ -1154,11 +1131,11 @@ where
             estimate,
             input,
         };
-        let run_state =
-            self.run_state
+        let invocation_state =
+            self.invocation_state
                 .ok_or_else(|| CapabilityInvocationError::ResumeStoreMissing {
                     capability: request.capability_id.clone(),
-                    store: "run_state",
+                    store: "invocation_state",
                 })?;
         let approval_requests = self.approval_requests.ok_or_else(|| {
             CapabilityInvocationError::ResumeStoreMissing {
@@ -1185,9 +1162,9 @@ where
         }
 
         // Resume-path pre-authorization (§5.3.2/§9, R-A): resolve the descriptor
-        // and enforce runtime-policy planning BEFORE the run-state lookup so an
+        // and enforce runtime-policy planning BEFORE the process-invocation lookup so an
         // unknown capability short-circuits to `UnknownCapability`
-        // (→ `MissingRuntime`) instead of the run-state-not-found `Backend` path,
+        // (→ `MissingRuntime`) instead of the process-invocation-not-found `Backend` path,
         // and a policy tightened between invoke and resume fails closed. On
         // refusal only the matching `BlockedApproval` run is failed.
         self.resume_preflight(
@@ -1211,10 +1188,10 @@ where
             source,
         })?;
 
-        let run_record = run_state
+        let run_record = invocation_state
             .get(&scope, invocation_id)
             .await?
-            .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
+            .ok_or(ProcessInvocationError::UnknownInvocation { invocation_id })?;
         if run_record.authenticated_actor_user_id != request.context.authenticated_actor_user_id {
             return Err(CapabilityInvocationError::AuthorizationDenied {
                 capability: request.capability_id,
@@ -1222,7 +1199,7 @@ where
                 detail: None,
             });
         }
-        if run_record.status != RunStatus::BlockedApproval {
+        if run_record.status != ProcessInvocationStatus::BlockedApproval {
             return Err(CapabilityInvocationError::ResumeNotBlocked {
                 capability: request.capability_id,
                 status: run_record.status,
@@ -1232,8 +1209,8 @@ where
         let approval_request_mismatch =
             run_record.approval_request_id != Some(request.approval_request_id);
         if capability_mismatch || approval_request_mismatch {
-            fail_run_if_configured(
-                Some(run_state),
+            fail_invocation_if_configured(
+                Some(invocation_state),
                 &scope,
                 invocation_id,
                 "ResumeContextMismatch",
@@ -1248,13 +1225,13 @@ where
         let approval = approval_requests
             .get(&scope, request.approval_request_id)
             .await?
-            .ok_or(RunStateError::UnknownApprovalRequest {
+            .ok_or(ApprovalStoreError::UnknownApprovalRequest {
                 request_id: request.approval_request_id,
             })?;
         if approval.status != ApprovalStatus::Approved {
             if approval.status != ApprovalStatus::Pending {
-                fail_run_if_configured(
-                    Some(run_state),
+                fail_invocation_if_configured(
+                    Some(invocation_state),
                     &scope,
                     invocation_id,
                     approval_not_approved_error_kind(approval.status),
@@ -1273,8 +1250,8 @@ where
             &request.estimate,
             CapabilityActionKind::Dispatch,
         ) {
-            fail_run_if_configured(
-                Some(run_state),
+            fail_invocation_if_configured(
+                Some(invocation_state),
                 &scope,
                 invocation_id,
                 "ApprovalRequestMismatch",
@@ -1283,8 +1260,8 @@ where
             return Err(error);
         }
         if approval.request.invocation_fingerprint.as_ref() != Some(&invocation_fingerprint) {
-            fail_run_if_configured(
-                Some(run_state),
+            fail_invocation_if_configured(
+                Some(invocation_state),
                 &scope,
                 invocation_id,
                 "InvocationFingerprintMismatch",
@@ -1296,8 +1273,13 @@ where
         }
 
         let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
-            fail_run_if_configured(Some(run_state), &scope, invocation_id, "UnknownCapability")
-                .await;
+            fail_invocation_if_configured(
+                Some(invocation_state),
+                &scope,
+                invocation_id,
+                "UnknownCapability",
+            )
+            .await;
             return Err(CapabilityInvocationError::UnknownCapability {
                 capability: request.capability_id,
             });
@@ -1311,8 +1293,8 @@ where
         )
         .await
         else {
-            fail_run_if_configured(
-                Some(run_state),
+            fail_invocation_if_configured(
+                Some(invocation_state),
                 &scope,
                 invocation_id,
                 "ApprovalLeaseMissing",
@@ -1335,7 +1317,7 @@ where
         let grant_expiry = lease.grant.constraints.expires_at;
 
         self.dispatch_resumed_capability(ResumedDispatchParams {
-            run_state,
+            invocation_state,
             scope,
             invocation_id,
             capability_id,
@@ -1355,7 +1337,7 @@ where
 
     /// Resume an invocation that was previously blocked at an auth gate.
     ///
-    /// Validates that the run record is in `BlockedAuth` status.  When the
+    /// Validates that the invocation record is in `BlockedAuth` status.  When the
     /// invocation also passed an earlier approval gate (`approval_request_id`
     /// is `Some`), validates and claims the fingerprinted approval lease before
     /// dispatch so the prior approval is honoured without a second approval
@@ -1376,11 +1358,11 @@ where
             input,
             approval_request_id,
         };
-        let run_state =
-            self.run_state
+        let invocation_state =
+            self.invocation_state
                 .ok_or_else(|| CapabilityInvocationError::ResumeStoreMissing {
                     capability: request.capability_id.clone(),
-                    store: "run_state",
+                    store: "invocation_state",
                 })?;
 
         let invocation_id = request.context.invocation_id;
@@ -1395,7 +1377,7 @@ where
         }
 
         // Resume-path pre-authorization (§5.3.2/§9, R-A): descriptor + runtime-policy
-        // planning BEFORE the run-state lookup (see `resume_json`). On refusal only
+        // planning BEFORE the process-invocation lookup (see `resume_json`). On refusal only
         // the matching `BlockedAuth` run is failed — `approval_request_id` is NOT
         // compared, because `block_auth` clears it to `None` on the record.
         self.resume_preflight(
@@ -1405,10 +1387,10 @@ where
         )
         .await?;
 
-        let run_record = run_state
+        let run_record = invocation_state
             .get(&scope, invocation_id)
             .await?
-            .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
+            .ok_or(ProcessInvocationError::UnknownInvocation { invocation_id })?;
         if run_record.authenticated_actor_user_id != request.context.authenticated_actor_user_id {
             return Err(CapabilityInvocationError::AuthorizationDenied {
                 capability: request.capability_id,
@@ -1416,19 +1398,19 @@ where
                 detail: None,
             });
         }
-        if run_record.status != RunStatus::BlockedAuth {
+        if run_record.status != ProcessInvocationStatus::BlockedAuth {
             return Err(CapabilityInvocationError::ResumeNotBlocked {
                 capability: request.capability_id,
                 status: run_record.status,
             });
         }
         // Verify the capability_id on the request matches the one recorded in
-        // the run state when the run was originally started.  A mismatch means
+        // the invocation state when the run was originally started.  A mismatch means
         // the caller is trying to resume a different capability than the one
         // that was blocked — treat it as a context mismatch and fail the run.
         if run_record.capability_id != request.capability_id {
-            fail_run_if_configured(
-                Some(run_state),
+            fail_invocation_if_configured(
+                Some(invocation_state),
                 &scope,
                 invocation_id,
                 "ResumeContextMismatch",
@@ -1447,8 +1429,13 @@ where
         // permanently stranded in `Claimed`/`Dispatching` when the capability
         // was unregistered between the original invocation and this resume.
         let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
-            fail_run_if_configured(Some(run_state), &scope, invocation_id, "UnknownCapability")
-                .await;
+            fail_invocation_if_configured(
+                Some(invocation_state),
+                &scope,
+                invocation_id,
+                "UnknownCapability",
+            )
+            .await;
             return Err(CapabilityInvocationError::UnknownCapability {
                 capability: request.capability_id,
             });
@@ -1493,13 +1480,13 @@ where
             let approval = approval_requests
                 .get(&scope, approval_request_id)
                 .await?
-                .ok_or(RunStateError::UnknownApprovalRequest {
+                .ok_or(ApprovalStoreError::UnknownApprovalRequest {
                     request_id: approval_request_id,
                 })?;
             if approval.status != ApprovalStatus::Approved {
                 if approval.status != ApprovalStatus::Pending {
-                    fail_run_if_configured(
-                        Some(run_state),
+                    fail_invocation_if_configured(
+                        Some(invocation_state),
                         &scope,
                         invocation_id,
                         approval_not_approved_error_kind(approval.status),
@@ -1518,8 +1505,8 @@ where
                 &request.estimate,
                 CapabilityActionKind::Dispatch,
             ) {
-                fail_run_if_configured(
-                    Some(run_state),
+                fail_invocation_if_configured(
+                    Some(invocation_state),
                     &scope,
                     invocation_id,
                     "ApprovalRequestMismatch",
@@ -1528,8 +1515,8 @@ where
                 return Err(error);
             }
             if approval.request.invocation_fingerprint.as_ref() != Some(&invocation_fingerprint) {
-                fail_run_if_configured(
-                    Some(run_state),
+                fail_invocation_if_configured(
+                    Some(invocation_state),
                     &scope,
                     invocation_id,
                     "InvocationFingerprintMismatch",
@@ -1570,11 +1557,11 @@ where
                                 invocation_id = %invocation_id,
                                 capability_id = %capability_id,
                                 error_kind = capability_lease_error_kind(&error),
-                                "approval lease claim lost to a concurrent auth-resume; leaving run state unchanged",
+                                "approval lease claim lost to a concurrent auth-resume; leaving invocation state unchanged",
                             );
                         } else {
-                            fail_run_if_configured(
-                                Some(run_state),
+                            fail_invocation_if_configured(
+                                Some(invocation_state),
                                 &scope,
                                 invocation_id,
                                 "ApprovalLeaseClaim",
@@ -1605,11 +1592,11 @@ where
                                 invocation_id = %invocation_id,
                                 capability_id = %capability_id,
                                 error_kind = capability_lease_error_kind(&error),
-                                "approval lease reuse lost to a concurrent auth-resume; leaving run state unchanged",
+                                "approval lease reuse lost to a concurrent auth-resume; leaving invocation state unchanged",
                             );
                         } else {
-                            fail_run_if_configured(
-                                Some(run_state),
+                            fail_invocation_if_configured(
+                                Some(invocation_state),
                                 &scope,
                                 invocation_id,
                                 "ApprovalLeaseClaim",
@@ -1652,11 +1639,11 @@ where
                                 invocation_id = %invocation_id,
                                 capability_id = %capability_id,
                                 error_kind = capability_lease_error_kind(&error),
-                                "approval lease reuse lost to a concurrent auth-resume; leaving run state unchanged",
+                                "approval lease reuse lost to a concurrent auth-resume; leaving invocation state unchanged",
                             );
                         } else {
-                            fail_run_if_configured(
-                                Some(run_state),
+                            fail_invocation_if_configured(
+                                Some(invocation_state),
                                 &scope,
                                 invocation_id,
                                 "ApprovalLeaseClaim",
@@ -1667,8 +1654,8 @@ where
                     }
                 }
             } else {
-                fail_run_if_configured(
-                    Some(run_state),
+                fail_invocation_if_configured(
+                    Some(invocation_state),
                     &scope,
                     invocation_id,
                     "ApprovalLeaseMissing",
@@ -1687,7 +1674,7 @@ where
         };
 
         self.dispatch_resumed_capability(ResumedDispatchParams {
-            run_state,
+            invocation_state,
             scope,
             invocation_id,
             capability_id,
@@ -1714,11 +1701,11 @@ where
         context: ExecutionContext,
         capability_id: CapabilityId,
     ) -> Result<(), CapabilityInvocationError> {
-        let run_state =
-            self.run_state
+        let invocation_state =
+            self.invocation_state
                 .ok_or_else(|| CapabilityInvocationError::ResumeStoreMissing {
                     capability: capability_id.clone(),
-                    store: "run_state",
+                    store: "invocation_state",
                 })?;
         let invocation_id = context.invocation_id;
         let scope = context.resource_scope.clone();
@@ -1729,10 +1716,10 @@ where
                 detail: None,
             });
         }
-        let run_record = run_state
+        let run_record = invocation_state
             .get(&scope, invocation_id)
             .await?
-            .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
+            .ok_or(ProcessInvocationError::UnknownInvocation { invocation_id })?;
         if run_record.authenticated_actor_user_id != context.authenticated_actor_user_id {
             return Err(CapabilityInvocationError::AuthorizationDenied {
                 capability: capability_id,
@@ -1740,15 +1727,15 @@ where
                 detail: None,
             });
         }
-        if run_record.status != RunStatus::BlockedAuth {
+        if run_record.status != ProcessInvocationStatus::BlockedAuth {
             return Err(CapabilityInvocationError::ResumeNotBlocked {
                 capability: capability_id,
                 status: run_record.status,
             });
         }
         if run_record.capability_id != capability_id {
-            fail_run_if_configured(
-                Some(run_state),
+            fail_invocation_if_configured(
+                Some(invocation_state),
                 &scope,
                 invocation_id,
                 "ResumeContextMismatch",
@@ -1759,7 +1746,7 @@ where
                 kind: resume_context_mismatch_kind(true, false),
             });
         }
-        run_state
+        invocation_state
             .fail(&scope, invocation_id, "GateDeclined".to_string())
             .await?;
         Ok(())
@@ -1785,11 +1772,11 @@ where
                 capability: request.capability_id.clone(),
             }
         })?;
-        let run_state =
-            self.run_state
+        let invocation_state =
+            self.invocation_state
                 .ok_or_else(|| CapabilityInvocationError::ResumeStoreMissing {
                     capability: request.capability_id.clone(),
-                    store: "run_state",
+                    store: "invocation_state",
                 })?;
         let approval_requests = self.approval_requests.ok_or_else(|| {
             CapabilityInvocationError::ResumeStoreMissing {
@@ -1816,7 +1803,7 @@ where
         }
 
         // Resume-path pre-authorization (§5.3.2/§9, R-A): descriptor + runtime-policy
-        // planning BEFORE the run-state lookup (see `resume_json`), so an unknown
+        // planning BEFORE the process-invocation lookup (see `resume_json`), so an unknown
         // capability short-circuits to `MissingRuntime` and a tightened policy fails
         // closed. On refusal only the matching `BlockedApproval` run is failed.
         self.resume_preflight(
@@ -1840,10 +1827,10 @@ where
             source,
         })?;
 
-        let run_record = run_state
+        let run_record = invocation_state
             .get(&scope, invocation_id)
             .await?
-            .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
+            .ok_or(ProcessInvocationError::UnknownInvocation { invocation_id })?;
         if run_record.authenticated_actor_user_id != request.context.authenticated_actor_user_id {
             return Err(CapabilityInvocationError::AuthorizationDenied {
                 capability: request.capability_id,
@@ -1851,7 +1838,7 @@ where
                 detail: None,
             });
         }
-        if run_record.status != RunStatus::BlockedApproval {
+        if run_record.status != ProcessInvocationStatus::BlockedApproval {
             return Err(CapabilityInvocationError::ResumeNotBlocked {
                 capability: request.capability_id,
                 status: run_record.status,
@@ -1861,8 +1848,8 @@ where
         let approval_request_mismatch =
             run_record.approval_request_id != Some(request.approval_request_id);
         if capability_mismatch || approval_request_mismatch {
-            fail_run_if_configured(
-                Some(run_state),
+            fail_invocation_if_configured(
+                Some(invocation_state),
                 &scope,
                 invocation_id,
                 "ResumeContextMismatch",
@@ -1877,13 +1864,13 @@ where
         let approval = approval_requests
             .get(&scope, request.approval_request_id)
             .await?
-            .ok_or(RunStateError::UnknownApprovalRequest {
+            .ok_or(ApprovalStoreError::UnknownApprovalRequest {
                 request_id: request.approval_request_id,
             })?;
         if approval.status != ApprovalStatus::Approved {
             if approval.status != ApprovalStatus::Pending {
-                fail_run_if_configured(
-                    Some(run_state),
+                fail_invocation_if_configured(
+                    Some(invocation_state),
                     &scope,
                     invocation_id,
                     approval_not_approved_error_kind(approval.status),
@@ -1902,8 +1889,8 @@ where
             &request.estimate,
             CapabilityActionKind::Spawn,
         ) {
-            fail_run_if_configured(
-                Some(run_state),
+            fail_invocation_if_configured(
+                Some(invocation_state),
                 &scope,
                 invocation_id,
                 "ApprovalRequestMismatch",
@@ -1912,8 +1899,8 @@ where
             return Err(error);
         }
         if approval.request.invocation_fingerprint.as_ref() != Some(&invocation_fingerprint) {
-            fail_run_if_configured(
-                Some(run_state),
+            fail_invocation_if_configured(
+                Some(invocation_state),
                 &scope,
                 invocation_id,
                 "InvocationFingerprintMismatch",
@@ -1925,8 +1912,13 @@ where
         }
 
         let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
-            fail_run_if_configured(Some(run_state), &scope, invocation_id, "UnknownCapability")
-                .await;
+            fail_invocation_if_configured(
+                Some(invocation_state),
+                &scope,
+                invocation_id,
+                "UnknownCapability",
+            )
+            .await;
             return Err(CapabilityInvocationError::UnknownCapability {
                 capability: request.capability_id,
             });
@@ -1940,8 +1932,8 @@ where
         )
         .await
         else {
-            fail_run_if_configured(
-                Some(run_state),
+            fail_invocation_if_configured(
+                Some(invocation_state),
                 &scope,
                 invocation_id,
                 "ApprovalLeaseMissing",
@@ -1960,8 +1952,8 @@ where
         let trust_decision = match self.evaluate_trust(&capability_id) {
             Ok(d) => d,
             Err(error) => {
-                fail_run_if_configured(
-                    Some(run_state),
+                fail_invocation_if_configured(
+                    Some(invocation_state),
                     &scope,
                     invocation_id,
                     "AuthorizationDenied",
@@ -1986,8 +1978,8 @@ where
                 obligations: allowed_obligations,
             } => allowed_obligations.into_vec(),
             Decision::Deny { reason } => {
-                fail_run_if_configured(
-                    Some(run_state),
+                fail_invocation_if_configured(
+                    Some(invocation_state),
                     &scope,
                     invocation_id,
                     "AuthorizationDenied",
@@ -2000,8 +1992,8 @@ where
                 });
             }
             Decision::RequireApproval { .. } => {
-                fail_run_if_configured(
-                    Some(run_state),
+                fail_invocation_if_configured(
+                    Some(invocation_state),
                     &scope,
                     invocation_id,
                     "AuthorizationRequiresApproval",
@@ -2025,11 +2017,11 @@ where
                         invocation_id = %invocation_id,
                         capability_id = %capability_id,
                         error_kind = capability_lease_error_kind(&error),
-                        "spawn approval lease claim lost to a concurrent resume; leaving run state unchanged",
+                        "spawn approval lease claim lost to a concurrent resume; leaving invocation state unchanged",
                     );
                 } else {
-                    fail_run_if_configured(
-                        Some(run_state),
+                    fail_invocation_if_configured(
+                        Some(invocation_state),
                         &scope,
                         invocation_id,
                         "ApprovalLeaseClaim",
@@ -2052,8 +2044,8 @@ where
         {
             Ok(outcome) => outcome,
             Err(error) => {
-                apply_run_state_transition_if_configured(
-                    Some(run_state),
+                apply_invocation_state_transition_if_configured(
+                    Some(invocation_state),
                     &scope,
                     invocation_id,
                     &error,
@@ -2110,8 +2102,13 @@ where
                     &obligation_outcome,
                 )
                 .await;
-                fail_run_if_configured(Some(run_state), &scope, invocation_id, "ProcessSpawn")
-                    .await;
+                fail_invocation_if_configured(
+                    Some(invocation_state),
+                    &scope,
+                    invocation_id,
+                    "ProcessSpawn",
+                )
+                .await;
                 if let Err(revoke_error) = capability_leases
                     .revoke(&scope, claimed_lease.grant.id)
                     .await
@@ -2158,8 +2155,13 @@ where
                     &obligation_outcome,
                 )
                 .await;
-                fail_run_if_configured(Some(run_state), &scope, invocation_id, "ProcessSpawn")
-                    .await;
+                fail_invocation_if_configured(
+                    Some(invocation_state),
+                    &scope,
+                    invocation_id,
+                    "ProcessSpawn",
+                )
+                .await;
                 let invocation_error = CapabilityInvocationError::from(error);
                 if let Err(revoke_error) = capability_leases
                     .revoke(&scope, claimed_lease.grant.id)
@@ -2191,8 +2193,14 @@ where
             );
         }
 
-        complete_run_after_side_effect(run_state, &scope, invocation_id, &capability_id, "spawn")
-            .await;
+        complete_invocation_after_side_effect(
+            invocation_state,
+            &scope,
+            invocation_id,
+            &capability_id,
+            "spawn",
+        )
+        .await;
         Ok(CapabilitySpawnResult { process })
     }
 
@@ -2209,7 +2217,7 @@ where
         let capability_id = request.capability_id.clone();
         let scope = request.context.resource_scope.clone();
         // The pre-spawn authority fold — context validation, fingerprint,
-        // run-state start, capability lookup, trust-aware spawn authorization,
+        // process-invocation start, capability lookup, trust-aware spawn authorization,
         // obligation preparation, and (Slice C) minting the sealed `Authorized`
         // witness — is one method mirroring `authorize()`. `spawn_json` maps its
         // `AuthorizeFold` back to today's exact process-spawn and error behavior.
@@ -2255,8 +2263,13 @@ where
                 &obligation_outcome,
             )
             .await;
-            fail_run_if_configured(self.run_state, &scope, invocation_id, "UnknownCapability")
-                .await;
+            fail_invocation_if_configured(
+                self.invocation_state,
+                &scope,
+                invocation_id,
+                "UnknownCapability",
+            )
+            .await;
             return Err(CapabilityInvocationError::UnknownCapability {
                 capability: request.capability_id,
             });
@@ -2288,7 +2301,13 @@ where
                     &obligation_outcome,
                 )
                 .await;
-                fail_run_if_configured(self.run_state, &scope, invocation_id, "ProcessSpawn").await;
+                fail_invocation_if_configured(
+                    self.invocation_state,
+                    &scope,
+                    invocation_id,
+                    "ProcessSpawn",
+                )
+                .await;
                 return Err(error);
             }
         };
@@ -2323,14 +2342,20 @@ where
                     &obligation_outcome,
                 )
                 .await;
-                fail_run_if_configured(self.run_state, &scope, invocation_id, "ProcessSpawn").await;
+                fail_invocation_if_configured(
+                    self.invocation_state,
+                    &scope,
+                    invocation_id,
+                    "ProcessSpawn",
+                )
+                .await;
                 return Err(CapabilityInvocationError::from(error));
             }
         };
 
-        if let Some(run_state) = self.run_state {
-            complete_run_after_side_effect(
-                run_state,
+        if let Some(invocation_state) = self.invocation_state {
+            complete_invocation_after_side_effect(
+                invocation_state,
                 &scope,
                 invocation_id,
                 &capability_id,
@@ -2347,7 +2372,7 @@ where
     /// for invoke: validate the context, fingerprint the spawn, start the run
     /// record, resolve the descriptor, run trust-aware spawn authorization, and
     /// on `Allow` prepare obligations and mint the sealed [`Authorized`] witness.
-    /// Every side effect the inline fold performed — run-state
+    /// Every side effect the inline fold performed — process-invocation
     /// `start`/`fail`/`block`, approval persist-and-rollback, obligation
     /// `prepare`, and each early error return — stays here verbatim; `spawn_json`
     /// only maps the returned [`AuthorizeFold`] back to today's outcome.
@@ -2377,18 +2402,18 @@ where
             source,
         })?;
 
-        // Resolve the descriptor BEFORE starting a run record (see `authorize`):
-        // an unknown capability short-circuits without creating a run record, so
-        // no `fail_run_if_configured` is needed here.
+        // Resolve the descriptor BEFORE starting a invocation record (see `authorize`):
+        // an unknown capability short-circuits without creating a invocation record, so
+        // no `fail_invocation_if_configured` is needed here.
         let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
             return Err(CapabilityInvocationError::UnknownCapability {
                 capability: request.capability_id.clone(),
             });
         };
 
-        if let Some(run_state) = self.run_state {
-            run_state
-                .start(RunStart {
+        if let Some(invocation_state) = self.invocation_state {
+            invocation_state
+                .start(ProcessInvocationStart {
                     invocation_id,
                     capability_id: request.capability_id.clone(),
                     scope: scope.clone(),
@@ -2405,8 +2430,8 @@ where
         let trust_decision = match self.evaluate_trust(&request.capability_id) {
             Ok(d) => d,
             Err(error) => {
-                apply_run_state_transition_if_configured(
-                    self.run_state,
+                apply_invocation_state_transition_if_configured(
+                    self.invocation_state,
                     &scope,
                     invocation_id,
                     &error,
@@ -2416,8 +2441,13 @@ where
             }
         };
         if let Err(error) = self.enforce_runtime_policy(descriptor) {
-            apply_run_state_transition_if_configured(self.run_state, &scope, invocation_id, &error)
-                .await;
+            apply_invocation_state_transition_if_configured(
+                self.invocation_state,
+                &scope,
+                invocation_id,
+                &error,
+            )
+            .await;
             return Err(error);
         }
 
@@ -2439,8 +2469,8 @@ where
                     required_secrets,
                     credential_requirements: requirements,
                 };
-                apply_run_state_transition_if_configured(
-                    self.run_state,
+                apply_invocation_state_transition_if_configured(
+                    self.invocation_state,
                     &scope,
                     invocation_id,
                     &error,
@@ -2490,8 +2520,8 @@ where
                 {
                     Ok(outcome) => outcome,
                     Err(error) => {
-                        apply_run_state_transition_if_configured(
-                            self.run_state,
+                        apply_invocation_state_transition_if_configured(
+                            self.invocation_state,
                             &scope,
                             invocation_id,
                             &error,
@@ -2517,8 +2547,8 @@ where
                 })))
             }
             Decision::Deny { reason } => {
-                fail_run_if_configured(
-                    self.run_state,
+                fail_invocation_if_configured(
+                    self.invocation_state,
                     &scope,
                     invocation_id,
                     "AuthorizationDenied",
@@ -2545,8 +2575,8 @@ where
                     &request.estimate,
                     CapabilityActionKind::Spawn,
                 ) {
-                    fail_run_if_configured(
-                        self.run_state,
+                    fail_invocation_if_configured(
+                        self.invocation_state,
                         &scope,
                         invocation_id,
                         "ApprovalRequestMismatch",
@@ -2557,8 +2587,8 @@ where
 
                 if let Some(existing) = &approval.invocation_fingerprint {
                     if existing != &invocation_fingerprint {
-                        fail_run_if_configured(
-                            self.run_state,
+                        fail_invocation_if_configured(
+                            self.invocation_state,
                             &scope,
                             invocation_id,
                             "InvocationFingerprintMismatch",
@@ -2572,69 +2602,50 @@ where
                     approval.invocation_fingerprint = Some(invocation_fingerprint);
                 }
 
-                match (self.run_state, self.approval_requests) {
-                    (Some(run_state), Some(approval_requests)) => {
-                        if let Some(combined_store) = self.run_state_approval_store {
-                            if let Err(error) = combined_store
-                                .save_pending_and_block_approval(
-                                    scope.clone(),
-                                    invocation_id,
-                                    approval,
-                                )
-                                .await
+                match (self.invocation_state, self.approval_requests) {
+                    (Some(invocation_state), Some(approval_requests)) => {
+                        let approval_id = approval.id;
+                        if let Err(error) = approval_requests
+                            .save_pending(scope.clone(), approval.clone())
+                            .await
+                        {
+                            fail_invocation_if_configured(
+                                Some(invocation_state),
+                                &scope,
+                                invocation_id,
+                                "ApprovalStore",
+                            )
+                            .await;
+                            return Err(CapabilityInvocationError::from(error));
+                        }
+                        if let Err(error) = invocation_state
+                            .block_approval(&scope, invocation_id, approval)
+                            .await
+                        {
+                            if let Err(discard_error) =
+                                approval_requests.discard_pending(&scope, approval_id).await
                             {
-                                fail_run_if_configured(
-                                    Some(run_state),
-                                    &scope,
-                                    invocation_id,
-                                    "ApprovalBlock",
-                                )
-                                .await;
-                                return Err(CapabilityInvocationError::from(error));
+                                warn!(
+                                    approval_request_id = %approval_id,
+                                    invocation_id = %invocation_id,
+                                    transition_error_kind = "ApprovalStore",
+                                    error = %discard_error,
+                                    "approval rollback failed after spawn invocation block transition failed",
+                                );
                             }
-                        } else {
-                            let approval_id = approval.id;
-                            if let Err(error) = approval_requests
-                                .save_pending(scope.clone(), approval.clone())
-                                .await
-                            {
-                                fail_run_if_configured(
-                                    Some(run_state),
-                                    &scope,
-                                    invocation_id,
-                                    "ApprovalStore",
-                                )
-                                .await;
-                                return Err(CapabilityInvocationError::from(error));
-                            }
-                            if let Err(error) = run_state
-                                .block_approval(&scope, invocation_id, approval)
-                                .await
-                            {
-                                if let Err(discard_error) =
-                                    approval_requests.discard_pending(&scope, approval_id).await
-                                {
-                                    warn!(
-                                        approval_request_id = %approval_id,
-                                        invocation_id = %invocation_id,
-                                        transition_error_kind = run_state_error_kind(&discard_error),
-                                        "approval rollback failed after spawn run-state block transition failed",
-                                    );
-                                }
-                                fail_run_if_configured(
-                                    Some(run_state),
-                                    &scope,
-                                    invocation_id,
-                                    "ApprovalBlock",
-                                )
-                                .await;
-                                return Err(CapabilityInvocationError::from(error));
-                            }
+                            fail_invocation_if_configured(
+                                Some(invocation_state),
+                                &scope,
+                                invocation_id,
+                                "ApprovalBlock",
+                            )
+                            .await;
+                            return Err(CapabilityInvocationError::from(error));
                         }
                     }
-                    (Some(run_state), None) => {
-                        fail_run_if_configured(
-                            Some(run_state),
+                    (Some(invocation_state), None) => {
+                        fail_invocation_if_configured(
+                            Some(invocation_state),
                             &scope,
                             invocation_id,
                             "ApprovalStoreMissing",
@@ -2648,13 +2659,13 @@ where
                     (None, Some(_)) => {
                         return Err(CapabilityInvocationError::ApprovalStoreMissing {
                             capability: request.capability_id.clone(),
-                            store: "run_state",
+                            store: "invocation_state",
                         });
                     }
                     (None, None) => {
                         return Err(CapabilityInvocationError::ApprovalStoreMissing {
                             capability: request.capability_id.clone(),
-                            store: "run_state and approval_requests",
+                            store: "invocation_state and approval_requests",
                         });
                     }
                 }
@@ -2670,15 +2681,15 @@ where
     /// Resume-path pre-authorization, relocated from host_runtime's deleted
     /// `open_pre_authorization` + `fail_matching_blocked_{,auth_}resume_on_preflight_error`
     /// (§5.3.2/§9, R-A). Resolves the descriptor and enforces runtime-policy
-    /// planning on the resumed capability BEFORE the fold's run-state lookup, so an
+    /// planning on the resumed capability BEFORE the fold's process-invocation lookup, so an
     /// unknown capability short-circuits to `UnknownCapability` (→ `MissingRuntime`)
-    /// instead of the run-state-not-found `Backend` path, and a runtime policy
+    /// instead of the process-invocation-not-found `Backend` path, and a runtime policy
     /// tightened between invoke and resume fails closed (reversing #6386's
     /// "planning is NOT re-run on resume"). On refusal it fails ONLY the matching
     /// blocked run — via [`Self::fail_matching_blocked_resume_run`] — recording the
     /// planner-specific INTERNAL `error_kind`, then returns the sanitized error (the
     /// model-visible message stays sanitized through `DenyReason`; the planner
-    /// detail rides only the run-state audit record). Trust is still classified
+    /// detail rides only the process-invocation audit record). Trust is still classified
     /// downstream (in `authorize_resumed` / the spawn-resume fold), which stamps
     /// `context.trust` before the authorizer.
     async fn resume_preflight(
@@ -2723,12 +2734,12 @@ where
         blocked: BlockedResumeKind,
         error_kind: &'static str,
     ) {
-        let Some(run_state) = self.run_state else {
+        let Some(invocation_state) = self.invocation_state else {
             return;
         };
         let scope = &context.resource_scope;
         let invocation_id = context.invocation_id;
-        let record = match run_state.get(scope, invocation_id).await {
+        let record = match invocation_state.get(scope, invocation_id).await {
             Ok(Some(record)) => record,
             Ok(None) => return,
             Err(error) => {
@@ -2736,8 +2747,8 @@ where
                     invocation_id = %invocation_id,
                     capability_id = %capability_id,
                     preflight_error_kind = error_kind,
-                    lookup_error_kind = run_state_error_kind(&error),
-                    "resume preflight failed, but run-state lookup failed; leaving run state unchanged",
+                    lookup_error_kind = invocation_state_error_kind(&error),
+                    "resume preflight failed, but process-invocation lookup failed; leaving invocation state unchanged",
                 );
                 return;
             }
@@ -2748,13 +2759,14 @@ where
                 BlockedResumeKind::Approval {
                     approval_request_id,
                 } => {
-                    record.status == RunStatus::BlockedApproval
+                    record.status == ProcessInvocationStatus::BlockedApproval
                         && record.approval_request_id == Some(approval_request_id)
                 }
-                BlockedResumeKind::Auth => record.status == RunStatus::BlockedAuth,
+                BlockedResumeKind::Auth => record.status == ProcessInvocationStatus::BlockedAuth,
             };
         if matches {
-            fail_run_if_configured(Some(run_state), scope, invocation_id, error_kind).await;
+            fail_invocation_if_configured(Some(invocation_state), scope, invocation_id, error_kind)
+                .await;
         }
     }
 
@@ -2762,7 +2774,7 @@ where
     /// `auth_resume_json`, extracted per arch-simplification §9 step 2 / §5.3.2
     /// exactly as [`Self::authorize`] does for invoke: run trust-aware
     /// authorization and map the `Decision`. On `Deny`/`RequireApproval` every
-    /// side effect the inline fold performed stays here verbatim — the run-state
+    /// side effect the inline fold performed stays here verbatim — the process-invocation
     /// `fail` transition and the revoke of an `AlreadyClaimed` lease (transitioned
     /// to `Dispatching` in the `auth_resume_json` preamble) so a terminal refusal
     /// does not strand it.
@@ -2789,8 +2801,8 @@ where
         let trust_decision = match self.evaluate_trust(&params.capability_id) {
             Ok(d) => d,
             Err(error) => {
-                fail_run_if_configured(
-                    Some(params.run_state),
+                fail_invocation_if_configured(
+                    Some(params.invocation_state),
                     &params.scope,
                     params.invocation_id,
                     "AuthorizationDenied",
@@ -2863,8 +2875,8 @@ where
                 })))
             }
             Decision::Deny { reason } => {
-                fail_run_if_configured(
-                    Some(params.run_state),
+                fail_invocation_if_configured(
+                    Some(params.invocation_state),
                     &params.scope,
                     params.invocation_id,
                     "AuthorizationDenied",
@@ -2890,8 +2902,8 @@ where
                 })
             }
             Decision::RequireApproval { .. } => {
-                fail_run_if_configured(
-                    Some(params.run_state),
+                fail_invocation_if_configured(
+                    Some(params.invocation_state),
                     &params.scope,
                     params.invocation_id,
                     "AuthorizationRequiresApproval",
@@ -2926,9 +2938,9 @@ where
     ///
     /// Runs: trust-aware authorization → prepare obligations (Resume phase) →
     /// `dispatcher.dispatch_json` → complete dispatch obligations → optional
-    /// lease consume → `complete_run_after_side_effect` → Ok.
+    /// lease consume → `complete_invocation_after_side_effect` → Ok.
     ///
-    /// On any failure: aborts applicable obligations, transitions run state,
+    /// On any failure: aborts applicable obligations, transitions invocation state,
     /// and revokes the claimed lease unless the error is a non-terminal
     /// `BlockAuth` transition (in which case the lease stays Claimed so a
     /// subsequent `auth_resume_json` can reuse it without a second approval).
@@ -2946,7 +2958,7 @@ where
         let fold = self.authorize_resumed(&params).await?;
 
         let ResumedDispatchParams {
-            run_state,
+            invocation_state,
             scope,
             invocation_id,
             capability_id,
@@ -3004,11 +3016,11 @@ where
                                     invocation_id = %invocation_id,
                                     capability_id = %capability_id,
                                     error_kind = capability_lease_error_kind(&error),
-                                    "approval lease claim lost to a concurrent resume; leaving run state unchanged",
+                                    "approval lease claim lost to a concurrent resume; leaving invocation state unchanged",
                                 );
                             } else {
-                                fail_run_if_configured(
-                                    Some(run_state),
+                                fail_invocation_if_configured(
+                                    Some(invocation_state),
                                     &scope,
                                     invocation_id,
                                     "ApprovalLeaseClaim",
@@ -3035,8 +3047,8 @@ where
         {
             Ok(outcome) => outcome,
             Err(error) => {
-                apply_run_state_transition_if_configured(
-                    Some(run_state),
+                apply_invocation_state_transition_if_configured(
+                    Some(invocation_state),
                     &scope,
                     invocation_id,
                     &error,
@@ -3081,8 +3093,8 @@ where
                     &obligation_outcome,
                 )
                 .await;
-                apply_run_state_transition_if_configured(
-                    Some(run_state),
+                apply_invocation_state_transition_if_configured(
+                    Some(invocation_state),
                     &scope,
                     invocation_id,
                     &error,
@@ -3119,8 +3131,8 @@ where
                 let error =
                     enrich_dispatch_error_credential_requirements(error, obligations.as_slice());
                 let invocation_error = CapabilityInvocationError::from(error);
-                apply_run_state_transition_if_configured(
-                    Some(run_state),
+                apply_invocation_state_transition_if_configured(
+                    Some(invocation_state),
                     &scope,
                     invocation_id,
                     &invocation_error,
@@ -3167,8 +3179,8 @@ where
                     &cleanup_outcome,
                 )
                 .await;
-                fail_run_if_configured(
-                    Some(run_state),
+                fail_invocation_if_configured(
+                    Some(invocation_state),
                     &scope,
                     invocation_id,
                     obligation_invocation_error_kind(&error),
@@ -3203,8 +3215,8 @@ where
             );
         }
 
-        complete_run_after_side_effect(
-            run_state,
+        complete_invocation_after_side_effect(
+            invocation_state,
             &scope,
             invocation_id,
             &capability_id,
@@ -3218,7 +3230,7 @@ where
         &self,
         phase: CapabilityObligationPhase,
         context: &ExecutionContext,
-        capability_id: &ironclaw_host_api::CapabilityId,
+        capability_id: &ironclaw_host_api::ids::CapabilityId,
         estimate: &ResourceEstimate,
         obligations: Vec<Obligation>,
     ) -> Result<CapabilityObligationOutcome, CapabilityInvocationError> {
@@ -3256,7 +3268,7 @@ where
         &self,
         phase: CapabilityObligationPhase,
         context: &ExecutionContext,
-        capability_id: &ironclaw_host_api::CapabilityId,
+        capability_id: &ironclaw_host_api::ids::CapabilityId,
         estimate: &ResourceEstimate,
         obligations: &[Obligation],
         dispatch: &CapabilityDispatchResult,
@@ -3291,7 +3303,7 @@ where
         &self,
         phase: CapabilityObligationPhase,
         context: &ExecutionContext,
-        capability_id: &ironclaw_host_api::CapabilityId,
+        capability_id: &ironclaw_host_api::ids::CapabilityId,
         estimate: &ResourceEstimate,
         obligations: &[Obligation],
         outcome: &CapabilityObligationOutcome,
@@ -3435,7 +3447,7 @@ fn planner_error_model_reason(error: &PlannerError) -> &'static str {
 /// distinct from the sanitized model-visible `DenyReason::PolicyDenied` that
 /// `runtime_policy_error_to_invocation_error` produces. Mirrors the strings
 /// host_runtime's deleted `RuntimePolicyEvaluationError::kind` recorded on the
-/// blocked-run failure so the run-state audit record is unchanged (e.g.
+/// blocked-run failure so the process-invocation audit record is unchanged (e.g.
 /// `"process_backend_none"`); the planner enum name never reaches the model.
 fn planner_error_kind(error: &PlannerError) -> &'static str {
     match error {
@@ -3528,13 +3540,13 @@ async fn cleanup_claimed_lease_after_resume_error(
 /// Claimed lease without requiring a new human approval.
 fn is_block_auth_transition(error: &CapabilityInvocationError) -> bool {
     matches!(
-        error.run_state_transition(),
-        Some(CapabilityRunStateTransition::BlockAuth { .. })
+        error.invocation_state_transition(),
+        Some(CapabilityInvocationStateTransition::BlockAuth { .. })
     )
 }
 
 fn prepare_obligation_error_to_invocation(
-    capability_id: &ironclaw_host_api::CapabilityId,
+    capability_id: &ironclaw_host_api::ids::CapabilityId,
     error: CapabilityObligationError,
 ) -> CapabilityInvocationError {
     match error {
@@ -3559,7 +3571,7 @@ fn prepare_obligation_error_to_invocation(
 }
 
 fn completion_obligation_error_to_invocation(
-    capability_id: &ironclaw_host_api::CapabilityId,
+    capability_id: &ironclaw_host_api::ids::CapabilityId,
     error: CapabilityObligationError,
 ) -> CapabilityInvocationError {
     match error {
@@ -3574,13 +3586,13 @@ fn completion_obligation_error_to_invocation(
 }
 
 fn obligation_invocation_error_kind(error: &CapabilityInvocationError) -> &'static str {
-    // `run_state_transition` returns `None` for `CapabilityInvocationError::Dispatch`
+    // `invocation_state_transition` returns `None` for `CapabilityInvocationError::Dispatch`
     // because PR #4236 handles those failures via the disposition policy on the
     // outcome path. The obligation call sites only see this function for
     // diagnostic logging; fall back to a stable "Dispatch" label in that case.
     error
-        .run_state_transition()
-        .map(CapabilityRunStateTransition::error_kind)
+        .invocation_state_transition()
+        .map(CapabilityInvocationStateTransition::error_kind)
         .unwrap_or("Dispatch")
 }
 
@@ -3647,8 +3659,9 @@ fn enrich_dispatch_error_credential_requirements(
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        CapabilityId, ExtensionId, Obligation, RuntimeCredentialAccountSetup, SecretHandle,
-        VendorId,
+        capability::RuntimeCredentialAccountSetup,
+        decision::Obligation,
+        ids::{CapabilityId, ExtensionId, SecretHandle, VendorId},
     };
 
     fn auth_required_empty(cap: &str) -> DispatchError {
@@ -3668,7 +3681,7 @@ mod tests {
     }
 
     fn auth_required_with_provider(cap: &str, provider: &str) -> DispatchError {
-        use ironclaw_host_api::RuntimeCredentialAuthRequirement;
+        use ironclaw_host_api::decision::RuntimeCredentialAuthRequirement;
         DispatchError::AuthRequired {
             capability: CapabilityId::new(cap).unwrap(),
             required_secrets: Vec::new(),
@@ -3839,7 +3852,7 @@ mod tests {
             _trust_decision: &TrustDecision,
         ) -> Decision {
             Decision::Allow {
-                obligations: ironclaw_host_api::Obligations::empty(),
+                obligations: ironclaw_host_api::decision::Obligations::empty(),
             }
         }
     }
@@ -3863,7 +3876,7 @@ mod tests {
             _capability_id: &CapabilityId,
             _context: &ExecutionContext,
             _action: crate::ports::PolicyAction,
-        ) -> Vec<ironclaw_host_api::CapabilityGrant> {
+        ) -> Vec<ironclaw_host_api::capability::CapabilityGrant> {
             Vec::new()
         }
     }
@@ -3890,10 +3903,13 @@ mod tests {
             capability_id: &CapabilityId,
             context: &ExecutionContext,
             _action: crate::ports::PolicyAction,
-        ) -> Vec<ironclaw_host_api::CapabilityGrant> {
+        ) -> Vec<ironclaw_host_api::capability::CapabilityGrant> {
             use ironclaw_host_api::{
-                CapabilityGrant, CapabilityGrantId, GrantConstraints, MountView, NetworkPolicy,
-                Principal,
+                action::NetworkPolicy,
+                capability::{CapabilityGrant, GrantConstraints},
+                ids::CapabilityGrantId,
+                mount::MountView,
+                scope::Principal,
             };
             vec![CapabilityGrant {
                 id: CapabilityGrantId::new(),
@@ -3948,7 +3964,7 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
             CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage,
             HostApiContractRegistry, ManifestSource,
         };
-        use ironclaw_host_api::{HostPortCatalog, VirtualPath};
+        use ironclaw_host_api::{host_port::HostPortCatalog, path::VirtualPath};
         let mut contracts = HostApiContractRegistry::new();
         contracts
             .register(std::sync::Arc::new(
@@ -3973,7 +3989,12 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
     }
 
     fn allow_request() -> InvocationInput {
-        use ironclaw_host_api::{CapabilitySet, MountView, RuntimeKind, TrustClass, UserId};
+        use ironclaw_host_api::{
+            capability::CapabilitySet,
+            ids::UserId,
+            mount::MountView,
+            runtime::{RuntimeKind, TrustClass},
+        };
         let mut context = ExecutionContext::local_default(
             UserId::new("user").unwrap(),
             ExtensionId::new("caller").unwrap(),
@@ -3986,8 +4007,8 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
         // A membrane-sealed actor and a real ingress origin are what make the
         // invocation seal-able. This models a direct product-surface action.
         context.authenticated_actor_user_id = Some(UserId::new("actor").unwrap());
-        context.origin = Some(ironclaw_host_api::InvocationOrigin::Product(
-            ironclaw_host_api::ProductKind::new("settings").unwrap(),
+        context.origin = Some(ironclaw_host_api::invocation::InvocationOrigin::Product(
+            ironclaw_host_api::ids::ProductKind::new("settings").unwrap(),
         ));
         InvocationInput {
             context,
@@ -4030,8 +4051,8 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
         };
         EffectiveRuntimePolicy {
             deployment: DeploymentMode::LocalSingleUser,
-            requested_profile: RuntimeProfile::LocalDev,
-            resolved_profile: RuntimeProfile::LocalDev,
+            requested_profile: RuntimeProfile::LocalHost,
+            resolved_profile: RuntimeProfile::LocalHost,
             filesystem_backend: FilesystemBackendKind::HostWorkspace,
             process_backend: ProcessBackendKind::LocalHost,
             network_mode: NetworkMode::DirectLogged,
@@ -4049,7 +4070,7 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
     // the bounded default TTL (§5.3.2).
     #[tokio::test]
     async fn authorize_allow_path_seals_authorized_with_lane_and_invocation() {
-        use ironclaw_host_api::UserId;
+        use ironclaw_host_api::ids::UserId;
 
         let registry = echo_registry();
         // Never dispatched on this authorize-only path; errors if it ever is.
@@ -4095,8 +4116,8 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
         );
         assert_eq!(
             invocation.origin,
-            ironclaw_host_api::InvocationOrigin::Product(
-                ironclaw_host_api::ProductKind::new("settings").unwrap()
+            ironclaw_host_api::invocation::InvocationOrigin::Product(
+                ironclaw_host_api::ids::ProductKind::new("settings").unwrap()
             )
         );
         assert_eq!(invocation.input, serde_json::json!({"message": "hi"}));
@@ -4155,7 +4176,10 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
 
     #[tokio::test]
     async fn authorize_seals_system_actor_and_real_origin_across_ingresses() {
-        use ironclaw_host_api::{InvocationOrigin, ProductKind, RoutineId, RunId, UserId};
+        use ironclaw_host_api::{
+            ids::{ProductKind, RoutineId, RunId, UserId},
+            invocation::InvocationOrigin,
+        };
 
         let registry = echo_registry();
         // Never dispatched on this authorize-only path; errors if it ever is.
@@ -4355,15 +4379,15 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
 
     // Run-state double for the successful resume tail: only the post-dispatch
     // completion transition is reachable.
-    struct CompletionRunStateStore;
+    struct CompletionInvocationStateStore;
 
     #[async_trait::async_trait]
-    impl RunStateStorePort for CompletionRunStateStore {
+    impl ProcessInvocationStatePort for CompletionInvocationStateStore {
         async fn start(
             &self,
-            _start: RunStart,
-        ) -> Result<ironclaw_run_state::RunRecord, RunStateError> {
-            unimplemented!("authorize_resumed Allow path does not mutate run state")
+            _start: ProcessInvocationStart,
+        ) -> Result<ironclaw_processes::ProcessInvocationRecord, ProcessInvocationError> {
+            unimplemented!("authorize_resumed Allow path does not mutate invocation state")
         }
 
         async fn block_approval(
@@ -4371,8 +4395,8 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
             _scope: &ResourceScope,
             _invocation_id: InvocationId,
             _approval: ironclaw_host_api::approval::ApprovalRequest,
-        ) -> Result<ironclaw_run_state::RunRecord, RunStateError> {
-            unimplemented!("authorize_resumed Allow path does not mutate run state")
+        ) -> Result<ironclaw_processes::ProcessInvocationRecord, ProcessInvocationError> {
+            unimplemented!("authorize_resumed Allow path does not mutate invocation state")
         }
 
         async fn block_auth(
@@ -4380,21 +4404,21 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
             _scope: &ResourceScope,
             _invocation_id: InvocationId,
             _error_kind: String,
-        ) -> Result<ironclaw_run_state::RunRecord, RunStateError> {
-            unimplemented!("authorize_resumed Allow path does not mutate run state")
+        ) -> Result<ironclaw_processes::ProcessInvocationRecord, ProcessInvocationError> {
+            unimplemented!("authorize_resumed Allow path does not mutate invocation state")
         }
 
         async fn complete(
             &self,
             scope: &ResourceScope,
             invocation_id: InvocationId,
-        ) -> Result<ironclaw_run_state::RunRecord, RunStateError> {
-            Ok(ironclaw_run_state::RunRecord {
+        ) -> Result<ironclaw_processes::ProcessInvocationRecord, ProcessInvocationError> {
+            Ok(ironclaw_processes::ProcessInvocationRecord {
                 invocation_id,
                 capability_id: CapabilityId::new("echo.say").unwrap(),
                 scope: scope.clone(),
                 authenticated_actor_user_id: None,
-                status: RunStatus::Completed,
+                status: ProcessInvocationStatus::Completed,
                 approval_request_id: None,
                 error_kind: None,
             })
@@ -4405,23 +4429,25 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
             _scope: &ResourceScope,
             _invocation_id: InvocationId,
             _error_kind: String,
-        ) -> Result<ironclaw_run_state::RunRecord, RunStateError> {
-            unimplemented!("authorize_resumed Allow path does not mutate run state")
+        ) -> Result<ironclaw_processes::ProcessInvocationRecord, ProcessInvocationError> {
+            unimplemented!("authorize_resumed Allow path does not mutate invocation state")
         }
 
         async fn get(
             &self,
             _scope: &ResourceScope,
             _invocation_id: InvocationId,
-        ) -> Result<Option<ironclaw_run_state::RunRecord>, RunStateError> {
-            unimplemented!("authorize_resumed Allow path does not read run state")
+        ) -> Result<Option<ironclaw_processes::ProcessInvocationRecord>, ProcessInvocationError>
+        {
+            unimplemented!("authorize_resumed Allow path does not read invocation state")
         }
 
         async fn records_for_scope(
             &self,
             _scope: &ResourceScope,
-        ) -> Result<Vec<ironclaw_run_state::RunRecord>, RunStateError> {
-            unimplemented!("authorize_resumed Allow path does not read run state")
+        ) -> Result<Vec<ironclaw_processes::ProcessInvocationRecord>, ProcessInvocationError>
+        {
+            unimplemented!("authorize_resumed Allow path does not read invocation state")
         }
     }
 
@@ -4446,13 +4472,13 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
                     runtime: RuntimeKind::Wasm,
                     output: serde_json::json!({"ok": true}),
                     display_preview: None,
-                    usage: ironclaw_host_api::ResourceUsage::default(),
-                    receipt: ironclaw_host_api::ResourceReceipt {
-                        id: ironclaw_host_api::ResourceReservationId::new(),
+                    usage: ironclaw_host_api::resource::ResourceUsage::default(),
+                    receipt: ironclaw_host_api::resource::ResourceReceipt {
+                        id: ironclaw_host_api::ids::ResourceReservationId::new(),
                         scope: request.invocation.scope.clone(),
-                        status: ironclaw_host_api::ReservationStatus::Reconciled,
+                        status: ironclaw_host_api::resource::ReservationStatus::Reconciled,
                         estimate: request.invocation.estimate.clone(),
-                        actual: Some(ironclaw_host_api::ResourceUsage::default()),
+                        actual: Some(ironclaw_host_api::resource::ResourceUsage::default()),
                     },
                 })
             });
@@ -4486,15 +4512,15 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
         let leases = PendingClaimLeaseStore {
             lease: CapabilityLease {
                 scope: scope.clone(),
-                grant: ironclaw_host_api::CapabilityGrant {
+                grant: ironclaw_host_api::capability::CapabilityGrant {
                     id: grant_id,
                     capability: capability_id.clone(),
-                    grantee: ironclaw_host_api::Principal::User(scope.user_id.clone()),
-                    issued_by: ironclaw_host_api::Principal::HostRuntime,
-                    constraints: ironclaw_host_api::GrantConstraints {
+                    grantee: ironclaw_host_api::scope::Principal::User(scope.user_id.clone()),
+                    issued_by: ironclaw_host_api::scope::Principal::HostRuntime,
+                    constraints: ironclaw_host_api::capability::GrantConstraints {
                         allowed_effects: Vec::new(),
-                        mounts: ironclaw_host_api::MountView::default(),
-                        network: ironclaw_host_api::NetworkPolicy::default(),
+                        mounts: ironclaw_host_api::mount::MountView::default(),
+                        network: ironclaw_host_api::action::NetworkPolicy::default(),
                         secrets: Vec::new(),
                         resource_ceiling: None,
                         expires_at: Some(lease_expiry),
@@ -4505,10 +4531,10 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
                 status: ironclaw_authorization::CapabilityLeaseStatus::Active,
             },
         };
-        let run_state = CompletionRunStateStore;
+        let invocation_state = CompletionInvocationStateStore;
 
         let params = ResumedDispatchParams {
-            run_state: &run_state,
+            invocation_state: &invocation_state,
             scope,
             invocation_id,
             capability_id,

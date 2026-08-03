@@ -1,10 +1,10 @@
 use anyhow::Context;
 use clap::{Args, Subcommand};
-use ironclaw_extension_host::extension_lifecycle_command::{
+use ironclaw_extension_manager::extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, execute_reborn_extension_lifecycle_command,
     render_reborn_extension_lifecycle_response,
 };
-use ironclaw_host_api::public_lifecycle_response_json;
+use ironclaw_product_contracts::package_lifecycle::public_lifecycle_response_json;
 use ironclaw_reborn_composition::{
     LifecycleProductResponse, RebornRuntimeInput, build_reborn_runtime,
 };
@@ -14,7 +14,7 @@ use crate::runtime::{RuntimeInputCaller, RuntimeInputOptions};
 
 #[derive(Debug, Args)]
 pub(crate) struct ExtensionCommand {
-    /// Confirm trusted-laptop host filesystem access for local-dev-yolo.
+    /// Confirm trusted-laptop host filesystem access for the unrestricted standalone profile.
     #[arg(long = "confirm-host-access", global = true)]
     confirm_host_access: bool,
 

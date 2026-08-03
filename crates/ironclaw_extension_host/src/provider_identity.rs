@@ -16,8 +16,11 @@ use std::{
 };
 
 #[cfg(test)]
-use ironclaw_host_api::RebornUserIdentityLookupError;
-use ironclaw_host_api::{RebornUserIdentityLookup, UserId, installation_scoped_provider_user_id};
+use ironclaw_host_api::user_identity::RebornUserIdentityLookupError;
+use ironclaw_host_api::{
+    ids::UserId,
+    user_identity::{RebornUserIdentityLookup, installation_scoped_provider_user_id},
+};
 use ironclaw_product::{
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductSurfaceFailure,
     ResolvedProductActorUser,
@@ -202,7 +205,8 @@ impl ProductActorUserResolver for ProviderIdentityActorResolver {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_product::{AdapterInstallationId, ExternalActorRef, ProductAdapterId};
+    use ironclaw_extension_contracts::external::ExternalActorRef;
+    use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
 
     use super::*;
 

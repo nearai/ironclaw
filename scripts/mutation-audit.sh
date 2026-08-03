@@ -9,7 +9,7 @@
 # Usage:
 #   ./scripts/mutation-audit.sh -p ironclaw_event_projections \
 #       crates/ironclaw_event_projections/src/runtime_projection.rs
-#   ./scripts/mutation-audit.sh -p ironclaw_dispatcher            # whole package
+#   ./scripts/mutation-audit.sh -p ironclaw_capabilities          # whole package
 #
 # Options (env vars):
 #   MUT_JOBS=3          Parallel mutants (default: 3)
@@ -87,11 +87,25 @@ if ! command -v cargo-mutants >/dev/null 2>&1; then
   exit 1
 fi
 
+# A path that no longer exists is the likeliest way to audit nothing: files get
+# moved between crates, an old command line keeps working, cargo-mutants filters
+# down to zero mutants, and the run reports success over a file it never read.
 args=(--package "$package" --timeout "$MUT_TIMEOUT" --jobs "$MUT_JOBS" --output "$MUT_OUT")
 for file in "${files[@]:-}"; do
-  [ -n "$file" ] && args+=(-f "$file")
+  [ -z "$file" ] && continue
+  if [ ! -f "$repo_root/$file" ] && [ ! -f "$file" ]; then
+    echo "error: no such file to audit: $file" >&2
+    echo "       it may have moved — an audit of a stale path finds zero" >&2
+    echo "       mutants and reports a clean run over code it never read." >&2
+    exit 1
+  fi
+  args+=(-f "$file")
 done
 [ "$MUT_ITERATE" = "1" ] && args+=(--iterate)
+
+# cargo-mutants creates --output with a single-level mkdir, which fails when
+# an intermediate parent (such as target/) does not exist on a fresh runner.
+mkdir -p -- "$MUT_OUT"
 
 echo "▶ mutation audit: package=$package files=${files[*]:-<all>}"
 set +e
@@ -110,6 +124,23 @@ fi
 # $MUT_OUT itself finds nothing, which failed every audit at this final step —
 # see scripts/test-mutation-audit.sh section G.
 report_dir="$MUT_OUT/mutants.out"
+
+# Zero mutants is never a pass. cargo-mutants only WARNs ("No mutants found
+# under the active filters") and still exits 0, so without this the script
+# prints an empty triage queue and reads as "nothing to fix" — the same clean
+# bill of health the --package guard above exists to prevent. Caught here as
+# well as at the filter, because filters are not the only way to reach zero.
+total=0
+for outcome in caught missed unviable timeout; do
+  file="$report_dir/$outcome.txt"
+  [ -f "$file" ] && total=$((total + $(grep -c . "$file" || true)))
+done
+if [ "$total" -eq 0 ]; then
+  echo "error: the run produced zero mutants, so nothing was tested." >&2
+  echo "       an empty result is not a passing audit — check that the" >&2
+  echo "       package and file filters still match real code." >&2
+  exit 1
+fi
 
 python3 "$repo_root/scripts/ci/mutation_triage_queue.py" \
   --report-dir "$report_dir" \

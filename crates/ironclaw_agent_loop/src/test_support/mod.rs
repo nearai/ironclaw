@@ -10,31 +10,33 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{
-    CapabilityId, Resolution, ResolutionBatch, RuntimeKind, TenantId, ThreadId,
+use ironclaw_host_api::turn::{
+    LoopGateRef, LoopMessageRef, LoopResultRef, RunProfileId, RunProfileVersion, TurnCheckpointId,
+    TurnId, TurnRunId, TurnScope,
 };
-use ironclaw_turns::{
-    AgentLoopDriverDescriptor, LoopFailureKind, LoopGateRef, LoopMessageRef, LoopResultRef,
-    RunProfileId, RunProfileVersion, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
-        CancellationPolicy, CapabilityCallCandidate, CapabilityDescriptorView,
-        CapabilityFailureKind, CapabilityInputRef, CapabilityProgress, CapabilitySurfaceProfileId,
-        CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
-        ConcurrencyHint, ContentDigest, ContextProfileId, FinalizeAssistantMessage,
-        LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
-        LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest,
-        LoopCompactionResponse, LoopContextBundle, LoopContextCompactionMetadata,
-        LoopContextRequest, LoopDriverId, LoopInput, LoopInputAck, LoopInputAckToken,
-        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
-        LoopModelResponse, LoopProgressEvent, LoopPromptBundle, LoopPromptBundleRef,
-        LoopPromptBundleRequest, LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort,
-        ModelProfileId, ModelStreamChunk, ParentLoopOutput, ProviderToolCallReference,
-        RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
-        RunClassId, RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
-        StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, resolution,
-    },
+use ironclaw_host_api::{
+    ids::{CapabilityId, TenantId, ThreadId},
+    resolution::{Resolution, ResolutionBatch},
+    result_meta::FailureKind,
+    runtime::RuntimeKind,
+};
+use ironclaw_loop_contracts::{
+    AgentLoopDriverDescriptor, AgentLoopHostError, AgentLoopHostErrorKind,
+    AppendCapabilityResultRef, AssistantReply, CancellationPolicy, CapabilityCallCandidate,
+    CapabilityDescriptorView, CapabilityFailureDetail, CapabilityInputRef, CapabilityProgress,
+    CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId,
+    ConcurrencyClass, ConcurrencyHint, ContentDigest, ContextProfileId, FinalizeAssistantMessage,
+    LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
+    LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest,
+    LoopCompactionResponse, LoopContextBundle, LoopContextCompactionMetadata, LoopContextRequest,
+    LoopDriverId, LoopFailureKind, LoopInput, LoopInputAck, LoopInputAckToken, LoopInputBatch,
+    LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest, LoopModelResponse,
+    LoopProgressEvent, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest, LoopRequest,
+    LoopRequestBatch, LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk,
+    ParentLoopOutput, ProviderToolCallReference, RedactedRunProfileProvenance, ResolvedRunProfile,
+    ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+    RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
 };
 
 /// Compaction prompt-index fixtures exposed for crate integration tests.
@@ -529,7 +531,7 @@ pub enum ScriptedCapabilityOutcome {
     /// Failed result.
     Failed {
         /// Error kind string consumed by the executor classifier.
-        error_kind: CapabilityFailureKind,
+        error_kind: FailureKind,
     },
 }
 
@@ -598,7 +600,7 @@ impl ScriptedCapabilityOutcome {
 /// Bundle fixture [`Resolution`]s into a [`ResolutionBatch`], carrying the
 /// `stopped_on_suspension` flag through unchanged — the batch-loop test sites'
 /// helper (§5.3 Stage 2b: producers emit `Resolution` directly, so fixtures
-/// build them through `ironclaw_turns::run_profile::resolution::*`).
+/// build them through `ironclaw_loop_contracts::resolution::*`).
 pub fn resolution_batch_from_scripted(
     resolutions: impl IntoIterator<Item = Resolution>,
     stopped_on_suspension: bool,
@@ -723,7 +725,7 @@ impl LoopRunInfoPort for MockAgentLoopDriverHost {
 }
 
 #[async_trait]
-impl ironclaw_turns::run_profile::LoopContextPort for MockAgentLoopDriverHost {
+impl ironclaw_loop_contracts::LoopContextPort for MockAgentLoopDriverHost {
     async fn load_loop_context(
         &self,
         _request: LoopContextRequest,
@@ -739,7 +741,7 @@ impl ironclaw_turns::run_profile::LoopContextPort for MockAgentLoopDriverHost {
 }
 
 #[async_trait]
-impl ironclaw_turns::run_profile::LoopPromptPort for MockAgentLoopDriverHost {
+impl ironclaw_loop_contracts::LoopPromptPort for MockAgentLoopDriverHost {
     async fn build_prompt_bundle(
         &self,
         request: LoopPromptBundleRequest,
@@ -768,7 +770,7 @@ impl ironclaw_turns::run_profile::LoopPromptPort for MockAgentLoopDriverHost {
 }
 
 #[async_trait]
-impl ironclaw_turns::run_profile::LoopInputPort for MockAgentLoopDriverHost {
+impl ironclaw_loop_contracts::LoopInputPort for MockAgentLoopDriverHost {
     async fn poll_inputs(
         &self,
         after: LoopInputCursor,
@@ -813,7 +815,7 @@ impl ironclaw_turns::run_profile::LoopInputPort for MockAgentLoopDriverHost {
 }
 
 #[async_trait]
-impl ironclaw_turns::run_profile::LoopModelPort for MockAgentLoopDriverHost {
+impl ironclaw_loop_contracts::LoopModelPort for MockAgentLoopDriverHost {
     async fn stream_model(
         &self,
         request: LoopModelRequest,
@@ -834,7 +836,7 @@ impl ironclaw_turns::run_profile::LoopModelPort for MockAgentLoopDriverHost {
 }
 
 #[async_trait]
-impl ironclaw_turns::run_profile::LoopCapabilityPort for MockAgentLoopDriverHost {
+impl ironclaw_loop_contracts::LoopCapabilityPort for MockAgentLoopDriverHost {
     async fn visible_capabilities(
         &self,
         _request: VisibleCapabilityRequest,
@@ -895,7 +897,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockAgentLoopDriverHost
 }
 
 #[async_trait]
-impl ironclaw_turns::run_profile::LoopTranscriptPort for MockAgentLoopDriverHost {
+impl ironclaw_loop_contracts::LoopTranscriptPort for MockAgentLoopDriverHost {
     async fn finalize_assistant_message(
         &self,
         request: FinalizeAssistantMessage,
@@ -924,7 +926,7 @@ impl ironclaw_turns::run_profile::LoopTranscriptPort for MockAgentLoopDriverHost
 }
 
 #[async_trait]
-impl ironclaw_turns::run_profile::LoopCheckpointPort for MockAgentLoopDriverHost {
+impl ironclaw_loop_contracts::LoopCheckpointPort for MockAgentLoopDriverHost {
     async fn checkpoint(
         &self,
         request: LoopCheckpointRequest,
@@ -955,7 +957,7 @@ impl ironclaw_turns::run_profile::LoopCheckpointPort for MockAgentLoopDriverHost
 }
 
 #[async_trait]
-impl ironclaw_turns::run_profile::LoopProgressPort for MockAgentLoopDriverHost {
+impl ironclaw_loop_contracts::LoopProgressPort for MockAgentLoopDriverHost {
     async fn emit_loop_progress(&self, event: LoopProgressEvent) -> Result<(), AgentLoopHostError> {
         lock_or_panic(&self.progress_events).push(event);
         Ok(())
@@ -963,7 +965,7 @@ impl ironclaw_turns::run_profile::LoopProgressPort for MockAgentLoopDriverHost {
 }
 
 #[async_trait]
-impl ironclaw_turns::run_profile::LoopCompactionPort for MockAgentLoopDriverHost {
+impl ironclaw_loop_contracts::LoopCompactionPort for MockAgentLoopDriverHost {
     async fn compact_loop_context(
         &self,
         _request: LoopCompactionRequest,
@@ -1048,7 +1050,7 @@ pub fn test_run_context(label: &str) -> LoopRunContext {
             max_model_calls: 32,
             max_capability_invocations: 64,
         },
-        personal_context_policy: ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
+        personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
         runtime_constraints: RuntimeProfileConstraints {
             allow_raw_runtime_backend_selection: false,
             allow_broad_capability_surface: false,
@@ -1079,6 +1081,7 @@ pub fn capability_descriptor(
         runtime: RuntimeKind::FirstParty,
         safe_name: "demo".to_string(),
         safe_description: "demo capability".to_string(),
+        description_trust: Default::default(),
         concurrency_hint,
         parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
     }
@@ -1127,7 +1130,7 @@ fn scripted_model_response(
 
 fn scripted_capability_call(call: ScriptedCapabilityCall) -> CapabilityCallCandidate {
     CapabilityCallCandidate {
-        activity_id: ironclaw_turns::CapabilityActivityId::new(),
+        activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
         surface_version: surface_version(),
         capability_id: capability_id(&call.name),
         input_ref: CapabilityInputRef::new(call.input_ref)
@@ -1199,9 +1202,13 @@ fn scripted_capability_outcome(
             byte_len,
             None,
         )),
-        ScriptedCapabilityOutcome::Failed { error_kind } => {
-            Ok(resolution::failed(error_kind, "failed".to_string(), None))
-        }
+        ScriptedCapabilityOutcome::Failed { error_kind } => Ok(resolution::failed(
+            error_kind,
+            "failed".to_string(),
+            CapabilityFailureDetail::Diagnostic {
+                text: "failed".to_string(),
+            },
+        )),
     }
 }
 
@@ -1214,30 +1221,12 @@ fn checkpoint_kind_from_host(kind: LoopCheckpointKind) -> CheckpointKind {
     }
 }
 
-fn scripted_failure_kind(kind: &str) -> CapabilityFailureKind {
+fn scripted_failure_kind(kind: &str) -> FailureKind {
     match kind {
-        "authorization" => CapabilityFailureKind::Authorization,
-        "backend" => CapabilityFailureKind::Backend,
-        "cancelled" => CapabilityFailureKind::Cancelled,
-        "dispatcher" => CapabilityFailureKind::Dispatcher,
-        "gate_declined" => CapabilityFailureKind::GateDeclined,
-        "input_invalid" | "invalid_input" => CapabilityFailureKind::InvalidInput,
-        "invalid_output" => CapabilityFailureKind::InvalidOutput,
-        "missing_runtime" => CapabilityFailureKind::MissingRuntime,
-        "network" => CapabilityFailureKind::Network,
-        "operation_failed" => CapabilityFailureKind::OperationFailed,
-        "output_too_large" => CapabilityFailureKind::OutputTooLarge,
-        "policy_denied" => CapabilityFailureKind::PolicyDenied,
-        "process" => CapabilityFailureKind::Process,
-        "resource" => CapabilityFailureKind::Resource,
-        "transient" => CapabilityFailureKind::Transient,
-        "unavailable" => CapabilityFailureKind::Unavailable,
-        "internal" => CapabilityFailureKind::Internal,
-        "permanent" => CapabilityFailureKind::Permanent,
-        other => match CapabilityFailureKind::unknown(other.to_string()) {
-            Ok(kind) => kind,
-            Err(_) => CapabilityFailureKind::Permanent,
-        },
+        // Historical scripted alias that predates the unified tag set.
+        "input_invalid" => FailureKind::InputEncode,
+        // Total over every tag (historical aliases included).
+        other => FailureKind::from_tag(other),
     }
 }
 

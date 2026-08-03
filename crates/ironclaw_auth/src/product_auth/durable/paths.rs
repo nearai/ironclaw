@@ -1,5 +1,5 @@
 use ironclaw_filesystem::FilesystemError;
-use ironclaw_host_api::{ResourceScope, ScopedPath, SecretHandle};
+use ironclaw_host_api::{ids::SecretHandle, path::ScopedPath, resource::ResourceScope};
 
 use crate::{
     AuthFlowId, AuthInteractionId, AuthProductError, AuthProviderId, AuthSurface,

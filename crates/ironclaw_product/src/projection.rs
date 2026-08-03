@@ -1,3 +1,4 @@
+use ironclaw_product_contracts::projection::ProjectionStream;
 // arch-exempt: large_file, mechanical InMemoryOutboundStateStore -> OutboundStateStore<InMemoryBackend> §4.3 store consolidation, no logic change, plan #6168
 use std::{
     sync::{Arc, atomic::AtomicU64},
@@ -9,11 +10,12 @@ use crate::{
     CapabilityActivityViewInput, ExternalActorRef, ExternalConversationRef, ProductAdapterError,
     ProductAdapterId, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
     ProductProjectionItem, ProductProjectionState, ProductSurfaceRejectionKind,
-    ProjectionCursor as ProductProjectionCursor, ProjectionStream, ProjectionStreamSubscription,
+    ProjectionCursor as ProductProjectionCursor, ProjectionStreamSubscription,
     ProjectionSubscriptionRequest, RedactedString,
 };
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
+use ironclaw_approvals::ApprovalRequestStorePort;
 use ironclaw_event_projections::{
     CapabilityActivityProjection, CapabilityActivityStatus, EventProjectionService,
     ProjectionCursor as EventProjectionCursor, ProjectionReplay,
@@ -32,15 +34,18 @@ use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope};
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_first_party_extension_ports::SkillActivationObserver;
 use ironclaw_host_api::{
-    HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, UserId,
-    VirtualPath,
+    error::HostApiError,
+    ids::UserId,
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
+use ironclaw_loop_contracts::LoopHostMilestoneSink;
 use ironclaw_outbound::OutboundStateStore;
-use ironclaw_run_state::ApprovalRequestStorePort;
 use ironclaw_turns::{
     ReplyTargetBindingRef, SanitizedFailure, TurnActor, TurnCoordinator, TurnError,
     TurnEventProjectionCursor, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent,
-    TurnRunId, TurnScope, TurnStatus, run_profile::LoopHostMilestoneSink,
+    TurnRunId, TurnScope, TurnStatus,
 };
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
@@ -135,7 +140,7 @@ impl RebornProjectionServices {
     pub fn with_model_failure_explainer_factory(
         self,
         system_inference: Arc<
-            dyn Fn() -> Arc<dyn ironclaw_turns::run_profile::SystemInferencePort> + Send + Sync,
+            dyn Fn() -> Arc<dyn ironclaw_loop_contracts::SystemInferencePort> + Send + Sync,
         >,
     ) -> Self {
         self.with_failure_explainer(Arc::new(ModelFailureExplanationProvider::from_factory(
@@ -220,7 +225,7 @@ pub fn build_reborn_projection_services(
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
         live_updates.clone(),
         Arc::new(NoExposureProjectionRedactionValidator),
-        // §4.3: the local-dev projection bundle's EventStreamManager keeps its
+        // §4.3: the standalone projection bundle's EventStreamManager keeps its
         // own ephemeral, volatile outbound-delivery bookkeeping — the drop-in
         // for the deleted throwaway `InMemoryOutboundStateStore::default()`.
         // A tenant/user-scoped view over a fresh `InMemoryBackend` mounts
@@ -267,7 +272,7 @@ fn outbound_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError>
 }
 
 fn outbound_scope_path_segment(value: &str) -> &str {
-    if value == ironclaw_host_api::SYSTEM_RESERVED_ID {
+    if value == ironclaw_host_api::resource::SYSTEM_RESERVED_ID {
         "__system__"
     } else {
         value

@@ -101,7 +101,7 @@ async fn product_event_stream_resumes_mixed_batch_without_skipping_turn_event() 
                 status: TurnStatus::BlockedAuth,
                 kind: TurnEventKind::Blocked,
                 blocked_gate: Some(TurnBlockedGateMetadata {
-                    gate_ref: GateRef::new("gate:auth-required").unwrap(),
+                    gate_ref: TurnGateRef::new("gate:auth-required").unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
                     activity_id: Some(blocked_activity_id),
                     credential_requirements: Vec::new(),
@@ -208,8 +208,8 @@ async fn product_event_stream_offers_always_for_typed_approval_gate() {
         thread_id.clone(),
     );
     let approval_request_id = ApprovalRequestId::new();
-    let gate_ref = GateRef::new(format!("gate:approval-{approval_request_id}")).unwrap();
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let gate_ref = TurnGateRef::new(format!("gate:approval-{approval_request_id}")).unwrap();
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let capability = CapabilityId::new("builtin.http").unwrap();
     let blocked_invocation = InvocationId::new();
     approval_requests
@@ -236,7 +236,7 @@ async fn product_event_stream_offers_always_for_typed_approval_gate() {
         )
         .await
         .unwrap();
-    let approval_requests_dyn: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort> =
+    let approval_requests_dyn: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort> =
         approval_requests;
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let actor = TurnActor::new(user_id.clone());
@@ -345,8 +345,8 @@ async fn product_event_stream_projects_network_approval_context() {
     );
     let network_run = TurnRunId::new();
     let network_request_id = ApprovalRequestId::new();
-    let network_gate_ref = GateRef::new(format!("gate:approval-{network_request_id}")).unwrap();
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let network_gate_ref = TurnGateRef::new(format!("gate:approval-{network_request_id}")).unwrap();
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let approval_scope = resource_scope(
         &tenant_id,
         &user_id,
@@ -379,7 +379,7 @@ async fn product_event_stream_projects_network_approval_context() {
         .await
         .unwrap();
 
-    let approval_requests_dyn: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort> =
+    let approval_requests_dyn: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort> =
         approval_requests;
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let actor = TurnActor::new(user_id.clone());
@@ -471,8 +471,8 @@ async fn product_event_stream_projects_spawn_approval_context() {
         thread_id.clone(),
     );
     let approval_request_id = ApprovalRequestId::new();
-    let gate_ref = GateRef::new(format!("gate:approval-{approval_request_id}")).unwrap();
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let gate_ref = TurnGateRef::new(format!("gate:approval-{approval_request_id}")).unwrap();
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     approval_requests
         .save_pending(
             resource_scope(
@@ -497,7 +497,7 @@ async fn product_event_stream_projects_spawn_approval_context() {
         )
         .await
         .unwrap();
-    let approval_requests_dyn: Arc<dyn ironclaw_run_state::ApprovalRequestStorePort> =
+    let approval_requests_dyn: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort> =
         approval_requests;
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let actor = TurnActor::new(user_id.clone());
@@ -577,7 +577,7 @@ async fn product_event_stream_fails_transiently_when_approval_request_lookup_fai
         thread_id.clone(),
     );
     let approval_request_id = ApprovalRequestId::new();
-    let gate_ref = GateRef::new(format!("gate:approval-{approval_request_id}")).unwrap();
+    let gate_ref = TurnGateRef::new(format!("gate:approval-{approval_request_id}")).unwrap();
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let actor = TurnActor::new(user_id.clone());
     let services = build_reborn_projection_services(
@@ -647,7 +647,7 @@ async fn product_event_stream_fails_closed_for_projection_allow_always_without_p
         thread_id.clone(),
     );
     let approval_request_id = ApprovalRequestId::new();
-    let gate_ref = GateRef::new(format!("gate:approval-{approval_request_id}")).unwrap();
+    let gate_ref = TurnGateRef::new(format!("gate:approval-{approval_request_id}")).unwrap();
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let actor = TurnActor::new(user_id.clone());
     let services = build_reborn_projection_services(
@@ -733,7 +733,7 @@ async fn product_event_stream_does_not_offer_always_for_generic_approval_gate() 
         None,
         thread_id.clone(),
     );
-    let gate_ref = GateRef::new("gate:generic-approval").unwrap();
+    let gate_ref = TurnGateRef::new("gate:generic-approval").unwrap();
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let actor = TurnActor::new(user_id.clone());
     let services = build_reborn_projection_services(
@@ -823,7 +823,7 @@ async fn product_event_stream_projects_blocked_dependent_run_status() {
                 status: TurnStatus::BlockedDependentRun,
                 kind: TurnEventKind::Blocked,
                 blocked_gate: Some(TurnBlockedGateMetadata {
-                    gate_ref: GateRef::new("gate:await-dependent-run").unwrap(),
+                    gate_ref: TurnGateRef::new("gate:await-dependent-run").unwrap(),
                     gate_kind: TurnBlockedGateKind::AwaitDependentRun,
                     activity_id: None,
                     credential_requirements: Vec::new(),
@@ -836,7 +836,7 @@ async fn product_event_stream_projects_blocked_dependent_run_status() {
         Arc::new(FakeTurnCoordinator {
             state: TurnRunState {
                 status: TurnStatus::BlockedDependentRun,
-                gate_ref: Some(GateRef::new("gate:await-dependent-run").unwrap()),
+                gate_ref: Some(TurnGateRef::new("gate:await-dependent-run").unwrap()),
                 ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1))
             },
         }),
@@ -1218,7 +1218,7 @@ async fn product_event_stream_reads_past_filtered_turn_event_pages() {
         status: TurnStatus::BlockedAuth,
         kind: TurnEventKind::Blocked,
         blocked_gate: Some(TurnBlockedGateMetadata {
-            gate_ref: GateRef::new("gate:auth-required").unwrap(),
+            gate_ref: TurnGateRef::new("gate:auth-required").unwrap(),
             gate_kind: TurnBlockedGateKind::Auth,
             activity_id: Some(blocked_activity_id),
             credential_requirements: Vec::new(),
@@ -1316,7 +1316,7 @@ async fn product_event_stream_does_not_prompt_for_stale_blocked_event() {
                 status: TurnStatus::BlockedAuth,
                 kind: TurnEventKind::Blocked,
                 blocked_gate: Some(TurnBlockedGateMetadata {
-                    gate_ref: GateRef::new("gate:auth-required").unwrap(),
+                    gate_ref: TurnGateRef::new("gate:auth-required").unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
                     activity_id: Some(blocked_activity_id),
                     credential_requirements: Vec::new(),

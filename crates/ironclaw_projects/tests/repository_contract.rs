@@ -11,8 +11,9 @@ use std::sync::Arc;
 use chrono::Utc;
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, UserId,
-    VirtualPath,
+    ids::{AgentId, ProjectId, TenantId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
 };
 use ironclaw_projects::{
     FilesystemProjectRepository, MAX_PROJECT_METADATA_BYTES, ProjectMemberRecord,
@@ -45,6 +46,14 @@ fn member(
         created_at: now,
         updated_at: now,
     }
+}
+
+#[test]
+fn project_record_new_mints_a_nonempty_project_id() {
+    let record = ProjectRecord::new(tenant(), user("alice"), "Research", "AI research")
+        .expect("project record is valid");
+
+    assert!(!record.project_id.as_str().is_empty());
 }
 
 /// Runs the full contract against any repository implementation.

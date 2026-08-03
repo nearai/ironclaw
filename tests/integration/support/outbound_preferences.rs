@@ -1,5 +1,5 @@
 //! In-process `OutboundPreferencesProductService` double for the C-SYNTH seam
-//! (`ironclaw_reborn_composition::runtime::local_dev::outbound_delivery`). Fixed
+//! (`ironclaw_reborn_composition::runtime::standalone::outbound_delivery`). Fixed
 //! in-memory inventory: succeeds for a known target, `NotFound` otherwise — one
 //! double drives both the happy path and the reject route without per-test
 //! config. Distinct from `delivery::RecordingOutboundDeliverySink` (the
@@ -10,15 +10,15 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{
-    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-};
 use ironclaw_product::{
     OutboundPreferencesProductService, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
     RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
     RebornOutboundPreferencesResponse, RebornSetOutboundPreferencesRequest,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 
 /// Bundled behind ONE mutex (not two) so a reader never observes `set_calls`
@@ -156,7 +156,7 @@ fn target_option(target_id: &str, display_name: &str) -> RebornOutboundDeliveryT
 
 /// The `NotFound` the production handler maps to `Failed(InvalidInput)` — see
 /// `OutboundDeliveryTargetSetHandler`'s `NotFound` arm in
-/// `runtime/local_dev/outbound_delivery.rs`.
+/// `runtime/standalone/outbound_delivery.rs`.
 fn target_not_found() -> ProductSurfaceError {
     ProductSurfaceError {
         code: ProductSurfaceErrorCode::NotFound,

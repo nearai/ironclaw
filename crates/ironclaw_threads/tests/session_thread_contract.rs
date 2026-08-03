@@ -1,6 +1,6 @@
 use chrono::Utc;
 use futures::future::join_all;
-use ironclaw_host_api::{
+use ironclaw_host_api::ids::{
     AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
 };
 use ironclaw_threads::{
@@ -2213,7 +2213,7 @@ async fn tool_result_preview_with_secretary_survives_model_context_replay() {
     );
 }
 
-/// Issue #5838: `ironclaw_reborn_composition::local_dev` inlines a first-look
+/// Issue #5838: `ironclaw_reborn_composition::standalone` inlines a first-look
 /// result preview up to `TOOL_RESULT_RECORD_READ_MAX_BYTES` into the
 /// `result_reference` observation. This pins that a full-size,
 /// JSON-braces-heavy preview at that cap survives this crate's own
@@ -2803,7 +2803,10 @@ async fn append_finalized_assistant_message_is_finalized_and_idempotent_by_turn_
             scope: scope("a"),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-finalized".into(),
-            content: MessageContent::text("final answer"),
+            content: MessageContent::with_attachments(
+                "final answer",
+                vec![sample_attachment_ref()],
+            ),
         })
         .await
         .unwrap();
@@ -2821,6 +2824,7 @@ async fn append_finalized_assistant_message_is_finalized_and_idempotent_by_turn_
     assert_eq!(duplicate.kind, MessageKind::Assistant);
     assert_eq!(duplicate.status, MessageStatus::Finalized);
     assert_eq!(duplicate.content.as_deref(), Some("final answer"));
+    assert_eq!(duplicate.attachments, vec![sample_attachment_ref()]);
 
     let by_run = service
         .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
@@ -2832,6 +2836,7 @@ async fn append_finalized_assistant_message_is_finalized_and_idempotent_by_turn_
         .unwrap()
         .expect("finalized assistant message should be lookupable by run");
     assert_eq!(by_run.message_id, first.message_id);
+    assert_eq!(by_run.attachments, vec![sample_attachment_ref()]);
 
     let history = service
         .list_thread_history(ThreadHistoryRequest {
@@ -2843,6 +2848,10 @@ async fn append_finalized_assistant_message_is_finalized_and_idempotent_by_turn_
     assert_eq!(history.messages.len(), 1);
     assert_eq!(history.messages[0].message_id, first.message_id);
     assert_eq!(history.messages[0].status, MessageStatus::Finalized);
+    assert_eq!(
+        history.messages[0].attachments,
+        vec![sample_attachment_ref()]
+    );
 }
 
 #[tokio::test]
@@ -2873,7 +2882,10 @@ async fn append_finalized_assistant_message_finalizes_existing_draft_by_turn_run
             scope: scope("a"),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-existing-draft".into(),
-            content: MessageContent::text("final answer"),
+            content: MessageContent::with_attachments(
+                "final answer",
+                vec![sample_attachment_ref()],
+            ),
         })
         .await
         .unwrap();
@@ -2881,6 +2893,7 @@ async fn append_finalized_assistant_message_finalizes_existing_draft_by_turn_run
     assert_eq!(finalized.message_id, draft.message_id);
     assert_eq!(finalized.status, MessageStatus::Finalized);
     assert_eq!(finalized.content.as_deref(), Some("final answer"));
+    assert_eq!(finalized.attachments, vec![sample_attachment_ref()]);
 }
 
 #[tokio::test]

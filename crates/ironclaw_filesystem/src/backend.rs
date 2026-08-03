@@ -9,14 +9,14 @@
 //! What lives here:
 //! - [`StorageTxn`] — the multi-key transactional handle that backends with
 //!   `TxnCapability::MultiKey` expose via
-//!   [`RootFilesystem::begin`](crate::RootFilesystem::begin). Stores must
-//!   continue to work using only CAS (`put` + `CasExpectation::Version`);
-//!   `StorageTxn` is a strictly stronger primitive offered as an optimisation
-//!   to backends that have it natively.
+//!   [`RootFilesystem::begin`](crate::RootFilesystem::begin). Most stores
+//!   should continue to work using only CAS (`put` +
+//!   `CasExpectation::Version`); stores whose invariants span multiple keyed
+//!   records may explicitly require `MultiKey`.
 //! - [`EventRecord`] — one entry emitted by the append/tail plane.
 
 use async_trait::async_trait;
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 
 use crate::{
     CasExpectation, Entry, FilesystemError, FilesystemOperation, RecordVersion, SeqNo,
@@ -48,6 +48,21 @@ pub trait StorageTxn: Send {
             path: path.clone(),
             operation: FilesystemOperation::ReserveSeq,
         })
+    }
+
+    /// Atomically reserve `count` consecutive sequence values, returning the
+    /// final reserved value. Backends override this to avoid one statement per
+    /// historical record during migrations.
+    async fn reserve_sequence_range(
+        &mut self,
+        path: &VirtualPath,
+        count: u64,
+    ) -> Result<SeqNo, FilesystemError> {
+        let mut last = SeqNo::ZERO;
+        for _ in 0..count {
+            last = self.reserve_sequence(path).await?;
+        }
+        Ok(last)
     }
 
     async fn commit(self: Box<Self>) -> Result<(), FilesystemError>;

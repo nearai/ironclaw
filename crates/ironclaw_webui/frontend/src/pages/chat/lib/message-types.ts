@@ -24,6 +24,7 @@ export type ChatAttachment = {
   size_label?: string;
   fetch_url?: string;
   preview_url?: string | null;
+  workspace_path?: string;
   [key: string]: unknown;
 };
 
@@ -41,6 +42,18 @@ export type ChatMessage = {
   toolCalls?: unknown[];
   [key: string]: unknown;
 };
+
+export function messageBelongsToActiveRun(
+  message: ChatMessage | null | undefined,
+  activeRunId: string | null | undefined,
+): boolean {
+  return (
+    typeof activeRunId === "string" &&
+    activeRunId.length > 0 &&
+    typeof message?.turnRunId === "string" &&
+    message.turnRunId === activeRunId
+  );
+}
 
 export type ErrorChatMessage = {
   id: string;

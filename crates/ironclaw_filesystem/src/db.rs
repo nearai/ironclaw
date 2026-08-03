@@ -1,6 +1,6 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ironclaw_host_api::{HostApiError, VirtualPath};
+use ironclaw_host_api::{error::HostApiError, path::VirtualPath};
 
 use crate::{DirEntry, FileType, FilesystemError, FilesystemOperation};
 pub(crate) fn directory_write_error(path: VirtualPath) -> FilesystemError {
@@ -70,20 +70,6 @@ pub(crate) fn descendant_path_range(path: &VirtualPath) -> (String, String) {
     // exclusive upper bound "{prefix}0" works because '/' sorts before '0'
     // in the normalized virtual path alphabet used by these storage paths.
     (format!("{prefix}/"), format!("{prefix}0"))
-}
-pub(crate) fn child_path_like_pattern(path: &VirtualPath) -> String {
-    let mut pattern = String::new();
-    for character in path.as_str().trim_end_matches('/').chars() {
-        match character {
-            '!' | '%' | '_' => {
-                pattern.push('!');
-                pattern.push(character);
-            }
-            _ => pattern.push(character),
-        }
-    }
-    pattern.push_str("/%");
-    pattern
 }
 pub(crate) fn not_found(path: VirtualPath, operation: FilesystemOperation) -> FilesystemError {
     FilesystemError::NotFound { path, operation }

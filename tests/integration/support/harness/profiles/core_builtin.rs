@@ -2,8 +2,8 @@
 //!
 //! Unlike the other `profiles/*` domains, this harness does NOT flow through
 //! `new_with_options`/`RebornServices` — it builds the `HostRuntime` directly
-//! via `local_dev_host_runtime_with_http_egress` /
-//! `local_dev_host_runtime_with_live_http_egress` and assembles
+//! via `standalone_host_runtime_with_http_egress` /
+//! `standalone_host_runtime_with_live_http_egress` and assembles
 //! `HostRuntimeCapabilityHarness` by hand (`core_builtin_tools_from_runtime`),
 //! so it does not go through `ToolsProfile`/`.build()`.
 
@@ -13,13 +13,17 @@ use std::sync::{Arc, Mutex};
 
 use super::super::{
     HarnessResult, HostRuntimeCapabilityHarness, RecordingNetworkHttpTransport,
-    RecordingRuntimeHttpEgress, host_runtime_storage_roots, http_test_policy,
-    local_dev_host_runtime_with_http_egress, local_dev_host_runtime_with_live_http_egress,
-    local_dev_host_runtime_with_real_egress_pipeline, memory_mounts, workspace_mounts,
+    RecordingRuntimeHttpEgress, host_runtime_storage_roots, http_test_policy, memory_mounts,
+    standalone_host_runtime_with_http_egress, standalone_host_runtime_with_live_http_egress,
+    standalone_host_runtime_with_real_egress_pipeline, workspace_mounts,
 };
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, MountAlias, MountGrant, MountPermissions, MountView,
-    NetworkPolicy, RuntimeKind, UserId, VirtualPath,
+    action::NetworkPolicy,
+    capability::EffectKind,
+    ids::{CapabilityId, ExtensionId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    runtime::RuntimeKind,
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, HTTP_CAPABILITY_ID,
@@ -38,11 +42,11 @@ pub(crate) enum EgressMode {
     /// policy enforcement or leak scan runs; requests/responses are scripted
     /// and captured on the harness).
     Recording,
-    /// `local_dev_host_runtime_with_live_http_egress`: real HTTP egress over
+    /// `standalone_host_runtime_with_live_http_egress`: real HTTP egress over
     /// the real network. No recording `RuntimeHttpEgress`/process port is
     /// captured on the harness.
     Live,
-    /// S1 seam: `local_dev_host_runtime_with_real_egress_pipeline` — the REAL
+    /// S1 seam: `standalone_host_runtime_with_real_egress_pipeline` — the REAL
     /// production egress pipeline (network-policy enforcement + leak scan)
     /// with only the wire-level transport recorded.
     RealPipeline,
@@ -65,6 +69,13 @@ pub(crate) struct CoreBuiltinOptions {
     /// `Recording`; set via `.with_live_http_egress()` /
     /// `.with_real_egress_pipeline()`.
     pub(crate) egress: EgressMode,
+    /// `true` (default) registers the bound memory provider's package
+    /// (native, mirroring the default binding) so the four
+    /// `ironclaw.memory.*` tools reach the model surface.
+    /// `.without_memory_package()` mirrors the `Disabled` binding shape:
+    /// composition registers NO memory package, so zero memory tools are
+    /// advertised. Recording-egress mode only.
+    pub(crate) include_memory_package: bool,
 }
 
 impl Default for CoreBuiltinOptions {
@@ -73,6 +84,7 @@ impl Default for CoreBuiltinOptions {
             network_policy: http_test_policy(),
             recording_process: true,
             egress: EgressMode::Recording,
+            include_memory_package: true,
         }
     }
 }
@@ -101,6 +113,13 @@ impl CoreBuiltinOptions {
         self.egress = EgressMode::RealPipeline;
         self
     }
+
+    /// The `Disabled` memory-binding shape: no memory package is registered,
+    /// so zero `ironclaw.memory.*` tools reach the model surface.
+    pub(crate) fn without_memory_package(mut self) -> Self {
+        self.include_memory_package = false;
+        self
+    }
 }
 
 /// Core built-in tools (`time`/`json`/`http`/`memory_*`/`profile_set`/
@@ -112,7 +131,18 @@ pub(crate) async fn core_builtin_tools(
         network_policy,
         recording_process,
         egress,
+        include_memory_package,
     } = options;
+    // Fail loud instead of silently ignoring the knob: only the
+    // recording-egress branch threads a caller-shaped registry; the Live and
+    // RealPipeline builders wire their own fixed registries.
+    if !include_memory_package && !matches!(egress, EgressMode::Recording) {
+        return Err(
+            "without_memory_package() is only supported with recording egress; the Live/\
+             RealPipeline harness builders wire fixed registries"
+                .into(),
+        );
+    }
     // Inject the inert recording port by default so `builtin.shell`
     // invocations in tests never spawn a real OS process. `.with_live_shell()`
     // sets `recording_process = false`, which skips injection and lets
@@ -131,7 +161,7 @@ pub(crate) async fn core_builtin_tools(
         EgressMode::RealPipeline => {
             let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
             let transport = RecordingNetworkHttpTransport::with_body(br#"{"ok":true}"#.to_vec());
-            let runtime = local_dev_host_runtime_with_real_egress_pipeline(
+            let runtime = standalone_host_runtime_with_real_egress_pipeline(
                 storage_root.clone(),
                 transport.clone(),
                 process_port_dyn,
@@ -149,7 +179,7 @@ pub(crate) async fn core_builtin_tools(
         }
         EgressMode::Live => {
             let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
-            let runtime = local_dev_host_runtime_with_live_http_egress(storage_root.clone())?;
+            let runtime = standalone_host_runtime_with_live_http_egress(storage_root.clone())?;
             core_builtin_tools_from_runtime(
                 root,
                 workspace_root,
@@ -163,11 +193,25 @@ pub(crate) async fn core_builtin_tools(
             let runtime_http_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
                 br#"{"accepted":true}"#.to_vec(),
             ));
-            let runtime = local_dev_host_runtime_with_http_egress(
-                storage_root.clone(),
-                Arc::clone(&runtime_http_egress),
-                process_port_dyn,
-            )?;
+            let runtime = if include_memory_package {
+                standalone_host_runtime_with_http_egress(
+                    storage_root.clone(),
+                    Arc::clone(&runtime_http_egress),
+                    process_port_dyn,
+                )?
+            } else {
+                // The `Disabled` binding shape: builtin package only — the
+                // registry (and therefore the model tool surface) carries no
+                // memory package at all.
+                let mut registry = ironclaw_extensions::ExtensionRegistry::new();
+                registry.insert(ironclaw_host_runtime::builtin_first_party_package()?)?;
+                super::super::assembly::standalone_host_runtime_with_registry_and_runtime_http_egress(
+                    storage_root.clone(),
+                    registry,
+                    Arc::clone(&runtime_http_egress),
+                    process_port_dyn,
+                )?
+            };
             let mut harness = core_builtin_tools_from_runtime(
                 root,
                 workspace_root,
@@ -197,7 +241,7 @@ pub(crate) async fn core_builtin_tools_with_durable_capability_io()
 
 /// Harness-port-seam Change 4: the SAME `core_builtin_tools_default` backend,
 /// with an additional confirmed `/host` mount grant layered onto the
-/// workspace mount view — mirrors `local_dev_mounts::ambient_workspace_mount_view`
+/// workspace mount view — mirrors `standalone_mounts::ambient_workspace_mount_view`
 /// appending a `/host` alias when `host_home_aliases` is non-empty. This is
 /// the ONLY integration-tier construction with a confirmed host-home mount,
 /// so it is the sole way to observe `wrap_surface_disclosure`'s
@@ -273,6 +317,7 @@ fn core_builtin_tools_from_runtime(
     let (io, result_writer_io) = super::super::default_capability_io_pair();
     Ok(HostRuntimeCapabilityHarness {
         runtime: Mutex::new(runtime),
+        resource_governor: None,
         approval_parts: None,
         gate_record_store: super::super::fresh_in_memory_gate_record_store(),
         auto_approve_settings: None,

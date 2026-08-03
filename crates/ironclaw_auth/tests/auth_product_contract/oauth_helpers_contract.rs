@@ -147,14 +147,14 @@ fn scope_text_returns_empty_string_for_empty_scopes() {
 
 fn auth_scope() -> ironclaw_auth::AuthProductScope {
     ironclaw_auth::AuthProductScope::new(
-        ironclaw_host_api::ResourceScope {
-            tenant_id: ironclaw_host_api::TenantId::new("tenant-a").unwrap(),
-            user_id: ironclaw_host_api::UserId::new("user-a").unwrap(),
+        ironclaw_host_api::resource::ResourceScope {
+            tenant_id: ironclaw_host_api::ids::TenantId::new("tenant-a").unwrap(),
+            user_id: ironclaw_host_api::ids::UserId::new("user-a").unwrap(),
             agent_id: None,
             project_id: None,
             mission_id: None,
             thread_id: None,
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         },
         ironclaw_auth::AuthSurface::Callback,
     )

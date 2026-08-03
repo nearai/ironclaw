@@ -42,11 +42,12 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use ironclaw_host_api::ResourceUsage;
+use ironclaw_host_api::resource::ResourceUsage;
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
+use ironclaw_loop_contracts::ModelProfileId;
 use ironclaw_loop_host::{ModelCost, ModelCostTable, StaticModelCostTable};
 use ironclaw_reborn_composition::test_support::{BudgetTestGateway, ScriptedReply};
 use ironclaw_reborn_composition::{
@@ -56,7 +57,6 @@ use ironclaw_reborn_composition::{
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::BudgetEvent;
 use ironclaw_turns::TurnStatus;
-use ironclaw_turns::run_profile::ModelProfileId;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
@@ -81,11 +81,11 @@ async fn budget_e2e_serial_guard() -> tokio::sync::OwnedMutexGuard<()> {
     gate.lock_owned().await
 }
 
-fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
+fn standalone_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,
@@ -144,8 +144,11 @@ fn build_input(
     budget_defaults: BudgetDefaults,
 ) -> RebornRuntimeInput {
     RebornRuntimeInput::from_build_input(
-        ironclaw_reborn_composition::local_dev_build_input(format!("{tenant}-owner"), owner_root)
-            .with_runtime_policy(local_dev_runtime_policy()),
+        ironclaw_reborn_composition::local_filesystem_build_input(
+            format!("{tenant}-owner"),
+            owner_root,
+        )
+        .with_runtime_policy(standalone_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: format!("{tenant}-tenant"),

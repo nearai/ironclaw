@@ -32,17 +32,22 @@ use async_trait::async_trait;
 use axum::Json;
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
-use ironclaw_attachments::InboundAttachment;
-use ironclaw_host_api::{
-    ActivityId, BoundProductSurface, ProductSurface, ProductSurfaceCaller, ThreadId,
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_host_api::attachment::InboundAttachment;
+use ironclaw_host_api::ids::{ActivityId, ThreadId};
+use ironclaw_host_api::product_adapter::ProtocolAuthEvidence;
+use ironclaw_product::{CREATE_THREAD_COMMAND, SUBMIT_TURN_COMMAND};
+use ironclaw_product_contracts::inbound::{
+    ProductInboundAck, ProductRejection, UserMessagePayload,
 };
-use ironclaw_product::{
-    CREATE_THREAD_COMMAND, ProductCreateThreadRequest, ProductInboundAttachment,
-    ProductSubmitTurnRequest, SUBMIT_TURN_COMMAND,
+use ironclaw_product_contracts::inbound_requests::{
+    ProductCreateThreadRequest, ProductInboundAttachment, ProductSubmitTurnRequest,
 };
-use ironclaw_product::{
-    ProductInboundAck, ProductRejection, ProductTriggerReason, ProjectionReadRequest,
-    ProjectionSubscriptionRequest, ProtocolAuthEvidence, UserMessagePayload,
+use ironclaw_product_contracts::projection::{
+    ProjectionReadRequest, ProjectionSubscriptionRequest,
+};
+use ironclaw_product_contracts::surface::{
+    BoundProductSurface, ProductSurface, ProductSurfaceCaller,
 };
 use uuid::Uuid;
 
@@ -766,7 +771,7 @@ fn chat_user_message_and_attachments(
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_product::ProductInboundAck;
+    use ironclaw_product_contracts::inbound::ProductInboundAck;
     use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
     use super::accepted_ack_from_ack;

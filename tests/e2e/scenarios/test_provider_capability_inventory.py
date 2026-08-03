@@ -2,12 +2,11 @@
 
 import ast
 import json
-from pathlib import Path
 import re
-import tomllib
+from pathlib import Path
 
 import pytest
-
+import tomllib
 from provider_capability_inventory import (
     ALL_CLASSIFIED_CAPABILITY_IDS,
     COVERAGE_BACKLOG,
@@ -95,10 +94,13 @@ def _cargo_test_targets() -> dict[str, str]:
 def _assert_integration_evidence_is_executable(
     evidence: dict, targets: dict[str, str]
 ) -> None:
-    required = {"capability", "target", "source", "test"}
+    required = {"capability", "outcome_class", "target", "source", "test"}
     assert set(evidence) == required, (
         f"integration evidence fields must be exactly {sorted(required)}: "
         f"{evidence}"
+    )
+    assert evidence["outcome_class"] in REQUIRED_READ_OUTCOME_CLASSES, (
+        f"unknown integration outcome class: {evidence}"
     )
 
     assert evidence["target"] in targets, (
@@ -176,13 +178,14 @@ def test_tested_capabilities_have_executable_evidence_at_the_correct_seam():
         capability_id_to_wire_name(case.capability_id)
         for case in PROVIDER_OPERATION_CASES
     }
-    integration_capabilities = [
-        entry["capability"] for entry in INTEGRATION_EVIDENCE
+    integration_outcomes = [
+        (entry["capability"], entry["outcome_class"])
+        for entry in INTEGRATION_EVIDENCE
     ]
     duplicates = sorted(
-        capability
-        for capability in set(integration_capabilities)
-        if integration_capabilities.count(capability) > 1
+        outcome
+        for outcome in set(integration_outcomes)
+        if integration_outcomes.count(outcome) > 1
     )
     assert not duplicates, f"duplicate integration evidence: {duplicates}"
     assert INTEGRATION_EVIDENCE_CAPABILITY_IDS <= TESTED_CAPABILITY_IDS, (
@@ -253,22 +256,190 @@ def _scope_nodes(node: ast.AST, *, top: bool = False):
         yield from _scope_nodes(child)
 
 
+def _module_functions(
+    source: str,
+) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    return {
+        node.name: node
+        for node in ast.parse(source).body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def _module_statement_bindings(statement: ast.stmt) -> set[str]:
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {statement.name}
+    if isinstance(statement, (ast.Import, ast.ImportFrom)):
+        return {
+            alias.asname or alias.name.split(".", 1)[0]
+            for alias in statement.names
+        }
+    return {
+        node.id
+        for node in _scope_nodes(statement)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+    }
+
+
+def _provider_helper_import_binding(
+    source: str,
+    assertion_source: str,
+    symbol: str,
+) -> tuple[str, str | None]:
+    """Resolve the caller binding for one provider-owned assertion helper."""
+    expected_module = Path(assertion_source).stem
+    tree = ast.parse(source)
+    bindings: list[tuple[str, str | None, ast.stmt]] = []
+    for statement in tree.body:
+        if isinstance(statement, ast.ImportFrom) and statement.module == expected_module:
+            bindings.extend(
+                (alias.asname or alias.name, None, statement)
+                for alias in statement.names
+                if alias.name == symbol
+            )
+        elif isinstance(statement, ast.Import):
+            bindings.extend(
+                (alias.asname or alias.name, symbol, statement)
+                for alias in statement.names
+                if alias.name == expected_module
+            )
+    assert len(bindings) == 1, (
+        f"journey evidence assertion helper {symbol!r} must be imported exactly "
+        f"once from declared provider module {expected_module!r}"
+    )
+    bound_name, attribute, import_statement = bindings[0]
+    shadowing = [
+        type(statement).__name__
+        for statement in tree.body
+        if statement is not import_statement
+        and bound_name in _module_statement_bindings(statement)
+    ]
+    assert not shadowing, (
+        f"journey evidence assertion helper binding {bound_name!r} is shadowed "
+        f"in the journey module by {shadowing}"
+    )
+    return bound_name, attribute
+
+
+def _executed_functions(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    module_functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """The caller plus its directly awaited module-level delegates."""
+    nodes = list(_scope_nodes(function, top=True))
+    awaited = {id(node.value) for node in nodes if isinstance(node, ast.Await)}
+    delegates = [
+        delegate
+        for node in nodes
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and id(node) in awaited
+        and (delegate := module_functions.get(node.func.id)) is not None
+        and delegate is not function
+    ]
+    return [function, *delegates]
+
+
+def _function_binds_name(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    name: str,
+) -> bool:
+    argument_names = {
+        argument.arg
+        for argument in (
+            *function.args.posonlyargs,
+            *function.args.args,
+            *function.args.kwonlyargs,
+        )
+    }
+    if function.args.vararg is not None:
+        argument_names.add(function.args.vararg.arg)
+    if function.args.kwarg is not None:
+        argument_names.add(function.args.kwarg.arg)
+    if name in argument_names:
+        return True
+
+    def binds_in_scope(node: ast.AST) -> bool:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(
+                child,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+            ):
+                if child.name == name:
+                    return True
+                continue
+            if isinstance(child, (ast.Import, ast.ImportFrom)) and any(
+                (alias.asname or alias.name.split(".", 1)[0]) == name
+                for alias in child.names
+            ):
+                return True
+            if (
+                isinstance(child, ast.Name)
+                and isinstance(child.ctx, ast.Store)
+                and child.id == name
+            ):
+                return True
+            if binds_in_scope(child):
+                return True
+        return False
+
+    return binds_in_scope(function)
+
+
 def _assert_python_symbol_called(
     function: ast.FunctionDef | ast.AsyncFunctionDef,
     helper: ast.FunctionDef | ast.AsyncFunctionDef,
     caller: str,
     source_label: str,
+    module_functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef]
+    | None = None,
+    binding: tuple[str, str | None] | None = None,
 ) -> None:
+    # Defaults to following nothing, so an omitted argument makes the check
+    # stricter rather than quietly accepting indirection it never inspected.
     symbol = helper.name
-    nodes = list(_scope_nodes(function, top=True))
+    functions = _executed_functions(function, module_functions or {})
+    nodes = [
+        node
+        for executed in functions
+        for node in _scope_nodes(executed, top=True)
+    ]
+    if binding is not None:
+        bound_name, attribute = binding
+        shadowing = [
+            executed.name
+            for executed in functions
+            if _function_binds_name(executed, bound_name)
+        ]
+        assert not shadowing, (
+            f"journey evidence assertion helper binding {bound_name!r} is "
+            f"shadowed in executed functions {shadowing}"
+        )
+
+        def matches_binding(call: ast.Call) -> bool:
+            if attribute is None:
+                return isinstance(call.func, ast.Name) and call.func.id == bound_name
+            return (
+                isinstance(call.func, ast.Attribute)
+                and call.func.attr == attribute
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == bound_name
+            )
+
+    else:
+
+        def matches_binding(call: ast.Call) -> bool:
+            return (
+                isinstance(call.func, ast.Name) and call.func.id == symbol
+            ) or (
+                isinstance(call.func, ast.Attribute)
+                and call.func.attr == symbol
+            )
+
     calls = [
         node
         for node in nodes
-        if isinstance(node, ast.Call)
-        and (
-            (isinstance(node.func, ast.Name) and node.func.id == symbol)
-            or (isinstance(node.func, ast.Attribute) and node.func.attr == symbol)
-        )
+        if isinstance(node, ast.Call) and matches_binding(node)
     ]
     assert calls, (
         f"journey evidence assertion helper {symbol!r} is never called by "
@@ -289,7 +460,13 @@ def _assert_python_symbol_called(
 
 
 def _assert_journey_evidence_is_executable(evidence: dict) -> None:
-    required = {"capability", "source", "test", "assertion"}
+    required = {
+        "capability",
+        "source",
+        "test",
+        "assertion_source",
+        "assertion",
+    }
     assert set(evidence) == required, (
         f"journey evidence fields must be exactly {sorted(required)}: {evidence}"
     )
@@ -303,11 +480,22 @@ def _assert_journey_evidence_is_executable(evidence: dict) -> None:
     )
     # The assertion helper is the part that actually reads provider state back.
     # Without it the named test still runs but proves nothing about the write.
+    assertion_source_path = ROOT / evidence["assertion_source"]
+    assert assertion_source_path.is_file(), (
+        "journey evidence assertion source is missing: "
+        f"{evidence['assertion_source']}"
+    )
+    assertion_source = assertion_source_path.read_text()
     helper = _python_function(
-        source,
+        assertion_source,
         evidence["assertion"],
-        evidence["source"],
+        evidence["assertion_source"],
         "journey evidence assertion helper",
+    )
+    binding = _provider_helper_import_binding(
+        source,
+        evidence["assertion_source"],
+        helper.name,
     )
     # Declaring the helper is not enough: deleting the call from the test would
     # leave both symbols and the recorded tool names intact, and the write
@@ -317,6 +505,8 @@ def _assert_journey_evidence_is_executable(evidence: dict) -> None:
         helper,
         evidence["test"],
         evidence["source"],
+        _module_functions(source),
+        binding,
     )
 
 
@@ -351,6 +541,61 @@ def test_journey_evidence_rejects_a_vanished_symbol(
     with pytest.raises(AssertionError, match=rf"{missing_symbol}.* is missing"):
         _python_function(
             remaining_source, missing_symbol, "synthetic.py", "journey evidence"
+        )
+
+
+def test_journey_evidence_rejects_a_same_named_local_stub():
+    source = (
+        "from provider_journey_google import assert_google_provider_outcome\n"
+        "\n"
+        "async def assert_google_provider_outcome(url, calls):\n"
+        "    return None\n"
+        "\n"
+        "async def test_journey(url, calls):\n"
+        "    await assert_google_provider_outcome(url, calls)\n"
+    )
+
+    with pytest.raises(AssertionError, match=r"binding .* is shadowed"):
+        _provider_helper_import_binding(
+            source,
+            "tests/e2e/provider_journey_google.py",
+            "assert_google_provider_outcome",
+        )
+
+
+def test_journey_evidence_rejects_a_same_named_function_local_import():
+    source = (
+        "from provider_journey_google import assert_google_provider_outcome\n"
+        "\n"
+        "async def test_journey(url, calls):\n"
+        "    from unrelated import assert_google_provider_outcome\n"
+        "    await assert_google_provider_outcome(url, calls)\n"
+    )
+    provider_source = (
+        "async def assert_google_provider_outcome(url, calls):\n"
+        "    return None\n"
+    )
+    test = _python_function(source, "test_journey", "synthetic.py", "test")
+    helper = _python_function(
+        provider_source,
+        "assert_google_provider_outcome",
+        "provider_journey_google.py",
+        "helper",
+    )
+    binding = _provider_helper_import_binding(
+        source,
+        "tests/e2e/provider_journey_google.py",
+        helper.name,
+    )
+
+    with pytest.raises(AssertionError, match=r"binding .* is shadowed"):
+        _assert_python_symbol_called(
+            test,
+            helper,
+            "test_journey",
+            "synthetic.py",
+            _module_functions(source),
+            binding,
         )
 
 
@@ -428,6 +673,72 @@ def test_journey_evidence_rejects_a_call_inside_an_uninvoked_nested_function():
         )
 
 
+def test_journey_evidence_accepts_a_readback_reached_through_an_awaited_delegate():
+    """A test may share its body with another scenario via one helper hop.
+
+    The readback still executes, so refusing to follow that hop would reject
+    real evidence and push authors back into duplicating the replay.
+    """
+    source = (
+        "async def test_journey(world):\n"
+        "    await _replay(world)\n"
+        "\n"
+        "async def _replay(world):\n"
+        "    await _assert_readback(world)\n"
+        "\n"
+        "async def _assert_readback(url):\n"
+        "    ...\n"
+    )
+    test = _python_function(source, "test_journey", "synthetic.py", "test")
+    helper = _python_function(source, "_assert_readback", "synthetic.py", "helper")
+    _assert_python_symbol_called(
+        test, helper, "test_journey", "synthetic.py", _module_functions(source)
+    )
+
+
+def test_journey_evidence_rejects_a_readback_behind_an_unawaited_delegate():
+    """An un-awaited delegate never runs, so nothing inside it is evidence."""
+    source = (
+        "async def test_journey(world):\n"
+        "    _replay(world)\n"
+        "\n"
+        "async def _replay(world):\n"
+        "    await _assert_readback(world)\n"
+        "\n"
+        "async def _assert_readback(url):\n"
+        "    ...\n"
+    )
+    test = _python_function(source, "test_journey", "synthetic.py", "test")
+    helper = _python_function(source, "_assert_readback", "synthetic.py", "helper")
+    with pytest.raises(AssertionError, match="is never called by 'test_journey'"):
+        _assert_python_symbol_called(
+            test, helper, "test_journey", "synthetic.py", _module_functions(source)
+        )
+
+
+def test_journey_evidence_does_not_follow_two_levels_of_delegation():
+    """One hop is reviewable at the call site; arbitrary depth is not."""
+    source = (
+        "async def test_journey(world):\n"
+        "    await _replay(world)\n"
+        "\n"
+        "async def _replay(world):\n"
+        "    await _deeper(world)\n"
+        "\n"
+        "async def _deeper(world):\n"
+        "    await _assert_readback(world)\n"
+        "\n"
+        "async def _assert_readback(url):\n"
+        "    ...\n"
+    )
+    test = _python_function(source, "test_journey", "synthetic.py", "test")
+    helper = _python_function(source, "_assert_readback", "synthetic.py", "helper")
+    with pytest.raises(AssertionError, match="is never called by 'test_journey'"):
+        _assert_python_symbol_called(
+            test, helper, "test_journey", "synthetic.py", _module_functions(source)
+        )
+
+
 def test_journey_evidence_rejects_a_duplicated_definition():
     """Python binds the last def; a stale earlier copy must not vouch for it."""
     source = (
@@ -477,32 +788,35 @@ def test_journey_evidence_accepts_a_genuinely_invoked_helper(call: str):
 
 
 def _covered_capability_outcomes() -> dict[str, set[str]]:
-    """Capability -> outcome classes proven by a typed operation case."""
+    """Capability -> outcome classes proven at an executable provider seam."""
     covered: dict[str, set[str]] = {}
     for case in PROVIDER_OPERATION_CASES:
         covered.setdefault(case.capability_id, set()).add(case.outcome_class)
+    for evidence in INTEGRATION_EVIDENCE:
+        covered.setdefault(evidence["capability"], set()).add(
+            evidence["outcome_class"]
+        )
     return covered
 
 
-def test_write_capabilities_are_not_evidenced_by_a_recorded_tool_name():
-    """A recorded tool-call name proves model choice, never a provider mutation.
+def test_write_capabilities_require_typed_provider_operation_contracts():
+    """Every provider mutation requires a typed observed-request contract.
 
-    `_recorded_tool_evidence` only observes that some harvested trace emitted a
-    call with this name. For an `external_write` capability that says nothing
-    about whether the provider committed the effect, so it cannot stand in for
-    a typed case with provider-side readback.
+    Journey evidence remains valuable user-flow coverage, but it cannot assert
+    the exact provider request, credential account, response, and mutation
+    count required by the operation runner.
     """
-    covered = set(_covered_capability_outcomes())
+    typed_capabilities = {
+        case.capability_id for case in PROVIDER_OPERATION_CASES
+    }
     unproven = sorted(
         WRITE_CAPABILITY_IDS
-        - covered
-        - INTEGRATION_EVIDENCE_CAPABILITY_IDS
-        - JOURNEY_EVIDENCE_CAPABILITY_IDS
+        - typed_capabilities
         - backlogged_capabilities("write_requires_operation_case")
     )
     assert not unproven, (
-        "write capabilities whose only evidence is a recorded tool-call name; "
-        "add a ProviderOperationCase with provider readback or an owned "
+        "write capabilities without typed request and readback evidence; "
+        "add a ProviderOperationCase or an owned "
         f"coverage_backlog entry: {unproven}"
     )
 
@@ -511,10 +825,6 @@ def test_read_capabilities_cover_every_required_outcome_class():
     """Epic #6524 workstream 5: seeded success *and* empty-result per read."""
     covered = _covered_capability_outcomes()
     backlogged = backlogged_capabilities("read_requires_outcome_classes")
-    # Integration evidence is not subtracted here. It names one executable test
-    # per capability with no notion of outcome class, so letting it exempt a
-    # read would be a silent exemption of exactly the kind this gate exists to
-    # remove. Those capabilities are carried in the backlog with a reason.
     missing = sorted(
         f"{capability_id}:{outcome_class}"
         for capability_id in READ_CAPABILITY_IDS - backlogged

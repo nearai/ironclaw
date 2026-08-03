@@ -1,24 +1,40 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_events::{DurableEventLog, EventError, RuntimeEvent};
+use ironclaw_events::{DurableEventLog, EventError, RuntimeEvent, RuntimeEventId};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, MissionId, ProjectId, ResourceScope, TenantId, ThreadId,
-    UserId,
+    ids::{AgentId, CapabilityId, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId},
+    resource::ResourceScope,
+};
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, HookDecisionSummary, LoopHostMilestone,
+    LoopHostMilestoneKind, LoopHostMilestoneSink,
 };
 use ironclaw_threads::ThreadScope;
-use ironclaw_turns::{
-    TurnRunId,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, HookDecisionSummary, LoopHostMilestone,
-        LoopHostMilestoneKind, LoopHostMilestoneSink,
-    },
-};
+use ironclaw_turns::TurnRunId;
 
 const MODEL_CAPABILITY_ID: &str = "loop.model";
 const ASSISTANT_REPLY_CAPABILITY_ID: &str = "loop.assistant_reply";
 const LOOP_RUN_CAPABILITY_ID: &str = "loop.run";
 const HOOK_CAPABILITY_ID: &str = "loop.hook";
+const RECOVERY_CAPABILITY_ID: &str = "loop.recovery";
+const RECOVERY_EVENT_ID_DOMAIN: &[u8] = b"ironclaw:loop-recovery-event:v1";
+
+fn recovery_event_id(run_id: TurnRunId, sequence: u64) -> RuntimeEventId {
+    // Purpose: stable logical deduplication across the event-append/checkpoint
+    // interruption window. This is identity derivation, not authentication.
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(RECOVERY_EVENT_ID_DOMAIN);
+    hasher.update(run_id.as_uuid().as_bytes());
+    hasher.update(&sequence.to_be_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    // Mark the value as an RFC 9562 UUIDv8 while preserving the derived bits.
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    RuntimeEventId::from_bytes(bytes)
+}
 
 /// Scope authority bound into the sink at construction time.
 ///
@@ -258,6 +274,19 @@ impl DurableLoopHostMilestoneSink {
                     Some(InvocationId::from_uuid(milestone.run_id.as_uuid()));
                 event
             }
+            LoopHostMilestoneKind::FailureRecovered {
+                sequence,
+                stage,
+                class,
+                disposition,
+            } => RuntimeEvent::failure_recovered(
+                recovery_event_id(milestone.run_id, *sequence),
+                scope,
+                capability_id(RECOVERY_CAPABILITY_ID)?,
+                stage.as_str(),
+                class.as_str(),
+                disposition.as_str(),
+            ),
             LoopHostMilestoneKind::AssistantReplyFinalized { .. } => {
                 RuntimeEvent::assistant_reply_finalized(
                     scope,
@@ -380,16 +409,16 @@ mod tests {
     use super::*;
     use ironclaw_events::{EventStreamKey, InMemoryDurableEventLog, ReadScope, RuntimeEventKind};
     use ironclaw_host_api::{
-        AgentId, ExtensionId, InvocationId, ProjectId, RuntimeKind, TenantId, ThreadId, UserId,
+        ids::{AgentId, ExtensionId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
+        result_meta::FailureKind,
+        runtime::RuntimeKind,
+    };
+    use ironclaw_loop_contracts::{
+        HookDecisionSummary, LoopDriverId, LoopHostMilestone, LoopRecoveryClass,
+        LoopRecoveryDisposition, LoopRecoveryStage, LoopSafeSummary,
     };
     use ironclaw_threads::ThreadScope;
-    use ironclaw_turns::{
-        CapabilityActivityId, TurnId, TurnScope,
-        run_profile::{
-            CapabilityFailureKind, HookDecisionSummary, LoopDriverId, LoopHostMilestone,
-            LoopSafeSummary,
-        },
-    };
+    use ironclaw_turns::{CapabilityActivityId, TurnId, TurnScope};
 
     const HOOK_HEX_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -432,6 +461,47 @@ mod tests {
         )
         .expect("durable milestone scope requires owner user — fixture supplies one");
         DurableLoopHostMilestoneSink::new(event_log, milestone_scope)
+    }
+
+    #[test]
+    fn replayed_recovery_milestone_keeps_one_logical_event_identity() {
+        let (milestone, thread_id, run_id) =
+            fixture_milestone(LoopHostMilestoneKind::FailureRecovered {
+                sequence: 1,
+                stage: LoopRecoveryStage::Model,
+                class: LoopRecoveryClass::ModelUnavailable,
+                disposition: LoopRecoveryDisposition::Retried,
+            });
+        let sink = projector_for(thread_id, run_id);
+
+        let first = sink
+            .runtime_event_for_milestone(&milestone)
+            .expect("first projection succeeds")
+            .expect("recovery milestone projects");
+        let replay = sink
+            .runtime_event_for_milestone(&milestone)
+            .expect("replay projection succeeds")
+            .expect("recovery milestone replay projects");
+        let mut next = milestone;
+        next.kind = LoopHostMilestoneKind::FailureRecovered {
+            sequence: 2,
+            stage: LoopRecoveryStage::Model,
+            class: LoopRecoveryClass::ModelUnavailable,
+            disposition: LoopRecoveryDisposition::Retried,
+        };
+        let next = sink
+            .runtime_event_for_milestone(&next)
+            .expect("next recovery projection succeeds")
+            .expect("next recovery milestone projects");
+
+        assert_eq!(
+            first.event_id, replay.event_id,
+            "append/checkpoint replay must preserve logical event identity"
+        );
+        assert_ne!(
+            first.event_id, next.event_id,
+            "separate applied recoveries must retain distinct numerator identities"
+        );
     }
 
     #[test]
@@ -538,7 +608,7 @@ mod tests {
                 capability_id: capability_id.clone(),
                 provider: Some(provider.clone()),
                 runtime: Some(RuntimeKind::Script),
-                reason_kind: CapabilityFailureKind::OperationFailed,
+                reason_kind: FailureKind::OperationFailed,
                 safe_summary: Some(
                     LoopSafeSummary::new(
                         "read_file failed for path workspace ironclaw_issues.json: file not found",
@@ -595,7 +665,7 @@ mod tests {
                 capability_id: capability_id.clone(),
                 provider: Some(provider.clone()),
                 runtime: Some(RuntimeKind::Script),
-                reason_kind: CapabilityFailureKind::OperationFailed,
+                reason_kind: FailureKind::OperationFailed,
                 safe_summary: None,
             },
         ] {

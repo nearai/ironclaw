@@ -4,9 +4,10 @@
 //! implemented exactly once here.
 
 use chrono::Utc;
-use ironclaw_host_api::{
-    MissingScopeBehavior, OAuth2CodeRecipe, PkceMode, SecretHandle, Timestamp, TokenExchangeAuth,
+use ironclaw_extension_contracts::recipe::{
+    MissingScopeBehavior, OAuth2CodeRecipe, PkceMode, TokenExchangeAuth,
 };
+use ironclaw_host_api::{Timestamp, ids::SecretHandle};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
@@ -60,7 +61,7 @@ impl AuthEngine {
         let scope = context.scope.resource.clone();
         let vendor = request.provider.as_str().to_string();
         let client = self
-            .oauth_client_material(&scope, &vendor, &recipe, resource.as_deref(), false)
+            .oauth_client_material(&scope, &vendor, &recipe, resource.as_deref(), None, false)
             .await
             .map_err(|_| AuthProductError::TokenExchangeFailed)?;
         let redirect_uri = self
@@ -146,7 +147,7 @@ impl AuthEngine {
             .read_refresh_token(&scope, &request.refresh_secret)
             .await?;
         let client = self
-            .oauth_client_material(&scope, &vendor, &recipe, resource.as_deref(), false)
+            .oauth_client_material(&scope, &vendor, &recipe, resource.as_deref(), None, false)
             .await
             .map_err(|_| AuthProductError::RefreshFailed)?;
 
@@ -236,7 +237,7 @@ impl AuthEngine {
 
     async fn read_refresh_token(
         &self,
-        scope: &ironclaw_host_api::ResourceScope,
+        scope: &ironclaw_host_api::resource::ResourceScope,
         handle: &SecretHandle,
     ) -> Result<SecretString, AuthProductError> {
         let lease = self
@@ -254,7 +255,7 @@ impl AuthEngine {
     /// declared identity endpoint called with the freshly-issued credential.
     async fn extract_identity(
         &self,
-        scope: &ironclaw_host_api::ResourceScope,
+        scope: &ironclaw_host_api::resource::ResourceScope,
         recipe: &OAuth2CodeRecipe,
         token_response: &ExtractedTokenResponse,
     ) -> Result<Option<OAuthProviderIdentity>, AuthProductError> {
@@ -310,7 +311,7 @@ impl AuthEngine {
     /// paired with a stale refresh token.
     async fn store_token_pair(
         &self,
-        scope: ironclaw_host_api::ResourceScope,
+        scope: ironclaw_host_api::resource::ResourceScope,
         access_secret: SecretHandle,
         refresh_secret: Option<SecretHandle>,
         tokens: &ExtractedTokenResponse,
@@ -569,7 +570,7 @@ fn pointer_string(value: &serde_json::Value, pointer: &str) -> Option<String> {
 fn exchange_token_handle(
     vendor: &str,
     flow_id: AuthFlowId,
-    invocation_id: ironclaw_host_api::InvocationId,
+    invocation_id: ironclaw_host_api::ids::InvocationId,
     token_kind: &'static str,
 ) -> Result<SecretHandle, AuthProductError> {
     SecretHandle::new(format!(

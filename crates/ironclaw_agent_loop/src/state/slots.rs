@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use ironclaw_host_api::CapabilityId;
-use ironclaw_turns::run_profile::CompactionInitiator;
+use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_loop_contracts::CompactionInitiator;
 
 use super::CapabilityCallSignature;
 
@@ -473,6 +473,11 @@ pub enum ModelErrorObservationClass {
     ContextOverflow,
     ContentFiltered,
     InvalidOutput,
+    Transient,
+    Unavailable,
+    Internal,
+    StaleRequest,
+    OutputTruncated,
 }
 
 /// Persistent state owned by `ReplyAdmissionStrategy`.

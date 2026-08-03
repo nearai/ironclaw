@@ -4,10 +4,16 @@ use async_trait::async_trait;
 use ironclaw_approvals::{ToolPermissionOverride, permission_mode_allows_persistent_approval};
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_host_api::{
-    Action, ApprovalRequest, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant,
-    CapabilityId, Decision, DenyReason, EffectKind, ExecutionContext, InvocationOrigin,
-    OriginGateMatrix, Principal, ResourceEstimate, ResourceScope, Timestamp,
+    Timestamp,
+    action::Action,
+    approval::ApprovalRequest,
+    capability::{CapabilityDescriptor, CapabilityGrant, EffectKind, OriginGateMatrix},
+    decision::{Decision, DenyReason},
+    ids::{ApprovalRequestId, CapabilityId},
+    invocation::InvocationOrigin,
+    resource::{ResourceEstimate, ResourceScope},
     runtime_policy::ApprovalPolicy,
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_trust::TrustDecision;
 
@@ -505,9 +511,16 @@ fn approval_request(
 mod tests {
     use ironclaw_approvals::persistent_approval_grant_issuer;
     use ironclaw_host_api::{
-        CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet,
-        EffectKind, ExecutionContext, ExtensionId, GrantConstraints, MountView, NetworkPolicy,
-        PermissionMode, Principal, ResourceEstimate, RuntimeKind, TrustClass,
+        action::NetworkPolicy,
+        capability::{
+            CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+            PermissionMode,
+        },
+        ids::{CapabilityGrantId, CapabilityId, ExtensionId},
+        mount::MountView,
+        resource::ResourceEstimate,
+        runtime::{RuntimeKind, TrustClass},
+        scope::{ExecutionContext, Principal},
     };
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
     use serde_json::json;
@@ -717,7 +730,7 @@ mod tests {
 
     fn test_context(grants: CapabilitySet) -> ExecutionContext {
         let ctx = ExecutionContext::local_default(
-            ironclaw_host_api::UserId::new("test-user").unwrap(),
+            ironclaw_host_api::ids::UserId::new("test-user").unwrap(),
             ExtensionId::new("builtin").unwrap(),
             RuntimeKind::FirstParty,
             TrustClass::UserTrusted,
@@ -1130,7 +1143,7 @@ mod tests {
 
         assert!(
             matches!(decision, Decision::Allow { .. }),
-            "same-user one-shot approval lease should satisfy the local-dev gate, got {decision:?}"
+            "same-user one-shot approval lease should satisfy the standalone gate, got {decision:?}"
         );
     }
 
@@ -1176,7 +1189,7 @@ mod tests {
 
         assert!(
             matches!(decision, Decision::Allow { .. }),
-            "settings persistent approval grant should satisfy the local-dev gate, got {decision:?}"
+            "settings persistent approval grant should satisfy the standalone gate, got {decision:?}"
         );
     }
 
@@ -1230,7 +1243,9 @@ mod tests {
                 id: CapabilityGrantId::new(),
                 capability: shell_id,
                 grantee: Principal::Extension(ExtensionId::new("builtin").unwrap()),
-                issued_by: Principal::User(ironclaw_host_api::UserId::new("other-user").unwrap()),
+                issued_by: Principal::User(
+                    ironclaw_host_api::ids::UserId::new("other-user").unwrap(),
+                ),
                 constraints: GrantConstraints {
                     allowed_effects: vec![EffectKind::SpawnProcess],
                     mounts: MountView::default(),
@@ -1309,7 +1324,7 @@ mod tests {
 
         assert!(
             matches!(decision, Decision::RequireApproval { .. }),
-            "expired persistent approval grant must not satisfy the local-dev gate, got {decision:?}"
+            "expired persistent approval grant must not satisfy the standalone gate, got {decision:?}"
         );
     }
 
@@ -1324,7 +1339,9 @@ mod tests {
                 id: CapabilityGrantId::new(),
                 capability: shell_id,
                 grantee: Principal::Extension(ExtensionId::new("builtin").unwrap()),
-                issued_by: Principal::User(ironclaw_host_api::UserId::new("other-user").unwrap()),
+                issued_by: Principal::User(
+                    ironclaw_host_api::ids::UserId::new("other-user").unwrap(),
+                ),
                 constraints: GrantConstraints {
                     allowed_effects: vec![EffectKind::SpawnProcess],
                     mounts: MountView::default(),
@@ -1347,7 +1364,7 @@ mod tests {
 
         assert!(
             matches!(decision, Decision::RequireApproval { .. }),
-            "different-user approval lease must not satisfy the local-dev gate, got {decision:?}"
+            "different-user approval lease must not satisfy the standalone gate, got {decision:?}"
         );
     }
 
@@ -1400,7 +1417,10 @@ mod tests {
     /// leaf). Proves (a) behavior-neutrality for `LoopRun` across profiles, and
     /// (b) that the fold demonstrably works with crafted matrices.
     mod origin_gate_matrix_fold {
-        use ironclaw_host_api::{OriginGatePolicy, ProductKind, RunId};
+        use ironclaw_host_api::{
+            capability::OriginGatePolicy,
+            ids::{ProductKind, RunId},
+        };
         use ironclaw_runtime_policy::MinimalApprovalBypass;
 
         use super::*;

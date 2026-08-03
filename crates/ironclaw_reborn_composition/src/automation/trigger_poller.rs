@@ -24,7 +24,9 @@ use crate::runtime_input::TriggerPollerSettings;
 pub use ironclaw_extension_host::channel_triggered_delivery::PostSubmitDeliveryHook;
 
 mod active_run_lookup;
-pub(crate) use active_run_lookup::SnapshotActiveRunLookup;
+pub(crate) use active_run_lookup::{
+    ProcessActiveRunLookup, RebindableProcessLifecycleLookupSource,
+};
 
 pub(crate) const TRIGGER_POLLER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -322,7 +324,7 @@ mod tests {
         use super::super::PostSubmitDeliveryHook;
         use async_trait::async_trait;
         use chrono::Utc;
-        use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
+        use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
         use ironclaw_triggers::{
             TriggerAcceptedFireSettlement, TriggerFire, TriggerFireIdentity,
             TriggerFireSettlementObserver, TriggerId,

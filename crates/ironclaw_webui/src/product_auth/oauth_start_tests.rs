@@ -13,11 +13,13 @@ mod tests {
         CredentialOwnership, EngineCallbackBase, NewCredentialAccount, ProviderScope,
         ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
     };
-    use ironclaw_host_api::ProductSurfaceCaller;
+    use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
     use ironclaw_host_api::{
-        MissionId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressRequest,
-        RuntimeHttpEgressResponse, SecretHandle, TenantId, ThreadId, UserId, VendorAuthRecipe,
+        http::{RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse},
+        ids::{MissionId, SecretHandle, TenantId, ThreadId, UserId},
+        resource::ResourceScope,
     };
+    use ironclaw_product_contracts::surface::ProductSurfaceCaller;
     use ironclaw_secrets::SecretStore;
     use serde_json::json;
     use std::sync::Arc;
@@ -74,7 +76,8 @@ mod tests {
         async fn execute(
             &self,
             request: RuntimeHttpEgressRequest,
-        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
+        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::http::RuntimeHttpEgressError>
+        {
             panic!(
                 "start-route flow preparation must not reach a vendor: {}",
                 request.url
@@ -90,7 +93,7 @@ mod tests {
         async fn resolve(
             &self,
             vendor: &str,
-            _credentials: &ironclaw_host_api::RecipeClientCredentials,
+            _credentials: &ironclaw_extension_contracts::recipe::RecipeClientCredentials,
         ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, AuthProductError> {
             Ok(ironclaw_auth::EngineOAuthClientMaterial {
                 client_id: ironclaw_auth::OAuthClientId::new(format!("{vendor}-client-id"))?,
@@ -114,6 +117,7 @@ mod tests {
             vendor: vendor.to_string(),
             recipe,
             token_exchange_resource: None,
+            protected_resource_metadata_url: None,
         }
     }
 

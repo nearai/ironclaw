@@ -1,51 +1,54 @@
 // arch-exempt: large_file, model accounting assertions extend the existing whole-port contract fixture, plan #6089
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
-use ironclaw_host_api::{
-    AgentId, Blocked, CapabilityId, ProjectId, Resolution, RuntimeKind, TenantId, ThreadId, UserId,
-};
-use ironclaw_turns::test_support::in_memory_turn_state_store;
-use ironclaw_turns::{
-    AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
-    DefaultTurnCoordinator, IdempotencyKey, LoopBlocked, LoopBlockedKind, LoopCompleted,
-    LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, ProductTurnContext,
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, IdempotencyKey, LoopExitId, LoopGateRef, LoopMessageRef,
     ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest, RunProfileVersion,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
-    TurnCoordinator, TurnLeaseToken, TurnOriginKind, TurnOwner, TurnRunId, TurnRunState,
-    TurnRunnerId, TurnStatus,
-    events::EventCursor,
-    run_profile::{
-        AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
-        BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityProgress, CapabilitySurfaceVersion, CommunicationRuntimeContext, ConcurrencyHint,
-        ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
-        DeliveryTargetSummary, EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
-        HostManagedLoopModelPort, HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink,
-        InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
-        InstructionMaterializationStore, InstructionSafetyContext,
-        LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopCancellationPort, LoopCancellationSignal,
-        LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
-        LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
-        LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata,
-        LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone,
-        LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputAckToken,
-        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
-        LoopModelBudgetAccountant, LoopModelCapabilityView, LoopModelGateway,
-        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard,
-        LoopModelPort, LoopModelProgressSink, LoopModelRequest, LoopModelResponse,
-        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
-        LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRequest,
-        LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopSafeSummary,
-        LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput, PromptMode,
-        PromptSkillContextMetadata, SkillTrustLevel, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, resolution,
-    },
-    runner::{ClaimRunRequest, TurnRunTransitionPort},
+    SourceBindingRef, TurnActor, TurnCheckpointId, TurnOwner, TurnRunId, TurnRunnerId, TurnStatus,
 };
+use ironclaw_host_api::{
+    ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
+    resolution::{Blocked, Resolution},
+    runtime::RuntimeKind,
+};
+use ironclaw_loop_contracts::{
+    AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverHost,
+    AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply, BatchPolicyKind,
+    CapabilityDeniedReasonKind, CapabilityDescriptionTrust, CapabilityDescriptorView,
+    CapabilityInputRef, CapabilityProgress, CapabilitySurfaceVersion, CommunicationRuntimeContext,
+    ConcurrencyHint, ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
+    DeliveryTargetSummary, EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
+    InMemoryLoopHostMilestoneSink, InstructionBundleBuilder, InstructionBundleFingerprint,
+    InstructionBundleRequest, InstructionMaterializationStore, InstructionSafetyContext,
+    LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopBlocked, LoopBlockedKind,
+    LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointKind,
+    LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError,
+    LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest, LoopCompactionResponse,
+    LoopCompleted, LoopCompletionKind, LoopContextBundle, LoopContextMessage, LoopContextPort,
+    LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata, LoopDriverId,
+    LoopDriverNoteKind, LoopExit, LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter,
+    LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
+    LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant,
+    LoopModelCapabilityView, LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest,
+    LoopModelMessage, LoopModelPolicyGuard, LoopModelPort, LoopModelProgressSink, LoopModelRequest,
+    LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
+    LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
+    LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext,
+    LoopSafeSummary, LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput,
+    PromptMode, PromptSkillContextMetadata, SkillTrustLevel, SystemInferenceTaskId,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+};
+use ironclaw_processes::{ClaimProcessesRequest, ProcessKind, ProcessWorkerId};
+use ironclaw_turns::test_support::in_memory_agent_turn_process_system;
+use ironclaw_turns::{
+    DefaultTurnCoordinator, ProductTurnContext, SubmitTurnRequest, SubmitTurnResponse,
+    TurnCoordinator, TurnOriginKind, TurnRunState, claimed_turn_run_from_process_claim,
+};
+use ironclaw_turns::{HostManagedLoopModelPort, HostManagedLoopPromptPort};
 
 #[test]
 fn loop_compaction_outcome_serializes_and_deserializes_wire_shape() {
@@ -55,6 +58,7 @@ fn loop_compaction_outcome_serializes_and_deserializes_wire_shape() {
             .try_into()
             .expect("valid summary id"),
         compression_ratio_ppm: 250_000,
+        redacted_leak_count: 0,
     });
     let compacted_json = serde_json::to_value(&compacted).expect("compacted should serialize");
     assert_eq!(
@@ -69,6 +73,25 @@ fn loop_compaction_outcome_serializes_and_deserializes_wire_shape() {
     let restored_compacted: LoopCompactionOutcome =
         serde_json::from_value(compacted_json).expect("compacted should deserialize");
     assert_eq!(restored_compacted, compacted);
+
+    let redacted = LoopCompactionOutcome::Compacted(LoopCompactionResponse {
+        summary_artifact_id: "summary:redacted"
+            .to_string()
+            .try_into()
+            .expect("valid summary id"),
+        compression_ratio_ppm: 200_000,
+        redacted_leak_count: 2,
+    });
+    assert_eq!(
+        serde_json::to_value(redacted).expect("redacted compaction should serialize"),
+        serde_json::json!({
+            "compacted": {
+                "summary_artifact_id": "summary:redacted",
+                "compression_ratio_ppm": 200000,
+                "redacted_leak_count": 2
+            }
+        })
+    );
 
     let deferred = LoopCompactionOutcome::Deferred {
         safe_summary: LoopSafeSummary::new("compaction deferred until transcript stabilizes")
@@ -86,6 +109,70 @@ fn loop_compaction_outcome_serializes_and_deserializes_wire_shape() {
     let restored_deferred: LoopCompactionOutcome =
         serde_json::from_value(deferred_json).expect("deferred should deserialize");
     assert_eq!(restored_deferred, deferred);
+}
+
+#[test]
+fn compaction_leak_telemetry_preserves_legacy_wire_shapes() {
+    let task_id = SystemInferenceTaskId::new();
+    let reason_kind = LoopSafeSummary::new("redacted").expect("valid safe summary");
+
+    let zero_progress = LoopProgressEvent::CompactionLeakDetected {
+        task_id,
+        reason_kind: reason_kind.clone(),
+        redacted_leak_count: 0,
+    };
+    let zero_progress_json =
+        serde_json::to_value(&zero_progress).expect("zero progress should serialize");
+    assert!(
+        zero_progress_json
+            .pointer("/compaction_leak_detected/redacted_leak_count")
+            .is_none(),
+        "legacy progress shape must omit a zero count"
+    );
+    let restored_progress: LoopProgressEvent =
+        serde_json::from_value(zero_progress_json).expect("legacy progress should deserialize");
+    assert_eq!(restored_progress, zero_progress);
+
+    let counted_progress = LoopProgressEvent::CompactionLeakDetected {
+        task_id,
+        reason_kind: reason_kind.clone(),
+        redacted_leak_count: 2,
+    };
+    assert_eq!(
+        serde_json::to_value(&counted_progress)
+            .expect("counted progress should serialize")
+            .pointer("/compaction_leak_detected/redacted_leak_count"),
+        Some(&serde_json::json!(2))
+    );
+
+    let zero_milestone = LoopHostMilestoneKind::CompactionLeakDetected {
+        task_id,
+        reason_kind,
+        redacted_leak_count: 0,
+    };
+    let zero_milestone_json =
+        serde_json::to_value(&zero_milestone).expect("zero milestone should serialize");
+    assert!(
+        zero_milestone_json
+            .pointer("/compaction_leak_detected/redacted_leak_count")
+            .is_none(),
+        "legacy milestone shape must omit a zero count"
+    );
+    let restored_milestone: LoopHostMilestoneKind =
+        serde_json::from_value(zero_milestone_json).expect("legacy milestone should deserialize");
+    assert_eq!(restored_milestone, zero_milestone);
+
+    let counted_milestone = LoopHostMilestoneKind::CompactionLeakDetected {
+        task_id,
+        reason_kind: LoopSafeSummary::new("redacted").expect("valid safe summary"),
+        redacted_leak_count: 2,
+    };
+    assert_eq!(
+        serde_json::to_value(&counted_milestone)
+            .expect("counted milestone should serialize")
+            .pointer("/compaction_leak_detected/redacted_leak_count"),
+        Some(&serde_json::json!(2))
+    );
 }
 
 #[tokio::test]
@@ -174,7 +261,7 @@ async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let gateway = Arc::new(RecordingLoopModelGateway::default());
     gateway.push_response(Ok(LoopModelResponse {
-        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+        chunks: vec![ironclaw_loop_contracts::ModelStreamChunk {
             safe_text_delta: "safe delta".to_string(),
         }],
         safe_reasoning_deltas: vec![
@@ -198,6 +285,7 @@ async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
             }],
             surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
             model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -237,7 +325,7 @@ async fn host_managed_model_port_returns_response_when_model_started_milestone_f
     let milestone_sink = Arc::new(FailingOnModelStartedMilestoneSink::default());
     let gateway = Arc::new(RecordingLoopModelGateway::default());
     gateway.push_response(Ok(LoopModelResponse {
-        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+        chunks: vec![ironclaw_loop_contracts::ModelStreamChunk {
             safe_text_delta: "safe delta".to_string(),
         }],
         safe_reasoning_deltas: Vec::new(),
@@ -256,6 +344,7 @@ async fn host_managed_model_port_returns_response_when_model_started_milestone_f
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -281,7 +370,7 @@ async fn host_managed_model_port_returns_response_when_model_completed_milestone
     let milestone_sink = Arc::new(FailingOnModelCompletedMilestoneSink::default());
     let gateway = Arc::new(RecordingLoopModelGateway::default());
     gateway.push_response(Ok(LoopModelResponse {
-        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+        chunks: vec![ironclaw_loop_contracts::ModelStreamChunk {
             safe_text_delta: "safe delta".to_string(),
         }],
         safe_reasoning_deltas: Vec::new(),
@@ -300,6 +389,7 @@ async fn host_managed_model_port_returns_response_when_model_completed_milestone
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -341,6 +431,7 @@ async fn host_managed_model_port_sanitizes_gateway_errors() {
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -372,6 +463,7 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
             runtime: RuntimeKind::FirstParty,
             safe_name: "Echo".to_string(),
             safe_description: "Echo safe input".to_string(),
+            description_trust: Default::default(),
             concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
         }],
@@ -517,6 +609,152 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
     );
     assert_eq!(first.skill_context.len(), 1);
     assert_eq!(first.skill_context[0].source_name, "alpha");
+}
+
+#[derive(Clone, Default)]
+struct SharedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+struct SharedLogWriterGuard(Arc<Mutex<Vec<u8>>>);
+
+impl Write for SharedLogWriterGuard {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log writer lock").extend(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogWriter {
+    type Writer = SharedLogWriterGuard;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        SharedLogWriterGuard(Arc::clone(&self.0))
+    }
+}
+
+impl SharedLogWriter {
+    fn contents(&self) -> String {
+        String::from_utf8(self.0.lock().expect("log writer lock").clone())
+            .expect("tracing output is UTF-8")
+    }
+}
+
+fn prompt_surface_request(descriptors: Vec<CapabilityDescriptorView>) -> InstructionBundleRequest {
+    InstructionBundleRequest {
+        context_bundle: LoopContextBundle::default(),
+        visible_surface: Some(VisibleCapabilitySurface {
+            version: CapabilitySurfaceVersion::new("surface-catalog-description").unwrap(),
+            descriptors,
+            callable_capability_ids: None,
+        }),
+        safety_context: None,
+        inline_messages: Vec::new(),
+        runtime_context: None,
+    }
+}
+
+fn prompt_capability_descriptor(
+    capability_id: &str,
+    description: &str,
+    description_trust: CapabilityDescriptionTrust,
+) -> CapabilityDescriptorView {
+    CapabilityDescriptorView {
+        capability_id: CapabilityId::new(capability_id).unwrap(),
+        provider: None,
+        runtime: RuntimeKind::Wasm,
+        safe_name: capability_id.to_string(),
+        safe_description: description.to_string(),
+        description_trust,
+        concurrency_hint: ConcurrencyHint::Exclusive,
+        parameters_schema: serde_json::json!({"type": "object"}),
+    }
+}
+
+/// Regression for the production Attio incident: signature-verified catalog
+/// descriptions may document auth vocabulary without being redacted or dropped.
+#[tokio::test]
+async fn instruction_bundle_preserves_verified_catalog_description_intact() {
+    let description = concat!(
+        "Authenticated with an Attio workspace API key presented as a Bearer header ",
+        "against api.attio.com."
+    );
+    let bundle = InstructionBundleBuilder::new(claimed_run_context().await)
+        .build(prompt_surface_request(vec![prompt_capability_descriptor(
+            "attio.invoke",
+            description,
+            CapabilityDescriptionTrust::VerifiedCatalog,
+        )]))
+        .expect("verified catalog description must not deny prompt construction");
+
+    let prompt = bundle
+        .materialized_messages
+        .iter()
+        .find(|message| message.model_content.contains("Capabilities:"))
+        .expect("capability surface reaches the model");
+    assert!(prompt.model_content.contains(description));
+    assert!(prompt.model_content.contains("Bearer"));
+}
+
+/// A malformed or unsafe untrusted package must degrade only its own prompt
+/// entry. The warning carries the capability id and matched denylist pattern,
+/// but never the rejected description value.
+#[tokio::test]
+async fn instruction_bundle_skips_one_bad_untrusted_description_and_warns() {
+    let rejected_description = "API key: sk-live-value-123456";
+    let context = claimed_run_context().await;
+    let logs = SharedLogWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_target(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(logs.clone())
+        .finish();
+    let result = tracing::subscriber::with_default(subscriber, || {
+        InstructionBundleBuilder::new(context).build(prompt_surface_request(vec![
+            prompt_capability_descriptor(
+                "unsafe.invoke",
+                rejected_description,
+                CapabilityDescriptionTrust::Untrusted,
+            ),
+            prompt_capability_descriptor(
+                "healthy.invoke",
+                "Healthy capability remains available",
+                CapabilityDescriptionTrust::Untrusted,
+            ),
+        ]))
+    });
+    let bundle = result.expect("one bad descriptor must not deny prompt construction");
+
+    let prompt = bundle
+        .materialized_messages
+        .iter()
+        .find(|message| message.model_content.contains("Capabilities:"))
+        .expect("capability surface reaches the model");
+    assert!(prompt.model_content.contains("healthy.invoke"));
+    assert!(
+        prompt
+            .model_content
+            .contains("Healthy capability remains available")
+    );
+    assert!(!prompt.model_content.contains("unsafe.invoke"));
+    assert!(!prompt.model_content.contains(rejected_description));
+
+    let logs = logs.contents();
+    assert!(
+        logs.contains("unsafe.invoke"),
+        "warning names culprit: {logs}"
+    );
+    assert!(
+        logs.contains("api key"),
+        "warning names matched pattern: {logs}"
+    );
+    assert!(
+        !logs.contains(rejected_description),
+        "warning must not contain the offending value: {logs}"
+    );
 }
 
 #[tokio::test]
@@ -1546,6 +1784,7 @@ async fn loop_prompt_port_filters_visible_surface_by_capability_view() {
                 runtime: RuntimeKind::Wasm,
                 safe_name: "Echo".to_string(),
                 safe_description: "Returns an opaque result ref".to_string(),
+                description_trust: Default::default(),
                 concurrency_hint: ConcurrencyHint::Exclusive,
                 parameters_schema: serde_json::json!({"type":"object"}),
             },
@@ -1555,6 +1794,7 @@ async fn loop_prompt_port_filters_visible_surface_by_capability_view() {
                 runtime: RuntimeKind::Wasm,
                 safe_name: "Hidden".to_string(),
                 safe_description: "Should not reach the prompt".to_string(),
+                description_trust: Default::default(),
                 concurrency_hint: ConcurrencyHint::Exclusive,
                 parameters_schema: serde_json::json!({"type":"object"}),
             },
@@ -2139,6 +2379,7 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
             runtime: RuntimeKind::FirstParty,
             safe_name: "Echo".to_string(),
             safe_description: "Echo safe input".to_string(),
+            description_trust: Default::default(),
             concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
         }],
@@ -2637,7 +2878,7 @@ impl AgentLoopDriver for ReplyDriver {
 
     async fn run(
         &self,
-        request: ironclaw_turns::AgentLoopDriverRunRequest,
+        request: ironclaw_loop_contracts::AgentLoopDriverRunRequest,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
     ) -> Result<LoopExit, AgentLoopDriverError> {
         assert_eq!(host.run_context().turn_id, request.turn_id);
@@ -2670,6 +2911,7 @@ impl AgentLoopDriver for ReplyDriver {
                         .model_profile_id
                         .clone(),
                 ),
+                fallback_index: 0,
                 capability_view: None,
             })
             .await
@@ -2705,11 +2947,11 @@ impl AgentLoopDriver for ReplyDriver {
 
     async fn resume(
         &self,
-        request: ironclaw_turns::AgentLoopDriverResumeRequest,
+        request: ironclaw_loop_contracts::AgentLoopDriverResumeRequest,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
     ) -> Result<LoopExit, AgentLoopDriverError> {
         self.run(
-            ironclaw_turns::AgentLoopDriverRunRequest {
+            ironclaw_loop_contracts::AgentLoopDriverRunRequest {
                 turn_id: request.turn_id,
                 run_id: request.run_id,
                 resolved_run_profile: request.resolved_run_profile,
@@ -2730,7 +2972,7 @@ impl AgentLoopDriver for CapabilityDriver {
 
     async fn run(
         &self,
-        _request: ironclaw_turns::AgentLoopDriverRunRequest,
+        _request: ironclaw_loop_contracts::AgentLoopDriverRunRequest,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
     ) -> Result<LoopExit, AgentLoopDriverError> {
         let surface = host
@@ -2791,11 +3033,11 @@ impl AgentLoopDriver for CapabilityDriver {
 
     async fn resume(
         &self,
-        request: ironclaw_turns::AgentLoopDriverResumeRequest,
+        request: ironclaw_loop_contracts::AgentLoopDriverResumeRequest,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
     ) -> Result<LoopExit, AgentLoopDriverError> {
         self.run(
-            ironclaw_turns::AgentLoopDriverRunRequest {
+            ironclaw_loop_contracts::AgentLoopDriverRunRequest {
                 turn_id: request.turn_id,
                 run_id: request.run_id,
                 resolved_run_profile: request.resolved_run_profile,
@@ -2961,6 +3203,7 @@ async fn host_managed_model_port_times_out_a_hung_gateway() {
             }],
             surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
             model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -2998,6 +3241,7 @@ async fn host_managed_model_port_allows_long_calls_that_keep_streaming_progress(
             }],
             surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
             model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3014,7 +3258,7 @@ struct RecordingAgentLoopHost {
     effects: Mutex<Vec<String>>,
     context_requests: Mutex<Vec<LoopContextRequest>>,
     model_responses: Mutex<Vec<LoopModelResponse>>,
-    capability_outcomes: Mutex<Vec<ironclaw_host_api::Resolution>>,
+    capability_outcomes: Mutex<Vec<ironclaw_host_api::resolution::Resolution>>,
     visible_surface: VisibleCapabilitySurface,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
     context_message_safe_summary: String,
@@ -3042,6 +3286,7 @@ impl RecordingAgentLoopHost {
                     runtime: RuntimeKind::Wasm,
                     safe_name: "Echo".to_string(),
                     safe_description: "Returns an opaque result ref".to_string(),
+                    description_trust: Default::default(),
                     concurrency_hint: ConcurrencyHint::Exclusive,
                     parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
                 }],
@@ -3130,7 +3375,7 @@ impl RecordingAgentLoopHost {
         self.model_responses.lock().unwrap().push(response);
     }
 
-    fn push_capability_outcome(&self, outcome: ironclaw_host_api::Resolution) {
+    fn push_capability_outcome(&self, outcome: ironclaw_host_api::resolution::Resolution) {
         self.capability_outcomes.lock().unwrap().push(outcome);
     }
 
@@ -3149,7 +3394,7 @@ impl RecordingAgentLoopHost {
             .collect()
     }
 
-    fn milestones(&self) -> Vec<ironclaw_turns::run_profile::LoopHostMilestone> {
+    fn milestones(&self) -> Vec<ironclaw_loop_contracts::LoopHostMilestone> {
         self.milestone_sink.milestones()
     }
 
@@ -3309,7 +3554,7 @@ impl LoopCapabilityPort for RecordingAgentLoopHost {
     async fn invoke_capability(
         &self,
         request: LoopRequest,
-    ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::resolution::Resolution, AgentLoopHostError> {
         if request.surface_version != self.visible_surface.version
             || !self
                 .visible_surface
@@ -3338,8 +3583,8 @@ impl LoopCapabilityPort for RecordingAgentLoopHost {
     async fn invoke_capability_batch(
         &self,
         _request: LoopRequestBatch,
-    ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
-        Ok(ironclaw_host_api::ResolutionBatch {
+    ) -> Result<ironclaw_host_api::resolution::ResolutionBatch, AgentLoopHostError> {
+        Ok(ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: Vec::new(),
             stopped_on_suspension: false,
         })
@@ -3421,7 +3666,8 @@ async fn claimed_run_context() -> LoopRunContext {
         Some(ProjectId::new("project-loop").unwrap()),
         ThreadId::new("thread-loop-host").unwrap(),
     );
-    let store = Arc::new(in_memory_turn_state_store());
+    let processes = in_memory_agent_turn_process_system();
+    let store = Arc::new(processes.runtime());
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let response = coordinator
         .submit_turn(SubmitTurnRequest {
@@ -3443,13 +3689,21 @@ async fn claimed_run_context() -> LoopRunContext {
         .await
         .unwrap();
     let SubmitTurnResponse::Accepted { run_id, .. } = response;
-    let claimed = store
-        .claim_next_run(ClaimRunRequest {
-            runner_id: TurnRunnerId::new(),
-            lease_token: TurnLeaseToken::new(),
-            scope_filter: Some(scope),
+    let runner_id = TurnRunnerId::new();
+    let claimed = processes
+        .transitions()
+        .claim_next_processes(ClaimProcessesRequest {
+            worker_id: ProcessWorkerId::from_trusted(runner_id.as_uuid().to_string()),
+            scope_filter: Some(scope.to_resource_scope()),
+            process_id_filter: None,
+            process_kind_filter: Some(ProcessKind::AgentTurn),
+            max_processes: 1,
         })
         .await
+        .unwrap()
+        .pop()
+        .map(claimed_turn_run_from_process_claim)
+        .transpose()
         .unwrap()
         .unwrap();
     assert_eq!(claimed.state.run_id, run_id);
@@ -3461,8 +3715,10 @@ async fn claimed_run_context() -> LoopRunContext {
     )
 }
 
-fn driver_run_request(host: &RecordingAgentLoopHost) -> ironclaw_turns::AgentLoopDriverRunRequest {
-    ironclaw_turns::AgentLoopDriverRunRequest {
+fn driver_run_request(
+    host: &RecordingAgentLoopHost,
+) -> ironclaw_loop_contracts::AgentLoopDriverRunRequest {
+    ironclaw_loop_contracts::AgentLoopDriverRunRequest {
         turn_id: host.context.turn_id,
         run_id: host.context.run_id,
         resolved_run_profile: host.context.resolved_run_profile.clone(),
@@ -3560,7 +3816,7 @@ impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
         self.pre_called.store(true, Ordering::SeqCst);
         if self.reject_pre.load(Ordering::SeqCst) {
             return Err(LoopModelGatewayError::new(
-                AgentLoopHostErrorKind::BudgetExceeded,
+                AgentLoopHostErrorKind::SpendBudgetExceeded,
                 "model call budget exceeded",
             )
             .expect("safe summary is valid"));
@@ -3580,7 +3836,7 @@ impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
         }
         if self.reject_post.load(Ordering::SeqCst) {
             return Err(LoopModelGatewayError::new(
-                AgentLoopHostErrorKind::BudgetExceeded,
+                AgentLoopHostErrorKind::BudgetAccountingFailed,
                 "model call accounting failed",
             )
             .expect("safe summary is valid"));
@@ -3602,13 +3858,14 @@ fn simple_model_request(context: &LoopRunContext) -> LoopModelRequest {
         }],
         surface_version: None,
         model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
+        fallback_index: 0,
         capability_view: None,
     }
 }
 
 fn success_response(context: &LoopRunContext) -> LoopModelResponse {
     LoopModelResponse {
-        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+        chunks: vec![ironclaw_loop_contracts::ModelStreamChunk {
             safe_text_delta: "safe delta".to_string(),
         }],
         safe_reasoning_deltas: Vec::new(),
@@ -3701,7 +3958,7 @@ async fn redaction_sentinels_never_leak_through_serialized_surfaces() {
 
     // Success path: response content has a sentinel, but milestones must not expose it.
     gateway.push_response(Ok(LoopModelResponse {
-        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+        chunks: vec![ironclaw_loop_contracts::ModelStreamChunk {
             safe_text_delta: "RAW_CREDENTIAL_SENTINEL visible in chunk".to_string(),
         }],
         safe_reasoning_deltas: Vec::new(),
@@ -3876,7 +4133,7 @@ async fn post_accounting_failure_after_success_fails_closed() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetExceeded);
+    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetAccountingFailed);
     assert_eq!(error.safe_summary, "model call accounting failed");
     assert!(accountant.was_pre_called());
     assert!(accountant.was_post_called());
@@ -3982,7 +4239,7 @@ async fn post_accounting_failure_after_gateway_failure_fails_closed() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetExceeded);
+    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetAccountingFailed);
     assert_eq!(error.safe_summary, "model call accounting failed");
     assert!(accountant.was_pre_called());
     assert!(accountant.was_post_called());
@@ -4002,9 +4259,9 @@ async fn post_accounting_failure_after_gateway_failure_fails_closed() {
     );
 }
 
-/// Budget-exceeded pre-call rejection prevents gateway call.
+/// Spend-budget pre-call rejection prevents the provider call.
 #[tokio::test]
-async fn budget_exceeded_pre_call_rejects_without_calling_gateway() {
+async fn spend_budget_exceeded_pre_call_rejects_without_calling_gateway() {
     let context = claimed_run_context().await;
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let gateway = Arc::new(RecordingLoopModelGateway::default());
@@ -4023,7 +4280,7 @@ async fn budget_exceeded_pre_call_rejects_without_calling_gateway() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetExceeded);
+    assert_eq!(error.kind, AgentLoopHostErrorKind::SpendBudgetExceeded);
     assert!(error.safe_summary.contains("budget exceeded"));
     // Gateway was never called.
     assert_eq!(gateway.requests().len(), 0);
@@ -4049,6 +4306,18 @@ async fn error_kind_mapping_through_host_managed_port() {
         (
             AgentLoopHostErrorKind::BudgetExceeded,
             "model call budget exceeded",
+        ),
+        (
+            AgentLoopHostErrorKind::SpendBudgetExceeded,
+            "model spend budget exceeded",
+        ),
+        (
+            AgentLoopHostErrorKind::ContextOverflow,
+            "model context overflow",
+        ),
+        (
+            AgentLoopHostErrorKind::OutputTruncated,
+            "model output truncated",
         ),
         (
             AgentLoopHostErrorKind::PolicyDenied,

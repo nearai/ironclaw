@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use ironclaw_host_api::{ExtensionId, SecretHandle};
+use ironclaw_host_api::ids::{ExtensionId, SecretHandle};
 
 use crate::installations::{
     ExtensionCredentialBinding, ExtensionCredentialHandle, ExtensionInstallation,
@@ -42,7 +42,27 @@ pub fn canonicalize_installation_rows(
                     extension_id: extension_id.clone(),
                 });
             }
-
+            // A conflict is only real when two rows share an `installation_id` but
+            // disagree on `incarnation_id`. Rows with distinct `installation_id`s are
+            // the legitimate legacy multi-row shape (each minted its own fresh
+            // incarnation) and must be allowed to merge.
+            for (i, row) in rows.iter().enumerate() {
+                for other in &rows[i + 1..] {
+                    if row.installation_id() == other.installation_id()
+                        && row.incarnation_id() != other.incarnation_id()
+                    {
+                        return Err(
+                            ExtensionInstallationError::ConflictingInstallationIncarnation {
+                                extension_id: extension_id.clone(),
+                            },
+                        );
+                    }
+                }
+            }
+            let incarnation_id = rows
+                .iter()
+                .max_by_key(|row| (row.updated_at(), row.incarnation_id().cloned()))
+                .and_then(|row| row.incarnation_id().cloned());
             let owner = if rows.iter().any(|row| row.owner().is_tenant()) {
                 InstallationOwner::Tenant
             } else {
@@ -76,18 +96,6 @@ pub fn canonicalize_installation_rows(
                 })
                 .collect();
 
-            let health = rows
-                .iter()
-                .max_by(|left, right| {
-                    left.health()
-                        .checked_at()
-                        .cmp(&right.health().checked_at())
-                        .then_with(|| left.installation_id().cmp(right.installation_id()))
-                })
-                .map(|row| row.health().clone())
-                .ok_or_else(|| ExtensionInstallationError::InvalidInstallation {
-                    reason: "installation group unexpectedly empty".to_string(),
-                })?;
             let updated_at = rows
                 .iter()
                 .map(ExtensionInstallation::updated_at)
@@ -101,11 +109,55 @@ pub fn canonicalize_installation_rows(
                 installation_id,
                 extension_id,
                 manifest_ref,
+                incarnation_id,
                 credential_bindings,
-                health,
                 updated_at,
                 owner,
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use ironclaw_host_api::ids::ExtensionId;
+
+    use super::*;
+    use crate::installations::{ExtensionManifestRef, InstallationOwner};
+
+    fn pending() -> ExtensionInstallation {
+        let extension_id = ExtensionId::new("fixture").expect("extension id");
+        ExtensionInstallation::new(
+            ExtensionInstallationId::new("fixture").expect("installation id"),
+            extension_id.clone(),
+            ExtensionManifestRef::new(extension_id, None),
+            Vec::new(),
+            Utc::now(),
+            InstallationOwner::Tenant,
+        )
+        .expect("pending installation")
+    }
+
+    #[test]
+    fn canonicalization_preserves_pending_lifecycle_identity() {
+        let pending = pending();
+        let expected_incarnation = pending.incarnation_id().cloned();
+        let canonical = canonicalize_installation_rows(vec![pending])
+            .expect("canonicalize pending")
+            .pop()
+            .expect("one row");
+
+        assert_eq!(canonical.incarnation_id(), expected_incarnation.as_ref());
+    }
+
+    #[test]
+    fn canonicalization_rejects_conflicting_pending_incarnations() {
+        let error = canonicalize_installation_rows(vec![pending(), pending()])
+            .expect_err("distinct pending lifetimes must not be merged");
+        assert!(matches!(
+            error,
+            ExtensionInstallationError::ConflictingInstallationIncarnation { .. }
+        ));
+    }
 }

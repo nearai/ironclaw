@@ -8,7 +8,7 @@ use crate::{
     SkillBundleDescriptor, SkillBundleSource, SkillBundleSourceError,
     sort_skill_bundle_descriptors,
 };
-use ironclaw_turns::run_profile::{LoopRunContext, SkillVisibility};
+use ironclaw_loop_contracts::{LoopRunContext, SkillVisibility};
 
 const MAX_CONCURRENT_SKILL_BUNDLE_CONTEXT_READS: usize = 8;
 const MAX_VISIBLE_SKILL_BUNDLE_CONTEXT_CANDIDATES: usize = 100;
@@ -185,17 +185,17 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use ironclaw_skills::SkillTrust;
-    use ironclaw_turns::{
-        RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
-        run_profile::InMemoryRunProfileResolver,
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver,
     };
+    use ironclaw_skills::SkillTrust;
+    use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
     use super::*;
     use crate::{
         SkillBundleDescriptor, SkillFilePath, skill_context::build_skill_instruction_snippets,
     };
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
 
     async fn run_context() -> LoopRunContext {
         let scope = TurnScope::new(

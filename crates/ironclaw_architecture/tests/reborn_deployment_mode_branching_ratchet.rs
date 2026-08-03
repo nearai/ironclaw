@@ -2,7 +2,7 @@
 //! of `docs/reborn/contracts/runtime-profiles.md`).
 //!
 //! Its two siblings own deployment mode as a **type name**
-//! (`reborn_localdev_typename_ratchet`, `reborn_deployment_mode_typename_ratchet`).
+//! (`reborn_standalone_typename_ratchet`, `reborn_deployment_mode_typename_ratchet`).
 //! This one owns the behaviour those names were a symptom of: **code that
 //! reads a deployment mode to decide what to do.**
 //!
@@ -11,7 +11,7 @@
 //! > A deployment mode must be branched on in exactly **zero** places past the
 //! > composition edge — that is the whole §2.1 thesis — so giving it an enum
 //! > would hand every crate an invitation to `match` on it (which is precisely
-//! > how the 66-identifier `LocalDev*` family grew).
+//! > how the 66-identifier `Standalone*` family grew).
 //!
 //! `RebornCompositionProfile` *is* such an enum. It survives as the CLI/env
 //! parse artifact and as a display label; what must not survive is consumers
@@ -48,8 +48,13 @@
 //! Skips `tests/`, `examples/`, `benches/` trees and `*tests.rs` files —
 //! test fixtures naming a profile are not production branching.
 
+#[allow(dead_code)]
+mod ratchet_support;
+
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+use ratchet_support::workspace_root;
 
 /// Production files under composition `src/` allowed to name a
 /// `RebornCompositionProfile` variant, each with the reason it is still here.
@@ -66,19 +71,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "Maps the composition profile to a typed `MemoryDeploymentProfile` for \
          the fail-closed memory profile-binding certification policy (#3537): \
          production rejects unverified third-party bindings absent an admin \
-         override; local-dev permits them. The branch produces a typed \
+         override; standalone permits them. The branch produces a typed \
          memory-deployment axis, not a raw label. Retires into `DeploymentConfig` \
          when it grows a memory-binding axis (#5264).",
     ),
 ];
-
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("architecture crate must live under crates/ironclaw_architecture")
-        .to_path_buf()
-}
 
 /// Remove line comments, block comments, and string literals so that prose and
 /// fixtures inside them cannot trip the scan.
@@ -176,7 +173,7 @@ fn collect(dir: &Path, root: &Path, found: &mut BTreeSet<String>) {
                 .and_then(|name| name.to_str())
                 .unwrap_or("");
             // `*_tests` covers the inline test trees composition keeps beside
-            // production modules (e.g. `factory/local_dev_host_tests/`).
+            // production modules (e.g. `factory/standalone_host_tests/`).
             if matches!(name, "tests" | "examples" | "benches" | "target")
                 || name.ends_with("_tests")
             {
@@ -269,7 +266,7 @@ fn scanner_strips_comments_and_strings() {
     // Self-test (§10: every check ships with its own self-test). Without
     // stripping, this ratchet's own doc comment would put it on the list.
     let source = r#"
-        // RebornCompositionProfile::LocalDev in a line comment
+        // RebornCompositionProfile::Standalone in a line comment
         /* RebornCompositionProfile::Production in a block comment */
         let label = "RebornCompositionProfile::Disabled";
     "#;
@@ -279,7 +276,7 @@ fn scanner_strips_comments_and_strings() {
         "stripped source still contains a variant path: {stripped}"
     );
 
-    let real = "match profile { RebornCompositionProfile::LocalDev => 1, _ => 0 }";
+    let real = "match profile { RebornCompositionProfile::Standalone => 1, _ => 0 }";
     assert!(
         strip_comments_and_strings(real).contains("RebornCompositionProfile::"),
         "real branching must survive stripping"
@@ -291,7 +288,7 @@ fn scanner_strips_comments_and_strings() {
     // was hidden from the scan — a silent ratchet false negative.
     let with_char_literal = r#"
         let quote = '"';
-        match profile { RebornCompositionProfile::LocalDev => 1, _ => 0 }
+        match profile { RebornCompositionProfile::Standalone => 1, _ => 0 }
     "#;
     assert!(
         strip_comments_and_strings(with_char_literal).contains("RebornCompositionProfile::"),

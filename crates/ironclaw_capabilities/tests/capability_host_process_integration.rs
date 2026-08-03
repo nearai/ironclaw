@@ -6,9 +6,20 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    capability::{CapabilityDescriptor, CapabilitySet},
+    decision::{Decision, DenyReason, Obligation, Obligations},
+    ids::{
+        ExtensionId, InvocationId, MissionId, ProcessId, ProductKind, ProjectId, ThreadId, UserId,
+    },
+    invocation::InvocationOrigin,
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::{RuntimeKind, TrustClass},
+    scope::ExecutionContext,
+};
 use ironclaw_processes::*;
-use ironclaw_run_state::*;
 use serde_json::json;
 
 mod support;
@@ -18,7 +29,7 @@ use support::*;
 async fn capability_host_spawn_runs_background_process_through_process_host() {
     let registry = registry_with_echo_capability();
     let dispatcher = recording_dispatcher();
-    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
     let process_services = ProcessServices::in_memory();
     let executor = Arc::new(RecordingSuccessExecutor::default());
     let process_manager = process_services.background_manager(Arc::clone(&executor));
@@ -27,15 +38,14 @@ async fn capability_host_spawn_runs_background_process_through_process_host() {
         .with_poll_interval(Duration::from_millis(5));
     let authorizer = SpawnOnlyAuthorizer;
     let host = capability_host(&registry, &dispatcher, &authorizer)
-        .with_run_state(&run_state)
+        .with_invocation_state(&run_state)
         .with_process_manager(&process_manager);
-    let parent_process_id = ProcessId::new();
     let context = execution_context_with_mounts_and_parent(
         CapabilitySet {
             grants: vec![spawn_grant()],
         },
         scoped_mounts(),
-        Some(parent_process_id),
+        None,
     );
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
@@ -58,7 +68,7 @@ async fn capability_host_spawn_runs_background_process_through_process_host() {
 
     assert!(dispatcher.call_count() == 0);
     assert_eq!(spawned.process.status, ProcessStatus::Running);
-    assert_eq!(spawned.process.parent_process_id, Some(parent_process_id));
+    assert_eq!(spawned.process.parent_process_id, None);
     assert_eq!(spawned.process.invocation_id, invocation_id);
     assert_eq!(spawned.process.scope, scope);
     assert_eq!(spawned.process.extension_id, extension_id());
@@ -103,7 +113,7 @@ async fn capability_host_spawn_runs_background_process_through_process_host() {
             .unwrap()
             .unwrap()
             .status,
-        RunStatus::Completed
+        ProcessInvocationStatus::Completed
     );
 }
 
@@ -152,12 +162,12 @@ async fn capability_spawn_process_host_hides_cross_scope_status_and_output() {
 async fn capability_host_spawn_fails_closed_on_unsupported_obligations_before_process_start() {
     let registry = registry_with_echo_capability();
     let dispatcher = recording_dispatcher();
-    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
     let process_services = ProcessServices::in_memory();
     let executor = Arc::new(RecordingSuccessExecutor::default());
     let process_manager = process_services.background_manager(Arc::clone(&executor));
     let host = capability_host(&registry, &dispatcher, &SpawnObligatingAuthorizer)
-        .with_run_state(&run_state)
+        .with_invocation_state(&run_state)
         .with_process_manager(&process_manager);
     let context = execution_context(CapabilitySet {
         grants: vec![spawn_grant()],
@@ -183,14 +193,14 @@ async fn capability_host_spawn_fails_closed_on_unsupported_obligations_before_pr
     assert!(executor.take_request_opt().is_none());
     assert!(
         process_services
-            .process_store()
-            .records_for_scope(&scope)
+            .process_runtime()
+            .process_snapshots(&scope)
             .await
             .unwrap()
             .is_empty()
     );
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
-    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.status, ProcessInvocationStatus::Failed);
     assert_eq!(run.error_kind.as_deref(), Some("UnsupportedObligations"));
 }
 
@@ -329,7 +339,7 @@ fn scope_with_project_mission_thread(
 }
 
 async fn assert_process_hidden(
-    process_host: &ProcessHost<'_>,
+    process_host: &ProcessHost,
     scope: &ResourceScope,
     process_id: ProcessId,
 ) {

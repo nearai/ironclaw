@@ -20,11 +20,14 @@ use std::time::Duration;
 
 use chrono::{TimeZone, Utc};
 use ironclaw_conversations::{
-    AdapterInstallationId, AdapterKind, ExternalActorRef, InMemoryConversationServices,
+    AdapterInstallationId, AdapterKind, InMemoryConversationServices,
     trusted_trigger_fire_submitter,
 };
+use ironclaw_extension_contracts::external::ExternalActorRef;
+use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
+use ironclaw_loop_contracts::ModelProfileId;
 use ironclaw_loop_host::HostManagedModelGateway;
 use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_triggers::{
@@ -33,11 +36,7 @@ use ironclaw_triggers::{
     TriggerInboundContentRef, TriggerMaterializedPrompt, TrustedTriggerFireSubmitOutcome,
     TrustedTriggerSubmitRequest,
 };
-use ironclaw_turns::run_profile::ModelProfileId;
-use ironclaw_turns::{
-    GateRef, GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition, TurnRunId,
-    TurnRunState, TurnScope, TurnStateStore, TurnStatus,
-};
+use ironclaw_turns::{GateResumeDisposition, ResumeTurnPrecondition, TurnRunState};
 
 use super::builder::{INTERACTIVE_MODEL_PROFILE, RebornIntegrationHarness};
 use super::reply::RebornScriptedReply;
@@ -97,6 +96,7 @@ impl RebornIntegrationHarness {
                 ExternalActorRef::new(
                     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
                     self.binding.actor_user_id.as_str(),
+                    None::<String>,
                 )?,
                 self.binding.actor_user_id.clone(),
             )
@@ -252,13 +252,7 @@ impl RebornIntegrationHarness {
     ) -> HarnessResult<TurnRunState> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
-            let state = self
-                .turn_store
-                .get_run_state(GetRunStateRequest {
-                    scope: scope.clone(),
-                    run_id,
-                })
-                .await?;
+            let state = self.turn_runtime.get_run_state(scope, run_id).await?;
             if state.status == expected {
                 return Ok(state);
             }
@@ -287,10 +281,10 @@ impl RebornIntegrationHarness {
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> HarnessResult<()> {
         self.capability_recorder
-            .approve_local_dev_gate(gate_ref)
+            .approve_standalone_gate(gate_ref)
             .await?;
         self.resume_run_in_scope(
             scope,
@@ -310,10 +304,10 @@ impl RebornIntegrationHarness {
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> HarnessResult<()> {
         self.capability_recorder
-            .deny_local_dev_gate(gate_ref)
+            .deny_standalone_gate(gate_ref)
             .await?;
         self.resume_run_in_scope(
             scope,
@@ -336,7 +330,7 @@ impl RebornIntegrationHarness {
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         resume_disposition: Option<GateResumeDisposition>,
         precondition: ResumeTurnPrecondition,
     ) -> HarnessResult<()> {

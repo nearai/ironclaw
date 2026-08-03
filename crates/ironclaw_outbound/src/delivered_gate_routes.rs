@@ -31,8 +31,8 @@
 //!   triggers (the driver already fails closed to personal-only).
 
 use chrono::{DateTime, Duration, Utc};
-use ironclaw_host_api::{TenantId, UserId};
-use ironclaw_turns::{TurnRunId, TurnScope};
+use ironclaw_host_api::ids::{TenantId, UserId};
+use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
 
 /// How long a delivered-gate route record may live before it is considered
@@ -219,7 +219,7 @@ impl DeliveredGateRouteStore for NoopDeliveredGateRouteStore {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{AgentId, ThreadId};
+    use ironclaw_host_api::ids::{AgentId, ThreadId};
 
     use super::*;
 

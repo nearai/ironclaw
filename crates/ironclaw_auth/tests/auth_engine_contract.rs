@@ -22,10 +22,16 @@ use ironclaw_auth::{
     OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, PrepareOAuthFlowRequest,
     ProviderCallbackOutcome, ProviderScope, ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
 };
+use ironclaw_extension_contracts::recipe::{
+    HttpsEndpoint, RecipeClientCredentials, VendorAuthRecipe,
+};
 use ironclaw_host_api::{
-    InvocationId, RecipeClientCredentials, ResourceScope, RuntimeHttpEgress,
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle,
-    UserId, VendorAuthRecipe,
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    ids::{InvocationId, SecretHandle, UserId},
+    resource::ResourceScope,
 };
 use ironclaw_secrets::{SecretStore, SecretStorePort};
 use secrecy::{ExposeSecret, SecretString};
@@ -286,6 +292,7 @@ fn manifest_recipe(package: &str, vendor: &str) -> ResolvedVendorAuthRecipe {
         vendor: vendor.to_string(),
         recipe,
         token_exchange_resource,
+        protected_resource_metadata_url: None,
     }
 }
 
@@ -323,6 +330,7 @@ fn synthetic_recipe(vendor: &str, toml_text: &str) -> ResolvedVendorAuthRecipe {
         vendor: vendor.to_string(),
         recipe,
         token_exchange_resource: None,
+        protected_resource_metadata_url: None,
     }
 }
 
@@ -409,6 +417,7 @@ async fn authorize_url_is_host_constructed_for_every_oauth_vendor_row() {
             .engine
             .prepare_oauth_flow(PrepareOAuthFlowRequest {
                 vendor: vendor.clone(),
+                requester_extension: None,
                 scope: scope.clone(),
                 flow_id: AuthFlowId::new(),
                 account_label: CredentialAccountLabel::new("account").unwrap(),
@@ -473,6 +482,7 @@ async fn google_extra_authorize_params_come_from_recipe_data() {
         .engine
         .prepare_oauth_flow(PrepareOAuthFlowRequest {
             vendor: "google".to_string(),
+            requester_extension: None,
             scope: test_scope(),
             flow_id: AuthFlowId::new(),
             account_label: CredentialAccountLabel::new("account").unwrap(),
@@ -522,6 +532,7 @@ async fn recipes_cannot_supply_or_override_reserved_authorize_params() {
             .engine
             .prepare_oauth_flow(PrepareOAuthFlowRequest {
                 vendor: "acme".to_string(),
+                requester_extension: None,
                 scope: test_scope(),
                 flow_id: AuthFlowId::new(),
                 account_label: CredentialAccountLabel::new("account").unwrap(),
@@ -552,6 +563,7 @@ async fn authorization_endpoint_predefining_reserved_params_is_rejected() {
         .engine
         .prepare_oauth_flow(PrepareOAuthFlowRequest {
             vendor: "acme".to_string(),
+            requester_extension: None,
             scope: test_scope(),
             flow_id: AuthFlowId::new(),
             account_label: CredentialAccountLabel::new("account").unwrap(),
@@ -571,6 +583,7 @@ async fn scope_widening_is_rejected_before_any_vendor_call() {
         .engine
         .prepare_oauth_flow(PrepareOAuthFlowRequest {
             vendor: "slack".to_string(),
+            requester_extension: None,
             scope: scope.clone(),
             flow_id: AuthFlowId::new(),
             account_label: CredentialAccountLabel::new("account").unwrap(),
@@ -1181,18 +1194,111 @@ async fn refresh_invalid_grant_is_a_typed_permanent_failure() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn dcr_requires_advertised_protected_resource_metadata() {
+    let harness = Harness::new(vec![manifest_recipe("notion-mcp", "notion")]);
+    harness.server.script(
+        "https://mcp.notion.com/mcp/.well-known/oauth-protected-resource",
+        404,
+        serde_json::json!({}),
+    );
+
+    let error = harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "notion".to_string(),
+            requester_extension: None,
+            scope: test_scope(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").unwrap(),
+            requested_scopes: Vec::new(),
+        })
+        .await
+        .expect_err("DCR must not invent an issuer when metadata is absent");
+
+    assert_eq!(error.code(), ironclaw_auth::AuthErrorCode::MalformedConfig);
+    assert_eq!(harness.server.request_count(), 1);
+}
+
+#[tokio::test]
+async fn dcr_uses_the_admitted_non_well_known_protected_resource_metadata_url() {
+    let mut recipe = manifest_recipe("notion-mcp", "notion");
+    recipe.token_exchange_resource = Some("https://mcp.example.test/mcp".to_string());
+    recipe.protected_resource_metadata_url = Some(
+        HttpsEndpoint::new("https://mcp.example.test/admitted-metadata".to_string())
+            .expect("admitted metadata URL"),
+    );
+    let harness = Harness::new(vec![recipe]);
+    harness.server.script(
+        "https://mcp.example.test/admitted-metadata",
+        200,
+        serde_json::json!({
+            "resource": "https://mcp.example.test/mcp",
+            "authorization_servers": ["https://auth.example.test"]
+        }),
+    );
+    harness.server.script(
+        "https://auth.example.test/.well-known/oauth-authorization-server",
+        200,
+        serde_json::json!({
+            "issuer": "https://auth.example.test",
+            "authorization_endpoint": "https://auth.example.test/authorize",
+            "token_endpoint": "https://auth.example.test/token",
+            "registration_endpoint": "https://auth.example.test/register"
+        }),
+    );
+    harness.server.script(
+        "https://auth.example.test/register",
+        201,
+        serde_json::json!({ "client_id": "admitted-metadata-dcr-client" }),
+    );
+
+    harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "notion".to_string(),
+            requester_extension: None,
+            scope: test_scope(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").expect("account label"),
+            requested_scopes: Vec::new(),
+        })
+        .await
+        .expect("DCR must use the admitted metadata location");
+
+    assert_eq!(
+        harness
+            .server
+            .requests_for("https://mcp.example.test/admitted-metadata")
+            .len(),
+        1,
+        "DCR reuses the exact metadata document admitted from the challenge"
+    );
+    assert!(
+        harness
+            .server
+            .requests_for("https://mcp.example.test/mcp/.well-known/oauth-protected-resource")
+            .is_empty(),
+        "DCR must not reconstruct a different metadata URL from the resource"
+    );
+}
+
+#[tokio::test]
 async fn dcr_vendor_registers_once_and_runs_standard_oauth_afterwards() {
     let harness = Harness::new(vec![manifest_recipe("notion-mcp", "notion")]);
     let scope = test_scope();
     harness.server.script(
         "https://mcp.notion.com/mcp/.well-known/oauth-protected-resource",
         200,
-        serde_json::json!({ "authorization_servers": ["https://mcp.notion.com"] }),
+        serde_json::json!({
+            "resource": "https://mcp.notion.com/mcp",
+            "authorization_servers": ["https://mcp.notion.com"]
+        }),
     );
     harness.server.script(
         "https://mcp.notion.com/.well-known/oauth-authorization-server",
         200,
         serde_json::json!({
+            "issuer": "https://mcp.notion.com",
             "authorization_endpoint": "https://mcp.notion.com/discovered/authorize",
             "token_endpoint": "https://mcp.notion.com/discovered/token",
             "registration_endpoint": "https://mcp.notion.com/register"
@@ -1207,6 +1313,7 @@ async fn dcr_vendor_registers_once_and_runs_standard_oauth_afterwards() {
     let prepare = |flow_id| {
         harness.engine.prepare_oauth_flow(PrepareOAuthFlowRequest {
             vendor: "notion".to_string(),
+            requester_extension: None,
             scope: scope.clone(),
             flow_id,
             account_label: CredentialAccountLabel::new("account").unwrap(),
@@ -1295,29 +1402,28 @@ async fn dcr_vendor_registers_once_and_runs_standard_oauth_afterwards() {
     );
 }
 
-/// A compromised protected-resource metadata document must not be able to
-/// redirect dynamic client registration to an attacker host that shares only
-/// a multi-part public suffix with the resource. The pre-PSL validation took
-/// the final two host labels, so `mcp.example.co.uk` and `attacker.co.uk`
-/// both resolved to "co.uk" and the attacker issuer passed (the PR #6116
-/// security-high finding). The discriminating assertion is the request count:
-/// the engine must stop after the protected-resource metadata fetch and never
-/// contact the attacker authorization server.
+/// Protected-resource metadata is authoritative only for the exact resource
+/// that was challenged. A document for another resource must fail before its
+/// advertised authorization server is contacted.
 #[tokio::test]
-async fn dcr_issuer_sharing_only_a_public_suffix_is_rejected_before_any_attacker_contact() {
+async fn dcr_rejects_protected_metadata_for_a_different_resource_before_issuer_fetch() {
     let mut recipe = manifest_recipe("notion-mcp", "notion");
     recipe.token_exchange_resource = Some("https://mcp.example.co.uk/mcp".to_string());
     let harness = Harness::new(vec![recipe]);
     harness.server.script(
         "https://mcp.example.co.uk/mcp/.well-known/oauth-protected-resource",
         200,
-        serde_json::json!({ "authorization_servers": ["https://attacker.co.uk"] }),
+        serde_json::json!({
+            "resource": "https://different.example.co.uk/mcp",
+            "authorization_servers": ["https://login.identity.test"]
+        }),
     );
 
     let result = harness
         .engine
         .prepare_oauth_flow(PrepareOAuthFlowRequest {
             vendor: "notion".to_string(),
+            requester_extension: None,
             scope: test_scope(),
             flow_id: AuthFlowId::new(),
             account_label: CredentialAccountLabel::new("account").unwrap(),
@@ -1327,47 +1433,49 @@ async fn dcr_issuer_sharing_only_a_public_suffix_is_rejected_before_any_attacker
 
     assert!(
         result.is_err(),
-        "an issuer on a foreign registrable domain under a shared public suffix must fail the flow"
+        "metadata for a different protected resource must fail the flow"
     );
     assert_eq!(
         harness.server.request_count(),
         1,
-        "the engine stops at the protected-resource metadata fetch; no request reaches the attacker host"
+        "the engine stops at the protected-resource metadata fetch"
     );
     assert!(
         harness
             .server
-            .requests_for("https://attacker.co.uk/.well-known/oauth-authorization-server")
+            .requests_for("https://login.identity.test/.well-known/oauth-authorization-server")
             .is_empty(),
-        "the attacker authorization-server metadata is never fetched"
+        "the advertised authorization-server metadata is never fetched"
     );
 }
 
-/// The positive companion: an issuer under the SAME registrable domain as the
-/// resource — including on a multi-part public suffix — keeps working end to
-/// end (discovery, registration, authorize URL), so the fix cannot overblock
-/// legitimate vendors whose auth host is a sibling of the MCP host.
+/// RFC 9728 binds the exact protected resource to its advertised issuer; it
+/// does not require their origins or registrable domains to match.
 #[tokio::test]
-async fn dcr_issuer_on_same_registrable_domain_under_multi_part_suffix_registers() {
+async fn dcr_accepts_exact_resource_binding_to_a_cross_origin_issuer() {
     let mut recipe = manifest_recipe("notion-mcp", "notion");
     recipe.token_exchange_resource = Some("https://mcp.example.co.uk/mcp".to_string());
     let harness = Harness::new(vec![recipe]);
     harness.server.script(
         "https://mcp.example.co.uk/mcp/.well-known/oauth-protected-resource",
         200,
-        serde_json::json!({ "authorization_servers": ["https://auth.example.co.uk"] }),
-    );
-    harness.server.script(
-        "https://auth.example.co.uk/.well-known/oauth-authorization-server",
-        200,
         serde_json::json!({
-            "authorization_endpoint": "https://auth.example.co.uk/authorize",
-            "token_endpoint": "https://auth.example.co.uk/token",
-            "registration_endpoint": "https://auth.example.co.uk/register"
+            "resource": "https://mcp.example.co.uk/mcp",
+            "authorization_servers": ["https://login.identity.test"]
         }),
     );
     harness.server.script(
-        "https://auth.example.co.uk/register",
+        "https://login.identity.test/.well-known/oauth-authorization-server",
+        200,
+        serde_json::json!({
+            "issuer": "https://login.identity.test",
+            "authorization_endpoint": "https://login.identity.test/authorize",
+            "token_endpoint": "https://login.identity.test/token",
+            "registration_endpoint": "https://login.identity.test/register"
+        }),
+    );
+    harness.server.script(
+        "https://login.identity.test/register",
         201,
         serde_json::json!({ "client_id": "couk-dcr-client-1" }),
     );
@@ -1376,19 +1484,74 @@ async fn dcr_issuer_on_same_registrable_domain_under_multi_part_suffix_registers
         .engine
         .prepare_oauth_flow(PrepareOAuthFlowRequest {
             vendor: "notion".to_string(),
+            requester_extension: None,
             scope: test_scope(),
             flow_id: AuthFlowId::new(),
             account_label: CredentialAccountLabel::new("account").unwrap(),
             requested_scopes: Vec::new(),
         })
         .await
-        .expect("sibling issuer under the same registrable domain is accepted");
+        .expect("the exact protected resource may advertise a cross-origin issuer");
     assert!(
         prepared
             .authorization_url
             .as_str()
-            .starts_with("https://auth.example.co.uk/authorize"),
-        "the discovered sibling authorize endpoint is used"
+            .starts_with("https://login.identity.test/authorize"),
+        "the discovered cross-origin authorize endpoint is used"
+    );
+}
+
+/// The authorization-server document must self-identify as the exact issuer
+/// selected by the protected-resource metadata. Discovery stops before DCR
+/// when that second binding does not match.
+#[tokio::test]
+async fn dcr_rejects_authorization_server_metadata_with_a_different_issuer() {
+    let mut recipe = manifest_recipe("notion-mcp", "notion");
+    recipe.token_exchange_resource = Some("https://mcp.example.test/mcp".to_string());
+    let harness = Harness::new(vec![recipe]);
+    harness.server.script(
+        "https://mcp.example.test/mcp/.well-known/oauth-protected-resource",
+        200,
+        serde_json::json!({
+            "resource": "https://mcp.example.test/mcp",
+            "authorization_servers": ["https://login.identity.test"]
+        }),
+    );
+    harness.server.script(
+        "https://login.identity.test/.well-known/oauth-authorization-server",
+        200,
+        serde_json::json!({
+            "issuer": "https://different.identity.test",
+            "authorization_endpoint": "https://login.identity.test/authorize",
+            "token_endpoint": "https://login.identity.test/token",
+            "registration_endpoint": "https://login.identity.test/register"
+        }),
+    );
+
+    let result = harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "notion".to_string(),
+            requester_extension: None,
+            scope: test_scope(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").unwrap(),
+            requested_scopes: Vec::new(),
+        })
+        .await;
+
+    assert!(result.is_err(), "an issuer mismatch must fail discovery");
+    assert_eq!(
+        harness.server.request_count(),
+        2,
+        "both metadata documents are fetched, but registration is not attempted"
+    );
+    assert!(
+        harness
+            .server
+            .requests_for("https://login.identity.test/register")
+            .is_empty(),
+        "DCR is not attempted for mismatched issuer metadata"
     );
 }
 
@@ -1436,6 +1599,7 @@ fn new_flow(
         scope: scope.clone(),
         kind: AuthFlowKind::IntegrationCredential,
         provider: AuthProviderId::new("acme").unwrap(),
+        requester_extension: None,
         challenge: AuthChallenge::OAuthUrl {
             authorization_url: OAuthAuthorizationUrl::new("https://auth.acme.example/authorize")
                 .unwrap(),
@@ -1562,12 +1726,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ironclaw_auth::keepalive::{sweep_once, tick_once};
 use ironclaw_auth::{
-    AlwaysLeaderKeepaliveLock, CredentialAccount, CredentialAccountLookupRequest,
-    CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
-    KeepaliveCandidateSource, KeepaliveLeaderLock, KeepaliveSweepDeps, KeepaliveSweepFuture,
-    KeepaliveSweepSettings, LeaderOutcome, NewCredentialAccount,
+    AlwaysLeaderKeepaliveLock, AuthRecipeResolver, CredentialAccount,
+    CredentialAccountLookupRequest, CredentialAccountService, CredentialAccountStatus,
+    CredentialOwnership, KeepaliveCandidateSource, KeepaliveLeaderLock, KeepaliveSweepDeps,
+    KeepaliveSweepFuture, KeepaliveSweepSettings, LeaderOutcome, NewCredentialAccount,
     ProviderBackedCredentialAccountService,
 };
+use ironclaw_host_api::ids::ExtensionId;
 use tokio_util::sync::CancellationToken;
 
 fn keepalive_recipe_toml(vendor: &str, keepalive_idle_seconds: Option<u32>) -> String {
@@ -1690,6 +1855,19 @@ impl SweepFixture {
     }
 
     async fn seed_account(&self, vendor: &str) -> CredentialAccount {
+        self.seed_account_with_ownership(vendor, CredentialOwnership::UserReusable, None)
+            .await
+    }
+
+    /// Sibling of [`Self::seed_account`] that lets a test control ownership
+    /// and `owner_extension`, e.g. to seed an `ExtensionOwned` candidate for
+    /// the sweep's extension-recipe-resolution branch.
+    async fn seed_account_with_ownership(
+        &self,
+        vendor: &str,
+        ownership: CredentialOwnership,
+        owner_extension: Option<ExtensionId>,
+    ) -> CredentialAccount {
         let refresh_handle = SecretHandle::new(format!("{vendor}-seeded-refresh")).unwrap();
         self.secrets
             .put(
@@ -1707,8 +1885,8 @@ impl SweepFixture {
                 provider: AuthProviderId::new(vendor).unwrap(),
                 label: CredentialAccountLabel::new(vendor).unwrap(),
                 status: CredentialAccountStatus::Configured,
-                ownership: CredentialOwnership::UserReusable,
-                owner_extension: None,
+                ownership,
+                owner_extension,
                 granted_extensions: Vec::new(),
                 access_secret: None,
                 refresh_secret: Some(refresh_handle),
@@ -1919,6 +2097,176 @@ async fn keepalive_refresh_failure_follows_engine_account_state_rules() {
             .len(),
         1,
         "a revoked account is never re-swept"
+    );
+}
+
+/// Requester-aware recipe resolver test double, keyed by requesting
+/// extension. `StaticAuthRecipeResolver` (used everywhere else in this suite)
+/// ignores `requester_extension` entirely, so it can never prove that
+/// `sweep_once`'s `ExtensionOwned` branch (`keepalive.rs:308-318`) actually
+/// carries `account.owner_extension` into `deps.recipes.resolve`.
+#[derive(Debug, Default)]
+struct RequesterAwareRecipeResolver {
+    by_extension: HashMap<String, ResolvedVendorAuthRecipe>,
+}
+
+impl RequesterAwareRecipeResolver {
+    fn new(entries: Vec<(ExtensionId, ResolvedVendorAuthRecipe)>) -> Self {
+        Self {
+            by_extension: entries
+                .into_iter()
+                .map(|(extension, recipe)| (extension.into_string(), recipe))
+                .collect(),
+        }
+    }
+}
+
+#[async_trait]
+impl AuthRecipeResolver for RequesterAwareRecipeResolver {
+    async fn resolve(
+        &self,
+        requester_extension: Option<&ExtensionId>,
+        vendor: &str,
+    ) -> Option<ResolvedVendorAuthRecipe> {
+        let extension = requester_extension?;
+        self.by_extension
+            .get(extension.as_str())
+            .filter(|recipe| recipe.vendor == vendor)
+            .cloned()
+    }
+}
+
+/// An `ExtensionOwned` account whose owner_extension resolves no recipe in
+/// this requester-aware resolver is skipped before any vendor traffic,
+/// proving the branch's early-continue when `resolve()` returns `None`.
+///
+/// The success leg of this branch — an `ExtensionOwned` account whose
+/// `owner_extension` DOES resolve a recipe, and is then actually refreshed —
+/// is covered by
+/// [`keepalive_sweep_refreshes_extension_owned_account_with_resolvable_recipe`]
+/// below, which asserts real vendor traffic and an advanced `updated_at`.
+#[tokio::test]
+async fn keepalive_sweep_skips_extension_owned_account_with_no_resolvable_recipe() {
+    let beta_recipe = synthetic_recipe("beta", &keepalive_recipe_toml("beta", Some(WEEK_SECONDS)));
+    let fixture = SweepFixture::new(vec![beta_recipe]);
+
+    let alpha_extension_with_recipe = ExtensionId::new("alpha-extension").unwrap();
+    let beta_extension_without_recipe = ExtensionId::new("beta-extension-no-recipe").unwrap();
+
+    // The resolver only has a (mismatched-vendor) entry for
+    // `alpha_extension_with_recipe`; `beta`'s owner_extension is entirely
+    // absent from it.
+    let mut deps = fixture.deps.clone();
+    deps.recipes = Arc::new(RequesterAwareRecipeResolver::new(vec![(
+        alpha_extension_with_recipe,
+        synthetic_recipe("alpha", &keepalive_recipe_toml("alpha", Some(WEEK_SECONDS))),
+    )]));
+
+    let beta = fixture
+        .seed_account_with_ownership(
+            "beta",
+            CredentialOwnership::ExtensionOwned,
+            Some(beta_extension_without_recipe.clone()),
+        )
+        .await;
+
+    let now = Utc::now() + Duration::days(4);
+    sweep_once(
+        &deps,
+        &KeepaliveSweepSettings::default(),
+        &CancellationToken::new(),
+        now,
+    )
+    .await;
+
+    assert_eq!(
+        fixture.server.request_count(),
+        0,
+        "an ExtensionOwned account whose owner_extension resolves no recipe generates zero vendor traffic"
+    );
+    // `stored_account` looks up with no requester identity, which
+    // `ExtensionOwned` accounts reject (CrossScopeDenied) regardless of
+    // sweep outcome; look up as the owning extension instead.
+    let refetched = fixture
+        .services
+        .get_account(
+            CredentialAccountLookupRequest::new(fixture.scope.clone(), beta.id)
+                .for_extension(beta_extension_without_recipe),
+        )
+        .await
+        .expect("lookup as owning extension")
+        .expect("account exists");
+    assert_eq!(
+        refetched.updated_at, beta.updated_at,
+        "the unresolved extension-owned account is skipped, never refreshed"
+    );
+}
+
+/// Success leg of the `ExtensionOwned` branch: when `owner_extension` DOES
+/// resolve a recipe, the sweep must actually refresh the account through the
+/// engine-owned refresh path — proving the resolved extension identity is
+/// carried from resolution all the way into the refresh request (not just
+/// into `deps.recipes.resolve`, which the skip-case test above already
+/// covers).
+#[tokio::test]
+async fn keepalive_sweep_refreshes_extension_owned_account_with_resolvable_recipe() {
+    let beta_recipe = synthetic_recipe("beta", &keepalive_recipe_toml("beta", Some(WEEK_SECONDS)));
+    let fixture = SweepFixture::new(vec![beta_recipe.clone()]);
+
+    let beta_extension = ExtensionId::new("beta-extension").unwrap();
+
+    let mut deps = fixture.deps.clone();
+    deps.recipes = Arc::new(RequesterAwareRecipeResolver::new(vec![(
+        beta_extension.clone(),
+        beta_recipe,
+    )]));
+
+    let beta = fixture
+        .seed_account_with_ownership(
+            "beta",
+            CredentialOwnership::ExtensionOwned,
+            Some(beta_extension.clone()),
+        )
+        .await;
+
+    fixture.server.script(
+        &SweepFixture::token_url("beta"),
+        200,
+        serde_json::json!({ "access_token": "beta-access", "expires_in": 3600 }),
+    );
+
+    let now = Utc::now() + Duration::days(4);
+    sweep_once(
+        &deps,
+        &KeepaliveSweepSettings::default(),
+        &CancellationToken::new(),
+        now,
+    )
+    .await;
+
+    let beta_requests = fixture
+        .server
+        .requests_for(&SweepFixture::token_url("beta"));
+    assert_eq!(
+        beta_requests.len(),
+        1,
+        "an ExtensionOwned account whose owner_extension resolves a recipe is actually refreshed"
+    );
+
+    // `ExtensionOwned` accounts reject a no-requester lookup (CrossScopeDenied);
+    // look up as the owning extension, as the skip-case test above does.
+    let refetched = fixture
+        .services
+        .get_account(
+            CredentialAccountLookupRequest::new(fixture.scope.clone(), beta.id)
+                .for_extension(beta_extension),
+        )
+        .await
+        .expect("lookup as owning extension")
+        .expect("account exists");
+    assert!(
+        refetched.updated_at > beta.updated_at,
+        "a successful keepalive refresh advances the account's idle clock"
     );
 }
 

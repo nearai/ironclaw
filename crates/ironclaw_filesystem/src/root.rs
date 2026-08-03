@@ -1,10 +1,11 @@
 use async_trait::async_trait;
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
-    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
-    FilesystemOperation, Filter, IndexSpec, Page, RecordVersion, SeqNo, VersionedEntry,
+    AtomicSubtreeEntry, BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat,
+    FilesystemError, FilesystemOperation, Filter, IndexSpec, OrderedPage, Page, RecordVersion,
+    SeqNo, VersionedEntry,
 };
 
 /// Unified filesystem interface over canonical virtual paths.
@@ -113,6 +114,16 @@ pub trait RootFilesystem: Send + Sync {
         unsupported(path, FilesystemOperation::Query)
     }
 
+    /// Ordered keyset query over one declared indexed projection.
+    async fn query_ordered(
+        &self,
+        path: &VirtualPath,
+        _filter: &Filter,
+        _page: &OrderedPage,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        unsupported(path, FilesystemOperation::Query)
+    }
+
     /// Declare an index on a mount prefix. Idempotent: re-declaring the same
     /// spec is a no-op; declaring a conflicting spec returns
     /// [`FilesystemError::IndexConflict`].
@@ -198,10 +209,23 @@ pub trait RootFilesystem: Send + Sync {
     // ─── Atomicity ────────────────────────────────────────────────────────
 
     /// Begin a multi-key transaction scoped to `prefix`. Backends with only
-    /// CAS support return [`FilesystemError::Unsupported`]; consumers must
-    /// always have a CAS-only path.
+    /// CAS support return [`FilesystemError::Unsupported`]. Consumers normally
+    /// provide a CAS-only path; stores with cross-record invariants may require
+    /// `TxnCapability::MultiKey` and fail closed on weaker backends.
     async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
         unsupported(path, FilesystemOperation::BeginTxn)
+    }
+
+    /// Atomically publish a complete, previously absent directory subtree.
+    ///
+    /// Every entry must be a unique strict descendant of `prefix`. Backends
+    /// either make the complete batch visible or leave `prefix` absent.
+    async fn create_subtree_atomic(
+        &self,
+        path: &VirtualPath,
+        _entries: Vec<AtomicSubtreeEntry>,
+    ) -> Result<Vec<RecordVersion>, FilesystemError> {
+        unsupported(path, FilesystemOperation::CreateSubtreeAtomic)
     }
 
     // ─── Event plane (append/tail) ────────────────────────────────────────
@@ -376,6 +400,36 @@ pub trait RootFilesystem: Send + Sync {
             operation: FilesystemOperation::CreateDirAll,
         })
     }
+}
+
+pub(crate) fn validate_atomic_subtree_entries(
+    prefix: &VirtualPath,
+    entries: &[AtomicSubtreeEntry],
+) -> Result<(), FilesystemError> {
+    if entries.is_empty() {
+        return Err(FilesystemError::Backend {
+            path: prefix.clone(),
+            operation: FilesystemOperation::CreateSubtreeAtomic,
+            reason: "atomic subtree batch must not be empty".to_string(),
+        });
+    }
+    let prefix_with_separator = format!("{}/", prefix.as_str().trim_end_matches('/'));
+    let mut paths = std::collections::HashSet::with_capacity(entries.len());
+    for item in entries {
+        if !item.path.as_str().starts_with(&prefix_with_separator) {
+            return Err(FilesystemError::PathOutsideMount {
+                path: item.path.clone(),
+            });
+        }
+        if !paths.insert(item.path.as_str()) {
+            return Err(FilesystemError::Backend {
+                path: item.path.clone(),
+                operation: FilesystemOperation::CreateSubtreeAtomic,
+                reason: "atomic subtree paths must be unique".to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn unsupported<T>(

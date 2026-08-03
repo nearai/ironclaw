@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 import pytest
 
+from hermetic_process import forward_hermetic_process_env
 from helpers import REBORN_V2_AUTH_TOKEN, wait_for_ready
 
 USER_ID = "reborn-responses-e2e-user"
@@ -37,6 +38,7 @@ def _forward_coverage_env(env: dict[str, str]) -> None:
             "CARGO_INCREMENTAL",
         }:
             env[key] = value
+    forward_hermetic_process_env(env)
 
 
 async def _stop_process(proc, *, sig=signal.SIGINT, timeout: float = 10) -> None:

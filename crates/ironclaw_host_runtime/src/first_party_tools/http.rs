@@ -1,12 +1,18 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
-    EffectKind, MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod, NetworkPolicy,
-    PermissionMode, RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, ResourceCeiling,
-    ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
-    RuntimeHttpEgressError, RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest,
-    RuntimeHttpSaveTarget, RuntimeKind, SandboxQuota, ScopedPath, VirtualPath,
-    valid_http_field_name,
+    action::{NetworkMethod, NetworkPolicy},
+    capability::{EffectKind, PermissionMode},
+    dispatch::RuntimeDispatchErrorKind,
+    http::{
+        RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, RuntimeHttpEgressError,
+        RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest, RuntimeHttpSaveTarget,
+        valid_http_field_name,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
+    resource::{ResourceCeiling, ResourceEstimate, ResourceProfile, ResourceUsage, SandboxQuota},
+    runtime::RuntimeKind,
 };
 use serde_json::Value;
 
@@ -464,13 +470,16 @@ fn http_error(error: RuntimeHttpEgressError, save_mode: HttpSaveMode) -> FirstPa
     let save_error = save_error_kind_and_summary(&error, save_mode);
     let kind = match save_error {
         Some((kind, _summary)) => kind,
-        // Host credential injection failures are backend/client integration faults;
-        // production maps RuntimeDispatchErrorKind::Client to RuntimeFailureKind::Backend.
+        // Host credential injection failures are host-client integration faults.
         None => match error.reason_code() {
             RuntimeHttpEgressReasonCode::CredentialUnavailable => RuntimeDispatchErrorKind::Client,
             RuntimeHttpEgressReasonCode::RequestDenied => RuntimeDispatchErrorKind::InputEncode,
             RuntimeHttpEgressReasonCode::PolicyDenied => RuntimeDispatchErrorKind::PolicyDenied,
-            RuntimeHttpEgressReasonCode::NetworkError => RuntimeDispatchErrorKind::NetworkDenied,
+            // Transport fault (unreachable, reset, timeout) — retryable. The
+            // policy-denial cousin rides `PolicyDenied` above; conflating the
+            // two made denied calls burn retry budget (and, post-fix, would
+            // have made real network blips non-retryable).
+            RuntimeHttpEgressReasonCode::NetworkError => RuntimeDispatchErrorKind::Network,
             RuntimeHttpEgressReasonCode::ResponseError => RuntimeDispatchErrorKind::OperationFailed,
             RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded => {
                 RuntimeDispatchErrorKind::OutputTooLarge
@@ -567,11 +576,16 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-        RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, ResourceEstimate, ResourceScope,
-        RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeHttpEgressError,
-        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeHttpSavedBody, TenantId,
-        UserId, VirtualPath,
+        dispatch::RuntimeDispatchErrorKind,
+        http::{
+            RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, RuntimeHttpEgress,
+            RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+            RuntimeHttpSavedBody,
+        },
+        ids::{CapabilityId, InvocationId, TenantId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+        resource::{ResourceEstimate, ResourceScope},
     };
     use serde_json::json;
 

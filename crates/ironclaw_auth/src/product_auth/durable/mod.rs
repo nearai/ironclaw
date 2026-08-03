@@ -10,7 +10,11 @@ use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FileType, FilesystemError, RecordVersion, RootFilesystem,
     ScopedFilesystem,
 };
-use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, ScopedPath, TenantId, UserId};
+use ironclaw_host_api::{
+    ids::{AgentId, ProjectId, TenantId, UserId},
+    path::ScopedPath,
+    resource::ResourceScope,
+};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
@@ -19,7 +23,7 @@ use crate::{
     CredentialAccountOwnerScope, CredentialAccountSelectionRequest, CredentialAccountStatus,
     NewCredentialAccount,
 };
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 
 use self::domain::validate_new_credential_account;
 use self::paths::{
@@ -86,7 +90,7 @@ where
     ///
     /// `ScopedFilesystem` does not expose its inner `RootFilesystem`, so
     /// this field is wired explicitly by the factory (`new_with_root`).
-    /// `None` in test/local-dev paths that do not need cross-tenant listing —
+    /// `None` in test/standalone paths that do not need cross-tenant listing —
     /// `list_refresh_candidates` returns an empty vec in that case (safe: no
     /// accounts are refreshed, which is benign for local/test deployments).
     root: Option<Arc<F>>,
@@ -149,8 +153,8 @@ where
     /// orphaned material — log it instead of dropping the error silently.
     async fn purge_secret_handle(
         &self,
-        scope: &ironclaw_host_api::ResourceScope,
-        handle: &ironclaw_host_api::SecretHandle,
+        scope: &ironclaw_host_api::resource::ResourceScope,
+        handle: &ironclaw_host_api::ids::SecretHandle,
     ) {
         if let Err(error) = self.secret_store.delete(scope, handle).await {
             tracing::debug!(
@@ -281,7 +285,7 @@ where
             project_id: owner.project_id.clone(),
             mission_id: None,
             thread_id: Some(owner.thread_id.clone()),
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         };
         self.flow_records_for_resource_filtered(&resource, |flow| owner.matches(flow))
             .await
@@ -386,7 +390,7 @@ where
             project_id: resource.project_id.clone(),
             mission_id: None,
             thread_id: None,
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         };
         self.flow_records_for_resource_filtered(&resource, |flow| {
             &flow.provider == provider && flow_requires_lifecycle_cleanup(flow)
@@ -414,7 +418,7 @@ where
             project_id: resource.project_id.clone(),
             mission_id: None,
             thread_id: None,
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         };
         self.flow_records_for_resource_filtered(&resource, |flow| {
             matches!(
@@ -536,7 +540,7 @@ where
             project_id: owner.project_id.clone(),
             mission_id: owner.mission_id.clone(),
             thread_id: owner.thread_id.clone(),
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         };
         let mut scopes = Vec::new();
         for surface in AuthSurface::ALL {
@@ -648,7 +652,7 @@ where
     /// `list_refresh_candidates`; idle-threshold filtering (by `updated_at`
     /// against the vendor's recipe-declared lifetime) is the engine keepalive
     /// sweep's job. Returns an empty vec when the root filesystem was not
-    /// wired (local-dev / test path). The returned `CredentialAccount` records
+    /// wired (standalone / test path). The returned `CredentialAccount` records
     /// carry the `access_secret`/`refresh_secret` *handles* (opaque
     /// references, never the raw token material) because the refresh path
     /// needs them. Callers MUST NOT log or serialize these records; only the
@@ -673,7 +677,7 @@ where
     /// so one bad subtree never aborts the sweep.
     pub(crate) async fn sweep_all_accounts(&self) -> Vec<CredentialAccount> {
         let Some(root) = &self.root else {
-            // Local-dev / test path: no root wired, nothing to enumerate.
+            // Standalone/test path: no root wired, nothing to enumerate.
             return Vec::new();
         };
 

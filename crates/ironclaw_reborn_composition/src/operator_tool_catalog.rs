@@ -2,8 +2,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_extensions::{InstallationOwner, SharedExtensionRegistry};
-use ironclaw_host_api::{EffectKind, ExtensionId, RuntimeKind, UserId};
-use ironclaw_product::{RebornOperatorToolCatalog, RebornOperatorToolInfo};
+use ironclaw_host_api::{
+    capability::EffectKind,
+    ids::{ExtensionId, UserId},
+    runtime::RuntimeKind,
+};
+use ironclaw_product_contracts::operator_tools::{
+    RebornOperatorToolCatalog, RebornOperatorToolInfo,
+};
 
 use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 
@@ -12,7 +18,7 @@ pub(crate) struct ActiveRegistryOperatorToolCatalog {
     registry: Arc<SharedExtensionRegistry>,
     synthetic_tools: Arc<[RebornOperatorToolInfo]>,
     /// Source of the installation owner-by-extension map (#5459 P1). Present
-    /// for the local-dev runtime; `None` for assemblies without extension
+    /// for the standalone runtime; `None` for assemblies without extension
     /// management, where every registry tool is treated as tenant-shared
     /// (there is no per-user install path to leak).
     owner_source: Option<Arc<RebornLocalExtensionManagementPort>>,

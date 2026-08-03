@@ -17,17 +17,17 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use ironclaw_hooks::middleware::HookGateRefFactory;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, Resolution, ResolutionBatch, UserId, sha256_digest_token,
+    approval::sha256_digest_token,
+    ids::{ApprovalRequestId, CapabilityId, UserId},
+    resolution::{Resolution, ResolutionBatch},
 };
-use ironclaw_turns::{
-    LoopGateRef,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, LoopCapabilityPort,
-        LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolDefinition, RegisterProviderToolCallRequest,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
-    },
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, LoopCapabilityPort,
+    LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+    VisibleCapabilitySurface,
 };
+use ironclaw_turns::LoopGateRef;
 
 tokio::task_local! {
     static HOOK_GATE_INVOCATION: HookGateInvocationMetadata;

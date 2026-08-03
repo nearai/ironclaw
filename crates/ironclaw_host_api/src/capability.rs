@@ -10,10 +10,16 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CapabilityGrantId, CapabilityId, ExtensionId, InvocationOrigin, MountView, NetworkPolicy,
-    NetworkTargetPattern, Principal, ResourceCeiling, ResourceProfile,
-    RuntimeCredentialAuthRequirement, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
-    Timestamp, TrustClass, VendorId,
+    Timestamp,
+    action::{NetworkPolicy, NetworkTargetPattern},
+    decision::RuntimeCredentialAuthRequirement,
+    http::RuntimeCredentialTarget,
+    ids::{CapabilityGrantId, CapabilityId, ExtensionId, SecretHandle, VendorId},
+    invocation::InvocationOrigin,
+    mount::MountView,
+    resource::{ResourceCeiling, ResourceProfile},
+    runtime::{RuntimeKind, TrustClass},
+    scope::Principal,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -61,6 +67,23 @@ pub enum PermissionMode {
     Deny,
 }
 
+/// Provenance-backed policy for a capability's model-visible description.
+///
+/// This marker does not grant execution authority. It only records whether the
+/// description was supplied by a signature-verified catalog path and may
+/// therefore bypass vocabulary/path/credential-shape false-positive checks.
+/// Structural prompt limits still apply on every variant.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityDescriptionTrust {
+    /// Unknown, local, client-supplied, or otherwise unverified provenance.
+    #[default]
+    Untrusted,
+    /// Description came from a registry package whose catalog manifest and
+    /// artifacts were signature/digest verified before installation.
+    VerifiedCatalog,
+}
+
 /// Per-origin gate requirement (§5.2.1). Absence of a declaration for an
 /// origin means `Forbidden` (deny-by-default).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -104,7 +127,11 @@ pub const UNGATED_LOOP_RUN_CAPABILITIES: &[&str] = &[
     "builtin.trace_commons.status",
     "builtin.trace_commons.credits",
     "builtin.trace_commons.onboard",
-    "builtin.profile_set",
+    // The bound memory provider's profile tool (formerly builtin-declared,
+    // #3537 lifecycle rework): a private local write to the user's own agent
+    // context, grandfathered with the same reviewed posture under its stable
+    // provider-declared id.
+    "ironclaw.memory.profile_set",
     // The memory tools moved from the builtin package (`builtin.memory_*`) to
     // the always-on `ironclaw.memory` package (#3537); same tools, same
     // reviewed read-only posture, renamed ids. `ironclaw.memory.write` stays
@@ -161,6 +188,30 @@ impl OriginGateMatrix {
             product: OriginGatePolicy::ConsentSufficient,
             automation: OriginGatePolicy::Forbidden,
         }
+    }
+
+    /// Clamp a REQUESTED matrix for a memory-provider tool: `Ungated` is a
+    /// reviewed host grant, not a manifest request. `loop_run` keeps `Ungated`
+    /// only when `id` is in the reviewed
+    /// [`UNGATED_LOOP_RUN_CAPABILITIES`] allowlist; any other `Ungated` cell —
+    /// including `product`/`automation`, which have no reviewed Ungated
+    /// allowlist at all — falls to [`OriginGatePolicy::GatedUnlessGranted`].
+    /// Every non-`Ungated` policy passes through unchanged, so a provider can
+    /// only ever request LESS gating than it gets, never less than the host
+    /// grants.
+    pub fn clamp_requested_for_memory_tool(mut self, id: &str) -> Self {
+        if self.loop_run == OriginGatePolicy::Ungated
+            && !UNGATED_LOOP_RUN_CAPABILITIES.contains(&id)
+        {
+            self.loop_run = OriginGatePolicy::GatedUnlessGranted;
+        }
+        if self.product == OriginGatePolicy::Ungated {
+            self.product = OriginGatePolicy::GatedUnlessGranted;
+        }
+        if self.automation == OriginGatePolicy::Ungated {
+            self.automation = OriginGatePolicy::GatedUnlessGranted;
+        }
+        self
     }
 }
 
@@ -293,6 +344,55 @@ pub struct GrantConstraints {
 }
 
 #[cfg(test)]
+mod capability_descriptor_runtime_kind_tests {
+    use super::{CapabilityDescriptor, PermissionMode};
+    use crate::{
+        ids::{CapabilityId, ExtensionId},
+        runtime::{RuntimeKind, TrustClass},
+    };
+
+    fn descriptor() -> CapabilityDescriptor {
+        CapabilityDescriptor {
+            id: CapabilityId::new("cap.example").expect("valid capability id"),
+            provider: ExtensionId::new("acme").expect("valid extension id"),
+            runtime: RuntimeKind::Wasm,
+            trust_ceiling: TrustClass::Sandbox,
+            description: "test".to_string(),
+            parameters_schema: serde_json::json!({}),
+            effects: vec![],
+            default_permission: PermissionMode::Ask,
+            runtime_credentials: vec![],
+            network_targets: vec![],
+            max_egress_bytes: None,
+            resource_profile: None,
+            origin_gate_matrix: None,
+        }
+    }
+
+    // This is the actual reachable attack path the module docs on
+    // `RuntimeKind` (runtime.rs) warn about: a third-party manifest is parsed
+    // into a `CapabilityDescriptor` with plain (untrusted) `Deserialize`, so a
+    // manifest declaring `"runtime": "first_party" | "system" | "sandbox"`
+    // must fail to parse rather than silently minting a privileged capability.
+    #[test]
+    fn manifest_deserialize_rejects_every_privileged_runtime_kind() {
+        for privileged in ["first_party", "system", "sandbox"] {
+            let mut wire = serde_json::to_value(descriptor()).expect("descriptor serializes");
+            wire["runtime"] = serde_json::Value::String(privileged.to_string());
+            assert!(
+                serde_json::from_value::<CapabilityDescriptor>(wire).is_err(),
+                "untrusted manifest must not be able to declare runtime = {privileged}"
+            );
+        }
+
+        // Sanity: non-privileged runtime kinds are unaffected.
+        let mut wire = serde_json::to_value(descriptor()).expect("descriptor serializes");
+        wire["runtime"] = serde_json::Value::String("mcp".to_string());
+        assert!(serde_json::from_value::<CapabilityDescriptor>(wire).is_ok());
+    }
+}
+
+#[cfg(test)]
 mod credential_setup_wire_tests {
     use super::RuntimeCredentialAccountSetup;
 
@@ -337,7 +437,10 @@ mod credential_setup_wire_tests {
 #[cfg(test)]
 mod origin_gate_wire_tests {
     use super::{OriginGateMatrix, OriginGatePolicy, UNGATED_LOOP_RUN_CAPABILITIES};
-    use crate::{CapabilityId, InvocationOrigin, ProductKind, RoutineId, RunId};
+    use crate::{
+        ids::{CapabilityId, ProductKind, RoutineId, RunId},
+        invocation::InvocationOrigin,
+    };
 
     /// The checked-in Ungated-for-LoopRun allowlist seed (§5.2.1/§10) must be
     /// internally consistent: non-empty, free of duplicates, and every entry a
@@ -376,6 +479,45 @@ mod origin_gate_wire_tests {
         assert_eq!(gated.loop_run, OriginGatePolicy::GatedUnlessGranted);
         assert_eq!(gated.product, OriginGatePolicy::Forbidden);
         assert_eq!(gated.automation, OriginGatePolicy::Forbidden);
+    }
+
+    /// A memory provider's requested matrix is clamped: off-allowlist
+    /// `Ungated` (a write tool, or any Product/Automation cell) falls to
+    /// `GatedUnlessGranted`; non-`Ungated` requests pass through unchanged.
+    #[test]
+    fn clamp_requested_for_memory_tool_downgrades_off_allowlist_ungated() {
+        let clamped = OriginGateMatrix {
+            loop_run: OriginGatePolicy::Ungated,
+            product: OriginGatePolicy::Ungated,
+            automation: OriginGatePolicy::Ungated,
+        }
+        .clamp_requested_for_memory_tool("ironclaw.memory.write");
+        assert_eq!(clamped.loop_run, OriginGatePolicy::GatedUnlessGranted);
+        assert_eq!(clamped.product, OriginGatePolicy::GatedUnlessGranted);
+        assert_eq!(clamped.automation, OriginGatePolicy::GatedUnlessGranted);
+    }
+
+    /// The reviewed allowlist still grants `Ungated` loop_run to the read-only
+    /// memory tools, and declared non-`Ungated` cells are never rewritten.
+    #[test]
+    fn clamp_requested_for_memory_tool_keeps_allowlisted_and_gated_cells() {
+        let kept = OriginGateMatrix {
+            loop_run: OriginGatePolicy::Ungated,
+            product: OriginGatePolicy::Forbidden,
+            automation: OriginGatePolicy::Forbidden,
+        }
+        .clamp_requested_for_memory_tool("ironclaw.memory.search");
+        assert_eq!(kept.loop_run, OriginGatePolicy::Ungated);
+        assert_eq!(kept.product, OriginGatePolicy::Forbidden);
+        assert_eq!(kept.automation, OriginGatePolicy::Forbidden);
+
+        let gated = OriginGateMatrix {
+            loop_run: OriginGatePolicy::GatedUnlessGranted,
+            product: OriginGatePolicy::Forbidden,
+            automation: OriginGatePolicy::Forbidden,
+        }
+        .clamp_requested_for_memory_tool("ironclaw.memory.write");
+        assert_eq!(gated.loop_run, OriginGatePolicy::GatedUnlessGranted);
     }
 
     /// `OriginGatePolicy` is a wire-stable enum: every variant must serialize to

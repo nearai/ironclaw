@@ -17,10 +17,16 @@ use async_trait::async_trait;
 use futures_util::FutureExt as _;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, NetworkMethod, NetworkPolicy, PermissionMode, ResourceEstimate,
-    ResourceProfile, ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource,
-    RuntimeCredentialTarget, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeKind, SecretHandle,
+    action::{NetworkMethod, NetworkPolicy},
+    capability::{EffectKind, PermissionMode},
+    dispatch::RuntimeDispatchErrorKind,
+    http::{
+        RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+    },
+    ids::{CapabilityId, SecretHandle},
+    resource::{ResourceEstimate, ResourceProfile, ResourceScope},
+    runtime::RuntimeKind,
 };
 use ironclaw_reborn_traces::contribution::{
     AccountLoginLink, AccountLoginLinkError, COMMUNITY_PROFILE_BIO_MAX_BYTES,
@@ -173,7 +179,7 @@ pub(super) fn profile_set_manifest() -> Result<CapabilityManifest, ExtensionErro
         // model-controlled (a prompt-injected model could supply it), so the
         // runtime approval gate — user-controlled consent — is the primary
         // control, with `confirmed=true` as defense-in-depth. profile_set is
-        // also deliberately NOT on the local-dev approval-gate exemption list.
+        // also deliberately NOT on the standalone approval-gate exemption list.
         PermissionMode::Ask,
         Some(ResourceProfile {
             default_estimate: ResourceEstimate::default()
@@ -360,7 +366,7 @@ impl OnboardingHttpSink for HostEgressOnboardingSink {
 /// Map a host egress error to an `OnboardError`, without leaking
 /// credential/secret detail into the reason string.
 fn map_egress_error(error: RuntimeHttpEgressError) -> OnboardError {
-    use ironclaw_host_api::RuntimeHttpEgressReasonCode as Code;
+    use ironclaw_host_api::http::RuntimeHttpEgressReasonCode as Code;
     let reason = error.stable_runtime_reason().to_string();
     match error.reason_code() {
         Code::CredentialUnavailable
@@ -628,7 +634,7 @@ it's safe to retry.",
         ),
         OnboardError::DeviceKey(_) => (
             "DeviceKeyError",
-            "Couldn't establish the local device key for onboarding; the device-key state \
+            "Couldn't establish the standaloneice key for onboarding; the device-key state \
 may be missing or malformed. Re-run onboarding with a fresh invite.",
         ),
         OnboardError::Persist { .. } => (
@@ -1330,7 +1336,10 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
     use ironclaw_filesystem::DiskFilesystem;
-    use ironclaw_host_api::{CapabilityId, ResourceEstimate, ResourceScope};
+    use ironclaw_host_api::{
+        ids::CapabilityId,
+        resource::{ResourceEstimate, ResourceScope},
+    };
     use ironclaw_reborn_traces::contribution::{
         StandingTraceContributionPolicy, TraceCreditReport,
     };

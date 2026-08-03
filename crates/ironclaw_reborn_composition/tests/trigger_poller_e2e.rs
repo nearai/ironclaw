@@ -15,16 +15,27 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
-use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ExternalActorRef};
+use ironclaw_conversations::{AdapterInstallationId, AdapterKind};
+use ironclaw_extension_contracts::external::ExternalActorRef;
+use ironclaw_host_api::product_adapter::AdapterInstallationId as ProductAdapterInstallationId;
 use ironclaw_host_api::{
-    AdapterInstallationId as ProductAdapterInstallationId, AgentId, CapabilityGrant,
-    CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId,
-    GrantConstraints, MountView, NetworkPolicy, Principal, ProviderToolName, ResourceEstimate,
-    RunId, RuntimeKind, TenantId, TrustClass, UserId,
+    action::NetworkPolicy,
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+    ids::{
+        AgentId, CapabilityGrantId, CapabilityId, ExtensionId, ProviderToolName, RunId, TenantId,
+        UserId,
+    },
+    mount::MountView,
+    resource::ResourceEstimate,
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
     RuntimeCapabilityOutcome, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+};
+use ironclaw_loop_contracts::{
+    LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
@@ -49,9 +60,6 @@ use ironclaw_triggers::{
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerDeliveryTargetId, TriggerId,
     TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
     TriggerSourceKind, TriggerState,
-};
-use ironclaw_turns::run_profile::{
-    LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
 use serde_json::{Value, json};
@@ -543,15 +551,15 @@ async fn build_runtime_with<G: HostManagedModelGateway + 'static>(
     let host_home_root = root.path().join("host-home");
     std::fs::create_dir_all(&host_home_root).expect("host home root");
     let input = local_runtime_build_input_with_options(
-        RebornCompositionProfile::LocalDevYolo,
+        RebornCompositionProfile::StandaloneUnrestricted,
         USER,
-        root.path().join("local-dev"),
+        root.path().join("standalone"),
         RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
     )
     .expect("local-yolo runtime input")
-    .with_local_dev_confirmed_host_home_root(host_home_root);
+    .with_local_runtime_confirmed_host_home_root(host_home_root);
 
     let input = RebornRuntimeInput::from_build_input(input)
         .with_identity(RebornRuntimeIdentity {
@@ -575,21 +583,20 @@ async fn build_runtime_with_slack_delivery(
     let host_home_root = root.path().join("host-home");
     std::fs::create_dir_all(&host_home_root).expect("host home root");
     let input = local_runtime_build_input_with_options(
-        RebornCompositionProfile::LocalDevYolo,
+        RebornCompositionProfile::StandaloneUnrestricted,
         USER,
-        root.path().join("local-dev"),
+        root.path().join("standalone"),
         RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
     )
     .expect("local-yolo runtime input")
-    .with_local_dev_confirmed_host_home_root(host_home_root)
+    .with_local_runtime_confirmed_host_home_root(host_home_root)
     .with_bundled_first_party_for_test()
     .with_network_http_egress_for_test(slack_provider)
     .with_channel_extension_bindings(vec![ChannelExtensionBinding {
         extension_id: "slack".to_string(),
         adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
-        inbound_payload_classifier: None,
         preference_target_codec: Some(Arc::new(
             ironclaw_slack_extension::SlackPreferenceTargetCodec,
         )),
@@ -705,7 +712,7 @@ async fn configure_delivery_targets(runtime: &RebornRuntime) {
     let user_id = UserId::new(USER).expect("valid user id");
     register_delivery_targets(runtime);
     runtime
-        .local_dev_outbound_preferences_for_test()
+        .standalone_outbound_preferences_for_test()
         .expect("local runtime exposes outbound preferences")
         .put_communication_preference(CommunicationPreferenceRecord {
             scope: DeliveryDefaultScope::personal(tenant_id, user_id.clone()),
@@ -754,8 +761,12 @@ async fn pair_trigger_creator(runtime: &RebornRuntime) {
             AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("valid adapter kind"),
             AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
                 .expect("valid trigger installation id"),
-            ExternalActorRef::new(TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, USER)
-                .expect("valid trigger actor ref"),
+            ExternalActorRef::new(
+                TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                USER,
+                None::<String>,
+            )
+            .expect("valid trigger actor ref"),
             UserId::new(USER).expect("valid user id"),
         )
         .await
@@ -849,15 +860,15 @@ async fn build_runtime_with_tool_disclosure<G: HostManagedModelGateway + 'static
     let host_home_root = root.path().join("host-home");
     std::fs::create_dir_all(&host_home_root).expect("host home root");
     let input = local_runtime_build_input_with_options(
-        RebornCompositionProfile::LocalDevYolo,
+        RebornCompositionProfile::StandaloneUnrestricted,
         USER,
-        root.path().join("local-dev"),
+        root.path().join("standalone"),
         RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
     )
     .expect("local-yolo runtime input")
-    .with_local_dev_confirmed_host_home_root(host_home_root);
+    .with_local_runtime_confirmed_host_home_root(host_home_root);
 
     let input = RebornRuntimeInput::from_build_input(input)
         .with_identity(RebornRuntimeIdentity {
@@ -875,12 +886,12 @@ async fn build_runtime_with_tool_disclosure<G: HostManagedModelGateway + 'static
 
 /// Keep parallel runtime tests off the ambient OS keychain. The production
 /// resolver deliberately prefers this cached dotfile, so this still exercises
-/// the real local-dev secret-store construction without process-global env
+/// the real standalone secret-store construction without process-global env
 /// mutation or platform keychain serialization.
 fn seed_test_secret_master_key(root: &Path) {
-    let local_dev_root = root.join("local-dev");
-    std::fs::create_dir_all(&local_dev_root).expect("local-dev root");
-    let key_path = local_dev_root.join(".reborn-local-dev-secrets-master-key");
+    let standalone_root = root.join("standalone");
+    std::fs::create_dir_all(&standalone_root).expect("standalone root");
+    let key_path = standalone_root.join(".reborn-local-dev-secrets-master-key");
     if !key_path.exists() {
         std::fs::write(key_path, TEST_SECRET_MASTER_KEY).expect("seed test secret master key");
     }
@@ -893,8 +904,8 @@ async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
     // same tenant/user) exercise the dispatch path instead of stopping at the
     // per-tool approval gate.
     let auto_approve = runtime
-        .local_dev_auto_approve_settings_for_test()
-        .expect("local-dev exposes auto-approve settings for test");
+        .standalone_auto_approve_settings_for_test()
+        .expect("standalone exposes auto-approve settings for test");
     let auto_approve_scope = trigger_management_execution_context().resource_scope;
     auto_approve
         .set(ironclaw_approvals::AutoApproveSettingInput {
@@ -1004,8 +1015,12 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
             AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
             AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
                 .expect("installation id"),
-            ExternalActorRef::new(TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, user_id.as_str())
-                .expect("actor ref"),
+            ExternalActorRef::new(
+                TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                user_id.as_str(),
+                None::<String>,
+            )
+            .expect("actor ref"),
             user_id.clone(),
         )
         .await
@@ -1169,18 +1184,8 @@ async fn scheduled_trigger_results_reach_exact_slack_targets_once_across_restart
         2,
         "one provider-side message per scheduled trigger: {provider_messages:?}"
     );
-    assert_slack_message(
-        &provider_messages,
-        QA_9B_RESULT,
-        SLACK_DEFAULT_DM,
-        "QA-9B default delivery",
-    );
-    assert_slack_message(
-        &provider_messages,
-        QA_9D_RESULT,
-        SLACK_PER_TRIGGER_CHANNEL,
-        "QA-9D per-trigger override",
-    );
+    assert_slack_dm_delivery_evidence(&provider_messages);
+    assert_slack_channel_delivery_evidence(&provider_messages);
 
     let wire_messages = slack_provider.wire_messages();
     assert_eq!(
@@ -1246,22 +1251,39 @@ async fn scheduled_trigger_results_reach_exact_slack_targets_once_across_restart
     );
 }
 
-fn assert_slack_message(
-    messages: &[Value],
-    expected_text: &str,
-    expected_channel: &str,
-    scenario: &str,
-) {
+fn assert_slack_dm_delivery_evidence(messages: &[Value]) {
+    let expected_conversation_id = "D-TRIGGER-DEFAULT";
+    let expected_thread_anchor: Option<&Value> = None;
+    let expected_count = 1;
     let matching = messages.iter().filter(|message| {
-        message["channel"] == expected_channel
+        message["channel"] == expected_conversation_id
+            && message.get("thread_ts") == expected_thread_anchor
             && message["text"]
                 .as_str()
-                .is_some_and(|text| text.contains(expected_text))
+                .is_some_and(|text| text.contains(QA_9B_RESULT))
     });
     assert_eq!(
         matching.count(),
-        1,
-        "{scenario} must create exactly one message in {expected_channel}: {messages:?}"
+        expected_count,
+        "QA-9B must create exactly one unthreaded message in D-TRIGGER-DEFAULT: {messages:?}"
+    );
+}
+
+fn assert_slack_channel_delivery_evidence(messages: &[Value]) {
+    let expected_conversation_id = "C-TRIGGER-OVERRIDE";
+    let expected_thread_anchor: Option<&Value> = None;
+    let expected_count = 1;
+    let matching = messages.iter().filter(|message| {
+        message["channel"] == expected_conversation_id
+            && message.get("thread_ts") == expected_thread_anchor
+            && message["text"]
+                .as_str()
+                .is_some_and(|text| text.contains(QA_9D_RESULT))
+    });
+    assert_eq!(
+        matching.count(),
+        expected_count,
+        "QA-9D must create exactly one unthreaded message in C-TRIGGER-OVERRIDE: {messages:?}"
     );
 }
 
@@ -1533,8 +1555,12 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
             AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
             AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
                 .expect("installation id"),
-            ExternalActorRef::new(TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, user_id.as_str())
-                .expect("actor ref"),
+            ExternalActorRef::new(
+                TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                user_id.as_str(),
+                None::<String>,
+            )
+            .expect("actor ref"),
             user_id.clone(),
         )
         .await
@@ -1757,8 +1783,12 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
             AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
             AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
                 .expect("installation id"),
-            ExternalActorRef::new(TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, user_id.as_str())
-                .expect("actor ref"),
+            ExternalActorRef::new(
+                TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                user_id.as_str(),
+                None::<String>,
+            )
+            .expect("actor ref"),
             user_id.clone(),
         )
         .await

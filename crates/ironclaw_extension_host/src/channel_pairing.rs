@@ -27,23 +27,31 @@ use ironclaw_auth::{
     AuthSurface,
 };
 use ironclaw_conversations::{
-    AdapterKind, ConversationActorPairingService, ExpectedExternalActorOwner, ExternalActorRef,
+    AdapterKind, ConversationActorPairingService, ExpectedExternalActorOwner,
 };
+use ironclaw_extension_contracts::external::ExternalActorRef;
 use ironclaw_filesystem::{
     CasApply, ContentType, Entry, FilesystemError, RootFilesystem, ScopedFilesystem, cas_update,
 };
+use ironclaw_host_api::product_adapter::AdapterInstallationId;
 use ironclaw_host_api::{
-    AgentId, ExtensionId, HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions,
-    MountView, ProjectId, ResourceScope, ScopedPath, TenantId, UserId, VirtualPath,
+    error::HostApiError,
+    ids::{AgentId, ExtensionId, InvocationId, ProjectId, TenantId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
+    resource::ResourceScope,
 };
-use ironclaw_product::AdapterInstallationId;
-use ironclaw_product::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::account_setup::{
+    AccountConnectionStatusError, AccountConnectionStatusSource,
+};
+use ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use ironclaw_auth::RebornAuthContinuationDispatcher;
 use ironclaw_extension_host::channel_identity_path_segment as path_segment;
-use ironclaw_host_api::{
+use ironclaw_host_api::user_identity::{
     RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
     RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
     RebornUserIdentityBindingStore, RebornUserIdentityLookup, installation_scoped_provider_user_id,
@@ -356,7 +364,7 @@ impl std::fmt::Debug for FilesystemChannelPairingStore {
 }
 
 fn pairing_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError> {
-    let tenant = ironclaw_host_api::resource_scope_path_segment(scope.tenant_id.as_str());
+    let tenant = ironclaw_host_api::resource::resource_scope_path_segment(scope.tenant_id.as_str());
     MountView::new(vec![MountGrant::new(
         MountAlias::new(PAIRING_ALIAS)?,
         VirtualPath::new(format!("/tenants/{tenant}/shared/channel-pairing"))?,
@@ -460,6 +468,7 @@ pub struct ChannelPairingService {
     project_id: Option<ProjectId>,
     extension_id: ExtensionId,
     connection_notices: ChannelConnectionNoticePolicy,
+    connection_requirement: ChannelConnectionRequirement,
     deep_link_template: Option<String>,
     inbound_code_prefixes: Vec<String>,
     store: Arc<FilesystemChannelPairingStore>,
@@ -493,6 +502,7 @@ pub struct ChannelPairingServiceParts {
     pub project_id: Option<ProjectId>,
     pub extension_id: ExtensionId,
     pub connection_notices: ChannelConnectionNoticePolicy,
+    pub connection_requirement: ChannelConnectionRequirement,
     pub deep_link_template: Option<String>,
     pub inbound_code_prefixes: Vec<String>,
     pub store: Arc<FilesystemChannelPairingStore>,
@@ -514,6 +524,7 @@ impl ChannelPairingService {
             project_id: parts.project_id,
             extension_id: parts.extension_id,
             connection_notices: parts.connection_notices,
+            connection_requirement: parts.connection_requirement,
             deep_link_template: parts.deep_link_template,
             inbound_code_prefixes: parts.inbound_code_prefixes,
             store: parts.store,
@@ -534,6 +545,10 @@ impl ChannelPairingService {
 
     pub fn connection_notices(&self) -> &ChannelConnectionNoticePolicy {
         &self.connection_notices
+    }
+
+    pub fn connection_requirement(&self) -> &ChannelConnectionRequirement {
+        &self.connection_requirement
     }
 
     async fn resolve_deep_link(
@@ -648,6 +663,23 @@ impl ChannelPairingService {
             _ => None,
         };
         Ok(ChannelPairingStatus { connected, pending })
+    }
+
+    /// Materialize the current pairing challenge without rotating a still-live
+    /// code. Prompt projection and delivery replays therefore observe the same
+    /// durable challenge as the WebUI pairing panel.
+    pub async fn pending_or_issue(
+        &self,
+        caller: &UserId,
+    ) -> Result<Option<ChannelPairingIssue>, ChannelPairingError> {
+        let status = self.status_for(caller).await?;
+        if status.connected {
+            return Ok(None);
+        }
+        match status.pending {
+            Some(issue) => Ok(Some(issue)),
+            None => self.issue_or_rotate(caller).await.map(Some),
+        }
     }
 
     /// Consume a code arriving over the verified webhook from a direct
@@ -865,8 +897,14 @@ impl ChannelPairingService {
         // user id alone (accepted delta from the epoch-guarded host-state
         // shape this generalizes).
         for actor in cleanup {
-            let actor_ref = ExternalActorRef::new(&actor.actor_kind, &actor.external_actor_id)
-                .map_err(store_unavailable)?;
+            let actor_ref = ExternalActorRef::new(
+                &actor.actor_kind,
+                &actor.external_actor_id,
+                // Cleanup matches on identity only; the canonical ref excludes
+                // the display name from `PartialEq`/`Hash`.
+                None::<String>,
+            )
+            .map_err(store_unavailable)?;
             let installation_id =
                 ironclaw_conversations::AdapterInstallationId::new(actor.installation_id.as_str())
                     .map_err(store_unavailable)?;
@@ -1087,11 +1125,13 @@ impl crate::extension_ingress::ChannelPairingInterceptor for ChannelPairingServi
     async fn intercept(
         &self,
         installation_id: &AdapterInstallationId,
-        message: &ironclaw_product::NormalizedInboundMessage,
+        message: &ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage,
     ) -> crate::extension_ingress::ChannelPairingInterception {
         use crate::extension_ingress::ChannelPairingInterception;
 
-        if message.trigger != ironclaw_product::ProductTriggerReason::DirectChat {
+        if message.trigger
+            != ironclaw_extension_contracts::channel_adapter::ProductTriggerReason::DirectChat
+        {
             return ChannelPairingInterception::NotHandled;
         }
         let Some(code) = candidate_code(&message.text, &self.inbound_code_prefixes) else {
@@ -1149,20 +1189,15 @@ impl crate::extension_ingress::ChannelPairingInterceptor for ChannelPairingServi
 /// entry so activation can gate on the caller's pairing state without
 /// holding the full pairing surface.
 #[async_trait]
-impl ironclaw_product::AccountConnectionStatusSource for ChannelPairingService {
-    async fn connected(
-        &self,
-        user_id: &UserId,
-    ) -> Result<bool, ironclaw_product::AccountConnectionStatusError> {
+impl AccountConnectionStatusSource for ChannelPairingService {
+    async fn connected(&self, user_id: &UserId) -> Result<bool, AccountConnectionStatusError> {
         let status = self.status_for(user_id).await.map_err(|error| {
             tracing::debug!(
                 target: "ironclaw::reborn::channel_pairing",
                 error = %error,
                 "channel pairing status lookup failed"
             );
-            ironclaw_product::AccountConnectionStatusError::new(
-                "channel pairing status unavailable",
-            )
+            AccountConnectionStatusError::new("channel pairing status unavailable")
         })?;
         Ok(status.connected)
     }

@@ -1,12 +1,14 @@
 use ironclaw_authorization::CapabilityLeaseError;
 use ironclaw_host_api::{
-    CapabilityId, DenyReason, DispatchError, DispatchFailureDetail, DispatchFailureKind,
-    HostApiError, Obligation, RuntimeCredentialAuthRequirement, SecretHandle,
+    decision::{DenyReason, Obligation, RuntimeCredentialAuthRequirement},
+    dispatch::{DispatchError, DispatchFailureDetail, DispatchFailureKind},
+    error::HostApiError,
+    ids::{CapabilityId, SecretHandle},
 };
-use ironclaw_processes::ProcessError;
+use ironclaw_processes::{ProcessError, ProcessInvocationError, ProcessInvocationStatus};
 
 use crate::CapabilityObligationFailureKind;
-use ironclaw_run_state::{ApprovalStatus, RunStateError, RunStatus};
+use ironclaw_approvals::{ApprovalStatus, ApprovalStoreError};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,7 +87,7 @@ pub enum CapabilityInvocationError {
     #[error("capability {capability} cannot resume from run status {status:?}")]
     ResumeNotBlocked {
         capability: CapabilityId,
-        status: RunStatus,
+        status: ProcessInvocationStatus,
     },
     #[error("capability {capability} resume context mismatch: {kind:?}")]
     ResumeContextMismatch {
@@ -94,8 +96,10 @@ pub enum CapabilityInvocationError {
     },
     #[error("lease update failed: {0}")]
     Lease(Box<CapabilityLeaseError>),
-    #[error("run-state update failed: {0}")]
-    RunState(Box<RunStateError>),
+    #[error("approval store update failed: {0}")]
+    ApprovalStore(Box<ApprovalStoreError>),
+    #[error("process invocation update failed: {0}")]
+    InvocationState(Box<ProcessInvocationError>),
     #[error("process update failed: {0}")]
     Process(Box<ProcessError>),
     /// Runtime dispatch failure surfaced through the neutral host API port.
@@ -111,9 +115,15 @@ pub enum CapabilityInvocationError {
     },
 }
 
-impl From<RunStateError> for CapabilityInvocationError {
-    fn from(error: RunStateError) -> Self {
-        Self::RunState(Box::new(error))
+impl From<ApprovalStoreError> for CapabilityInvocationError {
+    fn from(error: ApprovalStoreError) -> Self {
+        Self::ApprovalStore(Box::new(error))
+    }
+}
+
+impl From<ProcessInvocationError> for CapabilityInvocationError {
+    fn from(error: ProcessInvocationError) -> Self {
+        Self::InvocationState(Box::new(error))
     }
 }
 
@@ -204,9 +214,13 @@ fn dispatch_error_detail(error: &DispatchError) -> Option<DispatchFailureDetail>
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, ExtensionId,
-        RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
-        VendorId,
+        decision::RuntimeCredentialAuthRequirement,
+        dispatch::{
+            DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode,
+            RuntimeDispatchErrorKind,
+        },
+        ids::{ExtensionId, SecretHandle, VendorId},
+        runtime::RuntimeKind,
     };
 
     fn cap() -> CapabilityId {
@@ -396,7 +410,7 @@ mod tests {
     fn from_dispatch_auth_required_round_trips_credential_requirements() {
         let requirement = RuntimeCredentialAuthRequirement {
             provider: VendorId::new("google").unwrap(),
-            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+            setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                 scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
             },
             requester_extension: ExtensionId::new("gmail").unwrap(),

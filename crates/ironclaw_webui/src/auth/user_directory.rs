@@ -13,7 +13,7 @@
 //! provider-specific claim shapes.
 
 use async_trait::async_trait;
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::ids::UserId;
 use thiserror::Error;
 
 use super::profile::OAuthUserProfile;
@@ -57,7 +57,7 @@ pub trait UserDirectory: Send + Sync + 'static {
     ) -> Result<UserId, UserDirectoryError>;
 }
 
-/// Local-dev / single-operator default impl: derive the
+/// Standalone/single-operator default impl: derive the
 /// [`UserId`] from the verified provider email (lowercased) or fall
 /// back to `{provider}:{provider_user_id}` when no verified email
 /// is available. Production deployments should swap this for a

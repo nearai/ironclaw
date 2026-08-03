@@ -6,10 +6,12 @@ use std::{
     sync::LazyLock,
 };
 
-use ironclaw_host_api::{CapabilityId, ProviderToolName, RuntimeKind};
-use ironclaw_turns::run_profile::{
-    CapabilityDescriptorView, ConcurrencyHint, ProviderToolDefinition,
+use ironclaw_host_api::{
+    ids::{CapabilityId, ProviderToolName},
+    runtime::RuntimeKind,
 };
+use ironclaw_loop_contracts::{CapabilityDescriptorView, ConcurrencyHint, ProviderToolDefinition};
+use ironclaw_loop_host::CapabilityAllowSet;
 use serde_json::{Map, Value, json};
 
 /// Canonical core tool names from the progressive-disclosure policy.
@@ -91,7 +93,6 @@ pub(crate) enum ToolTier {
 #[derive(Debug, Clone)]
 pub(crate) struct CapabilityCatalog {
     entries: Vec<CatalogEntry>,
-    total_schema_tokens: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -156,21 +157,30 @@ impl CapabilityCatalog {
             })
             .collect();
         entries.sort_by(|left, right| left.definition.name.cmp(&right.definition.name));
-        let total_schema_tokens = entries.iter().fold(0_u32, |total, entry| {
-            total.saturating_add(entry.est_schema_tokens)
-        });
-        CapabilityCatalog {
-            entries,
-            total_schema_tokens,
-        }
+        CapabilityCatalog { entries }
     }
 
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
 
-    pub(crate) fn total_schema_tokens(&self) -> u32 {
-        self.total_schema_tokens
+    fn effective_entries<'a>(
+        &'a self,
+        allow_set: &'a CapabilityAllowSet,
+    ) -> impl Iterator<Item = &'a CatalogEntry> + 'a {
+        self.entries
+            .iter()
+            .filter(|entry| allow_set.permits(&entry.definition.capability_id))
+    }
+
+    pub(crate) fn effective_metrics(&self, allow_set: &CapabilityAllowSet) -> (usize, u32) {
+        self.effective_entries(allow_set)
+            .fold((0, 0_u32), |(count, tokens), entry| {
+                (
+                    count.saturating_add(1),
+                    tokens.saturating_add(entry.est_schema_tokens),
+                )
+            })
     }
 
     fn entry_by_name(&self, name: &str) -> Option<&CatalogEntry> {
@@ -209,13 +219,27 @@ impl CapabilityCatalog {
     /// model loads the real schema + description on demand via `tool_describe`.
     ///
     /// Core tools are omitted (already advertised with full schemas every turn).
-    /// The discoverable set is fixed at catalog construction (tier never changes
-    /// with promotion), so this index is constant per `CapabilitySurfaceVersion`
-    /// and therefore prefix-cache stable. Sorted by name (the catalog is sorted).
-    pub(crate) fn discoverable_tool_names(&self) -> Vec<String> {
+    /// The base catalog's discoverable TIER is fixed at construction (tier
+    /// never changes with promotion) and constant per `CapabilitySurfaceVersion`
+    /// — but the names *returned here* are additionally filtered by `allow_set`
+    /// (below), so the returned index is stable only for a given
+    /// `(CapabilitySurfaceVersion, effective allow_set)` pair, not for the
+    /// surface version alone. Sorted by name (the catalog is sorted).
+    ///
+    /// Narrowed by `allow_set`: this index is baked into the always-advertised
+    /// `tool_search` bridge description, which is host-exempt from the outer
+    /// `CapabilitySurfaceProfileFilter`'s capability-id narrowing (#5647) — so
+    /// without filtering here, a narrowed caller would read every discoverable
+    /// tool name in the system straight out of tool_search's own description,
+    /// bypassing the narrowing already applied to tool_search/tool_describe
+    /// results (#5712).
+    pub(crate) fn discoverable_tool_names(&self, allow_set: &CapabilityAllowSet) -> Vec<String> {
         self.entries
             .iter()
-            .filter(|entry| entry.tier == ToolTier::Discoverable)
+            .filter(|entry| {
+                entry.tier == ToolTier::Discoverable
+                    && allow_set.permits(&entry.definition.capability_id)
+            })
             .map(|entry| entry.definition.name.to_string())
             .collect()
     }
@@ -391,8 +415,8 @@ impl DisclosureCaps {
     }
 }
 
-static BRIDGE_TOOL_DEFINITIONS: LazyLock<Vec<(ProviderToolDefinition, u32)>> =
-    LazyLock::new(|| {
+static BRIDGE_TOOL_DEFINITIONS: LazyLock<Vec<(ProviderToolDefinition, u32)>> = LazyLock::new(
+    || {
         let definitions = vec![
             bridge_tool_definition(
                 TOOL_SEARCH_NAME,
@@ -441,9 +465,8 @@ static BRIDGE_TOOL_DEFINITIONS: LazyLock<Vec<(ProviderToolDefinition, u32)>> =
                             "description": "Provider-facing tool name to invoke."
                         },
                         "arguments": {
-                            "type": "object",
-                            "description": "Arguments for the named tool.",
-                            "additionalProperties": true
+                            "type": "string",
+                            "description": "JSON object encoded as a string containing arguments for the named tool."
                         }
                     },
                     "required": ["name", "arguments"],
@@ -458,7 +481,8 @@ static BRIDGE_TOOL_DEFINITIONS: LazyLock<Vec<(ProviderToolDefinition, u32)>> =
                 (definition, est_schema_tokens)
             })
             .collect()
-    });
+    },
+);
 
 type BridgeDefinitionWithTokens = (&'static ProviderToolDefinition, u32);
 
@@ -476,20 +500,20 @@ fn bridge_tool_definitions_with_tokens() -> impl Iterator<Item = BridgeDefinitio
 
 fn advertised_bridge_tool_definitions(
     catalog: &CapabilityCatalog,
+    allow_set: &CapabilityAllowSet,
 ) -> Vec<(ProviderToolDefinition, u32)> {
-    // Only `tool_search` is advertised to the model. Discovery is
-    // `tool_search` (find names) → `capability_info` (load schema + promote) →
-    // direct call, so `tool_describe` and `tool_call` are no longer surfaced:
-    // `capability_info` already returns schemas, and a promoted tool is called
-    // directly rather than through a proxy. Their synthetic capabilities are
-    // retained internally (see `bridge_tool_definitions`) only so describe-first
-    // can still hand back a schema when the model calls a deferred tool blind.
+    // Deferred surfaces advertise the complete protocol promised by the system
+    // prompt. `tool_search` carries the catalog index; the other bridge
+    // definitions are stable and can reuse their cached token estimates.
     bridge_tool_definitions_with_tokens()
-        .filter(|(definition, _)| definition.name.as_str() == TOOL_SEARCH_NAME)
-        .map(|(definition, _)| {
+        .map(|(definition, est_schema_tokens)| {
             let mut advertised = definition.clone();
-            advertised.description = catalog_index_tool_search_description(catalog);
-            let est_schema_tokens = estimate_definition_tokens(&advertised);
+            let est_schema_tokens = if advertised.name.as_str() == TOOL_SEARCH_NAME {
+                advertised.description = catalog_index_tool_search_description(catalog, allow_set);
+                estimate_definition_tokens(&advertised)
+            } else {
+                est_schema_tokens
+            };
             (advertised, est_schema_tokens)
         })
         .collect()
@@ -502,8 +526,9 @@ fn advertised_bridge_tool_definitions(
 /// integrations it can't see — it just uses the advertised builtins and gives up.
 /// Listing every discoverable tool by name gives structural awareness (the model
 /// SEES `google-calendar.list_events` etc.) while the full JSON schemas stay
-/// deferred, preserving the token reduction. The list is the constant discoverable
-/// set, so this string is cache-stable per surface version.
+/// deferred, preserving the token reduction. Narrowed by `allow_set` (see
+/// `CapabilityCatalog::discoverable_tool_names`), so this string is cache-stable
+/// per surface version *and* allow-set, not just per surface version.
 ///
 /// Hard constraint: this string is validated as a capability *safe-description*,
 /// which has a 4096-byte cap and a sensitive-content denylist — exceeding either
@@ -511,8 +536,11 @@ fn advertised_bridge_tool_definitions(
 /// tool descriptions, which both blow the budget and can carry denylisted
 /// substrings), and is byte-budgeted: if the catalog is large enough to overflow,
 /// the tail is summarized as "…and N more" and stays reachable via `query`.
-fn catalog_index_tool_search_description(catalog: &CapabilityCatalog) -> String {
-    let names = catalog.discoverable_tool_names();
+fn catalog_index_tool_search_description(
+    catalog: &CapabilityCatalog,
+    allow_set: &CapabilityAllowSet,
+) -> String {
+    let names = catalog.discoverable_tool_names(allow_set);
     if names.is_empty() {
         return "Search additional tools that are loaded on demand. Returns up to `limit` matches with name and description. Follow with tool_describe to load a tool's full parameter schema, then tool_call to invoke it. Tools already listed are available and do not need to be searched."
             .to_string();
@@ -523,7 +551,7 @@ fn catalog_index_tool_search_description(catalog: &CapabilityCatalog) -> String 
     const TAIL_NOTE_RESERVE: usize = 96;
     let total = names.len();
     let mut description = format!(
-        "These {total} tools are available on demand but are NOT shown with full schemas in your tool list. They are real and callable — never tell the user a capability is unavailable without checking this list first. To use one: call tool_describe(name) to load its parameter schema, then tool_call(name, arguments) to invoke it (once you know a tool's name you may also call it directly). `query` fuzzy-searches this list when you want ranked matches instead of scanning it. On-demand tools:"
+        "These {total} tools are available on demand but are NOT shown with full schemas in your tool list. They are real and callable — never tell the user a capability is unavailable without checking this list first. To use one: call tool_describe(name) to load its parameter schema, then tool_call(name, arguments) with the argument object encoded as a JSON string (once you know a tool's name you may also call it directly). `query` fuzzy-searches this list when you want ranked matches instead of scanning it. On-demand tools:"
     );
     let mut shown = 0usize;
     for name in &names {
@@ -552,6 +580,12 @@ pub(crate) fn is_bridge_capability_id(capability_id: &CapabilityId) -> bool {
         .any(|(definition, _)| &definition.capability_id == capability_id)
 }
 
+/// The synthetic `ironclaw.*` bridge ids, exempted from profile allow-set
+/// narrowing at the composition root (#5647).
+pub(crate) fn bridge_capability_ids() -> impl Iterator<Item = CapabilityId> {
+    bridge_tool_definitions_with_tokens().map(|(definition, _)| definition.capability_id.clone())
+}
+
 /// Selects the active wire surface for a turn.
 ///
 /// TODO(next pass): if promoted tools are truncated by caps, start a deliberate
@@ -560,27 +594,31 @@ pub(crate) fn select_active_set(
     catalog: &CapabilityCatalog,
     promoted: &PromotedSet,
     caps: DisclosureCaps,
+    allow_set: &CapabilityAllowSet,
 ) -> ActiveSet {
-    if catalog.total_schema_tokens() <= caps.defer_threshold_tokens()
-        && catalog.len() <= caps.max_tools
+    let effective_entries: Vec<&CatalogEntry> = catalog.effective_entries(allow_set).collect();
+    let effective_schema_tokens = effective_entries.iter().fold(0_u32, |total, entry| {
+        total.saturating_add(entry.est_schema_tokens)
+    });
+    if effective_schema_tokens <= caps.defer_threshold_tokens()
+        && effective_entries.len() <= caps.max_tools
     {
         return ActiveSet {
-            definitions: catalog
-                .entries
+            definitions: effective_entries
                 .iter()
                 .map(|entry| entry.definition.clone())
                 .collect(),
             deferred: false,
-            advertised_tokens: catalog.total_schema_tokens(),
+            advertised_tokens: effective_schema_tokens,
         };
     }
 
     let mut core_definitions = Vec::new();
     let mut core_names: HashSet<String> = HashSet::new();
 
-    for entry in catalog
-        .entries
+    for entry in effective_entries
         .iter()
+        .copied()
         .filter(|entry| entry.tier == ToolTier::Core)
     {
         if core_names.insert(entry.definition.name.to_string()) {
@@ -588,12 +626,11 @@ pub(crate) fn select_active_set(
         }
     }
 
-    let threshold_tokens = caps.defer_threshold_tokens();
     let core_tokens = sum_definition_tokens(&core_definitions);
     let mut advertised_non_bridge_count = core_definitions.len();
 
     loop {
-        let bridge_definitions = advertised_bridge_tool_definitions(catalog);
+        let bridge_definitions = advertised_bridge_tool_definitions(catalog, allow_set);
         let bridge_tokens = sum_definition_tokens(&bridge_definitions);
         let promoted_definitions = select_promoted_definitions(
             catalog,
@@ -603,8 +640,8 @@ pub(crate) fn select_active_set(
             core_definitions
                 .len()
                 .saturating_add(bridge_definitions.len()),
-            threshold_tokens,
-            caps.max_tools,
+            caps,
+            allow_set,
         );
         let next_advertised_non_bridge_count = core_definitions
             .len()
@@ -638,10 +675,14 @@ pub(crate) fn select_active_set(
     }
 }
 
+/// `permits` narrows results to the caller's capability allow-set (#5712) —
+/// applied before `.take(limit)` so limit counts against the caller's own
+/// visible candidate set, not the full catalog.
 pub(crate) fn tool_search_rank(
     catalog: &CapabilityCatalog,
     query: &str,
     limit: usize,
+    permits: impl Fn(&CapabilityId) -> bool,
 ) -> Vec<String> {
     if limit == 0 {
         return Vec::new();
@@ -661,6 +702,9 @@ pub(crate) fn tool_search_rank(
         .entries
         .iter()
         .filter_map(|entry| {
+            if !permits(&entry.definition.capability_id) {
+                return None;
+            }
             let score = score_tool_entry(entry, &query_terms);
             if score > 0 {
                 Some((entry.definition.name.to_string(), score))
@@ -757,20 +801,25 @@ fn select_promoted_definitions(
     core_names: &HashSet<String>,
     mut advertised_tokens: u32,
     mut advertised_count: usize,
-    threshold_tokens: u32,
-    max_tools: usize,
+    caps: DisclosureCaps,
+    allow_set: &CapabilityAllowSet,
 ) -> Vec<(ProviderToolDefinition, u32)> {
     let mut selected = Vec::new();
     let mut included_names = core_names.clone();
     for name in promoted.iter() {
         if let Some(entry) = catalog.entry_by_name(name) {
+            if !allow_set.permits(&entry.definition.capability_id) {
+                continue;
+            }
             if included_names.contains(name) {
                 continue;
             }
-            if advertised_count >= max_tools {
+            if advertised_count >= caps.max_tools {
                 break;
             }
-            if advertised_tokens.saturating_add(entry.est_schema_tokens) > threshold_tokens {
+            if advertised_tokens.saturating_add(entry.est_schema_tokens)
+                > caps.defer_threshold_tokens()
+            {
                 break;
             }
             included_names.insert(entry.definition.name.to_string());
@@ -854,6 +903,7 @@ fn bridge_descriptor(definition: &ProviderToolDefinition) -> CapabilityDescripto
         runtime: RuntimeKind::FirstParty,
         safe_name: definition.name.to_string(),
         safe_description: definition.description.clone(),
+        description_trust: Default::default(),
         concurrency_hint: ConcurrencyHint::Exclusive,
         parameters_schema: definition.parameters.clone(),
     }
@@ -866,6 +916,7 @@ fn catalog_descriptor(entry: &CatalogEntry) -> CapabilityDescriptorView {
         runtime: RuntimeKind::FirstParty,
         safe_name: entry.definition.name.to_string(),
         safe_description: entry.definition.description.clone(),
+        description_trust: Default::default(),
         concurrency_hint: ConcurrencyHint::Exclusive,
         parameters_schema: entry.definition.parameters.clone(),
     }
@@ -1214,6 +1265,7 @@ mod tests {
                 max_tools: 0,
                 ctx_limit: None,
             },
+            &CapabilityAllowSet::All,
         );
         let bridge = bridge_tool_definitions()
             .into_iter()
@@ -1307,11 +1359,57 @@ mod tests {
         assert_eq!(
             bridges[2].parameters["required"],
             json!(["name", "arguments"]),
-            "tool_call requires target name and argument object"
+            "tool_call requires target name and encoded arguments"
+        );
+        assert_eq!(
+            bridges[2].parameters["properties"]["arguments"]["type"],
+            json!("string"),
+            "tool_call arguments must survive strict provider schema normalization"
         );
         assert_eq!(
             bridges[0].description,
             "Search the deferred tool catalog by name and description."
+        );
+    }
+
+    #[test]
+    fn production_core_policy_fits_disclosure_caps() {
+        let caps = DisclosureCaps::default();
+        assert_eq!(
+            (caps.max_tools, caps.max_tokens),
+            (32, 12_000),
+            "the production disclosure budget changed; review the core policy and rollout gate"
+        );
+        assert!(
+            CORE_TOOL_NAMES.len() <= caps.max_tools,
+            "production core declares {} tools, exceeding the {}-tool disclosure budget",
+            CORE_TOOL_NAMES.len(),
+            caps.max_tools
+        );
+
+        // Exercise one deliberately broad schema per declared production core
+        // slot. This is a cheap deterministic CI tripwire; live trace estimates
+        // remain part of the rollout gate.
+        let definitions: Vec<_> = CORE_TOOL_NAMES
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| !is_bridge_name(name))
+            .map(|(index, name)| {
+                fixture_tool(
+                    *name,
+                    format!("Current production core schema budget fixture for {name}."),
+                    large_nested_schema(index),
+                )
+            })
+            .chain(bridge_tool_definitions())
+            .collect();
+        let estimated_tokens = definitions.iter().fold(0_u32, |total, definition| {
+            total.saturating_add(estimate_definition_tokens(definition))
+        });
+        assert!(
+            estimated_tokens <= caps.max_tokens,
+            "production core estimates {estimated_tokens} schema tokens, exceeding the {}-token disclosure budget",
+            caps.max_tokens
         );
     }
 
@@ -1338,12 +1436,175 @@ mod tests {
         ];
         let catalog = CapabilityCatalog::new(&definitions, &[]);
 
-        let active =
-            select_active_set(&catalog, &PromotedSet::default(), DisclosureCaps::default());
+        let active = select_active_set(
+            &catalog,
+            &PromotedSet::default(),
+            DisclosureCaps::default(),
+            &CapabilityAllowSet::All,
+        );
 
         assert!(!active.deferred);
         assert_eq!(active.definitions.len(), 2);
-        assert_eq!(active.advertised_tokens, catalog.total_schema_tokens());
+        assert_eq!(
+            active.advertised_tokens,
+            catalog.effective_metrics(&CapabilityAllowSet::All).1
+        );
+    }
+
+    #[test]
+    fn select_active_set_applies_thresholds_to_effective_allowlisted_catalog() {
+        let mut definitions = vec![fixture_tool(
+            "allowed_tool",
+            "Allowed",
+            small_no_arg_schema(),
+        )];
+        for index in 0..40 {
+            definitions.push(fixture_tool(
+                format!("denied_tool_{index:02}"),
+                "Denied",
+                medium_schema(index),
+            ));
+        }
+        let catalog = CapabilityCatalog::new(&definitions, &[]);
+        let allow_set = CapabilityAllowSet::allowlist([
+            CapabilityId::new("fixture.allowed_tool").expect("valid allowed capability id")
+        ]);
+
+        let active = select_active_set(
+            &catalog,
+            &PromotedSet::default(),
+            DisclosureCaps::default(),
+            &allow_set,
+        );
+
+        assert!(catalog.len() > DisclosureCaps::default().max_tools);
+        assert_eq!(catalog.effective_metrics(&allow_set).0, 1);
+        assert!(
+            !active.deferred,
+            "one effective tool stays on the flat surface"
+        );
+        assert_eq!(
+            active
+                .definitions
+                .iter()
+                .map(|definition| definition.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["allowed_tool"]
+        );
+        assert_eq!(
+            active.advertised_tokens,
+            catalog
+                .entry_by_name("allowed_tool")
+                .expect("allowed entry")
+                .est_schema_tokens
+        );
+    }
+
+    #[test]
+    fn select_active_set_denied_core_does_not_consume_deferred_caps() {
+        let definitions = vec![
+            fixture_tool("read_file", "Denied core", medium_schema(0)),
+            fixture_tool("memory_search", "Allowed core", medium_schema(1)),
+            fixture_tool("allowed_extra_1", "Allowed extra", medium_schema(2)),
+            fixture_tool("allowed_extra_2", "Allowed extra", medium_schema(3)),
+        ];
+        let catalog = CapabilityCatalog::new(&definitions, &[]);
+        let allow_set = CapabilityAllowSet::allowlist(
+            [
+                "fixture.memory_search",
+                "fixture.allowed_extra_1",
+                "fixture.allowed_extra_2",
+            ]
+            .into_iter()
+            .map(|id| CapabilityId::new(id).expect("valid allowed capability id")),
+        );
+
+        let active = select_active_set(
+            &catalog,
+            &PromotedSet::default(),
+            DisclosureCaps {
+                max_tokens: u32::MAX,
+                max_tools: 2,
+                ctx_limit: None,
+            },
+            &allow_set,
+        );
+        let names = active
+            .definitions
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(active.deferred);
+        assert_eq!(
+            names,
+            vec![
+                "memory_search",
+                TOOL_SEARCH_NAME,
+                TOOL_DESCRIBE_NAME,
+                TOOL_CALL_NAME
+            ]
+        );
+        assert!(!names.contains(&"read_file"));
+        assert_eq!(active.definitions.len(), 4);
+    }
+
+    #[test]
+    fn select_active_set_skips_denied_promotions_before_budget_break() {
+        let definitions = vec![
+            fixture_tool("read_file", "Allowed core", medium_schema(0)),
+            fixture_tool("denied_promoted", "Denied promoted", large_nested_schema(1)),
+            fixture_tool("allowed_promoted", "Allowed promoted", medium_schema(2)),
+            fixture_tool("allowed_extra_1", "Allowed extra", medium_schema(3)),
+            fixture_tool("allowed_extra_2", "Allowed extra", medium_schema(4)),
+            fixture_tool("allowed_extra_3", "Allowed extra", medium_schema(5)),
+            fixture_tool("allowed_extra_4", "Allowed extra", medium_schema(6)),
+        ];
+        let catalog = CapabilityCatalog::new(&definitions, &[]);
+        let allow_set = CapabilityAllowSet::allowlist(
+            [
+                "fixture.read_file",
+                "fixture.allowed_promoted",
+                "fixture.allowed_extra_1",
+                "fixture.allowed_extra_2",
+                "fixture.allowed_extra_3",
+                "fixture.allowed_extra_4",
+            ]
+            .into_iter()
+            .map(|id| CapabilityId::new(id).expect("valid allowed capability id")),
+        );
+        let mut promoted = PromotedSet::default();
+        promoted.push("denied_promoted");
+        promoted.push("allowed_promoted");
+
+        let active = select_active_set(
+            &catalog,
+            &promoted,
+            DisclosureCaps {
+                max_tokens: u32::MAX,
+                max_tools: 5,
+                ctx_limit: None,
+            },
+            &allow_set,
+        );
+        let names = active
+            .definitions
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(active.deferred);
+        assert_eq!(
+            names,
+            vec![
+                "read_file",
+                TOOL_SEARCH_NAME,
+                TOOL_DESCRIBE_NAME,
+                TOOL_CALL_NAME,
+                "allowed_promoted"
+            ]
+        );
+        assert!(!names.contains(&"denied_promoted"));
     }
 
     #[test]
@@ -1372,7 +1633,7 @@ mod tests {
         promoted.push("zzz_promoted");
         promoted.push("aaa_promoted");
         promoted.push("read_file");
-        let bridge_tokens = advertised_bridge_tool_definitions(&catalog)
+        let bridge_tokens = advertised_bridge_tool_definitions(&catalog, &CapabilityAllowSet::All)
             .iter()
             .fold(0_u32, |total, (_definition, est_schema_tokens)| {
                 total.saturating_add(*est_schema_tokens)
@@ -1392,6 +1653,7 @@ mod tests {
                 max_tools: 32,
                 ctx_limit: None,
             },
+            &CapabilityAllowSet::All,
         );
 
         let names: Vec<&str> = active
@@ -1406,6 +1668,8 @@ mod tests {
                 "memory_search",
                 "read_file",
                 "tool_search",
+                "tool_describe",
+                "tool_call",
                 "zzz_promoted",
                 "aaa_promoted"
             ]
@@ -1432,7 +1696,8 @@ mod tests {
             promoted.push(format!("promoted_{index:02}"));
         }
 
-        let base_count = advertised_bridge_tool_definitions(&catalog).len() + 1;
+        let base_count =
+            advertised_bridge_tool_definitions(&catalog, &CapabilityAllowSet::All).len() + 1;
         let by_count = select_active_set(
             &catalog,
             &promoted,
@@ -1441,6 +1706,7 @@ mod tests {
                 max_tools: base_count + 1,
                 ctx_limit: None,
             },
+            &CapabilityAllowSet::All,
         );
         let by_count_names: Vec<&str> = by_count
             .definitions
@@ -1451,12 +1717,12 @@ mod tests {
         assert!(by_count.definitions.len() <= base_count + 1);
         assert!(by_count_names.contains(&"read_file"));
         assert!(by_count_names.contains(&TOOL_SEARCH_NAME));
-        assert!(!by_count_names.contains(&TOOL_DESCRIBE_NAME));
-        assert!(!by_count_names.contains(&TOOL_CALL_NAME));
+        assert!(by_count_names.contains(&TOOL_DESCRIBE_NAME));
+        assert!(by_count_names.contains(&TOOL_CALL_NAME));
         assert!(by_count_names.contains(&"promoted_00"));
         assert!(!by_count_names.contains(&"promoted_01"));
 
-        let bridge_tokens = advertised_bridge_tool_definitions(&catalog)
+        let bridge_tokens = advertised_bridge_tool_definitions(&catalog, &CapabilityAllowSet::All)
             .iter()
             .fold(0_u32, |total, (_definition, est_schema_tokens)| {
                 total.saturating_add(*est_schema_tokens)
@@ -1475,7 +1741,7 @@ mod tests {
                     .est_schema_tokens,
             );
         assert!(
-            catalog.total_schema_tokens() > token_threshold,
+            catalog.effective_metrics(&CapabilityAllowSet::All).1 > token_threshold,
             "fixture must force deferred mode by token budget"
         );
         let by_tokens = select_active_set(
@@ -1486,6 +1752,7 @@ mod tests {
                 max_tools: 32,
                 ctx_limit: None,
             },
+            &CapabilityAllowSet::All,
         );
         let by_token_names: Vec<&str> = by_tokens
             .definitions
@@ -1497,8 +1764,8 @@ mod tests {
         assert!(by_tokens.advertised_tokens <= token_threshold);
         assert!(by_token_names.contains(&"read_file"));
         assert!(by_token_names.contains(&TOOL_SEARCH_NAME));
-        assert!(!by_token_names.contains(&TOOL_DESCRIBE_NAME));
-        assert!(!by_token_names.contains(&TOOL_CALL_NAME));
+        assert!(by_token_names.contains(&TOOL_DESCRIBE_NAME));
+        assert!(by_token_names.contains(&TOOL_CALL_NAME));
         assert!(by_token_names.contains(&"promoted_00"));
         assert!(!by_token_names.contains(&"promoted_01"));
     }
@@ -1525,6 +1792,7 @@ mod tests {
                 max_tools: 0,
                 ctx_limit: None,
             },
+            &CapabilityAllowSet::All,
         );
 
         assert!(active.deferred);
@@ -1535,17 +1803,18 @@ mod tests {
             .expect("tool_search advertised");
         assert_eq!(
             tool_search.description,
-            catalog_index_tool_search_description(&catalog)
+            catalog_index_tool_search_description(&catalog, &CapabilityAllowSet::All)
         );
-        // tool_describe / tool_call are no longer advertised — only tool_search.
-        assert!(
-            !active.definitions.iter().any(|definition| {
-                matches!(
-                    definition.name.as_str(),
-                    TOOL_DESCRIBE_NAME | TOOL_CALL_NAME
-                )
-            }),
-            "only tool_search is advertised; describe/call bridges are internal-only"
+        let bridge_names: Vec<_> = active
+            .definitions
+            .iter()
+            .filter(|definition| is_bridge_name(definition.name.as_str()))
+            .map(|definition| definition.name.as_str())
+            .collect();
+        assert_eq!(
+            bridge_names,
+            vec![TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME],
+            "deferred surfaces must advertise the complete discovery protocol"
         );
 
         let actual_tokens = active.definitions.iter().fold(0_u32, |total, definition| {
@@ -1572,7 +1841,7 @@ mod tests {
             ),
         ];
         let catalog = CapabilityCatalog::new(&definitions, &[]);
-        let description = catalog_index_tool_search_description(&catalog);
+        let description = catalog_index_tool_search_description(&catalog, &CapabilityAllowSet::All);
 
         assert!(
             description.contains("google-calendar__list_events"),
@@ -1581,6 +1850,50 @@ mod tests {
         assert!(
             !description.contains("read_file"),
             "core tools ship full schemas already and must not be re-listed: {description}"
+        );
+    }
+
+    /// Companion to the #5712 result/describe narrowing regressions: the
+    /// tool_search bridge's own advertised *description* is the always-on
+    /// catalog index, and it is built from this same `discoverable_tool_names`
+    /// path — so it must be narrowed by the caller's allow-set exactly like
+    /// `tool_search` results and `tool_describe` already are. Without this, a
+    /// narrowed profile reads every discoverable tool name straight out of
+    /// tool_search's own description, bypassing the result/describe filtering
+    /// entirely (the bridge id itself is host-exempt from the outer
+    /// `CapabilitySurfaceProfileFilter`, so nothing else catches this).
+    #[test]
+    fn tool_search_description_is_narrowed_by_allow_set() {
+        let definitions = vec![
+            fixture_tool(
+                "google-calendar__list_events",
+                "List events on a Google Calendar within a time window.",
+                small_no_arg_schema(),
+            ),
+            fixture_tool(
+                "github__list_issues",
+                "List issues on a GitHub repository.",
+                small_no_arg_schema(),
+            ),
+        ];
+        let catalog = CapabilityCatalog::new(&definitions, &[]);
+        let allowed_id = catalog
+            .entry_by_name("github__list_issues")
+            .expect("github entry")
+            .definition
+            .capability_id
+            .clone();
+        let allow_set = CapabilityAllowSet::allowlist([allowed_id]);
+
+        let description = catalog_index_tool_search_description(&catalog, &allow_set);
+
+        assert!(
+            description.contains("github__list_issues"),
+            "allowlisted tool must still be named in the index, got: {description}"
+        );
+        assert!(
+            !description.contains("google-calendar__list_events"),
+            "non-allowlisted tool name must not leak into the index, got: {description}"
         );
     }
 
@@ -1600,7 +1913,7 @@ mod tests {
             })
             .collect();
         let catalog = CapabilityCatalog::new(&definitions, &[]);
-        let description = catalog_index_tool_search_description(&catalog);
+        let description = catalog_index_tool_search_description(&catalog, &CapabilityAllowSet::All);
 
         assert!(
             description.len() <= 4096,
@@ -1635,10 +1948,32 @@ mod tests {
         let catalog = CapabilityCatalog::new(&definitions, &[]);
 
         assert_eq!(
-            tool_search_rank(&catalog, "search issue", 2),
+            tool_search_rank(&catalog, "search issue", 2, |_| true),
             vec!["github_issue_search"]
         );
-        assert_eq!(tool_search_rank(&catalog, "read", 2), vec!["read_file"]);
+        assert_eq!(
+            tool_search_rank(&catalog, "read", 2, |_| true),
+            vec!["read_file"]
+        );
+        // #5712: a non-permitting allow-set filters a scoring match out.
+        assert_eq!(
+            tool_search_rank(&catalog, "read", 2, |_| false),
+            Vec::<String>::new()
+        );
+
+        let permit_checks = std::cell::Cell::new(0);
+        assert_eq!(
+            tool_search_rank(&catalog, "read", 2, |_| {
+                permit_checks.set(permit_checks.get() + 1);
+                false
+            }),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            permit_checks.get(),
+            definitions.len(),
+            "allow-set filtering must run before query scoring, including for non-matching entries"
+        );
     }
 
     #[test]
@@ -1668,10 +2003,14 @@ mod tests {
         let definitions = representative_tool_fixture();
         let catalog = CapabilityCatalog::new(&definitions, &[]);
         let full_count = catalog.len();
-        let full_tokens = catalog.total_schema_tokens();
+        let full_tokens = catalog.effective_metrics(&CapabilityAllowSet::All).1;
 
-        let disclosed =
-            select_active_set(&catalog, &PromotedSet::default(), DisclosureCaps::default());
+        let disclosed = select_active_set(
+            &catalog,
+            &PromotedSet::default(),
+            DisclosureCaps::default(),
+            &CapabilityAllowSet::All,
+        );
         let disclosed_count = disclosed.definitions.len();
         let disclosed_tokens = disclosed.advertised_tokens;
         let reduction_abs = full_tokens.saturating_sub(disclosed_tokens);

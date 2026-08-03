@@ -20,10 +20,14 @@ pub mod after_turn_memory;
 pub mod app_loop_family;
 mod context_shadow;
 pub mod driver_registry;
-pub mod failure_categories;
-pub mod failure_classification;
+/// Failure **classification** only — the category identifiers and the
+/// category→summary tables moved to `ironclaw_host_api::failure` with WS1.7
+/// (PROPOSAL §6.1.1), so this module is now private to the runner.
+mod failure_categories;
 pub mod failure_lane;
-pub mod failure_summary;
+/// The writer half of the checkpoint-rejection envelope; its reader and the
+/// summary tables live in `ironclaw_host_api::failure::summary`.
+mod failure_summary;
 pub mod hook_gate_refs;
 pub mod retry_disposition;
 
@@ -43,8 +47,8 @@ pub mod production_readiness;
 pub mod runtime;
 pub mod subagent;
 pub mod text_loop_driver;
-pub mod thread_scope;
 mod tool_disclosure;
+pub mod tool_disclosure_bridge;
 mod tool_disclosure_port;
 pub mod turn_run_executor;
 pub mod turn_runner;

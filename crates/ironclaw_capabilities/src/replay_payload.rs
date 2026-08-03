@@ -5,7 +5,7 @@
 //! `input` JSON, its [`ResourceEstimate`], the prior-approval identity, the
 //! input ref, and the correlation id — currently rides *in-band* through the
 //! untrusted loop on [`CapabilityApprovalResume`] /
-//! [`CapabilityAuthResume`](ironclaw_turns::run_profile::CapabilityAuthResume)
+//! [`CapabilityAuthResume`](ironclaw_loop_contracts::CapabilityAuthResume)
 //! and is stashed in the loop's own serialized checkpoint. The
 //! capability-result collapse (arch-simplification §5.3) makes the loop-facing
 //! `Resolution` carry only an opaque resume token (equal to the
@@ -13,16 +13,16 @@
 //! reconstitute it on resume.
 //!
 //! [`ReplayPayload`] is therefore the exact opposite of a
-//! [`GateRecord`](ironclaw_host_api::GateRecord): a `GateRecord` is the
+//! [`GateRecord`](ironclaw_host_api::gate_record::GateRecord): a `GateRecord` is the
 //! *model-visible* content a pending gate renders from and carries only a
 //! `SafeSummary`; a `ReplayPayload` is **host-private** and carries the raw tool
 //! input. It must never be model-visible. Moving it host-side also retires a
 //! real exposure — raw tool input no longer round-trips through the loop's
 //! serialized checkpoint.
 //!
-//! This lives in `ironclaw_capabilities` (not `ironclaw_run_state`) because the
-//! `ironclaw_run_state` charter forbids persisting raw replay input in run-state
-//! records (`CLAUDE.md` line 7), and the `ironclaw_turns` charter forbids
+//! This lives in `ironclaw_capabilities` (not `ironclaw_approvals`) because the
+//! raw replay input does not belong in process-journal lifecycle rows, and the
+//! `ironclaw_turns` charter explicitly forbids
 //! persisting raw tool input in turn state or events — whereas
 //! `ironclaw_capabilities` owns the caller-facing invoke/resume/spawn workflow
 //! this payload exists to serve, and has no such prohibition. The record embeds
@@ -30,7 +30,7 @@
 //! ([`CapabilityInputRef`], [`AuthResumeApprovalIdentity`]) rather than
 //! re-typing them, per `type-placement.md`.
 //!
-//! The durable store mirrors `ironclaw_run_state`'s `GateRecordStore`:
+//! The durable store mirrors `ironclaw_approvals`'s `GateRecordStore`:
 //! a [`ScopedFilesystem`] over any [`RootFilesystem`], the shared lock-free
 //! [`cas_update`] lane (fail-closed on non-CAS backends), a `RecordKind` tag so
 //! byte-only backends are rejected, and a private [`StoredReplayPayload`] wrapper
@@ -44,21 +44,24 @@ use ironclaw_filesystem::{
     ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
-    CorrelationId, HostApiError, InvocationId, ResourceEstimate, ResourceScope, ScopedPath,
+    error::HostApiError,
+    ids::{CorrelationId, InvocationId},
+    path::ScopedPath,
+    resource::{ResourceEstimate, ResourceScope},
 };
-use ironclaw_turns::run_profile::{AuthResumeApprovalIdentity, CapabilityInputRef};
+use ironclaw_loop_contracts::{AuthResumeApprovalIdentity, CapabilityInputRef};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Host-private replay payload for a gate/auth resume, keyed by [`InvocationId`].
 ///
 /// Reuses the exact field types carried by
-/// [`CapabilityApprovalResume`](ironclaw_turns::run_profile::CapabilityApprovalResume)
-/// / [`CapabilityAuthResume`](ironclaw_turns::run_profile::CapabilityAuthResume)
+/// [`CapabilityApprovalResume`](ironclaw_loop_contracts::CapabilityApprovalResume)
+/// / [`CapabilityAuthResume`](ironclaw_loop_contracts::CapabilityAuthResume)
 /// so a later resume-read slice reconstitutes them without any lossy re-typing.
 ///
 /// **Never model-visible.** Unlike a
-/// [`GateRecord`](ironclaw_host_api::GateRecord) this deliberately carries no
+/// [`GateRecord`](ironclaw_host_api::gate_record::GateRecord) this deliberately carries no
 /// `SafeSummary` — it holds the raw tool `input` and `estimate` and exists only
 /// for host-side re-dispatch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -107,7 +110,7 @@ impl From<FilesystemError> for ReplayPayloadStoreError {
 /// This is a dependency-inversion port (`type-placement.md` §"Traits" reason 2 /
 /// 4): defined in this kernel crate, implemented by
 /// [`ReplayPayloadStore`] and wired at composition — the same single-
-/// production-impl shape as `ironclaw_run_state`'s `GateRecordStorePort` it mirrors.
+/// production-impl shape as `ironclaw_approvals`'s `GateRecordStorePort` it mirrors.
 ///
 /// Resource-owner scoped; wrong-scope lookups look unknown (`Ok(None)`). It
 /// intentionally exposes no removal method: the replay payload is consumed once
@@ -160,11 +163,11 @@ struct StoredReplayPayload {
 /// Filesystem-backed replay-payload store under the `/replay-payloads` mount
 /// alias.
 ///
-/// Mirrors `ironclaw_run_state`'s `GateRecordStore`: construct with a
+/// Mirrors `ironclaw_approvals`'s `GateRecordStore`: construct with a
 /// [`ScopedFilesystem`] over any [`RootFilesystem`]. The [`ScopedFilesystem`]
 /// resolves the `/replay-payloads` alias to a tenant/user-scoped
-/// [`VirtualPath`](ironclaw_host_api::VirtualPath) per its
-/// [`MountView`](ironclaw_host_api::MountView) and enforces per-op ACL before
+/// [`VirtualPath`](ironclaw_host_api::path::VirtualPath) per its
+/// [`MountView`](ironclaw_host_api::mount::MountView) and enforces per-op ACL before
 /// any backend dispatch — so tenant isolation is structural. Within-tenant axes
 /// (agent/project/mission/thread) remain in the alias-relative path because they
 /// are not covered by the per-tenant `MountAlias`.
@@ -258,7 +261,7 @@ where
 // `MountAlias` rewriting, so neither prefix is encoded in the path itself.
 // Within-tenant sub-scope axes (agent/project/mission/thread) stay in the
 // alias-relative path because they are within-tenant scoping not covered by the
-// per-tenant `MountAlias`. Mirrors `ironclaw_run_state`'s `/gate-records` layout.
+// per-tenant `MountAlias`. Mirrors `ironclaw_approvals`'s `/gate-records` layout.
 
 const REPLAY_PAYLOADS_PREFIX: &str = "/replay-payloads";
 
@@ -277,7 +280,7 @@ fn replay_payload_path(
 /// `MountView` the caller supplied. Sub-scope axes (agent/project/mission/
 /// thread) stay in the path so within-tenant cross-scope isolation still works
 /// for stores sharing one alias target. Mirrors the sibling helper in
-/// `ironclaw_run_state`.
+/// `ironclaw_approvals`.
 fn scope_owner_alias_string(prefix: &'static str, scope: &ResourceScope) -> String {
     let mut base = String::from(prefix);
     if let Some(agent_id) = &scope.agent_id {
@@ -335,7 +338,7 @@ where
 /// Map the shared CAS helper's [`CasUpdateError`] into a
 /// [`ReplayPayloadStoreError`], preserving the caller's own error and failing
 /// closed on a backend that cannot honor versioned CAS (mirrors
-/// `ironclaw_run_state`'s `map_cas_error`).
+/// `ironclaw_approvals`'s `map_cas_error`).
 fn map_cas_error(error: CasUpdateError<ReplayPayloadStoreError>) -> ReplayPayloadStoreError {
     match error {
         CasUpdateError::Apply(inner) => inner,

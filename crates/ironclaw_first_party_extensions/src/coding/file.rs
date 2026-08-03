@@ -4,7 +4,7 @@
 //! `CodingCapabilityRequest`, scoped mounts, and `RootFilesystem`.
 
 use ironclaw_filesystem::{FileType, FilesystemOperation};
-use ironclaw_host_api::RuntimeDispatchErrorKind;
+use ironclaw_host_api::dispatch::RuntimeDispatchErrorKind;
 use serde_json::{Value, json};
 
 use super::{CodingCapabilityError, CodingCapabilityOutput, CodingCapabilityRequest};

@@ -39,6 +39,7 @@ use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
+use ironclaw_host_api::turn::TurnGateRef;
 use ironclaw_loop_host::{ModelCost, ModelCostTable, StaticModelCostTable};
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
@@ -47,13 +48,12 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::BudgetGateId;
-use ironclaw_turns::GateRef;
 
-fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
+fn standalone_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,
@@ -76,7 +76,7 @@ fn assert_budget_blocked_outcome(outcome: RebornTurnDriveOutcome) -> BudgetGateI
         } => {
             assert_eq!(
                 status,
-                ironclaw_turns::TurnStatus::BlockedResource,
+                ironclaw_host_api::turn::TurnStatus::BlockedResource,
                 "unexpected budget approval status"
             );
             assert_eq!(partial_text, None);
@@ -91,7 +91,7 @@ fn assert_budget_blocked_outcome(outcome: RebornTurnDriveOutcome) -> BudgetGateI
 /// Parse the `gate:budget-<uuid>` ref a paused budget run surfaces back into
 /// the typed [`BudgetGateId`], so the id can be compared against the
 /// `GateOpened` broadcast event without reading the gate store.
-fn budget_gate_id_from_ref(gate_ref: &GateRef) -> BudgetGateId {
+fn budget_gate_id_from_ref(gate_ref: &TurnGateRef) -> BudgetGateId {
     let raw_id = gate_ref
         .as_str()
         .strip_prefix("gate:budget-")
@@ -109,7 +109,7 @@ fn budget_gate_id_from_ref(gate_ref: &GateRef) -> BudgetGateId {
 fn pause_inducing_cost_table() -> Arc<dyn ModelCostTable> {
     let mut table = StaticModelCostTable::new();
     table.insert(
-        ironclaw_turns::run_profile::ModelProfileId::new("interactive_model").unwrap(),
+        ironclaw_loop_contracts::ModelProfileId::new("interactive_model").unwrap(),
         ModelCost {
             input_per_token: rust_decimal_macros::dec!(0.05),
             output_per_token: rust_decimal_macros::dec!(0.10),
@@ -138,8 +138,8 @@ async fn build_runtime_with_pause_inducing_setup(
 ) -> (RebornRuntime, Arc<BudgetTestGateway>) {
     let gateway = Arc::new(BudgetTestGateway::with_constant("ok", 5, 5));
     let input = RebornRuntimeInput::from_build_input(
-        ironclaw_reborn_composition::local_dev_build_input(format!("{tag}-owner"), root)
-            .with_runtime_policy(local_dev_runtime_policy()),
+        ironclaw_reborn_composition::local_filesystem_build_input(format!("{tag}-owner"), root)
+            .with_runtime_policy(standalone_runtime_policy()),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: format!("{tag}-tenant"),

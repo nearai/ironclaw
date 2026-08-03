@@ -8,14 +8,18 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_filesystem::{DiskFilesystem, FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
-    ResourceScope, ScopedPath, TenantId, ThreadId, UserId, VirtualPath,
+    error::HostApiError,
+    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_product::{
-    ActionFingerprintKey, ActionPhase, ConversationBindingService, IdempotencyDecision,
-    IdempotencyLedger, ProductConversationRouteKind, ProductInboundAction, ProductSurfaceFailure,
+    ActionPhase, ConversationBindingService, IdempotencyDecision, IdempotencyLedger,
+    ProductConversationRouteKind, ProductInboundAction, ProductSurfaceFailure,
     ResolveBindingRequest, ResolvedBinding,
 };
+use ironclaw_product_contracts::action::ActionFingerprintKey;
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -694,6 +698,6 @@ pub fn resource_scope(
         project_id,
         mission_id: None,
         thread_id: None,
-        invocation_id: ironclaw_host_api::InvocationId::new(),
+        invocation_id: ironclaw_host_api::ids::InvocationId::new(),
     }
 }

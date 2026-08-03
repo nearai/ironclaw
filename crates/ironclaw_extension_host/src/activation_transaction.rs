@@ -11,11 +11,14 @@ use async_trait::async_trait;
 use ironclaw_auth::CredentialAccount;
 use ironclaw_extensions::{
     ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
-    ExtensionManifestRecord, ExtensionPackage, ExtensionRuntime, is_hosted_http_mcp_package,
+    ExtensionManifestRecord, ExtensionPackage, is_hosted_http_mcp_package,
 };
 use ironclaw_host_api::{
-    ExtensionId, NetworkPolicy, NetworkScheme, NetworkTargetPattern, ResourceScope,
-    RuntimeCredentialAuthRequirement, RuntimeHttpEgress, UserId,
+    action::NetworkPolicy,
+    decision::RuntimeCredentialAuthRequirement,
+    http::RuntimeHttpEgress,
+    ids::{ExtensionId, UserId},
+    resource::ResourceScope,
 };
 use tokio::sync::Mutex;
 
@@ -221,8 +224,15 @@ where
     };
 
     let (initial, scope, runtime_http_egress) = initial;
-    let network_policy = hosted_mcp_discovery_network_policy(&initial.package)
-        .map_err(|error| operations.map_authority_error(error))?;
+    let network_policy =
+        crate::mcp::hosted_mcp_network_policy(&initial.package).ok_or_else(|| {
+            operations.map_authority_error(ExtensionInstallationError::InvalidInstallation {
+                reason: format!(
+                    "hosted MCP extension {} has an invalid discovery endpoint",
+                    initial.package.id.as_str()
+                ),
+            })
+        })?;
     let _discovery_authority_guard = operations
         .stage_hosted_mcp_discovery_authority(&scope, &initial.package, network_policy)
         .await;
@@ -290,73 +300,6 @@ where
         return Err(operations.discovery_recheck_error(None));
     }
     commit_activation(operations, extension_id, installation_id, active_package).await
-}
-
-fn hosted_mcp_discovery_network_policy(
-    package: &ExtensionPackage,
-) -> Result<NetworkPolicy, ExtensionInstallationError> {
-    const MCP_NETWORK_EGRESS_LIMIT: u64 = 2 * 1024 * 1024;
-
-    let ExtensionRuntime::Mcp {
-        transport,
-        command: None,
-        args,
-        url: Some(url),
-    } = &package.manifest.runtime
-    else {
-        return Err(ExtensionInstallationError::InvalidInstallation {
-            reason: format!(
-                "hosted MCP extension {} has no hosted HTTP runtime",
-                package.id.as_str()
-            ),
-        });
-    };
-    if transport != "http" || !args.is_empty() {
-        return Err(ExtensionInstallationError::InvalidInstallation {
-            reason: format!(
-                "hosted MCP extension {} has an unsupported discovery transport",
-                package.id.as_str()
-            ),
-        });
-    }
-    let parsed =
-        url::Url::parse(url).map_err(|_| ExtensionInstallationError::InvalidInstallation {
-            reason: format!(
-                "hosted MCP extension {} has an invalid discovery endpoint",
-                package.id.as_str()
-            ),
-        })?;
-    if parsed.scheme() != "https"
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-    {
-        return Err(ExtensionInstallationError::InvalidInstallation {
-            reason: format!(
-                "hosted MCP extension {} has an invalid discovery endpoint",
-                package.id.as_str()
-            ),
-        });
-    }
-    let host =
-        parsed
-            .host_str()
-            .ok_or_else(|| ExtensionInstallationError::InvalidInstallation {
-                reason: format!(
-                    "hosted MCP extension {} has no discovery endpoint host",
-                    package.id.as_str()
-                ),
-            })?;
-    Ok(NetworkPolicy {
-        allowed_targets: vec![NetworkTargetPattern {
-            scheme: Some(NetworkScheme::Https),
-            host_pattern: host.to_ascii_lowercase(),
-            port: parsed.port(),
-        }],
-        deny_private_ip_ranges: true,
-        max_egress_bytes: Some(MCP_NETWORK_EGRESS_LIMIT),
-    })
 }
 
 async fn capture_snapshot<O>(
@@ -446,9 +389,14 @@ mod tests {
         ExtensionPackage, HostApiContractRegistry, InstallationOwner, ManifestSource,
     };
     use ironclaw_host_api::{
-        HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
-        InvocationId, NetworkPolicy, RuntimeCredentialAccountSetup, RuntimeHttpEgressError,
-        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle, VendorId, VirtualPath,
+        action::NetworkPolicy,
+        capability::RuntimeCredentialAccountSetup,
+        host_port::{
+            HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
+        },
+        http::{RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse},
+        ids::{InvocationId, SecretHandle, VendorId},
+        path::VirtualPath,
     };
     use tokio::sync::Notify;
 
@@ -999,6 +947,7 @@ default_permission = "ask"
 effects = ["network"]
 "#;
         let contracts = HostApiContractRegistry::new();
+        let root = VirtualPath::new("/system/extensions/hosted").expect("package root");
         let manifest = ExtensionManifestRecord::from_toml(
             raw_manifest,
             ManifestSource::HostBundled,
@@ -1008,6 +957,7 @@ effects = ["network"]
             .expect("host port catalog"),
             None,
             &contracts,
+            Some(root.clone()),
         )
         .expect("manifest record");
         let package_manifest: ExtensionManifest = manifest
@@ -1015,12 +965,8 @@ effects = ["network"]
             .clone()
             .try_into()
             .expect("package manifest");
-        let package = ExtensionPackage::from_manifest_toml(
-            package_manifest,
-            VirtualPath::new("/system/extensions/hosted").expect("package root"),
-            raw_manifest,
-        )
-        .expect("package");
+        let package = ExtensionPackage::from_manifest_toml(package_manifest, root, raw_manifest)
+            .expect("package");
         (package, manifest)
     }
 

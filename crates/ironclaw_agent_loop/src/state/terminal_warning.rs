@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use ironclaw_turns::LoopFailureKind;
+use ironclaw_loop_contracts::LoopFailureKind;
 
 const TERMINAL_WARNING_SCHEMA_VERSION: u32 = 1;
 
@@ -37,12 +37,22 @@ impl TerminalWarningObservation {
         }
     }
 
+    pub(crate) fn budget_accounting_failed() -> Self {
+        Self {
+            schema_version: TERMINAL_WARNING_SCHEMA_VERSION,
+            detail: TerminalWarningDetail::BudgetAccountingFailed,
+        }
+    }
+
     pub(crate) fn kind(&self) -> TerminalWarningKind {
         match self.detail {
             TerminalWarningDetail::NoProgressDetected { .. } => {
                 TerminalWarningKind::NoProgressDetected
             }
             TerminalWarningDetail::IterationLimit { .. } => TerminalWarningKind::IterationLimit,
+            TerminalWarningDetail::BudgetAccountingFailed => {
+                TerminalWarningKind::BudgetAccountingFailed
+            }
         }
     }
 
@@ -76,6 +86,9 @@ impl TerminalWarningObservation {
             TerminalWarningDetail::IterationLimit { limit } => format!(
                 "loop warning: iteration limit {limit} reached; this is the final recovery iteration; complete the task or provide the best final answer now"
             ),
+            TerminalWarningDetail::BudgetAccountingFailed => {
+                "loop warning: resource accounting failed while processing the previous model request; accounting was reconciled before this final recovery iteration; complete the task with a concise response or provide the best final answer now".to_string()
+            }
         }
     }
 }
@@ -96,6 +109,7 @@ enum TerminalWarningDetail {
     IterationLimit {
         limit: u32,
     },
+    BudgetAccountingFailed,
 }
 
 #[derive(
@@ -105,6 +119,7 @@ enum TerminalWarningDetail {
 pub(crate) enum TerminalWarningKind {
     NoProgressDetected,
     IterationLimit,
+    BudgetAccountingFailed,
 }
 
 /// Checkpoint-persistent accounting for pre-termination warning iterations.
@@ -180,6 +195,12 @@ mod tests {
         state.clear_active();
         assert!(!state.schedule(TerminalWarningObservation::iteration_limit(8)));
         assert!(state.schedule(TerminalWarningObservation::no_progress(None, None)));
+        state.mark_delivered();
+        state.clear_active();
+        assert!(state.schedule(TerminalWarningObservation::budget_accounting_failed()));
+        state.mark_delivered();
+        state.clear_active();
+        assert!(!state.schedule(TerminalWarningObservation::budget_accounting_failed()));
     }
 
     #[test]
@@ -213,6 +234,22 @@ mod tests {
             Some(TerminalWarningKind::NoProgressDetected)
         );
         assert!(!restored.schedule(TerminalWarningObservation::no_progress(None, None)));
+    }
+
+    #[test]
+    fn pending_budget_accounting_warning_survives_checkpoint_round_trip() {
+        let mut state = TerminalWarningState::default();
+        assert!(state.schedule(TerminalWarningObservation::budget_accounting_failed()));
+
+        let encoded = serde_json::to_vec(&state).expect("warning state serializes");
+        let mut restored: TerminalWarningState =
+            serde_json::from_slice(&encoded).expect("warning state deserializes");
+
+        assert_eq!(
+            restored.pending().map(TerminalWarningObservation::kind),
+            Some(TerminalWarningKind::BudgetAccountingFailed)
+        );
+        assert!(!restored.schedule(TerminalWarningObservation::budget_accounting_failed()));
     }
 
     #[test]

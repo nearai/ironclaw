@@ -3,6 +3,7 @@ import React from "react";
 import { useT } from "../../../lib/i18n";
 import { Panel, StatusPill } from "../../../design-system/primitives";
 import { Button } from "../../../design-system/button";
+import { ConfirmDialog } from "../../../design-system/confirm-dialog";
 import { Icon } from "../../../design-system/icons";
 import { SelectMenu } from "../../../design-system/select-menu";
 import { useAdminUsers } from "../hooks/useAdminUsers";
@@ -144,35 +145,6 @@ function CreateUserForm({ onCreate, isCreating, error, resetError }) {
   );
 }
 
-export function ConfirmModal({ title, message, confirmLabel, onConfirm, onCancel, isPending, error }) {
-  const t = useT();
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onCancel}>
-      <div data-testid="admin-user-confirm-dialog" className="w-full max-w-md rounded-xl border border-iron-700 bg-iron-900 p-6" onClick={(e) => e.stopPropagation()}>
-        <h3 className="text-lg font-semibold text-iron-100">{title}</h3>
-        <p className="mt-2 text-sm text-iron-300">{message}</p>
-        {error && (
-          <p className="mt-4 text-sm text-red-200" role="alert" data-testid="admin-user-confirm-error">
-            {adminUserActionErrorMessage(error, t)}
-          </p>
-        )}
-        <div className="mt-5 flex justify-end gap-2">
-          <Button variant="ghost" disabled={isPending} onClick={onCancel}>{t("admin.users.cancel")}</Button>
-          <Button
-            variant="danger"
-            loading={isPending}
-            disabled={isPending}
-            data-testid="admin-user-confirm-submit"
-            onClick={onConfirm}
-          >
-            {isPending ? t("common.loading") : confirmLabel}
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export function UserRow({
   user,
   onSelect,
@@ -211,7 +183,7 @@ export function UserRow({
         <span className="hidden text-xs text-iron-700 lg:inline">{formatRelativeTime(user.last_active_at, t)}</span>
         <div className="flex gap-1">
           {user.status === "active"
-            ? (<button data-testid="admin-user-suspend" disabled={isActionPending} aria-busy={isSuspending || undefined} onClick={() => onSuspend(user.id)} className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 hover:border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] hover:text-[var(--v2-danger-text)] disabled:cursor-not-allowed disabled:opacity-50">{isSuspending ? t("common.loading") : t("admin.users.suspend")}</button>)
+            ? (<button data-testid="admin-user-suspend" disabled={isActionPending} aria-busy={isSuspending || undefined} onClick={(event) => onSuspend(user, event.currentTarget)} className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 hover:border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] hover:text-[var(--v2-danger-text)] disabled:cursor-not-allowed disabled:opacity-50">{isSuspending ? t("common.loading") : t("admin.users.suspend")}</button>)
             : (<button data-testid="admin-user-activate" disabled={isActionPending} aria-busy={isActivating || undefined} onClick={() => onActivate(user.id)} className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 hover:border-signal/30 hover:text-signal disabled:cursor-not-allowed disabled:opacity-50">{isActivating ? t("common.loading") : t("admin.users.activate")}</button>)}
           <button
             data-testid="admin-user-role"
@@ -245,6 +217,7 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
   const {
     users, query, isForbidden, createUser, isCreating, createError,
     resetCreate,
+    hasMore, isLoadingMore, loadMoreError, loadMore,
     updateUser, suspendUser, activateUser,
     isUpdating, updateError, updatingUserId,
     isSuspending, suspendError, suspendingUserId, resetSuspend,
@@ -256,6 +229,7 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
   const [search, setSearch] = React.useState("");
   const [filter, setFilter] = React.useState("all");
   const [confirm, setConfirm] = React.useState(null);
+  const suspendInFlightRef = React.useRef(false);
 
   const filtered = filterUsers(users, { search, filter });
   const FILTERS = buildFilters(t);
@@ -263,24 +237,28 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
   const isActionPending = isUpdating || isSuspending || isActivating;
   const actionError = activateError || updateError;
 
-  const handleSuspend = (id) => {
+  const handleSuspend = (user, returnFocusTo) => {
     resetSuspend?.();
     setConfirm({
-      userId: id,
+      userId: user.id,
+      returnFocusTo,
       title: t("admin.users.suspendTitle"),
-      message: t("admin.users.suspendDesc"),
+      message: t("admin.users.suspendDesc", { name: user.display_name || user.id }),
       confirmLabel: t("admin.users.suspend"),
     });
   };
 
   const confirmSuspend = async () => {
-    if (!confirm?.userId || isActionPending) return;
+    if (!confirm?.userId || isActionPending || suspendInFlightRef.current) return;
+    suspendInFlightRef.current = true;
     resetActionErrors?.();
     try {
       await suspendUser(confirm.userId);
       setConfirm(null);
     } catch (_) {
       // Keep the confirmation open so the administrator can retry.
+    } finally {
+      suspendInFlightRef.current = false;
     }
   };
 
@@ -412,19 +390,54 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
                 />
               )
             )}
+
+        {(hasMore || loadMoreError) && (
+          <div className="mt-4 flex flex-col items-center gap-2 border-t border-iron-700 pt-4">
+            {loadMoreError && (
+              <p
+                className="text-sm text-[var(--v2-danger-text)]"
+                role="alert"
+                data-testid="admin-users-load-more-error"
+              >
+                {adminUserActionErrorMessage(loadMoreError, t)}
+              </p>
+            )}
+            <Button
+              variant="secondary"
+              size="sm"
+              loading={isLoadingMore}
+              disabled={isLoadingMore}
+              data-testid="admin-users-load-more"
+              onClick={loadMore}
+            >
+              {isLoadingMore ? t("common.loading") : t("common.loadMore")}
+            </Button>
+          </div>
+        )}
       </Panel>
 
-      {confirm && (
-        <ConfirmModal
-          title={confirm.title}
-          message={confirm.message}
-          confirmLabel={confirm.confirmLabel}
-          onConfirm={confirmSuspend}
-          onCancel={closeConfirm}
-          isPending={isSuspending}
-          error={suspendError}
-        />
-      )}
+      <ConfirmDialog
+        open={Boolean(confirm)}
+        title={confirm?.title || ""}
+        description={confirm
+          ? (
+              <>
+                <span>{confirm.message}</span>
+                {suspendError && (
+                  <span className="mt-4 block text-red-200" role="alert" data-testid="admin-user-confirm-error">
+                    {adminUserActionErrorMessage(suspendError, t)}
+                  </span>
+                )}
+              </>
+            )
+          : undefined}
+        confirmLabel={confirm?.confirmLabel || t("admin.users.suspend")}
+        cancelLabel={t("admin.users.cancel")}
+        isConfirming={isSuspending}
+        returnFocusTo={confirm?.returnFocusTo || null}
+        onConfirm={confirmSuspend}
+        onCancel={closeConfirm}
+      />
     </div>
   );
 }

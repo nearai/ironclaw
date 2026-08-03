@@ -13,21 +13,33 @@ use ironclaw_capabilities::{
     CapabilityObligationRequest,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
+use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{
-    AgentId, CapabilityDescriptor, CapabilityDispatchResult, CapabilityId, CapabilitySet,
-    CorrelationId, DispatchError, EffectKind, ExecutionContext, ExtensionId, HostPortCatalog,
-    InvocationId, MountView, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
-    Obligation, PermissionMode, ProjectId, ReservationStatus, ResourceEstimate, ResourceReceipt,
-    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialInjection,
-    RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind, RuntimeHttpEgress,
-    RuntimeHttpEgressRequest, RuntimeKind, RuntimeLane, SecretHandle, TenantId, TrustClass, UserId,
-    VirtualPath,
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::{CapabilityDescriptor, CapabilitySet, EffectKind, PermissionMode},
+    decision::Obligation,
+    dispatch::{CapabilityDispatchResult, DispatchError, RuntimeDispatchErrorKind},
+    host_port::HostPortCatalog,
+    http::{
+        RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+        RuntimeHttpEgress, RuntimeHttpEgressRequest,
+    },
+    ids::{
+        AgentId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProjectId,
+        ResourceReservationId, SecretHandle, TenantId, UserId,
+    },
+    lane::RuntimeLane,
+    mount::MountView,
+    path::VirtualPath,
+    resource::{
+        ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceScope, ResourceUsage,
+    },
+    runtime::{RuntimeKind, TrustClass},
+    scope::ExecutionContext,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
-use ironclaw_processes::{ProcessResultStore, ProcessStore};
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceTally,
 };
@@ -41,10 +53,10 @@ use super::{
     CapabilitySurfaceVersion, ConfiguredInvocationServicesResolver, DeploymentMode,
     EffectiveRuntimePolicy, FilesystemBackendKind, FirstPartyCapabilityRegistry,
     FirstPartyRuntimeAdapter, HostProcessPort, HostRuntimeHttpEgressPort, HostRuntimeServices,
-    McpRuntimeAdapter, NetworkMode, ProcessBackendKind, ProcessResultStorePort, ProcessStorePort,
-    ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssueKind, RootFilesystem,
-    RuntimeAdapter, RuntimeAdapterResult, RuntimeLaneExecutor, RuntimeLaneRequest, RuntimeProfile,
-    SecretMode, ServiceResolvedRuntimeAdapter,
+    McpRuntimeAdapter, NetworkMode, ProcessBackendKind, ProductionWiringComponent,
+    ProductionWiringConfig, ProductionWiringIssueKind, RootFilesystem, RuntimeAdapter,
+    RuntimeAdapterResult, RuntimeLaneExecutor, RuntimeLaneRequest, RuntimeProfile, SecretMode,
+    ServiceResolvedRuntimeAdapter,
 };
 #[cfg(unix)]
 use crate::CommandExecutionRequest;
@@ -95,6 +107,23 @@ async fn production_wiring_reports_local_only_persistent_approval_policies() {
     assert!(report.contains(
         ProductionWiringComponent::PersistentApprovalPolicies,
         ProductionWiringIssueKind::LocalOnlyImplementation
+    ));
+}
+
+// `registered_runtime_backends()` has no Sandbox backend field: there is no
+// production Sandbox runtime to wire up yet. A `RuntimeKind::Sandbox` entry in
+// `required_runtime_backends` must therefore surface as `UnsupportedRequirement`
+// — exactly like `RuntimeKind::System` — rather than being silently accepted by
+// the safe-runtimes catch-all arm.
+#[tokio::test]
+async fn production_wiring_reports_unsupported_sandbox_runtime_requirement() {
+    let report = test_services()
+        .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::Sandbox]))
+        .expect_err("Sandbox runtime requirement is not production-wired");
+
+    assert!(report.contains(
+        ProductionWiringComponent::RuntimeBackend,
+        ProductionWiringIssueKind::UnsupportedRequirement
     ));
 }
 
@@ -340,7 +369,7 @@ async fn host_runtime_http_egress_port_executes_with_host_staged_credentials() {
         .expect_err("caller-provided credential injections must be rejected");
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Credential { .. }
     ));
     assert_eq!(recorded_requests.lock().unwrap().len(), 1);
 }
@@ -376,7 +405,7 @@ async fn host_runtime_http_egress_port_denies_before_network_when_obligation_fai
 
     assert_eq!(
         error.reason_code(),
-        ironclaw_host_api::RuntimeHttpEgressReasonCode::RequestDenied
+        ironclaw_host_api::http::RuntimeHttpEgressReasonCode::RequestDenied
     );
     assert!(recorded_requests.lock().unwrap().is_empty());
 }
@@ -500,7 +529,7 @@ async fn host_http_egress_helper_consumes_staged_credentials_after_first_egress(
         .expect_err("consumed staged credential must not be reusable");
     assert!(matches!(
         replay,
-        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Credential { .. }
     ));
 
     let requests = recorded_requests.lock().unwrap();
@@ -550,7 +579,7 @@ async fn host_http_egress_treats_expired_staged_secret_as_missing() {
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Credential { ref reason }
+        ironclaw_host_api::http::RuntimeHttpEgressError::Credential { ref reason }
             if reason == "required credential is unavailable"
     ));
     assert!(recorded_requests.lock().unwrap().is_empty());
@@ -1172,12 +1201,7 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
     );
 }
 
-fn test_services() -> HostRuntimeServices<
-    DiskFilesystem,
-    InMemoryResourceGovernor,
-    ProcessStore<InMemoryBackend>,
-    ProcessResultStore<InMemoryBackend>,
-> {
+fn test_services() -> HostRuntimeServices<DiskFilesystem, InMemoryResourceGovernor> {
     HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
         Arc::new(DiskFilesystem::new()),
@@ -1188,13 +1212,8 @@ fn test_services() -> HostRuntimeServices<
     )
 }
 
-fn configured_egress<
-    F: RootFilesystem + 'static,
-    G: ResourceGovernor + 'static,
-    S: ProcessStorePort + 'static,
-    R: ProcessResultStorePort + 'static,
->(
-    services: &HostRuntimeServices<F, G, S, R>,
+fn configured_egress<F: RootFilesystem + 'static, G: ResourceGovernor + 'static>(
+    services: &HostRuntimeServices<F, G>,
 ) -> Arc<dyn RuntimeHttpEgress> {
     services
         .runtime_http_egress
@@ -1223,7 +1242,7 @@ fn test_package(manifest: &str, extension_id: &str) -> ExtensionPackage {
 fn test_descriptor(runtime: RuntimeKind, effects: Vec<EffectKind>) -> CapabilityDescriptor {
     CapabilityDescriptor {
         id: CapabilityId::new("test.capability").unwrap(),
-        provider: ironclaw_host_api::ExtensionId::new("test").unwrap(),
+        provider: ironclaw_host_api::ids::ExtensionId::new("test").unwrap(),
         runtime,
         trust_ceiling: TrustClass::UserTrusted,
         description: "test capability".to_string(),
@@ -1246,8 +1265,8 @@ fn policy_with(
 ) -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend,
         process_backend,
         network_mode,
@@ -1574,7 +1593,7 @@ impl CapabilityObligationHandler for DenyingObligationHandler {
 #[test]
 fn stage_secret_error_maps_auth_and_backend_variants() {
     use crate::services::stage_secret_error;
-    use ironclaw_host_api::CredentialStageError::{AuthRequired, Backend};
+    use ironclaw_host_api::dispatch::CredentialStageError::{AuthRequired, Backend};
 
     let scope = sample_scope();
     let cases: &[(SecretStoreError, crate::ProductAuthCredentialStageError)] = &[

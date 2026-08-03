@@ -2,7 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
+use ironclaw_memory::{MemoryDocumentPath, MemoryDocumentScope};
 use ironclaw_memory_native::*;
 
 #[test]

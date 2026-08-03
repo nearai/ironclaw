@@ -1,11 +1,13 @@
 use crate::ProductSurfaceRejectionKind;
+use ironclaw_approvals::ApprovalStatus;
+use ironclaw_host_api::turn::{IdempotencyKey, TurnActor, TurnGateRef, TurnRunId, TurnScope};
 use ironclaw_host_api::{
-    Action, ApprovalRequest, ApprovalRequestId, CapabilityId, InvocationId, ResourceScope,
+    action::Action,
+    approval::ApprovalRequest,
+    ids::{ApprovalRequestId, CapabilityId, InvocationId},
+    resource::ResourceScope,
 };
-use ironclaw_run_state::ApprovalStatus;
-use ironclaw_turns::{
-    GateRef, IdempotencyKey, ResumeTurnResponse, TurnActor, TurnRunId, TurnScope,
-};
+use ironclaw_turns::ResumeTurnResponse;
 use serde::{Deserialize, Serialize};
 
 use super::{approval_gate_ref, approval_rejected};
@@ -85,13 +87,13 @@ impl ApprovalInteractionRejectionKind {
 /// Caller-visible scope for approval interactions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalInteractionScope {
-    pub tenant_id: ironclaw_host_api::TenantId,
-    pub user_id: ironclaw_host_api::UserId,
+    pub tenant_id: ironclaw_host_api::ids::TenantId,
+    pub user_id: ironclaw_host_api::ids::UserId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<ironclaw_host_api::AgentId>,
+    pub agent_id: Option<ironclaw_host_api::ids::AgentId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<ironclaw_host_api::ProjectId>,
-    pub thread_id: ironclaw_host_api::ThreadId,
+    pub project_id: Option<ironclaw_host_api::ids::ProjectId>,
+    pub thread_id: ironclaw_host_api::ids::ThreadId,
 }
 
 impl ApprovalInteractionScope {
@@ -150,7 +152,7 @@ impl ApprovalInteractionActionView {
 pub struct PendingApprovalInteractionView {
     pub scope: ApprovalInteractionScope,
     pub run_id: TurnRunId,
-    pub gate_ref: GateRef,
+    pub gate_ref: TurnGateRef,
     pub approval_request_id: ApprovalRequestId,
     pub summary: String,
     pub action: ApprovalInteractionActionView,
@@ -161,7 +163,7 @@ pub struct ApprovalGateRecord {
     scope: ApprovalInteractionScope,
     resource_scope: ResourceScope,
     run_id: TurnRunId,
-    gate_ref: GateRef,
+    gate_ref: TurnGateRef,
     request: ApprovalRequest,
     status: ApprovalStatus,
 }
@@ -170,7 +172,7 @@ impl ApprovalGateRecord {
     pub fn new(
         resource_scope: ResourceScope,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         request: ApprovalRequest,
     ) -> Result<Self, ProductSurfaceFailure> {
         Self::with_status(
@@ -185,7 +187,7 @@ impl ApprovalGateRecord {
     pub fn with_status(
         resource_scope: ResourceScope,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         request: ApprovalRequest,
         status: ApprovalStatus,
     ) -> Result<Self, ProductSurfaceFailure> {
@@ -226,7 +228,7 @@ impl ApprovalGateRecord {
         self.run_id
     }
 
-    pub fn gate_ref(&self) -> &GateRef {
+    pub fn gate_ref(&self) -> &TurnGateRef {
         &self.gate_ref
     }
 
@@ -274,7 +276,7 @@ pub struct ResolveApprovalInteractionRequest {
     pub scope: TurnScope,
     pub actor: TurnActor,
     pub run_id_hint: Option<TurnRunId>,
-    pub gate_ref: GateRef,
+    pub gate_ref: TurnGateRef,
     pub decision: ApprovalInteractionDecision,
     pub idempotency_key: IdempotencyKey,
 }
@@ -292,8 +294,14 @@ fn display_safe_summary() -> String {
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::{
-        Action, AgentId, ApprovalRequest, CapabilityId, CorrelationId, InvocationId, Principal,
-        ProjectId, ResourceEstimate, TenantId, ThreadId, UserId,
+        action::Action,
+        approval::ApprovalRequest,
+        ids::{
+            AgentId, CapabilityId, CorrelationId, InvocationId, ProjectId, TenantId, ThreadId,
+            UserId,
+        },
+        resource::ResourceEstimate,
+        scope::Principal,
     };
 
     use super::*;
@@ -357,7 +365,7 @@ mod tests {
             ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
                 .unwrap();
         resource_scope.thread_id = Some(ThreadId::new("thread-a").unwrap());
-        let wrong_gate_ref = GateRef::new("gate:approval-wrong").unwrap();
+        let wrong_gate_ref = TurnGateRef::new("gate:approval-wrong").unwrap();
 
         let error = ApprovalGateRecord::with_status(
             resource_scope,

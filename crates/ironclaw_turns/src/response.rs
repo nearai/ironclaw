@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AcceptedMessageRef, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, TurnActor,
-    TurnRunId, TurnStatus, events::EventCursor,
+    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
+    TurnActor, TurnRunId, TurnStatus,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,7 +48,7 @@ pub struct CancelRunResponse {
     pub already_terminal: bool,
     /// Carried from the store so the coordinator can populate
     /// `owner_user_id` on the cancel lifecycle event without a follow-up
-    /// `get_run_state` lookup. `TurnStateStore` implementors must populate
+    /// `get_run_state` lookup. `AgentTurnRuntimePort` implementors must populate
     /// this field. Skipped on the wire because actor identity is internal.
     #[serde(skip)]
     pub actor: Option<TurnActor>,

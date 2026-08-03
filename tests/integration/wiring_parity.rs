@@ -33,7 +33,7 @@ mod support;
 
 use std::collections::HashSet;
 
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::harness::HarnessResult;
@@ -45,7 +45,7 @@ use reborn_support::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape
 // ---------------------------------------------------------------------------
 
 /// Hand-derived from `crates/ironclaw_reborn_composition/src/runtime.rs`
-/// lines 3365-3459 (`build_reborn_runtime`, `LocalDev`/`LocalDevYolo`
+/// lines 3365-3459 (`build_reborn_runtime`, `Standalone`/`StandaloneUnrestricted`
 /// profile, `local_runtime: Some(..)`). NOT computed from running code —
 /// RE-DERIVE by re-reading that literal whenever it changes. (Verified
 /// against this range 2026-07-04.) The smoke build below at least proves the
@@ -60,10 +60,11 @@ use reborn_support::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape
 /// below for the exact code path.
 const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
     DefaultPlannedRuntimePartsShape {
-        model_route_resolver: false,    // :3406 hardcoded None
-        cancellation_factory: false,    // :3407 hardcoded None
-        skill_context_source: true,     // :2917-2929 local_dev_filesystem_skill_context_source
+        model_route_resolver: false,        // :3406 hardcoded None
+        cancellation_factory: false,        // :3407 hardcoded None
+        skill_context_source: true,         // :2917-2929 standalone_filesystem_skill_context_source
         attachment_read_port: true, // :3372-3376 local_runtime.map(ProjectScopedAttachmentReader)
+        reply_attachment_intent_port: true, // shared production outbound-state store
         gate_record_store: true, // local_runtime.map(gate_record_store) — always Some when local_runtime present
         input_queue: false,      // hardcoded None
         memory_context_service: true, // :3481-3494 local_runtime + native MemoryServiceResolver
@@ -99,7 +100,7 @@ const ALLOWED_DIVERGENCES: &[(&str, &str)] = &[
     (
         "skill_context_source",
         "harness: None outside skill_activation_tools() groups (recorder.rs:56-63); \
-         production: always Some via local_dev_filesystem_skill_context_source (runtime.rs:2917-2929)",
+         production: always Some via standalone_filesystem_skill_context_source (runtime.rs:2917-2929)",
     ),
     (
         "attachment_read_port",
@@ -151,6 +152,9 @@ fn mask(
         "cancellation_factory" => shape.cancellation_factory = from.cancellation_factory,
         "skill_context_source" => shape.skill_context_source = from.skill_context_source,
         "attachment_read_port" => shape.attachment_read_port = from.attachment_read_port,
+        "reply_attachment_intent_port" => {
+            shape.reply_attachment_intent_port = from.reply_attachment_intent_port
+        }
         "gate_record_store" => shape.gate_record_store = from.gate_record_store,
         "input_queue" => shape.input_queue = from.input_queue,
         "memory_context_service" => shape.memory_context_service = from.memory_context_service,
@@ -223,18 +227,18 @@ async fn builtin_tools_planned_runtime_parts_shape_matches_production() {
 }
 
 /// Smoke build backing `EXPECTED_PRODUCTION_SHAPE`'s doc comment: proves the
-/// referenced `LocalDev` literal still exists and the profile still builds.
+/// referenced `Standalone` literal still exists and the profile still builds.
 /// Mirrors `crates/ironclaw_reborn_composition/tests/runtime.rs:132-146`. The
 /// constant's `bool` values still come from the hand-read above, NOT from
 /// introspecting this built `RebornRuntime` (there is no production-side
 /// accessor to do so without a production-crate change — the known accepted
 /// gap noted in the module doc).
 #[tokio::test]
-async fn local_dev_profile_still_builds() {
+async fn standalone_profile_still_builds() {
     let root = tempfile::tempdir().expect("tempdir");
-    let policy = ironclaw_reborn_composition::local_dev_runtime_policy()
+    let policy = ironclaw_reborn_composition::standalone_runtime_policy()
         .expect("local-dev runtime policy resolves");
-    let input = ironclaw_reborn_composition::local_dev_build_input(
+    let input = ironclaw_reborn_composition::local_filesystem_build_input(
         "wiring-parity-smoke-owner",
         root.path().join("local-dev"),
     )

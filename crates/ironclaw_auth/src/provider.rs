@@ -1,7 +1,7 @@
 use std::fmt;
 
 use async_trait::async_trait;
-use ironclaw_host_api::SecretHandle;
+use ironclaw_host_api::ids::{ExtensionId, SecretHandle};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::{
@@ -145,10 +145,30 @@ pub trait AuthProviderClient: Send + Sync {
         request: OAuthProviderCallbackRequest,
     ) -> Result<OAuthProviderExchange, AuthProductError>;
 
+    async fn exchange_callback_for_requester(
+        &self,
+        _requester_extension: Option<ExtensionId>,
+        context: OAuthProviderExchangeContext,
+        request: OAuthProviderCallbackRequest,
+    ) -> Result<OAuthProviderExchange, AuthProductError> {
+        self.exchange_callback(context, request).await
+    }
+
     async fn refresh_token(
         &self,
         request: OAuthProviderRefreshRequest,
     ) -> Result<OAuthProviderRefresh, AuthProductError>;
+
+    /// Auth orchestration may retain requester identity separately from the
+    /// provider-facing refresh DTO. Implementations that do not resolve
+    /// recipes can use the safe default.
+    async fn refresh_token_for_requester(
+        &self,
+        _requester_extension: Option<ExtensionId>,
+        request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError> {
+        self.refresh_token(request).await
+    }
 
     async fn cleanup_exchange(
         &self,

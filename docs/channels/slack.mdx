@@ -1,0 +1,290 @@
+---
+title: "Slack"
+description: "Talk to your agent in Slack channels and direct messages"
+icon: slack
+---
+
+Connect IronClaw to a Slack workspace so your agent can read and reply to messages in
+channels and DMs.
+
+## Prerequisites
+
+- A Slack workspace where you can install apps
+- An IronClaw instance reachable from Slack over HTTPS
+
+---
+
+## Setup
+
+<Steps>
+
+<Step title="Create a Slack app">
+
+Create an app at [api.slack.com/apps](https://api.slack.com/apps). The fastest route is
+**From an app manifest** — paste the [manifest below](#app-manifest), which sets the
+scopes, events, the `/ironclaw` slash command, and redirect URL in one step. Replace
+`example.com` with your own host first.
+
+If you build the app from scratch instead, configure **OAuth & Permissions**, **Event
+Subscriptions**, **Slash Commands**, and the redirect URL to match that manifest.
+
+Once created, install the app to your workspace and copy the bot token from **OAuth &
+Permissions**, and the signing secret from **Basic Information**. IronClaw uses the signing
+secret to verify that incoming requests really came from Slack.
+
+</Step>
+
+<Step title="Start IronClaw">
+
+```bash
+ironclaw serve
+```
+
+</Step>
+
+<Step title="Connect the channel">
+
+In the [web interface](/using/webui), open **Extensions**, switch to the **Channels** tab,
+and scroll to the **bottom of the Built-in section**. Use **Configure** on the Slack card
+and provide the app id, bot token, and signing secret. They are written to the encrypted
+secret store.
+
+<Warning>
+Extensions opens on the **Registry** tab, which is not where channels are connected, and
+the Slack card sits below the web and terminal rows on the Channels tab. If you can't find
+it, you're probably on the wrong tab or haven't scrolled.
+</Warning>
+
+<Note>
+Asking the agent to "connect Slack" will not work. It can install and use Slack *tools*
+once the channel is connected, but making the connection is an operator action that stays
+in the web interface. The agent may reply that it can't help.
+</Note>
+
+</Step>
+
+<Step title="Point Slack at your instance">
+
+Back in your Slack app, confirm **Event Subscriptions** points at your instance:
+
+```
+https://your-host/webhooks/extensions/slack/events
+```
+
+Slack sends a verification challenge to that URL, so IronClaw must already be running and
+reachable when you save it. Reinstall the app if Slack asks you to.
+
+Also register the `/ironclaw` slash command under **Slash Commands**, pointed at the
+identical Request URL — Slack allows a slash command's endpoint to be any URL, so one
+signed address answers both surfaces. Registering a slash command adds the `commands` bot
+scope, which also needs a reinstall.
+
+</Step>
+
+<Step title="Talk to it">
+
+Invite the bot to a channel and mention it, or send it a direct message.
+
+</Step>
+
+</Steps>
+
+---
+
+## URLs Slack Needs
+
+Both are served by `ironclaw serve`, so they use whatever host and port your instance is
+reachable on. Replace `your-host` and use HTTPS — Slack will not deliver to a plain-HTTP
+or self-signed endpoint.
+
+| Slack setting | URL |
+| --- | --- |
+| Event Subscriptions → Request URL | `https://your-host/webhooks/extensions/slack/events` |
+| Slash Commands → Request URL | `https://your-host/webhooks/extensions/slack/events` |
+| OAuth & Permissions → Redirect URL | `https://your-host/api/reborn/product-auth/oauth/slack/callback` |
+
+<Note>
+Event Subscriptions and the `/ironclaw` slash command point at the identical Request
+URL — one signed endpoint answers both surfaces, so there is no second address to stand
+up.
+</Note>
+
+The redirect URL is used for per-user ("personal") Slack authorization. Tell IronClaw the
+same value so the two agree:
+
+```bash
+export IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI=https://your-host/api/reborn/product-auth/oauth/slack/callback
+```
+
+<Warning>
+The redirect URL must match **exactly** on both sides, including scheme, host, port, and
+path. Slack rejects the authorization with a redirect-URI mismatch if it differs by even a
+trailing slash. The path is `/api/reborn/product-auth/oauth/slack/callback` — a shortened
+form like `/oauth/slack/callback` is not served and will 404.
+</Warning>
+
+For a local instance the values are `http://127.0.0.1:3000/...`, but Slack cannot reach
+loopback, so events only work once the instance is reachable from the internet.
+
+---
+
+## App Manifest
+
+Create the app with **From an app manifest** and paste this, replacing `example.com` with
+your host. It sets the scopes, bot events, the `/ironclaw` slash command, and redirect URL
+that the steps above describe.
+
+```json
+{
+  "display_information": {
+    "name": "IronClaw"
+  },
+  "features": {
+    "app_home": {
+      "home_tab_enabled": false,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
+    "bot_user": {
+      "display_name": "IronClaw",
+      "always_online": true
+    },
+    "slash_commands": [
+      {
+        "command": "/ironclaw",
+        "url": "https://example.com/webhooks/extensions/slack/events",
+        "description": "Run IronClaw commands",
+        "usage_hint": "status | model <name> | help",
+        "should_escape": false
+      }
+    ]
+  },
+  "oauth_config": {
+    "redirect_urls": [
+      "https://example.com/api/reborn/product-auth/oauth/slack/callback"
+    ],
+    "scopes": {
+      "user": [
+        "search:read",
+        "channels:history",
+        "groups:history",
+        "im:history",
+        "mpim:history",
+        "channels:read",
+        "groups:read",
+        "im:read",
+        "mpim:read",
+        "users:read",
+        "chat:write"
+      ],
+      "bot": [
+        "channels:history",
+        "app_mentions:read",
+        "chat:write",
+        "im:history",
+        "im:write",
+        "files:read",
+        "files:write",
+        "groups:history",
+        "mpim:history",
+        "commands"
+      ]
+    },
+    "pkce_enabled": false
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://example.com/webhooks/extensions/slack/events",
+      "bot_events": [
+        "app_mention",
+        "message.channels",
+        "message.groups",
+        "message.im",
+        "message.mpim"
+      ]
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false,
+    "is_mcp_enabled": false
+  }
+}
+```
+
+<Note>
+This is a starting point, not a minimum. The `user` scopes exist for per-user
+authorization — searching and posting as the person rather than as the bot. If you only
+want the bot to participate in channels, you can drop the `user` block and the redirect
+URL with it.
+</Note>
+
+`files:read` lets the bot resolve and download inbound file shares.
+`files:write` lets it return explicitly attached workspace files through
+Slack's external upload flow. IronClaw never uses the retired `files.upload`
+method.
+
+Slack validates the request URL when you save the manifest, so start IronClaw before
+creating the app.
+
+---
+
+## Configuration
+
+Slack settings live under `[slack]` in your configuration file. Set them through the web
+interface rather than by hand — the tokens belong in the secret store, and the file only
+names the variables that hold them.
+
+```toml
+[slack]
+enabled = true
+```
+
+| Key | Purpose |
+| --- | --- |
+| `slack.enabled` | Turn the Slack route on |
+| `slack.api_app_id` | Your Slack app id |
+| `slack.bot_token_env` | Name of the variable holding the bot token |
+| `slack.signing_secret_env` | Name of the variable holding the signing secret |
+| `slack.team_id` | Workspace the app is installed in |
+| `slack.channel_routes` | Which conversations map to which agent scope |
+
+Check what's currently set:
+
+```bash
+ironclaw config list | grep slack
+```
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+
+<Accordion title="Slack can't verify the request URL">
+IronClaw has to be running and publicly reachable over HTTPS before you save the URL.
+Confirm the instance answers from outside your network, and that you used the exact
+`/webhooks/extensions/slack/events` path.
+</Accordion>
+
+<Accordion title="Slack rejects authorization with a redirect-URI mismatch">
+The redirect URL in the Slack app and `IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI`
+must match character for character. Check the scheme, the port, and that the path is the
+full `/api/reborn/product-auth/oauth/slack/callback`.
+</Accordion>
+
+<Accordion title="The bot doesn't respond in a channel">
+Invite the bot to that channel, and make sure you subscribed to the matching message
+event. A bot only sees conversations it belongs to.
+</Accordion>
+
+<Accordion title="Requests are rejected">
+A wrong or missing signing secret makes IronClaw reject every incoming request. Re-enter
+it through the setup flow, then restart the server.
+</Accordion>
+
+<Accordion title="I can't find where to configure Slack">
+Open **Extensions**, switch from **Registry** to the **Channels** tab, and scroll to the
+bottom of the Built-in section. The Slack card is below the web and terminal channel rows.
+</Accordion>
+
+</AccordionGroup>

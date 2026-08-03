@@ -58,10 +58,15 @@ jobs:
         run: git config --global core.longpaths true
 
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
+
+      - name: Install Python for release smoke
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
 
       - name: Install Rust target
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -70,7 +75,7 @@ jobs:
 
       # The CLI embeds the WebChat v2 frontend during compilation, which requires Node/pnpm.
       - name: Install Node.js for the embedded WebUI
-        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
         with:
           node-version: "22"
 
@@ -138,22 +143,20 @@ jobs:
           file "$binary_path"
 
       - id: smoke
-        name: Smoke compiled binary
+        name: Smoke exact release binary
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
           BINARY: ${{ matrix.binary }}
         run: |
           binary_path="target/$TARGET/dist/$BINARY"
-          "$binary_path" --version
-          "$binary_path" --help > /dev/null
-          "$binary_path" profile list --json > /dev/null
+          python scripts/ci/smoke-release-binary.py --binary "$binary_path"
 
       # These are preflight evidence only. The reborn-compile-* prefix keeps the
       # existing release host's artifacts-* download pattern from publishing them.
       - id: upload
         name: Upload compile evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: reborn-compile-${{ matrix.target }}
           path: "target/${{ matrix.target }}/dist/${{ matrix.binary }}"
@@ -181,6 +184,6 @@ jobs:
             echo "- Binary: \`target/$TARGET/dist/$BINARY\`"
             echo "- Build result: \`$BUILD_RESULT\`"
             echo "- musl portability: \`$LINKAGE_RESULT\`"
-            echo "- Native CLI smoke: \`$SMOKE_RESULT\`"
+            echo "- Exact release-binary smoke: \`$SMOKE_RESULT\`"
             echo "- Preflight evidence upload: \`$UPLOAD_RESULT\`"
           } >> "$GITHUB_STEP_SUMMARY"

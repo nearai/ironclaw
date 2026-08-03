@@ -4,21 +4,15 @@ use serde::{Deserialize, Serialize};
 use std::{sync::Arc, sync::Mutex};
 use thiserror::Error;
 
-use ironclaw_host_api::{RuntimeCredentialAuthRequirement, Timestamp, UserId};
+use ironclaw_host_api::{Timestamp, decision::RuntimeCredentialAuthRequirement, ids::UserId};
 
 use crate::{
-    CapabilityActivityId, GateKind, GateRef, TurnError, TurnRunId, TurnRunState, TurnScope,
-    TurnStatus,
+    CapabilityActivityId, EventCursor, GateKind, TurnError, TurnGateRef, TurnRunId, TurnRunState,
+    TurnScope, TurnStatus,
 };
 
 const MAX_IN_MEMORY_EVENTS: usize = 10_000;
 pub const MAX_TURN_EVENT_PROJECTION_LIMIT: usize = 1_000;
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
-)]
-#[serde(transparent)]
-pub struct EventCursor(pub u64);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TurnEventKind {
@@ -64,7 +58,7 @@ impl TurnBlockedGateKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnBlockedGateMetadata {
-    pub gate_ref: GateRef,
+    pub gate_ref: TurnGateRef,
     pub gate_kind: TurnBlockedGateKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_id: Option<CapabilityActivityId>,
@@ -496,6 +490,7 @@ where
     })
 }
 
+#[cfg(test)]
 pub(crate) fn project_turn_events(
     events: &[TurnLifecycleEvent],
     scope: &TurnScope,
@@ -554,19 +549,18 @@ pub(crate) fn project_turn_events(
 mod tests {
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        AgentId, ExtensionId, ProjectId, RuntimeCredentialAuthRequirement, TenantId, ThreadId,
-        UserId, VendorId,
+        decision::RuntimeCredentialAuthRequirement,
+        ids::{AgentId, ExtensionId, ProjectId, TenantId, ThreadId, UserId, VendorId},
     };
 
     use crate::{
-        AcceptedMessageRef, CapabilityActivityId, GateRef, ReplyTargetBindingRef, RunProfileId,
-        RunProfileVersion, SourceBindingRef, TurnActor, TurnError, TurnId, TurnRunId, TurnRunState,
-        TurnScope, TurnStatus,
+        AcceptedMessageRef, CapabilityActivityId, ReplyTargetBindingRef, RunProfileId,
+        RunProfileVersion, SourceBindingRef, TurnActor, TurnError, TurnGateRef, TurnId, TurnRunId,
+        TurnRunState, TurnScope, TurnStatus,
         events::{
             EventCursor, TurnBlockedGateKind, TurnBlockedGateMetadata, TurnEventKind,
-            TurnEventPage, TurnEventProjectionError, TurnEventProjectionService,
-            TurnEventProjectionSource, TurnEventReducerService, TurnLifecycleEvent,
-            project_turn_events,
+            TurnEventPage, TurnEventProjectionService, TurnEventProjectionSource,
+            TurnEventReducerService, TurnLifecycleEvent, project_turn_events,
         },
     };
 
@@ -589,7 +583,7 @@ mod tests {
             status: TurnStatus::BlockedApproval,
             kind: TurnEventKind::Blocked,
             blocked_gate: Some(TurnBlockedGateMetadata {
-                gate_ref: GateRef::new("gate:approval-a").expect("gate ref"),
+                gate_ref: TurnGateRef::new("gate:approval-a").expect("gate ref"),
                 gate_kind: TurnBlockedGateKind::Approval,
                 activity_id: None,
                 credential_requirements: vec![RuntimeCredentialAuthRequirement {
@@ -722,7 +716,7 @@ mod tests {
             model_usage: None,
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
-            gate_ref: Some(GateRef::new("gate:auth-a").expect("gate ref")),
+            gate_ref: Some(TurnGateRef::new("gate:auth-a").expect("gate ref")),
             blocked_activity_id: Some(activity_id),
             credential_requirements: Vec::new(),
             failure: None,
@@ -863,46 +857,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn projection_service_preserves_source_read_error_cause() {
-        use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
-
-        // The projection source is the real `TurnStateRowStore` (which
-        // implements `TurnEventProjectionSource`) over a `FaultInjecting` backend
-        // armed to fail its first durable read. `read_turn_events_after` now runs
-        // the store's genuine durable-row read and its
-        // `FilesystemError::Backend -> TurnError::Unavailable` mapping, replacing
-        // the former hand-rolled `FailingProjectionSource` fake. The service must
-        // still wrap and preserve that read-error cause under the same
-        // `read_turn_events_after` operation label.
-        let backend = std::sync::Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
-            Fault::on(FilesystemOperation::ReadFile).backend("injected turn-state read failure"),
-        ));
-        let source = std::sync::Arc::new(crate::TurnStateRowStore::new(
-            crate::test_support::scoped_turns_filesystem(backend),
-        ));
-        let service = TurnEventProjectionService::new(source);
-        let error = service
-            .snapshot(crate::events::TurnEventProjectionRequest {
-                scope: scope("thread-source-error"),
-                owner_user_id: None,
-                after: None,
-                limit: 10,
-            })
-            .await
-            .expect_err("source error should propagate");
-
-        // The cause is the real store's mapped error (`fs_error`), not the fake's
-        // former "event store offline" string.
-        assert!(matches!(
-            error,
-            TurnEventProjectionError::Source {
-                operation: "read_turn_events_after",
-                reason: TurnError::Unavailable { reason }
-            } if reason == "turn state row-store persistence temporarily unavailable"
-        ));
-    }
-
-    #[tokio::test]
     async fn reducer_snapshot_keeps_activity_id_while_public_snapshot_redacts_gate_metadata() {
         let scope = scope("thread-activity-id");
         let activity_id = CapabilityActivityId::new();
@@ -971,7 +925,7 @@ mod tests {
             .expect("reducer service snapshot keeps gate metadata");
         assert_eq!(
             gate.gate_ref,
-            GateRef::new("gate:approval-a").expect("gate ref")
+            TurnGateRef::new("gate:approval-a").expect("gate ref")
         );
         assert_eq!(gate.gate_kind, TurnBlockedGateKind::Approval);
         assert_eq!(
