@@ -236,7 +236,7 @@ enum ResolvedChannelContextOutcome {
         channel: ResolvedChannelDelivery,
         reply_context: Option<Vec<u8>>,
     },
-    ExistingDelivery(CoordinatedDeliveryOutcome),
+    ExistingDelivery(Box<CoordinatedDeliveryOutcome>),
 }
 
 /// Coordinator-level failures raised before or around the adapter call.
@@ -559,7 +559,7 @@ impl DeliveryCoordinator {
                 channel,
                 reply_context,
             } => (channel, reply_context),
-            ResolvedChannelContextOutcome::ExistingDelivery(outcome) => return Ok(outcome),
+            ResolvedChannelContextOutcome::ExistingDelivery(outcome) => return Ok(*outcome),
         };
 
         let parts = match materialize_workspace_file_parts(materialization, parts).await {
@@ -611,7 +611,7 @@ impl DeliveryCoordinator {
                 channel,
                 reply_context,
             } => (channel, reply_context),
-            ResolvedChannelContextOutcome::ExistingDelivery(outcome) => return Ok(outcome),
+            ResolvedChannelContextOutcome::ExistingDelivery(outcome) => return Ok(*outcome),
         };
         self.drive_prepared(
             attempt,
@@ -646,9 +646,9 @@ impl DeliveryCoordinator {
                     })
                 }
                 FailPreparedDeliveryAttemptOutcome::Existing(existing) => {
-                    Ok(ResolvedChannelContextOutcome::ExistingDelivery(
+                    Ok(ResolvedChannelContextOutcome::ExistingDelivery(Box::new(
                         Self::outcome_for_existing_delivery(*existing, Some(conversation.clone())),
-                    ))
+                    )))
                 }
             };
         };
