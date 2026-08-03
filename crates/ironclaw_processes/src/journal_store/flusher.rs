@@ -325,11 +325,47 @@ fn clone_transaction_error(error: &ProcessJournalStoreError) -> ProcessJournalSt
     // server and return a stable category; the classification callers act on is
     // "transient, re-issue", which needs no detail.
     //
+    // The log gets the category, not the error. Logging `%error` would put the
+    // same resolved path into the log that this function exists to keep out of
+    // the response — sanitizing only the returned value moves the leak rather
+    // than closing it. The variant name still says which class of failure
+    // rolled the batch back, which is what a diagnosis starts from.
+    //
     // `debug!` rather than `warn!`: this runs on a background task, and higher
     // levels corrupt the REPL/TUI display (see CLAUDE.md logging guidance).
-    tracing::debug!(cause = %error, "process journal group commit rolled back");
+    tracing::debug!(
+        category = group_commit_failure_category(error),
+        "process journal group commit rolled back"
+    );
     ProcessJournalStoreError::GroupCommitFailed {
         reason: "group commit rolled back".to_string(),
+    }
+}
+
+/// A closed set of failure categories safe to log.
+///
+/// Deliberately the variant name only: several variants Display a resolved
+/// `VirtualPath` or backend error text, and none of that may reach a log.
+fn group_commit_failure_category(error: &ProcessJournalStoreError) -> &'static str {
+    match error {
+        ProcessJournalStoreError::UnknownProcess { .. } => "unknown_process",
+        ProcessJournalStoreError::ProcessAlreadyExists { .. } => "process_already_exists",
+        ProcessJournalStoreError::ActiveProcessConflict { .. } => "active_process_conflict",
+        ProcessJournalStoreError::InvalidTransition { .. } => "invalid_transition",
+        ProcessJournalStoreError::InvalidLease { .. } => "invalid_lease",
+        ProcessJournalStoreError::UnauthorizedScope => "unauthorized_scope",
+        ProcessJournalStoreError::InvalidRequest(_) => "invalid_request",
+        ProcessJournalStoreError::ProcessTreeCapacityExceeded { .. } => {
+            "process_tree_capacity_exceeded"
+        }
+        ProcessJournalStoreError::StaleSnapshot { .. } => "stale_snapshot",
+        ProcessJournalStoreError::InvalidPath(_) => "invalid_path",
+        ProcessJournalStoreError::Filesystem(_) => "filesystem",
+        ProcessJournalStoreError::Serialization(_) => "serialization",
+        ProcessJournalStoreError::Deserialization(_) => "deserialization",
+        ProcessJournalStoreError::Observer(_) => "observer",
+        ProcessJournalStoreError::GroupCommitFailed { .. } => "group_commit_failed",
+        ProcessJournalStoreError::MigrationRequired => "migration_required",
     }
 }
 

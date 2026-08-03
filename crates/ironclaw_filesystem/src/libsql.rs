@@ -2255,9 +2255,16 @@ impl LibSqlRootFilesystem {
         let placeholders: Vec<String> = (1..=candidate_prefixes.len())
             .map(|i| format!("?{i}"))
             .collect();
+        // Order in SQL, not by hoping the driver returns insertion order. The
+        // caller keeps the first row it sees per key, so "most specific wins"
+        // is only true if the most specific prefix arrives first; without an
+        // explicit ORDER BY, two FTS declarations at different ancestor
+        // prefixes resolve by rowid instead of by specificity. `query_ordered`
+        // in this file already orders the same table this way.
         let sql = format!(
             "SELECT prefix, name, keys FROM root_filesystem_index_specs \
-             WHERE kind = 'fts' AND prefix IN ({})",
+             WHERE kind = 'fts' AND prefix IN ({}) \
+             ORDER BY LENGTH(prefix) DESC",
             placeholders.join(", ")
         );
         let params: Vec<libsql::Value> = candidate_prefixes
