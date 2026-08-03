@@ -154,6 +154,7 @@ run_substrates() {
   run_test ironclaw_event_projections nested_dispatch_projection_contract
   run_test ironclaw_filesystem catalog_contract
   run_test ironclaw_filesystem filesystem_contract
+  run_test ironclaw_network ambient_proxy_contract
   run_test ironclaw_network boundary_contract
   run_test ironclaw_network network_http_egress_contract
   run_test ironclaw_network network_policy_contract
