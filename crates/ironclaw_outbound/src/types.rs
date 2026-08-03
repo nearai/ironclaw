@@ -228,6 +228,21 @@ pub enum DeliveryFailureKind {
     Unknown,
 }
 
+impl DeliveryFailureKind {
+    /// Returns whether this failure kind may settle the guarded
+    /// `Prepared -> Failed` preflight transition.
+    ///
+    /// This classification is specific to failures discovered before vendor
+    /// egress ownership is claimed. It does not classify delivery failures for
+    /// retry policy outside that settlement boundary.
+    pub const fn is_permanent_preflight(self) -> bool {
+        match self {
+            Self::AuthorizationRevoked | Self::Rejected | Self::Unknown => true,
+            Self::TransientValidatorError | Self::TransportUnavailable | Self::RateLimited => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplyTargetValidationRequest {
     pub scope: TurnScope,
@@ -391,4 +406,25 @@ pub struct FailPreparedDeliveryAttemptRequest {
 pub struct RecoverInterruptedDeliveryRequest {
     pub delivery_id: OutboundDeliveryId,
     pub scope: TurnScope,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DeliveryFailureKind;
+
+    #[test]
+    fn permanent_preflight_classification_covers_every_failure_kind() {
+        let cases = [
+            (DeliveryFailureKind::AuthorizationRevoked, true),
+            (DeliveryFailureKind::TransientValidatorError, false),
+            (DeliveryFailureKind::TransportUnavailable, false),
+            (DeliveryFailureKind::RateLimited, false),
+            (DeliveryFailureKind::Rejected, true),
+            (DeliveryFailureKind::Unknown, true),
+        ];
+
+        for (kind, expected) in cases {
+            assert_eq!(kind.is_permanent_preflight(), expected, "{kind:?}");
+        }
+    }
 }

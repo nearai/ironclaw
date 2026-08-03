@@ -155,7 +155,11 @@ pub trait OutboundStateStorePort: Send + Sync {
     /// Atomically settle a permanent preflight failure without consuming or
     /// rewriting an attempt that has already reached `Sending`. A caller that
     /// cannot settle receives the complete authoritative attempt from the
-    /// store read that rejected the transition.
+    /// store read that rejected the transition. The attempt must still be
+    /// `Prepared`, and `failure_kind` must satisfy
+    /// [`crate::DeliveryFailureKind::is_permanent_preflight`]. A retryable
+    /// kind is rejected with [`OutboundError::InvalidRequest`] and leaves the
+    /// attempt `Prepared`.
     async fn fail_prepared_delivery_attempt(
         &self,
         request: FailPreparedDeliveryAttemptRequest,

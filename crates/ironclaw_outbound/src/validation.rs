@@ -142,15 +142,12 @@ pub(crate) fn validate_delivery_status_request(
 pub(crate) fn validate_prepared_failure_request(
     request: &FailPreparedDeliveryAttemptRequest,
 ) -> Result<(), OutboundError> {
-    match request.failure_kind {
-        DeliveryFailureKind::AuthorizationRevoked
-        | DeliveryFailureKind::Rejected
-        | DeliveryFailureKind::Unknown => Ok(()),
-        DeliveryFailureKind::TransientValidatorError
-        | DeliveryFailureKind::TransportUnavailable
-        | DeliveryFailureKind::RateLimited => Err(OutboundError::InvalidRequest {
+    if request.failure_kind.is_permanent_preflight() {
+        Ok(())
+    } else {
+        Err(OutboundError::InvalidRequest {
             reason: "transient preflight failures must remain prepared",
-        }),
+        })
     }
 }
 
