@@ -236,8 +236,9 @@ impl ExtensionLifecycleManager {
     pub async fn register_hosted_mcp(
         &self,
         request: RegisterHostedMcpRequest,
+        scope: ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
-        self.hosted_mcp_preparation.register(request).await
+        self.hosted_mcp_preparation.register(request, scope).await
     }
 
     /// Run the composed preparation strategy, if this installation's generic
@@ -4026,14 +4027,20 @@ output_schema_ref = "schemas/run.output.json"
             )
             .expect("public fixture endpoint"),
             auth_selection: Some(
-                ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::Auto,
+                ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::NoAuth,
             ),
         };
+        let register_scope = ResourceScope::local_default(
+            UserId::new("lock-order-owner").expect("valid owner"),
+            ironclaw_host_api::ids::InvocationId::new(),
+        )
+        .expect("local registration scope");
         let register_manager = Arc::clone(&manager);
-        let register_task =
-            tokio::spawn(
-                async move { register_manager.register_hosted_mcp(register_request).await },
-            );
+        let register_task = tokio::spawn(async move {
+            register_manager
+                .register_hosted_mcp(register_request, register_scope)
+                .await
+        });
 
         holding.notified().await;
 

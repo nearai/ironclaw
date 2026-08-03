@@ -392,9 +392,34 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
         "registration persists a catalog definition without implicit installation: {registration:#?}",
     );
     assert!(
-        server.requests().is_empty(),
-        "registration must not contact MCP"
+        server
+            .requests()
+            .iter()
+            .any(|request| request.rpc_method.as_deref() == Some("initialize")),
+        "automatic registration proves that the server accepts unauthenticated MCP requests"
     );
+    assert!(
+        !server
+            .requests()
+            .iter()
+            .any(|request| request.rpc_method.as_deref() == Some("tools/list")),
+        "registration probes auth only; catalog discovery remains an installation step"
+    );
+    let registered_definition = services
+        .extension_management
+        .installation_store_for_test()
+        .get_registered_package_definition(&ExtensionId::new("mcp-fixture").expect("extension id"))
+        .await
+        .expect("registered definition readback")
+        .expect("registration persists the resolved definition");
+    assert!(matches!(
+        registered_definition
+            .resolved()
+            .mcp
+            .as_ref()
+            .map(|mcp| &mcp.registration_auth),
+        Some(HostedMcpAuthSelection::NoAuth)
+    ));
     assert!(
         services
             .extension_management
@@ -404,6 +429,7 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
             .is_empty(),
         "registration must not activate the definition"
     );
+    let requests_before_retry = server.requests().len();
     let exact_retry = services
         .lifecycle_service
         .execute(
@@ -418,6 +444,11 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
     assert_eq!(
         exact_retry.phase,
         ironclaw_extension_contracts::state::InstallationState::Installed
+    );
+    assert_eq!(
+        server.requests().len(),
+        requests_before_retry,
+        "an exact durable retry must not depend on the remote server still being available"
     );
     let mut conflicting = automatic_request();
     conflicting.desired_name = "Different fixture MCP".to_string();
@@ -488,7 +519,7 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
 }
 
 #[tokio::test]
-async fn explicit_no_auth_empty_catalog_does_not_reproject_auth_selection() {
+async fn automatic_no_auth_empty_catalog_registers_before_catalog_discovery() {
     let server = HostedMcpRegistrationServer::start(HostedMcpAuthPolicy::NoAuth, Vec::new()).await;
     let services = build_lifecycle_test_services(
         "hosted-mcp-no-auth-empty-catalog",
@@ -499,16 +530,16 @@ async fn explicit_no_auth_empty_catalog_does_not_reproject_auth_selection() {
     )
     .await;
     let scope = webui_gate_resource_scope_for_owner("hosted-mcp-no-auth-empty-catalog");
-    let mut request = automatic_request();
-    request.auth_selection = Some(HostedMcpAuthSelection::NoAuth);
     services
         .lifecycle_service
         .execute(
             lifecycle_product_context(scope.clone()),
-            LifecycleProductAction::ExtensionRegisterHostedMcp { request },
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: automatic_request(),
+            },
         )
         .await
-        .expect("explicit no-auth registration persists");
+        .expect("initialize success is enough to register a no-auth MCP");
 
     let installed = install_fixture(&services, scope.clone()).await;
     assert_eq!(
@@ -529,7 +560,7 @@ async fn explicit_no_auth_empty_catalog_does_not_reproject_auth_selection() {
             } if ref_id.as_str()
                 == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
         )),
-        "a successful explicit no-auth discovery must not re-open auth selection: {projected:#?}"
+        "a successful no-auth discovery must not re-open auth selection: {projected:#?}"
     );
 }
 
@@ -886,212 +917,100 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
             },
         )
         .await
-        .expect("bearer MCP definition is admitted before credentials exist");
-    assert_eq!(
-        registration.phase,
-        ironclaw_extension_contracts::state::InstallationState::Installed
-    );
+        .expect("automatic registration returns an actionable auth choice");
     assert!(
-        registration.blockers.is_empty(),
-        "registration does not probe auth"
-    );
-    assert!(
-        server.requests().is_empty(),
-        "registration must not contact MCP"
-    );
-    let selection_required = install_fixture(&services, scope.clone()).await;
-    assert!(
-        selection_required.blockers.iter().any(|blocker| matches!(
+        registration.blockers.iter().any(|blocker| matches!(
             blocker,
             ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
                 ref_id: Some(ref_id),
             } if ref_id.as_str()
                 == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
         )),
-        "a bare 401 remains an explicit auth-selection setup state: {selection_required:#?}"
+        "a bare 401 stops registration and requests an explicit auth type: {registration:#?}"
     );
     assert!(
-        selection_required.message.as_deref().is_some_and(
-            |message| message.contains("choose OAuth, Bearer token, or No authentication")
-        ),
-        "the setup state explains the recovery action: {selection_required:#?}"
+        registration
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("choose OAuth or Bearer token")),
+        "registration offers only auth methods still possible after a 401: {registration:#?}"
     );
     assert!(
         services
             .extension_management
-            .active_model_visible_capabilities()
+            .installation_store_for_test()
+            .get_registered_package_definition(
+                &ExtensionId::new("mcp-fixture").expect("extension id")
+            )
             .await
-            .expect("active capability projection")
-            .is_empty(),
-        "unfinished auth publishes no MCP tools"
+            .expect("definition readback")
+            .is_none(),
+        "an unresolved automatic registration must not persist a useless package"
     );
-
-    let projected_setup = services
-        .lifecycle_service
-        .project_package(
-            lifecycle_product_context(scope.clone()),
-            fixture_package_ref(),
-        )
-        .await
-        .expect("the setup view reprojects the durable auth-selection blocker");
-    assert!(projected_setup.blockers.iter().any(|blocker| matches!(
-        blocker,
-        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
-            ref_id: Some(ref_id),
-        } if ref_id.as_str()
-            == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
-    )));
-
-    let oauth_mismatch = services
-        .lifecycle_service
-        .execute(
-            lifecycle_product_context(scope.clone()),
-            LifecycleProductAction::ExtensionSelectHostedMcpAuth {
-                package_ref: fixture_package_ref(),
-                auth_selection: HostedMcpAuthSelection::OAuth {
-                    client_profile_id: None,
-                },
-            },
-        )
-        .await
-        .expect("missing OAuth metadata remains recoverable setup");
-    assert!(oauth_mismatch.blockers.iter().any(|blocker| matches!(
-        blocker,
-        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
-            ref_id: Some(ref_id),
-        } if ref_id.as_str()
-            == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
-    )));
-    let restored_after_oauth_mismatch = rebuild_lifecycle_test_services_with_auth_provider(
-        &services,
-        "hosted-mcp-bearer-user",
-        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
-            &server,
-        ))),
-        false,
-        Arc::new(ironclaw_auth::UnavailableAuthProviderClient),
-    )
-    .await;
-    let cold_oauth_projection = restored_after_oauth_mismatch
-        .lifecycle_service
-        .project_package(
-            lifecycle_product_context(scope.clone()),
-            fixture_package_ref(),
-        )
-        .await
-        .expect("the failed OAuth choice remains unresolved after restart");
-    assert!(cold_oauth_projection.blockers.iter().any(|blocker| matches!(
-        blocker,
-        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
-            ref_id: Some(ref_id),
-        } if ref_id.as_str()
-            == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
-    )));
-
-    services
-        .lifecycle_service
-        .execute(
-            lifecycle_product_context(webui_gate_resource_scope_for_owner(
-                "hosted-mcp-bearer-member",
-            )),
-            LifecycleProductAction::ExtensionSelectHostedMcpAuth {
-                package_ref: fixture_package_ref(),
-                auth_selection: HostedMcpAuthSelection::Bearer,
-            },
-        )
-        .await
-        .expect_err("a tenant member cannot change shared MCP authentication");
-
-    let no_auth_mismatch = services
-        .lifecycle_service
-        .execute(
-            lifecycle_product_context(scope.clone()),
-            LifecycleProductAction::ExtensionSelectHostedMcpAuth {
-                package_ref: fixture_package_ref(),
-                auth_selection: HostedMcpAuthSelection::NoAuth,
-            },
-        )
-        .await
-        .expect("the same pending installation accepts an explicit no-auth selection");
-    assert!(no_auth_mismatch.blockers.iter().any(|blocker| matches!(
-        blocker,
-        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
-            ref_id: Some(ref_id),
-        } if ref_id.as_str()
-            == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
-    )));
     assert!(
-        no_auth_mismatch
-            .message
-            .as_deref()
-            .is_some_and(|message| message.contains("rejected unauthenticated access")),
-        "NoAuth plus 401 stays an actionable selection mismatch: {no_auth_mismatch:#?}"
+        server
+            .requests()
+            .iter()
+            .any(|request| request.rpc_method.as_deref() == Some("initialize")),
+        "automatic registration must probe the MCP before deciding"
     );
-    let projected_after_no_auth_mismatch = services
-        .lifecycle_service
-        .project_package(
-            lifecycle_product_context(scope.clone()),
-            fixture_package_ref(),
-        )
-        .await
-        .expect("the rejected no-auth choice reprojects as unresolved auth setup");
-    assert!(projected_after_no_auth_mismatch
-        .blockers
-        .iter()
-        .any(|blocker| matches!(
-            blocker,
-            ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
-                ref_id: Some(ref_id),
-            } if ref_id.as_str()
-                == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
-        )));
-    let restored_after_no_auth_mismatch = rebuild_lifecycle_test_services_with_auth_provider(
-        &services,
-        "hosted-mcp-bearer-user",
-        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
-            &server,
-        ))),
-        false,
-        Arc::new(ironclaw_auth::UnavailableAuthProviderClient),
-    )
-    .await;
-    let cold_projection = restored_after_no_auth_mismatch
-        .lifecycle_service
-        .project_package(
-            lifecycle_product_context(scope.clone()),
-            fixture_package_ref(),
-        )
-        .await
-        .expect("the rejected no-auth choice remains unresolved after restart");
-    assert!(cold_projection.blockers.iter().any(|blocker| matches!(
-        blocker,
-        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
-            ref_id: Some(ref_id),
-        } if ref_id.as_str()
-            == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
-    )));
 
-    let unfinished_retry = services
+    let oauth_error = services
         .lifecycle_service
         .execute(
             lifecycle_product_context(scope.clone()),
-            LifecycleProductAction::ExtensionSelectHostedMcpAuth {
-                package_ref: fixture_package_ref(),
-                auth_selection: HostedMcpAuthSelection::Bearer,
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: registration_request(HostedMcpAuthSelection::OAuth {
+                    client_profile_id: None,
+                }),
             },
         )
         .await
-        .expect("the same pending installation accepts an explicit bearer selection");
+        .expect_err("an explicit OAuth retry still has to prove OAuth metadata");
+    assert_eq!(oauth_error.kind, ProductSurfaceErrorKind::Validation);
+    assert!(
+        services
+            .extension_management
+            .installation_store_for_test()
+            .get_registered_package_definition(
+                &ExtensionId::new("mcp-fixture").expect("extension id")
+            )
+            .await
+            .expect("definition readback")
+            .is_none(),
+        "a wrong OAuth choice must remain inside registration without persistence"
+    );
+
+    let explicit_registration = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: registration_request(HostedMcpAuthSelection::Bearer),
+            },
+        )
+        .await
+        .expect("explicit bearer retry persists the resolved definition");
     assert_eq!(
-        unfinished_retry.phase,
+        explicit_registration.phase,
         ironclaw_extension_contracts::state::InstallationState::Installed
     );
-    assert!(unfinished_retry.blockers.iter().any(|blocker| matches!(
+    assert!(explicit_registration.blockers.is_empty());
+
+    let setup_needed = install_fixture(&services, scope.clone()).await;
+    assert!(setup_needed.blockers.iter().any(|blocker| matches!(
         blocker,
         ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
     )));
+    assert!(!setup_needed.blockers.iter().any(|blocker| matches!(
+        blocker,
+        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
+            ref_id: Some(ref_id),
+        } if ref_id.as_str()
+            == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
+    )), "installation must not ask for the auth type after registration resolved it");
 
-    let provider = credential_provider_from_response(&unfinished_retry);
+    let provider = credential_provider_from_response(&setup_needed);
     let wrong = submit_fixture_bearer(&services, scope.clone(), provider.clone(), "wrong-token")
         .await
         .expect("the secure form accepts an opaque token before the MCP validates it");
@@ -1342,11 +1261,21 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
     );
     assert!(
         registration.blockers.is_empty(),
-        "registration does not probe auth"
+        "valid OAuth metadata resolves automatic registration"
     );
     assert!(
-        server.requests().is_empty(),
-        "registration must not contact MCP"
+        server
+            .requests()
+            .iter()
+            .any(|request| request.rpc_method.as_deref() == Some("initialize")),
+        "automatic registration probes the MCP"
+    );
+    assert!(
+        server
+            .requests()
+            .iter()
+            .any(|request| request.method == "GET"),
+        "registration proves OAuth from metadata before persisting"
     );
     let install = install_fixture(&services, scope.clone()).await;
     let provider = credential_provider_from_response(&install);
@@ -1355,7 +1284,7 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
             blocker,
             ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
         )),
-        "ordinary install discovers OAuth and returns the credential setup blocker: {install:#?}"
+        "ordinary install uses the registration-time OAuth decision and returns the credential setup blocker: {install:#?}"
     );
     assert!(
         services
@@ -1542,11 +1471,13 @@ async fn oauth_registration_accepts_path_metadata_without_root_fallback() {
         .execute(
             lifecycle_product_context(scope.clone()),
             LifecycleProductAction::ExtensionRegisterHostedMcp {
-                request: automatic_request(),
+                request: registration_request(HostedMcpAuthSelection::OAuth {
+                    client_profile_id: None,
+                }),
             },
         )
         .await
-        .expect("registration admits the definition");
+        .expect("explicit OAuth registration proves path metadata");
     install_fixture(&services, scope).await;
 
     let metadata_paths = server
@@ -1566,28 +1497,24 @@ async fn oauth_registration_accepts_path_metadata_without_root_fallback() {
 }
 
 /// Drives all four `fetch_oauth_metadata` failure branches (transport error,
-/// non-200 status, oversized body, malformed JSON) through the ordinary
-/// install path. Each sub-case gets its own fixture server/services (the
-/// scripted overrides are one-shot), but shares one assertion: the failure
-/// must surface (as an error, or as a still-installed non-progressing
-/// response) and the definition must remain unprepared, with no tools
-/// published.
+/// non-200 status, oversized body, malformed JSON) through registration
+/// preflight. Each sub-case gets its own fixture server/services (the scripted
+/// overrides are one-shot), but shares one assertion: the failure surfaces at
+/// registration and no package definition is persisted.
 #[tokio::test]
-async fn oauth_metadata_fetch_failures_leave_the_definition_unprepared() {
-    /// Discriminates the two distinct outcomes `fetch_oauth_metadata`
-    /// failures must produce, per sub-case (see the comment above the
-    /// `match install_result` below for which sub-case gets which).
-    enum ExpectedInstallOutcome {
-        /// Swallowed into a still-installed, non-progressing response.
-        SwallowedIntoInstalled,
-        /// Propagates as a real `ProductSurfaceErrorKind::Validation` error.
+async fn oauth_metadata_fetch_failures_stop_registration_before_persistence() {
+    /// Discriminates the two outcomes `fetch_oauth_metadata` failures produce.
+    enum ExpectedRegistrationOutcome {
+        /// A transport failure remains retryable.
+        Retryable,
+        /// Invalid metadata is a non-retryable validation failure.
         PropagatedValidationError,
     }
 
     async fn assert_metadata_failure_blocks_preparation(
         user_id: &str,
         egress: Arc<dyn ironclaw_network::NetworkHttpEgress>,
-        expected: ExpectedInstallOutcome,
+        expected: ExpectedRegistrationOutcome,
     ) {
         let fixture_secret_store = Arc::new(OnceLock::new());
         let services = build_lifecycle_test_services_with_auth_provider(
@@ -1602,52 +1529,26 @@ async fn oauth_metadata_fetch_failures_leave_the_definition_unprepared() {
         .await;
         assert!(fixture_secret_store.set(services.secret_store()).is_ok());
         let scope = webui_gate_resource_scope_for_owner(user_id);
-        services
+        let registration_result = services
             .lifecycle_service
             .execute(
-                lifecycle_product_context(scope.clone()),
+                lifecycle_product_context(scope),
                 LifecycleProductAction::ExtensionRegisterHostedMcp {
                     request: automatic_request(),
                 },
             )
-            .await
-            .expect("OAuth registration persists the tenant definition");
-
-        let install_result = services
-            .lifecycle_service
-            .execute(
-                lifecycle_product_context(scope),
-                LifecycleProductAction::ExtensionInstall {
-                    package_ref: fixture_package_ref(),
-                },
-            )
             .await;
-        // The transport-error branch is swallowed into a still-installed
-        // response (mirrors `install_activation_error`'s `Transient` arm);
-        // the non-200 and malformed-JSON branches propagate as a real
-        // error. Either way, no blockers get fabricated and no OAuth setup
-        // requirement is discovered.
+        let error = registration_result
+            .err()
+            .unwrap_or_else(|| panic!("invalid OAuth metadata must stop registration"));
         match expected {
-            ExpectedInstallOutcome::SwallowedIntoInstalled => {
-                let response = install_result.unwrap_or_else(|error| {
-                    panic!(
-                        "a transport-error metadata fetch must swallow into a \
-                         still-installed response, not propagate an error: {error:#?}"
-                    )
-                });
+            ExpectedRegistrationOutcome::Retryable => {
                 assert!(
-                    response.blockers.is_empty(),
-                    "a metadata-fetch failure surfaces as a still-installed response, not a \
-                     fabricated credential blocker: {response:#?}"
+                    error.retryable,
+                    "transport failure must remain retryable: {error:#?}"
                 );
             }
-            ExpectedInstallOutcome::PropagatedValidationError => {
-                let error = install_result.err().unwrap_or_else(|| {
-                    panic!(
-                        "a non-200/oversized/malformed metadata fetch must propagate as a \
-                         real error, not a still-installed response"
-                    )
-                });
+            ExpectedRegistrationOutcome::PropagatedValidationError => {
                 assert_eq!(
                     error.kind,
                     ProductSurfaceErrorKind::Validation,
@@ -1666,14 +1567,15 @@ async fn oauth_metadata_fetch_failures_leave_the_definition_unprepared() {
             "a metadata-fetch failure must not publish any tools"
         );
         let installation_store = services.extension_management.installation_store_for_test();
-        let manifest = installation_store
-            .get_manifest(&ExtensionId::new("mcp-fixture").expect("extension id"))
+        let definition = installation_store
+            .get_registered_package_definition(
+                &ExtensionId::new("mcp-fixture").expect("extension id"),
+            )
             .await
-            .expect("installed manifest readback")
-            .expect("fixture manifest remains durable after a metadata-fetch failure");
+            .expect("registered definition readback");
         assert!(
-            !manifest.resolved().has_model_visible_capabilities(),
-            "a metadata-fetch failure must leave the definition publishing nothing: {manifest:#?}"
+            definition.is_none(),
+            "a metadata-fetch failure must not persist an unusable definition"
         );
     }
 
@@ -1693,7 +1595,7 @@ async fn oauth_metadata_fetch_failures_leave_the_definition_unprepared() {
     assert_metadata_failure_blocks_preparation(
         "hosted-mcp-oauth-metadata-transport",
         transport_egress,
-        ExpectedInstallOutcome::SwallowedIntoInstalled,
+        ExpectedRegistrationOutcome::Retryable,
     )
     .await;
 
@@ -1709,7 +1611,7 @@ async fn oauth_metadata_fetch_failures_leave_the_definition_unprepared() {
     assert_metadata_failure_blocks_preparation(
         "hosted-mcp-oauth-metadata-non200",
         non200_egress,
-        ExpectedInstallOutcome::PropagatedValidationError,
+        ExpectedRegistrationOutcome::PropagatedValidationError,
     )
     .await;
 
@@ -1725,7 +1627,7 @@ async fn oauth_metadata_fetch_failures_leave_the_definition_unprepared() {
     assert_metadata_failure_blocks_preparation(
         "hosted-mcp-oauth-metadata-oversized",
         oversized_egress,
-        ExpectedInstallOutcome::PropagatedValidationError,
+        ExpectedRegistrationOutcome::PropagatedValidationError,
     )
     .await;
 
@@ -1741,7 +1643,7 @@ async fn oauth_metadata_fetch_failures_leave_the_definition_unprepared() {
     assert_metadata_failure_blocks_preparation(
         "hosted-mcp-oauth-metadata-malformed",
         malformed_egress,
-        ExpectedInstallOutcome::PropagatedValidationError,
+        ExpectedRegistrationOutcome::PropagatedValidationError,
     )
     .await;
 }
@@ -1875,7 +1777,7 @@ async fn oauth_empty_catalog_after_callback_retains_account_and_stays_installed(
         .expect("OAuth registration persists the tenant definition");
     assert!(
         registration.blockers.is_empty(),
-        "registration does not probe auth"
+        "registration proves OAuth before persisting"
     );
     let install = install_fixture(&services, scope.clone()).await;
     let provider = credential_provider_from_response(&install);

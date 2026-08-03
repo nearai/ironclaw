@@ -67,6 +67,7 @@ impl HostedMcpPreparationService {
     pub async fn register(
         &self,
         request: RegisterHostedMcpRequest,
+        scope: ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let endpoint =
             crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint::parse(&request.endpoint)
@@ -84,6 +85,64 @@ impl HostedMcpPreparationService {
             LifecyclePackageKind::Extension,
             extension_id.as_str(),
         )?;
+        let existing = self
+            .installation_store
+            .get_registered_package_definition(&extension_id)
+            .await
+            .map_err(crate::product_lifecycle::map_extension_installation_error)?;
+        let definition = if let Some(existing) = existing {
+            if !registration_request_matches(&existing, &request, &endpoint) {
+                return Err(crate::hosted_mcp_manifest::name_unavailable());
+            }
+            existing
+        } else {
+            match request.auth_selection.as_ref() {
+                Some(
+                    selection @ (HostedMcpAuthSelection::Auto
+                    | HostedMcpAuthSelection::OAuth { .. }),
+                ) => {
+                    let seed = crate::hosted_mcp_manifest::pending_manifest(
+                        &extension_id,
+                        &request.desired_name,
+                        &endpoint,
+                        selection,
+                    )?;
+                    let Some(resolved) = self
+                        .resolve_registration_auth(
+                            &extension_id,
+                            &request.desired_name,
+                            &endpoint,
+                            seed,
+                            selection,
+                            scope,
+                        )
+                        .await?
+                    else {
+                        return match selection {
+                            HostedMcpAuthSelection::Auto => auth_selection_required_response(
+                                package_ref,
+                                "Hosted MCP requires authentication but did not expose usable OAuth metadata; choose OAuth or Bearer token to finish registration.",
+                            ),
+                            HostedMcpAuthSelection::OAuth { .. } => {
+                                Err(ProductOperationFailure::InvalidBindingRequest {
+                                    reason: "hosted MCP did not expose usable OAuth metadata"
+                                        .to_string(),
+                                })
+                            }
+                            _ => Err(crate::hosted_mcp_manifest::name_unavailable()),
+                        };
+                    };
+                    resolved
+                }
+                Some(selection) => crate::hosted_mcp_manifest::pending_manifest(
+                    &extension_id,
+                    &request.desired_name,
+                    &endpoint,
+                    selection,
+                )?,
+                None => return Err(crate::hosted_mcp_manifest::name_unavailable()),
+            }
+        };
         // Lock order invariant: catalog write guard BEFORE operation_lock,
         // matching `ExtensionLifecycleManager::import_bundle` /
         // `install` (see product_lifecycle.rs). Both paths share the same
@@ -91,20 +150,6 @@ impl HostedMcpPreparationService {
         // order prevents an AB-BA deadlock across concurrent callers.
         let mut catalog = self.catalog.write().await;
         let _guard = self.operation_lock.lock().await;
-        let definition = match request.auth_selection.as_ref() {
-            Some(selection) => crate::hosted_mcp_manifest::pending_manifest(
-                &extension_id,
-                &request.desired_name,
-                &endpoint,
-                selection,
-            )?,
-            None => self
-                .installation_store
-                .get_registered_package_definition(&extension_id)
-                .await
-                .map_err(crate::product_lifecycle::map_extension_installation_error)?
-                .ok_or_else(crate::hosted_mcp_manifest::name_unavailable)?,
-        };
         self.installation_store
             .admit_package_definition(definition.clone())
             .await
@@ -114,6 +159,80 @@ impl HostedMcpPreparationService {
         Ok(crate::hosted_mcp_manifest::registration_response(
             package_ref,
         ))
+    }
+
+    async fn resolve_registration_auth(
+        &self,
+        extension_id: &ironclaw_host_api::ids::ExtensionId,
+        desired_name: &str,
+        endpoint: &crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint,
+        seed: ExtensionManifestRecord,
+        selection: &HostedMcpAuthSelection,
+        scope: ResourceScope,
+    ) -> Result<Option<ExtensionManifestRecord>, ProductOperationFailure> {
+        let ports = self.discovery_runtime_ports.as_ref().ok_or_else(|| {
+            ProductOperationFailure::Transient {
+                reason: "hosted MCP registration runtime is unavailable".to_string(),
+            }
+        })?;
+        let package = crate::hosted_mcp_manifest::available_package(&seed)?.package;
+        let capability_id = package
+            .manifest
+            .capabilities
+            .first()
+            .map(|capability| capability.id.clone())
+            .ok_or_else(crate::hosted_mcp_manifest::name_unavailable)?;
+        let network_policy = crate::mcp::hosted_mcp_network_policy(&package)
+            .ok_or_else(crate::hosted_mcp_manifest::name_unavailable)?;
+        let _handoff_guard = ports.staged_handoff_guard(scope.clone(), capability_id.clone());
+        ports.stage_network_policy_once(&scope, &capability_id, network_policy);
+        match crate::mcp_discovery::probe_hosted_mcp_auth(
+            &package,
+            scope.clone(),
+            ports.runtime_http_egress(),
+        )
+        .await
+        {
+            Ok(_) if matches!(selection, HostedMcpAuthSelection::Auto) => {
+                crate::hosted_mcp_manifest::pending_manifest(
+                    extension_id,
+                    desired_name,
+                    endpoint,
+                    &HostedMcpAuthSelection::NoAuth,
+                )
+                .map(Some)
+            }
+            Ok(_) => Err(ProductOperationFailure::InvalidBindingRequest {
+                reason: "hosted MCP accepted unauthenticated access instead of advertising OAuth"
+                    .to_string(),
+            }),
+            Err(crate::HostedMcpDiscoveryError::CredentialsRejected(challenge)) => {
+                let client_profile_id = match selection {
+                    HostedMcpAuthSelection::OAuth { client_profile_id } => {
+                        client_profile_id.clone()
+                    }
+                    HostedMcpAuthSelection::Auto => None,
+                    _ => return Err(crate::hosted_mcp_manifest::name_unavailable()),
+                };
+                self.prepare_oauth_manifest(
+                    seed,
+                    &challenge,
+                    client_profile_id,
+                    &scope,
+                    &capability_id,
+                    ports,
+                )
+                .await
+            }
+            Err(error) => {
+                tracing::debug!(
+                    extension_id = %extension_id,
+                    ?error,
+                    "hosted MCP registration preflight failed"
+                );
+                Err(crate::hosted_mcp_manifest::discovery_error(error))
+            }
+        }
     }
 
     pub async fn prepare_if_pending(
@@ -784,6 +903,27 @@ impl HostedMcpPreparationService {
             extension_id,
         )
         .await
+    }
+}
+
+fn registration_request_matches(
+    existing: &ExtensionManifestRecord,
+    request: &RegisterHostedMcpRequest,
+    endpoint: &crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint,
+) -> bool {
+    let resolved = existing.resolved();
+    if resolved.name != request.desired_name.trim() {
+        return false;
+    }
+    let Some(mcp) = resolved.mcp.as_ref() else {
+        return false;
+    };
+    if mcp.server != endpoint.as_str() {
+        return false;
+    }
+    match request.auth_selection.as_ref() {
+        None | Some(HostedMcpAuthSelection::Auto) => true,
+        Some(selection) => &mcp.registration_auth == selection,
     }
 }
 

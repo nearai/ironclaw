@@ -128,6 +128,33 @@ test("review submits automatic authentication without asking the user to classif
   assert.deepEqual(payload.authSelection, { kind: "auto" });
 });
 
+test("an ambiguous automatic probe stays in registration and retries with OAuth or bearer", () => {
+  const payloads: CustomMcpRegistrationPayload[] = [];
+  renderModal({ onRegister: (request) => { payloads.push(request); } });
+
+  advanceToReview();
+  clickButton("extensions.customMcpRegister");
+  assert.deepEqual(payloads[0]?.authSelection, { kind: "auto" });
+
+  act(() => payloads[0]?.onAuthSelectionRequired());
+  const radios = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="radio"]'));
+  assert.deepEqual(radios.map((radio) => radio.value), ["oauth", "bearer"]);
+  assert.equal(radios[0]?.checked, true);
+  assert.doesNotMatch(document.body.textContent || "", /customMcpAuth\.no_auth/);
+
+  act(() => radios[1]?.click());
+  clickButton("extensions.customMcpRegister");
+  assert.deepEqual(payloads[1]?.authSelection, { kind: "bearer" });
+  assert.match(document.body.textContent || "", /customMcpPhase\.review/);
+
+  clickButton("common.back");
+  setInput(document.querySelectorAll<HTMLInputElement>("input")[2], "https://mcp.example.com/mcp");
+  clickButton("common.continue");
+  assert.equal(document.querySelector('input[type="radio"]'), null);
+  clickButton("extensions.customMcpRegister");
+  assert.deepEqual(payloads[2]?.authSelection, { kind: "auto" });
+});
+
 test("registration completion renders step three and Done closes", () => {
   let payload: CustomMcpRegistrationPayload | null = null;
   const onClose = vi.fn();

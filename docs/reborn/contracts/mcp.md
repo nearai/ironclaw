@@ -102,6 +102,12 @@ advertised catalog violated the provider-neutral bounded-shape contract; the
 lifecycle treats that generation as permanently invalid instead of repeatedly
 reauthorizing a valid credential.
 
+The concrete host-mediated HTTP client also exposes an initialization-only
+auth probe for hosted-MCP registration. It performs `initialize` plus
+`notifications/initialized`, discards the temporary session, and never calls
+`tools/list`; extension catalog discovery and admission remain lifecycle
+preparation work rather than part of registration.
+
 Important boundaries:
 
 - command, args, URL, and transport come from the validated manifest, not model text

@@ -195,7 +195,11 @@ export function useExtensions() {
       setActionResult({ type: "success", message: res.message || t("extensions.customMcpRegistered", { name: desiredName }) });
       if (typeof onRegistered === "function") onRegistered();
     },
-    onError: (err, { onRegistrationError }) => {
+    onError: (err, { onAuthSelectionRequired, onRegistrationError }) => {
+      if (err?.payload?.validation_code === "auth_selection_required") {
+        if (typeof onAuthSelectionRequired === "function") onAuthSelectionRequired();
+        return;
+      }
       setActionResult({ type: "error", message: err.message });
       if (typeof onRegistrationError === "function") onRegistrationError(err.message);
     },

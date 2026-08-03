@@ -5547,6 +5547,36 @@ async fn register_hosted_mcp_uses_closed_wire_without_extension_readback() {
 }
 
 #[tokio::test]
+async fn register_hosted_mcp_surfaces_ambiguous_auth_as_a_typed_registration_choice() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Err(ProductSurfaceError::validation(
+        "auth_selection",
+        ProductSurfaceValidationCode::AuthSelectionRequired,
+    )));
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/register-hosted-mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"desired_id":"stripe","desired_name":"Stripe MCP","endpoint":"https://mcp.stripe.com","auth_selection":{"kind":"auto"}}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["field"], "auth_selection");
+    assert_eq!(body["validation_code"], "auth_selection_required");
+}
+
+#[tokio::test]
 async fn register_hosted_mcp_sanitizes_missing_and_forbidden_fields() {
     for body in [
         r#"{"desired_id":"linear","endpoint":"https://mcp.linear.app/mcp"}"#,

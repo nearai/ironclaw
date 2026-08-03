@@ -196,8 +196,9 @@ impl<'de> Deserialize<'de> for HostedMcpEndpoint {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostedMcpAuthSelection {
-    /// Probe without credentials and derive no-auth, bearer, or OAuth setup
-    /// from the server's protocol response.
+    /// Probe without credentials during registration. Resolve no-auth or OAuth
+    /// only when the protocol proves it; an otherwise unexplained 401 requires
+    /// the caller to retry registration with an explicit OAuth or bearer choice.
     Auto,
     #[default]
     NoAuth,

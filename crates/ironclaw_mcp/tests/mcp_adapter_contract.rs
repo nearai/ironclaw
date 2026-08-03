@@ -303,6 +303,74 @@ async fn concrete_mcp_http_client_routes_json_rpc_through_shared_egress() {
 }
 
 #[tokio::test]
+async fn concrete_mcp_http_auth_probe_stops_after_the_initialization_handshake() {
+    let egress = RecordingRuntimeEgress::json_rpc();
+    let planner = RecordingEgressPlanner::new(host_http_plan());
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        planner.clone(),
+    );
+
+    client
+        .probe_auth(McpClientRequest {
+            provider: ExtensionId::new("hosted-docs").unwrap(),
+            capability_id: CapabilityId::new("hosted-docs.connection").unwrap(),
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .expect("credential-free initialization succeeds");
+
+    let methods = planner
+        .calls()
+        .into_iter()
+        .map(|call| call.json_rpc_method)
+        .collect::<Vec<_>>();
+    assert_eq!(methods, vec!["initialize", "notifications/initialized"]);
+    assert_eq!(egress.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn concrete_mcp_http_auth_probe_rejects_non_http_or_missing_url_without_egress() {
+    for (transport, url, expected_reason) in [
+        (
+            "stdio",
+            Some("https://mcp.example.test/mcp"),
+            "mcp_unsupported_transport",
+        ),
+        ("http", None, "mcp_missing_url"),
+    ] {
+        let egress = RecordingRuntimeEgress::json_rpc();
+        let client = McpHostHttpClient::new(
+            McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+            StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+        );
+        let error = client
+            .probe_auth(McpClientRequest {
+                provider: ExtensionId::new("hosted-docs").unwrap(),
+                capability_id: CapabilityId::new("hosted-docs.connection").unwrap(),
+                scope: sample_scope(),
+                transport: transport.to_string(),
+                command: None,
+                args: vec![],
+                url: url.map(str::to_string),
+                input: json!({}),
+                max_output_bytes: 4096,
+            })
+            .await
+            .expect_err("an invalid auth probe must fail closed");
+
+        assert_eq!(error.stable_reason(), expected_reason);
+        assert!(egress.requests().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn concrete_mcp_http_client_maps_upstream_auth_status_to_auth_required() {
     let egress = RecordingRuntimeEgress::auth_required();
     let client = McpHostHttpClient::new(

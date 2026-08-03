@@ -18,6 +18,71 @@ pub enum HostedMcpDiscoveryError {
     CredentialsRejected(ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge),
 }
 
+/// Probe only the credential-free MCP initialization handshake.
+///
+/// This deliberately does not list or admit tools. Registration owns auth
+/// selection; catalog discovery remains an installation preparation step.
+pub async fn probe_hosted_mcp_auth(
+    package: &ExtensionPackage,
+    scope: ResourceScope,
+    runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+) -> Result<(), HostedMcpDiscoveryError> {
+    let (transport, command, args, url) = match &package.manifest.runtime {
+        ExtensionRuntime::Mcp {
+            transport,
+            command,
+            args,
+            url,
+        } if is_hosted_http_mcp_package(package) => (
+            transport.clone(),
+            command.clone(),
+            args.clone(),
+            url.clone(),
+        ),
+        _ => {
+            return Err(HostedMcpDiscoveryError::Permanent(format!(
+                "extension {} is not a host-bundled hosted MCP provider",
+                package.id
+            )));
+        }
+    };
+    let registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+    registry.upsert(package.clone()).map_err(|error| {
+        HostedMcpDiscoveryError::Permanent(format!(
+            "failed to prepare hosted MCP auth probe: {error}"
+        ))
+    })?;
+    let planning_capability_id = package
+        .manifest
+        .capabilities
+        .first()
+        .map(|capability| capability.id.clone())
+        .ok_or_else(|| {
+            HostedMcpDiscoveryError::Permanent(format!(
+                "hosted MCP provider {} has no capability template",
+                package.id
+            ))
+        })?;
+    McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(runtime_http_egress),
+        RegistryMcpEgressPlanner::new(registry),
+    )
+    .probe_auth(McpClientRequest {
+        provider: package.id.clone(),
+        capability_id: planning_capability_id,
+        scope,
+        transport,
+        command,
+        args,
+        url,
+        input: serde_json::Value::Null,
+        max_output_bytes: MCP_RESPONSE_BODY_LIMIT,
+    })
+    .await
+    .map(|_| ())
+    .map_err(classify_mcp_client_error)
+}
+
 pub async fn discover_hosted_mcp_package(
     package: &ExtensionPackage,
     max_tools: u32,
