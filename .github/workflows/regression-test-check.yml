@@ -12,7 +12,7 @@ permissions:
 concurrency:
   # A COMMENTED review is skipped below and must not cancel the ordinary PR
   # run that is still producing its enforcement result.
-  group: regression-check-${{ github.event.pull_request.number }}-${{ github.event_name }}
+  group: regression-check-${{ github.event.pull_request.number }}-${{ github.event_name }}-${{ github.event.review.state == 'commented' && 'commented' || 'enforcing' }}
   cancel-in-progress: true
 
 jobs:

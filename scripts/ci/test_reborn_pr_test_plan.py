@@ -304,6 +304,9 @@ class RebornPrTestPlanTests(unittest.TestCase):
         reborn_tests = (ROOT / ".github/workflows/reborn-tests.yml").read_text(
             encoding="utf-8"
         )
+        regression = (
+            ROOT / ".github/workflows/regression-test-check.yml"
+        ).read_text(encoding="utf-8")
 
         self.assertIn(
             "needs.changes.outputs.has_reborn_cli == 'true' && "
@@ -320,6 +323,10 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertIn("pnpm test", code_style)
         self.assertIn("pnpm build", code_style)
         self.assertNotIn("webui-v2-js-tests:", reborn_tests)
+        self.assertIn(
+            "github.event.review.state == 'commented' && 'commented' || 'enforcing'",
+            regression,
+        )
 
     def test_reborn_e2e_shards_preserve_all_runtime_and_webui_suites(self) -> None:
         workflow = (ROOT / ".github/workflows/reborn-e2e.yml").read_text(
