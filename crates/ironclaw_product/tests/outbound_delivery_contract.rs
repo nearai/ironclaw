@@ -273,6 +273,8 @@ use ironclaw_product_contracts::delivery::{
 };
 use tokio::sync::Barrier;
 
+// Keep this decorator local despite the contract file's size: it is specific to this race,
+// uses private suite seams and types, and extracting one use would prematurely create shared support.
 struct PausingRecoveryStore {
     inner: Arc<OutboundStateStore<InMemoryBackend>>,
     snapshot_listed: Arc<Barrier>,
