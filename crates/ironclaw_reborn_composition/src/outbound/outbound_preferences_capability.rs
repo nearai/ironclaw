@@ -13,9 +13,6 @@ use ironclaw_host_api::{
     dispatch::RuntimeDispatchErrorKind,
     error::HostApiError,
     ids::CapabilityId,
-    product_surface::{
-        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    },
     resource::{ResourceEstimate, ResourceProfile, ResourceUsage},
 };
 use ironclaw_host_runtime::{
@@ -26,12 +23,21 @@ use ironclaw_product::{
     OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OutboundPreferencesProductService,
     RebornSetOutboundPreferencesRequest,
 };
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+};
 
 pub(crate) fn extend_builtin_first_party_package(
     mut package: ExtensionPackage,
 ) -> Result<ExtensionPackage, ExtensionError> {
     package.manifest.capabilities.push(manifest()?);
-    ExtensionPackage::from_manifest(package.manifest, package.root)
+    let root = package
+        .materialized_root()
+        .map_err(|error| ExtensionError::InvalidManifest {
+            reason: format!("built-in package requires a materialized root: {error}"),
+        })?
+        .clone();
+    ExtensionPackage::from_manifest(package.manifest, root)
 }
 
 pub(crate) fn insert_handler(

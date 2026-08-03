@@ -52,11 +52,14 @@ clap_complete = "4.5.0"
 crossterm = "0.29"
 dotenvy = "0.15"
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version = "0.1.0" }
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_operator = { path = "../ironclaw_operator", version = "0.1.0" }
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
 ironclaw_extension_host = { path = "../ironclaw_extension_host", version = "0.1.0" }
+ironclaw_extension_manager = { path = "../ironclaw_extension_manager", version = "0.1.0" }
 # DEL-7: the binary is the one generic-side crate allowed to link the concrete
 # first-party extensions; it converts the package inventory into composition's
 # neutral bundle set and supplies the GSuite/web-access capability registrars.

@@ -130,13 +130,16 @@ fn assert_static_projection_parity(dir: &str) {
             .collect::<Vec<_>>()
     };
     assert!(
-        !kinds(&v2).contains(&ironclaw_host_api::surface::CapabilitySurfaceKind::Channel),
+        !kinds(&v2)
+            .contains(&ironclaw_extension_contracts::surface::CapabilitySurfaceKind::Channel),
         "{dir}: v2 fixtures cannot attest channel surfaces post-DEL-5"
     );
     let non_channel_kinds = |record: &ExtensionManifestRecord| {
         kinds(record)
             .into_iter()
-            .filter(|kind| *kind != ironclaw_host_api::surface::CapabilitySurfaceKind::Channel)
+            .filter(|kind| {
+                *kind != ironclaw_extension_contracts::surface::CapabilitySurfaceKind::Channel
+            })
             .collect::<Vec<_>>()
     };
     assert_eq!(
@@ -422,7 +425,8 @@ fn slack_v3_still_declares_the_channel_surface() {
     assert_eq!(
         kinds
             .iter()
-            .filter(|kind| **kind == ironclaw_host_api::surface::CapabilitySurfaceKind::Channel)
+            .filter(|kind| **kind
+                == ironclaw_extension_contracts::surface::CapabilitySurfaceKind::Channel)
             .count(),
         1,
         "live slack manifest must declare exactly one channel surface; got {kinds:?}"

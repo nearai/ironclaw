@@ -40,7 +40,7 @@ futures = "0.3"
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_prompt_envelope = { path = "../ironclaw_prompt_envelope" }
-ironclaw_turns = { path = "../ironclaw_turns" }
+ironclaw_loop_contracts = { path = "../ironclaw_loop_contracts", version = "0.1.0" }
 ironclaw_wasm_limiter = { path = "../ironclaw_wasm_limiter" }
 lru = "0.18"
 rust_decimal = { version = "1", features = ["serde", "serde-with-str", "db-tokio-postgres"] }

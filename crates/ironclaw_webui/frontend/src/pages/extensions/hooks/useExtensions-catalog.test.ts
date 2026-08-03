@@ -50,6 +50,7 @@ function useExtensionsForTest({ extensions, registry }) {
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
+    registerCustomMcp: () => {},
     // The real surface-taxonomy helper, so grouping matches production.
     hasChannelSurface,
     removeExtension: () => {},
@@ -176,6 +177,7 @@ test("useExtensions exposes catalog errors and refetches both catalog queries", 
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
+    registerCustomMcp: () => {},
     // The real surface-taxonomy helper, so grouping matches production.
     hasChannelSurface,
     removeExtension: () => {},
@@ -294,6 +296,19 @@ test("extension mutations preserve stable client action ids through hook payload
   ]);
 });
 
+// `useMutation` is called once per mutation declared in useExtensions.ts, in
+// declaration order. Binding a harness field to a fixed array index silently
+// repoints to the wrong mutation if that declaration order ever changes.
+// Instead, match each `mutationFn`'s source text against the distinctive
+// action call it makes — a stable discriminator independent of ordering.
+function configFor(mutationConfigs, calleeName) {
+  const config = mutationConfigs.find((candidate) =>
+    candidate.mutationFn.toString().includes(`${calleeName}(`),
+  );
+  assert.ok(config, `no mutation config found calling ${calleeName}(...)`);
+  return config;
+}
+
 function installMutationHarness(authoritativeExtension) {
   const mutationConfigs = [];
   const openCalls = [];
@@ -315,6 +330,7 @@ function installMutationHarness(authoritativeExtension) {
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
+    registerCustomMcp: () => {},
     hasChannelSurface,
     removeExtension: () => {},
     startExtensionOauth: () => {},
@@ -351,13 +367,86 @@ function installMutationHarness(authoritativeExtension) {
   vm.runInNewContext(useExtensionsSourceForTest(), context);
   context.globalThis.__testExports.useExtensions();
   return {
-    installConfig: mutationConfigs[0],
+    installConfig: configFor(mutationConfigs, "installExtension"),
+    registerConfig: configFor(mutationConfigs, "registerCustomMcp"),
     openCalls,
     refetches,
     setupRequests,
     onNeedsSetup: (request) => setupRequests.push(request),
   };
 }
+
+test("custom MCP registration refreshes only the registry and completes admission", async () => {
+  const registeredRegistryEntry = {
+    package_ref: { kind: "extension", id: "mcp-linear" },
+    display_name: "Linear MCP",
+    installation_state: "setup_needed",
+    surfaces: [{ kind: "auth" }],
+  };
+  const harness = installMutationHarness(registeredRegistryEntry);
+  const registered = [];
+
+  await harness.registerConfig.onSuccess(
+    {
+      success: true,
+      package_ref: { kind: "extension", id: "mcp-linear" },
+    },
+    {
+      desiredId: "linear",
+      desiredName: "Linear MCP",
+      onRegistered: () => registered.push(true),
+    },
+  );
+
+  assert.deepEqual(harness.refetches, ["extension-registry"]);
+  assert.deepEqual(registered, [true]);
+});
+
+test("rejected custom MCP admission returns the server message to the registration modal", async () => {
+  const harness = installMutationHarness(null);
+  const modalErrors = [];
+
+  await harness.registerConfig.onSuccess(
+    { success: false, message: "Server ID is already registered" },
+    {
+      desiredId: "linear",
+      desiredName: "Linear MCP",
+      onRegistrationError: (message) => modalErrors.push(message),
+    },
+  );
+
+  assert.deepEqual(
+    modalErrors,
+    ["Server ID is already registered"],
+    "the rejected registration response is handed to the modal's rendered error path",
+  );
+  assert.deepEqual(
+    harness.refetches,
+    [],
+    "a rejected admission must not pretend the registry changed",
+  );
+});
+
+test("custom MCP registration transport errors return to the registration modal", () => {
+  const harness = installMutationHarness(null);
+  const modalErrors = [];
+
+  harness.registerConfig.onError(
+    new Error("network unavailable"),
+    {
+      desiredId: "linear",
+      desiredName: "Linear MCP",
+      onRegistrationError: (message) => modalErrors.push(message),
+    },
+  );
+
+  assert.deepEqual(modalErrors, ["network unavailable"]);
+  assert.deepEqual(
+    harness.refetches,
+    [],
+    "a transport failure must not pretend the registry changed",
+  );
+});
 
 test("install refreshes the authoritative projection before opening setup", async () => {
   const packageRef = { kind: "extension", id: "notion" };

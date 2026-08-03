@@ -4,25 +4,55 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import re
 import subprocess
 import sys
 from pathlib import Path
 
+# The crate inventory, not a `crates/ironclaw_*` path shape, decides where a
+# high-risk area lives. The literal-prefix list this replaced matched nothing
+# once crates move into family directories (`crates/<family>/ironclaw_*`,
+# PROPOSAL §5): every high-risk path stopped matching, the gate reported "no
+# high-risk files changed", and the regression-test requirement relaxed
+# silently. See docs/reborn/target-architecture/CHECKLIST.md WS10 and #6963.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+try:
+    from crate_tree import CrateTreeError, crate_directory  # noqa: E402
+except ImportError as error:  # pragma: no cover - deployment error, not logic
+    # This gate is copied around (the commit-msg hook runs it from the repo, CI
+    # runs it from a second checkout). Say which file is missing instead of
+    # showing an import traceback — but still refuse to run, because without the
+    # inventory the gate cannot tell "no high-risk change" from "found nothing".
+    raise SystemExit(
+        "regression-test-check: cannot import scripts/ci/lib/crate_tree.py "
+        f"({error}). The gate resolves high-risk paths through the crate "
+        "inventory and will not run without it."
+    ) from error
 
-HIGH_RISK_PATTERNS = (
-    "crates/ironclaw_turns/src/coordinator.rs",
-    "crates/ironclaw_turns/src/status.rs",
-    "crates/ironclaw_run_state/src/",
-    "crates/ironclaw_processes/src/journal_store",
-    "crates/ironclaw_processes/src/supervisor.rs",
-    "crates/ironclaw_llm/src/circuit_breaker.rs",
-    "crates/ironclaw_llm/src/retry.rs",
-    "crates/ironclaw_llm/src/failover.rs",
-    "crates/ironclaw_agent_loop/src/executor",
-    "crates/ironclaw_agent_loop/src/state",
-    "crates/ironclaw_safety/src/",
+
+# High-risk areas as (crate name, path inside the crate). The crate name is the
+# identity; where its `Cargo.toml` sits is discovered. `ironclaw_run_state` used
+# to be here and was deleted with #6696 — the entry outlived the crate and, being
+# a never-matching string, cost nothing to leave behind. Resolution now refuses
+# an entry that names no crate, so that cannot recur.
+HIGH_RISK_ENTRIES = (
+    ("ironclaw_turns", "src/coordinator.rs"),
+    ("ironclaw_turns", "src/status.rs"),
+    ("ironclaw_processes", "src/journal_store"),
+    ("ironclaw_processes", "src/supervisor.rs"),
+    ("ironclaw_llm", "src/circuit_breaker.rs"),
+    ("ironclaw_llm", "src/retry.rs"),
+    ("ironclaw_llm", "src/failover.rs"),
+    ("ironclaw_agent_loop", "src/executor"),
+    ("ironclaw_agent_loop", "src/state"),
+    ("ironclaw_safety", "src/"),
 )
+
+# Built frontend assets carry no behavior, so a diff touching only these (and
+# markdown) does not owe a regression test. Same discovery rule as above.
+STATIC_ASSET_ENTRIES = (("ironclaw_webui", "frontend/public/"),)
+
 FIX_RE = re.compile(
     r"^(fix(\(.*\))?|hotfix|bugfix):", re.IGNORECASE | re.MULTILINE
 )
@@ -74,6 +104,94 @@ def changed_files(repo: Path, base: str, head: str) -> list[str]:
         "-z",
     )
     return [path for path in output.split("\0") if path]
+
+
+def all_touched_paths(repo: Path, base: str, head: str) -> list[str]:
+    """Every path the diff touches, deletions and renames included.
+
+    `changed_files` filters to ACMR because only surviving files can carry a
+    regression assertion. Staleness tolerance needs the unfiltered set: see
+    `resolve_prefixes`.
+    """
+
+    output = git(repo, *diff_args(base, head), "--name-only", "-z")
+    return [path for path in output.split("\0") if path]
+
+
+def is_workspace_checkout(repo: Path) -> bool:
+    """True when `repo` is the IronClaw workspace root.
+
+    The discriminator is the root manifest's `[workspace]` table. It decides
+    whether a missing crate tree is a broken checkout (hard error) or simply a
+    repository that has no crates — the hermetic fixtures in
+    `scripts/ci/test-regression-test-check.sh` are the latter, and so is any
+    caller pointing the gate at an unrelated tree.
+    """
+
+    try:
+        return "[workspace]" in (repo / "Cargo.toml").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+@functools.lru_cache(maxsize=None)
+def _crate_directory(crate: str, repo: Path) -> str:
+    """`crate_directory` memoized: each call re-walks `crates/` from scratch."""
+
+    return crate_directory(crate, repo)
+
+
+def resolve_prefixes(
+    repo: Path, entries: tuple[tuple[str, str], ...], touched: list[str]
+) -> list[str] | None:
+    """Resolve (crate, subpath) entries against the checkout's real crate tree.
+
+    Returns repo-relative path prefixes, or `None` when `repo` is not the
+    IronClaw workspace and there is therefore no inventory to resolve against.
+
+    Fails closed in both directions a path-keyed list can rot:
+
+    * a named crate that no longer exists (or moved so no directory carries the
+      name) raises, naming the entry — the failure mode that let
+      `ironclaw_run_state` sit here unmatched after #6696 deleted it;
+    * a resolved prefix that exists on disk nowhere raises too, so deleting the
+      last file under a high-risk subpath forces the entry out instead of
+      leaving a string that can never match again.
+
+    The one tolerated case is a prefix the diff itself touches. In CI the gate
+    executes from the *trusted base* checkout (`$GATE_ROOT`, base.sha) while
+    judging the PR *head* tree, so a PR deleting a high-risk file cannot also
+    fix the base copy of this list. Without that escape such a PR would be
+    permanently red with no in-PR remedy; with it, the entry disappears from the
+    list on the same merge that deletes the file.
+    """
+
+    if not is_workspace_checkout(repo):
+        return None
+
+    prefixes: list[str] = []
+    for crate, subpath in entries:
+        try:
+            directory = _crate_directory(crate, repo)
+        except CrateTreeError as error:
+            raise RuntimeError(
+                f"high-risk entry ({crate!r}, {subpath!r}) names a crate this "
+                f"checkout does not have: {error} Repoint or drop the entry in "
+                "scripts/ci/regression-test-check.py — an entry that resolves to "
+                "nothing silently relaxes the regression-test requirement."
+            ) from error
+        prefix = f"{directory}/{subpath}"
+        if not (repo / prefix).exists() and not any(
+            path.startswith(prefix) for path in touched
+        ):
+            raise RuntimeError(
+                f"high-risk entry ({crate!r}, {subpath!r}) resolves to {prefix!r}, "
+                "which this checkout does not contain and this diff does not "
+                "touch. Repoint or drop the entry in "
+                "scripts/ci/regression-test-check.py."
+            )
+        prefixes.append(prefix)
+    return prefixes
 
 
 def added_text(repo: Path, base: str, head: str, path: str) -> str:
@@ -333,6 +451,23 @@ def main() -> int:
 
     repo = args.repo.resolve()
     files = changed_files(repo, args.base, args.head)
+    # Discovery runs against --repo (the tree being judged), never against this
+    # script's own location: in CI the script comes from the trusted base
+    # checkout while --repo is the PR head (.github/workflows/regression-test-check.yml).
+    touched = all_touched_paths(repo, args.base, args.head)
+    # `resolve_prefixes` owns the workspace probe and returns None for a
+    # non-workspace checkout; `main` reads that result rather than re-probing,
+    # so there is exactly one place that decides "is this the IronClaw tree?".
+    high_risk_prefixes = resolve_prefixes(repo, HIGH_RISK_ENTRIES, touched)
+    static_asset_prefixes = resolve_prefixes(repo, STATIC_ASSET_ENTRIES, touched)
+    if high_risk_prefixes is None:
+        print(
+            f"No [workspace] manifest at {repo}; high-risk path detection is "
+            "inactive for this checkout and only the fix-commit trigger applies.",
+            file=sys.stderr,
+        )
+        high_risk_prefixes = []
+        static_asset_prefixes = []
     if args.commit_bodies is None:
         if args.head in {"INDEX", "WORKTREE"}:
             commit_bodies = ""
@@ -350,9 +485,9 @@ def main() -> int:
     )
     is_fix = bool(FIX_RE.search(args.title) or FIX_RE.search(commit_subjects))
     high_risk_matches = [
-        pattern
-        for pattern in HIGH_RISK_PATTERNS
-        if any(pattern in path for path in files)
+        prefix
+        for prefix in high_risk_prefixes
+        if any(prefix in path for path in files)
     ]
     if not is_fix and not high_risk_matches:
         print("Not a fix and no high-risk files changed; regression gate not required.")
@@ -363,7 +498,7 @@ def main() -> int:
         return 0
     if all(
         path.endswith(".md")
-        or path.startswith("crates/ironclaw_webui/frontend/public/")
+        or any(path.startswith(prefix) for prefix in static_asset_prefixes)
         for path in files
     ):
         print("Only documentation or static assets changed; regression gate not required.")

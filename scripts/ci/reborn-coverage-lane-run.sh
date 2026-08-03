@@ -10,13 +10,10 @@
 # job: 4 modulo-partitions of the `reborn_integration_*` suites, plus one
 # dedicated lane for the `reborn_group_*` suites.
 #
-# This script is the SINGLE execution of the int-tier suites for pass/fail
-# purposes too: `cargo llvm-cov ... test` has the same pass/fail semantics as
-# `cargo test`, so there is no separate uninstrumented run of the
-# `reborn_integration_*` suites. (The group suites also still have their own
-# uninstrumented `reborn-group-tests` job via run-reborn-group-tests.sh, which stays as the
-# fast low-contention pass/fail signal for that suite; this lane additionally
-# runs them once more, instrumented, for coverage.)
+# Full merge/main plans use this script for instrumented pass/fail and coverage.
+# Selected pull-request plans set REBORN_COV_COLLECT=false and use the same
+# lane selection with ordinary `cargo test`; this avoids maintaining a second
+# test inventory while keeping exhaustive instrumentation before merge.
 #
 # All of this lane's assigned suites run in ONE `cargo llvm-cov ... test`
 # invocation, with one repeated `--test <name>` per suite, `--workspace` so
@@ -37,7 +34,8 @@
 # reborn_group_* rewrite rules), so this script never re-derives that mapping.
 #
 # Modes (REBORN_COV_LANE_MODE):
-#   flat-partition  Modulo-partitions the reborn_integration_* suites
+#   flat-partition  Modulo-partitions the reborn_integration_* and
+#                   reborn_generated_* suites
 #                   across REBORN_COV_LANE_PARTITIONS lanes; REBORN_COV_LANE_INDEX
 #                   (0-based) selects this lane's slice — mirrors
 #                   scripts/ci/run-reborn-root-partition.sh's partitioning.
@@ -53,6 +51,12 @@ output_lcov="${1:?usage: reborn-coverage-lane-run.sh <output-lcov-path>}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mode="${REBORN_COV_LANE_MODE:?REBORN_COV_LANE_MODE must be set to 'flat-partition' or 'group'}"
 test_timeout="${REBORN_COV_LANE_TEST_TIMEOUT:-45m}"
+collect_coverage="${REBORN_COV_COLLECT:-true}"
+
+if [[ "${collect_coverage}" != "true" && "${collect_coverage}" != "false" ]]; then
+  echo "REBORN_COV_COLLECT must be 'true' or 'false'; got '${collect_coverage}'" >&2
+  exit 1
+fi
 
 # reborn-coverage-int-tier-tests.sh prints alternating "--test"/"<name>"
 # lines; keep only the name lines (every 2nd line, portable awk — no GNU-only
@@ -88,7 +92,11 @@ case "${mode}" in
       exit 1
     fi
 
-    mapfile -t flat_names < <(printf '%s\n' "${all_names[@]}" | grep '^reborn_integration_' | LC_ALL=C sort)
+    mapfile -t flat_names < <(
+      printf '%s\n' "${all_names[@]}" \
+        | grep -E '^reborn_(integration_|generated_)' \
+        | LC_ALL=C sort
+    )
 
     for index in "${!flat_names[@]}"; do
       if (( index % partition_count_int != partition_index_int )); then
@@ -113,7 +121,9 @@ if [ "${#selected_names[@]}" -eq 0 ]; then
   # caller's `cargo llvm-cov report`-less contract (this script always
   # produces output_lcov) holds even in the empty case.
   echo "No Reborn integration-tier suites assigned to this coverage lane (mode=${mode}); passing by design"
-  : > "${output_lcov}"
+  if [[ "${collect_coverage}" == "true" ]]; then
+    : > "${output_lcov}"
+  fi
   exit 0
 fi
 
@@ -122,9 +132,15 @@ for test_name in "${selected_names[@]}"; do
   test_args+=(--test "${test_name}")
 done
 
-echo "::group::cargo llvm-cov --workspace test ${test_args[*]}"
-timeout --signal=INT --kill-after=30s "${test_timeout}" \
-  cargo llvm-cov --branch --skip-functions --workspace test "${test_args[@]}" \
-    --lcov --output-path "${output_lcov}" \
-    --ignore-rust-version -- --nocapture
+if [[ "${collect_coverage}" == "true" ]]; then
+  echo "::group::cargo llvm-cov --workspace test ${test_args[*]}"
+  timeout --signal=INT --kill-after=30s "${test_timeout}" \
+    cargo llvm-cov --branch --skip-functions --workspace test "${test_args[@]}" \
+      --lcov --output-path "${output_lcov}" \
+      --ignore-rust-version -- --nocapture
+else
+  echo "::group::cargo test -p ironclaw_reborn_integration_tests ${test_args[*]}"
+  timeout --signal=INT --kill-after=30s "${test_timeout}" \
+    cargo test -p ironclaw_reborn_integration_tests "${test_args[@]}" -- --nocapture
+fi
 echo "::endgroup::"

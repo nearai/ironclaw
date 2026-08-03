@@ -21,9 +21,9 @@
 
 use std::sync::Arc;
 
+use ironclaw_extension_contracts::memory::{MemoryDescriptor, MemoryLifecycleHook};
 use ironclaw_extensions::ExtensionPackage;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::memory::{MemoryDescriptor, MemoryLifecycleHook};
 use ironclaw_host_runtime::memory_binding::{MemoryBindingPolicy, MemoryProviderBinding};
 use ironclaw_host_runtime::memory_context::ProductionMemoryPromptContextService;
 use ironclaw_host_runtime::memory_native_extension as memory_extension;
@@ -31,6 +31,7 @@ use ironclaw_host_runtime::memory_provider::MemoryServiceResolver;
 use ironclaw_host_runtime::{
     FirstPartyCapabilityHandler, MemoryBackedUserProfileSource, NativeMemoryToolHandler,
 };
+use ironclaw_loop_contracts::MemoryPromptContextService;
 use ironclaw_loop_host::HostUserProfileSource;
 use ironclaw_memory::{MemoryService, PromptWriteSafetyEventSink};
 #[cfg(feature = "memory-mem0")]
@@ -38,7 +39,6 @@ use ironclaw_memory_mem0::{
     MEM0_MEMORY_EXTENSION_ID, Mem0Config, Mem0HttpTransport, Mem0MemoryService, Mem0Transport,
 };
 use ironclaw_memory_native::NativeMemoryService;
-use ironclaw_turns::run_profile::MemoryPromptContextService;
 #[cfg(feature = "memory-mem0")]
 use secrecy::ExposeSecret;
 use secrecy::SecretString;
@@ -439,8 +439,8 @@ pub(crate) struct MemoryBackedUserProfileSourceAdapter(pub(crate) MemoryBackedUs
 impl HostUserProfileSource for MemoryBackedUserProfileSourceAdapter {
     async fn resolve_user_profile(
         &self,
-        run_context: &ironclaw_turns::run_profile::LoopRunContext,
-    ) -> Option<ironclaw_turns::run_profile::UserProfileContext> {
+        run_context: &ironclaw_loop_contracts::LoopRunContext,
+    ) -> Option<ironclaw_loop_contracts::UserProfileContext> {
         self.0.resolve_user_profile(run_context).await
     }
 }
@@ -617,7 +617,7 @@ mod tests {
         let full = memory_lifecycle_consumers(
             Some(inert_provider()),
             &MemoryDescriptor {
-                lifecycle: ironclaw_host_api::memory::MemoryLifecycleHook::ALL.to_vec(),
+                lifecycle: ironclaw_extension_contracts::memory::MemoryLifecycleHook::ALL.to_vec(),
             },
         );
         assert!(full.memory_context_service.is_some());

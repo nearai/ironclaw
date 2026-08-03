@@ -13,6 +13,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::preference_target::{
+    PreferenceTargetCodec, PreferenceTargetEncodeRequest,
+};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
+    SourceBindingRef, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
     attachment::WorkspaceFile,
     ids::{AgentId, TenantId, ThreadId, UserId},
@@ -25,33 +33,36 @@ use ironclaw_outbound::{
     TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore,
 };
 use ironclaw_product::{
-    AdapterInstallationId, AuthPromptView, AuthRequirement, ChannelAdapter, ChannelError,
-    DeliveryReport, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    InboundCommandPayload, InboundOutcome, OutboundEnvelope, OutboundPart, ParsedProductInbound,
-    PartDeliveryOutcome, ProductAdapterError, ProductAdapterId, ProductCommandResultPayload,
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
-    ProductRejectionKind, ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext,
-    UserMessagePayload, VerifiedInbound,
+    AdapterInstallationId, AuthPromptView, AuthRequirement, ChannelError, DeliveryReport,
+    ExternalActorRef, ExternalConversationRef, ExternalEventId, InboundCommandPayload,
+    InboundOutcome, OutboundEnvelope, OutboundPart, ParsedProductInbound, PartDeliveryOutcome,
+    ProductAdapterError, ProductAdapterId, ProductCommandResultPayload, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductRejectionKind,
+    ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
+    VerifiedInbound,
 };
 use ironclaw_product::{
-    BlockedAuthPromptRequest, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
-    ChannelDeliveryResolver, DeliveryCoordinator, DeliveryReplyContextSource, DeliveryRetryPolicy,
-    PreferenceTargetCodec, ResolvedChannelDelivery, RunDeliveryObserver, RunDeliveryServices,
+    DeliveryCoordinator, DeliveryRetryPolicy, RunDeliveryObserver, RunDeliveryServices,
     RunDeliverySettings, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
 };
 use ironclaw_product::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsStat,
+};
+use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::delivery::{
+    ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
+};
+use ironclaw_product_contracts::prompt_source::{
+    BlockedAuthPromptRequest, BlockedAuthPromptSource,
 };
 use ironclaw_threads::{
     AppendFinalizedAssistantMessageRequest, AttachmentKind, AttachmentRef, EnsureThreadRequest,
     InMemorySessionThreadService, MessageContent, SessionThreadService, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-    GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
-    RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError, TurnId, TurnRunId,
-    TurnRunState, TurnScope, TurnStatus,
+    CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
+    RetryTurnRequest, RetryTurnResponse, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator,
+    TurnError, TurnRunState,
 };
 
 // ── Scripted fakes ─────────────────────────────────────────────────────────
@@ -59,13 +70,13 @@ use ironclaw_turns::{
 #[derive(Clone)]
 struct ScriptedRunState {
     status: TurnStatus,
-    gate_ref: Option<GateRef>,
+    gate_ref: Option<TurnGateRef>,
 }
 
 fn scripted_state(status: TurnStatus, gate_ref: Option<&str>) -> ScriptedRunState {
     ScriptedRunState {
         status,
-        gate_ref: gate_ref.map(|s| GateRef::new(s).expect("gate ref")),
+        gate_ref: gate_ref.map(|s| TurnGateRef::new(s).expect("gate ref")),
     }
 }
 
@@ -249,7 +260,7 @@ impl ChannelAdapter for RecordingChannelAdapter {
     async fn deliver(
         &self,
         envelope: OutboundEnvelope,
-        _egress: &dyn ironclaw_host_api::tool_adapter::RestrictedEgress,
+        _egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
         self.envelopes
             .lock()
@@ -284,15 +295,15 @@ impl ChannelAdapter for RecordingChannelAdapter {
 struct DenyAllEgress;
 
 #[async_trait]
-impl ironclaw_host_api::tool_adapter::RestrictedEgress for DenyAllEgress {
+impl ironclaw_extension_contracts::tool_adapter::RestrictedEgress for DenyAllEgress {
     async fn send(
         &self,
-        _request: ironclaw_host_api::tool_adapter::RestrictedEgressRequest,
+        _request: ironclaw_extension_contracts::tool_adapter::RestrictedEgressRequest,
     ) -> Result<
-        ironclaw_host_api::tool_adapter::RestrictedEgressResponse,
-        ironclaw_host_api::tool_adapter::RestrictedEgressError,
+        ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse,
+        ironclaw_extension_contracts::tool_adapter::RestrictedEgressError,
     > {
-        Err(ironclaw_host_api::tool_adapter::RestrictedEgressError::PolicyDenied)
+        Err(ironclaw_extension_contracts::tool_adapter::RestrictedEgressError::PolicyDenied)
     }
 }
 
@@ -474,14 +485,14 @@ impl PreferenceTargetCodec for StaticCodec {
 
     fn encode_shared_conversation_target(
         &self,
-        _request: ironclaw_product::PreferenceTargetEncodeRequest<'_>,
+        _request: PreferenceTargetEncodeRequest<'_>,
     ) -> Option<ReplyTargetBindingRef> {
         None
     }
 
     fn encode_personal_direct_message_target(
         &self,
-        _request: ironclaw_product::PreferenceTargetEncodeRequest<'_>,
+        _request: PreferenceTargetEncodeRequest<'_>,
         _external_actor_id: &str,
     ) -> Option<ReplyTargetBindingRef> {
         None
@@ -540,6 +551,16 @@ fn envelope_for_conversation(
     event_id: &str,
     conversation_id: &str,
 ) -> ProductInboundEnvelope {
+    envelope_for_conversation_replying_to(payload, event_id, conversation_id, None, None)
+}
+
+fn envelope_for_conversation_replying_to(
+    payload: ProductInboundPayload,
+    event_id: &str,
+    conversation_id: &str,
+    topic_id: Option<&str>,
+    reply_target_message_id: Option<&str>,
+) -> ProductInboundEnvelope {
     let adapter_id = ProductAdapterId::new("acme_v1").expect("adapter");
     let installation_id = AdapterInstallationId::new("install_alpha").expect("installation");
     let evidence = ProtocolAuthEvidence::test_verified(
@@ -558,8 +579,13 @@ fn envelope_for_conversation(
     let parsed = ParsedProductInbound::new(
         ExternalEventId::new(event_id).expect("event"),
         ExternalActorRef::new("acme_user", "U-1", None::<String>).expect("actor"),
-        ExternalConversationRef::new(Some("space-1"), conversation_id, None, None)
-            .expect("conversation"),
+        ExternalConversationRef::new(
+            Some("space-1"),
+            conversation_id,
+            topic_id,
+            reply_target_message_id,
+        )
+        .expect("conversation"),
         payload,
     )
     .expect("parsed");
@@ -1241,10 +1267,30 @@ async fn observer_records_gate_route_after_approval_prompt() {
     );
     let run_id = TurnRunId::new();
 
+    // A *threaded* prompting event that is itself a reply. Both halves are
+    // load-bearing:
+    //
+    // - the topic (`1700.1`) makes the source branch's key distinguishable from
+    //   the delivered-message loop's, which only ever keys the topic off a
+    //   vendor message ref (`ts-N` here) or leaves it empty. Without a topic the
+    //   two branches produce the same conversation-root key and an assertion on
+    //   it passes no matter what the source branch does.
+    // - the reply target (`1800.2`) is the per-event id the recorded route must
+    //   NOT inherit: a later bare `approve` in the same topic carries a
+    //   different one (or none), and a key that varied with it would never match.
     harness
         .observer
         .observe_ack(
-            user_message_envelope(ProductTriggerReason::DirectChat, "evt-gate"),
+            envelope_for_conversation_replying_to(
+                ProductInboundPayload::UserMessage(
+                    UserMessagePayload::new("hello", Vec::new(), ProductTriggerReason::DirectChat)
+                        .expect("payload"),
+                ),
+                "evt-gate",
+                "conv-1",
+                Some("1700.1"),
+                Some("1800.2"),
+            ),
             accepted_ack(run_id),
         )
         .await;
@@ -1272,16 +1318,126 @@ async fn observer_records_gate_route_after_approval_prompt() {
         !route.delivered_conversation_fingerprints.is_empty(),
         "fingerprints recorded"
     );
-    // The source conversation (bare replies next to the prompt) routes too.
+    // The source topic (bare replies next to the prompt) routes too, keyed by
+    // the topic and WITHOUT the prompting event's reply target. Only the source
+    // branch can produce this key — the delivered loop's topics are vendor
+    // message refs.
     let source_fingerprint =
-        ironclaw_conversations::ExternalConversationRef::new(Some("space-1"), "conv-1", None, None)
+        ExternalConversationRef::new(Some("space-1"), "conv-1", Some("1700.1"), None)
             .expect("conversation")
             .conversation_fingerprint();
+    // Non-vacuity for the membership check below: if the topic did NOT
+    // participate in the fingerprint, `source_fingerprint` would just be the
+    // untargeted conversation's key, which the route records anyway — so the
+    // assertion would pass while proving nothing about topic routing.
+    assert_ne!(
+        source_fingerprint,
+        ExternalConversationRef::new(Some("space-1"), "conv-1", None, None)
+            .expect("conversation")
+            .conversation_fingerprint(),
+        "the conversation topic must participate in the fingerprint"
+    );
     assert!(
         route
             .delivered_conversation_fingerprints
             .contains(&source_fingerprint),
-        "source conversation fingerprint recorded"
+        "a gate route recorded from a threaded reply must still be resolvable by a \
+         bare reply in the same topic that carries no reply target: {:?}",
+        route.delivered_conversation_fingerprints
+    );
+    // The invariant the assertion above leans on, pinned here rather than left
+    // to be re-derived from `conversation_fingerprint`'s body: the fingerprint
+    // is the ROUTE, so it does not vary with the per-event reply target. If that
+    // ever stopped holding, the recording branch would start baking a message id
+    // into a stable key and the failure above would look unrelated to the cause.
+    assert_eq!(
+        ExternalConversationRef::new(Some("space-1"), "conv-1", Some("1700.1"), Some("1800.2"))
+            .expect("conversation")
+            .conversation_fingerprint(),
+        source_fingerprint,
+        "conversation_fingerprint must exclude the reply-target hint"
+    );
+}
+
+#[tokio::test]
+async fn observer_records_gate_route_without_a_vendor_ref_that_cannot_key_a_route() {
+    // `vendor_message_ref` is an unvalidated vendor string, so a channel can
+    // hand back a ref that is not a legal route segment (here: a control
+    // character). The two topic-keyed route variants must then be DROPPED
+    // rather than recorded malformed -- and, crucially, the conversation-root
+    // variants must still be recorded, or one bad ref would silently cost the
+    // gate every route and a bare `approve` would resolve nothing.
+    let harness = build_harness(
+        vec![scripted_state(
+            TurnStatus::BlockedApproval,
+            Some("gate:approval-00000000000000000000000000000001"),
+        )],
+        false,
+        None,
+        Duration::from_millis(40),
+    );
+    harness
+        .adapter
+        .reports
+        .lock()
+        .expect("reports lock")
+        .push_back(DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Sent {
+                vendor_message_ref: Some("ts-\u{7}1".to_string()),
+            }],
+        });
+    let run_id = TurnRunId::new();
+
+    harness
+        .observer
+        .observe_ack(
+            envelope_for_conversation_replying_to(
+                ProductInboundPayload::UserMessage(
+                    UserMessagePayload::new("hello", Vec::new(), ProductTriggerReason::DirectChat)
+                        .expect("payload"),
+                ),
+                "evt-gate-bad-ref",
+                "conv-1",
+                Some("1700.1"),
+                None,
+            ),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let route = harness
+        .route_store
+        .load_delivered_gate_route(
+            &tenant(),
+            &user(),
+            "gate:approval-00000000000000000000000000000001",
+        )
+        .await
+        .expect("route lookup")
+        .expect("gate route recorded");
+    let fingerprint = |space: Option<&str>, topic: Option<&str>| {
+        ExternalConversationRef::new(space, "conv-1", topic, None)
+            .expect("conversation")
+            .conversation_fingerprint()
+    };
+    let mut recorded = route.delivered_conversation_fingerprints.clone();
+    recorded.sort();
+    let mut expected = vec![
+        // Delivered loop, space-qualified conversation root.
+        fingerprint(Some("space-1"), None),
+        // Delivered loop, no-space fallback.
+        fingerprint(None, None),
+        // The prompting (source) conversation, keyed by its own topic.
+        fingerprint(Some("space-1"), Some("1700.1")),
+    ];
+    expected.sort();
+    assert_eq!(
+        recorded, expected,
+        "an unusable vendor message ref drops only the two ref-keyed variants"
+    );
+    assert!(
+        !recorded.iter().any(|entry| entry.contains('\u{7}')),
+        "a vendor ref that is not a legal external id must never reach a route key: {recorded:?}"
     );
 }
 

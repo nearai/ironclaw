@@ -5,6 +5,10 @@ use std::sync::Mutex;
 
 use chrono::Utc;
 use ironclaw_host_api::ids::{CapabilityId, ProviderToolName, ThreadId, UserId};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
+    SourceBindingRef, TurnActor, TurnId, TurnRunId, TurnScope,
+};
 use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, ProductAdapterError, ProductAdapterId,
     ProductOutboundTarget, ProjectionCursor,
@@ -20,9 +24,8 @@ use ironclaw_threads::{
     InMemorySessionThreadService, MessageContent, ToolResultSafeSummary,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, EventCursor, ExternalToolCatalog, InMemoryExternalToolCatalog,
-    PendingExternalCall, ReplyTargetBindingRef, ResumeTurnResponse, RunProfileId,
-    RunProfileVersion, SourceBindingRef, TurnActor, TurnId, TurnRunId, TurnRunState, TurnScope,
+    ExternalToolCatalog, InMemoryExternalToolCatalog, PendingExternalCall, ResumeTurnResponse,
+    TurnRunState,
 };
 
 #[tokio::test]
@@ -535,11 +538,12 @@ fn openai_compat_resume_scope_preserves_actor_owner_boundary() {
 
 #[test]
 fn external_tool_resume_idempotency_key_is_stable_and_gate_scoped() {
-    let gate_ref = ironclaw_turns::GateRef::new("gate:external_tool-call-a").expect("gate ref");
+    let gate_ref =
+        ironclaw_host_api::turn::TurnGateRef::new("gate:external_tool-call-a").expect("gate ref");
     let same_gate_ref =
-        ironclaw_turns::GateRef::new("gate:external_tool-call-a").expect("gate ref");
+        ironclaw_host_api::turn::TurnGateRef::new("gate:external_tool-call-a").expect("gate ref");
     let other_gate_ref =
-        ironclaw_turns::GateRef::new("gate:external_tool-call-b").expect("gate ref");
+        ironclaw_host_api::turn::TurnGateRef::new("gate:external_tool-call-b").expect("gate ref");
 
     let first =
         openai_compat_external_tool_resume_idempotency_key(&gate_ref).expect("idempotency key");
@@ -653,8 +657,10 @@ impl ResponseReaderFixture {
             public_id: OpenAiResponseId::new("resp_test").expect("response id"),
             actor_scope: self.actor_scope.clone(),
             accepted_ack: Some(ProductInboundAck::Accepted {
-                accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("accepted:test")
-                    .expect("accepted ref"),
+                accepted_message_ref: ironclaw_host_api::turn::AcceptedMessageRef::new(
+                    "accepted:test",
+                )
+                .expect("accepted ref"),
                 submitted_run_id: run_id,
             }),
             requested_model: "reborn-test".to_string(),
@@ -1166,8 +1172,8 @@ fn provider_view(
     default_model: &str,
     active: bool,
     active_model: Option<&str>,
-) -> ironclaw_product::LlmProviderView {
-    ironclaw_product::LlmProviderView {
+) -> ironclaw_product_contracts::operator_llm::LlmProviderView {
+    ironclaw_product_contracts::operator_llm::LlmProviderView {
         id: id.to_string(),
         description: String::new(),
         adapter: "open_ai_completions".to_string(),
@@ -1185,17 +1191,19 @@ fn provider_view(
 
 #[test]
 fn model_entries_list_active_first_then_providers_deduped() {
-    let snapshot = ironclaw_product::LlmConfigSnapshot {
+    let snapshot = ironclaw_product_contracts::operator_llm::LlmConfigSnapshot {
         providers: vec![
             provider_view("openai", "gpt-4o", true, Some("gpt-4o")),
             provider_view("anthropic", "claude-opus-4", false, None),
             // Duplicate model id (same default) must not be listed twice.
             provider_view("openai-mirror", "gpt-4o", false, None),
         ],
-        active: Some(ironclaw_product::LlmActiveSelection {
-            provider_id: "openai".to_string(),
-            model: Some("gpt-4o".to_string()),
-        }),
+        active: Some(
+            ironclaw_product_contracts::operator_llm::LlmActiveSelection {
+                provider_id: "openai".to_string(),
+                model: Some("gpt-4o".to_string()),
+            },
+        ),
     };
 
     let entries = model_entries_from_snapshot(&snapshot);
@@ -1209,7 +1217,7 @@ fn model_entries_list_active_first_then_providers_deduped() {
 
 #[test]
 fn model_entries_fall_back_to_default_model_when_no_active_selection() {
-    let snapshot = ironclaw_product::LlmConfigSnapshot {
+    let snapshot = ironclaw_product_contracts::operator_llm::LlmConfigSnapshot {
         providers: vec![provider_view("anthropic", "claude-opus-4", false, None)],
         active: None,
     };

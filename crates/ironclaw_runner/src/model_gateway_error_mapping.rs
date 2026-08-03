@@ -1,4 +1,4 @@
-use ironclaw_turns::run_profile::{AgentLoopHostError, LoopModelGatewayError, LoopSafeSummary};
+use ironclaw_loop_contracts::{AgentLoopHostError, LoopModelGatewayError, LoopSafeSummary};
 
 /// Canonical conversion at the host-model gateway boundary.
 ///
@@ -64,7 +64,7 @@ pub(crate) fn host_error_to_model_gateway_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_turns::run_profile::AgentLoopHostErrorKind;
+    use ironclaw_loop_contracts::AgentLoopHostErrorKind;
 
     #[test]
     fn existing_detail_is_rescrubbed_and_preserved() {
@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn failed_model_usage_survives_the_gateway_boundary() {
-        let usage = ironclaw_turns::run_profile::LoopModelUsage {
+        let usage = ironclaw_loop_contracts::LoopModelUsage {
             input_tokens: 11,
             output_tokens: 7,
             ..Default::default()

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use ironclaw_turns::ReplyTargetBindingRef;
+use ironclaw_host_api::turn::ReplyTargetBindingRef;
 
 use crate::{
     AdvanceSubscriptionCursorRequest, CommunicationPreferenceRecord, DeliveryDefaultScope,
@@ -118,7 +118,7 @@ pub(crate) fn validate_delivery_attempt(
 }
 
 pub(crate) fn validate_delivery_scope_candidate(
-    scope: &ironclaw_turns::TurnScope,
+    scope: &ironclaw_host_api::turn::TurnScope,
     candidate: &crate::OutboundPushCandidate,
 ) -> Result<(), OutboundError> {
     if scope.tenant_id != candidate.tenant_id

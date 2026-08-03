@@ -1,17 +1,17 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::ids::ThreadId;
-use ironclaw_safety::{InjectionScanner, LeakDetector, LeakScanner, Sanitizer};
-use ironclaw_threads::{
-    CreateSummaryArtifactRequest, MessageContent, MessageKind, MessageStatus, SessionThreadService,
-    SummaryKind, SummaryModelContextPolicy, ThreadMessageRangeRequest, ThreadScope,
-};
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome, LoopCompactionPort,
     LoopCompactionRequest, LoopCompactionResponse, LoopSafeSummary, LoopSummaryArtifactId,
     SystemInferenceError, SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
     SystemInferenceResponse, SystemInferenceTaskId, SystemPromptId, SystemPromptSource,
     SystemTaskKind,
+};
+use ironclaw_safety::{InjectionScanner, LeakDetector, LeakScanner, Sanitizer};
+use ironclaw_threads::{
+    CreateSummaryArtifactRequest, MessageContent, MessageKind, MessageStatus, SessionThreadService,
+    SummaryKind, SummaryModelContextPolicy, ThreadMessageRangeRequest, ThreadScope,
 };
 use thiserror::Error;
 

@@ -40,14 +40,12 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
-use ironclaw_host_api::{
-    ids::{AgentId, ProjectId, TenantId, UserId},
-    product_surface::ProductSurface,
-};
 use ironclaw_host_ingress::{
     ProtectedRouteMount, PublicRouteDrains, PublicRouteMount, SplitRouteMount,
 };
+use ironclaw_product_contracts::surface::ProductSurface;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -59,8 +57,10 @@ use crate::webui_operator_auth::{
 };
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
 use crate::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
-use ironclaw_host_api::product_surface::ProductSurfaceCaller;
-use ironclaw_product::mark_bearer_token_verified_for_tenant;
+use ironclaw_host_api::product_adapter::auth::{
+    HostProtocolAuthenticator, mark_bearer_token_verified_for_tenant,
+};
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use serde::Serialize;
 
 /// Default per-request body limit (14 MiB) — sized to cover ~10 MiB of
@@ -750,6 +750,20 @@ struct AuthLayerState {
     operator_routes: OperatorWebuiConfigRouteState,
 }
 
+/// This crate is the host transport that performs bearer/session authentication
+/// — trust stage T1 — so it holds the one production `HostProtocolAuthenticator`
+/// implementation in the workspace, and `reborn_sealed_evidence_mint_ratchet`
+/// keeps it that way.
+///
+/// The impl sits on `AuthLayerState`, which is **private to this module**, so
+/// the grant source is not even nameable outside the crate: the only place a
+/// `HostAuthenticationGrant` can come from is a few lines below, immediately
+/// after `authenticator.authenticate(&token)` returned `Some`. Before WS1.5 the
+/// same mint was reached through `ironclaw_product`'s re-export behind a
+/// `host-auth-mint` cargo feature that cargo's feature unification made
+/// vacuous — see `ironclaw_host_api::product_adapter::auth`.
+impl HostProtocolAuthenticator for AuthLayerState {}
+
 /// Resolve `Authorization: Bearer <token>` for any v2 route, OR the
 /// `?token=…` query parameter only on the v2 SSE stream endpoint
 /// (mirrors the browser's `EventSource` limitation — it cannot set
@@ -803,8 +817,14 @@ async fn authenticate_request(
             state.default_agent_id.clone(),
             state.default_project_id.clone(),
         );
-        let auth_evidence =
-            mark_bearer_token_verified_for_tenant(openai_user_id.as_str(), state.tenant_id.clone());
+        // The grant is minted from `state` — the middleware value that just ran
+        // `authenticate()` — so the evidence cannot be produced by any code path
+        // that did not authenticate the request.
+        let auth_evidence = mark_bearer_token_verified_for_tenant(
+            state.host_authentication_grant(),
+            openai_user_id.as_str(),
+            state.tenant_id.clone(),
+        );
         let caller = match ironclaw_reborn_openai_compat::OpenAiCompatAuthenticatedCaller::new(
             scope,
             auth_evidence,

@@ -1,12 +1,14 @@
 //! Filesystem-backed product workflow [`IdempotencyLedger`] storage adapters.
 
+use ironclaw_product_contracts::action::ActionFingerprintKey;
+
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::{
-    ActionFingerprintKey, ActionPhase, IdempotencyDecision, IdempotencyLedger,
-    ProductInboundAction, ProductSurfaceFailure,
+    ActionPhase, IdempotencyDecision, IdempotencyLedger, ProductInboundAction,
+    ProductSurfaceFailure,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};

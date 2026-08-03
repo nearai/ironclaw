@@ -159,7 +159,7 @@ async fn config_binding_swaps_the_memory_provider_to_mem0_through_the_factory() 
         .as_ref()
         .expect("binding mem0 must register mem0's package");
     assert_eq!(package.manifest.id.as_str(), MEM0_MEMORY_EXTENSION_ID);
-    use ironclaw_host_api::memory::MemoryLifecycleHook;
+    use ironclaw_extension_contracts::memory::MemoryLifecycleHook;
     assert!(
         resolved
             .lifecycle

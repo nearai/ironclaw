@@ -3,12 +3,12 @@
 use chrono::{Duration, Utc};
 use ironclaw_host_api::path::VirtualPath;
 use ironclaw_product::{
-    ActionFingerprintKey, IdempotencyDecision, IdempotencyLedger, ProductInboundAction,
-    ProductSurfaceFailure, SourceBindingKey,
-};
-use ironclaw_product::{
     AdapterInstallationId, ExternalActorRef, ExternalEventId, ProductAdapterId, ProductInboundAck,
 };
+use ironclaw_product::{
+    IdempotencyDecision, IdempotencyLedger, ProductInboundAction, ProductSurfaceFailure,
+};
+use ironclaw_product_contracts::action::{ActionFingerprintKey, SourceBindingKey};
 
 pub fn fingerprint(suffix: &str) -> ActionFingerprintKey {
     fingerprint_for_actor(suffix, "user1")

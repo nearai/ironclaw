@@ -39,6 +39,7 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_approvals: "agent-runtime",
       ironclaw_capabilities: "agent-runtime",
       ironclaw_host_api: "agent-runtime",
+      ironclaw_loop_contracts: "agent-runtime",
       ironclaw_loop_host: "agent-runtime",
 
       ironclaw_runner: "reborn-core",
@@ -51,6 +52,10 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_reborn_composition: "composition-core",
 
       ironclaw_product: "product-workflow",
+      # The product-tier contract crate rides with the product workflow it
+      # describes: a change to the membrane or its DTOs breaks product first.
+      # Buckets group by what a change can break, not by layer.
+      ironclaw_product_contracts: "product-workflow",
 
       ironclaw_attachments: "webui-ingress",
       ironclaw_projects: "webui-ingress",
@@ -100,7 +105,9 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_telegram_extension: "channel-adapters",
       ironclaw_telegram_v2_adapter: "channel-adapters",
 
+      ironclaw_extension_contracts: "extension-operator",
       ironclaw_extension_host: "extension-operator",
+      ironclaw_extension_manager: "extension-operator",
       ironclaw_extensions: "extension-operator",
       ironclaw_operator: "extension-operator",
 

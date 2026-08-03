@@ -438,10 +438,64 @@ async fn credential_refresh_without_refresh_secret_becomes_recoverable_status() 
     assert_eq!(failed.status, CredentialAccountStatus::RefreshFailed);
 }
 
+/// Records the `requester_extension` a caller passes into
+/// `refresh_token_for_requester`, overriding the trait default that silently
+/// discards it and forwards to `refresh_token`. Proves the identity actually
+/// reaches the provider boundary rather than being dropped in transit.
+struct RequesterRecordingProvider {
+    inner: Arc<InMemoryAuthProductServices>,
+    captured_requester: std::sync::Mutex<Option<ExtensionId>>,
+}
+
+impl RequesterRecordingProvider {
+    fn new(inner: Arc<InMemoryAuthProductServices>) -> Self {
+        Self {
+            inner,
+            captured_requester: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn captured_requester(&self) -> Option<ExtensionId> {
+        self.captured_requester.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl AuthProviderClient for RequesterRecordingProvider {
+    async fn exchange_callback(
+        &self,
+        context: ironclaw_auth::OAuthProviderExchangeContext,
+        request: ironclaw_auth::OAuthProviderCallbackRequest,
+    ) -> Result<ironclaw_auth::OAuthProviderExchange, AuthProductError> {
+        self.inner.exchange_callback(context, request).await
+    }
+
+    async fn refresh_token(
+        &self,
+        request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError> {
+        self.inner.refresh_token(request).await
+    }
+
+    async fn refresh_token_for_requester(
+        &self,
+        requester_extension: Option<ExtensionId>,
+        request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError> {
+        *self.captured_requester.lock().unwrap() = requester_extension;
+        self.inner.refresh_token(request).await
+    }
+}
+
 #[tokio::test]
 async fn provider_backed_refresh_preserves_requester_for_authorized_extensions() {
     let services = Arc::new(InMemoryAuthProductServices::new());
-    let auth = provider_backed_auth(services.clone());
+    let recording_provider = Arc::new(RequesterRecordingProvider::new(services.clone()));
+    let auth = Arc::new(ProviderBackedCredentialAccountService::new(
+        services.clone(),
+        services.clone(),
+        recording_provider.clone() as Arc<dyn AuthProviderClient>,
+    ));
     let owner = scope("alice");
     let extension_owned = ExtensionId::new("github-extension-owned").unwrap();
     let shared_admin = ExtensionId::new("github-shared-admin").unwrap();
@@ -485,6 +539,12 @@ async fn provider_backed_refresh_preserves_requester_for_authorized_extensions()
             .map(|account| account.id),
         Some(extension_account.id)
     );
+    assert_eq!(
+        recording_provider.captured_requester(),
+        Some(extension_owned.clone()),
+        "the account's owner_extension must reach refresh_token_for_requester, \
+         proving the caller does not fall through the identity-discarding default"
+    );
 
     let shared_account = auth
         .create_account(NewCredentialAccount {
@@ -524,6 +584,12 @@ async fn provider_backed_refresh_preserves_requester_for_authorized_extensions()
             .selected_account()
             .map(|account| account.id),
         Some(shared_account.id)
+    );
+    assert_eq!(
+        recording_provider.captured_requester(),
+        None,
+        "a shared-admin-managed account is never requester-scoped, even when the \
+         resume request names an extension"
     );
 }
 

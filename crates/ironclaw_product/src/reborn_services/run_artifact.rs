@@ -5,6 +5,8 @@
 //! selection, replay metadata reconstruction, and redaction rules live here so
 //! other callers cannot grow parallel definitions of a trajectory.
 
+use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewProvider};
+
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
@@ -21,12 +23,13 @@ use serde::{Deserialize, Serialize};
 use super::{
     OPERATOR_LOGS_MAX_LIMIT, ProductCapabilityInvoker, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornLogEntry, RebornLogQueryRequest, RebornServices,
-    RebornViewDescriptor, RebornViewProvider, bounded_log_query, map_thread_error,
-    parse_run_id_field, parse_thread_id_field,
+    bounded_log_query, map_thread_error, parse_run_id_field, parse_thread_id_field,
 };
-use ironclaw_host_api::product_surface::{
+use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
 };
+
+pub use ironclaw_product_contracts::product_wire::RebornRunArtifactRequest;
 
 pub const RUN_ARTIFACT_SCHEMA: &str = "ironclaw.run_artifact.v1";
 pub const RUN_ARTIFACT_VIEW: RebornViewDescriptor = RebornViewDescriptor {
@@ -34,12 +37,6 @@ pub const RUN_ARTIFACT_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     paginated: false,
 };
 pub(super) const ARTIFACT_REDACTION_PIPELINE: &str = "deterministic-trace-redactor-v1";
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornRunArtifactRequest {
-    pub thread_id: String,
-    pub run_id: String,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornRunArtifact {

@@ -7,16 +7,14 @@ use ironclaw_host_api::{
     resolution::Resolution,
 };
 use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
+use ironclaw_loop_contracts::{
+    InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopRequest, LoopRunContext,
+    ProviderToolCall, RunProfileResolutionRequest, RunProfileResolver, VisibleCapabilityRequest,
+};
 use ironclaw_loop_host::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
-use ironclaw_turns::{
-    RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
-    run_profile::{
-        InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopRequest, LoopRunContext,
-        ProviderToolCall, VisibleCapabilityRequest,
-    },
-};
+use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
 use super::{
     ExtensionCapabilitySurfaceSource, RefreshingLoopCapabilityPortFactory, StagedCapabilityIo,

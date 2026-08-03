@@ -4,24 +4,27 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_conversations::{
-    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
-    AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind, ConditionalUnpairOutcome,
-    ConversationBindingResolution, ConversationBindingService, ConversationRouteKind,
-    ExpectedExternalActorOwner, ExternalActorBindingEpoch, ExternalActorRef,
-    ExternalConversationIdentity, ExternalConversationRef, ExternalEventId,
-    InMemoryConversationServices, InboundMessageContentRef, InboundTurnError, InboundTurnRequest,
-    InboundTurnService, LinkConversationRequest, LinkedConversationBinding,
-    MessageIdempotencyStatus, ReplyTargetBinding, ResolveStoredReplyTargetRequest,
-    SessionThreadService, StoredReplyTargetAccess, ThreadAccessDecision,
+    AcceptConversationMessageRequest, AcceptedConversationMessage,
+    AcceptedConversationMessageLookup, AcceptedConversationMessageReplay, AdapterInstallationId,
+    AdapterKind, ConditionalUnpairOutcome, ConversationBindingResolution,
+    ConversationBindingService, ConversationRouteKind, ExpectedExternalActorOwner,
+    ExternalActorBindingEpoch, ExternalConversationIdentity, ExternalEventId,
+    InMemoryConversationServices, InboundConversationService, InboundMessageContentRef,
+    InboundTurnError, InboundTurnRequest, InboundTurnService, LinkConversationRequest,
+    LinkedConversationBinding, MessageIdempotencyStatus, ReplyTargetBinding,
+    ResolveStoredReplyTargetRequest, StoredReplyTargetAccess, ThreadAccessDecision,
     ValidateReplyTargetRequest,
 };
+use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileId, RunProfileRequest,
+    RunProfileVersion, SourceBindingRef, TurnActor, TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
-    ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
-    RetryTurnResponse, RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor, TurnCoordinator, TurnError,
-    TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
+    RetryTurnRequest, RetryTurnResponse, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
+    TurnCoordinator, TurnError, TurnRunState,
 };
 
 #[tokio::test]
@@ -1181,7 +1184,7 @@ async fn external_ref_keying_cannot_be_collided_with_delimiter_characters() {
             tenant(),
             telegram(),
             default_installation(),
-            ExternalActorRef::new("user;id=x", "y").unwrap(),
+            ExternalActorRef::new("user;id=x", "y", None::<String>).unwrap(),
             user("alice"),
         )
         .await;
@@ -1189,7 +1192,7 @@ async fn external_ref_keying_cannot_be_collided_with_delimiter_characters() {
     let colliding_actor = services
         .resolve_or_create_binding(resolve_request(
             telegram(),
-            ExternalActorRef::new("user", "x;id=y").unwrap(),
+            ExternalActorRef::new("user", "x;id=y", None::<String>).unwrap(),
             external_conversation("chat-1", None),
             "actor-collision-event",
         ))
@@ -1303,11 +1306,15 @@ async fn per_message_external_ids_do_not_fork_conversation_bindings() {
         .await
         .unwrap();
     assert_eq!(
-        first_target.external_conversation_ref.message_id(),
+        first_target
+            .external_conversation_ref
+            .reply_target_message_id(),
         Some("message-1")
     );
     assert_eq!(
-        second_target.external_conversation_ref.message_id(),
+        second_target
+            .external_conversation_ref
+            .reply_target_message_id(),
         Some("message-2")
     );
     assert_eq!(coordinator.submissions().len(), 2);
@@ -1449,11 +1456,11 @@ async fn validated_reply_target_preserves_adapter_installation_and_external_rout
         "channel-1"
     );
     assert_eq!(
-        target.external_conversation_ref.thread_id(),
+        target.external_conversation_ref.topic_id(),
         Some("thread-1")
     );
     assert_eq!(
-        target.external_conversation_ref.message_id(),
+        target.external_conversation_ref.reply_target_message_id(),
         None,
         "binding-level reply targets must not preserve stale per-message routing"
     );
@@ -2302,7 +2309,7 @@ async fn direct_route_rejects_borrowed_owner_actor_key() {
     assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
 
     let err = services
-        .accept_inbound_message(AcceptInboundMessageRequest {
+        .accept_inbound_message(AcceptConversationMessageRequest {
             tenant_id: tenant(),
             thread_id: resolution.turn_scope.thread_id,
             actor: TurnActor::new(user("bob")),
@@ -2501,7 +2508,7 @@ async fn shared_route_rejects_wrong_adapter_context() {
     assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
 
     let err = services
-        .accept_inbound_message(AcceptInboundMessageRequest {
+        .accept_inbound_message(AcceptConversationMessageRequest {
             tenant_id: tenant(),
             thread_id: resolution.turn_scope.thread_id,
             actor: resolution.actor,
@@ -2938,7 +2945,7 @@ async fn accept_inbound_message_rejects_stale_message_scoped_reply_ref() {
     inbound.handle_inbound_turn(widen).await.unwrap();
 
     let err = services
-        .accept_inbound_message(AcceptInboundMessageRequest {
+        .accept_inbound_message(AcceptConversationMessageRequest {
             tenant_id: tenant(),
             thread_id: first.resolution.turn_scope.thread_id,
             actor: first.resolution.actor,
@@ -2986,7 +2993,7 @@ async fn message_scoped_reply_target_rejects_same_thread_different_actor_route()
         .await
         .unwrap();
     let accepted = services
-        .accept_inbound_message(AcceptInboundMessageRequest {
+        .accept_inbound_message(AcceptConversationMessageRequest {
             tenant_id: tenant(),
             thread_id: resolution.turn_scope.thread_id.clone(),
             actor: resolution.actor,
@@ -3096,7 +3103,7 @@ async fn accept_inbound_message_rejects_external_route_mismatch() {
         .unwrap();
 
     let err = services
-        .accept_inbound_message(AcceptInboundMessageRequest {
+        .accept_inbound_message(AcceptConversationMessageRequest {
             tenant_id: tenant(),
             thread_id: resolution.turn_scope.thread_id,
             actor: resolution.actor,
@@ -3141,7 +3148,7 @@ async fn duplicate_accept_rejects_external_route_mismatch() {
         .unwrap();
 
     services
-        .accept_inbound_message(AcceptInboundMessageRequest {
+        .accept_inbound_message(AcceptConversationMessageRequest {
             tenant_id: tenant(),
             thread_id: resolution.turn_scope.thread_id.clone(),
             actor: resolution.actor.clone(),
@@ -3162,7 +3169,7 @@ async fn duplicate_accept_rejects_external_route_mismatch() {
         .unwrap();
 
     let err = services
-        .accept_inbound_message(AcceptInboundMessageRequest {
+        .accept_inbound_message(AcceptConversationMessageRequest {
             tenant_id: tenant(),
             thread_id: resolution.turn_scope.thread_id,
             actor: resolution.actor,
@@ -3217,7 +3224,7 @@ async fn accept_inbound_message_rejects_mixed_source_and_reply_bindings() {
         .unwrap();
 
     let err = services
-        .accept_inbound_message(AcceptInboundMessageRequest {
+        .accept_inbound_message(AcceptConversationMessageRequest {
             tenant_id: tenant(),
             thread_id: first.turn_scope.thread_id,
             actor: first.actor,
@@ -3249,16 +3256,32 @@ fn serde_deserialization_revalidates_external_ref_invariants() {
     assert!(serde_json::from_str::<InboundMessageContentRef>("\"\"").is_err());
     assert!(serde_json::from_str::<ExternalActorBindingEpoch>("\"\"").is_err());
     assert!(serde_json::from_str::<ExternalActorBindingEpoch>("\"bad\\u0000epoch\"").is_err());
+    // The external actor/conversation pair is now the canonical
+    // `ironclaw_extension_contracts` type, so these invariants are asserted
+    // against that type's field spelling (`topic_id` /
+    // `reply_target_message_id`). The *durable* spelling this crate's own
+    // records use — which still accepts the pre-unification `thread_id` /
+    // `message_id` — is pinned by `stored_refs::tests`.
     assert!(serde_json::from_str::<ExternalActorRef>(r#"{"kind":"user","id":""}"#).is_err());
-    assert!(serde_json::from_str::<ExternalConversationRef>(
-        r#"{"space_id":null,"conversation_id":"chat-1","thread_id":"ok","message_id":"bad\u0001"}"#
-    )
-    .is_err());
     assert!(
-        serde_json::from_str::<ExternalConversationIdentity>(
-            r#"{"space_id":null,"conversation_id":"","thread_id":null}"#
+        serde_json::from_str::<ExternalConversationRef>(
+            r#"{"space_id":null,"conversation_id":"chat-1","topic_id":"ok","reply_target_message_id":"bad\u0001"}"#
         )
         .is_err()
+    );
+    assert!(
+        serde_json::from_str::<ExternalConversationIdentity>(
+            r#"{"space_id":null,"conversation_id":"","topic_id":null}"#
+        )
+        .is_err()
+    );
+    // The route identity keeps reading the pre-unification `thread_id` key, so
+    // durable binding keys written by released builds resolve unchanged.
+    assert!(
+        serde_json::from_str::<ExternalConversationIdentity>(
+            r#"{"space_id":null,"conversation_id":"chat-1","thread_id":"topic-9"}"#
+        )
+        .is_ok()
     );
 }
 
@@ -3439,7 +3462,7 @@ fn default_installation() -> AdapterInstallationId {
 }
 
 fn external_actor(id: &str) -> ExternalActorRef {
-    ExternalActorRef::new("user", id).unwrap()
+    ExternalActorRef::new("user", id, None::<String>).unwrap()
 }
 
 fn external_conversation(
@@ -3451,7 +3474,7 @@ fn external_conversation(
 
 struct FixedMessageSessionService {
     message_ref: AcceptedMessageRef,
-    accepted: Mutex<Option<AcceptedInboundMessage>>,
+    accepted: Mutex<Option<AcceptedConversationMessage>>,
     submitted: Mutex<Option<SubmitTurnResponse>>,
 }
 
@@ -3466,18 +3489,18 @@ impl FixedMessageSessionService {
 }
 
 #[async_trait]
-impl SessionThreadService for FixedMessageSessionService {
+impl InboundConversationService for FixedMessageSessionService {
     async fn accept_inbound_message(
         &self,
-        request: AcceptInboundMessageRequest,
-    ) -> Result<AcceptedInboundMessage, InboundTurnError> {
+        request: AcceptConversationMessageRequest,
+    ) -> Result<AcceptedConversationMessage, InboundTurnError> {
         let mut accepted = self.accepted.lock().unwrap();
         if let Some(existing) = accepted.clone() {
             let mut duplicate = existing;
             duplicate.idempotency = MessageIdempotencyStatus::Duplicate;
             return Ok(duplicate);
         }
-        let message = AcceptedInboundMessage {
+        let message = AcceptedConversationMessage {
             tenant_id: request.tenant_id,
             thread_id: request.thread_id,
             actor: request.actor,
@@ -3494,8 +3517,8 @@ impl SessionThreadService for FixedMessageSessionService {
 
     async fn replay_accepted_inbound_message(
         &self,
-        _lookup: AcceptedInboundMessageLookup,
-    ) -> Result<Option<AcceptedInboundMessageReplay>, InboundTurnError> {
+        _lookup: AcceptedConversationMessageLookup,
+    ) -> Result<Option<AcceptedConversationMessageReplay>, InboundTurnError> {
         Ok(None)
     }
 
@@ -3824,7 +3847,7 @@ impl TurnCoordinator for BusyFirstUniqueKeyCoordinator {
             return Err(TurnError::ThreadBusy(ThreadBusy {
                 active_run_id: TurnRunId::new(),
                 status: TurnStatus::Running,
-                event_cursor: ironclaw_turns::events::EventCursor(1),
+                event_cursor: ironclaw_host_api::turn::EventCursor(1),
             }));
         }
         Ok(accepted_response(request))
@@ -3926,12 +3949,12 @@ impl TurnCoordinator for RecordingTurnCoordinator {
 
 fn accepted_response(request: SubmitTurnRequest) -> SubmitTurnResponse {
     SubmitTurnResponse::Accepted {
-        turn_id: ironclaw_turns::TurnId::new(),
+        turn_id: ironclaw_host_api::turn::TurnId::new(),
         run_id: TurnRunId::new(),
         status: TurnStatus::Queued,
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
-        event_cursor: ironclaw_turns::events::EventCursor(1),
+        event_cursor: ironclaw_host_api::turn::EventCursor(1),
         accepted_message_ref: request.accepted_message_ref,
         reply_target_binding_ref: request.reply_target_binding_ref,
     }

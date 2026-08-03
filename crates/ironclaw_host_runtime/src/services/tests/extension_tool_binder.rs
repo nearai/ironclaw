@@ -5,12 +5,10 @@
 
 use std::collections::BTreeSet;
 
-use ironclaw_host_api::{
-    path::VirtualPath,
-    runtime::TrustClass,
-    tool_adapter::{ToolCall, ToolCallResources, ToolError, ToolPorts},
-    trust::RequestedTrustClass,
+use ironclaw_extension_contracts::tool_adapter::{
+    ToolCall, ToolCallResources, ToolError, ToolPorts,
 };
+use ironclaw_host_api::{path::VirtualPath, runtime::TrustClass, trust::RequestedTrustClass};
 
 use super::super::ExtensionToolBindError;
 use super::*;

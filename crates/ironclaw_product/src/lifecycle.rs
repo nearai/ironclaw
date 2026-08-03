@@ -6,92 +6,25 @@
 //! the owning interaction.
 
 use async_trait::async_trait;
-use ironclaw_host_api::{
-    ids::{AgentId, ProjectId, TenantId, UserId},
-    product_surface::{ProductSurfaceError, ProductSurfaceErrorCode},
-    state::InstallationState,
+use ironclaw_extension_contracts::state::InstallationState;
+use ironclaw_product_contracts::lifecycle_service::{
+    LifecycleProductContext, LifecycleProductService,
 };
-use serde::Serialize;
+use ironclaw_product_contracts::surface::{ProductSurfaceError, ProductSurfaceErrorCode};
 
-use crate::ProductCommandContext;
-
-pub use ironclaw_host_api::package_lifecycle::{
-    ChannelConnectionRequirement, LifecycleBlockerRef, LifecycleChannelDirections,
-    LifecycleCommandKind, LifecycleExtensionCredentialRequirement,
-    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstallScope,
-    LifecycleInstalledExtensionSummary, LifecyclePackageId, LifecyclePackageKind,
-    LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, LifecycleSkillSource,
-    LifecycleSkillSummary, project_public_lifecycle_states, public_lifecycle_response_json,
+pub use ironclaw_extension_contracts::lifecycle_id::{LifecycleBlockerRef, LifecyclePackageId};
+pub use ironclaw_product_contracts::package_lifecycle::{
+    ChannelConnectionRequirement, LifecycleChannelDirections, LifecycleCommandKind,
+    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
+    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
+    LifecycleExtensionSummary, LifecycleInstallScope, LifecycleInstalledExtensionSummary,
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload,
+    LifecycleProductResponse, LifecycleReadinessBlocker, LifecycleSearchExtensionSummary,
+    LifecycleSkillSource, LifecycleSkillSummary, project_public_lifecycle_states,
+    public_lifecycle_response_json,
 };
 
 const LIFECYCLE_REF_MAX_BYTES: usize = 512;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct LifecycleProductSurfaceContext {
-    pub tenant_id: TenantId,
-    pub user_id: UserId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<AgentId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<ProjectId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "source", rename_all = "snake_case")]
-pub enum LifecycleProductContext {
-    Command(Box<ProductCommandContext>),
-    Surface(LifecycleProductSurfaceContext),
-}
-
-#[async_trait]
-pub trait LifecycleProductService: Send + Sync {
-    async fn execute(
-        &self,
-        context: LifecycleProductContext,
-        action: LifecycleProductAction,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceError>;
-
-    async fn project_package(
-        &self,
-        context: LifecycleProductContext,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceError>;
-
-    /// Import a standalone extension from an uploaded bundle (zip bytes) — the
-    /// WebUI "Install Tool" path. Default is unavailable; only the local runtime
-    /// service implements it.
-    async fn import_extension_bundle(
-        &self,
-        _context: LifecycleProductContext,
-        _bundle: Vec<u8>,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
-        Err(ProductSurfaceError::from_status(
-            ProductSurfaceErrorCode::InvalidRequest,
-            400,
-            false,
-        ))
-    }
-
-    /// Redacted activation error for each installed extension whose activation
-    /// failed, keyed by extension id — sourced from the durable installation
-    /// record's typed `last_error`. The extensions-list service threads this
-    /// into `RebornExtensionInfo::activation_error` so a failed extension shows
-    /// *why* it failed instead of collapsing to a bare `installed`/`failed`
-    /// state with no reason.
-    ///
-    /// Default: none. A service that does not surface durable installation
-    /// errors reports no reason and the wire's `activation_error` stays absent;
-    /// the production extension-host service overrides this to read the
-    /// installation records' `last_error`.
-    async fn installed_activation_errors(
-        &self,
-        _context: LifecycleProductContext,
-    ) -> Result<std::collections::HashMap<String, String>, ProductSurfaceError> {
-        Ok(std::collections::HashMap::new())
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct UnsupportedLifecycleProductService {

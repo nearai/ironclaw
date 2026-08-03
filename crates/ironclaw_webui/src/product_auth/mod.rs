@@ -51,16 +51,17 @@ use ironclaw_host_api::ingress::{
 };
 use ironclaw_host_api::{
     ids::{AgentId, ExtensionId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
-    product_surface::{
-        BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
-        ProductSurfaceQueryRequest,
-    },
     resource::ResourceScope,
 };
 use ironclaw_host_ingress::SplitRouteMount;
-use ironclaw_product::{
-    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, LifecyclePackageKind, RebornExtensionCredentialSetup,
-    RebornExtensionListResponse, RebornSetupExtensionResponse,
+use ironclaw_product::{EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, RebornExtensionListResponse};
+use ironclaw_product_contracts::package_lifecycle::LifecyclePackageKind;
+use ironclaw_product_contracts::product_wire::{
+    RebornExtensionCredentialSetup, RebornSetupExtensionResponse,
+};
+use ironclaw_product_contracts::surface::{
+    BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
+    ProductSurfaceQueryRequest,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -1829,6 +1830,7 @@ mod tests {
                 scope: scope.clone(),
                 kind: AuthFlowKind::IntegrationCredential,
                 provider: provider.clone(),
+                requester_extension: None,
                 challenge: AuthChallenge::SetupRequired {
                     provider: provider.clone(),
                     message: "route reconciliation test".to_string(),
@@ -1961,6 +1963,7 @@ mod tests {
                 scope: scope.clone(),
                 kind: AuthFlowKind::IntegrationCredential,
                 provider: AuthProviderId::new("route-reconcile-terminal").expect("provider"),
+                requester_extension: None,
                 challenge: AuthChallenge::SetupRequired {
                     provider: AuthProviderId::new("route-reconcile-terminal").expect("provider"),
                     message: "terminal route reconciliation test".to_string(),
@@ -2167,6 +2170,7 @@ mod tests {
             vendor: "vendorco".to_string(),
             recipe: serde_json::from_value(recipe).expect("test recipe parses"),
             token_exchange_resource: resource.map(str::to_string),
+            protected_resource_metadata_url: None,
         }
     }
 
@@ -2178,7 +2182,7 @@ mod tests {
         async fn resolve(
             &self,
             _vendor: &str,
-            _credentials: &ironclaw_host_api::recipe::RecipeClientCredentials,
+            _credentials: &ironclaw_extension_contracts::recipe::RecipeClientCredentials,
         ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, AuthProductError> {
             Ok(ironclaw_auth::EngineOAuthClientMaterial {
                 client_id: ironclaw_auth::OAuthClientId::new("vendorco-client-id")?,
@@ -2192,9 +2196,21 @@ mod tests {
         egress: Arc<dyn RuntimeHttpEgress>,
         secret_store: Arc<dyn SecretStorePort>,
     ) -> Arc<ironclaw_auth::AuthEngine> {
+        test_engine_with_resolver(
+            Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![recipe])),
+            egress,
+            secret_store,
+        )
+    }
+
+    fn test_engine_with_resolver(
+        recipes: Arc<dyn ironclaw_auth::AuthRecipeResolver>,
+        egress: Arc<dyn RuntimeHttpEgress>,
+        secret_store: Arc<dyn SecretStorePort>,
+    ) -> Arc<ironclaw_auth::AuthEngine> {
         Arc::new(ironclaw_auth::AuthEngine::new(
             ironclaw_auth::AuthEngineDeps {
-                recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![recipe])),
+                recipes,
                 client_credentials: Arc::new(StaticTestCredentials),
                 egress,
                 secret_store,
@@ -2205,6 +2221,43 @@ mod tests {
                 dcr_client_name: "Ironclaw".to_string(),
             },
         ))
+    }
+
+    #[derive(Debug)]
+    struct RequesterBoundTestResolver {
+        requester: ExtensionId,
+        recipe: ironclaw_auth::ResolvedVendorAuthRecipe,
+        calls: Mutex<Vec<(Option<ExtensionId>, String)>>,
+    }
+
+    impl RequesterBoundTestResolver {
+        fn new(requester: ExtensionId, recipe: ironclaw_auth::ResolvedVendorAuthRecipe) -> Self {
+            Self {
+                requester,
+                recipe,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<(Option<ExtensionId>, String)> {
+            self.calls.lock().expect("resolver calls lock").clone()
+        }
+    }
+
+    #[async_trait]
+    impl ironclaw_auth::AuthRecipeResolver for RequesterBoundTestResolver {
+        async fn resolve(
+            &self,
+            requester_extension: Option<&ExtensionId>,
+            vendor: &str,
+        ) -> Option<ironclaw_auth::ResolvedVendorAuthRecipe> {
+            self.calls
+                .lock()
+                .expect("resolver calls lock")
+                .push((requester_extension.cloned(), vendor.to_string()));
+            (requester_extension == Some(&self.requester) && vendor == self.recipe.vendor)
+                .then(|| self.recipe.clone())
+        }
     }
 
     /// A recipe without `client_credentials` declares dynamic client
@@ -2289,8 +2342,13 @@ mod tests {
         let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
         let provider_client: Arc<dyn AuthProviderClient> = shared.clone();
         let cleanup_service: Arc<dyn SecretCleanupService> = shared.clone();
-        let engine = test_engine(
+        let requester_extension = ExtensionId::new("vendorco-tools").expect("extension");
+        let resolver = Arc::new(RequesterBoundTestResolver::new(
+            requester_extension.clone(),
             test_vendor_recipe(true, None),
+        ));
+        let engine = test_engine_with_resolver(
+            resolver.clone(),
             Arc::new(PanickingDcrEgress),
             Arc::new(SecretStore::ephemeral()),
         );
@@ -2357,6 +2415,11 @@ mod tests {
             .expect("flow lookup")
             .expect("flow");
         assert!(flow.update_binding.is_none());
+        assert_eq!(
+            flow.requester_extension.as_ref(),
+            Some(&requester_extension),
+            "extension setup must persist the manifest-local recipe requester"
+        );
 
         let authorization_url = json["authorization_url"]
             .as_str()
@@ -2405,6 +2468,17 @@ mod tests {
 
         assert_eq!(account.status, CredentialAccountStatus::Configured);
         assert_eq!(account.provider.as_str(), "vendorco");
+        let calls = resolver.calls();
+        assert!(
+            calls.len() >= 2,
+            "start and callback preflight both resolve manifest-local recipes"
+        );
+        assert!(
+            calls.iter().all(|(requester, vendor)| requester.as_ref()
+                == Some(&requester_extension)
+                && vendor == "vendorco"),
+            "manifest-local OAuth must never retry without a requester or under another vendor: {calls:?}"
+        );
     }
 
     /// Restart/replica regression for the durable setup-PKCE port: the
@@ -2421,8 +2495,13 @@ mod tests {
         let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
         let provider_client: Arc<dyn AuthProviderClient> = shared.clone();
         let cleanup_service: Arc<dyn SecretCleanupService> = shared.clone();
-        let engine = test_engine(
+        let requester_extension = ExtensionId::new("vendorco-tools").expect("extension");
+        let resolver = Arc::new(RequesterBoundTestResolver::new(
+            requester_extension.clone(),
             test_vendor_recipe(true, None),
+        ));
+        let engine = test_engine_with_resolver(
+            resolver.clone(),
             Arc::new(PanickingDcrEgress),
             Arc::new(SecretStore::ephemeral()),
         );
@@ -2525,6 +2604,18 @@ mod tests {
         assert!(
             completed_flow.credential_account_id.is_some(),
             "callback should persist an account id"
+        );
+        assert_eq!(
+            completed_flow.requester_extension.as_ref(),
+            Some(&requester_extension),
+            "requester survives route-state restart through durable flow state"
+        );
+        let calls = resolver.calls();
+        assert!(
+            calls.iter().all(|(requester, vendor)| requester.as_ref()
+                == Some(&requester_extension)
+                && vendor == "vendorco"),
+            "reopened callback must resolve only the originating extension recipe: {calls:?}"
         );
     }
 
@@ -2855,10 +2946,10 @@ mod tests {
         {
             let body = match request.url.as_str() {
                 "https://mcp.vendorco.example/mcp/.well-known/oauth-protected-resource" => {
-                    br#"{"authorization_servers":["https://oauth.vendorco.example"]}"#.to_vec()
+                    br#"{"resource":"https://mcp.vendorco.example/mcp","authorization_servers":["https://oauth.vendorco.example"]}"#.to_vec()
                 }
                 "https://oauth.vendorco.example/.well-known/oauth-authorization-server" => {
-                    br#"{"authorization_endpoint":"https://oauth.vendorco.example/authorize","token_endpoint":"https://oauth.vendorco.example/token","registration_endpoint":"https://oauth.vendorco.example/register"}"#.to_vec()
+                    br#"{"issuer":"https://oauth.vendorco.example","authorization_endpoint":"https://oauth.vendorco.example/authorize","token_endpoint":"https://oauth.vendorco.example/token","registration_endpoint":"https://oauth.vendorco.example/register"}"#.to_vec()
                 }
                 "https://oauth.vendorco.example/register" => {
                     br#"{"client_id":"dcr-client"}"#.to_vec()

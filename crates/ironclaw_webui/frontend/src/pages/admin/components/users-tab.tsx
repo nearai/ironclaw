@@ -217,6 +217,7 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
   const {
     users, query, isForbidden, createUser, isCreating, createError,
     resetCreate,
+    hasMore, isLoadingMore, loadMoreError, loadMore,
     updateUser, suspendUser, activateUser,
     isUpdating, updateError, updatingUserId,
     isSuspending, suspendError, suspendingUserId, resetSuspend,
@@ -389,6 +390,30 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
                 />
               )
             )}
+
+        {(hasMore || loadMoreError) && (
+          <div className="mt-4 flex flex-col items-center gap-2 border-t border-iron-700 pt-4">
+            {loadMoreError && (
+              <p
+                className="text-sm text-[var(--v2-danger-text)]"
+                role="alert"
+                data-testid="admin-users-load-more-error"
+              >
+                {adminUserActionErrorMessage(loadMoreError, t)}
+              </p>
+            )}
+            <Button
+              variant="secondary"
+              size="sm"
+              loading={isLoadingMore}
+              disabled={isLoadingMore}
+              data-testid="admin-users-load-more"
+              onClick={loadMore}
+            >
+              {isLoadingMore ? t("common.loading") : t("common.loadMore")}
+            </Button>
+          </div>
+        )}
       </Panel>
 
       <ConfirmDialog

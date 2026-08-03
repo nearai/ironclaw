@@ -92,15 +92,26 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_turns"
-# LLVM 21 reports 9515 / 11179 = 85.11%; raise #6886's covered-line floor to
-# the branch-aware artifact while recalibrating only the incompatible percent.
+# WS1.2 split this crate: `run_profile/**`, the `LoopExit` DTO half, and the
+# checkpoint payload moved to `ironclaw_loop_contracts` (13,951 of 25,356 source
+# lines). The `floor_covered_lines = 9515` numerator captured at 11,179
+# instrumented lines therefore no longer describes this crate — it is
+# structurally unreachable, not a regression — so this entry drops to a
+# percentage floor for one release. `floor_percent` is retained unchanged rather
+# than weakened: the moved half is contract types with roughly the crate's own
+# coverage profile, so the ratio is the invariant that survives a split and the
+# absolute numerator is the one that cannot.
+#
+# OWED IN THE SAME LANE, from this PR's own merged coverage artifact (the
+# same-PR floor-raise workflow at the top of this file, applied to a split
+# rather than to growth): recapture `floor_covered_lines` +
+# `captured_total_lines` here, and add the matching `[[crate]]` entry for
+# `ironclaw_loop_contracts` so the moved lines regain the ratchet they had
+# under this entry. Both numbers must come from the artifact, never an estimate.
 floor_percent = 85.11
-floor_covered_lines = 9515
 tolerance_percent = 0.5
-tolerance_lines = 20
-captured_total_lines = 11179
-captured_date = "2026-07-30"
-rationale = "Protects generated restart, same-thread admission, retry, and process-projection behavior under LLVM 21 source mapping."
+captured_date = "2026-07-31"
+rationale = "Protects generated restart, same-thread admission, retry, and process-projection behavior under LLVM 21 source mapping. Covered-line numerator pending recapture after the WS1.2 contracts split."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 # Additional critical production crates were captured from this PR's first
@@ -149,11 +160,11 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_llm"
-floor_percent = 79.92
-floor_covered_lines = 22566
-captured_total_lines = 28235
+floor_percent = 79.22
+floor_covered_lines = 20885
+captured_total_lines = 26364
 captured_date = "2026-07-31"
-rationale = "Provider retry classification and the complete decorator chain are production-critical; recalibrated after current-main covered-code shrinkage."
+rationale = "Provider retry classification and the complete decorator chain are production-critical; recalibrated for #6964's verified-dead `reasoning` deletion (-1871 instrumented lines) — the dead half carried denser test coverage than the crate average, so deleting it with its tests lowered the percentage."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
@@ -185,11 +196,70 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_extension_host"
-floor_percent = 83.82
-floor_covered_lines = 22271
-captured_total_lines = 26569
-captured_date = "2026-07-31"
-rationale = "Channel ingress deduplication and outbound delivery routing are production-composed; recalibrated after current-main production growth while raising the covered-line floor."
+# WS2.4 split this crate: the extension-management product face — lifecycle
+# capabilities and commands, the lifecycle product service, the
+# admin/operator/skill capability handlers, credential views, the channel-config
+# product projection, and the extension hub — moved to
+# `ironclaw_extension_manager`. The pre-split `floor_covered_lines = 22271`
+# numerator was captured at 26,569 instrumented lines and therefore no longer
+# describes this crate: it is structurally unreachable, not a regression. The
+# ratio is the invariant that survives a split; the absolute numerator is the
+# one that cannot — and both were recaptured in the same PR (below), so unlike
+# the `ironclaw_turns` entry above, no release runs on a percentage floor
+# alone.
+#
+# RECAPTURED from this PR's own merged coverage artifact
+# (`reborn-integration-coverage-merged` from run 30689658637, the first
+# undisturbed run on the merged tip), read through the same
+# `scripts/ci/lib/reborn_coverage_lcov.py` aggregation that enforces this file
+# — not estimated, and not carried forward from the pre-split capture. The
+# covered-line floor returns, so the split costs this crate nothing:
+# 19,907 / 23,467 = 84.83%.
+#
+# The numerator fell 22,271 -> 19,907 and the denominator 26,569 -> 23,467
+# purely because the extension-management product face moved to
+# `ironclaw_extension_manager`; the *ratio* rose 83.82% -> 84.83%, which is the
+# number that survives a split and the reason `floor_percent` is raised here
+# rather than held. The moved lines are re-ratcheted by the sibling entry below,
+# so the two entries together protect strictly more than the single pre-split
+# entry did.
+#
+# Two units are in play and an earlier draft of this comment conflated them, so
+# both are stated. SOURCE lines: `crates/ironclaw_extension_host/src` fell
+# 57,464 -> 47,794 across 92 -> 75 files (-9,670; `git diff --stat` over that
+# path reports 9,683 deletions / 13 insertions), and the new crate ships 9,979
+# across 19 files — the +309 is its `lib.rs`, `ironhub/mod.rs`, and module
+# headers. That ~9.7k source-line figure is what "the split moved" means
+# colloquially, and it is NOT the number this file gates on. INSTRUMENTED lines
+# — the only unit `captured_total_lines` / `floor_covered_lines` speak, and the
+# unit of every number above — moved 3,102 out of the host (26,569 -> 23,467)
+# against the manager's 5,440. Those two do not reconcile to each other or to
+# 9.7k, and are not expected to: LLVM emits coverage regions per executable
+# line, so a file's instrumented count tracks neither its source lines nor its
+# share of a move.
+floor_percent = 84.83
+floor_covered_lines = 19907
+captured_total_lines = 23467
+captured_date = "2026-08-01"
+rationale = "Channel ingress deduplication and outbound delivery routing are production-composed. Recaptured after the WS2.4 extension_manager split moved the product face out."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+
+[[crate]]
+name = "ironclaw_extension_manager"
+# The other half of the WS2.4 split. Added in the same PR that created the
+# crate so the moved lines never spend a release un-ratcheted — the gap the
+# `ironclaw_turns` / WS1.2 entry above had to leave open, closed here because
+# this PR's own artifact was available before merge.
+#
+# Captured from the same merged artifact: 4,602 / 5,440 = 84.60%. Both halves
+# land within 0.3pp of each other, which is the evidence that the split was
+# behavior-free at the coverage level: a move that dropped tests would show as
+# one half sagging.
+floor_percent = 84.60
+floor_covered_lines = 4602
+captured_total_lines = 5440
+captured_date = "2026-08-01"
+rationale = "The extension-management product face: lifecycle capabilities and commands, the LifecycleProductService the WebUI routes through, and the admin/operator capability handlers are production-composed."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]

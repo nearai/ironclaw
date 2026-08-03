@@ -8,35 +8,56 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    marker::PhantomData,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{Arc, Mutex as StdMutex, Weak},
     time::Duration,
 };
 
+use ironclaw_product_contracts::admin_users::{
+    ADMIN_USER_LIST_DEFAULT_LIMIT, ADMIN_USER_LIST_MAX_LIMIT, AdminCreateUserFields,
+    AdminUserError, AdminUserRecord, AdminUserService, AdminUserStatus,
+};
+use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
+use ironclaw_product_contracts::lifecycle_service::{
+    LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
+};
+use ironclaw_product_contracts::operator_llm::{
+    ActiveModelReader, CodexLoginStart, LlmConfigService, LlmConfigSnapshot, LlmModelsResult,
+    LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, UpsertLlmProviderRequest,
+};
+use ironclaw_product_contracts::operator_service::{
+    OperatorLogsService, OperatorServiceLifecycleService, OperatorStatusService,
+    normalize_operator_log_context_value,
+};
+use ironclaw_product_contracts::operator_tools::{
+    RebornOperatorToolCatalog, RebornOperatorToolInfo,
+};
+use ironclaw_product_contracts::projection::ProjectionStream;
+use ironclaw_product_contracts::views::{RebornViewPage, RebornViewProvider, RebornViewQuery};
+
 use crate::{
-    ProductAdapterError, ProductSurfaceRejectionKind, ProjectionCursor, ProjectionStream,
+    ProductAdapterError, ProductSurfaceRejectionKind, ProjectionCursor,
     ProjectionSubscriptionRequest,
 };
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::future::try_join_all;
+use ironclaw_attachments::{InboundAttachmentLander, InboundAttachmentReader};
 use ironclaw_auth::{
     AuthFlowStatus, AuthProductScope, AuthProviderId, CredentialAccountId,
     CredentialAccountProjection, CredentialAccountStatus, CredentialAccountUpdateBinding,
     ProviderScope,
 };
-use ironclaw_common::{AutomationName, AutomationNameError};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, IdempotencyKey, SanitizedCancelReason, TurnActor, TurnGateRef, TurnRunId,
+    TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
-    attachment::InboundAttachment,
     capability::{EffectKind, GrantConstraints, PermissionMode},
     ids::{
         ActivityId, AgentId, CapabilityId, ExtensionId, InvocationId, ProjectId, ResultRef,
         SecretHandle, TenantId, ThreadId, UserId,
-    },
-    product_surface::{
-        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-        ProductSurfaceErrorKind, ProductSurfaceValidationCode,
     },
     resolution::{Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict},
     resource::ResourceScope,
@@ -44,19 +65,22 @@ use ironclaw_host_api::{
     safe_summary::SafeSummary,
     scope::Principal,
 };
-use ironclaw_threads::{
-    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, AttachmentRef, EnsureThreadRequest,
-    MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadRecord, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
-    ThreadMessageId, ThreadScope,
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ProductSurfaceValidationCode,
 };
+use ironclaw_threads::{
+    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
+    MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+};
+use ironclaw_triggers::{AutomationName, AutomationNameError};
 use ironclaw_turns::{
-    AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
-    ResumeTurnRequest, RetryTurnRequest, SanitizedCancelReason, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
+    GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest, RetryTurnRequest,
+    SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError,
 };
 use secrecy::{ExposeSecret as _, SecretString};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
 use url::Url;
 use uuid::Uuid;
@@ -64,18 +88,14 @@ use uuid::Uuid;
 use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
     AuthInteractionRejectionKind, AuthInteractionService, CommandAudience, CommandResultField,
-    CommandResultView, LifecycleProductContext, LifecycleProductService,
-    LifecycleProductSurfaceContext, ListPendingApprovalsRequest,
-    PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID,
-    PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCancelRunRequest, ProductCommand,
-    ProductCommandDescriptor, ProductCreateThreadRequest, ProductGateResolution,
-    ProductInboundCommand, ProductLifecycleCommandInput, ProductListAutomationsRequest,
-    ProductListThreadsRequest, ProductModelCommand, ProductModelCommandInput, ProductRejectionKind,
-    ProductRenameAutomationRequest, ProductResolveGateRequest, ProductRetryRunRequest,
-    ProductStatusCommandInput, ProductSubmitTurnRequest, ProductSurfaceFailure,
-    ProductTriggerReason, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
-    UnsupportedLifecycleProductService,
+    CommandResultView, DecodeInboundAttachments, IntoProductInboundCommand,
+    ListPendingApprovalsRequest, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
+    PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand,
+    ProductCommandDescriptor, ProductInboundCommand, ProductLifecycleCommandInput,
+    ProductModelCommand, ProductModelCommandInput, ProductRejectionKind, ProductStatusCommandInput,
+    ProductSurfaceFailure, ProductTriggerReason, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, UnsupportedLifecycleProductService,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -85,6 +105,11 @@ use crate::{
     declared_command_help_text, is_approval_gate_ref, is_auth_gate_ref,
     parse_product_slash_command, product_command_descriptors, required_audience,
     thread_metadata_is_automation_trigger,
+};
+use ironclaw_product_contracts::inbound_requests::{
+    ProductCancelRunRequest, ProductCreateThreadRequest, ProductGateResolution,
+    ProductListAutomationsRequest, ProductListThreadsRequest, ProductRenameAutomationRequest,
+    ProductResolveGateRequest, ProductRetryRunRequest, ProductSubmitTurnRequest,
 };
 
 mod admin_configuration;
@@ -118,23 +143,19 @@ pub use admin_configuration::{
     ADMIN_CONFIGURATION_VIEW, RebornAdminConfigurationField, RebornAdminConfigurationGroup,
     RebornAdminConfigurationListResponse, RebornAdminConfigurationUse,
 };
-use admin_users::{
-    ADMIN_USER_LIST_DEFAULT_LIMIT, ADMIN_USER_LIST_MAX_LIMIT, RejectingAdminUserService,
-};
+use admin_users::RejectingAdminUserService;
 pub use admin_users::{
-    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
-    AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
-    RebornAdminDeleteSecretProductRequest, RebornAdminPutSecretProductRequest,
-    RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
-    RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
-    RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
+    RebornAdminCreateUserRequest, RebornAdminDeleteSecretProductRequest,
+    RebornAdminPutSecretProductRequest, RebornAdminPutSecretRequest,
+    RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleProductRequest,
+    RebornAdminSetRoleRequest, RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
     RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest,
     RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
     RebornAdminUserSecretsListResponse,
 };
-pub use ironclaw_host_api::product_surface::{
-    ChannelInboundProductSurface, ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
+pub use ironclaw_product_contracts::surface::{
+    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
 };
 pub use trace_credits::{
@@ -156,15 +177,51 @@ pub use fs_browse::{
     RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
     RebornFsStatResponse,
 };
-pub use ironclaw_host_api::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
-pub use lifecycle_setup::EXTENSION_SETUP_VIEW;
-pub use llm_config::{
-    ActiveModelReader, CodexLoginStart, LLM_CONFIG_VIEW, LlmActiveSelection, LlmConfigService,
-    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
-    LlmProviderView, NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, SetActiveLlmRequest,
-    UpsertLlmProviderRequest,
+pub use ironclaw_product_contracts::descriptors::{
+    EmptyProductCommandInput, ProductCapabilityDescriptor, ProductSurfaceCommandDescriptor,
+    ProductView,
 };
+pub use ironclaw_product_contracts::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
+pub use ironclaw_product_contracts::product_wire::{
+    RebornAccountBindingSource, RebornAttachmentBytes, RebornAttachmentRequest,
+    RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
+    RebornChannelConnectAction, RebornCommandRejection, RebornDeleteThreadRequest,
+    RebornDeleteThreadResponse, RebornExecuteProductCommandRequest, RebornExtensionActionResponse,
+    RebornExtensionCredentialSetup, RebornExtensionOnboardingPayload,
+    RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
+    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornExtensionSurface,
+    RebornGetRunStateRequest, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
+    RebornListAutomationsResponse, RebornLogEntry, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
+    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
+    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
+    RebornOperatorSetupStatus, RebornOperatorSetupStep, RebornOperatorSetupStepStatus,
+    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
+    RebornOperatorStatusState, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
+    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornProductCommandInfo, RebornProductCommandListResponse,
+    RebornRenameAutomationProductRequest, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornRetryRunResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
+    RebornServiceLifecycleResponse, RebornServiceLifecycleState,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTraceHoldAuthorizeProductRequest, SettingsToolPermissionState,
+};
+pub use lifecycle_setup::EXTENSION_SETUP_VIEW;
+pub use llm_config::LLM_CONFIG_VIEW;
 pub use log_views::{LOGS_VIEW, OPERATOR_LOGS_VIEW};
 pub use operator_command_views::{
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
@@ -207,50 +264,11 @@ pub use thread_artifact::{
     THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
 };
 pub use types::{
-    RebornAccountBindingSource, RebornAttachmentBytes, RebornAttachmentRequest, RebornAuthAccount,
-    RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
-    RebornChannelConnectAction, RebornCommandRejection, RebornCreateThreadResponse,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExecuteProductCommandRequest,
-    RebornExecuteProductCommandResponse, RebornExtensionActionResponse,
-    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
-    RebornExtensionSurface, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
-    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
-    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
-    RebornOperatorSetupStatus, RebornOperatorSetupStep, RebornOperatorSetupStepStatus,
-    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
-    RebornOperatorStatusState, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
-    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornProductCommandInfo, RebornProductCommandListResponse,
-    RebornRenameAutomationProductRequest, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornRetryRunResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornTraceHoldAuthorizeProductRequest,
-    RebornVendorAuthAccounts,
+    RebornAuthAccount, RebornCreateThreadResponse, RebornExecuteProductCommandResponse,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornGetRunStateResponse,
+    RebornListThreadsResponse, RebornTimelineResponse, RebornVendorAuthAccounts,
 };
-pub use views::{
-    ProductView, RebornViewDescriptor, RebornViewPage, RebornViewProvider, RebornViewQuery,
-    UnavailableRebornViewProvider,
-};
+pub use views::UnavailableRebornViewProvider;
 
 type SkillActivationRecorder =
     dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), ProductSurfaceError> + Send + Sync;
@@ -285,6 +303,10 @@ pub const LLM_ACTIVE_SET_CAPABILITY: ProductCapabilityDescriptor =
 pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
 pub const EXTENSION_INSTALL_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(EXTENSION_INSTALL_CAPABILITY_ID);
+pub const EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID: &str =
+    "builtin.extension_register_hosted_mcp";
+pub const EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID);
 pub const EXTENSION_IMPORT_CAPABILITY_ID: &str = "builtin.extension_import";
 pub const EXTENSION_IMPORT_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(EXTENSION_IMPORT_CAPABILITY_ID);
@@ -537,29 +559,6 @@ pub const SKILL_SEARCH_VIEW: ProductView<serde_json::Value, RebornSkillSearchRes
 pub const SKILL_CONTENT_VIEW: ProductView<serde_json::Value, RebornSkillContentResponse> =
     ProductView::unpaginated("skill_content");
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebornOperatorToolInfo {
-    pub capability_id: CapabilityId,
-    pub provider: ExtensionId,
-    pub description: Arc<str>,
-    pub default_permission: PermissionMode,
-    pub effects: Arc<[EffectKind]>,
-}
-
-#[async_trait]
-pub trait RebornOperatorToolCatalog: Send + Sync {
-    /// Tools visible to `caller` in the operator/settings surface (#5459 P1).
-    ///
-    /// The settings/tools routes are authenticated-caller routes (not
-    /// operator-gated), so a member reads this catalog. It MUST therefore be
-    /// filtered by installation owner exactly like the model capability
-    /// surface: tenant-shared tools for everyone, user-private tools only for
-    /// their owner. An unfiltered catalog would disclose another user's
-    /// private install (its capability id, description, effects) — the leak
-    /// this parameter closes.
-    async fn list_operator_tools(&self, caller: &UserId) -> Vec<RebornOperatorToolInfo>;
-}
-
 #[derive(Clone)]
 struct RebornOperatorApprovalConfig {
     overrides: Arc<dyn ToolPermissionOverrideStorePort>,
@@ -573,9 +572,6 @@ const OPERATOR_LOGS_DEFAULT_LIMIT: u32 = 100;
 const OPERATOR_LOGS_MAX_LIMIT: u32 = 500;
 const OPERATOR_LOGS_CURSOR_MAX_BYTES: usize = 512;
 const OPERATOR_LOGS_TARGET_MAX_BYTES: usize = 256;
-const OPERATOR_LOGS_CONTEXT_MAX_BYTES: usize = 256;
-const OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX: &str = " ... [truncated]";
-
 const NOTICE_BLOCKED_APPROVAL: &str = "An approval gate is open on this thread — resolve it (approve or deny) before continuing, then resend your message.";
 const NOTICE_BLOCKED_AUTH: &str = "An authentication gate is open on this thread — complete authentication before continuing, then resend your message.";
 const NOTICE_BUSY_GENERIC: &str = "Ironclaw is still working on a previous message — resend yours once the current task finishes.";
@@ -589,7 +585,7 @@ fn command_result_field(label: &str, value: impl Into<String>) -> CommandResultF
     }
 }
 
-fn model_command_view(title: &str, snapshot: &llm_config::LlmConfigSnapshot) -> CommandResultView {
+fn model_command_view(title: &str, snapshot: &LlmConfigSnapshot) -> CommandResultView {
     let mut fields = Vec::new();
     let mut lines = Vec::new();
     match &snapshot.active {
@@ -733,42 +729,6 @@ impl ChannelConnectionService for StaticChannelConnectionService {
     }
 }
 
-pub use ironclaw_host_api::package_lifecycle::ChannelConfigField as RebornChannelConfigField;
-
-/// The generic channel-config configure port: per-extension operator config
-/// declared by the extension manifest's channel-config fields. Host
-/// composition implements it over the durable installation store and the
-/// scoped secret store; the setup service routes submitted values through it
-/// and derives config completeness from the field status.
-#[async_trait]
-pub trait ChannelConfigProductService: Send + Sync {
-    /// Per-field presence for the extension's declared channel config.
-    /// Empty when the extension declares none (or is not installed yet).
-    async fn field_status(
-        &self,
-        extension_id: &ExtensionId,
-    ) -> Result<Vec<RebornChannelConfigField>, ProductSurfaceError>;
-
-    /// Validate submitted `(handle, value)` pairs against the installed
-    /// manifest's declared fields and persist them (non-secret values
-    /// durably per installation, secret values into the scoped secret
-    /// store). Saving while the extension is active re-runs its activation
-    /// with the new values.
-    async fn save_values(
-        &self,
-        extension_id: &ExtensionId,
-        values: Vec<(String, String)>,
-    ) -> Result<(), ProductSurfaceError>;
-}
-
-#[async_trait]
-pub trait OperatorStatusService: Send + Sync {
-    async fn status(
-        &self,
-        caller: ProductSurfaceCaller,
-    ) -> Result<RebornOperatorStatusResponse, ProductSurfaceError>;
-}
-
 #[derive(Debug, Clone)]
 pub struct StaticOperatorStatusService {
     response: RebornOperatorStatusResponse,
@@ -803,15 +763,6 @@ impl OperatorStatusService for UnsupportedOperatorStatusService {
     }
 }
 
-#[async_trait]
-pub trait OperatorLogsService: Send + Sync {
-    async fn query_logs(
-        &self,
-        caller: ProductSurfaceCaller,
-        request: RebornLogQueryRequest,
-    ) -> Result<RebornLogQueryResponse, ProductSurfaceError>;
-}
-
 #[derive(Debug, Default)]
 pub struct UnsupportedOperatorLogsService;
 
@@ -824,15 +775,6 @@ impl OperatorLogsService for UnsupportedOperatorLogsService {
     ) -> Result<RebornLogQueryResponse, ProductSurfaceError> {
         Err(operator_surface_unavailable())
     }
-}
-
-#[async_trait]
-pub trait OperatorServiceLifecycleService: Send + Sync {
-    async fn control_service(
-        &self,
-        caller: ProductSurfaceCaller,
-        request: RebornServiceLifecycleRequest,
-    ) -> Result<RebornServiceLifecycleResponse, ProductSurfaceError>;
 }
 
 #[derive(Debug, Default)]
@@ -1243,8 +1185,8 @@ enum GateResolutionRoute {
 impl GateResolutionRoute {
     fn from_run_state(
         status: TurnStatus,
-        parked_gate_ref: Option<&GateRef>,
-        requested_gate_ref: &GateRef,
+        parked_gate_ref: Option<&TurnGateRef>,
+        requested_gate_ref: &TurnGateRef,
         resolution: &ProductGateResolution,
     ) -> Result<Self, ProductSurfaceError> {
         match status {
@@ -1274,7 +1216,7 @@ impl GateResolutionRoute {
         }
     }
 
-    fn from_gate_shape(gate_ref: &GateRef, resolution: &ProductGateResolution) -> Self {
+    fn from_gate_shape(gate_ref: &TurnGateRef, resolution: &ProductGateResolution) -> Self {
         match (
             is_approval_gate_ref(gate_ref.as_str()),
             is_auth_gate_ref(gate_ref.as_str()),
@@ -1793,24 +1735,6 @@ fn tool_permission_state_wire(state: ToolPermissionState) -> &'static str {
     }
 }
 
-/// Wire enum for the WebUI settings/tools permission request body.
-///
-/// Request-side vocabulary on the ProductSurface contract surface: the
-/// three resolved [`ToolPermissionState`] values plus `default`, which clears
-/// the stored per-capability override. The serialized strings must stay
-/// byte-identical to what [`parse_tool_permission_state`] accepts and
-/// [`tool_permission_state_wire`] emits — the
-/// `settings_tool_permission_state_wire_strings_stay_linked` test pins that
-/// link so the request enum cannot drift from the storage vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SettingsToolPermissionState {
-    Default,
-    AlwaysAllow,
-    AskEachTime,
-    Disabled,
-}
-
 enum ToolPermissionUpdate {
     Default,
     State(ToolPermissionState),
@@ -2214,167 +2138,6 @@ fn operator_diagnostics_surface_status(
     } else {
         RebornOperatorSurfaceStatus::Available
     }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EmptyProductCommandInput {}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProductSurfaceCommandDescriptor<Input, Output> {
-    pub id: &'static str,
-    _types: PhantomData<fn(Input) -> Output>,
-}
-
-impl<Input, Output> ProductSurfaceCommandDescriptor<Input, Output> {
-    pub const fn new(id: &'static str) -> Self {
-        Self {
-            id,
-            _types: PhantomData,
-        }
-    }
-
-    pub fn capability_id(&self) -> Result<CapabilityId, ProductSurfaceError> {
-        CapabilityId::new(self.id).map_err(ProductSurfaceError::internal_from)
-    }
-}
-
-impl<Input, Output> ProductSurfaceCommandDescriptor<Input, Output>
-where
-    Input: Serialize,
-    Output: DeserializeOwned,
-{
-    pub async fn invoke_on(
-        &self,
-        surface: &ironclaw_host_api::product_surface::BoundProductSurface,
-        input: Input,
-        activity_id: ActivityId,
-    ) -> Result<Output, ProductSurfaceError> {
-        let input = serde_json::to_value(input).map_err(ProductSurfaceError::internal_from)?;
-        let response = surface
-            .invoke(
-                ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
-                    operation_id: self.capability_id()?,
-                    input,
-                    activity_id,
-                },
-            )
-            .await?;
-        serde_json::from_value(response.output).map_err(ProductSurfaceError::internal_from)
-    }
-}
-
-/// ProductSurface operation descriptor.
-///
-/// Capability declarations stay as one stable id plus origin/policy metadata
-/// elsewhere. Product-workflow-owned ids are backed by the
-/// [`product_capability_handlers`] registry; runtime-backed ids delegate to the wired
-/// first-party capability invoker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProductCapabilityDescriptor {
-    pub id: &'static str,
-}
-
-impl ProductCapabilityDescriptor {
-    pub const fn product_operation(id: &'static str) -> Self {
-        Self { id }
-    }
-
-    pub const fn api_only(id: &'static str) -> Self {
-        Self::product_operation(id)
-    }
-
-    pub fn capability_id(&self) -> Result<CapabilityId, ProductSurfaceError> {
-        CapabilityId::new(self.id).map_err(ProductSurfaceError::internal_from)
-    }
-
-    pub async fn invoke_on<T>(
-        &self,
-        surface: &ironclaw_host_api::product_surface::BoundProductSurface,
-        input: T,
-        activity_id: ActivityId,
-    ) -> Result<Resolution, ProductSurfaceError>
-    where
-        T: Serialize,
-    {
-        let input = serde_json::to_value(input).map_err(ProductSurfaceError::internal_from)?;
-        let response = surface
-            .invoke(
-                ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
-                    operation_id: self.capability_id()?,
-                    input,
-                    activity_id,
-                },
-            )
-            .await?;
-        serde_json::from_value(response.output).map_err(ProductSurfaceError::internal_from)
-    }
-}
-
-/// Lands inbound attachment bytes into durable, agent-accessible storage and
-/// returns the transcript references to persist on the user message.
-///
-/// Injected by host composition, which owns the project-scoped filesystem
-/// authority. `message_id` is a stable per-message id (the idempotency key)
-/// used only to disambiguate the storage path; the implementation writes
-/// through the same `MountView` the agent's file tools resolve through, so
-/// landed bytes are readable by `file_read`/`list_dir` in later turns.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct AttachmentCleanupReport {
-    pub scanned_batches: usize,
-    pub deleted_batches: usize,
-}
-
-#[async_trait]
-pub trait InboundAttachmentLander: Send + Sync {
-    async fn land(
-        &self,
-        thread_scope: &ThreadScope,
-        message_id: &str,
-        attachments: Vec<InboundAttachment>,
-    ) -> Result<Vec<AttachmentRef>, ProductSurfaceError>;
-
-    /// Remove one complete batch previously returned by [`Self::land`].
-    ///
-    /// The inbound workflow calls this only when durable message acceptance
-    /// fails after landing. Implementations must constrain deletion to the
-    /// batch represented by `attachments`; they must never sweep unrelated
-    /// workspace paths.
-    async fn rollback(
-        &self,
-        thread_scope: &ThreadScope,
-        attachments: &[AttachmentRef],
-    ) -> Result<(), ProductSurfaceError>;
-
-    /// Reconcile old committed batches against an exhaustive set of durable
-    /// attachment storage keys for this exact thread scope.
-    ///
-    /// Callers must skip this operation when their reference scan was
-    /// truncated. The complete snapshot may include attachment domains the
-    /// implementation does not own, such as agent-created outbound workspace
-    /// files; implementations ignore those references and fail closed when no
-    /// owned reference proves the snapshot usable. Implementations keep a
-    /// reconciliation window and bounded filesystem scan so recent in-flight
-    /// work and unrelated workspace paths are never removed.
-    async fn cleanup_stale(
-        &self,
-        thread_scope: &ThreadScope,
-        referenced_storage_keys: &[String],
-    ) -> Result<AttachmentCleanupReport, ProductSurfaceError>;
-}
-
-/// Reads a landed attachment's bytes back for the WebUI bytes endpoint. The
-/// read counterpart of [`InboundAttachmentLander`]: host composition implements
-/// it over the same project-scoped workspace filesystem the lander wrote
-/// through, so `storage_key` is re-scoped through that mount authority and never
-/// treated as a host path.
-#[async_trait]
-pub trait InboundAttachmentReader: Send + Sync {
-    async fn read(
-        &self,
-        thread_scope: &ThreadScope,
-        storage_key: &str,
-    ) -> Result<Vec<u8>, ProductSurfaceError>;
 }
 
 /// Product-side command membrane for the generic [`ProductSurface::invoke`]
@@ -4495,7 +4258,7 @@ where
             .cancel_run(request)
             .await
             .map_err(map_turn_error)?;
-        Ok(response.into())
+        Ok(types::reborn_cancel_run_response(response))
     }
 
     pub async fn resolve_gate(
@@ -4615,7 +4378,7 @@ where
             })
             .await
             .map_err(map_turn_error)?;
-        Ok(response.into())
+        Ok(types::reborn_retry_run_response(response))
     }
 
     pub async fn get_run_state(
@@ -4780,7 +4543,7 @@ where
         service
             .test_connection(caller, request)
             .await
-            .map_err(llm_config::map_llm_config_error)
+            .map_err(ProductSurfaceError::from)
     }
 
     pub async fn list_llm_models(
@@ -4796,7 +4559,7 @@ where
         service
             .list_models(caller, request)
             .await
-            .map_err(llm_config::map_llm_config_error)
+            .map_err(ProductSurfaceError::from)
     }
 
     pub async fn start_nearai_login(
@@ -4811,7 +4574,7 @@ where
         service
             .start_nearai_login(caller, request)
             .await
-            .map_err(llm_config::map_llm_config_error)
+            .map_err(ProductSurfaceError::from)
     }
 
     pub async fn start_codex_login(
@@ -4825,7 +4588,7 @@ where
         service
             .start_codex_login(caller)
             .await
-            .map_err(llm_config::map_llm_config_error)
+            .map_err(ProductSurfaceError::from)
     }
 
     pub async fn complete_nearai_wallet_login(
@@ -4840,12 +4603,12 @@ where
         service
             .complete_nearai_wallet_login(caller, request)
             .await
-            .map_err(llm_config::map_llm_config_error)
+            .map_err(ProductSurfaceError::from)
     }
 }
 
 #[async_trait]
-impl<I, V> ironclaw_host_api::product_surface::ProductSurface for RebornServices<I, V>
+impl<I, V> ironclaw_product_contracts::surface::ProductSurface for RebornServices<I, V>
 where
     I: ProductCapabilityInvoker + Clone + 'static,
     V: RebornViewProvider + Clone + 'static,
@@ -4853,16 +4616,18 @@ where
     async fn invoke(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
+        request: ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest,
     ) -> Result<
-        ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse,
-        ironclaw_host_api::product_surface::ProductSurfaceError,
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
+        ironclaw_product_contracts::surface::ProductSurfaceError,
     > {
         if let Some(command) =
             product_capability_handlers::ProductCommandHandler::parse(&request.operation_id)
         {
             let output = command.invoke(self, caller, request.input).await?;
-            return Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output });
+            return Ok(
+                ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output },
+            );
         }
         let output = RebornServices::invoke(
             self,
@@ -4874,18 +4639,18 @@ where
         .await?;
         let output = serde_json::to_value(output).map_err(|error| {
             tracing::error!(%error, "failed to encode product surface invoke response");
-            ironclaw_host_api::product_surface::ProductSurfaceError::internal()
+            ironclaw_product_contracts::surface::ProductSurfaceError::internal()
         })?;
-        Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
+        Ok(ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output })
     }
 
     async fn query(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
+        request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
     ) -> Result<
-        ironclaw_host_api::product_surface::ProductSurfaceQueryPage,
-        ironclaw_host_api::product_surface::ProductSurfaceError,
+        ironclaw_product_contracts::surface::ProductSurfaceQueryPage,
+        ironclaw_product_contracts::surface::ProductSurfaceError,
     > {
         let page = RebornServices::query(
             self,
@@ -4898,7 +4663,7 @@ where
         )
         .await?;
         Ok(
-            ironclaw_host_api::product_surface::ProductSurfaceQueryPage {
+            ironclaw_product_contracts::surface::ProductSurfaceQueryPage {
                 items: vec![page.payload],
                 next_cursor: page.next_cursor,
             },
@@ -4908,10 +4673,10 @@ where
     async fn stream_events(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+        request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
     ) -> Result<
-        ironclaw_host_api::product_surface::ProductSurfaceStreamResponse,
-        ironclaw_host_api::product_surface::ProductSurfaceError,
+        ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
+        ironclaw_product_contracts::surface::ProductSurfaceError,
     > {
         let request = decode_product_surface_stream_request(request)?;
         if self
@@ -4930,7 +4695,7 @@ where
                 }
                 Ok(Some(Err(error))) => Err(error),
                 Ok(None) | Err(_) => Ok(
-                    ironclaw_host_api::product_surface::ProductSurfaceStreamResponse {
+                    ironclaw_product_contracts::surface::ProductSurfaceStreamResponse {
                         events: Vec::new(),
                         next_cursor: None,
                         subscription: None,
@@ -4947,7 +4712,7 @@ async fn open_product_surface_event_subscription<I, V>(
     services: &RebornServices<I, V>,
     caller: ProductSurfaceCaller,
     request: RebornStreamEventsRequest,
-) -> Result<ironclaw_host_api::product_surface::ProductSurfaceEventSubscription, ProductSurfaceError>
+) -> Result<ironclaw_product_contracts::surface::ProductSurfaceEventSubscription, ProductSurfaceError>
 where
     I: ProductCapabilityInvoker + Clone + 'static,
     V: RebornViewProvider + Clone + 'static,
@@ -5052,11 +4817,11 @@ where
             }
         }
     });
-    Ok(ironclaw_host_api::product_surface::ProductSurfaceEventSubscription::new(receiver))
+    Ok(ironclaw_product_contracts::surface::ProductSurfaceEventSubscription::new(receiver))
 }
 
 fn decode_product_surface_stream_request(
-    request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+    request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
 ) -> Result<RebornStreamEventsRequest, ProductSurfaceError> {
     let thread_id = request.stream_id.ok_or_else(|| {
         ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
@@ -5075,7 +4840,8 @@ fn decode_product_surface_stream_request(
 
 fn encode_product_surface_stream_response(
     response: RebornStreamEventsResponse,
-) -> Result<ironclaw_host_api::product_surface::ProductSurfaceStreamResponse, ProductSurfaceError> {
+) -> Result<ironclaw_product_contracts::surface::ProductSurfaceStreamResponse, ProductSurfaceError>
+{
     let events = response
         .events
         .into_iter()
@@ -5086,7 +4852,7 @@ fn encode_product_surface_stream_response(
             ProductSurfaceError::internal()
         })?;
     Ok(
-        ironclaw_host_api::product_surface::ProductSurfaceStreamResponse {
+        ironclaw_product_contracts::surface::ProductSurfaceStreamResponse {
             events,
             next_cursor: None,
             subscription: None,
@@ -6094,7 +5860,7 @@ where
         scope: TurnScope,
         actor: TurnActor,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         client_action_id: IdempotencyKey,
         resolution: ProductGateResolution,
     ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
@@ -6125,9 +5891,9 @@ where
             .map_err(|error| map_adapter_error(error.into()))?;
         match response {
             ResolveApprovalInteractionResponse::Approved(response)
-            | ResolveApprovalInteractionResponse::Resumed(response) => {
-                Ok(RebornResolveGateResponse::Resumed(response.into()))
-            }
+            | ResolveApprovalInteractionResponse::Resumed(response) => Ok(
+                RebornResolveGateResponse::Resumed(types::reborn_resume_gate_response(response)),
+            ),
         }
     }
 
@@ -6136,7 +5902,7 @@ where
         scope: &TurnScope,
         actor: &TurnActor,
         run_id: TurnRunId,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
         resolution: &ProductGateResolution,
     ) -> Result<GateResolutionRoute, ProductSurfaceError> {
         let state = match self
@@ -6173,7 +5939,7 @@ where
         scope: TurnScope,
         actor: TurnActor,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         client_action_id: IdempotencyKey,
         resolution: ProductGateResolution,
     ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
@@ -6202,12 +5968,12 @@ where
             .await
             .map_err(map_auth_interaction_error)?;
         match response {
-            ResolveAuthInteractionResponse::Resumed(response) => {
-                Ok(RebornResolveGateResponse::Resumed(response.into()))
-            }
-            ResolveAuthInteractionResponse::Canceled(response) => {
-                Ok(RebornResolveGateResponse::Cancelled(response.into()))
-            }
+            ResolveAuthInteractionResponse::Resumed(response) => Ok(
+                RebornResolveGateResponse::Resumed(types::reborn_resume_gate_response(response)),
+            ),
+            ResolveAuthInteractionResponse::Canceled(response) => Ok(
+                RebornResolveGateResponse::Cancelled(types::reborn_cancel_run_response(response)),
+            ),
         }
     }
 
@@ -6216,7 +5982,7 @@ where
         scope: TurnScope,
         actor: TurnActor,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         client_action_id: IdempotencyKey,
         resolution: ProductGateResolution,
     ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
@@ -6251,7 +6017,9 @@ where
                     })
                     .await
                     .map_err(map_turn_error)?;
-                Ok(RebornResolveGateResponse::Resumed(response.into()))
+                Ok(RebornResolveGateResponse::Resumed(
+                    types::reborn_resume_gate_response(response),
+                ))
             }
             ProductGateResolution::CredentialProvided { .. } => {
                 Err(blocked_authentication_unavailable())
@@ -6278,7 +6046,9 @@ where
                     })
                     .await
                     .map_err(map_turn_error)?;
-                Ok(RebornResolveGateResponse::Cancelled(response.into()))
+                Ok(RebornResolveGateResponse::Cancelled(
+                    types::reborn_cancel_run_response(response),
+                ))
             }
         }
     }
@@ -6391,8 +6161,8 @@ fn map_project_service_error(error: ProjectServiceError) -> ProductSurfaceError 
 }
 
 fn validate_current_gate_ref(
-    parked_gate_ref: Option<&GateRef>,
-    requested_gate_ref: &GateRef,
+    parked_gate_ref: Option<&TurnGateRef>,
+    requested_gate_ref: &TurnGateRef,
     kind: ProductSurfaceErrorKind,
 ) -> Result<(), ProductSurfaceError> {
     match parked_gate_ref {
@@ -6423,7 +6193,7 @@ async fn assert_generic_run_parked_on_gate(
     turn_coordinator: &dyn TurnCoordinator,
     scope: &TurnScope,
     run_id: TurnRunId,
-    expected_gate_ref: &GateRef,
+    expected_gate_ref: &TurnGateRef,
 ) -> Result<(), ProductSurfaceError> {
     let state = turn_coordinator
         .get_run_state(GetRunStateRequest {
@@ -6556,7 +6326,7 @@ fn parse_replay_run_id(value: Option<String>) -> Result<TurnRunId, ProductSurfac
 fn webui_source_binding_ref_from_raw(
     prefix: &str,
     raw: &str,
-) -> Result<ironclaw_turns::SourceBindingRef, ProductSurfaceError> {
+) -> Result<ironclaw_host_api::turn::SourceBindingRef, ProductSurfaceError> {
     bounded_source_binding_ref(prefix, raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(|_| {
         ProductSurfaceError::from_status(ProductSurfaceErrorCode::Internal, 500, false)
     })
@@ -6565,7 +6335,7 @@ fn webui_source_binding_ref_from_raw(
 fn webui_reply_target_binding_ref_from_raw(
     prefix: &str,
     raw: &str,
-) -> Result<ironclaw_turns::ReplyTargetBindingRef, ProductSurfaceError> {
+) -> Result<ironclaw_host_api::turn::ReplyTargetBindingRef, ProductSurfaceError> {
     bounded_reply_target_binding_ref(prefix, raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(|_| {
         ProductSurfaceError::from_status(ProductSurfaceErrorCode::Internal, 500, false)
     })
@@ -6838,7 +6608,7 @@ fn webui_retry_binding_id(
     )
 }
 
-fn gate_ref_string(gate_ref: &ironclaw_turns::GateRef) -> String {
+fn gate_ref_string(gate_ref: &ironclaw_host_api::turn::TurnGateRef) -> String {
     gate_ref.as_str().to_string()
 }
 
@@ -7094,7 +6864,7 @@ fn kind_for_surface_rejection(kind: ProductSurfaceRejectionKind) -> ProductSurfa
 }
 
 fn create_thread_metadata_json(
-    client_action_id: &ironclaw_turns::IdempotencyKey,
+    client_action_id: &ironclaw_host_api::turn::IdempotencyKey,
 ) -> Result<String, ProductSurfaceError> {
     serde_json::to_string(&serde_json::json!({
         "client_action_id": client_action_id.as_str(),
@@ -7173,36 +6943,12 @@ fn bounded_operator_logs_context_string(value: Option<String>) -> Option<String>
     })
 }
 
-pub fn normalize_operator_log_context_value(value: &str) -> String {
-    truncate_utf8_with_suffix(value, OPERATOR_LOGS_CONTEXT_MAX_BYTES)
-}
-
 fn truncate_utf8_to_bytes(value: &str, max_bytes: usize) -> String {
     let mut end = max_bytes.min(value.len());
     while end > 0 && !value.is_char_boundary(end) {
         end -= 1;
     }
     value[..end].to_string()
-}
-
-fn truncate_utf8_with_suffix(value: &str, max_bytes: usize) -> String {
-    if value.len() <= max_bytes {
-        return value.to_string();
-    }
-
-    if max_bytes <= OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX.len() {
-        return OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX[..max_bytes].to_string();
-    }
-
-    let mut end = max_bytes - OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX.len();
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-
-    let mut truncated = String::with_capacity(max_bytes);
-    truncated.push_str(&value[..end]);
-    truncated.push_str(OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX);
-    truncated
 }
 
 fn product_agent_bound_caller_from_webui(
@@ -7219,7 +6965,7 @@ fn product_agent_bound_caller_from_webui(
 
 fn generated_thread_id(
     caller: &ProductSurfaceCaller,
-    client_action_id: &ironclaw_turns::IdempotencyKey,
+    client_action_id: &ironclaw_host_api::turn::IdempotencyKey,
 ) -> ThreadId {
     let seed = format!(
         "{}{}{}{}{}{}",

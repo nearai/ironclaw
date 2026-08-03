@@ -1,3 +1,4 @@
+use ironclaw_product_contracts::action::SourceBindingKey;
 use std::{
     collections::VecDeque,
     future::pending,
@@ -15,9 +16,12 @@ use crate::{
 };
 use async_trait::async_trait;
 use chrono::TimeZone;
-use ironclaw_host_api::{
-    ids::{AgentId, TenantId, ThreadId, UserId},
-    tool_adapter::{RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse},
+use ironclaw_extension_contracts::tool_adapter::{
+    RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
+};
+use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::turn::{
+    EventCursor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -31,12 +35,9 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
-    RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion, SubmitTurnRequest,
-    SubmitTurnResponse, TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId,
-    TurnRunState, TurnScope, TurnStatus, TurnSurfaceType, events::EventCursor,
+    RetryTurnRequest, RetryTurnResponse, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator,
+    TurnError, TurnOriginKind, TurnRunState, TurnSurfaceType,
 };
-
-use crate::action::SourceBindingKey;
 
 use super::*;
 

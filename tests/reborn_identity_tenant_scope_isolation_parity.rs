@@ -11,16 +11,14 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{RwLock, watch};
 
 use async_trait::async_trait;
+use ironclaw_loop_contracts::{LoopRunContext, PromptMode};
 use ironclaw_loop_host::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostIdentityMessageContent, HostManagedModelMessageRole, HostManagedModelResponse,
     IdentityApplicability, IdentityFileName,
 };
 use ironclaw_product::ProductTriggerReason;
-use ironclaw_turns::{
-    LoopMessageRef, TurnStatus,
-    run_profile::{LoopRunContext, PromptMode},
-};
+use ironclaw_turns::{LoopMessageRef, TurnStatus};
 use parity_qa_support::binary_e2e::{RebornBinaryE2EHarness, RebornHarnessSharedStorage};
 use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
 use reborn_support::harness::{RecordingTestCapabilityPort, test_product_scope};

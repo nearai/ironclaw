@@ -16,12 +16,13 @@
 
 use std::{sync::Arc, time::Duration};
 
-use ironclaw_host_api::{
-    channel_identity::{ChannelIdentityPostBind, ChannelIdentityPostBindFactory},
-    ids::UserId,
+use ironclaw_host_api::ids::UserId;
+
+use ironclaw_extension_contracts::channel_adapter::TargetQuery;
+use ironclaw_extension_contracts::channel_identity::{
+    ChannelIdentityPostBind, ChannelIdentityPostBindFactory,
 };
-use ironclaw_product::ChannelDeliveryResolver;
-use ironclaw_product::TargetQuery;
+use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
 
 use ironclaw_extension_host::{FilesystemChannelDmTargetStore, dm_target_payload};
 
@@ -180,7 +181,9 @@ async fn provision_dm_target(
         .await
     {
         Ok(candidates) => candidates,
-        Err(ironclaw_product::ChannelError::Unsupported) => return Ok(false),
+        Err(ironclaw_extension_contracts::channel_adapter::ChannelError::Unsupported) => {
+            return Ok(false);
+        }
         Err(error) => {
             return Err(DmTargetProvisioningError::TargetDiscovery(
                 error.to_string(),
@@ -213,19 +216,18 @@ mod tests {
     };
 
     use async_trait::async_trait;
+    use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+    use ironclaw_extension_contracts::channel_adapter::{
+        ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, TargetCandidate,
+        VerifiedInbound,
+    };
+    use ironclaw_extension_contracts::external::ExternalConversationRef;
+    use ironclaw_extension_contracts::tool_adapter::{
+        RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
+    };
     use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{
-        ids::TenantId,
-        tool_adapter::{
-            RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest,
-            RestrictedEgressResponse,
-        },
-    };
-    use ironclaw_product::ResolvedChannelDelivery;
-    use ironclaw_product::{
-        ChannelAdapter, ChannelError, DeliveryReport, ExternalConversationRef, InboundOutcome,
-        OutboundEnvelope, TargetCandidate, VerifiedInbound,
-    };
+    use ironclaw_host_api::ids::TenantId;
+    use ironclaw_product_contracts::delivery::ResolvedChannelDelivery;
 
     use super::*;
 

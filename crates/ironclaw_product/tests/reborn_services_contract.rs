@@ -21,19 +21,20 @@ use ironclaw_approvals::{
     PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
     ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
 };
+use ironclaw_attachments::{InboundAttachmentLander, InboundAttachmentReader};
 use ironclaw_auth::{
     AuthAccountLastError, AuthAccountState, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountStatus,
 };
-use ironclaw_host_api::{
-    attachment::InboundAttachment,
-    product_surface::{
-        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-        ProductSurfaceErrorKind, ProductSurfaceInvokeRequest, ProductSurfaceStreamRequest,
-        ProductSurfaceValidationCode,
-    },
+use ironclaw_extension_contracts::{
     state::{InstallationState, LifecyclePublicState},
     surface::CapabilitySurfaceKind,
+};
+use ironclaw_host_api::attachment::InboundAttachment;
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
+    SanitizedFailure, SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
+    TurnStatus,
 };
 use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
@@ -47,6 +48,7 @@ use ironclaw_host_api::{
     safe_summary::SafeSummary,
     scope::Principal,
 };
+use ironclaw_loop_contracts::{LoopModelRouteSnapshot, LoopModelUsage};
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
     ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
@@ -56,37 +58,32 @@ use ironclaw_product::{
     AUTOMATION_LIST_MAX_PAGE_SIZE, AUTOMATION_PAUSE_CAPABILITY_ID, AUTOMATION_RENAME_CAPABILITY_ID,
     AUTOMATION_RESUME_CAPABILITY_ID, AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, AUTOMATIONS_VIEW,
-    ActiveModelReader, ApprovalInteractionActionView, ApprovalInteractionDecision,
-    ApprovalInteractionScope, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionService, AutomationListRequest, AutomationName, AutomationProductService,
-    ChannelAuthAccountState, ChannelConfigProductService, ChannelConnectionRequirement,
-    ChannelConnectionService, CodexLoginStart, CommandResultView, EXTENSION_IMPORT_CAPABILITY_ID,
-    EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
-    EmptyProductCommandInput, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialSubmitRequest, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW,
-    FilesystemBrowseReader, FsMount, GLOBAL_AUTO_APPROVE_VIEW, InboundAttachmentLander,
-    InboundAttachmentReader, LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW,
-    LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW,
-    LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
-    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
-    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductService,
+    ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
+    ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
+    AutomationListRequest, AutomationProductService, ChannelAuthAccountState,
+    ChannelConnectionRequirement, ChannelConnectionService, CommandResultView,
+    EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
+    EXTENSIONS_VIEW, EmptyProductCommandInput, ExtensionCredentialSetupService,
+    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, FS_LIST_VIEW,
+    FS_MOUNTS_VIEW, FS_STAT_VIEW, FilesystemBrowseReader, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
+    LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
+    LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW, LifecycleChannelDirections,
+    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
+    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+    LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload, LifecycleProductResponse,
     LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmActiveSelection,
-    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
-    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
+    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse,
+    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
     OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
     OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
     OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
-    OUTBOUND_PREFERENCES_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
-    OperatorStatusService, OutboundPreferencesProductService, PRODUCT_COMMAND_EXECUTE_COMMAND_ID,
-    PRODUCT_COMMAND_LIST_COMMAND_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID,
-    PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW,
-    PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
+    OUTBOUND_PREFERENCES_VIEW, OutboundPreferencesProductService,
+    PRODUCT_COMMAND_EXECUTE_COMMAND_ID, PRODUCT_COMMAND_LIST_COMMAND_ID,
+    PRODUCT_STATUS_COMMAND_OPERATION_ID, PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW,
+    PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
     PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
     PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView, ProductAgentBoundCaller,
     ProductCancelRunRequest, ProductCapabilityInvoker, ProductCreateThreadRequest,
@@ -99,64 +96,89 @@ use ironclaw_product::{
     RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
     RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRequest,
     RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornChannelConfigField, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
-    RebornExecuteProductCommandRequest, RebornExecuteProductCommandResponse,
-    RebornExtensionListResponse, RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse,
-    RebornFsMountsRequest, RebornFsMountsResponse, RebornFsStatRequest, RebornFsStatResponse,
-    RebornGetProjectRequest, RebornGetRunStateRequest, RebornGlobalAutoApproveRequest,
-    RebornGlobalAutoApproveResponse, RebornListAutomationsResponse, RebornListMembersRequest,
-    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
-    RebornListThreadsResponse, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
-    RebornOperatorSetupRequest, RebornOperatorSetupStatus, RebornOperatorStatusCheck,
-    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornOperatorSurfaceStatus, RebornOperatorToolCatalog, RebornOperatorToolInfo,
-    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
-    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
-    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornProductCommandListResponse,
-    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsStatRequest,
-    RebornProjectFsStatResponse, RebornProjectInfo, RebornProjectMemberInfo,
-    RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
-    RebornRemoveMemberRequest, RebornRenameAutomationProductRequest, RebornResolveGateResponse,
-    RebornRunArtifact, RebornRunArtifactRequest, RebornServiceLifecycleAction,
-    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
-    RebornServices, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornThreadArtifact,
-    RebornThreadArtifactRequest, RebornTimelineRequest, RebornTimelineResponse,
-    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExecuteProductCommandRequest,
+    RebornExecuteProductCommandResponse, RebornExtensionListResponse, RebornExtensionSurface,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest, RebornFsMountsResponse,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
+    RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse, RebornListAutomationsResponse,
+    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
+    RebornListProjectsResponse, RebornListThreadsResponse, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigGetResponse,
+    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
+    RebornOperatorSetupStatus, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornProductCommandListResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
+    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
+    RebornProjectState, RebornRemoveMemberRequest, RebornRenameAutomationProductRequest,
+    RebornResolveGateResponse, RebornRunArtifact, RebornRunArtifactRequest, RebornServices,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillContentResponse,
+    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornThreadArtifact, RebornThreadArtifactRequest, RebornTimelineRequest,
+    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
     RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    RebornViewPage, RebornViewQuery, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
-    SetActiveLlmRequest, SkillsProductService, StaticOperatorStatusService,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW,
+    SKILL_SEARCH_VIEW, SKILLS_VIEW, SkillsProductService, StaticOperatorStatusService,
     THREAD_ARTIFACT_MAX_MESSAGES, THREAD_ARTIFACT_VIEW, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
     TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND,
-    TriggerRunThreadScope, UpsertLlmProviderRequest, approval_gate_ref,
-    automation_trigger_thread_metadata_json,
+    TriggerRunThreadScope, approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, ProductAdapterError, ProductAdapterId,
     ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductSurfaceRejectionKind, ProjectionCursor, ProjectionStream, ProjectionStreamSubscription,
+    ProductSurfaceRejectionKind, ProjectionCursor, ProjectionStreamSubscription,
     ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_product::{
-    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
-    AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
-    RebornAdminDeleteSecretProductRequest, RebornAdminPutSecretProductRequest,
-    RebornAdminPutSecretRequest, RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
+    RebornAdminCreateUserRequest, RebornAdminDeleteSecretProductRequest,
+    RebornAdminPutSecretProductRequest, RebornAdminPutSecretRequest,
+    RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
     RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
     RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest, RebornAdminUserListQuery,
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
     RebornAdminUserSecretsListResponse,
 };
+use ironclaw_product_contracts::admin_users::{
+    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
+    AdminUserSecretMeta, AdminUserService, AdminUserStatus,
+};
+use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
+use ironclaw_product_contracts::lifecycle_service::{
+    LifecycleProductContext, LifecycleProductService,
+};
+use ironclaw_product_contracts::operator_llm::{
+    ActiveModelReader, CodexLoginStart, LlmActiveSelection, LlmConfigService,
+    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
+    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
+};
+use ironclaw_product_contracts::operator_service::{
+    OperatorLogsService, OperatorServiceLifecycleService, OperatorStatusService,
+};
+use ironclaw_product_contracts::operator_tools::{
+    RebornOperatorToolCatalog, RebornOperatorToolInfo,
+};
+use ironclaw_product_contracts::package_lifecycle::ChannelConfigField as RebornChannelConfigField;
+use ironclaw_product_contracts::product_wire::{
+    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorStatusCheck,
+    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
+    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
+    RebornServiceLifecycleState,
+};
+use ironclaw_product_contracts::projection::ProjectionStream;
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ProductSurfaceInvokeRequest, ProductSurfaceStreamRequest,
+    ProductSurfaceValidationCode,
+};
+use ironclaw_product_contracts::views::{RebornViewPage, RebornViewQuery};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
@@ -170,16 +192,13 @@ use ironclaw_threads::{
     ThreadMessageRange, ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
     UpdateToolResultReferenceRequest,
 };
-use ironclaw_turns::run_profile::{LoopModelRouteSnapshot, LoopModelUsage};
+use ironclaw_triggers::AutomationName;
 use ironclaw_turns::test_support::in_memory_agent_turn_runtime;
 use ironclaw_turns::{
-    AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
-    CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
-    ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, ResumeTurnResponse,
-    RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion, SanitizedFailure,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCapacityResource,
-    TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState, TurnScope,
-    TurnStatus,
+    AdmissionRejection, AdmissionRejectionReason, CancelRunRequest, CancelRunResponse,
+    DefaultTurnCoordinator, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
+    ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, SubmitTurnRequest, SubmitTurnResponse,
+    TurnCapacityResource, TurnCoordinator, TurnError, TurnOriginKind, TurnRunState,
 };
 use secrecy::SecretString;
 use serde::Serialize;
@@ -366,7 +385,7 @@ struct FakeTurnCoordinator {
     run_state_error: Mutex<Option<TurnError>>,
     run_state_actor: Mutex<Option<TurnActor>>,
     explicit_run_status: Mutex<Option<TurnStatus>>,
-    parked_gate_ref: Mutex<Option<GateRef>>,
+    parked_gate_ref: Mutex<Option<TurnGateRef>>,
     parked_auth_gate: Mutex<bool>,
     parked_approval_gate: Mutex<bool>,
     run_state_failure: Mutex<Option<SanitizedFailure>>,
@@ -424,19 +443,19 @@ impl FakeTurnCoordinator {
     /// parked gate. Needed by tests that exercise `resolve_gate` denied/
     /// cancelled paths now that `RebornServices` verifies the run is parked
     /// on the supplied gate before issuing cancellation.
-    fn set_parked_gate(&self, gate_ref: GateRef) {
+    fn set_parked_gate(&self, gate_ref: TurnGateRef) {
         *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
         *self.parked_auth_gate.lock().expect("lock") = false;
         *self.parked_approval_gate.lock().expect("lock") = false;
     }
 
-    fn set_parked_auth_gate(&self, gate_ref: GateRef) {
+    fn set_parked_auth_gate(&self, gate_ref: TurnGateRef) {
         *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
         *self.parked_auth_gate.lock().expect("lock") = true;
         *self.parked_approval_gate.lock().expect("lock") = false;
     }
 
-    fn set_parked_approval_gate(&self, gate_ref: GateRef) {
+    fn set_parked_approval_gate(&self, gate_ref: TurnGateRef) {
         *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
         *self.parked_auth_gate.lock().expect("lock") = false;
         *self.parked_approval_gate.lock().expect("lock") = true;
@@ -2548,7 +2567,7 @@ async fn trace_hold_authorize_capability_decodes_typed_product_input() {
     let response = ProductSurface::invoke(
         &services,
         caller(),
-        ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
             operation_id: operation_id.clone(),
             input: serde_json::to_value(RebornTraceHoldAuthorizeProductRequest {
                 submission_id: uuid::Uuid::new_v4().to_string(),
@@ -2566,7 +2585,7 @@ async fn trace_hold_authorize_capability_decodes_typed_product_input() {
     let error = ProductSurface::invoke(
         &services,
         caller(),
-        ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
             operation_id,
             input: serde_json::to_value(RebornTraceHoldAuthorizeProductRequest {
                 submission_id: "not-a-submission-id".to_string(),
@@ -3751,7 +3770,7 @@ async fn submit_turn_returns_internal_when_skill_activation_recorder_fails() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(threads, coordinator.clone())
         .with_skill_activation_recorder(|_, _, _| {
-            Err(ironclaw_host_api::product_surface::ProductSurfaceError {
+            Err(ironclaw_product_contracts::surface::ProductSurfaceError {
                 code: ProductSurfaceErrorCode::Internal,
                 kind: ProductSurfaceErrorKind::Internal,
                 status_code: 500,
@@ -5373,7 +5392,7 @@ async fn resolve_gate_rejects_missing_run_state_actor() {
         coordinator.clone(),
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+    coordinator.set_parked_gate(TurnGateRef::new("gate-alpha").expect("gate"));
     coordinator.set_run_state_actor(None);
 
     let err = services
@@ -5405,7 +5424,7 @@ async fn resolve_gate_rejects_mismatched_run_state_actor() {
         coordinator.clone(),
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+    coordinator.set_parked_gate(TurnGateRef::new("gate-alpha").expect("gate"));
     coordinator.set_run_state_actor(Some(turn_actor_for_user("user-beta")));
 
     let err = services
@@ -5437,7 +5456,7 @@ async fn generic_gate_resolution_rejects_blocked_auth_run() {
         coordinator.clone(),
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_auth_gate(GateRef::new("custom-auth-gate").expect("gate"));
+    coordinator.set_parked_auth_gate(TurnGateRef::new("custom-auth-gate").expect("gate"));
 
     let err = services
         .resolve_gate(
@@ -5469,7 +5488,7 @@ async fn blocked_auth_run_routes_non_prefixed_gate_to_auth_interaction_service()
     )
     .with_auth_interactions(auth_interactions.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_auth_gate(GateRef::new("custom-auth-gate").expect("gate"));
+    coordinator.set_parked_auth_gate(TurnGateRef::new("custom-auth-gate").expect("gate"));
 
     let response = services
         .resolve_gate(
@@ -5504,7 +5523,7 @@ async fn blocked_auth_run_with_stale_gate_ref_returns_conflict() {
     )
     .with_auth_interactions(auth_interactions.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_auth_gate(GateRef::new("gate-current").expect("gate"));
+    coordinator.set_parked_auth_gate(TurnGateRef::new("gate-current").expect("gate"));
 
     let err = services
         .resolve_gate(
@@ -5539,7 +5558,7 @@ async fn blocked_approval_run_routes_non_prefixed_gate_to_approval_interaction_s
     )
     .with_approval_interactions(approval_interactions.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_approval_gate(GateRef::new("custom-approval-gate").expect("gate"));
+    coordinator.set_parked_approval_gate(TurnGateRef::new("custom-approval-gate").expect("gate"));
 
     let response = services
         .resolve_gate(
@@ -5577,7 +5596,7 @@ async fn blocked_approval_run_with_stale_gate_ref_returns_conflict() {
     )
     .with_approval_interactions(approval_interactions.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_approval_gate(GateRef::new("gate-current").expect("gate"));
+    coordinator.set_parked_approval_gate(TurnGateRef::new("gate-current").expect("gate"));
 
     let err = services
         .resolve_gate(
@@ -5941,7 +5960,7 @@ async fn denied_gate_resolution_cancels_run() {
         coordinator.clone(),
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+    coordinator.set_parked_gate(TurnGateRef::new("gate-alpha").expect("gate"));
 
     let response = services
         .resolve_gate(
@@ -6055,7 +6074,7 @@ async fn resolve_gate_rejects_cross_user_access() {
     );
     let alice = caller();
     create_thread_for(&services, alice.clone(), "thread-alice").await;
-    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+    coordinator.set_parked_gate(TurnGateRef::new("gate-alpha").expect("gate"));
 
     let bob = ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
@@ -6185,7 +6204,7 @@ async fn denied_gate_resolution_with_stale_gate_ref_returns_conflict() {
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
     // The run is parked on `gate-current`, but the browser supplies `gate-stale`.
-    coordinator.set_parked_gate(GateRef::new("gate-current").expect("gate"));
+    coordinator.set_parked_gate(TurnGateRef::new("gate-current").expect("gate"));
 
     let err = services
         .resolve_gate(
@@ -10601,6 +10620,7 @@ struct SetupRecordingLlmConfigService {
     next_snapshot_error: Mutex<Option<LlmConfigServiceError>>,
     next_upsert_error: Mutex<Option<LlmConfigServiceError>>,
     next_set_active_error: Mutex<Option<LlmConfigServiceError>>,
+    next_login_error: Mutex<Option<LlmConfigServiceError>>,
 }
 
 impl Default for SetupRecordingLlmConfigService {
@@ -10617,6 +10637,7 @@ impl Default for SetupRecordingLlmConfigService {
             next_snapshot_error: Mutex::new(None),
             next_upsert_error: Mutex::new(None),
             next_set_active_error: Mutex::new(None),
+            next_login_error: Mutex::new(None),
         }
     }
 }
@@ -10656,6 +10677,22 @@ impl SetupRecordingLlmConfigService {
 
     fn fail_next_upsert(&self, error: LlmConfigServiceError) {
         *self.next_upsert_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_next_login(&self, error: LlmConfigServiceError) {
+        *self.next_login_error.lock().expect("login error lock") = Some(error);
+    }
+
+    fn take_login_error(&self) -> Result<(), LlmConfigServiceError> {
+        match self
+            .next_login_error
+            .lock()
+            .expect("login error lock")
+            .take()
+        {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn fail_next_set_active(&self, error: LlmConfigServiceError) {
@@ -10785,12 +10822,21 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
         })
     }
 
+    // The three vendor logins answer with `next_login_error` when one is armed.
+    // They used to `panic!("not used by operator setup tests")`, which made the
+    // *failure* half of each path untestable -- and that half is the whole
+    // point: WS5 replaced product's own `map_llm_config_error` with the `From`
+    // projection declared beside the port, so these three are the call sites
+    // that prove the projection is what product actually returns.
     async fn start_nearai_login(
         &self,
         _caller: ProductSurfaceCaller,
         _request: NearAiLoginRequest,
     ) -> Result<NearAiLoginStart, LlmConfigServiceError> {
-        panic!("start_nearai_login is not used by operator setup tests")
+        self.take_login_error()?;
+        Ok(NearAiLoginStart {
+            auth_url: "https://auth.example/v1/auth/github".to_string(),
+        })
     }
 
     async fn complete_nearai_wallet_login(
@@ -10798,14 +10844,19 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
         _caller: ProductSurfaceCaller,
         _request: NearAiWalletLoginRequest,
     ) -> Result<NearAiWalletLoginResult, LlmConfigServiceError> {
-        panic!("complete_nearai_wallet_login is not used by operator setup tests")
+        self.take_login_error()?;
+        Ok(NearAiWalletLoginResult { active: true })
     }
 
     async fn start_codex_login(
         &self,
         _caller: ProductSurfaceCaller,
     ) -> Result<CodexLoginStart, LlmConfigServiceError> {
-        panic!("start_codex_login is not used by operator setup tests")
+        self.take_login_error()?;
+        Ok(CodexLoginStart {
+            user_code: "ABCD-EFGH".to_string(),
+            verification_uri: "https://auth.example/device".to_string(),
+        })
     }
 }
 
@@ -11282,7 +11333,7 @@ async fn query_product_surface_page<S: ProductSurface + ?Sized>(
     let page = services
         .query(
             caller,
-            ironclaw_host_api::product_surface::ProductSurfaceQueryRequest {
+            ironclaw_product_contracts::surface::ProductSurfaceQueryRequest {
                 view_id: query.view_id,
                 input: query.params,
                 cursor: query.cursor,
@@ -11359,7 +11410,7 @@ where
     let response = services
         .invoke(
             caller,
-            ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+            ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
                 operation_id: CapabilityId::new(capability_id).expect("capability id"),
                 input: serde_json::to_value(input).expect("capability input"),
                 activity_id: ActivityId::new(),
@@ -11432,7 +11483,7 @@ async fn invoke_extension_setup_submit<S: ProductSurface + ?Sized>(
     let response = services
         .invoke(
             caller,
-            ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+            ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
                 operation_id: CapabilityId::new(EXTENSION_SETUP_SUBMIT_CAPABILITY_ID)
                     .expect("capability id"),
                 input,
@@ -14823,8 +14874,8 @@ impl InboundAttachmentLander for RecordingLander {
         &self,
         _thread_scope: &ThreadScope,
         _referenced_storage_keys: &[String],
-    ) -> Result<ironclaw_product::AttachmentCleanupReport, ProductSurfaceError> {
-        Ok(ironclaw_product::AttachmentCleanupReport::default())
+    ) -> Result<ironclaw_attachments::AttachmentCleanupReport, ProductSurfaceError> {
+        Ok(ironclaw_attachments::AttachmentCleanupReport::default())
     }
 }
 
@@ -16324,7 +16375,7 @@ async fn execute_status_on_foreign_thread_is_indistinguishable_from_unknown() {
 // `extension_list` exercises the list-family shaping: a `Count` field plus
 // one readable row per installed extension (id, name, version, and its
 // public `LifecyclePublicState`, never the raw internal `InstallationState`
-// checkpoint — see `ironclaw_host_api::state`'s "must never expose those
+// checkpoint — see `ironclaw_extension_contracts::state`'s "must never expose those
 // checkpoints" contract).
 #[tokio::test]
 async fn admin_execute_lifecycle_command_executes_and_renders_installed_extensions() {
@@ -16661,4 +16712,96 @@ async fn execute_user_audience_commands_succeed_without_admin_directory_but_admi
     );
     assert_eq!(admin_audience_error.status_code, 503);
     assert!(admin_audience_error.retryable);
+}
+
+/// The three vendor-login paths, driven through `RebornServices`, on their
+/// failure half.
+///
+/// WS5 moved `LlmConfigServiceError`'s projection onto `ProductSurfaceError`
+/// out of product (`map_llm_config_error`) and into the `From` impl declared
+/// beside the port, so these three `.map_err(ProductSurfaceError::from)` call
+/// sites are what proves product still answers with the sanitized taxonomy --
+/// and there is a wrapper plus an `Option` unwrap between the port and the
+/// answer, so a direct test of the `From` impl would not prove it
+/// (`.claude/rules/testing.md`, "Test through the caller").
+///
+/// `Unavailable` is the arm that matters: it is the only retryable one, so a
+/// projection that lost it would turn a transient backend failure into a
+/// permanent-looking error in the Inference tab.
+#[tokio::test]
+async fn vendor_login_failures_project_the_sanitized_port_taxonomy() {
+    let nearai_request = || NearAiLoginRequest {
+        provider: ironclaw_product_contracts::operator_llm::NearAiAuthProvider::Github,
+        origin: "https://app.example".to_string(),
+    };
+    let wallet_request = || NearAiWalletLoginRequest {
+        account_id: "alice.near".to_string(),
+        public_key: "ed25519:key".to_string(),
+        signature: "c2ln".to_string(),
+        message: "login".to_string(),
+        recipient: "ironclaw".to_string(),
+        nonce: vec![0u8; 32],
+        callback_url: None,
+    };
+
+    // Unavailable -> 503, retryable.
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+    llm_config.fail_next_login(LlmConfigServiceError::Unavailable);
+    let error = services
+        .start_nearai_login(caller(), nearai_request())
+        .await
+        .expect_err("an unavailable backend must fail the login");
+    assert_eq!(error.status_code, 503);
+    assert!(error.retryable, "Unavailable is the one retryable arm");
+
+    llm_config.fail_next_login(LlmConfigServiceError::Unavailable);
+    let error = services
+        .start_codex_login(caller())
+        .await
+        .expect_err("an unavailable backend must fail the codex login");
+    assert_eq!(error.status_code, 503);
+    assert!(error.retryable);
+
+    llm_config.fail_next_login(LlmConfigServiceError::Unavailable);
+    let error = services
+        .complete_nearai_wallet_login(caller(), wallet_request())
+        .await
+        .expect_err("an unavailable backend must fail the wallet login");
+    assert_eq!(error.status_code, 503);
+    assert!(error.retryable);
+
+    // The non-retryable arms keep their own statuses, and none of them leaks a
+    // backend string: `InvalidRequest`'s reason is dropped by the projection.
+    for (arm, status) in [
+        (
+            LlmConfigServiceError::InvalidRequest {
+                field: Some("provider".to_string()),
+                reason: "backend said /var/lib/ironclaw is unreadable".to_string(),
+            },
+            400,
+        ),
+        (LlmConfigServiceError::NotFound, 404),
+        (LlmConfigServiceError::Internal, 500),
+    ] {
+        llm_config.fail_next_login(arm);
+        let error = services
+            .start_nearai_login(caller(), nearai_request())
+            .await
+            .expect_err("the armed error must surface");
+        assert_eq!(error.status_code, status);
+        assert!(!error.retryable, "only Unavailable is retryable");
+        let on_the_wire = serde_json::to_string(&error).expect("surface error serializes");
+        assert!(
+            !on_the_wire.contains("/var/lib/ironclaw"),
+            "no backend string may cross the membrane: {on_the_wire}"
+        );
+    }
+
+    // And the success half still works, so the double is not simply broken.
+    let start = services
+        .start_nearai_login(caller(), nearai_request())
+        .await
+        .expect("a healthy backend starts the login");
+    assert!(start.auth_url.contains("/v1/auth/github"));
 }

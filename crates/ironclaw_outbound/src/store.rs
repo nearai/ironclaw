@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 use ironclaw_event_projections::ProjectionCursor;
-use ironclaw_turns::{ReplyTargetBindingRef, TurnScope};
+use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnScope};
 
 use crate::{
     AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest,
@@ -69,11 +69,11 @@ pub trait OutboundStateStorePort: Send + Sync {
 
     async fn load_run_final_reply_handoff_cursor(
         &self,
-    ) -> Result<ironclaw_turns::EventCursor, OutboundError>;
+    ) -> Result<ironclaw_host_api::turn::EventCursor, OutboundError>;
 
     async fn advance_run_final_reply_handoff_cursor(
         &self,
-        cursor: ironclaw_turns::EventCursor,
+        cursor: ironclaw_host_api::turn::EventCursor,
     ) -> Result<(), OutboundError>;
 
     /// Seal the final-reply destination for one run.

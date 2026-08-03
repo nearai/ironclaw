@@ -10,8 +10,9 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+use ironclaw_loop_contracts::LoopRecoveryClass;
 use ironclaw_threads::SessionThreadError;
-use ironclaw_turns::{TurnEventKind, TurnStatus, run_profile::LoopRecoveryClass};
+use ironclaw_turns::{TurnEventKind, TurnStatus};
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
 use reborn_support::http_matcher::ScriptedHttpResponse;
 use reborn_support::reply::RebornScriptedReply;

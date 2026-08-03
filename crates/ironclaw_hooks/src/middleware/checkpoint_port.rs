@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::ids::TenantId;
-use ironclaw_turns::TurnCheckpointId;
-use ironclaw_turns::run_profile::{
+use ironclaw_host_api::turn::TurnCheckpointId;
+use ironclaw_loop_contracts::{
     AgentLoopHostError, LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCheckpointPort,
     LoopCheckpointRequest, LoopCheckpointStateRef, StageCheckpointPayloadRequest,
 };
@@ -93,7 +93,7 @@ mod tests {
     use crate::sink::{ObserverHook, ObserverSink};
     use crate::trust::HookTrustClass;
     use async_trait::async_trait;
-    use ironclaw_turns::run_profile::{LoopCheckpointKind, LoopCheckpointStateRef};
+    use ironclaw_loop_contracts::{LoopCheckpointKind, LoopCheckpointStateRef};
     use std::sync::Mutex;
 
     fn tenant() -> TenantId {
@@ -148,7 +148,7 @@ mod tests {
             *self.calls.lock().expect("not poisoned") += 1;
             if self.fail {
                 return Err(AgentLoopHostError::new(
-                    ironclaw_turns::run_profile::AgentLoopHostErrorKind::CheckpointRejected,
+                    ironclaw_loop_contracts::AgentLoopHostErrorKind::CheckpointRejected,
                     "stub checkpoint failure",
                 ));
             }
@@ -157,19 +157,19 @@ mod tests {
 
         async fn stage_checkpoint_payload(
             &self,
-            request: ironclaw_turns::run_profile::StageCheckpointPayloadRequest,
+            request: ironclaw_loop_contracts::StageCheckpointPayloadRequest,
         ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
             *self.stage_calls.lock().expect("not poisoned") += 1;
             let _ = request;
             if self.fail {
                 return Err(AgentLoopHostError::new(
-                    ironclaw_turns::run_profile::AgentLoopHostErrorKind::Invalid,
+                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Invalid,
                     "stub stage failure",
                 ));
             }
             LoopCheckpointStateRef::new("checkpoint:stub-staged").map_err(|reason| {
                 AgentLoopHostError::new(
-                    ironclaw_turns::run_profile::AgentLoopHostErrorKind::Internal,
+                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
                     reason,
                 )
             })
@@ -177,21 +177,20 @@ mod tests {
 
         async fn load_checkpoint_payload(
             &self,
-            request: ironclaw_turns::run_profile::LoadCheckpointPayloadRequest,
-        ) -> Result<ironclaw_turns::run_profile::LoadedCheckpointPayload, AgentLoopHostError>
-        {
+            request: ironclaw_loop_contracts::LoadCheckpointPayloadRequest,
+        ) -> Result<ironclaw_loop_contracts::LoadedCheckpointPayload, AgentLoopHostError> {
             *self.load_calls.lock().expect("not poisoned") += 1;
             if self.fail {
                 return Err(AgentLoopHostError::new(
-                    ironclaw_turns::run_profile::AgentLoopHostErrorKind::Invalid,
+                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Invalid,
                     "stub load failure",
                 ));
             }
-            Ok(ironclaw_turns::run_profile::LoadedCheckpointPayload {
+            Ok(ironclaw_loop_contracts::LoadedCheckpointPayload {
                 kind: LoopCheckpointKind::BeforeModel,
                 schema_id: request.expected_schema_id,
                 schema_version: request.expected_schema_version,
-                payload: ironclaw_turns::RedactedCheckpointPayload::new(Vec::new())
+                payload: ironclaw_loop_contracts::RedactedCheckpointPayload::new(Vec::new())
                     .expect("empty payload is within the size limit"),
             })
         }
@@ -269,9 +268,9 @@ mod tests {
         let wrapped = HookedLoopCheckpointPort::new(inner.clone(), dispatcher, tenant());
 
         wrapped
-            .stage_checkpoint_payload(ironclaw_turns::run_profile::StageCheckpointPayloadRequest {
+            .stage_checkpoint_payload(ironclaw_loop_contracts::StageCheckpointPayloadRequest {
                 kind: LoopCheckpointKind::BeforeModel,
-                schema_id: ironclaw_turns::run_profile::CheckpointSchemaId::new("test-schema")
+                schema_id: ironclaw_loop_contracts::CheckpointSchemaId::new("test-schema")
                     .expect("valid"),
                 payload: b"payload".to_vec(),
             })
@@ -280,13 +279,11 @@ mod tests {
         assert_eq!(inner.stage_call_count(), 1);
 
         wrapped
-            .load_checkpoint_payload(ironclaw_turns::run_profile::LoadCheckpointPayloadRequest {
+            .load_checkpoint_payload(ironclaw_loop_contracts::LoadCheckpointPayloadRequest {
                 checkpoint_id: TurnCheckpointId::new(),
-                expected_schema_id: ironclaw_turns::run_profile::CheckpointSchemaId::new(
-                    "test-schema",
-                )
-                .expect("ok"),
-                expected_schema_version: ironclaw_turns::RunProfileVersion::new(1),
+                expected_schema_id: ironclaw_loop_contracts::CheckpointSchemaId::new("test-schema")
+                    .expect("ok"),
+                expected_schema_version: ironclaw_host_api::turn::RunProfileVersion::new(1),
             })
             .await
             .expect("forwarded load call succeeds");
@@ -303,9 +300,9 @@ mod tests {
         let wrapped = HookedLoopCheckpointPort::new(inner.clone(), dispatcher, tenant());
 
         let stage_err = wrapped
-            .stage_checkpoint_payload(ironclaw_turns::run_profile::StageCheckpointPayloadRequest {
+            .stage_checkpoint_payload(ironclaw_loop_contracts::StageCheckpointPayloadRequest {
                 kind: LoopCheckpointKind::BeforeModel,
-                schema_id: ironclaw_turns::run_profile::CheckpointSchemaId::new("test-schema")
+                schema_id: ironclaw_loop_contracts::CheckpointSchemaId::new("test-schema")
                     .expect("valid"),
                 payload: b"payload".to_vec(),
             })
@@ -313,24 +310,22 @@ mod tests {
             .expect_err("inner stage error must propagate");
         assert_eq!(
             stage_err.kind,
-            ironclaw_turns::run_profile::AgentLoopHostErrorKind::Invalid
+            ironclaw_loop_contracts::AgentLoopHostErrorKind::Invalid
         );
         assert_eq!(inner.stage_call_count(), 1);
 
         let load_err = wrapped
-            .load_checkpoint_payload(ironclaw_turns::run_profile::LoadCheckpointPayloadRequest {
+            .load_checkpoint_payload(ironclaw_loop_contracts::LoadCheckpointPayloadRequest {
                 checkpoint_id: TurnCheckpointId::new(),
-                expected_schema_id: ironclaw_turns::run_profile::CheckpointSchemaId::new(
-                    "test-schema",
-                )
-                .expect("ok"),
-                expected_schema_version: ironclaw_turns::RunProfileVersion::new(1),
+                expected_schema_id: ironclaw_loop_contracts::CheckpointSchemaId::new("test-schema")
+                    .expect("ok"),
+                expected_schema_version: ironclaw_host_api::turn::RunProfileVersion::new(1),
             })
             .await
             .expect_err("inner load error must propagate");
         assert_eq!(
             load_err.kind,
-            ironclaw_turns::run_profile::AgentLoopHostErrorKind::Invalid
+            ironclaw_loop_contracts::AgentLoopHostErrorKind::Invalid
         );
         assert_eq!(inner.load_call_count(), 1);
     }
@@ -378,7 +373,7 @@ mod tests {
         let err = wrapped.checkpoint(request()).await.expect_err("must err");
         assert_eq!(
             err.kind,
-            ironclaw_turns::run_profile::AgentLoopHostErrorKind::CheckpointRejected
+            ironclaw_loop_contracts::AgentLoopHostErrorKind::CheckpointRejected
         );
         assert_eq!(*seen.lock().expect("not poisoned"), 0);
     }

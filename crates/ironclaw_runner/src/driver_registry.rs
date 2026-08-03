@@ -7,10 +7,10 @@
 
 use std::{borrow::Borrow, collections::HashMap, error::Error, fmt, sync::Arc};
 
-use ironclaw_turns::{
-    AgentLoopDriver, AgentLoopDriverDescriptor, RunProfileVersion, TurnStatus,
-    run_profile::{CheckpointSchemaId, LoopDriverId},
+use ironclaw_loop_contracts::{
+    AgentLoopDriver, AgentLoopDriverDescriptor, CheckpointSchemaId, LoopDriverId,
 };
+use ironclaw_turns::{RunProfileVersion, TurnStatus};
 
 /// Exact persisted identity for a registered loop driver.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

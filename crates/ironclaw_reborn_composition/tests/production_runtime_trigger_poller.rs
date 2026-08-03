@@ -45,7 +45,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ExternalActorRef};
+use ironclaw_conversations::{AdapterInstallationId, AdapterKind};
+use ironclaw_extension_contracts::external::ExternalActorRef;
 use ironclaw_host_api::{
     ids::{AgentId, TenantId, UserId},
     runtime_policy::{
@@ -223,8 +224,12 @@ async fn production_runtime_trigger_poller_fires_due_scheduled_trigger() {
             AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
             AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
                 .expect("installation id"),
-            ExternalActorRef::new(TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, user_id.as_str())
-                .expect("actor ref"),
+            ExternalActorRef::new(
+                TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                user_id.as_str(),
+                None::<String>,
+            )
+            .expect("actor ref"),
             user_id.clone(),
         )
         .await

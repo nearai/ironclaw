@@ -6,11 +6,18 @@
 //! the host to echo before normal ProductSurface admission. The host stamps
 //! trusted context outside this crate after verifying Slack request signatures.
 
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelAttachmentRef, NormalizedInboundMessage, ProductTriggerReason,
+};
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
+    ProductAttachmentKind,
+};
 use ironclaw_host_api::product_adapter::{
-    AdapterInstallationId, ChannelAttachmentRef, ChannelInboundClassification, ExternalActorRef,
-    ExternalConversationRef, ExternalEventId, NormalizedInboundMessage, ParsedProductInbound,
-    ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind, ProductInboundPayload,
-    ProductTriggerReason, ProtocolAuthEvidence, UserMessagePayload,
+    AdapterInstallationId, ProductAdapterError, ProtocolAuthEvidence,
+};
+use ironclaw_product_contracts::inbound::{
+    ChannelInboundClassification, ParsedProductInbound, ProductInboundPayload, UserMessagePayload,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -626,13 +633,16 @@ fn parse_interaction_resolution(
 ) -> Result<Option<ProductInboundPayload>, SlackPayloadParseError> {
     // Slack-specific normalization (mentions may wrap or sit inside the
     // pasted inline code) in front of the channel-neutral grammar owned by
-    // `ironclaw_host_api::product_adapter::interaction_commands` — one grammar for
+    // `ironclaw_product_contracts::interaction_commands` — one grammar for
     // every channel whose busy/prompt copy advertises these commands.
     let text = strip_leading_slack_mentions(text);
-    let text = ironclaw_host_api::product_adapter::strip_wrapping_inline_code(text);
+    let text = ironclaw_product_contracts::interaction_commands::strip_wrapping_inline_code(text);
     let text = strip_leading_slack_mentions(text);
-    ironclaw_host_api::product_adapter::parse_interaction_resolution_text(text, source_trigger)
-        .map_err(adapter_error_to_payload_error)
+    ironclaw_product_contracts::interaction_commands::parse_interaction_resolution_text(
+        text,
+        source_trigger,
+    )
+    .map_err(adapter_error_to_payload_error)
 }
 
 fn strip_leading_slack_mentions(text: &str) -> &str {
@@ -886,17 +896,23 @@ struct SlackSlashCommandForm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::product_adapter::ProductInboundPayload;
-    use ironclaw_host_api::product_adapter::auth::mark_request_signature_verified;
+    use ironclaw_host_api::product_adapter::auth::AuthRequirement;
+    use ironclaw_product_contracts::inbound::ProductInboundPayload;
 
     fn installation_id() -> AdapterInstallationId {
         AdapterInstallationId::new("slack_install_beta").expect("valid")
     }
 
     fn verified() -> ProtocolAuthEvidence {
-        mark_request_signature_verified(
-            "X-Slack-Signature",
-            Some("X-Slack-Request-Timestamp".to_string()),
+        // `test_verified` is the `test-support` seam standing in for the host:
+        // an adapter crate holds no `VerifiedInboundGrant` and must not be able
+        // to mint in production (PROPOSAL §12.1a). Value-identical to the
+        // pre-WS1.5 `mark_request_signature_verified` call this replaced.
+        ProtocolAuthEvidence::test_verified(
+            AuthRequirement::RequestSignature {
+                header_name: "X-Slack-Signature".to_string(),
+                timestamp_header_name: Some("X-Slack-Request-Timestamp".to_string()),
+            },
             "T123",
         )
     }
@@ -1593,13 +1609,19 @@ mod tests {
 #[cfg(test)]
 mod ingress_properties {
     use super::*;
-    use ironclaw_host_api::product_adapter::auth::mark_request_signature_verified;
+    use ironclaw_host_api::product_adapter::auth::AuthRequirement;
     use proptest::prelude::*;
 
     fn verified_evidence() -> ProtocolAuthEvidence {
-        mark_request_signature_verified(
-            "X-Slack-Signature",
-            Some("X-Slack-Request-Timestamp".to_string()),
+        // `test_verified` is the `test-support` seam standing in for the host:
+        // an adapter crate holds no `VerifiedInboundGrant` and must not be able
+        // to mint in production (PROPOSAL §12.1a). Value-identical to the
+        // pre-WS1.5 `mark_request_signature_verified` call this replaced.
+        ProtocolAuthEvidence::test_verified(
+            AuthRequirement::RequestSignature {
+                header_name: "X-Slack-Signature".to_string(),
+                timestamp_header_name: Some("X-Slack-Request-Timestamp".to_string()),
+            },
             "T123",
         )
     }

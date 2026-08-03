@@ -370,8 +370,8 @@ async fn fetch_snapshot_maps_projection_snapshot_errors() {
         ),
         (
             ProjectionError::TurnEventRebaseRequired {
-                requested: ironclaw_turns::EventCursor(0),
-                earliest: ironclaw_turns::EventCursor(5),
+                requested: ironclaw_host_api::turn::EventCursor(0),
+                earliest: ironclaw_host_api::turn::EventCursor(5),
             },
             ProjectionStreamError::InvalidRequest {
                 reason: "turn event projection rebase required outside subscribe flow",
