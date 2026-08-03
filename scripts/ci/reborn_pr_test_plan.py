@@ -21,6 +21,10 @@ MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
 IGNORED_PREFIXES = ("docs/", ".github/ISSUE_TEMPLATE/")
 DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
+QA_HARNESS_PREFIXES = (
+    "scripts/live-canary/",
+    "scripts/reborn_webui_v2_live_qa/",
+)
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 PR_STATIC_CONTROL_PATHS = {
     "Cargo.toml",
@@ -335,6 +339,10 @@ def build_plan(
         if path.startswith(DEDICATED_WORKFLOW_PREFIXES):
             reasons.append(f"dedicated stress workflow owns: {path}")
             continue
+        if path.startswith(QA_HARNESS_PREFIXES):
+            qa_evidence_changed = True
+            reasons.append(f"live QA harness changed: {path}")
+            continue
         if path == CHANGED_COVERAGE_MANIFEST:
             reasons.append("changed-coverage policy is statically validated")
             continue
@@ -375,6 +383,17 @@ def build_plan(
         }:
             qa_evidence_changed = True
             reasons.append("recorded QA evidence changed")
+            continue
+        if path.startswith(("tests/reborn_", "tests/e2e/reborn_", "scripts/ci/reborn-")):
+            raise ValueError(f"unmapped Reborn test path: {path}")
+        if path.startswith("tests/e2e/"):
+            # E2E scenarios and support live in the dedicated
+            # `reborn-e2e.yml` workflow, which runs its own changed-path
+            # filter and provider/shard matrix. They are not part of the
+            # crate-bucket / root-partition / integration-lane plan emitted
+            # here, so skip them instead of failing closed on an unmapped
+            # path.
+            reasons.append(f"Reborn E2E workflow owns: {path}")
             continue
         if path.startswith("crates/"):
             package = next(

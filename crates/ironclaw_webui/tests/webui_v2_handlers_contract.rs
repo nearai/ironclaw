@@ -7103,6 +7103,101 @@ async fn stream_events_emits_application_keep_alive_while_subscription_is_idle()
     assert!(text.contains(r#"data: {"type":"keep_alive"}"#), "{text}");
 }
 
+// Keep-alive frames are liveness pings, not durable resume positions.
+// The product seam stamps an advancing cursor into every envelope
+// (including `KeepAlive`), and the browser's `EventSource` echoes the
+// last `id:` back as `Last-Event-ID` on reconnect. If a keep-alive is
+// the last frame before a disconnect, resuming from its cursor would
+// skip real events that precede it. Pin that keep-alive envelopes never
+// carry an SSE `id:` so the browser keeps the last real event's id as
+// the resume point.
+#[tokio::test]
+async fn stream_events_keep_alive_frame_carries_no_sse_id() {
+    let services = Arc::new(StubServices::default());
+
+    let real_envelope = make_projection_envelope("cursor:real", "hello");
+    let keep_alive_envelope =
+        make_outbound_envelope("cursor:keepalive", ProductOutboundPayload::KeepAlive);
+
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+        events: vec![real_envelope.clone(), keep_alive_envelope],
+    }));
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse { events: Vec::new() }));
+
+    let router = router_with(services.clone());
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body();
+    let mut bytes = Vec::<u8>::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let have_events = bytes.windows(2).filter(|w| *w == b"\n\n").count() >= 2;
+        let saw_second_call = services.stream_events_calls.lock().expect("lock").len() >= 2;
+        if have_events && saw_second_call {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(remaining, body.frame()).await {
+            Ok(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    bytes.extend_from_slice(data.as_ref());
+                }
+            }
+            _ => break,
+        }
+    }
+    drop(body);
+
+    let events = parse_sse_events(&bytes);
+    let keep_alive = events
+        .iter()
+        .find(|event| event.event.as_deref() == Some("keep_alive"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a keep_alive event; got: {events:?}; raw: {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        });
+    assert!(
+        keep_alive.id.is_none(),
+        "keep_alive frame must not carry an SSE id (resume cursor); got: {keep_alive:?}"
+    );
+    let keep_alive_json: Value =
+        serde_json::from_str(keep_alive.data.as_deref().expect("data")).expect("keep_alive json");
+    assert_eq!(keep_alive_json["type"], "keep_alive");
+    // The cursor field may be present on the frame (it is the envelope's
+    // projection cursor), but it must not be surfaced as the SSE `id:`
+    // field — that is the contract the assertion above pins.
+    assert_eq!(
+        keep_alive_json.get("cursor"),
+        Some(&Value::String("cursor:keepalive".to_string())),
+        "keep_alive frame data carries its envelope cursor as a data field, {keep_alive_json}"
+    );
+
+    // The preceding real event still carries its cursor id, so the browser
+    // keeps it as the Last-Event-ID resume point across the keep-alive.
+    let real_event = events
+        .iter()
+        .find(|event| event.event.as_deref() == Some("final_reply"))
+        .expect("real event precedes keep-alive");
+    let real_cursor_json =
+        serde_json::to_string(real_envelope.projection_cursor()).expect("cursor json");
+    assert_eq!(real_event.id.as_deref(), Some(real_cursor_json.as_str()));
+}
+
 // Pins the *wire* contract the browser sees, not just the handler being
 // called: each envelope must emit a typed WebChat v2 event with the
 // JSON-serialized projection cursor as the SSE `id` and the redacted
