@@ -105,6 +105,7 @@ async fn run_contract(repo: &dyn ProjectRepository) {
         repo.list_projects_for_user(&tenant(), &bob, 10)
             .await
             .unwrap()
+            .projects
             .len(),
         1
     );
@@ -178,6 +179,7 @@ async fn run_contract(repo: &dyn ProjectRepository) {
         repo.list_projects_for_user(&tenant(), &bob, 10)
             .await
             .unwrap()
+            .projects
             .is_empty()
     );
 
@@ -223,7 +225,8 @@ async fn run_contract(repo: &dyn ProjectRepository) {
 
     // Cross-tenant isolation: a project in another tenant is invisible.
     let other_tenant = TenantId::new("tenant2").unwrap();
-    let other = ProjectRecord::new(other_tenant.clone(), owner.clone(), "Other", "").unwrap();
+    let mut other = ProjectRecord::new(other_tenant.clone(), owner.clone(), "Other", "").unwrap();
+    other.state = ProjectState::Archived;
     let other_id = other.project_id.clone();
     let other_created = other.created_at;
     repo.create_project(other).await.unwrap();
@@ -252,14 +255,30 @@ async fn run_contract(repo: &dyn ProjectRepository) {
         .list_projects_for_user(&other_tenant, &owner, 10)
         .await
         .unwrap();
-    assert_eq!(listed.len(), 2, "owner sees both other-tenant projects");
-    assert_eq!(listed[0].project_id, newer_id, "newest project first");
+    assert_eq!(
+        listed.projects.len(),
+        2,
+        "owner sees both other-tenant projects"
+    );
+    assert_eq!(
+        listed.projects[0].project_id, newer_id,
+        "newest project first"
+    );
+    assert_eq!(listed.total_projects, 2);
+    assert_eq!(listed.active_projects, 1);
+    assert_eq!(listed.archived_projects, 1);
     let capped = repo
         .list_projects_for_user(&other_tenant, &owner, 1)
         .await
         .unwrap();
-    assert_eq!(capped.len(), 1, "limit cap is honored");
-    assert_eq!(capped[0].project_id, newer_id);
+    assert_eq!(capped.projects.len(), 1, "limit cap is honored");
+    assert_eq!(capped.projects[0].project_id, newer_id);
+    assert_eq!(
+        capped.total_projects, 2,
+        "total remains authoritative beyond the response page"
+    );
+    assert_eq!(capped.active_projects, 1);
+    assert_eq!(capped.archived_projects, 1);
 
     // Oversized metadata is rejected by every backend.
     let mut huge = ProjectRecord::new(other_tenant.clone(), owner.clone(), "Huge", "").unwrap();

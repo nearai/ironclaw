@@ -2,7 +2,7 @@
 // arch-exempt: large_file, table-driven auth conformance remains one contract suite, plan #6175
 //! contract over recipe data against a scripted vendor HTTP server. Vendors
 //! are rows — the five real vendors' recipes are loaded from their bundled
-//! manifests (`crates/ironclaw_first_party_extensions/assets`), synthetic rows
+//! manifests (`crates/extensions/packages`), synthetic rows
 //! cover recipe shapes no current vendor exercises. There is deliberately no
 //! per-vendor test suite anywhere else.
 
@@ -270,7 +270,7 @@ fn exchange_context(scope: &AuthProductScope) -> OAuthProviderExchangeContext {
 /// runs against exactly the data production resolves (AUTH-12).
 fn manifest_recipe(package: &str, vendor: &str) -> ResolvedVendorAuthRecipe {
     let path = format!(
-        "{}/../ironclaw_first_party_extensions/assets/{package}/manifest.toml",
+        "{}/../extensions/packages/{package}/manifest.toml",
         env!("CARGO_MANIFEST_DIR")
     );
     let text =

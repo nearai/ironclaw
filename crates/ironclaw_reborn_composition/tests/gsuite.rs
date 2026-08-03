@@ -6,14 +6,14 @@ use ironclaw_auth::{
     CredentialAccountStatus, CredentialOwnership, GOOGLE_GMAIL_SEND_SCOPE,
     InMemoryAuthProductServices, NewCredentialAccount, ProviderScope,
 };
-use ironclaw_extensions::{ExtensionRuntime, ManifestSource};
-use ironclaw_first_party_extensions::{
+use ironclaw_extension_support::{
     CALENDAR_LIST_CALENDARS_CAPABILITY_ID, GMAIL_SEND_MESSAGE_CAPABILITY_ID, GOOGLE_PROVIDER_ID,
     GsuiteCapabilitySpec, GsuiteCredentialDispatchReason, GsuiteCredentialStageError,
     GsuiteCredentialStageRequest, GsuiteCredentialStager, GsuiteDispatchError,
     GsuiteDispatchRequest, GsuiteExecutor, GsuitePackageSpec, find_gsuite_capability,
     google_provider_id, gsuite_package_specs,
 };
+use ironclaw_extensions::{ExtensionRuntime, ManifestSource};
 use ironclaw_host_api::{
     action::{NetworkScheme, NetworkTargetPattern},
     capability::{
@@ -38,7 +38,7 @@ use serde_json::json;
 
 // DEL-7 moved the GSuite `FirstPartyCapabilityHandler` wrapper + registration out
 // of composition into the assembling binary. These tests drive the real
-// `ironclaw_first_party_extensions::GsuiteExecutor` through the same thin wrapper
+// `ironclaw_extension_support::GsuiteExecutor` through the same thin wrapper
 // the binary supplies, built here directly over the executor (the composition
 // test crate links first-party / host-runtime / host-api as dev-dependencies).
 fn gsuite_first_party_handlers(
@@ -284,11 +284,9 @@ fn cap_id(value: &str) -> CapabilityId {
 fn asset_manifest(extension_id: &str) -> ironclaw_extensions::ExtensionManifest {
     let manifest_toml = match extension_id {
         "google-calendar" => {
-            include_str!(
-                "../../ironclaw_first_party_extensions/assets/google-calendar/manifest.toml"
-            )
+            include_str!("../../extensions/packages/google-calendar/manifest.toml")
         }
-        "gmail" => include_str!("../../ironclaw_first_party_extensions/assets/gmail/manifest.toml"),
+        "gmail" => include_str!("../../extensions/packages/gmail/manifest.toml"),
         other => panic!("unknown GSuite asset manifest {other}"),
     };
     // Parse through the single record entry point so this test follows the
@@ -308,17 +306,17 @@ fn asset_manifest(extension_id: &str) -> ironclaw_extensions::ExtensionManifest 
 fn asset_schema(path: &str) -> serde_json::Value {
     let schema_json = match path {
         "google-calendar/create_event.input.v1.json" => include_str!(
-            "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/create_event.input.v1.json"
+            "../../extensions/packages/google-calendar/schemas/google-calendar/create_event.input.v1.json"
         ),
         "google-calendar/list_events.input.v1.json" => include_str!(
-            "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/list_events.input.v1.json"
+            "../../extensions/packages/google-calendar/schemas/google-calendar/list_events.input.v1.json"
         ),
         "gmail/list_messages.input.v1.json" => include_str!(
-            "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/list_messages.input.v1.json"
+            "../../extensions/packages/gmail/schemas/gmail/list_messages.input.v1.json"
         ),
-        "gmail/send_message.input.v1.json" => include_str!(
-            "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/send_message.input.v1.json"
-        ),
+        "gmail/send_message.input.v1.json" => {
+            include_str!("../../extensions/packages/gmail/schemas/gmail/send_message.input.v1.json")
+        }
         other => panic!("unknown GSuite asset schema {other}"),
     };
     serde_json::from_str(schema_json).unwrap()

@@ -1,4 +1,4 @@
-//! Converts the concrete `ironclaw_first_party_extensions` package inventory
+//! Converts the concrete `ironclaw_extension_support` package inventory
 //! into extension-host's neutral [`FirstPartyPackageBundle`]s (extension-runtime
 //! DEL-7). This is the one production spot allowed to name the concrete
 //! inventory; composition consumes the neutral bundles as opaque data.
@@ -6,8 +6,8 @@
 use ironclaw_extension_host::{
     FirstPartyPackageAsset, FirstPartyPackageBundle, FirstPartyPackageOnboarding,
 };
-use ironclaw_first_party_extensions::is_gsuite_extension_id;
-use ironclaw_first_party_extensions::packages::{PackageAssetContent, bundled_packages};
+use ironclaw_extension_support::is_gsuite_extension_id;
+use ironclaw_extension_support::packages::{PackageAssetContent, bundled_packages};
 use ironclaw_host_api::ids::ExtensionId;
 
 /// The GSuite family's catalog search aliases, folded into the neutral bundle so

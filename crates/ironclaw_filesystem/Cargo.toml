@@ -41,6 +41,10 @@ tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+# The Postgres contract tests provision their own container when no database
+# URL is supplied, so they run in any Docker-enabled lane instead of silently
+# skipping. Same image the CI lanes pre-pull.
+testcontainers-modules = { version = "0.12", features = ["postgres"] }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "test-util"] }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
 uuid = { version = "1", features = ["v4"] }

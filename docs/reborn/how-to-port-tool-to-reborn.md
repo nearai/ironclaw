@@ -420,4 +420,4 @@ This guide is useful for planning and initial ports, but several production path
 - `docs/reborn/contracts/network.md`
 - `src/tools/README.md`
 - `src/tools/wasm/capabilities_schema.rs`
-- `crates/ironclaw_first_party_extensions/assets/` for current packaged first-party extension examples
+- `crates/extensions/packages/` for current packaged first-party extension examples

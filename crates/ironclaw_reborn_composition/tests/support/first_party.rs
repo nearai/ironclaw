@@ -1,5 +1,5 @@
 //! Shared integration-test helper: builds the neutral first-party bundle set
-//! from the `ironclaw_first_party_extensions` dev-dependency and the production
+//! from the `ironclaw_extension_support` dev-dependency and the production
 //! trust policy over it (extension-runtime DEL-7).
 //!
 //! Composition no longer links first-party extensions in production, so
@@ -16,8 +16,8 @@
 use ironclaw_extension_host::{
     FirstPartyPackageAsset, FirstPartyPackageBundle, FirstPartyPackageOnboarding,
 };
-use ironclaw_first_party_extensions::is_gsuite_extension_id;
-use ironclaw_first_party_extensions::packages::{PackageAssetContent, bundled_packages};
+use ironclaw_extension_support::is_gsuite_extension_id;
+use ironclaw_extension_support::packages::{PackageAssetContent, bundled_packages};
 use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_reborn_composition::production_first_party_trust_policy;
 use ironclaw_trust::HostTrustPolicy;

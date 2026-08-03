@@ -21,12 +21,31 @@ jobs that have a checkout but no Rust toolchain (the coverage-report job in
 cargo — `scripts/check_no_panics.py` — use `cargo metadata` directly, which is
 strictly better where it is available.
 
-Outermost wins: `crates/ironclaw_safety/fuzz/` and the six
-`crates/ironclaw_first_party_extensions/assets/*/wasm-src/` manifests are
-nested inside a crate that already owns their path, so files under them are
-attributed to the enclosing crate. That is exactly what the flat-shaped
-patterns did (`crates/ironclaw_safety/*` matched the fuzz subtree too), so the
-generalization is behavior-free on today's tree.
+Outermost wins: `crates/ironclaw_safety/fuzz/` is nested inside a crate that
+already owns its path, so files under it are attributed to the enclosing crate.
+That is exactly what the flat-shaped patterns did (`crates/ironclaw_safety/*`
+matched the fuzz subtree too).
+
+Separate workspace roots are not crates of this workspace. A `Cargo.toml` that
+declares its own `[workspace]` table is by construction the root of a
+*different* workspace: `cargo build` here never compiles it, `cargo metadata`
+never lists it, and no test run of this workspace can cover a line inside it.
+Those manifests are pruned from the inventory; paths under them are reported by
+`nested_workspace_root()` instead, so a caller can tell "excluded by
+construction" apart from "the tree and the inventory disagree".
+
+Why the rule had to be stated rather than inherited (WS2 package colocation).
+The six `wasm-src/` guest components used to sit under
+`crates/ironclaw_first_party_extensions/`, so outermost-wins attributed them to
+the enclosing crate and they never surfaced. Once packages moved to
+`crates/extensions/packages/<ext>/` — where a data-only package deliberately has
+no `Cargo.toml` of its own — five of them became the outermost manifest on their
+path and were silently promoted to first-class crates, which put ~12k lines of
+workspace-excluded, uncoverable guest code into the changed-coverage and
+composition-budget denominators. The `[workspace]` marker is exactly what those
+directories have in common with `crates/ironclaw_silk_decoder` (also `exclude`d
+from the root workspace, also never built here), so one rule covers both; the
+silk-decoder half is a latent-bug fix that arrives with it.
 
 Usage:
     python3 scripts/ci/lib/crate_tree.py [repo_root]   # one crate dir per line
@@ -52,9 +71,32 @@ MIN_CRATE_DIRECTORIES = 20
 # inside a crate directory (cargo-fuzz does this by default).
 _SKIPPED_DIRECTORY_NAMES = ("target",)
 
+# A `[workspace]` table at the start of a line. Cargo only recognizes the
+# table at the top level of a manifest, so a line-anchored match is exact;
+# `[workspace.dependencies]` and friends are deliberately not matched, since a
+# member manifest may inherit from them without being a workspace root itself.
+_WORKSPACE_TABLE_HEADER = "[workspace]"
+
 
 class CrateTreeError(RuntimeError):
     """Discovery could not produce a usable crate inventory."""
+
+
+def _declares_own_workspace(manifest: pathlib.Path) -> bool:
+    """True when ``manifest`` is the root of a separate cargo workspace.
+
+    Read fail-closed: an unreadable manifest is treated as a normal crate so a
+    permissions problem shows up as a build error rather than as a directory
+    quietly vanishing from every path-keyed gate.
+    """
+
+    try:
+        text = manifest.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return any(
+        line.strip() == _WORKSPACE_TABLE_HEADER for line in text.splitlines()
+    )
 
 
 def _is_skipped(relative: pathlib.PurePosixPath) -> bool:
@@ -86,6 +128,11 @@ def crate_directories(repo_root: str | pathlib.Path = ".") -> list[str]:
     for manifest in crates_root.rglob("Cargo.toml"):
         relative = pathlib.PurePosixPath(manifest.parent.relative_to(root).as_posix())
         if _is_skipped(relative):
+            continue
+        # A separate workspace root is not a crate of this workspace. Skipping
+        # it here (rather than after the outermost-wins pass) is deliberate: a
+        # guest that is not shadowed by an enclosing crate must not become one.
+        if _declares_own_workspace(manifest):
             continue
         manifests.append(relative)
 
@@ -147,11 +194,57 @@ def owning_crate_directory(
     `crates/` at all). Callers that classify production sources must treat the
     first case as an error rather than as "not production" — that fall-through
     is the WS10 silent-dark failure mode
-    (docs/reborn/target-architecture/CHECKLIST.md).
+    (docs/reborn/target-architecture/CHECKLIST.md) — *unless*
+    `nested_workspace_root()` claims the path, which is the sanctioned
+    "excluded by construction" answer.
     """
 
     normalized = pathlib.PurePosixPath(path).as_posix()
     for directory in _crate_directories_cached(repo_root):
+        if normalized.startswith(f"{directory}/"):
+            return directory
+    return None
+
+
+def workspace_root_directories(repo_root: str | pathlib.Path = ".") -> list[str]:
+    """Directories under `crates/` that are roots of a *separate* workspace.
+
+    These are excluded from `crate_directories()` on purpose (see the module
+    docstring). Today: `crates/ironclaw_silk_decoder` and the six
+    `crates/extensions/packages/*/wasm-src` guest components.
+    """
+
+    root = pathlib.Path(repo_root)
+    crates_root = root / CRATES_ROOT_NAME
+    if not crates_root.is_dir():
+        raise CrateTreeError(
+            f"no {CRATES_ROOT_NAME}/ directory under {root!s} — cannot enumerate "
+            "separate workspace roots."
+        )
+
+    roots: list[str] = []
+    for manifest in crates_root.rglob("Cargo.toml"):
+        relative = pathlib.PurePosixPath(manifest.parent.relative_to(root).as_posix())
+        if _is_skipped(relative):
+            continue
+        if _declares_own_workspace(manifest):
+            roots.append(relative.as_posix())
+    return sorted(roots)
+
+
+def nested_workspace_root(
+    path: str, repo_root: str | pathlib.Path = "."
+) -> str | None:
+    """Return the separate-workspace root containing ``path``, else ``None``.
+
+    A path this claims is excluded from the workspace *by construction* — it is
+    never compiled here and no line in it can be covered — which is a different
+    answer from "the inventory and the tree disagree". Callers that fail closed
+    on unattributable `crates/` paths consult this first.
+    """
+
+    normalized = pathlib.PurePosixPath(path).as_posix()
+    for directory in _workspace_roots_cached(repo_root):
         if normalized.startswith(f"{directory}/"):
             return directory
     return None
@@ -169,6 +262,18 @@ def crate_source_relative(
 
 
 _INVENTORY_CACHE: dict[str, list[str]] = {}
+_WORKSPACE_ROOT_CACHE: dict[str, list[str]] = {}
+
+
+def _workspace_roots_cached(repo_root: str | pathlib.Path = ".") -> list[str]:
+    """`workspace_root_directories()` memoized per resolved root."""
+
+    key = str(pathlib.Path(repo_root).resolve())
+    cached = _WORKSPACE_ROOT_CACHE.get(key)
+    if cached is None:
+        cached = sorted(workspace_root_directories(repo_root), key=len)
+        _WORKSPACE_ROOT_CACHE[key] = cached
+    return cached
 
 
 def _crate_directories_cached(repo_root: str | pathlib.Path = ".") -> list[str]:
@@ -201,6 +306,7 @@ def reset_inventory_cache() -> None:
     """
 
     _INVENTORY_CACHE.clear()
+    _WORKSPACE_ROOT_CACHE.clear()
 
 
 def main() -> int:

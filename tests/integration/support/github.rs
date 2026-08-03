@@ -73,7 +73,7 @@ pub fn extension_package() -> GithubSupportResult<ExtensionPackage> {
 }
 
 pub fn asset_root() -> PathBuf {
-    repo_root().join("crates/ironclaw_first_party_extensions/assets/github")
+    repo_root().join("crates/extensions/packages/github")
 }
 
 fn repo_root() -> &'static Path {

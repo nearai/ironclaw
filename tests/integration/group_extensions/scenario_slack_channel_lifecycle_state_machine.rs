@@ -64,7 +64,7 @@ const SLACK_OAUTH_CLIENT_ID: &str = "slack-oauth-client";
 const SLACK_OAUTH_CLIENT_SECRET: &str = "slack-oauth-secret";
 
 /// Mirrors the slack manifest's `[[tools.credentials]]` scope union
-/// (`crates/ironclaw_first_party_extensions/assets/slack/manifest.toml`):
+/// (`crates/extensions/packages/slack/manifest.toml`):
 /// read scopes shared by every tool plus `chat:write` for `send_message`.
 const SLACK_SCOPES: &[&str] = &[
     "search:read",
