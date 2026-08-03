@@ -165,16 +165,16 @@ h1,h2,h3,p{margin:0}
 .cpill .cstate svg{width:12px;height:12px}
 .cpill.on{border-color:color-mix(in srgb,var(--v2-positive-text) 45%,var(--v2-panel-border));background:color-mix(in srgb,var(--v2-positive-soft) 55%,var(--v2-surface))}
 .cpill.on .cstate{background:var(--v2-positive-text);border-color:var(--v2-positive-text);color:#fff}
-.cstack{display:inline-flex;align-items:center;gap:11px;border:1px solid color-mix(in srgb,var(--v2-positive-text) 32%,var(--v2-panel-border));background:color-mix(in srgb,var(--v2-positive-soft) 55%,var(--v2-surface));border-radius:999px;padding:6px 14px 6px 9px;cursor:pointer;font:inherit;animation:card-in .34s ease both}
-.cstack:hover{border-color:color-mix(in srgb,var(--v2-positive-text) 55%,var(--v2-panel-border))}
+.cstack{display:inline-flex;align-items:center;border:0;background:transparent;padding:4px 2px;cursor:pointer;font:inherit;animation:card-in .34s ease both}
+.cstack:focus-visible{outline:2px solid color-mix(in srgb,var(--v2-accent) 45%,transparent);outline-offset:3px;border-radius:999px}
 .cstack .stackicons{display:inline-flex;align-items:center}
-.cstack .stackicons .appchip{width:26px;height:26px;border-radius:8px;display:grid;place-items:center;border:2px solid var(--v2-surface);margin-left:-10px;box-shadow:0 1px 3px rgba(0,0,0,.16)}
+.cstack .stackicons .appchip{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;border:0;margin-left:-14px;box-shadow:0 0 0 3px var(--v2-surface),0 2px 5px rgba(0,0,0,.2)}
 .cstack .stackicons .appchip:first-child{margin-left:0}
-.cstack .stackicons .appchip svg{width:14px;height:14px}
-.cstack .stacklbl{font-size:12.5px;color:var(--v2-text-muted)}
-.cstack .stacklbl b{color:var(--v2-text-strong);font-weight:640}
-.cstack .scv{width:15px;height:15px;color:var(--v2-text-faint)}
-@media (prefers-reduced-motion:reduce){.cstack{animation:none}}
+.cstack .stackicons .appchip svg{width:17px;height:17px}
+.cstack .addmore{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;margin-left:-14px;background:var(--v2-surface);color:var(--v2-accent-text);box-shadow:0 0 0 3px var(--v2-surface),0 2px 5px rgba(0,0,0,.2);transition:transform .16s}
+.cstack .addmore svg{width:16px;height:16px}
+.cstack:hover .addmore{transform:scale(1.08)}
+@media (prefers-reduced-motion:reduce){.cstack{animation:none}.cstack:hover .addmore{transform:none}}
 
 /* ---------- carousel strip (Done for you) ---------- */
 .carousel{width:100%}
@@ -590,7 +590,8 @@ h1,h2,h3,p{margin:0}
     bolt:'<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>',
     users:'<path d="M17 21v-2a4 4 0 0 0-3-3.9M9 21v-2a4 4 0 0 1 3-3.9M12 7a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>',
     list:'<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
-    arrow:'<path d="M9 6l6 6-6 6"/>'
+    arrow:'<path d="M9 6l6 6-6 6"/>',
+    plus:'<path d="M12 5v14M5 12h14"/>'
   };
   function svg(name,sw){return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="'+(sw||1.8)+'" stroke-linecap="round" stroke-linejoin="round">'+ICON[name]+'</svg>';}
   function chipStyle(accent){return 'color:'+accent+';background:color-mix(in srgb,'+accent+' 16%,transparent);border-color:color-mix(in srgb,'+accent+' 38%,transparent)';}
@@ -611,11 +612,12 @@ h1,h2,h3,p{margin:0}
     var all=APPS.length,n=connSet.length;
     if(condensed && n>0){
       connectAllBtn.style.display='none';
-      connectSub.textContent='connected — tap to manage';
-      appRow.innerHTML='<button class="cstack" id="cstackBtn" type="button" aria-label="Connected tools — tap to manage">'
-        +'<span class="stackicons">'+APPS.filter(function(a){return isConn(a.key);}).map(function(a){return appChip(a);}).join('')+'</span>'
-        +'<span class="stacklbl"><b>'+n+'</b> connected</span>'
-        +'<svg class="scv" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>';
+      connectSub.textContent=n+' connected — tap to manage';
+      appRow.innerHTML='<button class="cstack" id="cstackBtn" type="button" aria-label="'+n+' connected — tap to manage or add another tool">'
+        +'<span class="stackicons">'
+        +APPS.filter(function(a){return isConn(a.key);}).map(function(a){return appChip(a);}).join('')
+        +'<span class="addmore">'+svg('plus',2.2)+'</span>'
+        +'</span></button>';
       document.getElementById('cstackBtn').onclick=function(){ condensed=false; renderConnect(); };
     } else {
       connectAllBtn.style.display=(n>=all)?'none':'';
