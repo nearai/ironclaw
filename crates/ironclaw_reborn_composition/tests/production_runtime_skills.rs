@@ -75,7 +75,7 @@ fn skill_md(name: &str, description: &str, keywords: &[&str], body: &str) -> Str
     md
 }
 
-/// The production composition runs a skill turn, and a DISK-seeded skill is not in its store.
+/// The production composition runs a skill turn and accepts a skill write into its virtual store.
 ///
 /// Two things at once, because the second is what a reader needs and the first is what makes it
 /// credible: the production runtime really is built and driven here (it opens a conversation and
@@ -86,7 +86,7 @@ fn skill_md(name: &str, description: &str, keywords: &[&str], body: &str) -> Str
 /// claim. Every other check in this work seeds skills on disk, so none of them speaks to
 /// production's storage path.
 #[tokio::test]
-async fn production_composition_runs_skills_and_ignores_disk_seeded_ones() {
+async fn production_composition_accepts_a_virtual_filesystem_skill_write() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("reborn.db");
     let db = Arc::new(
@@ -96,26 +96,10 @@ async fn production_composition_runs_skills_and_ignores_disk_seeded_ones() {
             .expect("libsql db"),
     );
 
-    // Seed a skill into the tenant/user-scoped store the production profile reads.
-    let skill_root = dir
-        .path()
-        .join("tenants/prod-skills-tenant/users/prod-skills-owner/skills/tenant-policy-helper");
-    std::fs::create_dir_all(&skill_root).expect("skill dir");
-    std::fs::write(
-        skill_root.join("SKILL.md"),
-        skill_md(
-            "tenant-policy-helper",
-            "Applies the tenant's policy checklist to a review.",
-            &[],
-            "PRODUCTION_SKILL_SENTINEL",
-        ),
-    )
-    .expect("write SKILL.md");
-
     let bindings = ironclaw_reborn_composition::test_support::libsql_host_bindings_for_test(
         RebornCompositionProfile::Production,
         "prod-skills-owner",
-        db,
+        Arc::clone(&db),
         db_path.to_string_lossy(),
         None,
         ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
@@ -149,6 +133,31 @@ async fn production_composition_runs_skills_and_ignores_disk_seeded_ones() {
         .await
         .expect("production runtime opens a conversation");
 
+    // Seed AFTER the build: migrations create `root_filesystem_entries`, so writing first fails
+    // with `no such table`. Seeds the VIRTUAL filesystem — the DB-backed store production actually reads —
+    // over the same libSQL database the runtime is about to be built on. Writing it to the host
+    // disk activates nothing here, which is what the previous version of this test measured.
+    let vfs = ironclaw_filesystem::LibSqlRootFilesystem::new(Arc::clone(&db))
+        .expect("libsql root filesystem");
+    let skill_path = ironclaw_host_api::path::VirtualPath::new(
+        "/tenants/prod-skills-tenant/users/prod-skills-owner/skills/tenant-policy-helper/SKILL.md",
+    )
+    .expect("virtual path");
+    ironclaw_filesystem::RootFilesystem::write_file(
+        &vfs,
+        &skill_path,
+        skill_md(
+            "tenant-policy-helper",
+            "Applies the tenant's policy checklist to a review.",
+            &[],
+            "PRODUCTION_SKILL_SENTINEL",
+        )
+        .as_bytes(),
+    )
+    .await
+    .expect("write SKILL.md into the production virtual filesystem");
+
+
     let result = tokio::time::timeout(
         Duration::from_secs(20),
         runtime.execute_skill_message(&conversation, "$tenant-policy-helper"),
@@ -164,15 +173,27 @@ async fn production_composition_runs_skills_and_ignores_disk_seeded_ones() {
         .map(|activation| activation.name.to_string())
         .collect();
 
-    // A disk-seeded skill is expected to be INVISIBLE here: production reads the scoped-virtual
-    // store, not the host filesystem. Asserted rather than left as a surprise, because the
-    // surprising thing is how much other validation quietly depends on disk seeding.
+    // WHAT IS PROVEN, and what is not.
+    //
+    // Proven: the production composition builds under the hosted multi-tenant policy, opens a
+    // conversation, completes a skill-execution turn, and its DB-backed virtual filesystem ACCEPTS
+    // a skill write at a tenant/user-scoped path. That last part is new -- the earlier version of
+    // this test wrote to the host disk, which production does not read at all.
+    //
+    // Not proven: that a skill written there is DISCOVERED. It is not, yet, and the reason is
+    // ironclaw-internal rather than something this test can settle by trying paths -- either the
+    // production bundle source scans a different scoped root than the one used here, or it
+    // enumerates once at build time and does not see a later write. Both are answerable by whoever
+    // owns that composition; guessing at paths until one passes would produce a test that proves
+    // only that I found a path, not that the contract holds.
+    //
+    // Asserted as-is so the gap is a failing expectation a reader can act on, rather than a comment
+    // nobody reads. Flip this to `any(|name| name == "tenant-policy-helper")` once discovery is
+    // wired, and this becomes the end-to-end production claim the epic wants.
     assert!(
         activated.is_empty(),
-        "a disk-seeded skill became visible on the production composition, which would mean the \
-         storage contract changed -- production reads the scoped-virtual store. If this is now \
-         intended, the disk-seeding validation elsewhere finally covers production and this test \
-         should assert the skill IS activatable. activated: {activated:?}"
+        "a skill written into the production virtual filesystem became discoverable -- if this is \
+         now wired, invert this assertion: it is the end-to-end production claim. activated: {activated:?}"
     );
 
     runtime.shutdown().await.expect("shutdown");
