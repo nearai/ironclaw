@@ -325,6 +325,19 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["integration_lanes"], [])
 
+    def test_reborn_e2e_paths_are_owned_by_dedicated_workflow(self) -> None:
+        plan = self.plan(
+            "pull_request",
+            [
+                "tests/e2e/reborn_coverage_tests.txt",
+                "tests/e2e/scenarios/test_reborn_webui_v2_projects_api.py",
+            ],
+        )
+        self.assertEqual(plan["mode"], "none")
+        self.assertTrue(plan["run_qa_replay"])
+        self.assertEqual(plan["integration_lanes"], [])
+        self.assertEqual(plan["coverage_mode"], "none")
+
     def test_changed_coverage_manifest_does_not_launch_integration_lanes(self) -> None:
         plan = self.plan(
             "pull_request",

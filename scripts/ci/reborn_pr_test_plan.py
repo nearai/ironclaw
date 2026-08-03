@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
 IGNORED_PREFIXES = ("docs/", ".github/ISSUE_TEMPLATE/")
-DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
+DEDICATED_WORKFLOW_PREFIXES = ("tests/e2e/", "tools/ironclaw_stress/")
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 PR_STATIC_CONTROL_PATHS = {
     "Cargo.toml",
@@ -333,7 +333,7 @@ def build_plan(
             reasons.append(f"static CI or workspace-policy checks own: {path}")
             continue
         if path.startswith(DEDICATED_WORKFLOW_PREFIXES):
-            reasons.append(f"dedicated stress workflow owns: {path}")
+            reasons.append(f"dedicated workflow owns: {path}")
             continue
         if path == CHANGED_COVERAGE_MANIFEST:
             reasons.append("changed-coverage policy is statically validated")
