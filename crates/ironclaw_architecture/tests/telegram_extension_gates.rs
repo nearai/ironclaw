@@ -16,6 +16,29 @@ use std::path::{Path, PathBuf};
 
 use ratchet_support::workspace_root;
 
+/// The Telegram package's `src/` tree, refusing rather than returning a path
+/// that is not there.
+///
+/// `rust_files` yields an empty vec for a root it cannot read, so the three
+/// gates below — deleted-abstraction, in-memory-store, and the line budget —
+/// all pass vacuously against a stale path. That is the same silent-green
+/// failure `assert_absent_within` was written to close for the absence
+/// assertions in this file; these three never got it, and WS2's package move
+/// (`crates/ironclaw_telegram_extension/src` ->
+/// `crates/extensions/packages/telegram/src`) is exactly the kind of change
+/// that would have exercised the hole.
+fn telegram_source_root() -> PathBuf {
+    let root = workspace_root().join("crates/extensions/packages/telegram/src");
+    assert!(
+        root.is_dir(),
+        "the Telegram package source root {} does not exist, so every gate keyed on it \
+         would pass without measuring anything — repoint this path in the same change that \
+         moved or renamed the package",
+        root.display()
+    );
+    root
+}
+
 fn rust_and_frontend_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -139,7 +162,7 @@ fn generic_extension_lifecycle_has_no_telegram_knowledge() {
 
 #[test]
 fn deleted_telegram_abstractions_and_dtos_stay_deleted() {
-    let source_root = workspace_root().join("crates/ironclaw_telegram_extension/src");
+    let source_root = telegram_source_root();
     let mut offenders = Vec::new();
     for file in rust_files(&source_root) {
         let source = std::fs::read_to_string(&file).expect("Telegram source readable");
@@ -158,7 +181,7 @@ fn deleted_telegram_abstractions_and_dtos_stay_deleted() {
 
 #[test]
 fn telegram_tests_use_the_real_filesystem_state() {
-    let source_root = workspace_root().join("crates/ironclaw_telegram_extension/src");
+    let source_root = telegram_source_root();
     let mut offenders = Vec::new();
     for file in rust_files(&source_root) {
         let source = std::fs::read_to_string(&file).expect("Telegram source readable");
@@ -209,7 +232,7 @@ fn in_memory_store_gate_catches_all_rust_visibility_forms() {
 
 #[test]
 fn telegram_production_files_meet_the_line_budget() {
-    let source_root = workspace_root().join("crates/ironclaw_telegram_extension/src");
+    let source_root = telegram_source_root();
     let mut offenders = Vec::new();
     for file in rust_files(&source_root) {
         let line_count = std::fs::read_to_string(&file)

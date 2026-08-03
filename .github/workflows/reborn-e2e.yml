@@ -118,7 +118,10 @@ jobs:
   rust-reborn:
     name: Rust Reborn (${{ matrix.group }})
     needs: changes
-    if: needs.changes.outputs.has_e2e_scope == 'true'
+    # Tests (Reborn) already runs these crate/root/integration contracts for
+    # pull requests. Keep this exhaustive grouping for merged-state and main
+    # validation without spending four additional PR runners on duplicates.
+    if: needs.changes.outputs.has_e2e_scope == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
@@ -313,10 +316,11 @@ jobs:
           # Temporary compatibility member for downstream QA consumers; remove
           # after every consumer invokes the canonical ironclaw binary.
           cp target/debug/ironclaw target/debug/ironclaw-reborn
-          tar -C target/debug -czf "${live_dir}/ironclaw-reborn.tar.gz" ironclaw ironclaw-reborn &
+          tar -C target/debug -cf - ironclaw ironclaw-reborn \
+            | gzip -1 > "${live_dir}/ironclaw-reborn.tar.gz" &
           live_package_pid=$!
-          tar -C "${CARGO_TARGET_DIR:-target}/e2e-sso/debug" \
-            -czf "${sso_dir}/ironclaw-sso.tar.gz" ironclaw &
+          tar -C "${CARGO_TARGET_DIR:-target}/e2e-sso/debug" -cf - ironclaw \
+            | gzip -1 > "${sso_dir}/ironclaw-sso.tar.gz" &
           sso_package_pid=$!
           status=0
           wait "${live_package_pid}" || status=1
@@ -351,6 +355,7 @@ jobs:
           name: reborn-webui-v2-binary-${{ steps.live_canary_binary.outputs.product_ref }}
           path: artifacts/reborn-webui-v2-binary/
           if-no-files-found: error
+          compression-level: 0
           retention-days: 7
 
   webui-v2-test-lanes:
@@ -367,30 +372,21 @@ jobs:
       IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE: "1"
     strategy:
       fail-fast: false
-      max-parallel: 7
+      max-parallel: 4
       matrix:
         include:
           - lane: browser
             kind: browser
             shard: ""
-          - lane: fast-contracts
-            kind: fast-contracts
-            shard: ""
           - lane: provider-contracts
             kind: provider
             shard: ""
-          - lane: provider-0
+          - lane: provider-0-1
             kind: provider
-            shard: "0/4"
-          - lane: provider-1
+            shard: "0/4 1/4"
+          - lane: provider-2-3
             kind: provider
-            shard: "1/4"
-          - lane: provider-2
-            kind: provider
-            shard: "2/4"
-          - lane: provider-3
-            kind: provider
-            shard: "3/4"
+            shard: "2/4 3/4"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -503,8 +499,6 @@ jobs:
                 tests/e2e/scenarios/test_reborn_webui_v2_sso.py \
                 tests/e2e/scenarios/test_reborn_webui_v2_custom_mcp.py \
                 -v --timeout=120
-              ;;
-            fast-contracts)
               mapfile -t responses_tests < <(
                 sed -e 's/#.*//' -e '/^[[:space:]]*$/d' \
                   tests/e2e/reborn_responses_e2e_tests.txt
@@ -530,10 +524,36 @@ jobs:
                 -m "not shared_world" -v --timeout=120
               ;;
             provider-*)
-              IRONCLAW_PROVIDER_OPERATION_SHARD="${PROVIDER_SHARD}" \
-                scripts/ci/run-hermetic-deterministic-suite.sh command pytest \
-                  tests/e2e/scenarios/test_reborn_qa_trace_full_path.py::test_provider_operation_case_executes_with_provider_readback \
-                  -m "not shared_world" -v --timeout=120
+              read -ra provider_shards <<< "${PROVIDER_SHARD}"
+              ((${#provider_shards[@]} > 0))
+              provider_pids=()
+              provider_logs=()
+              for provider_shard in "${provider_shards[@]}"; do
+                provider_log="${RUNNER_TEMP}/provider-operation-${provider_shard//\//-}.log"
+                (
+                  IRONCLAW_PROVIDER_OPERATION_SHARD="${provider_shard}" \
+                    scripts/ci/run-hermetic-deterministic-suite.sh command pytest \
+                      tests/e2e/scenarios/test_reborn_qa_trace_full_path.py::test_provider_operation_case_executes_with_provider_readback \
+                      -m "not shared_world" -p no:cacheprovider -v --timeout=120
+                ) > "${provider_log}" 2>&1 &
+                provider_pids+=("$!")
+                provider_logs+=("${provider_log}")
+              done
+
+              provider_status=0
+              for index in "${!provider_pids[@]}"; do
+                provider_shard="${provider_shards[$index]}"
+                echo "::group::provider operation shard ${provider_shard}"
+                shard_status=0
+                wait "${provider_pids[$index]}" || shard_status=$?
+                cat "${provider_logs[$index]}"
+                if ((shard_status != 0)); then
+                  echo "provider operation shard ${provider_shard} failed with status ${shard_status}" >&2
+                  provider_status=1
+                fi
+                echo "::endgroup::"
+              done
+              exit "${provider_status}"
               ;;
             *)
               echo "Unknown Reborn E2E lane: ${LANE}" >&2
@@ -542,7 +562,7 @@ jobs:
           esac
 
       - name: Replay provider journeys in reverse order
-        if: matrix.lane == 'provider-0' && inputs.reversed_journey_order
+        if: matrix.lane == 'provider-0-1' && inputs.reversed_journey_order
         env:
           IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
           IRONCLAW_JOURNEY_ORDER: reverse
@@ -555,7 +575,7 @@ jobs:
           --timeout=120
 
       - name: Replay each mutating journey alone
-        if: matrix.lane == 'provider-0' && inputs.alone_journey_replay
+        if: matrix.lane == 'provider-0-1' && inputs.alone_journey_replay
         env:
           IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
         run: |
@@ -613,7 +633,11 @@ jobs:
             echo "No Reborn E2E scope in this merge group — roll-up passes"
             exit 0
           fi
-          if ! job_result_ok "rust-reborn" "${{ needs.rust-reborn.result }}" false "allow"; then
+          rust_reborn_optional=false
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            rust_reborn_optional=true
+          fi
+          if ! job_result_ok "rust-reborn" "${{ needs.rust-reborn.result }}" "${rust_reborn_optional}" "allow"; then
             echo "Rust Reborn E2E failed"
             exit 1
           fi

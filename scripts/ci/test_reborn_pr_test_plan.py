@@ -52,12 +52,19 @@ class RebornPrTestPlanTests(unittest.TestCase):
     def tearDown(self) -> None:
         planner._bucket_packages = self.original_bucket_packages
 
-    def plan(self, event: str, paths: list[str]) -> dict:
+    def plan(
+        self,
+        event: str,
+        paths: list[str],
+        *,
+        lockfile_manifest_owned: bool = False,
+    ) -> dict:
         return planner.build_plan(
             event=event,
             changed_paths=paths,
             metadata=metadata(),
             canonical_packages=self.canonical,
+            lockfile_manifest_owned=lockfile_manifest_owned,
         )
 
     def test_merge_queue_is_always_exhaustive(self) -> None:
@@ -78,6 +85,29 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["coverage_mode"], "none")
+
+    def test_package_owned_test_change_does_not_run_reverse_dependents(self) -> None:
+        plan = self.plan("pull_request", ["crates/alpha/tests/contract.rs"])
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["alpha"])
+        self.assertEqual(plan["affected_packages"], ["alpha"])
+        self.assertEqual(
+            plan["crate_buckets"],
+            [
+                {
+                    "name": "selected",
+                    "packages": ["alpha"],
+                    "exact_targets": [
+                        {"package": "alpha", "kind": "test", "name": "contract"}
+                    ],
+                }
+            ],
+        )
+
+    def test_nested_package_test_change_keeps_all_owning_package_targets(self) -> None:
+        plan = self.plan("pull_request", ["crates/alpha/tests/support/mod.rs"])
+        self.assertEqual(plan["affected_packages"], ["alpha"])
+        self.assertNotIn("exact_targets", plan["crate_buckets"][0])
 
     def test_high_fanout_package_keeps_consumers_in_bounded_jobs(self) -> None:
         wide = metadata()
@@ -137,12 +167,12 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 any(package_set <= set(candidate["packages"]) for candidate in bounded)
             )
 
-    def test_frontend_change_runs_frontend_and_baseline_qa_replay(self) -> None:
+    def test_frontend_change_is_owned_by_code_style_with_baseline_qa_replay(self) -> None:
         plan = self.plan(
             "pull_request", ["crates/ironclaw_webui/frontend/src/app.tsx"]
         )
-        self.assertEqual(plan["mode"], "selected")
-        self.assertTrue(plan["run_frontend"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertNotIn("run_frontend", plan)
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["crate_buckets"], [])
         self.assertEqual(plan["integration_lanes"], [])
@@ -166,38 +196,152 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "none")
         self.assertTrue(plan["run_qa_replay"])
 
-    def test_reborn_workflow_change_fails_closed_to_full_pr_plan(self) -> None:
+    def test_reborn_workflow_change_is_owned_by_static_and_merge_queue_gates(self) -> None:
         plan = self.plan("pull_request", [".github/workflows/reborn-tests.yml"])
-        self.assertEqual(plan["mode"], "full")
-        self.assertEqual(plan["root_partitions"], [0, 1, 2, 3])
-        self.assertEqual(plan["integration_lanes"], [0, 1, 2, 3, "groups"])
-        self.assertTrue(plan["run_frontend"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["root_partitions"], [])
+        self.assertEqual(plan["integration_lanes"], [])
         self.assertTrue(plan["run_qa_replay"])
-        self.assertEqual(plan["coverage_mode"], "full")
+        self.assertEqual(plan["coverage_mode"], "none")
 
-    def test_empty_diff_fails_closed_to_full_pr_plan(self) -> None:
-        plan = self.plan("pull_request", [])
-        self.assertEqual(plan["mode"], "full")
+    def test_empty_diff_fails_fast(self) -> None:
+        with self.assertRaisesRegex(ValueError, "empty pull-request diff"):
+            self.plan("pull_request", [])
 
-    def test_reborn_caller_workflow_fails_closed_to_full_pr_plan(self) -> None:
+    def test_reborn_caller_workflow_is_owned_by_static_and_merge_queue_gates(self) -> None:
         plan = self.plan("pull_request", [".github/workflows/nightly-deep-ci.yml"])
-        self.assertEqual(plan["mode"], "full")
+        self.assertEqual(plan["mode"], "none")
 
-    def test_coverage_policy_change_runs_full_coverage_on_pr(self) -> None:
+    def test_coverage_policy_change_is_statically_validated_on_pr(self) -> None:
         plan = self.plan(
             "pull_request", ["tests/integration/coverage-floor.toml"]
         )
-        self.assertEqual(plan["mode"], "full")
-        self.assertEqual(plan["coverage_mode"], "full")
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["coverage_mode"], "none")
 
-    def test_noncanonical_package_fails_closed_to_full_pr_plan(self) -> None:
-        plan = planner.build_plan(
-            event="pull_request",
-            changed_paths=["crates/gamma/src/lib.rs"],
-            metadata=metadata(),
-            canonical_packages=["alpha", "beta"],
+    def test_lockfile_with_changed_crate_manifest_uses_affected_packages(self) -> None:
+        plan = self.plan(
+            "pull_request",
+            ["Cargo.lock", "crates/alpha/Cargo.toml"],
+            lockfile_manifest_owned=True,
         )
-        self.assertEqual(plan["mode"], "full")
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["alpha"])
+        self.assertEqual(plan["affected_packages"], ["alpha", "beta", "gamma"])
+
+    def test_lockfile_without_changed_crate_manifest_defers_breadth_to_queue(self) -> None:
+        plan = self.plan("pull_request", ["Cargo.lock"])
+        self.assertEqual(plan["mode"], "none")
+
+    def test_unowned_lockfile_change_still_runs_changed_manifest_closure(self) -> None:
+        plan = self.plan(
+            "pull_request", ["Cargo.lock", "crates/alpha/Cargo.toml"]
+        )
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["affected_packages"], ["alpha", "beta", "gamma"])
+
+    def test_lockfile_ownership_accepts_only_changed_workspace_dependency_edges(self) -> None:
+        base = {
+            "version": 4,
+            "package": [
+                {"name": "alpha", "version": "0.1.0", "dependencies": ["serde"]},
+                {
+                    "name": "serde",
+                    "version": "1.0.0",
+                    "source": "registry",
+                    "checksum": "same",
+                },
+            ],
+        }
+        current = {
+            **base,
+            "package": [
+                {
+                    "name": "alpha",
+                    "version": "0.1.0",
+                    "dependencies": ["serde", "tempfile"],
+                },
+                base["package"][1],
+            ],
+        }
+        self.assertTrue(
+            planner._lockfile_change_is_manifest_owned(
+                current=current,
+                base=base,
+                changed_paths={"crates/alpha/Cargo.toml"},
+                metadata=metadata(),
+            )
+        )
+
+        current["package"][1] = {**base["package"][1], "checksum": "changed"}
+        self.assertFalse(
+            planner._lockfile_change_is_manifest_owned(
+                current=current,
+                base=base,
+                changed_paths={"crates/alpha/Cargo.toml"},
+                metadata=metadata(),
+            )
+        )
+
+    def test_lockfile_ownership_rejects_package_additions_and_removals(self) -> None:
+        base = {
+            "version": 4,
+            "package": [
+                {"name": "alpha", "version": "0.1.0", "dependencies": []},
+            ],
+        }
+        added = {
+            "version": 4,
+            "package": [
+                {
+                    "name": "alpha",
+                    "version": "0.1.0",
+                    "dependencies": ["tempfile"],
+                },
+                {
+                    "name": "tempfile",
+                    "version": "3.0.0",
+                    "source": "registry",
+                    "checksum": "x",
+                },
+            ],
+        }
+        for current, previous in ((added, base), (base, added)):
+            with self.subTest(current=current):
+                self.assertFalse(
+                    planner._lockfile_change_is_manifest_owned(
+                        current=current,
+                        base=previous,
+                        changed_paths={"crates/alpha/Cargo.toml"},
+                        metadata=metadata(),
+                    )
+                )
+
+    def test_stress_tool_is_owned_by_dedicated_workflow(self) -> None:
+        plan = self.plan(
+            "pull_request", ["tools/ironclaw_stress/src/main.rs"]
+        )
+        self.assertEqual(plan["mode"], "none")
+        self.assertTrue(plan["run_qa_replay"])
+        self.assertEqual(plan["integration_lanes"], [])
+
+    def test_changed_coverage_manifest_does_not_launch_integration_lanes(self) -> None:
+        plan = self.plan(
+            "pull_request",
+            ["tests/integration/changed-coverage-exemptions.toml"],
+        )
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["integration_lanes"], [])
+        self.assertEqual(plan["coverage_mode"], "none")
+
+    def test_noncanonical_package_fails_fast(self) -> None:
+        with self.assertRaisesRegex(ValueError, "outside the canonical"):
+            planner.build_plan(
+                event="pull_request",
+                changed_paths=["crates/gamma/src/lib.rs"],
+                metadata=metadata(),
+                canonical_packages=["alpha", "beta"],
+            )
 
     def test_generated_integration_suites_are_assigned_to_flat_lanes(self) -> None:
         lanes = planner._integration_test_lanes()
@@ -211,19 +355,35 @@ class RebornPrTestPlanTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("reborn_(integration_|generated_)", lane_runner)
 
-    def test_unmapped_crate_path_fails_closed_to_full_pr_plan(self) -> None:
-        plan = self.plan("pull_request", ["crates/deleted/src/lib.rs"])
-        self.assertEqual(plan["mode"], "full")
+    def test_unmapped_crate_path_fails_fast(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unmapped crate path"):
+            self.plan("pull_request", ["crates/deleted/src/lib.rs"])
 
-    def test_unclassified_build_input_fails_closed_to_full_pr_plan(self) -> None:
-        plan = self.plan("pull_request", ["Dockerfile"])
-        self.assertEqual(plan["mode"], "full")
+    def test_unclassified_build_input_fails_fast(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
+            self.plan("pull_request", ["Dockerfile"])
 
     def test_changed_integration_binary_selects_its_exact_lane(self) -> None:
         path, lane = next(iter(planner._integration_test_lanes().items()))
         plan = self.plan("pull_request", [path])
         self.assertEqual(plan["mode"], "selected")
         self.assertEqual(plan["integration_lanes"], [lane])
+
+    def test_shared_test_support_uses_representative_pr_lanes(self) -> None:
+        root_plan = self.plan(
+            "pull_request", ["tests/support/reborn_parity_qa/assertions.rs"]
+        )
+        integration_plan = self.plan(
+            "pull_request", ["tests/integration/support/database.rs"]
+        )
+        self.assertEqual(root_plan["root_partitions"], [0])
+        self.assertEqual(integration_plan["integration_lanes"], [0])
+
+    def test_workspace_topology_change_defers_exhaustive_matrix_to_queue(self) -> None:
+        plan = self.plan("pull_request", ["Cargo.toml"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["crate_buckets"], [])
+        self.assertTrue(plan["run_qa_replay"])
 
     def test_workflow_consumes_plan_and_bounds_each_rust_matrix(self) -> None:
         workflow = (ROOT / ".github/workflows/reborn-tests.yml").read_text(
@@ -232,6 +392,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertIn("python3 scripts/ci/reborn_pr_test_plan.py", workflow)
         self.assertIn("scripts/ci/discover-reborn-package-crates.sh", workflow)
         self.assertIn("--canonical-packages", workflow)
+        self.assertIn('--base-sha "$BASE_SHA"', workflow)
         self.assertIn("needs.changes.outputs.crate_buckets", workflow)
         self.assertIn("needs.changes.outputs.root_partitions", workflow)
         self.assertIn("needs.changes.outputs.integration_lanes", workflow)
@@ -239,6 +400,12 @@ class RebornPrTestPlanTests(unittest.TestCase):
             '"${feature_args[@]}" --ignore-rust-version --all-targets',
             workflow,
         )
+        self.assertIn(
+            'cargo llvm-cov --branch --skip-functions \\\n'
+            '                "${package_args[@]}" "${feature_args[@]}"',
+            workflow,
+        )
+        self.assertNotIn('coverage/${package}.lcov', workflow)
         self.assertIn(
             "max-parallel: ${{ github.event_name == 'pull_request' && 3 || 14 }}",
             workflow,
@@ -258,6 +425,74 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
         self.assertIn("Full Reborn plan is not exhaustive", workflow)
         self.assertIn("Full Reborn plan omitted a required lane", workflow)
+        self.assertIn(
+            "github.event_name == 'merge_group' && "
+            "steps.scope.outputs.should_run == 'true'",
+            workflow,
+        )
+        self.assertIn("scripts/ci/test-critical-mutation-gate.sh", workflow)
+        self.assertIn("if: github.event_name == 'merge_group'", workflow)
+        self.assertIn(
+            "mutation_expected=${{ github.event_name == 'merge_group' }}",
+            workflow,
+        )
+
+        code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "python3 scripts/ci/changed_workspace_packages.py",
+            code_style,
+        )
+        self.assertIn('package_args+=(-p "${package}")', code_style)
+        self.assertIn("needs.changes.outputs.has_clippy == 'true'", code_style)
+        self.assertIn(
+            "cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings",
+            code_style,
+        )
+        self.assertIn(
+            "${{ toJSON(matrix.bucket.exact_targets || fromJSON('[]')) }}",
+            workflow,
+        )
+        self.assertIn(
+            '"${incremental_env[@]}" cargo test \\\n'
+            '                    -p "${package}" "--${kind}" "${name}"',
+            workflow,
+        )
+
+    def test_pr_workflows_do_not_repeat_reborn_rust_contracts(self) -> None:
+        code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
+            encoding="utf-8"
+        )
+        e2e = (ROOT / ".github/workflows/reborn-e2e.yml").read_text(
+            encoding="utf-8"
+        )
+        reborn_tests = (ROOT / ".github/workflows/reborn-tests.yml").read_text(
+            encoding="utf-8"
+        )
+        regression = (
+            ROOT / ".github/workflows/regression-test-check.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "needs.changes.outputs.has_reborn_cli == 'true' && "
+            "github.event_name != 'pull_request'",
+            code_style,
+        )
+        self.assertIn(
+            "needs.changes.outputs.has_e2e_scope == 'true' && "
+            "github.event_name != 'pull_request'",
+            e2e,
+        )
+        self.assertIn("rust_reborn_optional=true", e2e)
+        self.assertIn("--validate-manifest-only", code_style)
+        self.assertIn("pnpm test", code_style)
+        self.assertIn("pnpm build", code_style)
+        self.assertNotIn("webui-v2-js-tests:", reborn_tests)
+        self.assertIn(
+            "github.event.review.state == 'commented' && 'commented' || 'enforcing'",
+            regression,
+        )
 
     def test_reborn_e2e_shards_preserve_all_runtime_and_webui_suites(self) -> None:
         workflow = (ROOT / ".github/workflows/reborn-e2e.yml").read_text(
@@ -318,14 +553,21 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertIn('mv "${default_binary}" "${target_dir}/debug/ironclaw"', workflow)
         self.assertNotIn('--target-dir "${CARGO_TARGET_DIR:-target}/e2e-sso"', workflow)
 
-        for shard in range(4):
-            with self.subTest(provider_operation_shard=shard):
-                self.assertIn(f'shard: "{shard}/4"', workflow)
+        self.assertIn('shard: "0/4 1/4"', workflow)
+        self.assertIn('shard: "2/4 3/4"', workflow)
+        self.assertIn('for provider_shard in "${provider_shards[@]}"', workflow)
+        self.assertIn(
+            'IRONCLAW_PROVIDER_OPERATION_SHARD="${provider_shard}"',
+            workflow,
+        )
+        self.assertIn('provider_pids+=("$!")', workflow)
+        self.assertIn('wait "${provider_pids[$index]}"', workflow)
+        self.assertIn('> "${provider_log}" 2>&1 &', workflow)
         self.assertIn("  webui-v2-test-lanes:", workflow)
-        self.assertIn("lane: fast-contracts", workflow)
+        self.assertNotIn("lane: fast-contracts", workflow)
         self.assertIn("lane: provider-contracts", workflow)
         self.assertNotIn("\n  blackbox-smoke:", workflow)
-        self.assertIn("max-parallel: 7", workflow)
+        self.assertIn("max-parallel: 4", workflow)
         self.assertIn("reborn-webui-v2-sso-binary-${{", workflow)
         self.assertIn("reborn-webui-v2-binary-${{", workflow)
         self.assertIn("touch target/debug/ironclaw", workflow)

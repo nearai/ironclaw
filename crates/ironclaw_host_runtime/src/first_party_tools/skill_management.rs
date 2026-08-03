@@ -2,11 +2,11 @@ use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use ironclaw_extensions::{CapabilityManifest, ExtensionError};
-use ironclaw_first_party_extensions::skills::{
+use ironclaw_extension_support::skills::{
     SkillManagementCapabilityError, SkillManagementCapabilityKind,
     SkillManagementCapabilityRequest, dispatch,
 };
+use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
     dispatch::RuntimeDispatchErrorKind,

@@ -63,7 +63,7 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_resources: "webui-ingress",
 
       ironclaw_first_party_extension_ports: "wasm-sandbox",
-      ironclaw_first_party_extensions: "wasm-sandbox",
+      ironclaw_extension_support: "wasm-sandbox",
       ironclaw_wasm: "wasm-sandbox",
       ironclaw_wasm_limiter: "wasm-sandbox",
       ironclaw_wasm_sandbox_core: "wasm-sandbox",
@@ -95,6 +95,7 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_extractors: "memory-skills",
       ironclaw_memory: "memory-skills",
       ironclaw_memory_native: "memory-skills",
+      ironclaw_memory_mem0: "memory-skills",
       ironclaw_observability: "memory-skills",
       ironclaw_scripts: "memory-skills",
       ironclaw_skill_learning: "memory-skills",
@@ -103,7 +104,6 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_host_ingress: "channel-adapters",
       ironclaw_slack_extension: "channel-adapters",
       ironclaw_telegram_extension: "channel-adapters",
-      ironclaw_telegram_v2_adapter: "channel-adapters",
 
       ironclaw_extension_contracts: "extension-operator",
       ironclaw_extension_host: "extension-operator",

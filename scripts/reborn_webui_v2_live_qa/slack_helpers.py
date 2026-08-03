@@ -46,7 +46,7 @@ SLACK_PERSONAL_ACCESS_TOKEN_ENV_NAMES = [
 SLACK_EXTENSION_INSTALLATION_ID = "slack"
 SLACK_EXTENSION_MANIFEST = (
     Path(__file__).resolve().parents[2]
-    / "crates/ironclaw_first_party_extensions/assets/slack/manifest.toml"
+    / "crates/extensions/packages/slack/manifest.toml"
 )
 # Optional SECOND human identity (a dedicated canary user, distinct from the
 # connected personal account AND from the bot). Arms that strictly need a

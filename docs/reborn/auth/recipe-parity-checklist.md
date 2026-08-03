@@ -24,7 +24,7 @@ provenance — they are NOT live pointers on this branch. The structural map:
    `if vendor == …`.
 2. **The OAuth "recipe" is Rust/manifest data, not `[auth.*.token_response]` TOML on
    main** — but on this rollup the first-party recipes ARE bundled TOML under
-   `crates/ironclaw_first_party_extensions/assets/<pkg>/manifest.toml` (`[auth.<vendor>]`
+   `crates/extensions/packages/<pkg>/manifest.toml` (`[auth.<vendor>]`
    with `[token_response]` / `[token_response.scope]`), resolved into `OAuth2CodeRecipe`.
    The engine suite (`crates/ironclaw_auth/tests/auth_engine_contract.rs`) runs against
    those real bundled manifests.

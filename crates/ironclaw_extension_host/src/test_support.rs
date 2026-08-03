@@ -252,8 +252,8 @@ pub fn tool_and_channel_manifest() -> ResolvedExtensionManifest {
 #[cfg(any(test, feature = "test-support"))]
 pub fn first_party_bundles_from_inventory() -> Vec<crate::FirstPartyPackageBundle> {
     use crate::{FirstPartyPackageAsset, FirstPartyPackageBundle, FirstPartyPackageOnboarding};
-    use ironclaw_first_party_extensions::is_gsuite_extension_id;
-    use ironclaw_first_party_extensions::packages::{PackageAssetContent, bundled_packages};
+    use ironclaw_extension_support::is_gsuite_extension_id;
+    use ironclaw_extension_support::packages::{PackageAssetContent, bundled_packages};
     use ironclaw_host_api::ids::ExtensionId;
 
     bundled_packages()
