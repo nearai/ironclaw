@@ -17,16 +17,16 @@ use ironclaw_outbound::{
     AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest,
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    CommunicationPreferenceVersion, DeliveryDefaultScope, LoadSubscriptionCursorRequest,
-    OutboundDeliveryAttempt, OutboundError, OutboundPolicyService, OutboundPushPlan,
-    OutboundPushTargetRequest, OutboundStateStore, OutboundStateStorePort,
-    ProjectionSubscriptionRecord, RecoverInterruptedDeliveryRequest, ReplyTargetBindingClaim,
-    ReplyTargetBindingValidator, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,
-    RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord, RunFinalReplyTargetRequest,
-    RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin,
-    ThreadNotificationPolicy, ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy,
-    ThreadProjectionAccessRequest, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
-    UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
+    CommunicationPreferenceVersion, DeliveryDefaultScope, DeliveryFailureKind,
+    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryStatus, OutboundError,
+    OutboundPolicyService, OutboundPushPlan, OutboundPushTargetRequest, OutboundStateStore,
+    OutboundStateStorePort, ProjectionSubscriptionRecord, RecoverInterruptedDeliveryRequest,
+    ReplyTargetBindingClaim, ReplyTargetBindingValidator, RunDeliveryCleanupRecord,
+    RunDeliveryCleanupRequest, RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord,
+    RunFinalReplyTargetRequest, RunNotificationContext, RunNotificationEventKind,
+    RunNotificationOrigin, ThreadNotificationPolicy, ThreadProjectionAccessClaim,
+    ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest, TriggerFireSlot, TriggerOriginRef,
+    TriggerSourceKind, UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
     WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product::{ExternalActorRef, ExternalConversationRef};
@@ -271,12 +271,12 @@ use ironclaw_product::{
 use ironclaw_product_contracts::delivery::{
     ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
 };
-use tokio::sync::Notify;
+use tokio::sync::Barrier;
 
 struct PausingRecoveryStore {
     inner: Arc<OutboundStateStore<InMemoryBackend>>,
-    snapshot_listed: Arc<Notify>,
-    resume_recovery: Arc<Notify>,
+    snapshot_listed: Arc<Barrier>,
+    resume_recovery: Arc<Barrier>,
 }
 
 #[async_trait]
@@ -441,8 +441,8 @@ impl OutboundStateStorePort for PausingRecoveryStore {
         scope: TurnScope,
     ) -> Result<Vec<OutboundDeliveryAttempt>, OutboundError> {
         let attempts = self.inner.list_delivery_attempts(scope).await?;
-        self.snapshot_listed.notify_one();
-        self.resume_recovery.notified().await;
+        self.snapshot_listed.wait().await;
+        self.resume_recovery.wait().await;
         Ok(attempts)
     }
 }
@@ -1787,8 +1787,10 @@ async fn coordinator_recovery_marks_interrupted_sending_attempts_unknown() {
     assert_eq!(adapter.deliver_calls(), 1, "adapter never called again");
 }
 
-#[tokio::test]
-async fn coordinator_recovery_never_clobbers_a_concurrent_delivered_status() {
+async fn assert_coordinator_recovery_preserves_concurrent_terminal_status(
+    terminal_status: OutboundDeliveryStatus,
+    terminal_failure_kind: Option<DeliveryFailureKind>,
+) {
     let scope = scope();
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let attempt = OutboundDeliveryAttempt {
@@ -1817,8 +1819,8 @@ async fn coordinator_recovery_never_clobbers_a_concurrent_delivered_status() {
         .await
         .expect("seed sending attempt");
 
-    let snapshot_listed = Arc::new(Notify::new());
-    let resume_recovery = Arc::new(Notify::new());
+    let snapshot_listed = Arc::new(Barrier::new(2));
+    let resume_recovery = Arc::new(Barrier::new(2));
     let pausing_store = Arc::new(PausingRecoveryStore {
         inner: Arc::clone(&store),
         snapshot_listed: Arc::clone(&snapshot_listed),
@@ -1845,19 +1847,19 @@ async fn coordinator_recovery_never_clobbers_a_concurrent_delivered_status() {
             .recover_interrupted_deliveries(recovery_scope)
             .await
     });
-    snapshot_listed.notified().await;
+    snapshot_listed.wait().await;
 
     store
         .update_delivery_status(UpdateDeliveryStatusRequest {
             delivery_id: attempt.delivery_id,
             scope: scope.clone(),
-            status: ironclaw_outbound::OutboundDeliveryStatus::Delivered,
+            status: terminal_status,
             updated_at: Utc::now(),
-            failure_kind: None,
+            failure_kind: terminal_failure_kind,
         })
         .await
-        .expect("concurrent worker commits delivered");
-    resume_recovery.notify_one();
+        .expect("concurrent worker commits terminal status");
+    resume_recovery.wait().await;
 
     let recovered = recovery
         .await
@@ -1870,10 +1872,27 @@ async fn coordinator_recovery_never_clobbers_a_concurrent_delivered_status() {
         .expect("load final attempt");
     assert_eq!(attempts.len(), 1);
     assert_eq!(
-        attempts[0].status,
-        ironclaw_outbound::OutboundDeliveryStatus::Delivered,
+        attempts[0].status, terminal_status,
         "stale recovery must preserve the concurrent terminal transition"
     );
+    assert_eq!(
+        attempts[0].failure_kind, terminal_failure_kind,
+        "stale recovery must preserve the terminal failure classification"
+    );
+}
+
+#[tokio::test]
+async fn coordinator_recovery_never_clobbers_concurrent_terminal_statuses() {
+    for (status, failure_kind) in [
+        (OutboundDeliveryStatus::Delivered, None),
+        (
+            OutboundDeliveryStatus::Failed,
+            Some(DeliveryFailureKind::TransportUnavailable),
+        ),
+    ] {
+        assert_coordinator_recovery_preserves_concurrent_terminal_status(status, failure_kind)
+            .await;
+    }
 }
 
 #[tokio::test]
