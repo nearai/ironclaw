@@ -28,16 +28,18 @@ use ironclaw_host_api::{
     path::ScopedPath,
 };
 use ironclaw_outbound::{
-    AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest, CommunicationModality,
-    CommunicationPreferenceRecord, CommunicationPreferenceRepository, DeliveredGateRouteStore,
-    DeliveryDefaultScope, DeliveryFailureKind, FailPreparedDeliveryAttemptRequest,
-    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryStatus, OutboundError,
-    OutboundPushPlan, OutboundPushTargetRequest, OutboundStateStore, OutboundStateStorePort,
-    ProjectionSubscriptionRecord, RecoverInterruptedDeliveryRequest, RunDeliveryCleanupRecord,
-    RunDeliveryCleanupRequest, RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord,
-    RunFinalReplyTargetRequest, ThreadNotificationPolicy, TriggerCommunicationContext,
-    TriggerFireSlot, TriggerOriginRef, TriggerSourceKind, TriggeredRunDeliveryOutcomeKind,
-    TriggeredRunDeliveryStore, UpdateDeliveryStatusRequest,
+    AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendOutcome,
+    ClaimDeliveryAttemptForSendRequest, CommunicationModality, CommunicationPreferenceRecord,
+    CommunicationPreferenceRepository, DeliveredGateRouteStore, DeliveryDefaultScope,
+    DeliveryFailureKind, FailPreparedDeliveryAttemptOutcome, FailPreparedDeliveryAttemptRequest,
+    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryId,
+    OutboundDeliveryStatus, OutboundError, OutboundPushPlan, OutboundPushTargetRequest,
+    OutboundStateStore, OutboundStateStorePort, ProjectionSubscriptionRecord,
+    RecoverInterruptedDeliveryRequest, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,
+    RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord, RunFinalReplyTargetRequest,
+    ThreadNotificationPolicy, TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef,
+    TriggerSourceKind, TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore,
+    UpdateDeliveryStatusRequest,
 };
 use ironclaw_product::{
     AdapterInstallationId, AuthPromptView, AuthRequirement, ChannelError, DeliveryReport,
@@ -356,6 +358,8 @@ struct ClaimLossStore {
     failure_kind: Option<DeliveryFailureKind>,
     claim_calls: Arc<AtomicUsize>,
     claim_loss_on: usize,
+    authoritative_attempts: Mutex<HashMap<OutboundDeliveryId, OutboundDeliveryAttempt>>,
+    list_calls: AtomicUsize,
 }
 
 #[async_trait]
@@ -487,17 +491,34 @@ impl OutboundStateStorePort for ClaimLossStore {
         &self,
         attempt: OutboundDeliveryAttempt,
     ) -> Result<(), OutboundError> {
+        self.authoritative_attempts
+            .lock()
+            .expect("authoritative attempts")
+            .entry(attempt.delivery_id)
+            .or_insert_with(|| attempt.clone());
         self.inner.record_delivery_attempt(attempt).await
     }
 
     async fn claim_delivery_attempt_for_send(
         &self,
         request: ClaimDeliveryAttemptForSendRequest,
-    ) -> Result<bool, OutboundError> {
+    ) -> Result<ClaimDeliveryAttemptForSendOutcome, OutboundError> {
         let claim_call = self.claim_calls.fetch_add(1, Ordering::SeqCst) + 1;
         if claim_call != self.claim_loss_on {
             return self.inner.claim_delivery_attempt_for_send(request).await;
         }
+        let authoritative = {
+            let mut attempts = self
+                .authoritative_attempts
+                .lock()
+                .expect("authoritative attempts");
+            let attempt = attempts
+                .get_mut(&request.delivery_id)
+                .expect("claim-loss attempt was recorded first");
+            attempt.status = self.observed_status;
+            attempt.failure_kind = self.failure_kind;
+            attempt.clone()
+        };
         self.inner
             .update_delivery_status(UpdateDeliveryStatusRequest {
                 delivery_id: request.delivery_id,
@@ -507,13 +528,13 @@ impl OutboundStateStorePort for ClaimLossStore {
                 failure_kind: self.failure_kind,
             })
             .await?;
-        Ok(false)
+        Ok(ClaimDeliveryAttemptForSendOutcome::Existing(authoritative))
     }
 
     async fn fail_prepared_delivery_attempt(
         &self,
         request: FailPreparedDeliveryAttemptRequest,
-    ) -> Result<bool, OutboundError> {
+    ) -> Result<FailPreparedDeliveryAttemptOutcome, OutboundError> {
         self.inner.fail_prepared_delivery_attempt(request).await
     }
 
@@ -530,6 +551,15 @@ impl OutboundStateStorePort for ClaimLossStore {
         &self,
         request: UpdateDeliveryStatusRequest,
     ) -> Result<(), OutboundError> {
+        if let Some(attempt) = self
+            .authoritative_attempts
+            .lock()
+            .expect("authoritative attempts")
+            .get_mut(&request.delivery_id)
+        {
+            attempt.status = request.status;
+            attempt.failure_kind = request.failure_kind;
+        }
         self.inner.update_delivery_status(request).await
     }
 
@@ -537,6 +567,11 @@ impl OutboundStateStorePort for ClaimLossStore {
         &self,
         scope: TurnScope,
     ) -> Result<Vec<OutboundDeliveryAttempt>, OutboundError> {
+        assert_eq!(
+            self.list_calls.fetch_add(1, Ordering::SeqCst),
+            0,
+            "the coordinator must consume the authoritative claim outcome without a post-claim reread"
+        );
         self.inner.list_delivery_attempts(scope).await
     }
 }
@@ -974,6 +1009,8 @@ fn build_claim_loss_observer_harness(
         failure_kind,
         claim_calls: Arc::clone(&claim_calls),
         claim_loss_on,
+        authoritative_attempts: Mutex::new(HashMap::new()),
+        list_calls: AtomicUsize::new(0),
     });
     let coordinator = Arc::new(DeliveryCoordinator::new(
         claim_loss_store as Arc<dyn OutboundStateStorePort>,
@@ -2641,6 +2678,8 @@ fn build_claim_loss_triggered_harness(
             failure_kind,
             claim_calls: Arc::clone(&claim_calls),
             claim_loss_on: 1,
+            authoritative_attempts: Mutex::new(HashMap::new()),
+            list_calls: AtomicUsize::new(0),
         }) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),

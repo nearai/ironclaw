@@ -14,20 +14,21 @@ use ironclaw_host_api::{
     product_adapter::AdapterInstallationId,
 };
 use ironclaw_outbound::{
-    AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest,
-    CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
-    CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
+    AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendOutcome,
+    ClaimDeliveryAttemptForSendRequest, CommunicationDeliveryIntent,
+    CommunicationDeliveryResolutionRequest, CommunicationModality, CommunicationPreferenceKey,
+    CommunicationPreferenceRecord, CommunicationPreferenceRepository,
     CommunicationPreferenceVersion, DeliveryDefaultScope, DeliveryFailureKind,
-    FailPreparedDeliveryAttemptRequest, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
-    OutboundDeliveryStatus, OutboundError, OutboundPolicyService, OutboundPushPlan,
-    OutboundPushTargetRequest, OutboundStateStore, OutboundStateStorePort,
-    ProjectionSubscriptionRecord, RecoverInterruptedDeliveryRequest, ReplyTargetBindingClaim,
-    ReplyTargetBindingValidator, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,
-    RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord, RunFinalReplyTargetRequest,
-    RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin,
-    ThreadNotificationPolicy, ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy,
-    ThreadProjectionAccessRequest, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
-    UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
+    FailPreparedDeliveryAttemptOutcome, FailPreparedDeliveryAttemptRequest,
+    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryStatus, OutboundError,
+    OutboundPolicyService, OutboundPushPlan, OutboundPushTargetRequest, OutboundStateStore,
+    OutboundStateStorePort, ProjectionSubscriptionRecord, RecoverInterruptedDeliveryRequest,
+    ReplyTargetBindingClaim, ReplyTargetBindingValidator, RunDeliveryCleanupRecord,
+    RunDeliveryCleanupRequest, RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord,
+    RunFinalReplyTargetRequest, RunNotificationContext, RunNotificationEventKind,
+    RunNotificationOrigin, ThreadNotificationPolicy, ThreadProjectionAccessClaim,
+    ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest, TriggerFireSlot, TriggerOriginRef,
+    TriggerSourceKind, UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
     WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product::{ExternalActorRef, ExternalConversationRef};
@@ -83,22 +84,6 @@ impl ReplyTargetBindingValidator for FakeReplyTargetBindingValidator {
         } else {
             Err(OutboundError::AccessDenied)
         }
-    }
-}
-
-struct ConcurrentReplyTargetBindingValidator {
-    barrier: Arc<Barrier>,
-}
-
-#[async_trait]
-impl ReplyTargetBindingValidator for ConcurrentReplyTargetBindingValidator {
-    async fn validate_reply_target(
-        &self,
-        request: ironclaw_outbound::ReplyTargetValidationRequest,
-    ) -> Result<ReplyTargetBindingClaim, OutboundError> {
-        assert_eq!(request.candidate.target, validated_reply_target());
-        self.barrier.wait().await;
-        Ok(ReplyTargetBindingClaim::new(request.candidate.target))
     }
 }
 
@@ -290,12 +275,18 @@ use ironclaw_product_contracts::delivery::{
 };
 use tokio::sync::Barrier;
 
-// Keep this decorator local despite the contract file's size: it exercises recovery-only
-// store seams, and extracting the two uses would prematurely create shared test support.
+// Keep this decorator local despite the contract file's size: it exercises
+// the recovery pause/race, per-attempt recovery failure, and authoritative
+// preflight-settlement seams. Extracting those three uses would prematurely
+// create shared test support.
 struct RecoveryTestStore {
     inner: Arc<OutboundStateStore<InMemoryBackend>>,
     pause_after_snapshot: Option<(Arc<Barrier>, Arc<Barrier>)>,
     fail_recovery_for: Option<ironclaw_outbound::OutboundDeliveryId>,
+    fail_prepared_existing: Option<(OutboundDeliveryStatus, Option<DeliveryFailureKind>)>,
+    authoritative_attempts:
+        Mutex<HashMap<ironclaw_outbound::OutboundDeliveryId, OutboundDeliveryAttempt>>,
+    list_calls: AtomicU8,
 }
 
 #[async_trait]
@@ -429,21 +420,50 @@ impl OutboundStateStorePort for RecoveryTestStore {
         &self,
         attempt: OutboundDeliveryAttempt,
     ) -> Result<(), OutboundError> {
+        self.authoritative_attempts
+            .lock()
+            .expect("authoritative attempts")
+            .entry(attempt.delivery_id)
+            .or_insert_with(|| attempt.clone());
         self.inner.record_delivery_attempt(attempt).await
     }
 
     async fn claim_delivery_attempt_for_send(
         &self,
         request: ClaimDeliveryAttemptForSendRequest,
-    ) -> Result<bool, OutboundError> {
+    ) -> Result<ClaimDeliveryAttemptForSendOutcome, OutboundError> {
         self.inner.claim_delivery_attempt_for_send(request).await
     }
 
     async fn fail_prepared_delivery_attempt(
         &self,
         request: FailPreparedDeliveryAttemptRequest,
-    ) -> Result<bool, OutboundError> {
-        self.inner.fail_prepared_delivery_attempt(request).await
+    ) -> Result<FailPreparedDeliveryAttemptOutcome, OutboundError> {
+        let Some((status, failure_kind)) = self.fail_prepared_existing else {
+            return self.inner.fail_prepared_delivery_attempt(request).await;
+        };
+        let authoritative = {
+            let mut attempts = self
+                .authoritative_attempts
+                .lock()
+                .expect("authoritative attempts");
+            let attempt = attempts
+                .get_mut(&request.delivery_id)
+                .expect("preflight attempt was recorded first");
+            attempt.status = status;
+            attempt.failure_kind = failure_kind;
+            attempt.clone()
+        };
+        self.inner
+            .update_delivery_status(UpdateDeliveryStatusRequest {
+                delivery_id: request.delivery_id,
+                scope: request.scope,
+                status,
+                updated_at: request.updated_at,
+                failure_kind,
+            })
+            .await?;
+        Ok(FailPreparedDeliveryAttemptOutcome::Existing(authoritative))
     }
 
     async fn recover_interrupted_delivery_attempt(
@@ -462,6 +482,15 @@ impl OutboundStateStorePort for RecoveryTestStore {
         &self,
         request: UpdateDeliveryStatusRequest,
     ) -> Result<(), OutboundError> {
+        if let Some(attempt) = self
+            .authoritative_attempts
+            .lock()
+            .expect("authoritative attempts")
+            .get_mut(&request.delivery_id)
+        {
+            attempt.status = request.status;
+            attempt.failure_kind = request.failure_kind;
+        }
         self.inner.update_delivery_status(request).await
     }
 
@@ -473,6 +502,12 @@ impl OutboundStateStorePort for RecoveryTestStore {
         if let Some((snapshot_listed, resume_recovery)) = &self.pause_after_snapshot {
             snapshot_listed.wait().await;
             resume_recovery.wait().await;
+        } else {
+            assert_eq!(
+                self.list_calls.fetch_add(1, Ordering::SeqCst),
+                0,
+                "preflight settlement must consume Existing(attempt) without a post-settlement reread"
+            );
         }
         Ok(attempts)
     }
@@ -897,6 +932,35 @@ fn coordinator_over_recording_reply_lookups(
     (coordinator, reply_context)
 }
 
+fn coordinator_with_existing_preflight_settlement(
+    store: &Arc<OutboundStateStore<InMemoryBackend>>,
+    adapter: &Arc<ScriptedChannelAdapter>,
+    status: OutboundDeliveryStatus,
+    failure_kind: Option<DeliveryFailureKind>,
+    channel_unavailable: bool,
+) -> DeliveryCoordinator {
+    let decorated = Arc::new(RecoveryTestStore {
+        inner: Arc::clone(store),
+        pause_after_snapshot: None,
+        fail_recovery_for: None,
+        fail_prepared_existing: Some((status, failure_kind)),
+        authoritative_attempts: Mutex::new(HashMap::new()),
+        list_calls: AtomicU8::new(0),
+    });
+    DeliveryCoordinator::new(
+        decorated as Arc<dyn OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(adapter),
+            unavailable: channel_unavailable,
+        }),
+        Arc::new(FixedReplyContext(b"vendor-reply-ctx".to_vec())),
+        DeliveryRetryPolicy {
+            max_attempts: 1,
+            backoff: std::time::Duration::ZERO,
+        },
+    )
+}
+
 fn shared_store_pair() -> (
     Arc<OutboundStateStore<InMemoryBackend>>,
     Arc<OutboundStateStore<InMemoryBackend>>,
@@ -1229,28 +1293,166 @@ async fn transient_target_preflight_stays_prepared_and_replay_delivers() {
 }
 
 #[tokio::test]
+async fn target_resolution_preflight_loser_preserves_authoritative_sending_as_non_success() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    let coordinator = coordinator_with_existing_preflight_settlement(
+        &store,
+        &adapter,
+        OutboundDeliveryStatus::Sending,
+        None,
+        false,
+    );
+    let thread_scope = project_thread_scope();
+    let mut request = coordinated_final_reply(scope, "vendorx", &thread_scope);
+    request.require_direct_message_target = true;
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &preferences,
+            &DmRequiringTargetResolver,
+            &NO_PROJECT_FILESYSTEM,
+            request,
+        )
+        .await
+        .expect("the settlement loser returns the authoritative row");
+
+    assert!(matches!(
+        outcome,
+        CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
+            status: OutboundDeliveryStatus::Sending,
+            failure_kind: None,
+        }
+    ));
+    assert_eq!(adapter.deliver_calls(), 0);
+}
+
+#[tokio::test]
+async fn workspace_preflight_loser_preserves_authoritative_failed_as_non_success() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    let coordinator = coordinator_with_existing_preflight_settlement(
+        &store,
+        &adapter,
+        OutboundDeliveryStatus::Failed,
+        Some(DeliveryFailureKind::Rejected),
+        false,
+    );
+    let files = ScriptedProjectFilesystem::default();
+    let thread_scope = project_thread_scope();
+    let mut request = coordinated_final_reply(scope, "vendorx", &thread_scope);
+    request.attachments = vec![workspace_attachment_ref(
+        "missing",
+        "/workspace/missing.pdf",
+        "missing.pdf",
+        "application/pdf",
+        1,
+    )];
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &preferences,
+            &FakeProductOutboundTargetResolver,
+            &files,
+            request,
+        )
+        .await
+        .expect("the settlement loser returns the authoritative row");
+
+    assert!(matches!(
+        outcome,
+        CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
+            status: OutboundDeliveryStatus::Failed,
+            failure_kind: Some(DeliveryFailureKind::Rejected),
+        }
+    ));
+    assert_eq!(adapter.deliver_calls(), 0);
+}
+
+#[tokio::test]
+async fn missing_channel_preflight_loser_preserves_authoritative_unknown_as_non_success() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    let coordinator = coordinator_with_existing_preflight_settlement(
+        &store,
+        &adapter,
+        OutboundDeliveryStatus::Unknown,
+        None,
+        true,
+    );
+    let thread_scope = project_thread_scope();
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &preferences,
+            &FakeProductOutboundTargetResolver,
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_final_reply(scope, "vendorx", &thread_scope),
+        )
+        .await
+        .expect("the settlement loser returns the authoritative row");
+
+    assert!(matches!(
+        outcome,
+        CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
+            status: OutboundDeliveryStatus::Unknown,
+            failure_kind: None,
+        }
+    ));
+    assert_eq!(adapter.deliver_calls(), 0);
+}
+
+#[tokio::test]
 async fn concurrent_coordinators_claim_one_durable_delivery_before_egress() {
     let scope = scope();
     let (first_store, second_store) = shared_store_pair();
-    let adapter = Arc::new(ScriptedChannelAdapter::new(
+    let (adapter, delivery_started, delivery_release) = ScriptedChannelAdapter::new_paused(
         Arc::clone(&first_store),
         scope.clone(),
-        vec![
-            Ok(DeliveryReport {
-                parts: vec![sent("ts-first")],
-            }),
-            Ok(DeliveryReport {
-                parts: vec![sent("ts-duplicate")],
-            }),
-        ],
-    ));
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-first")],
+        })],
+    );
+    let adapter = Arc::new(adapter);
     let first_coordinator = coordinator_over(&first_store, &adapter);
     let second_coordinator = coordinator_over(&second_store, &adapter);
     let preferences = FakePreferenceRepository::default();
     seed_preference(&preferences, &scope);
-    let validator = ConcurrentReplyTargetBindingValidator {
-        barrier: Arc::new(Barrier::new(2)),
-    };
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
     let first_policy = configured_policy(&first_store, &validator);
     let second_policy = configured_policy(&second_store, &validator);
     let resolver = FakeProductOutboundTargetResolver;
@@ -1258,70 +1460,66 @@ async fn concurrent_coordinators_claim_one_durable_delivery_before_egress() {
     let first_thread_scope = project_thread_scope();
     let second_thread_scope = project_thread_scope();
 
-    let (first, second) = tokio::join!(
-        first_coordinator.deliver(
-            &first_policy,
-            &preferences,
-            &resolver,
-            &NO_PROJECT_FILESYSTEM,
-            CoordinatedDeliveryRequest {
-                intent: DeliveryIntent::FinalReply,
-                delivery: delivery.clone(),
-                parts: vec![ironclaw_product::OutboundPart::Text(
-                    "one durable fact".to_string(),
-                )],
-                attachments: Vec::new(),
-                thread_anchor: None,
-                require_direct_message_target: false,
-                extension_id: "vendorx",
-                thread_scope: &first_thread_scope,
-            },
-        ),
-        second_coordinator.deliver(
-            &second_policy,
-            &preferences,
-            &resolver,
-            &NO_PROJECT_FILESYSTEM,
-            CoordinatedDeliveryRequest {
-                intent: DeliveryIntent::FinalReply,
-                delivery,
-                parts: vec![ironclaw_product::OutboundPart::Text(
-                    "one durable fact".to_string(),
-                )],
-                attachments: Vec::new(),
-                thread_anchor: None,
-                require_direct_message_target: false,
-                extension_id: "vendorx",
-                thread_scope: &second_thread_scope,
-            },
-        ),
+    let first = first_coordinator.deliver(
+        &first_policy,
+        &preferences,
+        &resolver,
+        &NO_PROJECT_FILESYSTEM,
+        CoordinatedDeliveryRequest {
+            intent: DeliveryIntent::FinalReply,
+            delivery: delivery.clone(),
+            parts: vec![ironclaw_product::OutboundPart::Text(
+                "one durable fact".to_string(),
+            )],
+            attachments: Vec::new(),
+            thread_anchor: None,
+            require_direct_message_target: false,
+            extension_id: "vendorx",
+            thread_scope: &first_thread_scope,
+        },
     );
+    let second = async {
+        delivery_started
+            .acquire()
+            .await
+            .expect("first delivery starts")
+            .forget();
+        let outcome = second_coordinator
+            .deliver(
+                &second_policy,
+                &preferences,
+                &resolver,
+                &NO_PROJECT_FILESYSTEM,
+                CoordinatedDeliveryRequest {
+                    intent: DeliveryIntent::FinalReply,
+                    delivery,
+                    parts: vec![ironclaw_product::OutboundPart::Text(
+                        "one durable fact".to_string(),
+                    )],
+                    attachments: Vec::new(),
+                    thread_anchor: None,
+                    require_direct_message_target: false,
+                    extension_id: "vendorx",
+                    thread_scope: &second_thread_scope,
+                },
+            )
+            .await;
+        delivery_release.add_permits(1);
+        outcome
+    };
+    let (first, second) = tokio::join!(first, second);
 
-    let outcomes = [
-        first.expect("the durable-claim loser is a semantic no-op, not a transport error"),
-        second.expect("the durable-claim loser is a semantic no-op, not a transport error"),
-    ];
-    assert_eq!(
-        outcomes
-            .iter()
-            .filter(|outcome| matches!(outcome, CoordinatedDeliveryOutcome::Delivered { .. }))
-            .count(),
-        1,
-        "exactly one coordinator owns and completes vendor egress"
-    );
-    assert_eq!(
-        outcomes
-            .iter()
-            .filter(|outcome| {
-                matches!(
-                    outcome,
-                    CoordinatedDeliveryOutcome::DuplicateSuppressed { .. }
-                )
-            })
-            .count(),
-        1,
-        "the lost durable claim is reported as duplicate-suppressed"
-    );
+    assert!(matches!(
+        first.expect("claim owner delivers"),
+        CoordinatedDeliveryOutcome::Delivered { .. }
+    ));
+    assert!(matches!(
+        second.expect("claim loser returns authoritative state"),
+        CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
+            status: OutboundDeliveryStatus::Sending,
+            failure_kind: None,
+        }
+    ));
     assert_eq!(
         adapter.deliver_calls(),
         1,
@@ -1786,7 +1984,10 @@ async fn coordinator_partial_multipart_failure_is_terminal_without_retry() {
         .expect("terminal replay is a semantic no-op");
     assert!(matches!(
         replay,
-        CoordinatedDeliveryOutcome::DuplicateSuppressed { .. }
+        CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
+            status: OutboundDeliveryStatus::Failed,
+            failure_kind: Some(DeliveryFailureKind::Rejected),
+        }
     ));
     assert_eq!(
         adapter.deliver_calls(),
@@ -2478,6 +2679,9 @@ async fn coordinator_recovery_continues_after_a_per_attempt_store_failure() {
         inner: Arc::clone(&store),
         pause_after_snapshot: None,
         fail_recovery_for: Some(seeded[1].delivery_id),
+        fail_prepared_existing: None,
+        authoritative_attempts: Mutex::new(HashMap::new()),
+        list_calls: AtomicU8::new(0),
     });
     let coordinator = DeliveryCoordinator::new(
         recovery_store as Arc<dyn OutboundStateStorePort>,
@@ -2541,6 +2745,9 @@ async fn assert_coordinator_recovery_preserves_concurrent_terminal_status(
         inner: Arc::clone(&store),
         pause_after_snapshot: Some((Arc::clone(&snapshot_listed), Arc::clone(&resume_recovery))),
         fail_recovery_for: None,
+        fail_prepared_existing: None,
+        authoritative_attempts: Mutex::new(HashMap::new()),
+        list_calls: AtomicU8::new(0),
     });
     let adapter = Arc::new(ScriptedChannelAdapter::new(
         Arc::clone(&store),
