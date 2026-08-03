@@ -23,6 +23,7 @@ use ironclaw_loop_contracts::{LoopHostMilestoneKind, LoopRecoveryClass};
 use ironclaw_processes::ProcessKind;
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::{ResourceAccount, ResourceGovernor, ResourceTally};
+use ironclaw_threads::SessionThreadService as _;
 use ironclaw_turns::{TurnEventKind, TurnRunId, TurnRunState};
 use rust_decimal::Decimal;
 
@@ -419,6 +420,50 @@ impl RebornIntegrationHarness {
     /// scripted `TraceLlm` retained before the `dyn LlmProvider` upcast —
     /// proves prompt-injected content (safety banners, skill instructions,
     /// profile lines) actually reached the model.
+    /// Assert that some captured model request carried a User-role message
+    /// containing `text` — the end-to-end proof that a queued steering message
+    /// actually reached the model (through the real transcript rebuild), not
+    /// merely that its transcript status flipped.
+    pub async fn assert_model_saw_user_message(&self, text: &str) -> HarnessResult<()> {
+        let messages = self.captured_model_user_messages();
+        if messages.iter().any(|message| message.contains(text)) {
+            return Ok(());
+        }
+        Err(format!(
+            "no captured model request carried a user message containing {text:?}; saw {messages:?}"
+        )
+        .into())
+    }
+
+    /// This thread's transcript row for the (first) user message whose content
+    /// contains `text`. Reads through the same `SessionThreadService` the run
+    /// persisted through.
+    pub async fn user_message_record(
+        &self,
+        text: &str,
+    ) -> HarnessResult<ironclaw_threads::ThreadMessageRecord> {
+        let history = self
+            .thread_harness
+            .service
+            .list_thread_history(ironclaw_threads::ThreadHistoryRequest {
+                scope: self.thread_harness.scope.clone(),
+                thread_id: self.binding.thread_id.clone(),
+            })
+            .await?;
+        history
+            .messages
+            .iter()
+            .find(|message| {
+                message.kind == ironclaw_threads::MessageKind::User
+                    && message
+                        .content
+                        .as_deref()
+                        .is_some_and(|content| content.contains(text))
+            })
+            .cloned()
+            .ok_or_else(|| format!("no user message containing {text:?} in thread history").into())
+    }
+
     pub async fn assert_system_prompt_contains(&self, text: &str) -> HarnessResult<()> {
         let prompts = self.captured_system_prompts();
         if prompts.iter().any(|prompt| prompt.contains(text)) {

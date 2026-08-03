@@ -1486,7 +1486,7 @@ mod tests {
                         runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
                         safe_name: definition.name.to_string(),
                         safe_description: definition.description.clone(),
-                        description_trust: Default::default(),
+                        description_trust: definition.description_trust,
                         concurrency_hint: ConcurrencyHint::SafeForParallel,
                         parameters_schema: definition.parameters.clone(),
                     })
@@ -1556,6 +1556,44 @@ mod tests {
                 write.output.to_string().len() as u64,
             ))
         }
+    }
+
+    #[tokio::test]
+    async fn visible_surface_preserves_verified_catalog_description_provenance() {
+        let mut definition = provider_definition(
+            "fixture.read_file",
+            "read_file",
+            "Verified catalog description",
+        );
+        definition.description_trust =
+            ironclaw_host_api::capability::CapabilityDescriptionTrust::VerifiedCatalog;
+        let inner = Arc::new(SpyPort {
+            definitions: vec![definition],
+            surface_version: CapabilitySurfaceVersion::new("surface:verified-catalog")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let port = disclosure_port(
+            inner as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible surface");
+        let descriptor = surface
+            .descriptors
+            .iter()
+            .find(|descriptor| descriptor.safe_name == "read_file")
+            .expect("core capability remains visible");
+
+        assert_eq!(
+            descriptor.description_trust,
+            ironclaw_host_api::capability::CapabilityDescriptionTrust::VerifiedCatalog
+        );
     }
 
     #[tokio::test]
@@ -3272,6 +3310,7 @@ mod tests {
             capability_id: CapabilityId::new(capability_id).expect("valid capability id"),
             name: ProviderToolName::new(name).expect("valid provider tool name"),
             description: description.to_string(),
+            description_trust: Default::default(),
             parameters: json!({
                 "type": "object",
                 "properties": {

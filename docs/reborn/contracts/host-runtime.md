@@ -42,6 +42,8 @@ Surface versioning returns `sha256:<lower-hex>` over canonical JSON that include
 
 The hot capability catalog resolves cold manifest refs through the package's virtual root before model/tool publication. `input_schema_ref` replaces the descriptor's `$ref`-style `parameters_schema`, while `output_schema_ref` is retained adjacent to the descriptor. `prompt_doc_ref` is optional lazy help metadata: when declared, it is resolved with the same bounded fail-closed file handling, but model-visible capabilities are valid without it. Resolution remains publication metadata only: it does not grant authority, execute runtime code, or construct host-port implementations.
 
+The resolved input schema is the canonical capability contract for both host-bundled and installed packages. The loop may reject unresolved external `$ref`s, but it must not impose a second provider-specific schema dialect or rewrite the canonical schema. LLM provider adapters derive transient wire-compatible tool schemas from that contract (for example, flattening a top-level `oneOf` for an OpenAI-compatible API), while capability input validation and dispatch continue to use the original resolved schema. Package authors version schema assets through their manifest refs, such as `schemas/<extension>/<operation>.input.v1.json`; a new incompatible contract uses a new asset version and package release rather than mutating provider-facing schema in the loop.
+
 ## FirstParty runtime adapter
 
 `HostRuntimeServices` can register host-owned first-party capability handlers through `FirstPartyCapabilityRegistry`. When a declared capability uses `RuntimeKind::FirstParty`, dispatch still follows the normal path:

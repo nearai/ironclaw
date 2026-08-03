@@ -278,6 +278,8 @@ where
             identity: None,
             refresh: None,
             revoke: None,
+            instructions: None,
+            setup_url: None,
         };
         recipe
             .validate()

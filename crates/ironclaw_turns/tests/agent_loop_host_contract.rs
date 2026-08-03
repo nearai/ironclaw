@@ -2630,6 +2630,7 @@ async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-loop-host").unwrap(),
         resolved_run_profile_id: host.context.resolved_run_profile.profile_id.clone(),
         resolved_run_profile_version: host.context.resolved_run_profile.profile_version,
+        allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
         received_at: Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap(),
@@ -4437,6 +4438,7 @@ async fn turn_run_state_product_context_defaults_to_none_when_missing_from_json(
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-origin-serde").unwrap(),
         resolved_run_profile_id: context.resolved_run_profile.profile_id.clone(),
         resolved_run_profile_version: context.resolved_run_profile.profile_version,
+        allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
         received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
@@ -4499,6 +4501,7 @@ async fn turn_run_state_resume_disposition_defaults_to_none_when_missing_from_js
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-ard-serde").unwrap(),
         resolved_run_profile_id: context.resolved_run_profile.profile_id.clone(),
         resolved_run_profile_version: context.resolved_run_profile.profile_version,
+        allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
         received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
@@ -4524,6 +4527,56 @@ async fn turn_run_state_resume_disposition_defaults_to_none_when_missing_from_js
     assert!(
         decoded.resume_disposition.is_none(),
         "resume_disposition must default to None when absent from legacy JSON"
+    );
+}
+
+#[tokio::test]
+async fn turn_run_state_allow_steering_defaults_to_true_when_missing_from_json() {
+    // Guard the #[serde(default = "steering_allowed_default")] backward-compat
+    // contract: legacy persisted TurnRunState payloads that pre-date the
+    // allow_steering field must deserialize as steering-allowed (true).
+    let context = claimed_run_context().await;
+    let state = TurnRunState {
+        scope: context.scope.clone(),
+        actor: None,
+        turn_id: ironclaw_turns::TurnId::new(),
+        run_id: context.run_id,
+        status: TurnStatus::Queued,
+        accepted_message_ref: AcceptedMessageRef::new("accepted-steer-serde").unwrap(),
+        source_binding_ref: SourceBindingRef::new("source-steer-serde").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-steer-serde").unwrap(),
+        resolved_run_profile_id: context.resolved_run_profile.profile_id.clone(),
+        resolved_run_profile_version: context.resolved_run_profile.profile_version,
+        // Deliberately false so the assertion below can only pass through the
+        // serde default fn, never by echoing the constructed value.
+        allow_steering: false,
+        resolved_model_route: None,
+        model_usage: None,
+        received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
+        checkpoint_id: None,
+        gate_ref: None,
+        blocked_activity_id: None,
+        credential_requirements: Vec::new(),
+        failure: None,
+        event_cursor: EventCursor(0),
+        product_context: None,
+        resume_disposition: None,
+    };
+
+    // Serialize, drop the allow_steering key (simulates a pre-feature persisted
+    // row), then deserialize — the field must default to allowed.
+    let mut json = serde_json::to_value(&state).unwrap();
+    assert!(
+        json.as_object_mut()
+            .unwrap()
+            .remove("allow_steering")
+            .is_some(),
+        "current wire shape must always serialize allow_steering"
+    );
+    let decoded: TurnRunState = serde_json::from_value(json).unwrap();
+    assert!(
+        decoded.allow_steering,
+        "allow_steering must default to true when absent from legacy JSON"
     );
 }
 

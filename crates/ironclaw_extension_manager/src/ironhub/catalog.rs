@@ -1,20 +1,27 @@
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, VerifyingKey};
-use ironclaw_host_api::action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern};
+use ironclaw_host_api::{
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    approval::sha256_digest_token,
+};
 use sha2::{Digest, Sha256};
 
-use super::model::{
-    IronHubArtifact, IronHubCommandError, IronHubEntryKind, IronHubEntrySummary,
-    IronHubInstallOptions, IronHubManifest, IronHubProvenance, IronHubSkillEntry, IronHubToolEntry,
-    SignedManifestEnvelope,
+use crate::ironhub::{
+    artifact_hosts::is_allowed_artifact_host,
+    model::{
+        IronHubArtifact, IronHubCommandError, IronHubEntryKind, IronHubEntrySummary,
+        IronHubInstallOptions, IronHubManifest, IronHubProvenance, IronHubSkillEntry,
+        IronHubToolEntry, MANIFEST_VERIFY_KEYS, MAX_METADATA_BYTES, MAX_TOOL_SCHEMA_ARTIFACTS,
+        MAX_WASM_BYTES, SignedManifestEnvelope,
+    },
 };
 
 const MAX_SEARCH_DESCRIPTION_BYTES: usize = 120;
 const SEARCH_DESCRIPTION_ELLIPSIS: char = '…';
 
 pub(crate) fn verify_signed_manifest(envelope_bytes: &[u8]) -> Result<Vec<u8>, String> {
-    verify_signed_manifest_with_keys(envelope_bytes, super::model::MANIFEST_VERIFY_KEYS)
+    verify_signed_manifest_with_keys(envelope_bytes, MANIFEST_VERIFY_KEYS)
 }
 
 pub(crate) fn verify_signed_manifest_with_keys(
@@ -63,6 +70,7 @@ pub(crate) fn classify_gate_and_digest(
     name: &str,
     hint: Option<IronHubEntryKind>,
     options: &IronHubInstallOptions,
+    source: IronHubManifestSource,
 ) -> Result<(IronHubEntryKind, IronHubProvenance, String), IronHubCommandError> {
     let kind = classify(manifest, name, hint)?;
     let (version, provenance, artifact_digest) = match kind {
@@ -87,6 +95,15 @@ pub(crate) fn classify_gate_and_digest(
             )
         }
     };
+    let provenance = if source == IronHubManifestSource::Private {
+        IronHubProvenance::Private
+    } else if matches!(provenance, IronHubProvenance::Private) {
+        return Err(invalid(format!(
+            "catalog entry '{name}' claims private provenance but was not installed from a private manifest"
+        )));
+    } else {
+        provenance
+    };
     if let Some(expected) = &options.expected_version
         && expected != version
     {
@@ -108,6 +125,12 @@ pub(crate) fn classify_gate_and_digest(
         )));
     }
     Ok((kind, provenance, artifact_digest))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IronHubManifestSource {
+    Public,
+    Private,
 }
 
 pub(crate) fn classify(
@@ -180,11 +203,27 @@ pub(crate) fn compact_skill_summary(entry: &IronHubSkillEntry) -> IronHubEntrySu
 }
 
 pub(crate) fn tool_artifact_digest(entry: &IronHubToolEntry) -> String {
-    sha256_hex(format!("{}:{}", entry.wasm.sha256, entry.capabilities.sha256).as_bytes())
+    let mut digest_material = format!(
+        "wasm:{}\0capabilities:{}\0",
+        entry.wasm.sha256, entry.capabilities.sha256
+    );
+    if let Some(manifest) = &entry.manifest {
+        digest_material.push_str("manifest:");
+        digest_material.push_str(&manifest.sha256);
+        digest_material.push('\0');
+    }
+    for (path, artifact) in &entry.schemas {
+        digest_material.push_str("schema:");
+        digest_material.push_str(path);
+        digest_material.push('\0');
+        digest_material.push_str(&artifact.sha256);
+        digest_material.push('\0');
+    }
+    sha256_digest_token(digest_material.as_bytes())
 }
 
 fn skill_artifact_digest(entry: &IronHubSkillEntry) -> String {
-    sha256_hex(entry.skill_md.sha256.as_bytes())
+    sha256_digest_token(entry.skill_md.sha256.as_bytes())
 }
 
 fn compact_description(description: &str) -> String {
@@ -206,6 +245,20 @@ fn compact_description(description: &str) -> String {
 }
 
 pub(crate) fn validate_manifest(manifest: &IronHubManifest) -> Result<(), IronHubCommandError> {
+    validate_manifest_artifacts(manifest, None)
+}
+
+pub(crate) fn validate_private_manifest(
+    manifest: &IronHubManifest,
+    origin: &CatalogOrigin,
+) -> Result<(), IronHubCommandError> {
+    validate_manifest_artifacts(manifest, Some(origin))
+}
+
+fn validate_manifest_artifacts(
+    manifest: &IronHubManifest,
+    origin: Option<&CatalogOrigin>,
+) -> Result<(), IronHubCommandError> {
     if manifest.version != "1" {
         return Err(catalog(format!(
             "unsupported IronHub manifest version {}",
@@ -217,21 +270,40 @@ pub(crate) fn validate_manifest(manifest: &IronHubManifest) -> Result<(), IronHu
     }
     for entry in &manifest.tools {
         validate_hub_name(&entry.name)?;
-        validate_artifact(&entry.wasm, super::model::MAX_WASM_BYTES)?;
-        validate_artifact(&entry.capabilities, super::model::MAX_METADATA_BYTES)?;
+        validate_artifact_for_origin(&entry.wasm, MAX_WASM_BYTES, origin)?;
+        validate_artifact_for_origin(&entry.capabilities, MAX_METADATA_BYTES, origin)?;
+        if let Some(extension_manifest) = &entry.manifest {
+            validate_artifact_for_origin(extension_manifest, MAX_METADATA_BYTES, origin)?;
+        }
+        if entry.schemas.len() > MAX_TOOL_SCHEMA_ARTIFACTS {
+            return Err(catalog(format!(
+                "tool '{}' publishes more than {} schema artifacts",
+                entry.name, MAX_TOOL_SCHEMA_ARTIFACTS
+            )));
+        }
+        for (path, schema) in &entry.schemas {
+            ironclaw_extensions::ExtensionAssetPath::new(path.clone()).map_err(|error| {
+                catalog(format!(
+                    "tool '{}' publishes an invalid schema path: {error}",
+                    entry.name
+                ))
+            })?;
+            validate_artifact_for_origin(schema, MAX_METADATA_BYTES, origin)?;
+        }
     }
     for entry in &manifest.skills {
         validate_hub_name(&entry.name)?;
-        validate_artifact(&entry.skill_md, super::model::MAX_METADATA_BYTES)?;
+        validate_artifact_for_origin(&entry.skill_md, MAX_METADATA_BYTES, origin)?;
     }
     Ok(())
 }
 
-pub(crate) fn validate_artifact(
+pub(crate) fn validate_artifact_for_origin(
     artifact: &IronHubArtifact,
     max_bytes: u64,
+    origin: Option<&CatalogOrigin>,
 ) -> Result<(), IronHubCommandError> {
-    validate_artifact_url("artifact", "url", &artifact.url)?;
+    validate_artifact_url_for_origin("artifact", "url", &artifact.url, origin)?;
     if artifact.size_bytes > max_bytes {
         return Err(catalog(format!("artifact exceeds {max_bytes} byte cap")));
     }
@@ -247,6 +319,15 @@ pub(crate) fn validate_artifact_url(
     field: &str,
     value: &str,
 ) -> Result<(), IronHubCommandError> {
+    validate_artifact_url_for_origin(manifest_name, field, value, None)
+}
+
+fn validate_artifact_url_for_origin(
+    manifest_name: &str,
+    field: &str,
+    value: &str,
+    origin: Option<&CatalogOrigin>,
+) -> Result<(), IronHubCommandError> {
     let parsed = url::Url::parse(value)
         .map_err(|error| catalog(format!("{manifest_name}.{field} invalid URL: {error}")))?;
     if parsed.scheme() != "https" {
@@ -255,7 +336,11 @@ pub(crate) fn validate_artifact_url(
     let host = parsed
         .host_str()
         .ok_or_else(|| catalog(format!("{manifest_name}.{field} host is missing")))?;
-    if host_is_disallowed_target(host) || !is_allowed_artifact_host(host) {
+    let allowed = match origin {
+        Some(origin) => origin.matches(&parsed),
+        None => is_allowed_artifact_host(host),
+    };
+    if host_is_disallowed_target(host) || !allowed {
         return Err(catalog(format!(
             "{manifest_name}.{field} host '{host}' is not allowed"
         )));
@@ -263,11 +348,12 @@ pub(crate) fn validate_artifact_url(
     Ok(())
 }
 
-pub(crate) fn network_policy_for_url(
+pub(crate) fn network_policy_for_url_from_origin(
     value: &str,
     max_bytes: u64,
+    origin: Option<&CatalogOrigin>,
 ) -> Result<NetworkPolicy, IronHubCommandError> {
-    validate_artifact_url("download", "url", value)?;
+    validate_artifact_url_for_origin("download", "url", value, origin)?;
     let parsed =
         url::Url::parse(value).map_err(|error| catalog(format!("invalid URL: {error}")))?;
     let host = parsed
@@ -284,22 +370,75 @@ pub(crate) fn network_policy_for_url(
     })
 }
 
-fn is_allowed_artifact_host(host: &str) -> bool {
-    host.eq_ignore_ascii_case("hub.ironclaw.com")
-        || ironclaw_host_runtime::is_allowed_code_artifact_host(host)
-        || extra_artifact_hosts()
-            .iter()
-            .any(|allowed| host.eq_ignore_ascii_case(allowed))
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CatalogOrigin {
+    host: String,
+    port: u16,
 }
 
-fn extra_artifact_hosts() -> Vec<String> {
-    std::env::var("IRONHUB_EXTRA_ARTIFACT_HOSTS")
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .map(str::to_ascii_lowercase)
-        .filter(|host| !host.is_empty() && !host_is_disallowed_target(host))
-        .collect()
+impl CatalogOrigin {
+    pub(crate) fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub(crate) fn redacted_source_url(&self) -> String {
+        if self.port == 443 {
+            format!("https://{}/", self.host)
+        } else {
+            format!("https://{}:{}/", self.host, self.port)
+        }
+    }
+
+    fn from_url(value: &str, label: &str) -> Result<Self, IronHubCommandError> {
+        let parsed = url::Url::parse(value)
+            .map_err(|error| catalog(format!("{label} is not a valid URL: {error}")))?;
+        if parsed.scheme() != "https" {
+            return Err(catalog(format!("{label} must use https")));
+        }
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(catalog(format!(
+                "{label} must not contain user information"
+            )));
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| catalog(format!("{label} host is missing")))?
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        if host_is_disallowed_target(&host) {
+            return Err(catalog(format!("{label} host is not allowed")));
+        }
+        let port = parsed
+            .port_or_known_default()
+            .ok_or_else(|| catalog(format!("{label} port is invalid")))?;
+        Ok(Self { host, port })
+    }
+
+    fn matches(&self, parsed: &url::Url) -> bool {
+        parsed.scheme() == "https"
+            && parsed.username().is_empty()
+            && parsed.password().is_none()
+            && parsed
+                .host_str()
+                .map(|host| host.trim_end_matches('.').eq_ignore_ascii_case(&self.host))
+                .unwrap_or(false)
+            && parsed.port_or_known_default() == Some(self.port)
+    }
+}
+
+pub(crate) fn validate_private_manifest_origin(
+    configured_catalog_url: &str,
+    private_manifest_url: &str,
+) -> Result<CatalogOrigin, IronHubCommandError> {
+    let configured = CatalogOrigin::from_url(configured_catalog_url, "configured catalog URL")?;
+    let private = url::Url::parse(private_manifest_url)
+        .map_err(|_| catalog("private manifest URL is invalid"))?;
+    if !configured.matches(&private) {
+        return Err(catalog(
+            "private manifest URL must use the configured catalog origin",
+        ));
+    }
+    Ok(configured)
 }
 
 pub(crate) fn host_is_disallowed_target(host: &str) -> bool {

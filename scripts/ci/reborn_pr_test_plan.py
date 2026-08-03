@@ -21,6 +21,10 @@ MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
 IGNORED_PREFIXES = ("docs/", ".github/ISSUE_TEMPLATE/")
 DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
+QA_HARNESS_PREFIXES = (
+    "scripts/live-canary/",
+    "scripts/reborn_webui_v2_live_qa/",
+)
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 PR_STATIC_CONTROL_PATHS = {
     "Cargo.toml",
@@ -335,6 +339,10 @@ def build_plan(
         if path.startswith(DEDICATED_WORKFLOW_PREFIXES):
             reasons.append(f"dedicated stress workflow owns: {path}")
             continue
+        if path.startswith(QA_HARNESS_PREFIXES):
+            qa_evidence_changed = True
+            reasons.append(f"live QA harness changed: {path}")
+            continue
         if path == CHANGED_COVERAGE_MANIFEST:
             reasons.append("changed-coverage policy is statically validated")
             continue
@@ -425,6 +433,14 @@ def build_plan(
             continue
         if path.startswith(("tests/reborn_", "tests/e2e/reborn_", "scripts/ci/reborn-")):
             raise ValueError(f"unmapped Reborn test path: {path}")
+        if path.startswith("tests/e2e/"):
+            # The browser/E2E suite has its own workflow (`reborn-e2e.yml`,
+            # `paths: tests/e2e/**`) with its own scope detection, so this
+            # planner must not also schedule Rust lanes for it. The
+            # `tests/e2e/reborn_*` harnesses above stay a deliberate hard
+            # error — they are shared fixtures, not one scenario.
+            reasons.append(f"dedicated Reborn E2E workflow owns: {path}")
+            continue
         if path.startswith(("scripts/", "tests/", ".github/actions/")):
             raise ValueError(f"unmapped test or CI path: {path}")
         raise ValueError(f"unclassified pull-request path: {path}")

@@ -229,6 +229,30 @@ test("ChatInput keeps the textarea editable when only submit is disabled", () =>
   assert.equal(sendProps.disabled, true);
 });
 
+// Regression: the queued-steering composer swaps cancel for send as soon as the
+// user types, so a follow-up can be queued behind the running turn. But when the
+// send itself is unavailable (cooldown — the only `sendDisabled` cause that
+// co-occurs with `canCancel`, since a gate/onboarding clears `canCancel`), that
+// swap left a disabled send button and NO cancel: the user had to erase their
+// draft to reach cancel. Keep cancel reachable whenever send cannot be used.
+test("ChatInput keeps cancel reachable when a draft exists but send is disabled", () => {
+  const { tree, components } = renderChatInput({
+    disabled: false,
+    sendDisabled: true,
+    canCancel: true,
+    draft: "follow-up while the run is cooling down",
+  });
+
+  const button = findComponent(tree, components.Button);
+  const props = componentProps(button, components.Button);
+  assert.equal(
+    props["data-testid"],
+    "chat-cancel-run",
+    "a disabled send must not hide the cancel affordance behind clearing the draft",
+  );
+  assert.equal(props.disabled, false, "cancel stays clickable");
+});
+
 test("ChatInput blocks Enter send when only submit is disabled", async () => {
   let sendCalls = 0;
   const { tree } = renderChatInput({

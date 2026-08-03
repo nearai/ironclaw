@@ -228,6 +228,14 @@ impl RunProfileDefinition {
         self
     }
 
+    /// Override the profile's steering policy. `allow_steering: false` makes
+    /// busy-submit admission fall back to the `RejectedBusy` outcome instead
+    /// of queueing mid-run steering input for runs resolved with this profile.
+    pub fn with_steering_policy(mut self, policy: SteeringPolicy) -> Self {
+        self.steering_policy = policy;
+        self
+    }
+
     fn resolve(&self, request: &RunProfileResolutionRequest) -> ResolvedRunProfile {
         let mut provenance = provenance_for(self, request);
         let resource_budget_policy = self.resolve_resource_budget_policy(request, &mut provenance);

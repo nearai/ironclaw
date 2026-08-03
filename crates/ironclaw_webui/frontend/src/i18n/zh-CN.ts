@@ -118,6 +118,7 @@ registerPack("zh-CN", {
   "chat.identityUser": "你",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "跳转至最新",
+  "chat.queued": "排队中",
   "shortcuts.title": "快捷键",
   "shortcuts.send": "发送消息",
   "shortcuts.newline": "换行",

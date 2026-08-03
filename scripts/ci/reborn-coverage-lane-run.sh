@@ -141,6 +141,7 @@ if [[ "${collect_coverage}" == "true" ]]; then
 else
   echo "::group::cargo test -p ironclaw_reborn_integration_tests ${test_args[*]}"
   timeout --signal=INT --kill-after=30s "${test_timeout}" \
-    cargo test -p ironclaw_reborn_integration_tests "${test_args[@]}" -- --nocapture
+    cargo test -p ironclaw_reborn_integration_tests "${test_args[@]}" \
+      --ignore-rust-version -- --nocapture
 fi
 echo "::endgroup::"

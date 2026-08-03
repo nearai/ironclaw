@@ -880,6 +880,7 @@ fn bridge_tool_definition(
         capability_id: bridge_capability_id(name),
         name: tool_name,
         description: description.to_string(),
+        description_trust: Default::default(),
         parameters,
     }
 }
@@ -916,7 +917,7 @@ fn catalog_descriptor(entry: &CatalogEntry) -> CapabilityDescriptorView {
         runtime: RuntimeKind::FirstParty,
         safe_name: entry.definition.name.to_string(),
         safe_description: entry.definition.description.clone(),
-        description_trust: Default::default(),
+        description_trust: entry.definition.description_trust,
         concurrency_hint: ConcurrencyHint::Exclusive,
         parameters_schema: entry.definition.parameters.clone(),
     }
@@ -1036,6 +1037,7 @@ mod tests {
                 name: ProviderToolName::new(encode_provider_tool_name(capability_id))
                     .expect("valid provider tool name"),
                 description: format!("Core loop primitive for {name}."),
+                description_trust: Default::default(),
                 parameters: small_no_arg_schema(),
             };
             assert!(
@@ -1077,6 +1079,7 @@ mod tests {
                 .expect("valid capability id"),
             name: ProviderToolName::new("builtin__read_file").expect("valid provider tool name"),
             description: "Read files from the workspace.".to_string(),
+            description_trust: Default::default(),
             parameters: medium_schema(0),
         }];
 
@@ -1098,6 +1101,7 @@ mod tests {
                 name: ProviderToolName::new(encode_provider_tool_name(capability_id))
                     .expect("valid provider tool name"),
                 description: format!("Memory tool {legacy_name}."),
+                description_trust: Default::default(),
                 parameters: medium_schema(0),
             };
 
@@ -1146,6 +1150,7 @@ mod tests {
                 .expect("valid capability id"),
             name: ProviderToolName::new(stored_name).expect("valid provider tool name"),
             description: "List events on a Google Calendar.".to_string(),
+            description_trust: Default::default(),
             parameters: medium_schema(0),
         };
         assert!(
@@ -1179,6 +1184,7 @@ mod tests {
             name: ProviderToolName::new("google-calendar__list_events")
                 .expect("valid provider tool name"),
             description: "List events on a Google Calendar.".to_string(),
+            description_trust: Default::default(),
             parameters: medium_schema(0),
         };
         let catalog = CapabilityCatalog::new(&[definition], &[]);
@@ -1200,6 +1206,37 @@ mod tests {
                 .search_result("google-calendar.list_calendars")
                 .is_none(),
             "an unrelated name must not resolve"
+        );
+    }
+
+    #[test]
+    fn catalog_descriptor_preserves_verified_description_provenance() {
+        let definition = ProviderToolDefinition {
+            capability_id: CapabilityId::new("builtin.ironhub_search")
+                .expect("valid capability id"),
+            name: ProviderToolName::new("builtin__ironhub_search")
+                .expect("valid provider tool name"),
+            description: "Search the verified IronHub catalog.".to_string(),
+            description_trust:
+                ironclaw_host_api::capability::CapabilityDescriptionTrust::VerifiedCatalog,
+            parameters: small_no_arg_schema(),
+        };
+        let catalog = CapabilityCatalog::new(&[definition], &[]);
+        let disclosed_names = BTreeSet::from(["builtin__ironhub_search".to_string()]);
+
+        let descriptors = catalog.active_or_disclosed_descriptors(
+            &ActiveSet {
+                definitions: Vec::new(),
+                deferred: true,
+                advertised_tokens: 0,
+            },
+            &disclosed_names,
+        );
+
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(
+            descriptors[0].description_trust,
+            ironclaw_host_api::capability::CapabilityDescriptionTrust::VerifiedCatalog
         );
     }
 
@@ -1291,6 +1328,7 @@ mod tests {
                 name: ProviderToolName::new("ordinary_tool_name")
                     .expect("valid provider tool name"),
                 description: "Conflicting real tool with a reserved bridge id".to_string(),
+                description_trust: Default::default(),
                 parameters: small_no_arg_schema(),
             },
             fixture_tool(
@@ -2111,6 +2149,7 @@ mod tests {
             capability_id: CapabilityId::new(format!("fixture.{name}")).expect("fixture id"),
             name: ProviderToolName::new(name).expect("valid fixture tool name"),
             description: description.into(),
+            description_trust: Default::default(),
             parameters,
         }
     }

@@ -150,6 +150,10 @@ use ironclaw_product_contracts::admin_users::{
     AdminUserSecretMeta, AdminUserService, AdminUserStatus,
 };
 use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
+use ironclaw_product_contracts::ironhub::{
+    IRONHUB_DELIVER_INSTALL_COMMAND_ID, IronhubInstallDeliveryRequest,
+    IronhubInstallDeliveryResult, IronhubLinkError, IronhubLinkService, IronhubRegisterRequest,
+};
 use ironclaw_product_contracts::lifecycle_service::{
     LifecycleProductContext, LifecycleProductService,
 };
@@ -674,6 +678,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
                 .expect("valid ref"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
+            allow_steering: true,
             resolved_model_route: self.run_state_model_route.lock().expect("lock").clone(),
             model_usage: *self.run_state_usage.lock().expect("lock"),
             received_at: Utc::now(),
@@ -779,6 +784,7 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
                 .expect("valid ref"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
+            allow_steering: true,
             resolved_model_route: None,
             model_usage: None,
             received_at: Utc::now(),
@@ -2391,6 +2397,40 @@ impl SessionThreadService for ScriptedThreadService {
             }
             _ => scripted_stub_unreachable("mark_message_rejected_busy"),
         }
+    }
+
+    async fn read_thread_message(
+        &self,
+        _scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        // Reconcile point-read for the mark-failure scenarios: report the row
+        // in the settled state the scripted behavior models.
+        let status = match &self.behavior {
+            ScriptedThreadBehavior::RejectedBusyMarkFails { .. } => MessageStatus::RejectedBusy,
+            ScriptedThreadBehavior::DeferredBusyMarkFails { .. } => MessageStatus::DeferredBusy,
+            _ => scripted_stub_unreachable("read_thread_message"),
+        };
+        Ok(Some(ThreadMessageRecord {
+            message_id,
+            thread_id: thread_id.clone(),
+            sequence: 1,
+            kind: MessageKind::User,
+            status,
+            created_at: None,
+            updated_at: None,
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: None,
+            tool_result_ref: None,
+            tool_result_provider_call: None,
+            content: Some("scripted".to_string()),
+            attachments: Vec::new(),
+            redaction_ref: None,
+        }))
     }
 
     async fn append_assistant_draft(
@@ -4407,14 +4447,16 @@ async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
     let first_run_id = match &first {
         RebornSubmitTurnResponse::Submitted { run_id, .. }
         | RebornSubmitTurnResponse::AlreadySubmitted { run_id, .. } => *run_id,
-        RebornSubmitTurnResponse::RejectedBusy { .. } => {
+        RebornSubmitTurnResponse::RejectedBusy { .. }
+        | RebornSubmitTurnResponse::DeferredBusy { .. } => {
             panic!("duplicate submit must not defer while deduping")
         }
     };
     let second_run_id = match &second {
         RebornSubmitTurnResponse::Submitted { run_id, .. }
         | RebornSubmitTurnResponse::AlreadySubmitted { run_id, .. } => *run_id,
-        RebornSubmitTurnResponse::RejectedBusy { .. } => {
+        RebornSubmitTurnResponse::RejectedBusy { .. }
+        | RebornSubmitTurnResponse::DeferredBusy { .. } => {
             panic!("duplicate submit must not defer while deduping")
         }
     };
@@ -16718,6 +16760,212 @@ async fn execute_user_audience_commands_succeed_without_admin_directory_but_admi
     );
     assert_eq!(admin_audience_error.status_code, 503);
     assert!(admin_audience_error.retryable);
+}
+
+#[derive(Default)]
+struct RecordingIronhubLinkService {
+    deliveries: Mutex<Vec<(ProductSurfaceCaller, IronhubInstallDeliveryRequest)>>,
+}
+
+#[async_trait]
+impl IronhubLinkService for RecordingIronhubLinkService {
+    async fn register(&self, _request: IronhubRegisterRequest) -> Result<(), IronhubLinkError> {
+        Ok(())
+    }
+
+    async fn deliver_install(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: IronhubInstallDeliveryRequest,
+    ) -> Result<IronhubInstallDeliveryResult, IronhubLinkError> {
+        let slug = request.slug.clone();
+        self.deliveries
+            .lock()
+            .expect("lock")
+            .push((caller, request));
+        Ok(IronhubInstallDeliveryResult {
+            installed: true,
+            slug,
+            message: "installed".to_string(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn ironhub_delivery_command_forwards_authenticated_product_surface_caller() {
+    let link = Arc::new(RecordingIronhubLinkService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_ironhub_link_service(link.clone());
+    let authenticated_caller =
+        caller_for_user_with_project("user-ironhub", Some("project-ironhub"));
+
+    let response = ProductSurface::invoke(
+        &services,
+        authenticated_caller.clone(),
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
+            operation_id: CapabilityId::new(IRONHUB_DELIVER_INSTALL_COMMAND_ID)
+                .expect("operation id"),
+            input: serde_json::json!({
+                "slug": "private-skill",
+                "version": "1.2.3",
+                "uid": "body-user-is-not-authority",
+                "aid": "agent-alpha",
+                "ts": 1_700_000_000_u64,
+                "nonce": "nonce-1",
+                "artifact_digest": "sha256:deadbeef",
+                "sig": "signature",
+                "private_manifest_url": "https://catalog.example/private/repo?token=rotating"
+            }),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await
+    .expect("delivery command");
+
+    let output: IronhubInstallDeliveryResult =
+        serde_json::from_value(response.output).expect("typed output");
+    assert!(output.installed);
+    assert_eq!(output.slug, "private-skill");
+
+    let deliveries = link.deliveries.lock().expect("lock");
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].0, authenticated_caller);
+    assert_eq!(deliveries[0].1.uid, "body-user-is-not-authority");
+}
+
+#[tokio::test]
+async fn ironhub_delivery_command_fails_closed_when_link_service_is_unwired() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let error = ProductSurface::invoke(
+        &services,
+        caller(),
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
+            operation_id: CapabilityId::new(IRONHUB_DELIVER_INSTALL_COMMAND_ID)
+                .expect("operation id"),
+            input: serde_json::json!({
+                "slug": "private-skill",
+                "version": "1.2.3",
+                "uid": "body-user-is-not-authority",
+                "aid": "agent-alpha",
+                "ts": 1_700_000_000_u64,
+                "nonce": "nonce-1",
+                "artifact_digest": "sha256:deadbeef",
+                "sig": "signature"
+            }),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await
+    .expect_err("unwired IronHub link service must fail closed");
+
+    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::ServiceUnavailable);
+    assert_eq!(error.status_code, 503);
+    assert!(!error.retryable);
+}
+
+// ---------------------------------------------------------------------------
+// Queued-replay crash-orphan recovery (WebUI path): a Queued row whose queue
+// entry was lost (crash between the status write and the enqueue) must be
+// idempotently re-enqueued on replay instead of treating Queued as proof.
+// ---------------------------------------------------------------------------
+
+struct VanishingWebUiEnqueue;
+
+#[async_trait]
+impl ironclaw_loop_host::HostInputEnqueuePort for VanishingWebUiEnqueue {
+    async fn enqueue_queued_message(
+        &self,
+        request: ironclaw_loop_host::EnqueueQueuedMessageRequest,
+    ) -> Result<ironclaw_loop_host::HostInputEnvelope, ironclaw_loop_host::HostInputQueueError>
+    {
+        Ok(ironclaw_loop_host::HostInputEnvelope {
+            input: request.input,
+            cursor: ironclaw_loop_contracts::LoopInputCursorToken::new(
+                "input-cursor:1".to_string(),
+            )
+            .expect("cursor"),
+            ack_token: ironclaw_loop_contracts::LoopInputAckToken::new("input-ack:1".to_string())
+                .expect("ack token"),
+        })
+    }
+}
+
+#[tokio::test]
+async fn webui_queued_replay_re_enqueues_crash_orphaned_message() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let active_run_id = TurnRunId::new();
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id,
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(3),
+        }),
+    ));
+    // Phase 1 — the "crashed" process: the enqueue vanishes, leaving the row
+    // Queued with no backing queue entry.
+    let crashed = RebornServices::new(
+        thread_service.clone() as Arc<dyn SessionThreadService>,
+        coordinator.clone(),
+    )
+    .with_input_enqueue(Arc::new(VanishingWebUiEnqueue));
+    setup_owned_thread(&crashed, caller(), "thread-orphan-webui").await;
+    let request = || {
+        serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            "client_action_id": "send-orphan-webui",
+            "thread_id": "thread-orphan-webui",
+            "content": "orphaned webui steering"
+        }))
+        .expect("request")
+    };
+    let response = crashed
+        .submit_turn(caller(), request())
+        .await
+        .expect("busy submit succeeds");
+    assert!(
+        matches!(response, RebornSubmitTurnResponse::DeferredBusy { .. }),
+        "expected DeferredBusy, got {response:?}"
+    );
+
+    // Phase 2 — the restarted process with the REAL queue: the same
+    // client_action_id triggers the WebUI replay, which must re-enqueue.
+    let real_queue = Arc::new(ironclaw_loop_host::InMemoryHostInputQueue::new(
+        thread_service.clone() as Arc<dyn SessionThreadService>,
+    ));
+    let restarted = RebornServices::new(
+        thread_service.clone() as Arc<dyn SessionThreadService>,
+        coordinator,
+    )
+    .with_input_enqueue(real_queue.clone() as Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>);
+    let replayed = restarted
+        .submit_turn(caller(), request())
+        .await
+        .expect("replay succeeds");
+    assert!(
+        matches!(replayed, RebornSubmitTurnResponse::DeferredBusy { .. }),
+        "replay stays DeferredBusy, got {replayed:?}"
+    );
+    use ironclaw_loop_host::HostInputQueue as _;
+    let batch = real_queue
+        .next_after(
+            active_run_id,
+            ironclaw_loop_contracts::LoopInputCursorToken::origin(),
+            8,
+        )
+        .await
+        .expect("poll after replay");
+    assert_eq!(
+        batch.inputs.len(),
+        1,
+        "the WebUI queued replay must re-enqueue the orphaned steering input"
+    );
 }
 
 /// The three vendor-login paths, driven through `RebornServices`, on their

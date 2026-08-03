@@ -6,9 +6,9 @@
 //! implementation lookup.
 //!
 //! Shared vendors (overview §3.2): every extension using a vendor embeds the
-//! recipe; recipes for one vendor must be identical except `scopes` and
-//! `display_name`, the scope ceiling is the union across extensions, and an
-//! incompatible pair is a conflict.
+//! recipe; recipes for one vendor must be identical except scope and
+//! presentation metadata, the scope ceiling is the union across extensions,
+//! and an incompatible pair is a conflict.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -26,7 +26,7 @@ use crate::SnapshotWatch;
 #[error(
     "extensions `{first_extension}` and `{second_extension}` declare incompatible \
      [auth.{vendor}] recipes (recipes for a shared vendor must be identical except \
-     scopes and display_name)"
+     scope and presentation metadata)"
 )]
 pub struct VendorRecipeConflict {
     pub vendor: String,
@@ -35,8 +35,8 @@ pub struct VendorRecipeConflict {
 }
 
 /// Unify the vendor recipes declared across `manifests` (overview §3.2):
-/// identical-except-`scopes`/`display_name` recipes merge with a scope-ceiling
-/// union; anything else conflicts.
+/// Recipes that differ only in scope or presentation metadata merge with a
+/// scope-ceiling union; anything else conflicts.
 pub fn unified_vendor_recipes<'a>(
     manifests: impl IntoIterator<Item = &'a ResolvedExtensionManifest>,
 ) -> Result<Vec<ResolvedVendorAuthRecipe>, VendorRecipeConflict> {
@@ -316,6 +316,48 @@ mod tests {
         assert_eq!(error.vendor, "vendorco");
         assert_eq!(error.first_extension, "mail-ext");
         assert_eq!(error.second_extension, "docs-ext");
+    }
+
+    #[test]
+    fn shared_vendor_recipes_allow_extension_specific_setup_copy() {
+        let mut mail_recipe = oauth_recipe(&["mail:read"], "https://vendor.example/token");
+        let VendorAuthRecipe::Oauth2Code(mail_oauth) = &mut mail_recipe else {
+            panic!("oauth recipe");
+        };
+        mail_oauth.instructions = Some("Register the mail extension.".to_string());
+        mail_oauth.setup_url = Some(
+            ironclaw_extension_contracts::recipe::HttpsEndpoint::new(
+                "https://vendor.example/settings/mail",
+            )
+            .expect("mail setup URL"),
+        );
+
+        let mut calendar_recipe = oauth_recipe(&["calendar:read"], "https://vendor.example/token");
+        let VendorAuthRecipe::Oauth2Code(calendar_oauth) = &mut calendar_recipe else {
+            panic!("oauth recipe");
+        };
+        calendar_oauth.instructions = Some("Register the calendar extension.".to_string());
+        calendar_oauth.setup_url = Some(
+            ironclaw_extension_contracts::recipe::HttpsEndpoint::new(
+                "https://vendor.example/settings/calendar",
+            )
+            .expect("calendar setup URL"),
+        );
+
+        let mail = manifest_with_recipe("mail-ext", "vendorco", mail_recipe);
+        let calendar = manifest_with_recipe("cal-ext", "vendorco", calendar_recipe);
+        let unified = unified_vendor_recipes([&mail, &calendar])
+            .expect("presentation-only setup differences must not conflict");
+
+        let VendorAuthRecipe::Oauth2Code(recipe) = &unified[0].recipe else {
+            panic!("oauth recipe");
+        };
+        assert_eq!(recipe.scopes, vec!["mail:read", "calendar:read"]);
+        assert_eq!(
+            recipe.instructions.as_deref(),
+            Some("Register the mail extension."),
+            "the first installed extension remains the presentation source"
+        );
     }
 
     /// Resolution is vendor-scoped: unioning ceilings across installed

@@ -194,7 +194,7 @@ impl std::fmt::Display for HttpsEndpoint {
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum VendorAuthRecipe {
     Oauth2Code(Box<OAuth2CodeRecipe>),
-    ApiKey(ApiKeyRecipe),
+    ApiKey(Box<ApiKeyRecipe>),
 }
 
 impl VendorAuthRecipe {
@@ -235,7 +235,8 @@ impl VendorAuthRecipe {
     }
 
     /// Whether two recipes for a shared vendor are compatible: identical
-    /// except `scopes` and `display_name`
+    /// except `scopes` and presentation-only `display_name`, `instructions`,
+    /// and `setup_url`
     /// (`docs/reborn/extension-runtime/overview.md` §3.2).
     pub fn compatible_for_shared_vendor(&self, other: &Self) -> bool {
         match (self, other) {
@@ -246,6 +247,10 @@ impl VendorAuthRecipe {
                 b.scopes = Vec::new();
                 a.display_name = String::new();
                 b.display_name = String::new();
+                a.instructions = None;
+                b.instructions = None;
+                a.setup_url = None;
+                b.setup_url = None;
                 a == b
             }
             (Self::ApiKey(a), Self::ApiKey(b)) => {
@@ -253,6 +258,10 @@ impl VendorAuthRecipe {
                 let mut b = b.clone();
                 a.display_name = String::new();
                 b.display_name = String::new();
+                a.instructions = None;
+                b.instructions = None;
+                a.setup_url = None;
+                b.setup_url = None;
                 a == b
             }
             _ => false,
@@ -302,6 +311,16 @@ pub struct OAuth2CodeRecipe {
     pub refresh: Option<RefreshRecipe>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoke: Option<RevokeRecipe>,
+    /// What a user has to arrange before the consent screen will work — an app
+    /// registered with the vendor, a redirect URI allowlisted. An OAuth flow that
+    /// fails for a missing prerequisite is otherwise indistinguishable from a
+    /// broken integration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// Where that arranging happens. `HttpsEndpoint` because this becomes a link
+    /// the user is invited to follow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_url: Option<HttpsEndpoint>,
 }
 
 impl OAuth2CodeRecipe {
@@ -483,6 +502,16 @@ pub struct ApiKeyRecipe {
     pub fields: Vec<RecipeSecretField>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation: Option<ApiKeyValidationProbe>,
+    /// How a user obtains this credential, in the vendor's own terms — "open
+    /// Workspace Settings > Developers, create an access token". Without it the
+    /// host can say a secret is required but not where it comes from, and a
+    /// model asked to help will invent the steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// Where those steps happen. `HttpsEndpoint` because this becomes a link the
+    /// user is invited to follow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_url: Option<HttpsEndpoint>,
 }
 
 impl ApiKeyRecipe {
@@ -853,14 +882,34 @@ signed_payload = [ { body = true } ]
     }
 
     #[test]
-    fn shared_vendor_compatibility_ignores_scopes_and_display_name_only() {
+    fn shared_vendor_compatibility_ignores_scope_and_presentation_metadata() {
         let base: VendorAuthRecipe = toml::from_str(slack_shaped_recipe_toml()).unwrap();
         let mut other = base.clone();
         if let VendorAuthRecipe::Oauth2Code(inner) = &mut other {
             inner.scopes = vec!["different:scope".to_string()];
             inner.display_name = "Other".to_string();
+            inner.instructions = Some("Register this extension's OAuth app.".to_string());
+            inner.setup_url =
+                Some(HttpsEndpoint::new("https://vendor.example/settings/other-app").unwrap());
         }
         assert!(base.compatible_for_shared_vendor(&other));
+
+        let api_key: VendorAuthRecipe = toml::from_str(
+            r#"
+method = "api_key"
+display_name = "Example token"
+fields = [{ handle = "example_token", label = "Token" }]
+"#,
+        )
+        .unwrap();
+        let mut other_api_key = api_key.clone();
+        if let VendorAuthRecipe::ApiKey(inner) = &mut other_api_key {
+            inner.display_name = "Other token".to_string();
+            inner.instructions = Some("Create a token for this extension.".to_string());
+            inner.setup_url =
+                Some(HttpsEndpoint::new("https://vendor.example/settings/tokens").unwrap());
+        }
+        assert!(api_key.compatible_for_shared_vendor(&other_api_key));
 
         let mut conflicting = base.clone();
         if let VendorAuthRecipe::Oauth2Code(inner) = &mut conflicting {
@@ -931,5 +980,106 @@ signed_payload = [ { body = true } ]
         let json = serde_json::to_string(&recipe).unwrap();
         let back: VendorAuthRecipe = serde_json::from_str(&json).unwrap();
         assert_eq!(recipe, back);
+    }
+
+    #[test]
+    fn oauth_and_api_key_setup_metadata_parse_default_and_round_trip() {
+        let oauth_toml = slack_shaped_recipe_toml().replace(
+            "display_name = \"Example account\"",
+            "display_name = \"Example account\"\n\
+             instructions = \"Register an OAuth app.\"\n\
+             setup_url = \"https://vendor.example/settings/apps\"",
+        );
+        let api_key_toml = r#"
+method = "api_key"
+display_name = "Example token"
+fields = [ { handle = "example_token", label = "Token", secret = true } ]
+instructions = "Create a personal access token."
+setup_url = "https://vendor.example/settings/tokens"
+"#;
+
+        for (label, source, expected_instructions, expected_url) in [
+            (
+                "oauth",
+                oauth_toml.as_str(),
+                "Register an OAuth app.",
+                "https://vendor.example/settings/apps",
+            ),
+            (
+                "api-key",
+                api_key_toml,
+                "Create a personal access token.",
+                "https://vendor.example/settings/tokens",
+            ),
+        ] {
+            let recipe: VendorAuthRecipe = toml::from_str(source).expect(label);
+            let (instructions, setup_url) = match &recipe {
+                VendorAuthRecipe::Oauth2Code(recipe) => {
+                    (recipe.instructions.as_deref(), recipe.setup_url.as_ref())
+                }
+                VendorAuthRecipe::ApiKey(recipe) => {
+                    (recipe.instructions.as_deref(), recipe.setup_url.as_ref())
+                }
+            };
+            assert_eq!(instructions, Some(expected_instructions), "{label}");
+            assert_eq!(
+                setup_url.map(HttpsEndpoint::as_str),
+                Some(expected_url),
+                "{label}"
+            );
+
+            let json = serde_json::to_string(&recipe).expect("serialize JSON");
+            assert_eq!(
+                serde_json::from_str::<VendorAuthRecipe>(&json).expect("deserialize JSON"),
+                recipe,
+                "{label} JSON round trip"
+            );
+            let encoded_toml = toml::to_string(&recipe).expect("serialize TOML");
+            assert_eq!(
+                toml::from_str::<VendorAuthRecipe>(&encoded_toml).expect("deserialize TOML"),
+                recipe,
+                "{label} TOML round trip"
+            );
+        }
+
+        let oauth_without_metadata: VendorAuthRecipe =
+            toml::from_str(slack_shaped_recipe_toml()).expect("OAuth without setup metadata");
+        let api_key_without_metadata: VendorAuthRecipe = toml::from_str(
+            r#"
+method = "api_key"
+display_name = "Example token"
+fields = [ { handle = "example_token", label = "Token", secret = true } ]
+"#,
+        )
+        .expect("API key without setup metadata");
+        for recipe in [oauth_without_metadata, api_key_without_metadata] {
+            let (instructions, setup_url) = match recipe {
+                VendorAuthRecipe::Oauth2Code(recipe) => (recipe.instructions, recipe.setup_url),
+                VendorAuthRecipe::ApiKey(recipe) => (recipe.instructions, recipe.setup_url),
+            };
+            assert!(instructions.is_none());
+            assert!(setup_url.is_none());
+        }
+    }
+
+    #[test]
+    fn setup_metadata_rejects_non_https_urls() {
+        for source in [
+            slack_shaped_recipe_toml().replace(
+                "display_name = \"Example account\"",
+                "display_name = \"Example account\"\nsetup_url = \"http://vendor.example/apps\"",
+            ),
+            r#"
+method = "api_key"
+display_name = "Example token"
+fields = [ { handle = "example_token", label = "Token", secret = true } ]
+setup_url = "http://vendor.example/tokens"
+"#
+            .to_string(),
+        ] {
+            let error = toml::from_str::<VendorAuthRecipe>(&source)
+                .expect_err("non-HTTPS setup URL must fail");
+            assert!(error.to_string().contains("https"), "{error}");
+        }
     }
 }
