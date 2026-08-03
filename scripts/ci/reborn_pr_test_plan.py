@@ -414,6 +414,14 @@ def build_plan(
             continue
         if path.startswith(("tests/reborn_", "tests/e2e/reborn_", "scripts/ci/reborn-")):
             raise ValueError(f"unmapped Reborn test path: {path}")
+        if path.startswith("tests/e2e/"):
+            # The browser/E2E suite has its own workflow (`reborn-e2e.yml`,
+            # `paths: tests/e2e/**`) with its own scope detection, so this
+            # planner must not also schedule Rust lanes for it. The
+            # `tests/e2e/reborn_*` harnesses above stay a deliberate hard
+            # error — they are shared fixtures, not one scenario.
+            reasons.append(f"dedicated Reborn E2E workflow owns: {path}")
+            continue
         if path.startswith(("scripts/", "tests/", ".github/actions/")):
             raise ValueError(f"unmapped test or CI path: {path}")
         raise ValueError(f"unclassified pull-request path: {path}")
