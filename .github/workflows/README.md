@@ -69,9 +69,10 @@ state, but do not repeat those contracts on PR runners. The release-binary
 smoke harness self-test remains in Code Style's fast deterministic job on every
 code PR. Reborn E2E continues to build the real product binary and run all
 browser/provider lanes on pull requests.
-The four provider-operation shards run as two sequential pairs, so each shard
-still receives its own pytest process while two Emulate checkout/build cycles
-and two runner allocations are avoided.
+The four provider-operation shards run as two concurrent pairs. Each shard
+keeps its own pytest process and hermetic runtime, while each pair shares one
+runner and one Emulate checkout/build cycle. This preserves shard isolation
+without restoring the two runner allocations removed by pairing.
 
 History: the slim-vs-full clippy matrix violated this — the queue linted only
 `--all-features` while push linted a broader matrix, so feature-gated dead code
