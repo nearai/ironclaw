@@ -27,7 +27,8 @@ mod tests;
 
 pub use install_bundle::{
     MAX_INSTALL_BUNDLE_FILE_BYTES, MAX_INSTALL_BUNDLE_FILES, MAX_INSTALL_BUNDLE_TOTAL_BYTES,
-    SkillInstallFile, validate_install_bundle_relative_path,
+    SkillInstallFile, normalize_install_bundle_relative_path,
+    validate_install_bundle_relative_path,
 };
 pub(crate) use install_bundle::{SkillBundleSnapshot, capture_skill_bundle, restore_skill_bundle};
 
