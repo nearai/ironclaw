@@ -134,6 +134,9 @@ impl RecordingServer {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         stream
+                            .set_nonblocking(false)
+                            .expect("set accepted stream blocking");
+                        stream
                             .set_read_timeout(Some(Duration::from_secs(1)))
                             .expect("set request read timeout");
                         let mut buf = [0_u8; 2048];
