@@ -783,9 +783,8 @@ mod mount_view_tests {
     async fn invocation_mount_view_limits_tenant_shared_delete_to_owned_subtrees() {
         let scope = sample_scope();
         let view = invocation_mount_view(&scope).unwrap();
-        let (_, broad_grant) = view
-            .resolve_with_grant(&ScopedPath::new("/tenant-shared/other/state.json").unwrap())
-            .unwrap();
+        let broad_scoped_path = ScopedPath::new("/tenant-shared/other/state.json").unwrap();
+        let (_, broad_grant) = view.resolve_with_grant(&broad_scoped_path).unwrap();
         let project_scoped_path =
             ScopedPath::new("/tenant-shared/reborn-projects/tenant-a/record.json").unwrap();
         let (project_path, project_grant) = view.resolve_with_grant(&project_scoped_path).unwrap();
@@ -798,6 +797,28 @@ mod mount_view_tests {
         );
 
         let scoped = wrap_scoped(Arc::new(InMemoryBackend::new()));
+        scoped
+            .write_bytes(&scope, &broad_scoped_path, b"shared".to_vec())
+            .await
+            .unwrap();
+        assert!(matches!(
+            scoped
+                .delete(&scope, &broad_scoped_path)
+                .await
+                .expect_err("broad tenant-shared grant must deny delete"),
+            FilesystemError::PermissionDenied {
+                operation: FilesystemOperation::Delete,
+                ..
+            }
+        ));
+        assert!(
+            scoped
+                .get(&scope, &broad_scoped_path)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
         scoped
             .write_bytes(&scope, &project_scoped_path, b"project".to_vec())
             .await

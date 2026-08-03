@@ -35,6 +35,11 @@ def _project_ids(response: httpx.Response) -> set[str]:
     return {project["project_id"] for project in response.json()["projects"]}
 
 
+def _client(base_url: str, token: str | None = None) -> httpx.AsyncClient:
+    headers = reborn_bearer_headers() if token is None else reborn_bearer_headers(token)
+    return httpx.AsyncClient(base_url=base_url, headers=headers, timeout=15)
+
+
 async def test_project_lifecycle_membership_and_restart_persistence_served(
     reborn_v2_restartable_server,
 ):
@@ -43,20 +48,12 @@ async def test_project_lifecycle_membership_and_restart_persistence_served(
     suffix = uuid.uuid4().hex[:8]
     project_name = f"Project lifecycle {suffix}"
 
-    async with httpx.AsyncClient(
-        base_url=state["base_url"],
-        headers=reborn_bearer_headers(),
-        timeout=15,
-    ) as operator:
+    async with _client(state["base_url"]) as operator:
         owner_user = await _create_user(operator, suffix, "owner")
         member = await _create_user(operator, suffix, "member")
         non_member = await _create_user(operator, suffix, "outsider")
 
-    async with httpx.AsyncClient(
-        base_url=state["base_url"],
-        headers=reborn_bearer_headers(owner_user["token"]),
-        timeout=15,
-    ) as owner:
+    async with _client(state["base_url"], owner_user["token"]) as owner:
         owner_session = await owner.get("/api/webchat/v2/session")
         assert owner_session.status_code == 200, owner_session.text
         assert owner_session.json()["user_id"] == owner_user["id"]
@@ -112,32 +109,20 @@ async def test_project_lifecycle_membership_and_restart_persistence_served(
         }
         assert active_roles == {member["id"]: "viewer"}
 
-    async with httpx.AsyncClient(
-        base_url=state["base_url"],
-        headers=reborn_bearer_headers(member["token"]),
-        timeout=15,
-    ) as viewer:
+    async with _client(state["base_url"], member["token"]) as viewer:
         visible = await viewer.get(project_path)
         assert visible.status_code == 200, visible.text
         assert visible.json()["project"]["role"] == "viewer"
         denied_update = await viewer.post(project_path, json={"name": "not allowed"})
         assert denied_update.status_code == 403, denied_update.text
 
-    async with httpx.AsyncClient(
-        base_url=state["base_url"],
-        headers=reborn_bearer_headers(non_member["token"]),
-        timeout=15,
-    ) as outsider:
+    async with _client(state["base_url"], non_member["token"]) as outsider:
         hidden = await outsider.get(project_path)
         assert hidden.status_code == 404, hidden.text
         assert hidden.json()["error"] == "not_found"
         assert project_id not in _project_ids(await outsider.get(PROJECTS))
 
-    async with httpx.AsyncClient(
-        base_url=state["base_url"],
-        headers=reborn_bearer_headers(owner_user["token"]),
-        timeout=15,
-    ) as owner:
+    async with _client(state["base_url"], owner_user["token"]) as owner:
         promoted = await owner.post(
             f"{members_path}/{member['id']}",
             json={"role": "editor"},
@@ -148,11 +133,7 @@ async def test_project_lifecycle_membership_and_restart_persistence_served(
     await stop()
     restarted_url = await start()
 
-    async with httpx.AsyncClient(
-        base_url=restarted_url,
-        headers=reborn_bearer_headers(member["token"]),
-        timeout=15,
-    ) as editor:
+    async with _client(restarted_url, member["token"]) as editor:
         session = await editor.get("/api/webchat/v2/session")
         assert session.status_code == 200, session.text
         assert session.json()["user_id"] == member["id"]
@@ -172,11 +153,7 @@ async def test_project_lifecycle_membership_and_restart_persistence_served(
             == "Updated by the editor after restart"
         )
 
-    async with httpx.AsyncClient(
-        base_url=restarted_url,
-        headers=reborn_bearer_headers(owner_user["token"]),
-        timeout=15,
-    ) as owner:
+    async with _client(restarted_url, owner_user["token"]) as owner:
         persisted_members = await owner.get(members_path)
         assert persisted_members.status_code == 200, persisted_members.text
         member_record = next(
@@ -190,20 +167,12 @@ async def test_project_lifecycle_membership_and_restart_persistence_served(
         revoked = await owner.delete(f"{members_path}/{member['id']}")
         assert revoked.status_code == 204, revoked.text
 
-    async with httpx.AsyncClient(
-        base_url=restarted_url,
-        headers=reborn_bearer_headers(member["token"]),
-        timeout=15,
-    ) as former_member:
+    async with _client(restarted_url, member["token"]) as former_member:
         hidden_after_revoke = await former_member.get(project_path)
         assert hidden_after_revoke.status_code == 404, hidden_after_revoke.text
         assert project_id not in _project_ids(await former_member.get(PROJECTS))
 
-    async with httpx.AsyncClient(
-        base_url=restarted_url,
-        headers=reborn_bearer_headers(owner_user["token"]),
-        timeout=15,
-    ) as owner:
+    async with _client(restarted_url, owner_user["token"]) as owner:
         deleted = await owner.delete(project_path)
         assert deleted.status_code == 204, deleted.text
 
@@ -211,11 +180,7 @@ async def test_project_lifecycle_membership_and_restart_persistence_served(
         assert missing.status_code == 404, missing.text
         assert project_id not in _project_ids(await owner.get(PROJECTS))
 
-    async with httpx.AsyncClient(
-        base_url=restarted_url,
-        headers=reborn_bearer_headers(),
-        timeout=15,
-    ) as operator:
+    async with _client(restarted_url) as operator:
         for user_id in (owner_user["id"], member["id"], non_member["id"]):
             removed_user = await operator.delete(f"{ADMIN_USERS}/{user_id}")
             assert removed_user.status_code == 200, removed_user.text
