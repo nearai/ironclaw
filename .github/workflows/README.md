@@ -37,19 +37,27 @@ and integration suites without LLVM instrumentation. Recorded QA
 replay remains a baseline on every pull request because it detects ordering
 and cross-surface regressions that cannot be inferred from changed paths. The
 full transitive reverse workspace dependency closure is included in PR crate
-selection. Foundational-crate changes that span more than three canonical
-buckets coalesce every changed and dependent package into at most three PR
-jobs instead of omitting consumer tests. The merge queue and pushes to `main`
-still run every crate bucket, root
-partition, group suite, integration lane, recorded replay, and
-coverage gate. Unknown paths, empty diffs, and recognized test-topology or
-workspace-topology changes fail closed to that same full plan on the pull
-request. A planner execution or schema failure also fails the required check
-loudly.
+selection for production-source changes. Package-owned tests, examples, and
+benches run only their owning package because they cannot alter a dependent
+package's production behavior. Foundational-crate changes that span more than
+three canonical buckets coalesce every changed and dependent package into at
+most three PR jobs instead of omitting consumer tests. The merge queue and
+pushes to `main` still run every crate bucket, root partition, group suite,
+integration lane, recorded replay, and coverage gate. Shared root or
+integration support changes run one
+representative PR partition or lane, with the exhaustive fan-out required in
+merge queue. CI workflow, CI script, coverage-policy, toolchain, and workspace
+topology changes use their owning static/compile gates on the PR and receive
+the exhaustive Reborn matrix in merge queue. Unknown paths and empty diffs
+fail quickly at planning instead of silently launching or skipping an
+unbounded matrix. A planner execution or schema failure also fails the
+required check loudly.
 `Cargo.lock` is scoped only when a structured base/head comparison proves that
 the lockfile changed solely in dependency lists for workspace manifests changed
 by the same PR. Package additions/removals, versions, checksums, unrelated
-workspace edges, and unreadable base state remain exhaustive. The stress tool
+workspace edges, and unreadable base state receive their full dependency
+breadth in merge queue; changed workspace manifests still select their
+production dependency closure on the PR. The stress tool
 is owned by `ironclaw-stress.yml`, and changed-line coverage exemptions are
 schema-checked in Code Style instead of launching unrelated integration lanes.
 The queue therefore preserves exhaustive deterministic evidence while
@@ -63,12 +71,18 @@ sharing dependency compilation across packages in the same job.
 
 `Tests (Reborn)` owns Rust crate, root, architecture, runtime, and coverage
 contracts. Code Style owns WebUI lint, Vitest, and the production build on all
-code events. Code Style's CLI Rust smoke and Reborn E2E's four Rust
-groups run on merge queue and main, where they validate the exhaustive merged
-state, but do not repeat those contracts on PR runners. The release-binary
+code events. Pull-request Clippy covers every workspace production library and
+binary with all features; merge queue and main add test and example targets,
+plus the default-feature matrix. Code Style's CLI Rust smoke and Reborn E2E's
+four Rust groups run on merge queue and main, where they validate the
+exhaustive merged state, but do not repeat those contracts on PR runners. The release-binary
 smoke harness self-test remains in Code Style's fast deterministic job on every
 code PR. Reborn E2E continues to build the real product binary and run all
 browser/provider lanes on pull requests.
+Critical mutation manifests, selection logic, and changed-function resolution
+run on each PR. Actual `cargo-mutants` execution is a merge-queue gate, avoiding
+a long and low-frequency compile workload on the author feedback path without
+allowing selected mutations to reach `main` untested.
 The four provider-operation shards run as two concurrent pairs. Each shard
 keeps its own pytest process and hermetic runtime, while each pair shares one
 runner and one Emulate checkout/build cycle. This preserves shard isolation

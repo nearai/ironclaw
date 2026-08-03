@@ -86,6 +86,16 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["coverage_mode"], "none")
 
+    def test_package_owned_test_change_does_not_run_reverse_dependents(self) -> None:
+        plan = self.plan("pull_request", ["crates/alpha/tests/contract.rs"])
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["alpha"])
+        self.assertEqual(plan["affected_packages"], ["alpha"])
+        self.assertEqual(
+            plan["crate_buckets"],
+            [{"name": "selected", "packages": ["alpha"]}],
+        )
+
     def test_high_fanout_package_keeps_consumers_in_bounded_jobs(self) -> None:
         wide = metadata()
         for index in range(5):
@@ -173,29 +183,28 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "none")
         self.assertTrue(plan["run_qa_replay"])
 
-    def test_reborn_workflow_change_fails_closed_to_full_pr_plan(self) -> None:
+    def test_reborn_workflow_change_is_owned_by_static_and_merge_queue_gates(self) -> None:
         plan = self.plan("pull_request", [".github/workflows/reborn-tests.yml"])
-        self.assertEqual(plan["mode"], "full")
-        self.assertEqual(plan["root_partitions"], [0, 1, 2, 3])
-        self.assertEqual(plan["integration_lanes"], [0, 1, 2, 3, "groups"])
-        self.assertNotIn("run_frontend", plan)
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["root_partitions"], [])
+        self.assertEqual(plan["integration_lanes"], [])
         self.assertTrue(plan["run_qa_replay"])
-        self.assertEqual(plan["coverage_mode"], "full")
+        self.assertEqual(plan["coverage_mode"], "none")
 
-    def test_empty_diff_fails_closed_to_full_pr_plan(self) -> None:
-        plan = self.plan("pull_request", [])
-        self.assertEqual(plan["mode"], "full")
+    def test_empty_diff_fails_fast(self) -> None:
+        with self.assertRaisesRegex(ValueError, "empty pull-request diff"):
+            self.plan("pull_request", [])
 
-    def test_reborn_caller_workflow_fails_closed_to_full_pr_plan(self) -> None:
+    def test_reborn_caller_workflow_is_owned_by_static_and_merge_queue_gates(self) -> None:
         plan = self.plan("pull_request", [".github/workflows/nightly-deep-ci.yml"])
-        self.assertEqual(plan["mode"], "full")
+        self.assertEqual(plan["mode"], "none")
 
-    def test_coverage_policy_change_runs_full_coverage_on_pr(self) -> None:
+    def test_coverage_policy_change_is_statically_validated_on_pr(self) -> None:
         plan = self.plan(
             "pull_request", ["tests/integration/coverage-floor.toml"]
         )
-        self.assertEqual(plan["mode"], "full")
-        self.assertEqual(plan["coverage_mode"], "full")
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["coverage_mode"], "none")
 
     def test_lockfile_with_changed_crate_manifest_uses_affected_packages(self) -> None:
         plan = self.plan(
@@ -207,15 +216,16 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["changed_packages"], ["alpha"])
         self.assertEqual(plan["affected_packages"], ["alpha", "beta", "gamma"])
 
-    def test_lockfile_without_changed_crate_manifest_fails_closed(self) -> None:
+    def test_lockfile_without_changed_crate_manifest_defers_breadth_to_queue(self) -> None:
         plan = self.plan("pull_request", ["Cargo.lock"])
-        self.assertEqual(plan["mode"], "full")
+        self.assertEqual(plan["mode"], "none")
 
-    def test_unowned_lockfile_change_with_manifest_still_fails_closed(self) -> None:
+    def test_unowned_lockfile_change_still_runs_changed_manifest_closure(self) -> None:
         plan = self.plan(
             "pull_request", ["Cargo.lock", "crates/alpha/Cargo.toml"]
         )
-        self.assertEqual(plan["mode"], "full")
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["affected_packages"], ["alpha", "beta", "gamma"])
 
     def test_lockfile_ownership_accepts_only_changed_workspace_dependency_edges(self) -> None:
         base = {
@@ -277,14 +287,14 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["integration_lanes"], [])
         self.assertEqual(plan["coverage_mode"], "none")
 
-    def test_noncanonical_package_fails_closed_to_full_pr_plan(self) -> None:
-        plan = planner.build_plan(
-            event="pull_request",
-            changed_paths=["crates/gamma/src/lib.rs"],
-            metadata=metadata(),
-            canonical_packages=["alpha", "beta"],
-        )
-        self.assertEqual(plan["mode"], "full")
+    def test_noncanonical_package_fails_fast(self) -> None:
+        with self.assertRaisesRegex(ValueError, "outside the canonical"):
+            planner.build_plan(
+                event="pull_request",
+                changed_paths=["crates/gamma/src/lib.rs"],
+                metadata=metadata(),
+                canonical_packages=["alpha", "beta"],
+            )
 
     def test_generated_integration_suites_are_assigned_to_flat_lanes(self) -> None:
         lanes = planner._integration_test_lanes()
@@ -298,19 +308,35 @@ class RebornPrTestPlanTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("reborn_(integration_|generated_)", lane_runner)
 
-    def test_unmapped_crate_path_fails_closed_to_full_pr_plan(self) -> None:
-        plan = self.plan("pull_request", ["crates/deleted/src/lib.rs"])
-        self.assertEqual(plan["mode"], "full")
+    def test_unmapped_crate_path_fails_fast(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unmapped crate path"):
+            self.plan("pull_request", ["crates/deleted/src/lib.rs"])
 
-    def test_unclassified_build_input_fails_closed_to_full_pr_plan(self) -> None:
-        plan = self.plan("pull_request", ["Dockerfile"])
-        self.assertEqual(plan["mode"], "full")
+    def test_unclassified_build_input_fails_fast(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
+            self.plan("pull_request", ["Dockerfile"])
 
     def test_changed_integration_binary_selects_its_exact_lane(self) -> None:
         path, lane = next(iter(planner._integration_test_lanes().items()))
         plan = self.plan("pull_request", [path])
         self.assertEqual(plan["mode"], "selected")
         self.assertEqual(plan["integration_lanes"], [lane])
+
+    def test_shared_test_support_uses_representative_pr_lanes(self) -> None:
+        root_plan = self.plan(
+            "pull_request", ["tests/support/reborn_parity_qa/assertions.rs"]
+        )
+        integration_plan = self.plan(
+            "pull_request", ["tests/integration/support/database.rs"]
+        )
+        self.assertEqual(root_plan["root_partitions"], [0])
+        self.assertEqual(integration_plan["integration_lanes"], [0])
+
+    def test_workspace_topology_change_defers_exhaustive_matrix_to_queue(self) -> None:
+        plan = self.plan("pull_request", ["Cargo.toml"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["crate_buckets"], [])
+        self.assertTrue(plan["run_qa_replay"])
 
     def test_workflow_consumes_plan_and_bounds_each_rust_matrix(self) -> None:
         workflow = (ROOT / ".github/workflows/reborn-tests.yml").read_text(
@@ -352,6 +378,23 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
         self.assertIn("Full Reborn plan is not exhaustive", workflow)
         self.assertIn("Full Reborn plan omitted a required lane", workflow)
+        self.assertIn(
+            "github.event_name == 'merge_group' && "
+            "steps.scope.outputs.should_run == 'true'",
+            workflow,
+        )
+
+        code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "cargo clippy --workspace --lib --bins ${{ matrix.flags }} -- -D warnings",
+            code_style,
+        )
+        self.assertIn(
+            "cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings",
+            code_style,
+        )
 
     def test_pr_workflows_do_not_repeat_reborn_rust_contracts(self) -> None:
         code_style = (ROOT / ".github/workflows/code_style.yml").read_text(

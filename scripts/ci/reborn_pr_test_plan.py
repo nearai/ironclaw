@@ -22,31 +22,16 @@ FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "sch
 IGNORED_PREFIXES = ("docs/", ".github/ISSUE_TEMPLATE/")
 DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
-FULL_PR_PATHS = {
+PR_STATIC_CONTROL_PATHS = {
     "Cargo.toml",
     "rust-toolchain",
     "rust-toolchain.toml",
     ".cargo/config",
     ".cargo/config.toml",
-    ".github/workflows/reborn-tests.yml",
-    ".github/workflows/coverage.yml",
-    ".github/workflows/nightly-deep-ci.yml",
-    ".github/workflows/reborn-e2e.yml",
-    ".github/workflows/reborn-playwright.yml",
-    ".github/workflows/reborn-release-compile.yml",
-    "scripts/ci/reborn_pr_test_plan.py",
-    "scripts/ci/test_reborn_pr_test_plan.py",
-    "scripts/ci/discover-reborn-package-crates.sh",
-    "scripts/ci/reborn-crate-test-buckets.sh",
-    "scripts/ci/package-feature-flags.sh",
-    "scripts/ci/run-hermetic-deterministic-suite.sh",
-    "scripts/ci/run-reborn-root-partition.sh",
-    "scripts/ci/run-reborn-group-tests.sh",
-    "scripts/ci/reborn-coverage-int-tier-tests.sh",
-    "scripts/ci/reborn-coverage-lane-run.sh",
     "tests/integration/coverage-exemptions.toml",
     "tests/integration/coverage-floor.toml",
 }
+PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/")
 BUCKET_WEIGHTS = {
     "reborn-core": 12,
     "auth-security": 9,
@@ -302,7 +287,7 @@ def build_plan(
     canonical_packages: list[str],
     lockfile_manifest_owned: bool = False,
 ) -> dict[str, Any]:
-    """Build a deterministic test plan, failing open on unknown Reborn inputs."""
+    """Build a deterministic test plan, rejecting unknown PR inputs."""
     if event in FULL_EVENTS:
         return _full_plan(f"{event} requires exhaustive coverage", canonical_packages)
     if event != "pull_request":
@@ -310,24 +295,14 @@ def build_plan(
 
     paths = {path.strip().replace("\\", "/") for path in changed_paths if path.strip()}
     if not paths:
-        return _full_plan(
-            "empty pull-request diff requires fail-closed exhaustive coverage",
-            canonical_packages,
-        )
-    if any(path in FULL_PR_PATHS for path in paths):
-        return _full_plan(
-            "Reborn test infrastructure or workspace topology changed",
-            canonical_packages,
+        raise ValueError(
+            "empty pull-request diff cannot be classified; refusing to launch "
+            "an unbounded PR matrix"
         )
 
     package_directories, reverse = _workspace_packages(metadata)
-    if "Cargo.lock" in paths and not lockfile_manifest_owned:
-        return _full_plan(
-            "Cargo.lock changed beyond dependency edges owned by changed "
-            "workspace manifests; dependency impact requires fail-closed coverage",
-            canonical_packages,
-        )
-    changed_packages: set[str] = set()
+    production_packages: set[str] = set()
+    direct_test_packages: set[str] = set()
     root_partitions: set[int] = set()
     integration_lanes: set[str | int] = set()
     # Recorded replay is a repository-wide ordering and integration sentinel,
@@ -341,7 +316,19 @@ def build_plan(
 
     for path in sorted(paths):
         if path == "Cargo.lock":
-            reasons.append("Cargo.lock change is owned by a changed crate manifest")
+            if lockfile_manifest_owned:
+                reasons.append(
+                    "Cargo.lock change is owned by a changed crate manifest"
+                )
+            else:
+                reasons.append(
+                    "workspace lockfile breadth is deferred to the exhaustive merge-queue gate"
+                )
+            continue
+        if path in PR_STATIC_CONTROL_PATHS or path.startswith(
+            PR_STATIC_CONTROL_PREFIXES
+        ):
+            reasons.append(f"static CI or workspace-policy checks own: {path}")
             continue
         if path.startswith(DEDICATED_WORKFLOW_PREFIXES):
             reasons.append(f"dedicated stress workflow owns: {path}")
@@ -352,8 +339,6 @@ def build_plan(
         if path.startswith(IGNORED_PREFIXES) or (
             path.endswith(".md") and "/" not in path
         ):
-            continue
-        if path.startswith(".github/workflows/"):
             continue
         if path.startswith("crates/ironclaw_webui/frontend/"):
             reasons.append("Code Style owns WebUI lint, tests, and production build")
@@ -366,16 +351,20 @@ def build_plan(
             path.startswith("tests/support/reborn_parity_qa/")
             or path == "tests/support_unit_tests.rs"
         ):
-            root_partitions.update(range(4))
-            reasons.append("shared root-test support changed")
+            root_partitions.add(0)
+            reasons.append(
+                "shared root-test support changed; PR runs a representative partition"
+            )
             continue
         if path in integration_inventory:
             integration_lanes.add(integration_inventory[path])
             reasons.append(f"integration test changed: {path}")
             continue
         if path.startswith("tests/integration/"):
-            integration_lanes.update([0, 1, 2, 3, "groups"])
-            reasons.append("shared integration support changed")
+            integration_lanes.add(0)
+            reasons.append(
+                "shared integration support changed; PR runs a representative lane"
+            )
             continue
         if path.startswith("tests/fixtures/llm_traces/reborn_qa/") or path in {
             "scripts/ci/check-reborn-qa-fixtures.sh",
@@ -395,35 +384,35 @@ def build_plan(
                 None,
             )
             if package is None:
-                return _full_plan(
-                    f"unmapped crate path {path} requires fail-closed coverage",
-                    canonical_packages,
-                )
-            changed_packages.add(package)
-            reasons.append(f"production package changed: {package}")
+                raise ValueError(f"unmapped crate path: {path}")
+            directory = next(
+                directory
+                for directory, name in package_directories.items()
+                if name == package
+            )
+            relative = path.removeprefix(f"{directory}/")
+            if relative.startswith(("tests/", "benches/", "examples/")):
+                direct_test_packages.add(package)
+                reasons.append(f"package-owned test surface changed: {package}")
+            else:
+                production_packages.add(package)
+                reasons.append(f"production package changed: {package}")
             continue
         if path.startswith(("tests/reborn_", "tests/e2e/reborn_", "scripts/ci/reborn-")):
-            return _full_plan(
-                f"unmapped Reborn test path {path} requires fail-closed coverage",
-                canonical_packages,
-            )
+            raise ValueError(f"unmapped Reborn test path: {path}")
         if path.startswith(("scripts/", "tests/", ".github/actions/")):
-            return _full_plan(
-                f"unmapped test or CI path {path} requires fail-closed coverage",
-                canonical_packages,
-            )
-        return _full_plan(
-            f"unclassified pull-request path {path} requires fail-closed coverage",
-            canonical_packages,
-        )
+            raise ValueError(f"unmapped test or CI path: {path}")
+        raise ValueError(f"unclassified pull-request path: {path}")
 
     canonical_set = set(canonical_packages)
-    affected = _affected_packages(changed_packages, reverse) & canonical_set
+    changed_packages = production_packages | direct_test_packages
+    affected = (
+        _affected_packages(production_packages, reverse) | direct_test_packages
+    ) & canonical_set
     if changed_packages and not affected:
-        return _full_plan(
-            "changed packages are outside the canonical Reborn set; "
-            "fail-closed exhaustive coverage required",
-            canonical_packages,
+        raise ValueError(
+            "changed packages are outside the canonical Reborn package set: "
+            f"{', '.join(sorted(changed_packages))}"
         )
 
     buckets = _bucket_packages(sorted(affected)) if affected else []

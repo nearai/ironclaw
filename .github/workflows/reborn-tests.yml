@@ -823,10 +823,9 @@ jobs:
           if-no-files-found: warn
 
   critical-mutation:
-    name: Critical named-function mutation gate
+    name: Critical mutation scope and merged-state gate
     needs: changes
     if: >-
-      needs.changes.outputs.plan_mode != 'none' &&
       (github.event_name == 'pull_request' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -858,22 +857,23 @@ jobs:
           echo "should_run=${should_run}" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
-        if: steps.scope.outputs.should_run == 'true'
+        if: github.event_name == 'merge_group' && steps.scope.outputs.should_run == 'true'
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Install mold and clang
-        if: steps.scope.outputs.should_run == 'true'
+        if: github.event_name == 'merge_group' && steps.scope.outputs.should_run == 'true'
         run: |
           scripts/ci/install-ci-apt-packages.sh clang mold
           test -x /usr/bin/mold
 
       - name: Install cargo-mutants
-        if: steps.scope.outputs.should_run == 'true'
+        if: github.event_name == 'merge_group' && steps.scope.outputs.should_run == 'true'
         uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
         with:
           tool: cargo-mutants@27.1.0
 
       - name: Run affected named critical invariants
+        if: github.event_name == 'merge_group' && steps.scope.outputs.should_run == 'true'
         run: |
           python3 scripts/ci/critical_mutation_gate.py \
             --manifest tests/integration/critical-mutation-functions.toml \
@@ -1071,9 +1071,8 @@ jobs:
             "${{ needs.changes.outputs.run_qa_replay }}"
 
           mutation_expected=false
-          if [[ "${plan_mode}" != "none" && \
-                ("${{ github.event_name }}" == "pull_request" || \
-                 "${{ github.event_name }}" == "merge_group") ]]; then
+          if [[ "${{ github.event_name }}" == "pull_request" || \
+                "${{ github.event_name }}" == "merge_group" ]]; then
             mutation_expected=true
           fi
           check_planned_job "critical-mutation" \
