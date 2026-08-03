@@ -376,6 +376,8 @@ def build_plan(
             qa_evidence_changed = True
             reasons.append("recorded QA evidence changed")
             continue
+        if path.startswith(("tests/reborn_", "tests/e2e/reborn_", "scripts/ci/reborn-")):
+            raise ValueError(f"unmapped Reborn test path: {path}")
         if path.startswith("tests/e2e/"):
             # E2E scenarios and support live in the dedicated
             # `reborn-e2e.yml` workflow, which runs its own changed-path

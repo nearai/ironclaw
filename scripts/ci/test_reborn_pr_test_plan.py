@@ -210,6 +210,10 @@ class RebornPrTestPlanTests(unittest.TestCase):
             plan["reasons"],
         )
 
+    def test_shared_e2e_harness_remains_an_explicit_mapping_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unmapped Reborn test path"):
+            self.plan("pull_request", ["tests/e2e/reborn_webui_harness.py"])
+
     def test_reborn_e2e_and_crate_changes_keep_both_owners(self) -> None:
         plan = self.plan(
             "pull_request",
