@@ -322,26 +322,32 @@ impl DeliveryCoordinator {
 
     /// Crash recovery (OUT-6): every attempt still `Sending` in this scope
     /// crashed between vendor egress and the result write. Mark each
-    /// `Unknown`; never blindly resend.
+    /// `Unknown`; never blindly resend. A per-attempt failure does not abandon
+    /// the captured snapshot: recovery continues, then returns the first
+    /// typed store error after all remaining attempts have been guarded.
     pub async fn recover_interrupted_deliveries(
         &self,
         scope: ironclaw_turns::TurnScope,
     ) -> Result<usize, ironclaw_outbound::OutboundError> {
         let attempts = self.store.list_delivery_attempts(scope.clone()).await?;
         let mut recovered = 0usize;
+        let mut first_error = None;
         for attempt in attempts {
             if attempt.status != OutboundDeliveryStatus::Sending {
                 continue;
             }
-            if self
+            match self
                 .store
                 .recover_interrupted_delivery_attempt(RecoverInterruptedDeliveryRequest {
                     delivery_id: attempt.delivery_id,
                     scope: scope.clone(),
                 })
-                .await?
+                .await
             {
-                recovered += 1;
+                Ok(true) => recovered += 1,
+                Ok(false) => {}
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
             }
         }
         if recovered > 0 {
@@ -349,6 +355,9 @@ impl DeliveryCoordinator {
                 recovered,
                 "delivery coordinator: interrupted deliveries marked Unknown (never resent)"
             );
+        }
+        if let Some(error) = first_error {
+            return Err(error);
         }
         Ok(recovered)
     }
