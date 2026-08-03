@@ -848,10 +848,10 @@ async fn deliver_triggered_notification(
 /// Classify a [`CoordinatedDeliveryError`] into the typed failure variants
 /// used for outcome recording.
 fn classify_delivery_error(error: CoordinatedDeliveryError) -> TriggeredNotificationFailure {
+    if is_oauth_target_not_dm_error(&error) {
+        return TriggeredNotificationFailure::OAuthTargetNotDm;
+    }
     match &error {
-        CoordinatedDeliveryError::Workflow(
-            ProductSurfaceFailure::OutboundTargetNotDirectMessage,
-        ) => TriggeredNotificationFailure::OAuthTargetNotDm,
         CoordinatedDeliveryError::Outbound(OutboundError::PreferenceTargetMissing { .. }) => {
             TriggeredNotificationFailure::NoDefaultConfigured
         }
@@ -859,6 +859,18 @@ fn classify_delivery_error(error: CoordinatedDeliveryError) -> TriggeredNotifica
             TriggeredNotificationFailure::Denied
         }
         _ => TriggeredNotificationFailure::Other(error.to_string()),
+    }
+}
+
+fn is_oauth_target_not_dm_error(error: &CoordinatedDeliveryError) -> bool {
+    match error {
+        CoordinatedDeliveryError::Workflow(
+            ProductSurfaceFailure::OutboundTargetNotDirectMessage,
+        ) => true,
+        CoordinatedDeliveryError::PreflightSettlementFailed { preflight, .. } => {
+            is_oauth_target_not_dm_error(preflight)
+        }
+        _ => false,
     }
 }
 

@@ -260,6 +260,12 @@ pub enum CoordinatedDeliveryError {
     WorkspaceAttachmentRefInvalid { reason: &'static str },
     #[error("caller-supplied materialized workspace attachments are not accepted")]
     PreMaterializedWorkspaceAttachment,
+    #[error("preflight delivery failed: {preflight}; settlement also failed: {settlement}")]
+    PreflightSettlementFailed {
+        preflight: Box<CoordinatedDeliveryError>,
+        #[source]
+        settlement: ironclaw_outbound::OutboundError,
+    },
 }
 
 fn workspace_materialization_failure_kind(error: &CoordinatedDeliveryError) -> DeliveryFailureKind {
@@ -526,13 +532,16 @@ impl DeliveryCoordinator {
                 if !kind.is_permanent_preflight() {
                     return Err(CoordinatedDeliveryError::Workflow(error));
                 }
-                return match self.fail_prepared(&attempt, kind).await? {
-                    FailPreparedDeliveryAttemptOutcome::Settled => {
-                        Err(CoordinatedDeliveryError::Workflow(error))
-                    }
-                    FailPreparedDeliveryAttemptOutcome::Existing(existing) => {
+                let preflight = CoordinatedDeliveryError::Workflow(error);
+                return match self.fail_prepared(&attempt, kind).await {
+                    Ok(FailPreparedDeliveryAttemptOutcome::Settled) => Err(preflight),
+                    Ok(FailPreparedDeliveryAttemptOutcome::Existing(existing)) => {
                         Ok(Self::outcome_for_existing_delivery(*existing, None))
                     }
+                    Err(settlement) => Err(CoordinatedDeliveryError::PreflightSettlementFailed {
+                        preflight: Box::new(preflight),
+                        settlement,
+                    }),
                 };
             }
         };
@@ -558,14 +567,18 @@ impl DeliveryCoordinator {
                 if !failure_kind.is_permanent_preflight() {
                     return Err(error);
                 }
-                return match self.fail_prepared(&attempt, failure_kind).await? {
-                    FailPreparedDeliveryAttemptOutcome::Settled => Err(error),
-                    FailPreparedDeliveryAttemptOutcome::Existing(existing) => {
+                return match self.fail_prepared(&attempt, failure_kind).await {
+                    Ok(FailPreparedDeliveryAttemptOutcome::Settled) => Err(error),
+                    Ok(FailPreparedDeliveryAttemptOutcome::Existing(existing)) => {
                         Ok(Self::outcome_for_existing_delivery(
                             *existing,
                             Some(metadata.external_conversation_ref.clone()),
                         ))
                     }
+                    Err(settlement) => Err(CoordinatedDeliveryError::PreflightSettlementFailed {
+                        preflight: Box::new(error),
+                        settlement,
+                    }),
                 };
             }
         };
@@ -625,20 +638,23 @@ impl DeliveryCoordinator {
             // taxonomy. Preserve the existing fail-closed, no-retry behavior
             // and caller error, while recording only the sanitized permanent
             // `Rejected` kind accepted by the preflight-settlement contract.
+            let preflight = CoordinatedDeliveryError::ChannelUnavailable {
+                extension_id: extension_id.to_string(),
+            };
             return match self
                 .fail_prepared(attempt, DeliveryFailureKind::Rejected)
-                .await?
+                .await
             {
-                FailPreparedDeliveryAttemptOutcome::Settled => {
-                    Err(CoordinatedDeliveryError::ChannelUnavailable {
-                        extension_id: extension_id.to_string(),
-                    })
-                }
-                FailPreparedDeliveryAttemptOutcome::Existing(existing) => {
+                Ok(FailPreparedDeliveryAttemptOutcome::Settled) => Err(preflight),
+                Ok(FailPreparedDeliveryAttemptOutcome::Existing(existing)) => {
                     Ok(ResolvedChannelContextOutcome::ExistingDelivery(Box::new(
                         Self::outcome_for_existing_delivery(*existing, Some(conversation.clone())),
                     )))
                 }
+                Err(settlement) => Err(CoordinatedDeliveryError::PreflightSettlementFailed {
+                    preflight: Box::new(preflight),
+                    settlement,
+                }),
             };
         };
 
