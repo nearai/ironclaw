@@ -19,7 +19,14 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
-IGNORED_PREFIXES = ("docs/", ".github/ISSUE_TEMPLATE/")
+# Path classes with no Rust or E2E surface any Reborn lane can exercise.
+# `.claude/` is agent guidance (skills, commands, rules) — prose in the same
+# class as `docs/`. It was unclassified until 2026-08-03, which meant the
+# planner's fail-closed arm rejected every PR that touched agent guidance:
+# the only satisfiable behaviour for that class was "never edit it", which is
+# not a policy anyone chose. Classifying it is the fix; loosening the
+# fail-closed arm is not.
+IGNORED_PREFIXES = ("docs/", ".claude/", ".github/ISSUE_TEMPLATE/")
 DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 PR_STATIC_CONTROL_PATHS = {
