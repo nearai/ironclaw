@@ -443,26 +443,10 @@ async fn delivery_send_claim_is_atomic_across_store_instances() {
     let second = Arc::new(build_outbound_store_for_backend(backend));
     let scope = turn_scope();
     let delivery_id = OutboundDeliveryId::new();
+    let prepared =
+        prepared_delivery_attempt(delivery_id, scope.clone(), "reply-cross-instance-claim");
     first
-        .record_delivery_attempt(OutboundDeliveryAttempt {
-            delivery_id,
-            scope: scope.clone(),
-            candidate: OutboundPushCandidate {
-                tenant_id: scope.tenant_id.clone(),
-                agent_id: scope.agent_id.clone(),
-                project_id: scope.project_id.clone(),
-                thread_id: scope.thread_id.clone(),
-                turn_run_id: Some(TurnRunId::new()),
-                target: reply_ref("reply-cross-instance-claim"),
-                kind: OutboundPushKind::FinalReply,
-                projection_ref: ProjectionUpdateRef::new("projection:cross-instance-claim")
-                    .unwrap(),
-                requires_reply_target_revalidation: true,
-            },
-            status: OutboundDeliveryStatus::Prepared,
-            attempted_at: now(),
-            failure_kind: None,
-        })
+        .record_delivery_attempt(prepared.clone())
         .await
         .unwrap();
 
@@ -490,10 +474,9 @@ async fn delivery_send_claim_is_atomic_across_store_instances() {
             ClaimDeliveryAttemptForSendOutcome::Claimed => None,
         })
         .expect("the losing claimant receives the winner's authoritative state");
-    assert_eq!(existing.delivery_id, delivery_id);
-    assert_eq!(existing.scope, scope);
-    assert_eq!(existing.status, OutboundDeliveryStatus::Sending);
-    assert_eq!(existing.failure_kind, None);
+    let mut expected = prepared;
+    expected.status = OutboundDeliveryStatus::Sending;
+    assert_eq!(existing, &expected);
 }
 
 #[tokio::test]
@@ -503,12 +486,10 @@ async fn prepared_failure_and_send_claim_are_one_atomic_decision_across_store_in
     let second = Arc::new(build_outbound_store_for_backend(backend));
     let scope = turn_scope();
     let delivery_id = OutboundDeliveryId::new();
+    let prepared =
+        prepared_delivery_attempt(delivery_id, scope.clone(), "reply-cross-instance-preflight");
     first
-        .record_delivery_attempt(prepared_delivery_attempt(
-            delivery_id,
-            scope.clone(),
-            "reply-cross-instance-preflight",
-        ))
+        .record_delivery_attempt(prepared.clone())
         .await
         .expect("seed prepared attempt");
 
@@ -532,24 +513,94 @@ async fn prepared_failure_and_send_claim_are_one_atomic_decision_across_store_in
             ClaimDeliveryAttemptForSendOutcome::Claimed,
             FailPreparedDeliveryAttemptOutcome::Existing(existing),
         ) => {
-            assert_eq!(existing.delivery_id, delivery_id);
-            assert_eq!(existing.scope, scope);
-            assert_eq!(existing.status, OutboundDeliveryStatus::Sending);
-            assert_eq!(existing.failure_kind, None);
+            let mut expected = prepared.clone();
+            expected.status = OutboundDeliveryStatus::Sending;
+            assert_eq!(existing, expected);
         }
         (
             ClaimDeliveryAttemptForSendOutcome::Existing(existing),
             FailPreparedDeliveryAttemptOutcome::Settled,
         ) => {
-            assert_eq!(existing.delivery_id, delivery_id);
-            assert_eq!(existing.scope, scope);
-            assert_eq!(existing.status, OutboundDeliveryStatus::Failed);
-            assert_eq!(existing.failure_kind, Some(DeliveryFailureKind::Rejected));
+            let mut expected = prepared;
+            expected.status = OutboundDeliveryStatus::Failed;
+            expected.failure_kind = Some(DeliveryFailureKind::Rejected);
+            assert_eq!(existing, expected);
         }
         (claim, failure) => panic!(
             "one Prepared consumer must win and the loser must observe it: claim={claim:?}, failure={failure:?}"
         ),
     }
+}
+
+#[tokio::test]
+async fn send_claim_cas_loser_returns_exact_winner_snapshot_without_post_resolution_read() {
+    let inner = Arc::new(InMemoryBackend::new());
+    let racing = Arc::new(DeliveryTransitionRaceBackend::new(Arc::clone(&inner)));
+    let store = OutboundStateStore::new(build_scoped_fs(Arc::clone(&racing), TEST_OUTBOUND_ROOT));
+    let scope = turn_scope();
+    let delivery_id = OutboundDeliveryId::new();
+    let prepared = prepared_delivery_attempt(
+        delivery_id,
+        scope.clone(),
+        "reply-deterministic-claim-loser",
+    );
+    store
+        .record_delivery_attempt(prepared.clone())
+        .await
+        .expect("seed prepared attempt");
+
+    let mut winner = prepared;
+    winner.status = OutboundDeliveryStatus::Failed;
+    winner.failure_kind = Some(DeliveryFailureKind::AuthorizationRevoked);
+    racing.arm(delivery_id, winner.clone()).await;
+
+    assert_eq!(
+        store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id,
+                scope,
+            })
+            .await
+            .expect("claim loser observes the racing settlement"),
+        ClaimDeliveryAttemptForSendOutcome::Existing(winner)
+    );
+    racing.assert_resolved_in_retry_read().await;
+}
+
+#[tokio::test]
+async fn prepared_failure_cas_loser_returns_exact_winner_snapshot_without_post_resolution_read() {
+    let inner = Arc::new(InMemoryBackend::new());
+    let racing = Arc::new(DeliveryTransitionRaceBackend::new(Arc::clone(&inner)));
+    let store = OutboundStateStore::new(build_scoped_fs(Arc::clone(&racing), TEST_OUTBOUND_ROOT));
+    let scope = turn_scope();
+    let delivery_id = OutboundDeliveryId::new();
+    let prepared = prepared_delivery_attempt(
+        delivery_id,
+        scope.clone(),
+        "reply-deterministic-settlement-loser",
+    );
+    store
+        .record_delivery_attempt(prepared.clone())
+        .await
+        .expect("seed prepared attempt");
+
+    let mut winner = prepared;
+    winner.status = OutboundDeliveryStatus::Sending;
+    racing.arm(delivery_id, winner.clone()).await;
+
+    assert_eq!(
+        store
+            .fail_prepared_delivery_attempt(FailPreparedDeliveryAttemptRequest {
+                delivery_id,
+                scope,
+                updated_at: now(),
+                failure_kind: DeliveryFailureKind::Rejected,
+            })
+            .await
+            .expect("settlement loser observes the racing send claim"),
+        FailPreparedDeliveryAttemptOutcome::Existing(winner)
+    );
+    racing.assert_resolved_in_retry_read().await;
 }
 
 // Legacy LibSqlOutboundStateStore / PostgresOutboundStateStore have been
@@ -1772,19 +1823,20 @@ async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateSt
         .unwrap(),
         requires_reply_target_revalidation: true,
     };
+    let prepared = OutboundDeliveryAttempt {
+        delivery_id,
+        scope: scope.clone(),
+        candidate,
+        status: OutboundDeliveryStatus::Prepared,
+        attempted_at: now(),
+        failure_kind: None,
+    };
     store
-        .record_delivery_attempt(OutboundDeliveryAttempt {
-            delivery_id,
-            scope: scope.clone(),
-            candidate,
-            status: OutboundDeliveryStatus::Prepared,
-            attempted_at: now(),
-            failure_kind: None,
-        })
+        .record_delivery_attempt(prepared.clone())
         .await
         .unwrap();
 
-    assert!(
+    assert_eq!(
         store
             .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
                 delivery_id,
@@ -1792,16 +1844,20 @@ async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateSt
             })
             .await
             .unwrap(),
+        ClaimDeliveryAttemptForSendOutcome::Claimed,
         "the first caller atomically owns vendor egress"
     );
-    assert!(
-        !store
+    let mut sending = prepared;
+    sending.status = OutboundDeliveryStatus::Sending;
+    assert_eq!(
+        store
             .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
                 delivery_id,
                 scope: scope.clone(),
             })
             .await
             .unwrap(),
+        ClaimDeliveryAttemptForSendOutcome::Existing(sending),
         "a replay cannot claim the same durable attempt"
     );
     let wrong_scope_claim = store
@@ -2030,12 +2086,9 @@ async fn prepared_failure_is_permanent_scoped_and_source_guarded(
 ) {
     let scope = turn_scope();
     let delivery_id = OutboundDeliveryId::new();
+    let prepared = prepared_delivery_attempt(delivery_id, scope.clone(), "reply-preflight-failure");
     store
-        .record_delivery_attempt(prepared_delivery_attempt(
-            delivery_id,
-            scope.clone(),
-            "reply-preflight-failure",
-        ))
+        .record_delivery_attempt(prepared.clone())
         .await
         .expect("seed prepared attempt");
 
@@ -2078,7 +2131,7 @@ async fn prepared_failure_is_permanent_scoped_and_source_guarded(
         Err(OutboundError::DeliveryNotFound | OutboundError::SubscriptionScopeMismatch)
     ));
 
-    assert!(
+    assert_eq!(
         store
             .fail_prepared_delivery_attempt(FailPreparedDeliveryAttemptRequest {
                 delivery_id,
@@ -2087,10 +2140,14 @@ async fn prepared_failure_is_permanent_scoped_and_source_guarded(
                 failure_kind: DeliveryFailureKind::Rejected,
             })
             .await
-            .expect("settle permanent preflight failure")
+            .expect("settle permanent preflight failure"),
+        FailPreparedDeliveryAttemptOutcome::Settled
     );
-    assert!(
-        !store
+    let mut failed = prepared;
+    failed.status = OutboundDeliveryStatus::Failed;
+    failed.failure_kind = Some(DeliveryFailureKind::Rejected);
+    assert_eq!(
+        store
             .fail_prepared_delivery_attempt(FailPreparedDeliveryAttemptRequest {
                 delivery_id,
                 scope: scope.clone(),
@@ -2099,39 +2156,42 @@ async fn prepared_failure_is_permanent_scoped_and_source_guarded(
             })
             .await
             .expect("terminal replay is a no-op"),
+        FailPreparedDeliveryAttemptOutcome::Existing(failed.clone()),
         "a terminal attempt cannot be failed again"
     );
-    assert!(
-        !store
+    assert_eq!(
+        store
             .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
                 delivery_id,
                 scope: scope.clone(),
             })
             .await
             .expect("terminal claim is a no-op"),
+        ClaimDeliveryAttemptForSendOutcome::Existing(failed),
         "a permanently failed preflight cannot later reach vendor egress"
     );
 
     let sending_id = OutboundDeliveryId::new();
+    let prepared_sending =
+        prepared_delivery_attempt(sending_id, scope.clone(), "reply-post-adapter-source-guard");
     store
-        .record_delivery_attempt(prepared_delivery_attempt(
-            sending_id,
-            scope.clone(),
-            "reply-post-adapter-source-guard",
-        ))
+        .record_delivery_attempt(prepared_sending.clone())
         .await
         .expect("seed second prepared attempt");
-    assert!(
+    assert_eq!(
         store
             .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
                 delivery_id: sending_id,
                 scope: scope.clone(),
             })
             .await
-            .expect("claim second attempt")
+            .expect("claim second attempt"),
+        ClaimDeliveryAttemptForSendOutcome::Claimed
     );
-    assert!(
-        !store
+    let mut expected_sending = prepared_sending;
+    expected_sending.status = OutboundDeliveryStatus::Sending;
+    assert_eq!(
+        store
             .fail_prepared_delivery_attempt(FailPreparedDeliveryAttemptRequest {
                 delivery_id: sending_id,
                 scope: scope.clone(),
@@ -2140,6 +2200,7 @@ async fn prepared_failure_is_permanent_scoped_and_source_guarded(
             })
             .await
             .expect("non-Prepared source is a no-op"),
+        FailPreparedDeliveryAttemptOutcome::Existing(expected_sending),
         "preflight settlement must never rewrite an attempt that may have reached the adapter"
     );
     let attempts = store
@@ -2186,14 +2247,15 @@ async fn recovery_transition_never_clobbers_delivered(store: &impl OutboundState
         })
         .await
         .unwrap();
-    assert!(
+    assert_eq!(
         store
             .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
                 delivery_id: interrupted,
                 scope: scope.clone(),
             })
             .await
-            .unwrap()
+            .unwrap(),
+        ClaimDeliveryAttemptForSendOutcome::Claimed
     );
     assert!(
         store
@@ -2231,14 +2293,15 @@ async fn recovery_transition_never_clobbers_delivered(store: &impl OutboundState
         })
         .await
         .unwrap();
-    assert!(
+    assert_eq!(
         store
             .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
                 delivery_id: delivered,
                 scope: scope.clone(),
             })
             .await
-            .unwrap()
+            .unwrap(),
+        ClaimDeliveryAttemptForSendOutcome::Claimed
     );
     store
         .update_delivery_status(UpdateDeliveryStatusRequest {
@@ -2517,6 +2580,148 @@ async fn communication_preference_virtual_paths(
 }
 
 // ── F4 — CAS retry / drain / backwards-race regression tests ─────────────
+
+/// Deterministically models another store consuming `Prepared` between this
+/// store's versioned read and CAS write. Once armed for one delivery, the
+/// permitted sequence is exactly: read `Prepared`; lose the guarded write
+/// while this backend commits `winner`; retry-read the complete winner record.
+/// A third read or second write fails, rejecting post-resolution polling or a
+/// reclaim attempt without counting unrelated filesystem operations.
+struct DeliveryTransitionRaceBackend {
+    inner: Arc<InMemoryBackend>,
+    state: Mutex<DeliveryTransitionRaceState>,
+}
+
+struct DeliveryTransitionRaceState {
+    target_path: Option<String>,
+    winner: Option<OutboundDeliveryAttempt>,
+    reads: u8,
+    conflicts: u8,
+}
+
+impl DeliveryTransitionRaceBackend {
+    fn new(inner: Arc<InMemoryBackend>) -> Self {
+        Self {
+            inner,
+            state: Mutex::new(DeliveryTransitionRaceState {
+                target_path: None,
+                winner: None,
+                reads: 0,
+                conflicts: 0,
+            }),
+        }
+    }
+
+    async fn arm(&self, delivery_id: OutboundDeliveryId, winner: OutboundDeliveryAttempt) {
+        let mut state = self.state.lock().await;
+        state.target_path = Some(format!(
+            "{TEST_OUTBOUND_ROOT}/deliveries/{delivery_id}.json"
+        ));
+        state.winner = Some(winner);
+        state.reads = 0;
+        state.conflicts = 0;
+    }
+
+    async fn assert_resolved_in_retry_read(&self) {
+        let state = self.state.lock().await;
+        assert_eq!(state.reads, 2, "initial read plus one CAS retry read");
+        assert_eq!(state.conflicts, 1, "one deterministic racing winner");
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for DeliveryTransitionRaceBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        let injected_winner = {
+            let mut state = self.state.lock().await;
+            if state.target_path.as_deref() != Some(path.as_str()) {
+                None
+            } else if state.conflicts == 0 {
+                state.conflicts = 1;
+                state.winner.clone()
+            } else {
+                return Err(FilesystemError::Backend {
+                    path: path.clone(),
+                    operation: FilesystemOperation::WriteFile,
+                    reason: "unexpected delivery reclaim after CAS loss".to_string(),
+                });
+            }
+        };
+
+        if let Some(winner) = injected_winner {
+            let winner_entry = Entry {
+                body: serde_json::to_vec(&winner).expect("serialize deterministic race winner"),
+                ..entry
+            };
+            let found = self.inner.put(path, winner_entry, cas.clone()).await?;
+            let expected = match cas {
+                CasExpectation::Version(version) => Some(version),
+                CasExpectation::Absent | CasExpectation::Any => None,
+            };
+            return Err(FilesystemError::VersionMismatch {
+                path: path.clone(),
+                expected,
+                found: Some(found),
+            });
+        }
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        {
+            let mut state = self.state.lock().await;
+            if state.target_path.as_deref() == Some(path.as_str()) {
+                state.reads += 1;
+                if state.reads > 2 {
+                    return Err(FilesystemError::Backend {
+                        path: path.clone(),
+                        operation: FilesystemOperation::ReadFile,
+                        reason: "unexpected post-resolution delivery read".to_string(),
+                    });
+                }
+            }
+        }
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn ensure_index(
+        &self,
+        path: &VirtualPath,
+        spec: &IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        self.inner.ensure_index(path, spec).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+}
 
 /// Test backend that wraps an inner [`RootFilesystem`] and injects a single
 /// [`FilesystemError::VersionMismatch`] on the next `put` to any path matching
