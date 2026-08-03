@@ -731,8 +731,8 @@ review_after = "2026-11-01"
 [[exemption]]
 path = "crates/ironclaw_product/src/reborn_services.rs"
 lines = [
-  3570, 3571, 3572, 3573, 3574, 3575, 3576, 3577, 3579, 3580, 3581, 3582,
-  3583, 3584, 3585, 6464, 6465, 6466, 6468, 6471, 6474, 6475,
+  3476, 3477, 3478, 3479, 3480, 3481, 3482, 3483, 3485, 3486, 3487, 3488,
+  3489, 3490, 3491, 6370, 6371, 6372, 6374, 6377, 6380, 6381,
 ]
 owner = "@nearai/reborn"
 reason = "steering_admission_error mapping fn and queued-replay run-id parse failure arms: fault-only paths covered by the scripted reborn_services_contract crate-tier tests."
@@ -872,7 +872,7 @@ review_after = "2026-11-01"
 
 [[exemption]]
 path = "crates/ironclaw_product_contracts/src/product_wire.rs"
-lines = [308, 309, 310, 311, 312, 313, 314]
+lines = [392, 393, 394, 395, 396, 397, 398]
 owner = "@nearai/reborn"
 reason = "DeferredBusy response-variant field declarations (moved here by the WS5 product_wire inversion); no DA records emitted for enum variant bodies in the integration lcov."
 issue = "https://github.com/nearai/ironclaw/issues/7006"
