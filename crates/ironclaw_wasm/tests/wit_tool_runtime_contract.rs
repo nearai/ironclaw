@@ -257,15 +257,17 @@ fn prepares_metadata_from_wit_tool_component() {
 #[test]
 fn malformed_component_bytes_are_rejected_as_compilation_failure() {
     let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+    let private_marker = "guest-private-malformed-component-marker";
 
     let error = runtime
-        .prepare("malformed", b"not a wasm component")
+        .prepare("malformed", private_marker.as_bytes())
         .unwrap_err();
 
-    assert!(
-        matches!(error, WasmError::CompilationFailed(_)),
-        "unexpected error: {error:?}"
-    );
+    let WasmError::CompilationFailed(message) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    assert_eq!(message, "WASM component compilation failed");
+    assert!(!message.contains(private_marker));
 }
 
 #[test]
@@ -308,10 +310,17 @@ fn unsupported_component_without_tool_exports_is_rejected_at_instantiation() {
         .prepare("unsupported", &component_without_tool_exports)
         .unwrap_err();
 
-    assert!(
-        matches!(error, WasmError::InstantiationFailed(_)),
-        "unexpected error: {error:?}"
+    let WasmError::InstantiationFailed(message) = error else {
+        panic!("unexpected error: {error:?}");
+    };
+    assert_eq!(
+        message,
+        format!(
+            "WASM component instantiation failed; component may target an incompatible WIT ABI (host: {})",
+            ironclaw_wasm::WIT_TOOL_VERSION
+        )
     );
+    assert!(!message.contains("near:agent"));
 }
 
 #[test]

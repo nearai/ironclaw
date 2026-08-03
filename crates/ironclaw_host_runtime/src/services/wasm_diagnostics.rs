@@ -78,9 +78,10 @@ mod tests {
         CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage,
         HostApiContractRegistry, ManifestSource,
     };
-    use ironclaw_filesystem::DiskFilesystem;
+    use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
     use ironclaw_host_api::{
         capability::{CapabilityDescriptor, PermissionMode},
+        dispatch::RuntimeDispatchErrorKind,
         host_port::HostPortCatalog,
         ids::{CapabilityId, ExtensionId},
         path::VirtualPath,
@@ -105,9 +106,10 @@ mod tests {
     use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
     use wit_parser::Resolve;
 
-    use super::super::runtime_adapters::RuntimeLaneRequest;
+    use super::super::runtime_adapters::{RuntimeAdapter, RuntimeLaneRequest, WasmRuntimeAdapter};
     use super::super::wasm_execution::execute_prepared_wasm;
     use super::*;
+    use crate::obligations::NetworkObligationPolicyStore;
 
     const DETECTABLE_SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
     const DIAGNOSTIC_TARGET: &str = "ironclaw_host_runtime::services::wasm_diagnostics";
@@ -628,6 +630,50 @@ __OUTCOME__)
         .await
     }
 
+    async fn dispatch_cold_wasm_fixture(
+        wasm_bytes: Vec<u8>,
+    ) -> (
+        Result<super::super::RuntimeAdapterResult, super::super::DispatchError>,
+        Vec<CapturedEvent>,
+    ) {
+        let filesystem = InMemoryBackend::new();
+        let module_path =
+            VirtualPath::new("/system/extensions/wasm-trace-fixture/fixture.wasm").unwrap();
+        filesystem
+            .write_file(&module_path, &wasm_bytes)
+            .await
+            .expect("fixture component must be written to the virtual package root");
+        let adapter = WasmRuntimeAdapter::new(
+            WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap(),
+            WitToolHost::deny_all(),
+            Arc::new(NetworkObligationPolicyStore::new()),
+            Arc::new(Mutex::new(None)),
+            None,
+        );
+        let package = caller_trace_package();
+        let descriptor = caller_trace_descriptor();
+        let governor = InMemoryResourceGovernor::new();
+        let policy = caller_trace_policy();
+        let request = RuntimeLaneRequest {
+            package: &package,
+            descriptor: &descriptor,
+            filesystem: &filesystem,
+            governor: &governor,
+            runtime_policy: &policy,
+            capability_id: &descriptor.id,
+            scope: ResourceScope::system(),
+            authenticated_actor_user_id: None,
+            run_id: None,
+            origin: None,
+            estimate: ResourceEstimate::default(),
+            mounts: None,
+            resource_reservation: None,
+            input: json!({}),
+        };
+
+        capture_events_async(adapter.dispatch_json(request)).await
+    }
+
     fn assert_caller_trace_envelope(events: &[CapturedEvent], capability_id: &CapabilityId) {
         assert_eq!(events.len(), 2, "guest log and error must both be traced");
         assert!(events.iter().all(|event| event.target == DIAGNOSTIC_TARGET));
@@ -673,5 +719,58 @@ __OUTCOME__)
         let traced_error = field(&events[1], "wasm_error");
         assert!(traced_error.contains(WASM_DIAGNOSTIC_REDACTION_MARKER));
         assert!(traced_error.contains("retained-error-context"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn production_wasm_cold_compile_failure_discards_private_wasmtime_chain() {
+        let private_marker = "guest-private-host-compilation-marker";
+        let (result, events) = dispatch_cold_wasm_fixture(private_marker.as_bytes().to_vec()).await;
+        let error = result.expect_err("malformed component must fail cold preparation");
+
+        let super::super::DispatchError::Wasm {
+            kind,
+            model_visible_cause,
+        } = error
+        else {
+            panic!("cold compilation must return a WASM dispatch failure");
+        };
+        assert_eq!(kind, RuntimeDispatchErrorKind::Manifest);
+        assert_eq!(
+            model_visible_cause.as_deref(),
+            Some("failed to compile WIT component: WASM component compilation failed")
+        );
+        assert!(!model_visible_cause.unwrap().contains(private_marker));
+        assert!(events.is_empty(), "preparation chains must not be traced");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn production_wasm_cold_instantiation_failure_uses_only_fixed_wit_hint() {
+        let private_marker = "guest-private-host-instantiation-marker";
+        let incompatible_component = wat::parse_str(format!(
+            r#"(component
+                (type $private-function (func))
+                (import "near:agent/{private_marker}@9.9.9" (func (type $private-function)))
+            )"#
+        ))
+        .expect("incompatible component fixture must parse");
+        let (result, events) = dispatch_cold_wasm_fixture(incompatible_component).await;
+        let error = result.expect_err("unlinked component import must fail cold preparation");
+
+        let super::super::DispatchError::Wasm {
+            kind,
+            model_visible_cause,
+        } = error
+        else {
+            panic!("cold instantiation must return a WASM dispatch failure");
+        };
+        assert_eq!(kind, RuntimeDispatchErrorKind::MethodMissing);
+        assert_eq!(
+            model_visible_cause.as_deref(),
+            Some(
+                "failed to instantiate WIT component: WASM component instantiation failed; component may target an incompatible WIT ABI (host: 0.3.0)"
+            )
+        );
+        assert!(!model_visible_cause.unwrap().contains(private_marker));
+        assert!(events.is_empty(), "preparation chains must not be traced");
     }
 }

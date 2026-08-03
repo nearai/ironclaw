@@ -51,6 +51,13 @@ diagnostics. The runtime sanitizes each source independently when it is captured
   capability result.
 - Host-runtime tracing sanitizes these fields again as defense in depth before
   recording them. This sink check does not replace capture-boundary sanitizing.
+- Component compilation and instantiation failures discard the raw Wasmtime
+  error chain at the runtime boundary. They retain only the stable
+  host-authored messages `WASM component compilation failed` or
+  `WASM component instantiation failed`. Internal chain inspection may select
+  the fixed incompatible-WIT hint, which reports only the host's
+  `WIT_TOOL_VERSION`; guest-controlled component, module, function, import, and
+  path text is never stored, returned, or traced.
 
 This protection detects credential and secret patterns known to the shared leak
 detector. Arbitrary PII or sensitive prose that does not match one of those

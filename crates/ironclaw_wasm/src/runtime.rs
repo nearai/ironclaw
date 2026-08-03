@@ -12,6 +12,9 @@ use crate::store::StoreData;
 use crate::types::{PreparedWitTool, WitToolExecution, WitToolRequest};
 use crate::wasm_sandbox_core::SandboxLimits;
 
+const WASM_COMPONENT_COMPILATION_FAILED: &str = "WASM component compilation failed";
+const WASM_COMPONENT_INSTANTIATION_FAILED: &str = "WASM component instantiation failed";
+
 /// Reborn WIT-compatible WASM tool runtime.
 ///
 /// Cloning is cheap: [`Engine`] is internally reference-counted and
@@ -51,7 +54,7 @@ impl WitToolRuntime {
 
     pub fn prepare(&self, name: &str, wasm_bytes: &[u8]) -> Result<PreparedWitTool, WasmError> {
         let component = wasmtime::component::Component::new(&self.engine, wasm_bytes)
-            .map_err(|error| WasmError::CompilationFailed(error.to_string()))?;
+            .map_err(compilation_failed)?;
         let limits = self.config.default_limits.clone();
         let (description, schema) = self.extract_metadata(&component, &limits)?;
 
@@ -150,7 +153,7 @@ impl WitToolRuntime {
         configure_store(&mut store, limits)?;
         let linker = create_linker(&self.engine)?;
         let instance = bindings::SandboxedTool::instantiate(&mut store, component, &linker)
-            .map_err(|error| classify_instantiation_error(error.to_string()))?;
+            .map_err(classify_instantiation_error)?;
         Ok((store, instance))
     }
 }
@@ -226,19 +229,38 @@ fn create_linker(engine: &Engine) -> Result<Linker<StoreData>, WasmError> {
     Ok(linker)
 }
 
-fn classify_instantiation_error(message: String) -> WasmError {
-    if message.contains("near:agent") || message.contains("import") {
+fn compilation_failed(_error: wasmtime::Error) -> WasmError {
+    // A Wasmtime compilation chain can contain guest-controlled component,
+    // module, and function names. Classification is the only information the
+    // caller needs, so discard the chain at the runtime boundary.
+    WasmError::CompilationFailed(WASM_COMPONENT_COMPILATION_FAILED.to_string())
+}
+
+fn classify_instantiation_error(error: wasmtime::Error) -> WasmError {
+    // Inspect the chain only to select the host-authored compatibility hint.
+    // Never retain, return, or trace any of the Wasmtime diagnostic text.
+    let incompatible_wit = error.chain().any(|cause| {
+        let diagnostic = cause.to_string();
+        diagnostic.contains("near:agent") || diagnostic.contains("import")
+    });
+    if incompatible_wit {
         WasmError::InstantiationFailed(format!(
-            "{message}. This usually means the component was compiled against a different WIT version than the host supports (host: {WIT_TOOL_VERSION})."
+            "{WASM_COMPONENT_INSTANTIATION_FAILED}; component may target an incompatible WIT ABI (host: {WIT_TOOL_VERSION})"
         ))
     } else {
-        WasmError::InstantiationFailed(message)
+        WasmError::InstantiationFailed(WASM_COMPONENT_INSTANTIATION_FAILED.to_string())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::safe_component_call_message;
+    use super::{
+        WASM_COMPONENT_COMPILATION_FAILED, WASM_COMPONENT_INSTANTIATION_FAILED,
+        classify_instantiation_error, compilation_failed, safe_component_call_message,
+    };
+    use crate::{WIT_TOOL_VERSION, WasmError};
+
+    const PRIVATE_PREPARATION_MARKER: &str = "guest-private-wasmtime-preparation-marker";
 
     #[test]
     fn non_trap_component_call_error_uses_fixed_public_message() {
@@ -251,5 +273,54 @@ mod tests {
 
         assert_eq!(message, "WASM component execution failed");
         assert!(!message.contains(private_marker));
+    }
+
+    #[test]
+    fn compilation_failure_discards_private_wasmtime_chain() {
+        let error = wasmtime::Error::msg(format!(
+            "component compilation exposed {PRIVATE_PREPARATION_MARKER}"
+        ));
+
+        let WasmError::CompilationFailed(message) = compilation_failed(error) else {
+            panic!("compilation helper must preserve the compilation classification");
+        };
+
+        assert_eq!(message, WASM_COMPONENT_COMPILATION_FAILED);
+        assert!(!message.contains(PRIVATE_PREPARATION_MARKER));
+    }
+
+    #[test]
+    fn instantiation_failure_discards_private_chain_and_selects_fixed_wit_hint() {
+        let error =
+            wasmtime::Error::msg(format!("private root cause {PRIVATE_PREPARATION_MARKER}"))
+                .context(format!(
+                    "missing import near:agent/private@9.9.9 {PRIVATE_PREPARATION_MARKER}"
+                ));
+
+        let WasmError::InstantiationFailed(message) = classify_instantiation_error(error) else {
+            panic!("instantiation helper must preserve the instantiation classification");
+        };
+
+        assert_eq!(
+            message,
+            format!(
+                "{WASM_COMPONENT_INSTANTIATION_FAILED}; component may target an incompatible WIT ABI (host: {WIT_TOOL_VERSION})"
+            )
+        );
+        assert!(!message.contains(PRIVATE_PREPARATION_MARKER));
+    }
+
+    #[test]
+    fn generic_instantiation_failure_uses_fixed_message_without_private_chain() {
+        let error = wasmtime::Error::msg(format!(
+            "private instantiation cause {PRIVATE_PREPARATION_MARKER}"
+        ));
+
+        let WasmError::InstantiationFailed(message) = classify_instantiation_error(error) else {
+            panic!("instantiation helper must preserve the instantiation classification");
+        };
+
+        assert_eq!(message, WASM_COMPONENT_INSTANTIATION_FAILED);
+        assert!(!message.contains(PRIVATE_PREPARATION_MARKER));
     }
 }
