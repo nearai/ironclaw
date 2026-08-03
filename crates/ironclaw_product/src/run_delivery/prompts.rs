@@ -45,8 +45,8 @@ const RUN_NOTIFICATION_GATE_PROJECTION_DOMAIN: &str =
 pub(crate) enum RunNotificationProjectionIdError {
     #[error("gate notification requires a canonical gate ref")]
     MissingGateRef,
-    #[error("gate notification has an invalid gate ref")]
-    InvalidGateRef,
+    #[error("gate notification has an invalid gate ref: {reason}")]
+    InvalidGateRef { reason: String },
 }
 
 /// Stable projection id for run-notification deliveries.
@@ -78,7 +78,7 @@ pub(crate) fn run_notification_projection_id(
 
     let gate_ref = gate_ref.ok_or(RunNotificationProjectionIdError::MissingGateRef)?;
     let gate_ref = TurnGateRef::new(gate_ref.to_string())
-        .map_err(|_| RunNotificationProjectionIdError::InvalidGateRef)?;
+        .map_err(|reason| RunNotificationProjectionIdError::InvalidGateRef { reason })?;
     let mut digest_input = Vec::with_capacity(
         RUN_NOTIFICATION_GATE_PROJECTION_DOMAIN.len() + suffix.len() + gate_ref.as_str().len() + 24,
     );
@@ -331,6 +331,25 @@ mod tests {
                 "gate identity hardening must not rewrite legacy non-gate delivery identities"
             );
         }
+    }
+
+    #[test]
+    fn approval_projection_preserves_the_safe_canonical_invalid_gate_reason() {
+        let error = run_notification_projection_id(
+            TurnRunId::new(),
+            RunNotificationEventKind::ApprovalNeeded,
+            Some(""),
+        )
+        .expect_err("an empty approval gate ref must be rejected");
+
+        let RunNotificationProjectionIdError::InvalidGateRef { reason } = &error else {
+            panic!("expected the invalid-gate-ref error, got {error:?}");
+        };
+        assert_eq!(reason, "turn_gate_ref must not be empty");
+        assert_eq!(
+            error.to_string(),
+            "gate notification has an invalid gate ref: turn_gate_ref must not be empty"
+        );
     }
 
     /// A pairing challenge is completable from a chat surface, so it must not
