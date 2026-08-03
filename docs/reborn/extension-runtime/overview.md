@@ -308,7 +308,8 @@ Rules that keep the boundary easy to reason about:
 Extensions that use the same `VendorId` each carry the recipe (gmail, drive,
 calendar all embed the `[auth.google]` recipe). During internal publication the
 host unifies them: recipes for one vendor must be **identical except `scopes`
-and `display_name`**, or publication fails with a conflict. Scope ceilings union
+and presentation-only `display_name`, `instructions`, and `setup_url`**, or
+publication fails with a conflict. Scope ceilings union
 across extensions available to the caller exactly as the system does today; a
 new extension needing more scopes triggers incremental re-consent. Accounts and
 grants are stored per user and vendor and shared — connecting Google once serves

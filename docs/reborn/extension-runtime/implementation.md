@@ -276,7 +276,8 @@ branch anywhere in dispatch (`tests/integration/extension_runtime.rs`).
   deployment tick, due at half the declared lifetime, soonest-death-first
   under the per-tick cap). There is no per-vendor refresher code.
 - Shared vendors: unify recipes during internal publication (identical except
-  `scopes`/`display_name`, else conflict); scope union and incremental
+  `scopes` and presentation-only `display_name`/`instructions`/`setup_url`,
+  else conflict); scope union and incremental
   re-consent keep today's behavior; grants are vendor-scoped and survive
   removal of one consumer while another active extension shares the vendor.
 - Recipe reference (fields beyond `overview.md` §3): `scope_param` (default

@@ -235,7 +235,8 @@ impl VendorAuthRecipe {
     }
 
     /// Whether two recipes for a shared vendor are compatible: identical
-    /// except `scopes` and `display_name`
+    /// except `scopes` and presentation-only `display_name`, `instructions`,
+    /// and `setup_url`
     /// (`docs/reborn/extension-runtime/overview.md` §3.2).
     pub fn compatible_for_shared_vendor(&self, other: &Self) -> bool {
         match (self, other) {
@@ -246,6 +247,10 @@ impl VendorAuthRecipe {
                 b.scopes = Vec::new();
                 a.display_name = String::new();
                 b.display_name = String::new();
+                a.instructions = None;
+                b.instructions = None;
+                a.setup_url = None;
+                b.setup_url = None;
                 a == b
             }
             (Self::ApiKey(a), Self::ApiKey(b)) => {
@@ -253,6 +258,10 @@ impl VendorAuthRecipe {
                 let mut b = b.clone();
                 a.display_name = String::new();
                 b.display_name = String::new();
+                a.instructions = None;
+                b.instructions = None;
+                a.setup_url = None;
+                b.setup_url = None;
                 a == b
             }
             _ => false,
@@ -873,14 +882,34 @@ signed_payload = [ { body = true } ]
     }
 
     #[test]
-    fn shared_vendor_compatibility_ignores_scopes_and_display_name_only() {
+    fn shared_vendor_compatibility_ignores_scope_and_presentation_metadata() {
         let base: VendorAuthRecipe = toml::from_str(slack_shaped_recipe_toml()).unwrap();
         let mut other = base.clone();
         if let VendorAuthRecipe::Oauth2Code(inner) = &mut other {
             inner.scopes = vec!["different:scope".to_string()];
             inner.display_name = "Other".to_string();
+            inner.instructions = Some("Register this extension's OAuth app.".to_string());
+            inner.setup_url =
+                Some(HttpsEndpoint::new("https://vendor.example/settings/other-app").unwrap());
         }
         assert!(base.compatible_for_shared_vendor(&other));
+
+        let api_key: VendorAuthRecipe = toml::from_str(
+            r#"
+method = "api_key"
+display_name = "Example token"
+fields = [{ handle = "example_token", label = "Token" }]
+"#,
+        )
+        .unwrap();
+        let mut other_api_key = api_key.clone();
+        if let VendorAuthRecipe::ApiKey(inner) = &mut other_api_key {
+            inner.display_name = "Other token".to_string();
+            inner.instructions = Some("Create a token for this extension.".to_string());
+            inner.setup_url =
+                Some(HttpsEndpoint::new("https://vendor.example/settings/tokens").unwrap());
+        }
+        assert!(api_key.compatible_for_shared_vendor(&other_api_key));
 
         let mut conflicting = base.clone();
         if let VendorAuthRecipe::Oauth2Code(inner) = &mut conflicting {
