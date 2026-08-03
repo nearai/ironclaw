@@ -404,11 +404,15 @@ impl HostedMcpPreparationService {
                             )
                             .await?
                         else {
-                            return auth_selection_required_response(
-                                package_ref.clone(),
-                                "Hosted MCP OAuth metadata could not be discovered; choose a different authentication method or fix the server metadata.",
-                            )
-                            .map(Some);
+                            return self
+                                .reset_auth_selection(
+                                    package_ref,
+                                    extension_id,
+                                    installation,
+                                    manifest,
+                                    "Hosted MCP OAuth metadata could not be discovered; choose a different authentication method or fix the server metadata.",
+                                )
+                                .await;
                         };
                         enriched
                     }
@@ -446,11 +450,15 @@ impl HostedMcpPreparationService {
                     Some(ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::NoAuth)
                 ) =>
             {
-                return auth_selection_required_response(
-                    package_ref.clone(),
-                    "Hosted MCP rejected unauthenticated access; choose OAuth or Bearer token in extension setup.",
-                )
-                .map(Some);
+                return self
+                    .reset_auth_selection(
+                        package_ref,
+                        extension_id,
+                        installation,
+                        manifest,
+                        "Hosted MCP rejected unauthenticated access; choose OAuth or Bearer token in extension setup.",
+                    )
+                    .await;
             }
             Err(crate::HostedMcpDiscoveryError::CredentialsRejected(_)) => {
                 let mut response =
@@ -533,6 +541,35 @@ impl HostedMcpPreparationService {
                 requirements,
             )?,
         ))
+    }
+
+    async fn reset_auth_selection(
+        &self,
+        package_ref: &LifecyclePackageRef,
+        extension_id: &ironclaw_host_api::ids::ExtensionId,
+        installation: &ExtensionInstallation,
+        manifest: &ExtensionManifestRecord,
+        message: &str,
+    ) -> Result<Option<LifecycleProductResponse>, ProductOperationFailure> {
+        let mcp = manifest
+            .resolved()
+            .mcp
+            .as_ref()
+            .ok_or_else(crate::hosted_mcp_manifest::name_unavailable)?;
+        let endpoint =
+            ironclaw_extension_contracts::hosted_mcp::HostedMcpEndpoint::new(mcp.server.clone())
+                .map_err(|_| crate::hosted_mcp_manifest::name_unavailable())?;
+        let endpoint = crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint::parse(&endpoint)
+            .map_err(|_| crate::hosted_mcp_manifest::name_unavailable())?;
+        let unresolved = crate::hosted_mcp_manifest::pending_manifest(
+            extension_id,
+            &manifest.resolved().name,
+            &endpoint,
+            &HostedMcpAuthSelection::Auto,
+        )?;
+        self.checkpoint_prepared_manifest(extension_id, installation, unresolved)
+            .await?;
+        auth_selection_required_response(package_ref.clone(), message).map(Some)
     }
 
     async fn checkpoint_prepared_manifest(

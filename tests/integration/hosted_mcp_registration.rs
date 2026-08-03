@@ -981,6 +981,49 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
             .is_some_and(|message| message.contains("rejected unauthenticated access")),
         "NoAuth plus 401 stays an actionable selection mismatch: {no_auth_mismatch:#?}"
     );
+    let projected_after_no_auth_mismatch = services
+        .lifecycle_service
+        .project_package(
+            lifecycle_product_context(scope.clone()),
+            fixture_package_ref(),
+        )
+        .await
+        .expect("the rejected no-auth choice reprojects as unresolved auth setup");
+    assert!(projected_after_no_auth_mismatch
+        .blockers
+        .iter()
+        .any(|blocker| matches!(
+            blocker,
+            ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
+                ref_id: Some(ref_id),
+            } if ref_id.as_str()
+                == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
+        )));
+    let restored_after_no_auth_mismatch = rebuild_lifecycle_test_services_with_auth_provider(
+        &services,
+        "hosted-mcp-bearer-user",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+        Arc::new(ironclaw_auth::UnavailableAuthProviderClient),
+    )
+    .await;
+    let cold_projection = restored_after_no_auth_mismatch
+        .lifecycle_service
+        .project_package(
+            lifecycle_product_context(scope.clone()),
+            fixture_package_ref(),
+        )
+        .await
+        .expect("the rejected no-auth choice remains unresolved after restart");
+    assert!(cold_projection.blockers.iter().any(|blocker| matches!(
+        blocker,
+        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
+            ref_id: Some(ref_id),
+        } if ref_id.as_str()
+            == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
+    )));
 
     let unfinished_retry = services
         .lifecycle_service
