@@ -1,0 +1,67 @@
+import { Meta } from "@storybook/addon-docs/blocks";
+
+<Meta title="Design/Guidelines" />
+
+# IronClaw Design System
+
+IronClaw's WebUI follows a **governed design system** oriented around an
+AI/agentic-first UX. The canonical specification is
+[`DESIGN.md`](https://github.com/nearai/ironclaw/blob/main/crates/ironclaw_webui/frontend/DESIGN.md)
+in the frontend package; this page is its Storybook-facing summary. Tracked by
+Epic [#7038](https://github.com/nearai/ironclaw/issues/7038).
+
+## Design language
+
+The visual and interaction language is **Material 3 Expressive (M3X)** —
+high-chroma dynamic color, tonal (shadow-light) surfaces, expressive typography,
+and physics-based, shape-morphing interactions tuned for agent chat, streaming,
+and tool management.
+
+**Native M3X, not Material Web.** M3X is realized with IronClaw's own
+**React 19 + Tailwind v4** primitives — never `<md-*>` Lit web components or a
+parallel component framework. DESIGN.md governs *look and feel*; the Epic's
+non-goals govern *implementation*.
+
+## Tokens
+
+Styling is **token-driven**. Design tokens live in `src/styles/app.css` under
+`@theme` and `:root[data-theme="light"|"dark"]`, and are consumed as `--v2-*`
+CSS variables. **Never hardcode hex or raw px in a component** — add a token
+(light **and** dark) and reference it.
+
+See the **Tokens** section of this Storybook (`Tokens/Colors`,
+`Tokens/Typography`, `Tokens/Motion`) for the live token reference. The M3 →
+`--v2-*` mapping and the light-only-palette / dark-derivation work are tracked in
+the DESIGN.md appendix.
+
+## Do's and Don'ts
+
+- **DO** use a Branded Progress Indicator for AI generation to make the
+  interface feel alive.
+- **DON'T** use the high-chroma `ai-spark` color for static UI (buttons, links)
+  — reserve it for active agentic streaming or Hero Moments.
+- **DO** use spring physics for un-furling the FAB Menu and expanding reasoning
+  blocks — never hard linear easings. (Motion is opt-in and
+  `prefers-reduced-motion`-gated; see the motion policy.)
+- **DON'T** clutter chat with heavy drop shadows — separate tool-use blocks from
+  prose with tonal `surface-container` shifts.
+- **DO** use shape-morphing on icon buttons (e.g. "Stop Generation") for tactile
+  feedback.
+
+## Contributing
+
+- Build the design language natively (React + Tailwind + `--v2-*`).
+- Every primitive/composite/component with meaningful states ships a colocated
+  `*.stories.tsx` (see the design-system `README.md` for conventions).
+- Preserve `aria-*`, keyboard/focus, light + dark parity, and WCAG AA contrast.
+- Validate: `pnpm typecheck && pnpm lint:conventions && pnpm test:storybook && pnpm build-storybook`.
+
+The full governance for agents lives in `.claude/rules/design-system.md`.
+
+## Phasing (Epic #7038)
+
+1. **Storybook integration** — done.
+2. **DESIGN.md governance & guidelines** — this page + `DESIGN.md` + agent rules.
+3. **Theme update & UI reskin** — token values (light + dark), assets.
+4. **Interaction & component updates** — agentic components + expressive motion.
+5. **Information architecture** — navigation & page structure.

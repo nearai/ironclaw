@@ -56,7 +56,7 @@ const preview: Preview = {
     // Sidebar category order (matches the 5 requested groups).
     options: {
       storySort: {
-        order: ["Primitives", "Components", "Composites", "Icons", "Tokens"],
+        order: ["Design", "Primitives", "Components", "Composites", "Icons", "Tokens"],
       },
     },
     controls: {

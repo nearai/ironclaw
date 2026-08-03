@@ -211,6 +211,7 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | `crates/ironclaw_llm/` | `crates/ironclaw_llm/CLAUDE.md` |
 | `crates/ironclaw_filesystem/` | `crates/ironclaw_filesystem/CLAUDE.md` |
 | `crates/ironclaw_webui/` | `crates/ironclaw_webui/CLAUDE.md` |
+| WebUI design system | `crates/ironclaw_webui/frontend/DESIGN.md` + `.claude/rules/design-system.md` |
 | `crates/ironclaw_reborn_composition/` | `crates/ironclaw_reborn_composition/CLAUDE.md` |
 | `crates/ironclaw_reborn_identity/` | `crates/ironclaw_reborn_identity/CONTRACT.md` |
 | `tests/integration/` | `tests/integration/CLAUDE.md` |

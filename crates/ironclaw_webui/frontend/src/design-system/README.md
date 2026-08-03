@@ -5,6 +5,12 @@ shadcn-style primitives layer (equivalent to `components/ui` in many React
 codebases): small, presentational, dependency-light components that everything
 else composes from.
 
+> **Design governance:** the design source of truth is [`../../DESIGN.md`](../../DESIGN.md)
+> (surfaced in Storybook under **Design/Guidelines**); the agent rules live in
+> [`.claude/rules/design-system.md`](../../../../.claude/rules/design-system.md).
+> Style token-driven (`--v2-*`), never hardcode hex/px, and ship a story with
+> every component.
+
 Where it sits in the frontend:
 
 ```
