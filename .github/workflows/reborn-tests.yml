@@ -314,6 +314,7 @@ jobs:
         env:
           BUCKET_NAME: ${{ matrix.bucket.name }}
           BUCKET_PACKAGES: ${{ toJSON(matrix.bucket.packages) }}
+          EXACT_TARGETS: ${{ toJSON(matrix.bucket.exact_targets || fromJSON('[]')) }}
           COLLECT_COVERAGE: ${{ needs.changes.outputs.run_coverage }}
         run: |
           echo "Running Reborn crate bucket: ${BUCKET_NAME}"
@@ -350,10 +351,27 @@ jobs:
             echo "::endgroup::"
           else
             echo "::group::cargo test affected bucket ${BUCKET_NAME}"
-            scripts/ci/run-hermetic-deterministic-suite.sh command \
-              timeout --signal=INT --kill-after=30s 28m \
-              "${incremental_env[@]}" cargo test "${package_args[@]}" \
-                "${feature_args[@]}" --ignore-rust-version --all-targets -- --nocapture
+            if [[ "$(jq 'length' <<< "${EXACT_TARGETS}")" -gt 0 ]]; then
+              while IFS=$'\t' read -r package kind name; do
+                target_feature_args=()
+                feature_flags="$(scripts/ci/package-feature-flags.sh "${package}")"
+                if [[ -n "${feature_flags}" ]]; then
+                  read -ra target_feature_args <<< "${feature_flags}"
+                fi
+                scripts/ci/run-hermetic-deterministic-suite.sh command \
+                  timeout --signal=INT --kill-after=30s 28m \
+                  cargo test -p "${package}" "--${kind}" "${name}" \
+                    "${target_feature_args[@]}" --ignore-rust-version -- --nocapture
+              done < <(
+                jq -r '.[] | [.package, .kind, .name] | @tsv' \
+                  <<< "${EXACT_TARGETS}"
+              )
+            else
+              scripts/ci/run-hermetic-deterministic-suite.sh command \
+                timeout --signal=INT --kill-after=30s 28m \
+                "${incremental_env[@]}" cargo test "${package_args[@]}" \
+                  "${feature_args[@]}" --ignore-rust-version --all-targets -- --nocapture
+            fi
             echo "::endgroup::"
           fi
 

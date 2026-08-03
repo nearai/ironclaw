@@ -41,6 +41,8 @@ jobs:
     outputs:
       has_code: ${{ steps.non_pr.outputs.has_code || steps.diff.outputs.has_code }}
       has_reborn_cli: ${{ steps.non_pr.outputs.has_reborn_cli || steps.diff.outputs.has_reborn_cli }}
+      has_clippy: ${{ steps.non_pr.outputs.has_clippy || steps.diff.outputs.has_clippy }}
+      clippy_packages: ${{ steps.non_pr.outputs.clippy_packages || steps.diff.outputs.clippy_packages }}
       clippy_matrix: ${{ steps.non_pr.outputs.clippy_matrix || steps.diff.outputs.clippy_matrix }}
     steps:
       - id: non_pr
@@ -48,6 +50,8 @@ jobs:
         run: |
           echo "has_code=true" >> "$GITHUB_OUTPUT"
           echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
+          echo "has_clippy=true" >> "$GITHUB_OUTPUT"
+          echo 'clippy_packages=[]' >> "$GITHUB_OUTPUT"
           echo 'clippy_matrix=[{"name":"all-features","flags":"--all-features"},{"name":"default","flags":""}]' >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
@@ -61,6 +65,18 @@ jobs:
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
           CHANGED_FILES="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
+          printf '%s\n' "$CHANGED_FILES" > "${RUNNER_TEMP}/changed-files.txt"
+
+          clippy_packages="$(
+            python3 scripts/ci/changed_workspace_packages.py \
+              --changed-files "${RUNNER_TEMP}/changed-files.txt"
+          )"
+          echo "clippy_packages=${clippy_packages}" >> "$GITHUB_OUTPUT"
+          if jq -e 'length > 0' <<< "${clippy_packages}" > /dev/null; then
+            echo "has_clippy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_clippy=false" >> "$GITHUB_OUTPUT"
+          fi
 
           if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|scripts/check_no_panics\.py$|scripts/no_panics_reborn_baseline\.txt$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/(code_style|main-ci-slack-alerts)\.yml$)'; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
@@ -136,6 +152,7 @@ jobs:
           scripts/ci/test-classify-test-scope.sh
           scripts/ci/test-build-wasm-extensions.sh
           scripts/ci/test-package-feature-flags.sh
+          python3 scripts/ci/test_changed_workspace_packages.py
           scripts/ci/test-reborn-crate-test-buckets.sh
           scripts/ci/test-main-ci-slack-alerts.sh
           python3 scripts/ci/test_ws12_suite_shards.py
@@ -216,7 +233,9 @@ jobs:
   clippy:
     name: Clippy (${{ matrix.name }})
     needs: changes
-    if: needs.changes.outputs.has_code == 'true'
+    if: >-
+      needs.changes.outputs.has_code == 'true' &&
+      (github.event_name != 'pull_request' || needs.changes.outputs.has_clippy == 'true')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -268,7 +287,15 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Check production-target lints
         if: github.event_name == 'pull_request'
-        run: cargo clippy --workspace --lib --bins ${{ matrix.flags }} -- -D warnings
+        env:
+          CLIPPY_PACKAGES: ${{ needs.changes.outputs.clippy_packages }}
+        run: |
+          package_args=()
+          while IFS= read -r package; do
+            package_args+=(-p "${package}")
+          done < <(jq -r '.[]' <<< "${CLIPPY_PACKAGES}")
+          cargo clippy "${package_args[@]}" --lib --bins \
+            ${{ matrix.flags }} -- -D warnings
       - name: Check all-target lints
         if: github.event_name != 'pull_request'
         run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings
@@ -395,7 +422,6 @@ jobs:
 
           for job_result in \
             "fast-checks=${{ needs.fast-checks.result }}" \
-            "clippy=${{ needs.clippy.result }}" \
             "webui-v2-js-lint=${{ needs.webui-v2-js-lint.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"
@@ -404,6 +430,17 @@ jobs:
               exit 1
             fi
           done
+
+          clippy_may_skip=false
+          if [[ "${{ github.event_name }}" == "pull_request" && \
+                "${{ needs.changes.outputs.has_clippy }}" != "true" ]]; then
+            clippy_may_skip=true
+          fi
+          if ! job_result_ok \
+            "clippy" "${{ needs.clippy.result }}" "${clippy_may_skip}" "allow"; then
+            echo "clippy failed: ${{ needs.clippy.result }}"
+            exit 1
+          fi
 
           for job_result in \
             "reborn-cli-smoke=${{ needs.reborn-cli-smoke.result }}" \

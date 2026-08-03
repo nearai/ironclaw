@@ -39,7 +39,9 @@ and cross-surface regressions that cannot be inferred from changed paths. The
 full transitive reverse workspace dependency closure is included in PR crate
 selection for production-source changes. Package-owned tests, examples, and
 benches run only their owning package because they cannot alter a dependent
-package's production behavior. Foundational-crate changes that span more than
+package's production behavior. A changed top-level Cargo test, example, or
+bench target runs directly; nested support changes retain all owning-package
+targets. Foundational-crate changes that span more than
 three canonical buckets coalesce every changed and dependent package into at
 most three PR jobs instead of omitting consumer tests. The merge queue and
 pushes to `main` still run every crate bucket, root partition, group suite,
@@ -71,9 +73,11 @@ sharing dependency compilation across packages in the same job.
 
 `Tests (Reborn)` owns Rust crate, root, architecture, runtime, and coverage
 contracts. Code Style owns WebUI lint, Vitest, and the production build on all
-code events. Pull-request Clippy covers every workspace production library and
-binary with all features; merge queue and main add test and example targets,
-plus the default-feature matrix. Code Style's CLI Rust smoke and Reborn E2E's
+code events. Pull-request Clippy covers production libraries and binaries for
+directly changed workspace packages with all features. Test-only and CI-only
+PRs do not compile an unchanged workspace solely for linting. Merge queue and
+main lint the full workspace, add test and example targets, and run the
+default-feature matrix. Code Style's CLI Rust smoke and Reborn E2E's
 four Rust groups run on merge queue and main, where they validate the
 exhaustive merged state, but do not repeat those contracts on PR runners. The release-binary
 smoke harness self-test remains in Code Style's fast deterministic job on every

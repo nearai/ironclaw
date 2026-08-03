@@ -303,6 +303,8 @@ def build_plan(
     package_directories, reverse = _workspace_packages(metadata)
     production_packages: set[str] = set()
     direct_test_packages: set[str] = set()
+    exact_test_targets: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    packages_requiring_all_targets: set[str] = set()
     root_partitions: set[int] = set()
     integration_lanes: set[str | int] = set()
     # Recorded replay is a repository-wide ordering and integration sentinel,
@@ -394,6 +396,18 @@ def build_plan(
             if relative.startswith(("tests/", "benches/", "examples/")):
                 direct_test_packages.add(package)
                 reasons.append(f"package-owned test surface changed: {package}")
+                parts = Path(relative).parts
+                target_kinds = {
+                    "tests": "test",
+                    "benches": "bench",
+                    "examples": "example",
+                }
+                if len(parts) == 2 and Path(parts[1]).suffix == ".rs":
+                    exact_test_targets[package].add(
+                        (target_kinds[parts[0]], Path(parts[1]).stem)
+                    )
+                else:
+                    packages_requiring_all_targets.add(package)
             else:
                 production_packages.add(package)
                 reasons.append(f"production package changed: {package}")
@@ -416,6 +430,21 @@ def build_plan(
         )
 
     buckets = _bucket_packages(sorted(affected)) if affected else []
+    full_target_packages = (
+        _affected_packages(production_packages, reverse)
+        | packages_requiring_all_targets
+    ) & canonical_set
+    for bucket in buckets:
+        bucket_packages = set(bucket["packages"])
+        if bucket_packages & full_target_packages:
+            continue
+        if not all(package in exact_test_targets for package in bucket_packages):
+            continue
+        bucket["exact_targets"] = [
+            {"package": package, "kind": kind, "name": name}
+            for package in sorted(bucket_packages)
+            for kind, name in sorted(exact_test_targets[package])
+        ]
     if len(buckets) > MAX_PR_CRATE_BUCKETS:
         original_bucket_count = len(buckets)
         buckets = _bound_pr_buckets(buckets)

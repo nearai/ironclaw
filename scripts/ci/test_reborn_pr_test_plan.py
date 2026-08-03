@@ -93,8 +93,21 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["affected_packages"], ["alpha"])
         self.assertEqual(
             plan["crate_buckets"],
-            [{"name": "selected", "packages": ["alpha"]}],
+            [
+                {
+                    "name": "selected",
+                    "packages": ["alpha"],
+                    "exact_targets": [
+                        {"package": "alpha", "kind": "test", "name": "contract"}
+                    ],
+                }
+            ],
         )
+
+    def test_nested_package_test_change_keeps_all_owning_package_targets(self) -> None:
+        plan = self.plan("pull_request", ["crates/alpha/tests/support/mod.rs"])
+        self.assertEqual(plan["affected_packages"], ["alpha"])
+        self.assertNotIn("exact_targets", plan["crate_buckets"][0])
 
     def test_high_fanout_package_keeps_consumers_in_bounded_jobs(self) -> None:
         wide = metadata()
@@ -388,13 +401,20 @@ class RebornPrTestPlanTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(
-            "cargo clippy --workspace --lib --bins ${{ matrix.flags }} -- -D warnings",
+            "python3 scripts/ci/changed_workspace_packages.py",
             code_style,
         )
+        self.assertIn('package_args+=(-p "${package}")', code_style)
+        self.assertIn("needs.changes.outputs.has_clippy == 'true'", code_style)
         self.assertIn(
             "cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings",
             code_style,
         )
+        self.assertIn(
+            "${{ toJSON(matrix.bucket.exact_targets || fromJSON('[]')) }}",
+            workflow,
+        )
+        self.assertIn('cargo test -p "${package}" "--${kind}" "${name}"', workflow)
 
     def test_pr_workflows_do_not_repeat_reborn_rust_contracts(self) -> None:
         code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
