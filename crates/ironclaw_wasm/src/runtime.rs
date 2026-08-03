@@ -84,10 +84,7 @@ impl WitToolRuntime {
                 let message = if store.data().deadline_exceeded() {
                     "WASM execution deadline exceeded".to_string()
                 } else {
-                    error.downcast_ref::<wasmtime::Trap>().map_or_else(
-                        || "WASM component execution failed".to_string(),
-                        ToString::to_string,
-                    )
+                    safe_component_execution_message(&error)
                 };
                 return Err(execution_failed_with_usage(message, &store, started));
             }
@@ -183,6 +180,13 @@ fn elapsed_millis(started: Instant) -> u64 {
     started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
+fn safe_component_execution_message(error: &wasmtime::Error) -> String {
+    error.downcast_ref::<wasmtime::Trap>().map_or_else(
+        || "WASM component execution failed".to_string(),
+        ToString::to_string,
+    )
+}
+
 fn execution_failed_with_usage(
     message: String,
     store: &Store<StoreData>,
@@ -227,5 +231,23 @@ fn classify_instantiation_error(message: String) -> WasmError {
         ))
     } else {
         WasmError::InstantiationFailed(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_component_execution_message;
+
+    #[test]
+    fn non_trap_execution_error_uses_fixed_public_message() {
+        let private_marker = "guest-owned-private-error-marker";
+        let error = wasmtime::Error::msg(format!("guest root cause: {private_marker}"))
+            .context(format!("component call failed: {private_marker}"));
+
+        assert!(error.downcast_ref::<wasmtime::Trap>().is_none());
+        let message = safe_component_execution_message(&error);
+
+        assert_eq!(message, "WASM component execution failed");
+        assert!(!message.contains(private_marker));
     }
 }
