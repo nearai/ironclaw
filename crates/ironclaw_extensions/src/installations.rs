@@ -3151,6 +3151,58 @@ impl ExtensionInstallationStore {
         .map_err(|error| map_extension_state_cas_error(error, "installation"))
     }
 
+    async fn clear_v2_preparation_lease(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        incarnation_id: &InstallationIncarnationId,
+        expected_manifest_ref: &ExtensionManifestRef,
+    ) -> Result<(), ExtensionInstallationError> {
+        let path = self.v2_scoped_path(&self.v2_installation_path(installation_id)?)?;
+        let installation_id = installation_id.clone();
+        let incarnation_id = incarnation_id.clone();
+        let expected_manifest_ref = expected_manifest_ref.clone();
+        cas_update(
+            self.scoped_filesystem.as_ref(),
+            &ResourceScope::system(),
+            &path,
+            decode_v2_installation_body,
+            entry_for_v2_installation,
+            move |current: Option<V2InstallationRecord>| {
+                let installation_id = installation_id.clone();
+                let incarnation_id = incarnation_id.clone();
+                let expected_manifest_ref = expected_manifest_ref.clone();
+                async move {
+                    let Some(mut record) = current else {
+                        return Err(ExtensionInstallationError::InstallationNotFound {
+                            installation_id,
+                        });
+                    };
+                    if record.installation_id != installation_id {
+                        return Err(invalid_installation_error(
+                            "v2 installation body identity did not match its key",
+                        ));
+                    }
+                    let lease_matches = record
+                        .lease
+                        .as_ref()
+                        .and_then(|lease| lease.preparation.as_ref())
+                        .is_some_and(|preparation| {
+                            preparation.incarnation_id == incarnation_id
+                                && preparation.expected_manifest_ref == expected_manifest_ref
+                        });
+                    if !lease_matches {
+                        return Ok(CasApply::no_op(record, ()));
+                    }
+                    record.lease = None;
+                    record.updated_at = Utc::now();
+                    Ok(CasApply::new(record, ()))
+                }
+            },
+        )
+        .await
+        .map_err(|error| map_extension_state_cas_error(error, "installation"))
+    }
+
     async fn repair_compatibility_views(&self) -> Result<(), ExtensionInstallationError> {
         let installation_rows = query_all(
             &self.filesystem,
@@ -3616,7 +3668,13 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
                 // (repair_interrupted_v2_leases) or another mutator; either
                 // outcome still clears the lease, and the original rejection
                 // below is the error the caller must see.
-                let _ = self.clear_v2_lease(installation_id).await;
+                let _ = self
+                    .clear_v2_preparation_lease(
+                        installation_id,
+                        incarnation_id,
+                        expected_pending_manifest_ref,
+                    )
+                    .await;
                 return Err(rejection);
             }
         };
@@ -3689,7 +3747,13 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
             Err(rejection) => {
                 // The lease was committed above. Keep the pending aggregate
                 // immediately visible if the checkpoint CAS fails.
-                let _ = self.clear_v2_lease(installation_id).await;
+                let _ = self
+                    .clear_v2_preparation_lease(
+                        installation_id,
+                        incarnation_id,
+                        expected_pending_manifest_ref,
+                    )
+                    .await;
                 return Err(rejection);
             }
         };
@@ -5212,6 +5276,56 @@ mod tests {
                 .manifest_hash()
                 .map(ManifestHash::as_str),
             Some("hash-two")
+        );
+    }
+
+    #[tokio::test]
+    async fn preparation_lease_cleanup_clears_only_the_matching_lease() {
+        let store = installation_store().await;
+        let pending = pending_installation("fixture", Some("hash-one"));
+        let installation_id = pending.installation_id().clone();
+        let incarnation = pending.incarnation_id().cloned().expect("incarnation");
+        let expected_ref = pending.manifest_ref().clone();
+        store
+            .upsert_manifest_and_installation(
+                pending_manifest_record("fixture", Some("hash-one")),
+                pending,
+            )
+            .await
+            .expect("seed pending");
+        store
+            .take_v2_preparation_lease(&installation_id, &incarnation, &expected_ref)
+            .await
+            .expect("take preparation lease");
+
+        let different_ref = ExtensionManifestRef::new(
+            ExtensionId::new("fixture").expect("extension id"),
+            Some(ManifestHash::new("hash-other").expect("hash")),
+        );
+        store
+            .clear_v2_preparation_lease(&installation_id, &incarnation, &different_ref)
+            .await
+            .expect("mismatched cleanup is a no-op");
+        assert!(
+            store
+                .get_installation(&installation_id)
+                .await
+                .expect("load leased installation")
+                .is_none(),
+            "a mismatched cleanup must retain the newer preparation lease"
+        );
+
+        store
+            .clear_v2_preparation_lease(&installation_id, &incarnation, &expected_ref)
+            .await
+            .expect("matching cleanup succeeds");
+        assert!(
+            store
+                .get_installation(&installation_id)
+                .await
+                .expect("load released installation")
+                .is_some(),
+            "the matching cleanup restores visibility"
         );
     }
 
