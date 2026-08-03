@@ -129,8 +129,10 @@ pull requests.
 `ironclaw-release.yml` is the tag-only cargo-dist publisher for the shipping Reborn
 `ironclaw` package and binary. Matching `ironclaw-v*` tags build the seven
 release targets, produce archives and checksums plus shell, PowerShell, and MSI
-installers, and create the tag's GitHub Release. cargo-dist derives the
-Release title and body from the release metadata and `CHANGELOG.md`.
+installers, and create the tag's GitHub Release. After that Release exists, the
+workflow publishes the regular `nearaidev/ironclaw` Docker image with version,
+`latest`, and source-SHA tags. cargo-dist derives the Release title and body
+from the release metadata and `CHANGELOG.md`.
 
 cargo-dist 0.31 generates workflow-wide `contents: write` and does not expose a
 setting for built-in job permissions. The checked-in workflow is therefore
@@ -231,12 +233,14 @@ the configuration:
   Windows/bench/docker deep coverage). Called workflows use the `deep` marker
   input instead: it defaults to true and only materializes under
   `workflow_call`.
-- **A called workflow that references `secrets.*` needs `secrets: inherit` at
-  the call site.** Otherwise the entire caller run dies at trigger time as a
-  `startup_failure` with zero jobs — including any in-run alert job. Nightly
-  Deep CI had zero successful runs from its creation (2026-05-06) through
-  2026-07-08 — 65 of its 74 retained runs are startup_failures — precisely
-  because this failure mode is invisible from inside the run.
+- **A called workflow that references `secrets.*` needs those secrets passed at
+  the call site**, either through an explicit mapping (preferred for a
+  narrowly privileged publish job) or `secrets: inherit` when it truly needs
+  the caller's full secret set. Otherwise the entire caller run dies at trigger
+  time as a `startup_failure` with zero jobs — including any in-run alert job.
+  Nightly Deep CI had zero successful runs from its creation (2026-05-06)
+  through 2026-07-08 — 65 of its 74 retained runs are startup_failures —
+  precisely because this failure mode is invisible from inside the run.
   `nightly-watchdog.yml` (08:00 UTC) exists for exactly that: it checks each
   nightly's latest scheduled run from outside and posts the failure to Slack
   even when the run itself never started.
@@ -285,16 +289,20 @@ pull requests.
 For #6160, `ironclaw-release.yml` uses cargo-dist to publish only the canonical Reborn
 `ironclaw` package. The active tag DAG consists of cargo-dist planning, the
 seven target builds, universal installer generation, and GitHub Release
-hosting. Legacy v1 artifacts, independently published WASM extensions, Docker
-images, and the old registry-checksum/announcement path are outside this DAG.
-The generated `announce` job remains as cargo-dist's final release step; it does
-not restore any of those retired products.
+hosting, followed by the regular Reborn Docker image. Legacy v1 artifacts,
+independently published WASM extensions, `ironclaw-worker`, and the old
+registry-checksum path remain outside this DAG. The generated `announce` job
+remains cargo-dist's final release step and does not restore those retired
+products.
 
-`docker.yml` keeps its independent manual and hourly entry points; a Reborn
-version tag does not invoke them. The manual `reborn-release-compile.yml`
-preflight is also independent from publishing. Restoring any retired release
-product requires adding it back explicitly instead of making it a dependency
-of the Reborn package by default.
+The `docker-image` job runs only after `host` creates the GitHub Release. If
+Docker publishing fails, the existing GitHub Release and its artifacts remain
+available while the overall workflow reports failure for retry/repair. Release
+builds publish only `nearaidev/ironclaw`; they do not dispatch
+`nearai/ironclaw-dind` because the caller explicitly sets `trigger_dind: false`.
+The reusable `docker.yml` keeps its independent manual and hourly staging entry
+points, including their existing optional DIND dispatch. The manual
+`reborn-release-compile.yml` preflight remains independent from publishing.
 
 ## Known accepted gaps (deliberate, revisit as needed)
 
