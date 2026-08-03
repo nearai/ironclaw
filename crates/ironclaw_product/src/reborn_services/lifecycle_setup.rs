@@ -123,15 +123,16 @@ pub(super) async fn setup_extension(
     });
     if action == SetupAction::SelectAuth {
         let auth_selection = parse_hosted_mcp_auth_selection(&request)?;
-        let refreshed = service
+        let _selection = service
             .execute(
-                context,
+                context.clone(),
                 LifecycleProductAction::ExtensionSelectHostedMcpAuth {
-                    package_ref,
+                    package_ref: package_ref.clone(),
                     auth_selection,
                 },
             )
             .await?;
+        let refreshed = project_package(service, context, package_ref).await?;
         let refreshed_requirements = extension_setup_credentials::requirements(&refreshed);
         return setup_extension_response(
             extension_credentials,

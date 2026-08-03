@@ -29,6 +29,8 @@ import {
 
 const OAUTH_SETUP_REFRESH_MS = 2000;
 const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
+const HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF =
+  "hosted_mcp_auth_selection_required";
 const OAUTH_STATUS_ERROR_KEYS = Object.freeze({
   failed: "extensions.oauthFailed",
   canceled: "extensions.oauthCanceled",
@@ -337,7 +339,7 @@ export function useExtensionSetup(packageRef) {
       query.data?.blockers?.some(
         (blocker) =>
           blocker?.kind === "setup" &&
-          blocker?.ref_id === "hosted_mcp_auth_selection_required",
+          blocker?.ref_id === HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF,
       ) === true,
     isLoading: query.isLoading,
     error: query.error,
@@ -645,7 +647,7 @@ export function useHostedMcpAuthSelection(packageRef, onSuccess) {
           res.blockers?.some(
             (blocker) =>
               blocker?.kind === "setup" &&
-              blocker?.ref_id === "hosted_mcp_auth_selection_required",
+              blocker?.ref_id === HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF,
           )
         ) {
           throw new Error(res.message || t("extensions.customMcpAuthHint"));

@@ -611,6 +611,7 @@ impl HostedMcpPreparationService {
             self.installation_store
                 .upsert_manifest_only(
                     installation.installation_id(),
+                    installation.incarnation_id(),
                     installation.manifest_ref(),
                     installation.updated_at(),
                     finalized.clone(),

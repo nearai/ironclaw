@@ -11,8 +11,8 @@ use ironclaw_extensions::{
     ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
     ExtensionInstallationPersistedParts, ExtensionInstallationStore,
     ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef,
-    HostApiContractRegistry, InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestHash,
-    ManifestSource, ManifestV2Error, MembershipDeactivation,
+    HostApiContractRegistry, InstallationIncarnationId, InstallationOwner, MANIFEST_SCHEMA_VERSION,
+    ManifestHash, ManifestSource, ManifestV2Error, MembershipDeactivation,
 };
 use ironclaw_filesystem::{
     CasExpectation, Fault, FaultInjecting, FilesystemOperation, Filter, InMemoryBackend,
@@ -1212,11 +1212,31 @@ async fn assert_normalized_backend_contract(
         .await
         .unwrap()
         .unwrap();
+    assert!(
+        before_refresh.updated_at() > expected.updated_at(),
+        "the public version must include the newer membership-row timestamp",
+    );
     let expected_ref = before_refresh.manifest_ref().clone();
     let expected_updated_at = before_refresh.updated_at();
+    let stale_incarnation = InstallationIncarnationId::fresh();
+    let stale_replacement = store
+        .upsert_manifest_only(
+            expected.installation_id(),
+            Some(&stale_incarnation),
+            &expected_ref,
+            expected_updated_at,
+            manifest("sha256:stale-incarnation"),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        stale_replacement,
+        ExtensionInstallationError::PreparationFinalizationRejected { .. }
+    ));
     store
         .upsert_manifest_only(
             expected.installation_id(),
+            before_refresh.incarnation_id(),
             &expected_ref,
             expected_updated_at,
             manifest("sha256:refresh"),
@@ -1244,6 +1264,7 @@ async fn assert_normalized_backend_contract(
     let mismatched = store
         .upsert_manifest_only(
             expected.installation_id(),
+            refreshed.incarnation_id(),
             &mismatched_ref,
             refreshed.updated_at(),
             manifest("sha256:stale"),
@@ -1258,6 +1279,7 @@ async fn assert_normalized_backend_contract(
     let stale = store
         .upsert_manifest_only(
             expected.installation_id(),
+            before_refresh.incarnation_id(),
             &expected_ref,
             expected_updated_at,
             manifest("sha256:stale"),
@@ -1278,6 +1300,7 @@ async fn assert_normalized_backend_contract(
     store
         .upsert_manifest_only(
             expected.installation_id(),
+            refreshed.incarnation_id(),
             &refresh_ref,
             refresh_updated_at,
             manifest("sha256:after-membership"),

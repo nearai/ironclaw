@@ -10322,7 +10322,12 @@ async fn setup_extension_returns_post_setup_onboarding_payload() {
 
 #[tokio::test]
 async fn setup_extension_dispatches_one_typed_hosted_mcp_auth_selection() {
-    let lifecycle = Arc::new(RecordingLifecycleService::new());
+    let lifecycle = Arc::new(RecordingLifecycleService::with_credential_requirements(
+        vec![manual_credential_requirement(
+            "hosted_mcp_bearer_token",
+            true,
+        )],
+    ));
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
@@ -10352,6 +10357,14 @@ async fn setup_extension_dispatches_one_typed_hosted_mcp_auth_selection() {
             auth_selection: HostedMcpAuthSelection::Bearer,
         }],
         "the setup boundary dispatches selection exactly once and does not run a second activation",
+    );
+    assert_eq!(
+        lifecycle.package_refs(),
+        vec![
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "mcp-custom",)
+                .expect("package ref")
+        ],
+        "setup re-projects the package after applying the auth selection",
     );
 }
 

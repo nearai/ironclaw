@@ -860,16 +860,19 @@ pub trait ExtensionInstallationStorePort: Send + Sync {
     /// Conditionally refresh only the manifest embedded in a live installation.
     /// The current installation row is read and retained by the CAS transform,
     /// so concurrent membership and credential state cannot be overwritten by
-    /// a manifest refresh. A changed manifest reference rejects the refresh.
+    /// a manifest refresh. A changed incarnation or manifest reference rejects
+    /// the refresh.
     async fn upsert_manifest_only(
         &self,
         installation_id: &ExtensionInstallationId,
+        expected_incarnation_id: Option<&InstallationIncarnationId>,
         expected_manifest_ref: &ExtensionManifestRef,
         expected_updated_at: DateTime<Utc>,
         manifest: ExtensionManifestRecord,
     ) -> Result<(), ExtensionInstallationError> {
         let _ = (
             installation_id,
+            expected_incarnation_id,
             expected_manifest_ref,
             expected_updated_at,
             manifest,
@@ -1028,6 +1031,7 @@ where
     async fn upsert_manifest_only(
         &self,
         installation_id: &ExtensionInstallationId,
+        expected_incarnation_id: Option<&InstallationIncarnationId>,
         expected_manifest_ref: &ExtensionManifestRef,
         expected_updated_at: DateTime<Utc>,
         manifest: ExtensionManifestRecord,
@@ -1035,6 +1039,7 @@ where
         (**self)
             .upsert_manifest_only(
                 installation_id,
+                expected_incarnation_id,
                 expected_manifest_ref,
                 expected_updated_at,
                 manifest,
@@ -3556,6 +3561,7 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
     async fn upsert_manifest_only(
         &self,
         installation_id: &ExtensionInstallationId,
+        expected_incarnation_id: Option<&InstallationIncarnationId>,
         expected_manifest_ref: &ExtensionManifestRef,
         expected_updated_at: DateTime<Utc>,
         manifest: ExtensionManifestRecord,
@@ -3568,6 +3574,7 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
         }
         let path = self.v2_scoped_path(&self.v2_installation_path(installation_id)?)?;
         let installation_id = installation_id.clone();
+        let expected_incarnation_id = expected_incarnation_id.cloned();
         let expected_manifest_ref = expected_manifest_ref.clone();
         let manifest_wire = WireManifestRecord::from(&manifest);
         cas_update(
@@ -3578,6 +3585,7 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
             entry_for_v2_installation,
             move |current: Option<V2InstallationRecord>| {
                 let installation_id = installation_id.clone();
+                let expected_incarnation_id = expected_incarnation_id.clone();
                 let expected_manifest_ref = expected_manifest_ref.clone();
                 let manifest_wire = manifest_wire.clone();
                 async move {
@@ -3596,9 +3604,14 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
                             installation_id,
                         });
                     }
+                    // The expected timestamp is the aggregate maximum across
+                    // this core and its child rows. Child-only changes can make
+                    // it newer than the core and must not block this update;
+                    // only a core newer than the observed aggregate is stale.
                     if record.lease.is_some()
+                        || record.incarnation_id != expected_incarnation_id
                         || record.manifest_ref() != expected_manifest_ref
-                        || record.updated_at != expected_updated_at
+                        || record.updated_at > expected_updated_at
                     {
                         return Err(
                             ExtensionInstallationError::PreparationFinalizationRejected {
