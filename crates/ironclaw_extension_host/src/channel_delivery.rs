@@ -65,8 +65,7 @@ fn delivery_identity(
             tracing::debug!(
                 target: "ironclaw::reborn::channel_delivery",
                 extension_id,
-                "channel delivery identity is not valid boundary vocabulary; treating the \
-                 channel as unresolved"
+                "channel delivery identity is not boundary vocabulary; channel unresolved"
             );
             None
         }

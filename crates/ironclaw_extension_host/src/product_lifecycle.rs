@@ -779,14 +779,13 @@ impl ExtensionLifecycleManager {
         &self,
     ) -> Result<std::collections::HashMap<ExtensionId, String>, ProductOperationFailure> {
         match self.generic_host.get() {
-            Some(host) => {
-                let raw = host.installation_errors().await.map_err(|error| {
-                    ProductOperationFailure::Transient {
-                        reason: format!("extension activation errors could not be read: {error}"),
-                    }
-                })?;
-                Ok(typed_activation_errors(raw))
-            }
+            Some(host) => host
+                .installation_errors()
+                .await
+                .map(typed_activation_errors)
+                .map_err(|error| ProductOperationFailure::Transient {
+                    reason: format!("extension activation errors could not be read: {error}"),
+                }),
             None => Ok(std::collections::HashMap::new()),
         }
     }
