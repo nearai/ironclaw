@@ -7,6 +7,7 @@
 
 mod bindings;
 mod config;
+mod diagnostic;
 mod error;
 mod host;
 mod runtime;

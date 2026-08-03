@@ -5,6 +5,7 @@ use wasmtime::{Config, Engine, Store};
 
 use crate::bindings;
 use crate::config::{EPOCH_TICK_INTERVAL, WIT_TOOL_VERSION, WitToolRuntimeConfig};
+use crate::diagnostic::sanitize_wasm_diagnostic;
 use crate::error::WasmError;
 use crate::host::WitToolHost;
 use crate::store::StoreData;
@@ -83,7 +84,7 @@ impl WitToolRuntime {
                 let message = if store.data().deadline_exceeded() {
                     "WASM execution deadline exceeded".to_string()
                 } else {
-                    error.to_string()
+                    format!("{error:#}")
                 };
                 return Err(execution_failed_with_usage(message, &store, started));
             }
@@ -107,7 +108,7 @@ impl WitToolRuntime {
 
         Ok(WitToolExecution {
             output_json: response.output,
-            error: response.error,
+            error: response.error.map(sanitize_wasm_diagnostic),
             usage,
             logs,
         })
@@ -187,7 +188,7 @@ fn execution_failed_with_usage(
     let mut usage = store.data().usage.clone();
     usage.wall_clock_ms = elapsed_millis(started);
     WasmError::ExecutionFailed {
-        message,
+        message: sanitize_wasm_diagnostic(message),
         usage,
         logs: store.data().logs.clone(),
     }

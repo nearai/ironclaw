@@ -5,6 +5,7 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiVie
 
 use crate::bindings;
 use crate::config::{DEFAULT_HTTP_TIMEOUT_MS, MAX_LOG_MESSAGE_BYTES, MAX_LOGS_PER_EXECUTION};
+use crate::diagnostic::sanitize_wasm_diagnostic;
 use crate::host::{WasmHttpRequest, WitToolHost};
 use crate::types::{WasmLogLevel, WasmLogRecord};
 use ironclaw_wasm_limiter::WasmResourceLimiter;
@@ -82,7 +83,7 @@ impl bindings::near::agent::host::Host for StoreData {
         if self.logs.len() >= MAX_LOGS_PER_EXECUTION {
             return;
         }
-        let message = truncate_log_message(message);
+        let message = sanitize_wasm_diagnostic(message);
         let level = match level {
             bindings::near::agent::host::LogLevel::Trace => WasmLogLevel::Trace,
             bindings::near::agent::host::LogLevel::Debug => WasmLogLevel::Debug,
@@ -176,7 +177,7 @@ impl bindings::near::agent::host::Host for StoreData {
     }
 }
 
-fn truncate_log_message(message: String) -> String {
+pub(crate) fn truncate_log_message(message: String) -> String {
     if message.len() <= MAX_LOG_MESSAGE_BYTES {
         return message;
     }
