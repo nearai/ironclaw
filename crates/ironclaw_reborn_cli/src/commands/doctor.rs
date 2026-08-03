@@ -232,6 +232,21 @@ mod tests {
 
     const HOST_MEDIATED_PROXY_CHECK: &str = "host_mediated_ambient_proxy";
     const HOST_MEDIATED_PROXY_DETAIL: &str = "ambient proxy variables are configured but ignored by host-mediated ReqwestNetworkTransport so approved pinned destinations remain authoritative; LLM clients and sandbox egress use separate proxy policies";
+    const AMBIENT_PROXY_ENV_VARS: [&str; 6] = [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ];
+
+    fn cleared_ambient_proxy_env() -> Vec<crate::runtime::test_env::EnvGuard> {
+        AMBIENT_PROXY_ENV_VARS
+            .into_iter()
+            .map(crate::runtime::test_env::EnvGuard::clear)
+            .collect()
+    }
 
     fn render_doctor_text(dto: &DoctorDto) -> String {
         let mut output = Vec::new();
@@ -323,6 +338,56 @@ mod tests {
         );
         assert!(!text.contains(HOST_MEDIATED_PROXY_CHECK));
         assert!(!json.contains(HOST_MEDIATED_PROXY_CHECK));
+    }
+
+    #[test]
+    fn doctor_uses_proxy_presence_captured_when_cli_context_is_resolved() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let _cleared_proxy_env = cleared_ambient_proxy_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = crate::runtime::test_env::EnvGuard::set(
+            "HOME",
+            temp.path().to_str().expect("temporary HOME must be UTF-8"),
+        );
+        let reborn_home = temp.path().join("reborn-home");
+        let _reborn_home = crate::runtime::test_env::EnvGuard::set(
+            "IRONCLAW_REBORN_HOME",
+            reborn_home
+                .to_str()
+                .expect("temporary Reborn home must be UTF-8"),
+        );
+
+        let absent_context =
+            RebornCliContext::resolve_from_env().expect("absent-proxy context must resolve");
+        let present_context = {
+            let _http_proxy = crate::runtime::test_env::EnvGuard::set(
+                "HTTP_PROXY",
+                "http://context-boundary-sentinel.invalid:18443/secret-path",
+            );
+            RebornCliContext::resolve_from_env().expect("present-proxy context must resolve")
+        };
+        assert!(
+            std::env::var_os("HTTP_PROXY").is_none(),
+            "the proxy variable must be absent before either context is rendered"
+        );
+
+        let absent_dto = build_doctor_dto(&absent_context);
+        assert!(
+            absent_dto
+                .checks
+                .iter()
+                .all(|check| check.name != HOST_MEDIATED_PROXY_CHECK),
+            "a context resolved without ambient proxy configuration must omit the diagnostic"
+        );
+
+        let present_dto = build_doctor_dto(&present_context);
+        assert!(
+            present_dto
+                .checks
+                .iter()
+                .any(|check| check.name == HOST_MEDIATED_PROXY_CHECK),
+            "a context resolved while an ambient proxy variable was present must retain the diagnostic after the process environment changes"
+        );
     }
 
     #[test]
