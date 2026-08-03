@@ -77,21 +77,41 @@ async def test_reborn_v2_agent_files_render_download_chips(reborn_v2_yolo_page):
     assert len(page.context.pages) == open_pages
 
     # Workspace-backed previews expose a direct jump to the selected file.
-    # Reload the dotted deep link to cover the server-side SPA fallback too;
-    # without it `/workspace/.../report.pdf` is mistaken for a missing asset.
+    # The route carries the source thread scope, and the viewer must keep using
+    # that thread's authorized file APIs instead of falling back to generic
+    # caller-default filesystem reads. Reload the dotted deep link to cover the
+    # server-side SPA fallback too.
+    workspace_requests = []
+
+    def record_workspace_request(request):
+        path = urlparse(request.url).path
+        if path.startswith("/api/webchat/v2/"):
+            workspace_requests.append(path)
+
+    page.on("request", record_workspace_request)
     open_workspace = page.locator(SEL_V2["attachment_open_workspace"])
     await expect(open_workspace).to_be_visible()
     await open_workspace.click()
     await expect(page).to_have_url(
-        re.compile(r"/workspace/workspace/report\.pdf$")
+        re.compile(r"/workspace/thread/[^/]+/workspace/report\.pdf$")
     )
     await expect(page.locator(SEL_V2["workspace_heading"])).to_be_visible()
     await expect(page.locator(SEL_V2["workspace_download"])).to_be_visible(
         timeout=15000
     )
+    route_match = re.search(r"/workspace/thread/([^/]+)/", page.url)
+    assert route_match is not None
+    source_thread_id = route_match.group(1)
+    assert (
+        f"/api/webchat/v2/threads/{source_thread_id}/files/stat"
+        in workspace_requests
+    )
+    assert not any(
+        path.startswith("/api/webchat/v2/fs/") for path in workspace_requests
+    )
     await page.reload()
     await expect(page).to_have_url(
-        re.compile(r"/workspace/workspace/report\.pdf$")
+        re.compile(r"/workspace/thread/[^/]+/workspace/report\.pdf$")
     )
     await expect(page.locator(SEL_V2["workspace_heading"])).to_be_visible()
 
