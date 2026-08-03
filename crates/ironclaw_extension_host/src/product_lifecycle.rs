@@ -680,7 +680,12 @@ impl ExtensionLifecycleManager {
         let summary = available.summary();
         let auth_selection_required = available.source
             == ironclaw_extensions::ManifestSource::UserRegistered
-            && available.resolved_manifest.mcp.is_some()
+            && available.resolved_manifest.mcp.as_ref().is_some_and(|mcp| {
+                matches!(
+                    mcp.registration_auth,
+                    ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::Auto
+                )
+            })
             && !has_activatable_surface
             && package_runtime_credential_auth_requirements(&available.package).is_empty();
         let mut response = response_with_payload(

@@ -488,6 +488,52 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
 }
 
 #[tokio::test]
+async fn explicit_no_auth_empty_catalog_does_not_reproject_auth_selection() {
+    let server = HostedMcpRegistrationServer::start(HostedMcpAuthPolicy::NoAuth, Vec::new()).await;
+    let services = build_lifecycle_test_services(
+        "hosted-mcp-no-auth-empty-catalog",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+    )
+    .await;
+    let scope = webui_gate_resource_scope_for_owner("hosted-mcp-no-auth-empty-catalog");
+    let mut request = automatic_request();
+    request.auth_selection = Some(HostedMcpAuthSelection::NoAuth);
+    services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionRegisterHostedMcp { request },
+        )
+        .await
+        .expect("explicit no-auth registration persists");
+
+    let installed = install_fixture(&services, scope.clone()).await;
+    assert_eq!(
+        installed.phase,
+        ironclaw_extension_contracts::state::InstallationState::Installed,
+        "an empty catalog has no activatable surface"
+    );
+    let projected = services
+        .lifecycle_service
+        .project_package(lifecycle_product_context(scope), fixture_package_ref())
+        .await
+        .expect("the finalized no-auth package reprojects");
+    assert!(
+        !projected.blockers.iter().any(|blocker| matches!(
+            blocker,
+            ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
+                ref_id: Some(ref_id),
+            } if ref_id.as_str()
+                == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
+        )),
+        "a successful explicit no-auth discovery must not re-open auth selection: {projected:#?}"
+    );
+}
+
+#[tokio::test]
 async fn registered_but_never_installed_definition_survives_restart_and_installs_without_reregistration()
  {
     let server = HostedMcpRegistrationServer::start(
