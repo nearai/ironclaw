@@ -1255,13 +1255,18 @@ impl StubServices {
                     .lock()
                     .expect("lock")
                     .push(request.clone());
+                let entry_path = if request.path.is_empty() {
+                    "today.md".to_string()
+                } else {
+                    format!("{}/today.md", request.path.trim_end_matches('/'))
+                };
                 Ok(RebornViewPage {
                     payload: serde_json::to_value(RebornFsListResponse {
                         mount: request.mount,
                         path: request.path,
                         entries: vec![ProjectFsEntry {
                             name: "today.md".to_string(),
-                            path: "daily/today.md".to_string(),
+                            path: entry_path,
                             kind: ProjectFsEntryKind::File,
                         }],
                     })
@@ -8188,6 +8193,43 @@ async fn browse_fs_dir_rejects_parent_traversal_under_scoped_projection() {
         calls.is_empty(),
         "traversal request must not reach the product layer"
     );
+}
+
+#[tokio::test]
+async fn browse_fs_dir_strips_prefixed_entry_paths_under_scoped_projection() {
+    // The stub now echoes entry paths under the served (prefixed) root, as the
+    // product layer does. The handler must strip the caller prefix from every
+    // entry path so the browser navigates with mount-relative paths and never
+    // sees the storage ownership prefix.
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(true),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: false,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=workspace")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(
+        body["entries"][0]["path"], "today.md",
+        "entry paths must be stripped to mount-relative, not the prefixed served path"
+    );
+    assert_eq!(body["entries"][0]["name"], "today.md");
 }
 
 #[tokio::test]

@@ -220,7 +220,7 @@ pub async fn get_session(
     let user_id = caller.user_id.to_string();
     let global_auto_approve = global_auto_approve_enabled(&state, caller).await;
     let workspace_requires_scoped_projection =
-        state.workspace_requires_scoped_projection() || !capabilities.operator_webui_config;
+        workspace_scoped_projection_required(&state, &capabilities);
     Json(WebUiV2SessionResponse {
         tenant_id,
         user_id,
@@ -783,7 +783,7 @@ pub async fn browse_fs_dir(
         .path
         .filter(|path| !path.trim().is_empty())
         .unwrap_or_default();
-    let projection = workspace_projection_for(&state, &caller, &capabilities);
+    let projection = workspace_projection_for(&state, &caller, &capabilities)?;
     let (served_path, scoped_prefix) =
         workspace_served_path(&query.mount, &requested_path, projection)?;
     let surface = state.bind_services(caller);
@@ -812,7 +812,7 @@ pub async fn stat_fs_path(
     Query(query): Query<FsBrowseQuery>,
 ) -> Result<Json<RebornFsStatResponse>, WebUiV2HttpError> {
     let requested_path = require_fs_browse_path(query.path)?;
-    let projection = workspace_projection_for(&state, &caller, &capabilities);
+    let projection = workspace_projection_for(&state, &caller, &capabilities)?;
     let (served_path, scoped_prefix) =
         workspace_served_path(&query.mount, &requested_path, projection)?;
     let surface = state.bind_services(caller);
@@ -839,7 +839,7 @@ pub async fn read_fs_file(
     Query(query): Query<FsBrowseQuery>,
 ) -> Result<Response, WebUiV2HttpError> {
     let requested_path = require_fs_browse_path(query.path)?;
-    let projection = workspace_projection_for(&state, &caller, &capabilities);
+    let projection = workspace_projection_for(&state, &caller, &capabilities)?;
     let (served_path, scoped_prefix) =
         workspace_served_path(&query.mount, &requested_path, projection)?;
     let request = RebornFsReadRequest {
@@ -866,32 +866,44 @@ fn require_fs_browse_path(path: Option<String>) -> Result<String, WebUiV2HttpErr
     }
 }
 
+/// Effective scoped-workspace mode for one authenticated caller. The deployment
+/// gate and the operator bypass are one policy; `/session` and the `/fs/*`
+/// handlers must never compute it differently.
+fn workspace_scoped_projection_required(
+    state: &WebUiV2State,
+    capabilities: &WebUiV2Capabilities,
+) -> bool {
+    state.workspace_requires_scoped_projection() || !capabilities.operator_webui_config
+}
+
 /// Effective caller-scoped workspace projection for an authenticated `/fs/*`
 /// request. The browser must confine Workspace reads to the caller's own
-/// subtree (`tenants/{tenant}/users/{user}`) when the deployment requires
-/// scoped projection **and** the caller is not using an operator WebUI bypass.
-/// Memory is already caller-scoped server-side; Workspace is shared by default,
-/// so this projection is what prevents one user from listing another user's
-/// workspace artifacts through the browser.
+/// subtree (`tenants/{tenant}/users/{user}`) when scoped projection is
+/// required. Memory is already caller-scoped server-side; Workspace is shared
+/// by default, so this projection is what prevents one user from listing
+/// another user's workspace artifacts through the browser.
 ///
-/// Returns the per-caller prefix to prepend when `Some`; `None` means the
-/// raw shared workspace root is served (local/operator fallback).
+/// Returns the per-caller prefix to prepend when `Ok(Some)`; `Ok(None)` means
+/// the raw shared workspace root is served (local/operator fallback). `Err`
+/// fails closed: scoped projection is required but the caller identity cannot
+/// key a subtree, so serving the shared root would reintroduce the leak the
+/// projection exists to prevent.
 fn workspace_projection_for(
     state: &WebUiV2State,
     caller: &ProductSurfaceCaller,
     capabilities: &WebUiV2Capabilities,
-) -> Option<String> {
-    let scoped =
-        state.workspace_requires_scoped_projection() || !capabilities.operator_webui_config;
-    if !scoped {
-        return None;
+) -> Result<Option<String>, WebUiV2HttpError> {
+    if !workspace_scoped_projection_required(state, capabilities) {
+        return Ok(None);
     }
     let tenant = caller.tenant_id.as_str();
     let user = caller.user_id.as_str();
     if tenant.is_empty() || user.is_empty() {
-        return None;
+        return Err(
+            ProductSurfaceError::validation("caller", ProductSurfaceValidationCode::Blank).into(),
+        );
     }
-    Some(format!("tenants/{tenant}/users/{user}"))
+    Ok(Some(format!("tenants/{tenant}/users/{user}")))
 }
 
 /// Translate a mount-relative browser path into the path the product layer
@@ -938,9 +950,15 @@ fn workspace_served_path(
 /// does not carry the prefix (e.g. a NotFound response that echoes the raw
 /// request) is returned trimmed of surrounding slashes.
 fn strip_workspace_prefix(prefix: &str, path: &str) -> String {
-    path.strip_prefix(prefix)
+    let base = prefix.trim_matches('/');
+    let value = path.trim_matches('/');
+    if value.is_empty() {
+        return String::new();
+    }
+    value
+        .strip_prefix(&format!("{base}/"))
         .map(|rest| rest.trim_start_matches('/').to_string())
-        .unwrap_or_else(|| path.trim_matches('/').to_string())
+        .unwrap_or_else(|| value.to_string())
 }
 
 /// Reject a missing or blank `?path=` on the stat/download routes with a

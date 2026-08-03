@@ -148,6 +148,28 @@ pub(crate) fn system_extensions_lifecycle_mount_view() -> Result<MountView, Host
 /// [`BROWSE_MEMORY_ALIAS`]/[`WORKSPACE_ALIAS`].
 pub(crate) const BROWSE_MEMORY_ALIAS: &str = MEMORY_ALIAS;
 
+/// Per-caller workspace mount view for agent read/write filesystem access.
+/// Maps `WORKSPACE_ALIAS` to the caller's own subtree under
+/// `/projects/workspace/tenants/{tenant}/users/{user}`, mirroring memory's
+/// per-caller scoping, so agent tool/attachment writes land in the caller's
+/// private subtree and the WebUI browser (which reads the same subtree) can
+/// surface them. A missing subtree renders empty on read rather than falling
+/// back to the shared root.
+pub(crate) fn scoped_workspace_mount_view(
+    scope: &ResourceScope,
+    permissions: MountPermissions,
+) -> Result<MountView, HostApiError> {
+    MountView::new(vec![grant(
+        WORKSPACE_ALIAS,
+        &format!(
+            "{WORKSPACE_TARGET}/tenants/{}/users/{}",
+            scope.tenant_id.as_str(),
+            scope.user_id.as_str()
+        ),
+        permissions,
+    )?])
+}
+
 pub(crate) fn scoped_browse_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError> {
     let memory_target = scoped_memory_target(scope)?;
     MountView::new(vec![

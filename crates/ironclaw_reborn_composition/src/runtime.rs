@@ -1367,14 +1367,18 @@ impl RebornRuntime {
         &self,
     ) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
         let extension_filesystem = &self.extension_filesystem;
-        let attachment_mounts = crate::runtime_mounts::workspace_mount_view(
-            ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
-            &[],
-        )
-        .ok()?;
-        Some(Arc::new(ScopedFilesystem::with_fixed_view(
+        let permissions = ironclaw_host_api::mount::MountPermissions::read_write_list_delete();
+        // Per-caller scoped workspace: agent tool/attachment writes land under
+        // `/projects/workspace/tenants/{tenant}/users/{user}`, mirroring memory.
+        // The WebUI browser reads the same subtree, so a hosted user sees and
+        // reads/writes only their own artifacts. The resolver runs per call so
+        // each authenticated caller keys its own subtree; the shared
+        // `/projects/workspace` root is never exposed.
+        Some(Arc::new(ScopedFilesystem::new(
             Arc::clone(extension_filesystem),
-            attachment_mounts,
+            move |scope| {
+                crate::runtime_mounts::scoped_workspace_mount_view(scope, permissions.clone())
+            },
         )))
     }
 

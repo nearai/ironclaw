@@ -217,10 +217,13 @@ pub struct WebuiServeConfig {
     /// the same-origin check pass for a forged Origin. Defaults to
     /// `None` (fall back to Host-header comparison + allowlist).
     pub(crate) canonical_host: Option<String>,
-    /// Whether the browser must avoid raw workspace fallback and only display
-    /// caller-scoped workspace content. This is presentation-layer behavior:
-    /// filesystem mounts stay unchanged, but hosted profiles fail closed when
-    /// the raw workspace root would otherwise expose shared artifacts.
+    /// Whether `/fs/*` workspace list/stat/read handlers must confine reads to
+    /// the caller's own subtree (`tenants/{tenant}/users/{user}`) instead of
+    /// the shared `/projects/workspace` root, and the `/session` feature flag
+    /// advertises the same mode to the browser. Hosted profiles enable this so
+    /// one user cannot list another user's workspace artifacts; local/operator
+    /// profiles keep it off so single-user workspaces stay visible. The flag
+    /// controls filesystem-handler path selection, not only UI display.
     pub(crate) workspace_requires_scoped_projection: bool,
     /// Trusted default agent id stamped onto every
     /// [`ProductSurfaceCaller`]. The browser body cannot influence
