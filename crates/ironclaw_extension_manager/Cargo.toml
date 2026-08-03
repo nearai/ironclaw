@@ -18,7 +18,7 @@ layer = "products"
 # reused by downstream integration tests. Zero-byte in production.
 test-support = [
     "dep:ironclaw_authorization",
-    "dep:ironclaw_first_party_extensions",
+    "dep:ironclaw_extension_support",
     "dep:ironclaw_network",
     "dep:ironclaw_processes",
     "dep:ironclaw_resources",
@@ -46,7 +46,7 @@ ironclaw_authorization = { path = "../ironclaw_authorization", optional = true }
 ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_extension_host = { path = "../ironclaw_extension_host" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
-ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions", optional = true }
+ironclaw_extension_support = { path = "../extensions/ironclaw_extension_support", optional = true }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
@@ -76,7 +76,7 @@ ironclaw_auth = { path = "../ironclaw_auth", features = ["test-support"] }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_extension_host = { path = "../ironclaw_extension_host", features = ["test-support"] }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
-ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
+ironclaw_extension_support = { path = "../extensions/ironclaw_extension_support" }
 ironclaw_host_api = { path = "../ironclaw_host_api", features = ["test-support"] }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime", features = ["test-support"] }
 ironclaw_loop_contracts = { path = "../ironclaw_loop_contracts", version = "0.1.0" }

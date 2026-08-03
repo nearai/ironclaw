@@ -18,7 +18,7 @@ change trips that gate, you are re-introducing a deleted model.
 and `[auth.*]` sections. The design is law: `docs/reborn/extension-runtime/`
 (`overview.md` §3 the manifest, §4 the adapters, §5 the flows, §6 lifecycle).
 The worked example for *every* section below is the live Slack manifest —
-read it first: `crates/ironclaw_first_party_extensions/assets/slack/manifest.toml`.
+read it first: `crates/extensions/packages/slack/manifest.toml`.
 
 ## The model in one diagram
 
@@ -56,15 +56,15 @@ trait — it is one host engine driving manifest recipes (overview §4.3).
 ## Where a bundled package lives
 
 Every first-party integration is a self-contained package:
-`crates/ironclaw_first_party_extensions/assets/<id>/` (manifest + schemas +
+`crates/extensions/packages/<id>/` (manifest + schemas +
 prompts + any WASM) beside one module
-`crates/ironclaw_first_party_extensions/src/packages/<id>.rs` (embeds via
+`crates/extensions/ironclaw_extension_support/src/packages/<id>.rs` (embeds via
 `include_str!`/`include_bytes!`, onboarding copy, trust effects). A collector
 concatenates them; add a line to `PACKAGES` in `.../src/packages/mod.rs`.
 Composition and the CLI consume these as **opaque bundles** and never name a
 package (overview §3). Do NOT register assets in composition — the old
 `available_extensions.rs::*_assets()` home (now `crates/ironclaw_extension_host/src/available_extensions.rs`) is being dissolved.
-Re-verify the module list: `grep -n 'ID,' crates/ironclaw_first_party_extensions/src/packages/mod.rs`.
+Re-verify the module list: `grep -n 'ID,' crates/extensions/ironclaw_extension_support/src/packages/mod.rs`.
 
 ## Adding a tool surface
 

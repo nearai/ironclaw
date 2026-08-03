@@ -6941,7 +6941,7 @@ api_key_env = "REBORN_TEST_UNSET_BC8F4D_KEY"
 }
 
 #[test]
-fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
+fn release_ci_publishes_reborn_and_regular_docker_without_legacy_or_dind_paths() {
     let root = workspace_root();
     let release_workflow =
         std::fs::read_to_string(root.join(".github/workflows/ironclaw-release.yml"))
@@ -7050,6 +7050,22 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
         "cargo-dist host must publish generated assets with generated title, notes, and prerelease state"
     );
 
+    let docker_job = release_job("docker-image");
+    assert!(
+        docker_job.contains("needs: host")
+            && docker_job.contains("needs.host.result == 'success'")
+            && docker_job.contains("permissions:\n      contents: read")
+            && docker_job.contains("packages: read")
+            && docker_job.contains("actions: write")
+            && docker_job.contains("uses: ./.github/workflows/docker.yml")
+            && docker_job.contains("release: true")
+            && docker_job.contains("trigger_dind: false")
+            && docker_job.contains("DOCKER_REGISTRY_TOKEN: ${{ secrets.DOCKER_REGISTRY_TOKEN }}")
+            && !docker_job.contains("secrets: inherit")
+            && !docker_job.contains("GH_RELEASES_MANAGER"),
+        "release CI must publish the regular Docker image only after the hosted release succeeds"
+    );
+
     let announce_job = release_job("announce");
     assert!(
         announce_job.contains("- plan")
@@ -7066,7 +7082,6 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
         "reborn-binary-compile",
         "publish-reborn-binaries",
         "build-wasm-extensions",
-        "docker-image",
         "update-registry-checksums",
     ] {
         assert!(
@@ -7075,15 +7090,50 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
         );
     }
     assert!(
-        !release_workflow.contains("uses: ./.github/workflows/docker.yml")
-            && !release_workflow.contains("ironclaw-legacy")
+        !release_workflow.contains("ironclaw-legacy")
             && !release_workflow.contains("ironclaw_legacy")
             && !release_workflow.contains("reborn-compile-"),
-        "the release workflow must consume only cargo-dist Reborn artifacts"
+        "the release workflow must consume only cargo-dist Reborn artifacts before Docker publishing"
+    );
+    let workflow_call_config = docker_workflow
+        .split_once("  workflow_call:\n")
+        .and_then(|(_, remainder)| {
+            remainder
+                .split_once("  workflow_dispatch:\n")
+                .map(|(section, _)| section)
+        })
+        .expect("Docker workflow should define workflow_call configuration");
+    let workflow_dispatch_config = docker_workflow
+        .split_once("  workflow_dispatch:\n")
+        .and_then(|(_, remainder)| {
+            remainder
+                .split_once("  schedule:\n")
+                .map(|(section, _)| section)
+        })
+        .expect("Docker workflow should define workflow_dispatch configuration");
+    assert!(
+        docker_workflow.contains("workflow_dispatch:")
+            && docker_workflow.contains("schedule:")
+            && docker_workflow.contains(r#"TAGS="${IMAGE_NAME}:${VERSION}""#)
+            && docker_workflow.contains(r#"TAGS="${TAGS},${IMAGE_NAME}:latest""#)
+            && docker_workflow.contains(r#"TAGS="${TAGS},${IMAGE_NAME}:${SHA}""#)
+            && docker_workflow.contains("SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}")
+            && workflow_call_config.contains(
+                "      trigger_dind:\n        description: \"Dispatch the optional ironclaw-dind image build\"\n        required: false\n        type: boolean\n        default: false"
+            )
+            && workflow_dispatch_config.contains(
+                "      trigger_dind:\n        description: \"Dispatch the optional ironclaw-dind image build\"\n        required: false\n        type: boolean\n        default: true"
+            ),
+        "the reusable Docker workflow must retain manual/staging entry points and release version/latest/SHA tags"
     );
     assert!(
-        docker_workflow.contains("workflow_dispatch:") && docker_workflow.contains("schedule:"),
-        "the independent Docker workflow must remain manually and periodically runnable"
+        docker_workflow.contains(
+            "if: (github.event_name == 'schedule' || inputs.trigger_dind) && steps.check.outputs.skip != 'true'"
+        ) && docker_workflow.contains(
+            "if: (github.event_name == 'schedule' || inputs.trigger_dind) && steps.app-token.outcome == 'success' && steps.check.outputs.skip != 'true'"
+        ) && !docker_workflow.contains("ironclaw-worker")
+            && !docker_workflow.contains("Dockerfile.worker"),
+        "release Docker publishing must not restore worker or dispatch ironclaw-dind"
     );
     assert!(
         workspace_manifest.contains("name = \"ironclaw_reborn_integration_tests\"")

@@ -16,7 +16,7 @@ export function useProjectsOverview() {
   }, [queryClient]);
 
   return {
-    overview: query.data || { attention: [], projects: [] },
+    overview: query.data || { projects: [] },
     isLoading: query.isLoading,
     isRefreshing: query.isFetching,
     error: query.error || null,

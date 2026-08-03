@@ -91,9 +91,15 @@ handles Chat Completions create and optional projection-backed SSE streaming:
 - Streaming create consumes a composition-supplied projection streamer and must
   suppress keepalive/control frames, internal refs, projection cursors, and
   sanitized backend details.
-- This crate still must not call v1 gateway handlers, raw `SseManager`/
-  `AppEvent` streams, `ironclaw_llm`, `TurnCoordinator`, projection internals,
-  listener APIs, secrets, DBs, or the host runtime directly.
+- This crate still must not call v1 gateway handlers, `ironclaw_llm`,
+  `TurnCoordinator`, projection internals, listener APIs, secrets, DBs, or the
+  host runtime directly. (Corrected 2026-08-02: this list also named raw
+  `SseManager`/`AppEvent` streams. **Both types are deleted** — `AppEvent` went
+  with `ironclaw_common::event` in #6982 under the un-masking discipline, and
+  `SseManager` has no declaration anywhere in the workspace. A prohibition on a
+  type that does not exist reads as a live constraint and hides that the real
+  streaming boundary is the projection stream. The retired-name pin lives in the
+  architecture suite, not here.)
 
 ## Models Listing
 

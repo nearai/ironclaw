@@ -1,7 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { listWorkspace } from "../lib/workspace-api";
 import { areaDisplayName, sortEntries } from "../lib/workspace-presenters";
 
 type WorkspaceEntry = {
@@ -16,6 +15,8 @@ type TreeNodeProps = {
   selectedPath: string;
   expandedPaths: Set<string>;
   filter: string;
+  scopeKey: string;
+  listDirectory: (path: string) => Promise<{ entries: WorkspaceEntry[] }>;
   onToggleDirectory: (path: string) => void;
   onSelectFile: (path: string) => void;
   focusedPathRef: React.RefObject<string>;
@@ -35,6 +36,8 @@ type WorkspaceTreeProps = {
   selectedPath: string;
   expandedPaths: Set<string>;
   filter: string;
+  scopeKey: string;
+  listDirectory: (path: string) => Promise<{ entries: WorkspaceEntry[] }>;
   onToggleDirectory: (path: string) => void;
   onSelectFile: (path: string) => void;
   isLoading: boolean;
@@ -70,6 +73,8 @@ const TreeNode = React.memo(function WorkspaceTreeNode({
   selectedPath,
   expandedPaths,
   filter,
+  scopeKey,
+  listDirectory,
   onToggleDirectory,
   onSelectFile,
   focusedPathRef,
@@ -87,8 +92,8 @@ const TreeNode = React.memo(function WorkspaceTreeNode({
   const isExpanded = expandedPaths.has(entry.path);
   const displayName = depth === 0 ? areaDisplayName(entry.path, t) : entry.name;
   const childQuery = useQuery({
-    queryKey: ["workspace-list", entry.path],
-    queryFn: () => listWorkspace(entry.path),
+    queryKey: ["workspace-list", scopeKey, entry.path],
+    queryFn: () => listDirectory(entry.path),
     enabled: entry.is_dir && isExpanded,
   });
 
@@ -153,6 +158,8 @@ const TreeNode = React.memo(function WorkspaceTreeNode({
                     selectedPath={selectedPath}
                     expandedPaths={expandedPaths}
                     filter={filter}
+                    scopeKey={scopeKey}
+                    listDirectory={listDirectory}
                     onToggleDirectory={onToggleDirectory}
                     onSelectFile={onSelectFile}
                     focusedPathRef={focusedPathRef}
@@ -287,6 +294,8 @@ export function WorkspaceTree({
   selectedPath,
   expandedPaths,
   filter,
+  scopeKey,
+  listDirectory,
   onToggleDirectory,
   onSelectFile,
   isLoading,
@@ -477,6 +486,8 @@ export function WorkspaceTree({
           selectedPath={selectedPath}
           expandedPaths={expandedPaths}
           filter={filter}
+          scopeKey={scopeKey}
+          listDirectory={listDirectory}
           onToggleDirectory={onToggleDirectory}
           onSelectFile={onSelectFile}
           focusedPathRef={focusedPathRef}

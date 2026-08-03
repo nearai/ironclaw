@@ -320,6 +320,23 @@ jobs:
 
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
+  # Build and push the regular Reborn Docker image after the GitHub Release
+  # exists. A Docker failure leaves that Release intact but fails this workflow.
+  # docker.yml excludes its separate ironclaw-dind dispatch for release builds.
+  docker-image:
+    needs: host
+    if: ${{ always() && needs.host.result == 'success' }}
+    permissions:
+      contents: read
+      packages: read
+      actions: write
+    uses: ./.github/workflows/docker.yml
+    with:
+      release: true
+      trigger_dind: false
+    secrets:
+      DOCKER_REGISTRY_TOKEN: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
+
   announce:
     needs:
       - plan

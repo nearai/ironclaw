@@ -15,12 +15,18 @@
 #   ./scripts/build-wasm-extensions.sh --channels # channels only
 #   ./scripts/build-wasm-extensions.sh --first-party # first-party extensions only
 #
-# The first-party extension assets root is resolved from the crate inventory
-# (scripts/ci/lib/crate_tree.py) by crate NAME, not from the literal
-# crates/ironclaw_first_party_extensions path, so the target-architecture family
-# move (crates/<family>/ironclaw_*, PROPOSAL §5) does not leave this script
-# unable to find the manifests it is supposed to build
-# (docs/reborn/target-architecture/CHECKLIST.md WS10, #6963).
+# The package root is resolved from the crate inventory
+# (scripts/ci/lib/crate_tree.py) by crate NAME, not from a literal path, so the
+# target-architecture family move (crates/<family>/ironclaw_*, PROPOSAL §5)
+# does not leave this script unable to find the manifests it is supposed to
+# build (docs/reborn/target-architecture/CHECKLIST.md WS10, #6963).
+#
+# WS2 moved the packages out of the support crate: they were
+# `<support-crate>/assets/<ext>/`, they are now `packages/<ext>/` SIBLING to
+# the support crate (PROPOSAL §5 — a package directory is self-contained and
+# is not owned by any crate). So discovery still anchors on the crate name and
+# then steps to its sibling, which keeps both properties: name-keyed (survives
+# a family move) and following the code (survives this one).
 #
 # Override for tests: FIRST_PARTY_ASSETS_ROOT bypasses discovery.
 
@@ -29,7 +35,7 @@ shopt -s nullglob
 
 cd "$(dirname "$0")/.."
 
-FIRST_PARTY_CRATE="${FIRST_PARTY_CRATE:-ironclaw_first_party_extensions}"
+FIRST_PARTY_CRATE="${FIRST_PARTY_CRATE:-ironclaw_extension_support}"
 
 # Resolve the crate that owns the first-party extension assets, at any depth.
 # Failing here is deliberate: "cannot find the crate" must be an actionable
@@ -59,7 +65,8 @@ resolve_first_party_assets_root() {
 renamed or moved it)" >&2
         return 1
     fi
-    printf '%s/assets\n' "${match}"
+    # `packages/` sits beside the support crate, not inside it.
+    printf '%s/packages\n' "$(dirname "${match}")"
 }
 
 # cargo-component may be installed under ~/.cargo while Homebrew rustc wins PATH on

@@ -4,7 +4,7 @@
 //! Goal (docs/reborn/extension-runtime/overview.md §1): no generic crate
 //! contains a concrete product name, vendor id, or vendor API host. The
 //! forbidden vocabulary is **derived from the bundled package inventory**
-//! (`crates/ironclaw_first_party_extensions/assets/` plus the test fixture
+//! (`crates/extensions/packages/` plus the test fixture
 //! inventory `tests/fixtures/extensions/`), so a future `discord` package is
 //! caught without editing this scanner (checklist TEST-6).
 //!
@@ -13,7 +13,7 @@
 //!
 //! - **Concrete extension crates** (`CONCRETE_EXTENSION_CRATES`) — they *are*
 //!   the product code.
-//! - **The package inventory crate** (`ironclaw_first_party_extensions`) —
+//! - **The package inventory crate** (`ironclaw_extension_support`) —
 //!   it owns the concrete packages and their native executors.
 //! - **Sanctioned assemblers** — `ironclaw` (the binary assembles
 //!   the native factory registry; overview §4.0) and this architecture crate
@@ -72,11 +72,37 @@ use ratchet_support::workspace_root;
 // Inventory-derived forbidden terms
 // ---------------------------------------------------------------------------
 
+/// Package directories under `packages/` whose ids are NOT vendor vocabulary.
+///
+/// WS2 moved the two `[memory]` provider packages into `extensions/packages/`
+/// beside the extension packages. Deriving the forbidden vocabulary from their
+/// manifests as well would be wrong on both halves:
+///
+/// * `ironclaw.memory` and the `ironclaw.memory.*` tool ids are the
+///   *provider-neutral* memory contract — the ids stay identical whichever
+///   provider is bound, which is the whole point of
+///   `MEMORY_PROVIDER_PACKAGE_IDS`. The kernel and the contracts crates name
+///   them legitimately, so scanning them would flag the contract as vendor
+///   specificity.
+/// * `mem0` genuinely *is* a vendor name, and generic crates naming it
+///   genuinely is debt — but that is the rule PROPOSAL §8.2 states separately
+///   ("no crate outside the provider packages and the binary names a memory
+///   provider"), enforced by
+///   `reborn_dependency_boundaries.rs::only_the_sanctioned_residue_names_a_memory_provider`
+///   with its own named, shrink-only residue. Folding it in here instead would
+///   have meant raising this gate's shrink-only allowlist baseline by ~40
+///   entries for debt that predates the move.
+///
+/// Excluding these two restores exactly the pre-move term set: before WS2 the
+/// inventory was the twelve extension packages plus the fixtures, and it still
+/// is.
+const NON_VENDOR_PROVIDER_PACKAGE_DIRS: &[&str] = &["memory-native", "mem0"];
+
 /// Directories whose `*/manifest.toml` files form the package inventory the
 /// forbidden vocabulary derives from.
 fn inventory_dirs(root: &Path) -> Vec<PathBuf> {
     vec![
-        root.join("crates/ironclaw_first_party_extensions/assets"),
+        root.join("crates/extensions/packages"),
         root.join("tests/fixtures/extensions"),
     ]
 }
@@ -580,6 +606,12 @@ fn derive_forbidden_terms(inventory: &[PathBuf]) -> BTreeSet<String> {
             if !package_dir.is_dir() {
                 continue;
             }
+            if NON_VENDOR_PROVIDER_PACKAGE_DIRS
+                .iter()
+                .any(|name| package_dir.file_name().is_some_and(|dir| dir == *name))
+            {
+                continue;
+            }
             let manifest_path = package_dir.join("manifest.toml");
             let Ok(contents) = std::fs::read_to_string(&manifest_path) else {
                 continue;
@@ -715,17 +747,14 @@ const REBORN_LAYERS: &[&str] = &[
 /// Crates that are the concrete product code (present or planned). A missing
 /// directory is tolerated so the planned extension crates are covered from
 /// the day they appear.
-const CONCRETE_EXTENSION_CRATES: &[&str] = &[
-    "ironclaw_slack_extension",
-    "ironclaw_telegram_extension",
-    "ironclaw_telegram_v2_adapter",
-];
+const CONCRETE_EXTENSION_CRATES: &[&str] =
+    &["ironclaw_slack_extension", "ironclaw_telegram_extension"];
 
 /// Generic-side crates excluded from the scan for a documented structural
 /// reason (see the module header).
 const SANCTIONED_SCAN_EXEMPT_CRATES: &[&str] = &[
     // The package inventory + native executors for bundled extensions.
-    "ironclaw_first_party_extensions",
+    "ironclaw_extension_support",
     // The binary assembles the native factory registry (overview §4.0).
     "ironclaw",
     // The post-Tier-B workspace root: a test-only host for the Reborn
@@ -1494,6 +1523,30 @@ fn classify_hits(
 // ---------------------------------------------------------------------------
 // The gate
 // ---------------------------------------------------------------------------
+
+/// A carve-out that names a directory which is not there stops carving
+/// anything out — silently, and in the direction that *adds* terms. Pin the
+/// two provider package directories so a rename has to come here.
+#[test]
+fn the_non_vendor_provider_carve_out_names_real_packages() {
+    let packages = workspace_root().join("crates/extensions/packages");
+    assert!(
+        packages.is_dir(),
+        "package inventory root {} does not exist — the specificity vocabulary would derive \
+         from nothing",
+        packages.display()
+    );
+    for name in NON_VENDOR_PROVIDER_PACKAGE_DIRS {
+        let dir = packages.join(name);
+        assert!(
+            dir.join("manifest.toml").is_file(),
+            "NON_VENDOR_PROVIDER_PACKAGE_DIRS names {name}, but {} has no manifest.toml. \
+             A stale entry excludes nothing; a renamed package silently rejoins the vendor \
+             vocabulary. Repoint it in the same change that moved the package.",
+            dir.display()
+        );
+    }
+}
 
 #[test]
 fn reborn_generic_code_names_no_concrete_extension() {
