@@ -27,6 +27,36 @@ The abandoned JSON pointer/length ABI (`alloc`, `invoke_json`, `output_ptr`, `ou
 - Treat WIT metadata as the source of runtime compatibility: `description()` and `schema()` are called through generated Wasmtime component bindings.
 - Keep V1 `src/tools/wasm/*` and `src/channels/wasm/*` as compatibility references only; Reborn is a separate binary path.
 
+## Guest diagnostic boundary
+
+Guest-provided log messages, response errors, and trap messages are untrusted
+diagnostics. The runtime sanitizes each source independently when it is captured:
+
+- A diagnostic of at most 4096 raw UTF-8 bytes is scanned in full. Every
+  detectable secret match is replaced, regardless of whether its leak action is
+  `Warn`, `Redact`, or `Block`, and the result is then bounded at a valid UTF-8
+  boundary.
+- A diagnostic larger than 4096 raw bytes is not scanned or partially retained;
+  it fails closed to the stable `[WASM_DIAGNOSTIC_REDACTED]` marker. Together
+  with the existing 1000-log limit, this bounds secret-scanning work per
+  execution.
+- Sanitization preserves the accepted log count, order, and levels, and leaves
+  benign diagnostic content unchanged. It does not change the semantic
+  `output_json` returned by a successful guest.
+- The success log vector, a guest response error, and a trap's message and log
+  snapshot cross the public runtime boundary only after their own sanitization.
+  The production host-runtime currently emits guest logs to tracing only when a
+  guest returns an error or execution traps; successful dispatch still carries
+  the sanitized vector in the runtime result but consumes `output_json` as the
+  capability result.
+- Host-runtime tracing sanitizes these fields again as defense in depth before
+  recording them. This sink check does not replace capture-boundary sanitizing.
+
+This protection detects credential and secret patterns known to the shared leak
+detector. Arbitrary PII or sensitive prose that does not match one of those
+patterns is outside this guarantee. These rules change neither the WIT/schema
+shape nor ABI version.
+
 ## Host capability seams
 
 All host capabilities are injected through explicit Rust seams. The default host is fail-closed:

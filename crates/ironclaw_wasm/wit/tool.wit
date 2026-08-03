@@ -27,8 +27,11 @@ interface host {
 
     /// Emit a log message.
     ///
-    /// Messages are collected and emitted after execution completes.
-    /// Rate-limited to 1000 entries per execution, 4KB per message.
+    /// Messages are collected in call order with their requested levels.
+    /// The host sanitizes detectable secret patterns at capture. Messages over
+    /// 4096 raw UTF-8 bytes fail closed to `[WASM_DIAGNOSTIC_REDACTED]`; shorter
+    /// messages are scanned in full and bounded at a valid UTF-8 boundary.
+    /// Limited to 1000 accepted entries per execution.
     log: func(level: log-level, message: string);
 
     /// Get the current timestamp in milliseconds since Unix epoch.
@@ -117,9 +120,11 @@ interface tool {
 
     /// Response from tool execution.
     record response {
-        /// JSON-encoded output on success.
+        /// JSON-encoded semantic output on success; diagnostic sanitization
+        /// does not modify this value.
         output: option<string>,
-        /// Error message on failure.
+        /// Diagnostic error on failure. The host sanitizes this independently
+        /// from captured logs before it crosses the runtime boundary.
         error: option<string>,
     }
 
