@@ -1132,6 +1132,7 @@ def _markdown_reborn_case_lines(
         if inconclusive:
             heading += f", {inconclusive} inconclusive"
         lines.append(heading)
+        lines.extend(_format_reborn_metric_summary(group_cases))
         for case in group_cases:
             label, status = _case_outcome(case)
             latency = (

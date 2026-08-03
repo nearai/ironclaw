@@ -899,6 +899,13 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertNotIn("mainsha", body)
         self.assertIn("| `reborn-webui-v2-live-qa` | `reborn-webui-v2` |", body)
         self.assertIn("#### QA 2: 1/2 passed", body)
+        self.assertIn(
+            "*Usage:* 2 model calls (1/2 cases) · 3 tool calls (1/2 cases) · "
+            "1,000 input tokens (1/2 cases) · 200 output tokens (1/2 cases) · "
+            "400 cache-read (1/2 cases) · 600 uncached input (1/2 cases) · "
+            "$0.0123 (1/2 cases)",
+            body,
+        )
         self.assertIn(":white_check_mark: `2A` Gmail connection flow", body)
         self.assertIn(
             "2 model calls · 3 tool calls · 1,000 input tokens · "
