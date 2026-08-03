@@ -339,9 +339,9 @@ capture "${merge_sh}" "${tmp_root}/m4_merged.lcov" \
 assert_exit_code "M4: merge accepts reports without trailing newlines" 0 "${CAP_RC}"
 m4_merged_body="$(cat "${tmp_root}/m4_merged.lcov")"
 assert_contains "M4: merge keeps the first package report" \
-  "${m4_merged_body}" "ironclaw_slack_extension/src/attachment_transfer.rs"
+  "${m4_merged_body}" "extensions/packages/slack/src/attachment_transfer.rs"
 assert_contains "M4: merge keeps the next package report" \
-  "${m4_merged_body}" "ironclaw_telegram_extension/src/attachment_transfer.rs"
+  "${m4_merged_body}" "extensions/packages/telegram/src/attachment_transfer.rs"
 
 # ---------------------------------------------------------------------------
 # A. reborn-coverage-summary.sh (default report mode)

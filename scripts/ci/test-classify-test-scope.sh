@@ -112,11 +112,42 @@ has_core_code=true
 has_legacy_tests=false
 has_reborn_tests=true"
 
+# A data-only package owns no crate BY DESIGN — no Cargo.toml, just manifest,
+# prompts, schemas and committed wasm. Its data is embedded by
+# `ironclaw_extension_support`, so it lights the same lane that crate does.
+# This case is not hypothetical: without it the classifier REFUSED on
+# `packages/github/manifest.toml` and failed every job that consults it.
+assert_scope \
+  "data-only package manifest" \
+  "crates/extensions/packages/github/manifest.toml" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
+  "data-only package prompt asset" \
+  "crates/extensions/packages/gmail/prompts/gmail/send.md" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
+
 # A guest component rooting its own workspace: attributable to no crate, but a
 # refusal would be wrong — it is excluded by construction, not missing.
 assert_scope \
   "wasm-src guest inside a data-only package" \
   "crates/extensions/packages/github/wasm-src/src/lib.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
+
+# A crate-bearing package resolves through its own Cargo.toml, so its manifest
+# rides the crate's arm rather than the package-data arm.
+assert_scope \
+  "crate-bearing package manifest" \
+  "crates/extensions/packages/slack/manifest.toml" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false

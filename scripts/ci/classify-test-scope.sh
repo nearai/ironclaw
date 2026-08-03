@@ -110,6 +110,26 @@ owning_crate_dir() {
   return 1
 }
 
+# True when "$1" is package data under `extensions/packages/`. Anchored on the
+# support crate rather than a literal path, so a family move keeps it working:
+# `packages/` is that crate's sibling.
+package_asset_dir() {
+  local path="$1" support_dir
+  while IFS= read -r support_dir; do
+    [ -n "${support_dir}" ] || continue
+    case "${support_dir}" in
+      */ironclaw_extension_support)
+        case "${path}" in
+          "${support_dir%/*}"/packages/*) return 0 ;;
+        esac
+        ;;
+    esac
+  done <<EOF
+${crate_dirs}
+EOF
+  return 1
+}
+
 # True when "$1" lies inside a directory that roots a separate cargo workspace.
 nested_workspace_dir() {
   local path="$1" root
@@ -161,11 +181,19 @@ normalize_crate_path() {
     return 0
   fi
 
-  # A separate cargo workspace under `crates/` (the `wasm-src/` guest
-  # components, `ironclaw_silk_decoder`). It owns no workspace crate, so it is
-  # deliberately unattributable — pass it through unchanged and let the arms
-  # below decide, rather than refusing.
-  if nested_workspace_dir "${path}"; then
+  # Two shapes under `crates/` own no crate BY DESIGN, and refusing on them
+  # would be wrong — they are attributable, just not to a crate:
+  #
+  #   * a separate cargo workspace (the `wasm-src/` guest components,
+  #     `ironclaw_silk_decoder`);
+  #   * a data-only package directory under `extensions/packages/`, which is
+  #     manifest + prompts + schemas + committed wasm and deliberately carries
+  #     no `Cargo.toml` (PROPOSAL §5). Its data is embedded by
+  #     `ironclaw_extension_support`, which is where it used to live, so it
+  #     lights the same lane that crate does.
+  #
+  # Pass both through unchanged and let the arms below decide.
+  if nested_workspace_dir "${path}" || package_asset_dir "${path}"; then
     return 0
   fi
 
@@ -244,7 +272,8 @@ is_shared_test_path() {
     crates/ironclaw_auth/*|crates/ironclaw_trust/*|crates/ironclaw_turns/*|crates/ironclaw_agent_loop/*|crates/ironclaw_threads/*)
       return 0
       ;;
-    crates/ironclaw_prompt_envelope/*|crates/ironclaw_hooks/*|crates/ironclaw_extension_support/*|crates/ironclaw_llm/*)
+    crates/ironclaw_prompt_envelope/*|crates/ironclaw_hooks/*|crates/ironclaw_extension_support/*|crates/ironclaw_llm/*|\
+    crates/extensions/packages/*)
       return 0
       ;;
     crates/ironclaw_safety/*|crates/ironclaw_skills/*|crates/ironclaw_oauth/*)
@@ -269,8 +298,7 @@ is_reborn_test_path() {
       return 0
       ;;
     crates/ironclaw_product_*/*|\
-    crates/slack/*|crates/telegram/*|crates/memory-native/*|crates/mem0/*|\
-    crates/extensions/packages/*/wasm-src/*)
+    crates/slack/*|crates/telegram/*|crates/memory-native/*|crates/mem0/*)
       return 0
       ;;
     crates/ironclaw_webui/*)
