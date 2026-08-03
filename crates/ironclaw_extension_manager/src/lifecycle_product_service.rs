@@ -505,7 +505,7 @@ impl LifecycleProductService for ExtensionHostLifecycleProductService {
     async fn installed_activation_errors(
         &self,
         _context: LifecycleProductContext,
-    ) -> Result<std::collections::HashMap<String, String>, ProductSurfaceError> {
+    ) -> Result<std::collections::HashMap<ExtensionId, String>, ProductSurfaceError> {
         let result = match &self.extension_management {
             Some(extension_management) => {
                 extension_management.installation_activation_errors().await

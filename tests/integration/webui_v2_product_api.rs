@@ -1668,10 +1668,11 @@ impl AdminConfigurationFixture {
     }
 
     fn pairing_member_router(&self) -> Router {
-        let pairing = self
-            .runtime
-            .channel_pairing_route_mount()
-            .expect("Telegram pairing route mount");
+        let pairing = ironclaw_webui::channel_pairing_route_mount(
+            self.runtime
+                .channel_pairing_registry()
+                .expect("Telegram pairing registry"),
+        );
         pairing
             .router
             .layer(axum::Extension(self.caller.clone()))

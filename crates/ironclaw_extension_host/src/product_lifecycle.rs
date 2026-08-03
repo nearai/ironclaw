@@ -703,7 +703,7 @@ impl ExtensionLifecycleManager {
                 installation_state_for_installation(
                     installation,
                     has_activatable_surface,
-                    activation_errors.contains_key(installation.extension_id().as_str()),
+                    activation_errors.contains_key(installation.extension_id()),
                 )
             })
             .unwrap_or(InstallationState::Installed);
@@ -826,13 +826,15 @@ impl ExtensionLifecycleManager {
     /// `activation_error` are driven from this one source.
     pub async fn installation_activation_errors(
         &self,
-    ) -> Result<std::collections::HashMap<String, String>, ProductOperationFailure> {
+    ) -> Result<std::collections::HashMap<ExtensionId, String>, ProductOperationFailure> {
         match self.generic_host.get() {
-            Some(host) => host.installation_errors().await.map_err(|error| {
-                ProductOperationFailure::Transient {
+            Some(host) => host
+                .installation_errors()
+                .await
+                .map(typed_activation_errors)
+                .map_err(|error| ProductOperationFailure::Transient {
                     reason: format!("extension activation errors could not be read: {error}"),
-                }
-            }),
+                }),
             None => Ok(std::collections::HashMap::new()),
         }
     }
@@ -873,7 +875,7 @@ impl ExtensionLifecycleManager {
                 phase: installation_state_for_installation(
                     &installation,
                     package_has_activatable_surface(&available.package),
-                    activation_errors.contains_key(installation.extension_id().as_str()),
+                    activation_errors.contains_key(installation.extension_id()),
                 ),
                 install_scope: Some(install_scope_for_owner(installation.owner())),
             });
@@ -886,7 +888,7 @@ impl ExtensionLifecycleManager {
         extension: &AvailableExtensionPackage,
         credential_gate: Option<&dyn ExtensionActivationCredentialGate>,
         caller: &UserId,
-        activation_errors: &std::collections::HashMap<String, String>,
+        activation_errors: &std::collections::HashMap<ExtensionId, String>,
     ) -> Result<LifecycleSearchExtensionSummary, ProductOperationFailure> {
         let mut summary = extension.summary();
         suppress_search_credential_onboarding(&mut summary);
@@ -902,7 +904,7 @@ impl ExtensionLifecycleManager {
                 installation_phase: None,
             });
         };
-        let has_last_error = activation_errors.contains_key(installation.extension_id().as_str());
+        let has_last_error = activation_errors.contains_key(installation.extension_id());
         let phase =
             search_installation_phase(extension, &installation, credential_gate, has_last_error)
                 .await?;
@@ -2894,6 +2896,24 @@ fn map_channel_config_error(error: crate::ChannelConfigError) -> ProductOperatio
     }
 }
 
+/// Project the durable installation records' bare-string keys onto the
+/// `ExtensionId` every consumer of this map already holds, so the lookup is
+/// typed instead of stringified at each call site.
+///
+/// A key the boundary vocabulary rejects is **dropped**. That changes no
+/// answer — such a key could never have matched an installation's own
+/// `ExtensionId` — it only stops an unmatchable row from being carried around
+/// as though it could match.
+fn typed_activation_errors(
+    raw: std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<ExtensionId, String> {
+    raw.into_iter()
+        .filter_map(|(extension_id, reason)| {
+            ExtensionId::new(extension_id).ok().map(|id| (id, reason))
+        })
+        .collect()
+}
+
 pub(crate) fn extension_ids_from_package_ref(
     package_ref: &LifecyclePackageRef,
 ) -> Result<(ExtensionId, ExtensionInstallationId), ProductOperationFailure> {
@@ -3210,6 +3230,37 @@ fn compensation_failure(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    /// The activation-error map is keyed by `ExtensionId` so the three
+    /// installation-state call sites can look it up with the id they already
+    /// hold instead of stringifying. This pins both halves of that projection:
+    /// a well-formed durable key survives verbatim, and a key that is not
+    /// extension vocabulary is dropped rather than carried as an entry nothing
+    /// could ever match.
+    #[test]
+    fn typed_activation_errors_keeps_valid_keys_and_drops_unmatchable_ones() {
+        let typed = super::typed_activation_errors(std::collections::HashMap::from([
+            (
+                "slack".to_string(),
+                "activation failed: bad token".to_string(),
+            ),
+            // Not a name segment: uppercase and a space.
+            ("Slack Channel".to_string(), "corrupted row".to_string()),
+            (String::new(), "empty key".to_string()),
+        ]));
+
+        assert_eq!(
+            typed.len(),
+            1,
+            "only the well-formed key survives: {typed:?}"
+        );
+        assert_eq!(
+            typed
+                .get(&super::ExtensionId::new("slack").expect("valid extension id"))
+                .map(String::as_str),
+            Some("activation failed: bad token"),
+        );
+    }
 
     use ironclaw_extensions::{
         ExtensionInstallationStore, ExtensionInstallationStorePort as _, ExtensionLifecycleService,
