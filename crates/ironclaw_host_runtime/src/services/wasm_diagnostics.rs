@@ -1,18 +1,5 @@
-use std::sync::LazyLock;
-
 use ironclaw_host_api::ids::CapabilityId;
-use ironclaw_safety::LeakDetector;
-use ironclaw_wasm::{
-    WASM_DIAGNOSTIC_MAX_BYTES, WASM_DIAGNOSTIC_REDACTION_MARKER, WasmError, WasmLogLevel,
-    WasmLogRecord,
-};
-
-const LEAK_DETECTOR_REDACTION_MARKER: &str = "[REDACTED]";
-
-/// Shared leak detector for guest-controlled tracing fields. Building a
-/// detector compiles its regex registry and prefix matcher, so keep one at the
-/// sink instead of rebuilding it for every guest log record.
-static WASM_DIAGNOSTIC_LEAK_DETECTOR: LazyLock<LeakDetector> = LazyLock::new(LeakDetector::new);
+use ironclaw_wasm::{WasmError, WasmLogLevel, WasmLogRecord, sanitize_wasm_diagnostic};
 
 pub(super) fn log_wasm_runtime_error(capability_id: &CapabilityId, error: &WasmError) {
     if let WasmError::ExecutionFailed { message, logs, .. } = error {
@@ -26,7 +13,7 @@ pub(super) fn log_wasm_runtime_error(capability_id: &CapabilityId, error: &WasmE
         return;
     }
 
-    let error = sanitize_wasm_diagnostic(&error.to_string());
+    let error = sanitize_wasm_diagnostic(error.to_string());
     tracing::debug!(
         capability_id = %capability_id,
         wasm_error = %error,
@@ -81,39 +68,13 @@ fn log_wasm_guest_logs(capability_id: &CapabilityId, logs: &[WasmLogRecord]) {
     }
 }
 
-fn sanitize_wasm_diagnostic(raw: &str) -> String {
-    // Do not scan unbounded guest-controlled strings. Oversize diagnostics are
-    // discarded wholesale so no unscanned fragment can reach tracing.
-    if raw.len() > WASM_DIAGNOSTIC_MAX_BYTES {
-        return WASM_DIAGNOSTIC_REDACTION_MARKER.to_string();
-    }
-
-    let (redacted, changed) = WASM_DIAGNOSTIC_LEAK_DETECTOR.redact_all_secrets(raw);
-    let sanitized = if changed {
-        redacted.replace(
-            LEAK_DETECTOR_REDACTION_MARKER,
-            WASM_DIAGNOSTIC_REDACTION_MARKER,
-        )
-    } else {
-        redacted
-    };
-    truncate_to_char_boundary(&sanitized, WASM_DIAGNOSTIC_MAX_BYTES).to_string()
-}
-
-fn truncate_to_char_boundary(value: &str, max_bytes: usize) -> &str {
-    let mut end = value.len().min(max_bytes);
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    &value[..end] // safety: `end` is moved to a UTF-8 boundary above.
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
     use ironclaw_host_api::resource::ResourceUsage;
+    use ironclaw_wasm::{WASM_DIAGNOSTIC_MAX_BYTES, WASM_DIAGNOSTIC_REDACTION_MARKER};
     use tracing::field::{Field, Visit};
     use tracing::{Event, Level, Subscriber};
     use tracing_subscriber::layer::{Context, SubscriberExt};

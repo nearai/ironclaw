@@ -181,6 +181,8 @@ fn elapsed_millis(started: Instant) -> u64 {
 }
 
 fn safe_component_execution_message(error: &wasmtime::Error) -> String {
+    // Raw Wasmtime chains can include guest-controlled module/function names
+    // from WASM backtraces. Never expose or trace the chain wholesale.
     error.downcast_ref::<wasmtime::Trap>().map_or_else(
         || "WASM component execution failed".to_string(),
         ToString::to_string,

@@ -809,7 +809,7 @@ fn guest_logs_sanitize_every_leak_action_before_public_success_result() {
             record.message.contains("retained cause"),
             "sanitization should retain non-secret diagnostic context"
         );
-        assert!(record.message.contains("[REDACTED]"));
+        assert!(record.message.contains(WASM_DIAGNOSTIC_REDACTION_MARKER));
     }
 }
 
@@ -831,7 +831,7 @@ fn guest_response_error_is_sanitized_independently_from_captured_logs() {
         .expect("guest response.error must be retained");
     assert!(!error.contains(&response_secret));
     assert!(error.contains("status=503"));
-    assert!(error.contains("[REDACTED]"));
+    assert!(error.contains(WASM_DIAGNOSTIC_REDACTION_MARKER));
     assert!(!executed.logs[0].message.contains(&log_secret));
     assert!(executed.logs[0].message.contains("log cause"));
 }
@@ -892,7 +892,7 @@ fn guest_trap_preserves_sanitized_log_snapshot_and_safe_trap_cause() {
             assert_eq!(logs.len(), 1);
             assert!(!logs[0].message.contains(&secret));
             assert!(logs[0].message.contains("operation=write"));
-            assert!(logs[0].message.contains("[REDACTED]"));
+            assert!(logs[0].message.contains(WASM_DIAGNOSTIC_REDACTION_MARKER));
         }
         other => panic!("expected execution failure, got {other:?}"),
     }
@@ -908,7 +908,7 @@ fn execution_failure_message_size_boundary_is_fail_closed() {
         WasmError::ExecutionFailed { message, .. } => {
             assert!(!message.contains(&secret));
             assert!(message.contains("wasm-function=7"));
-            assert!(message.contains("[REDACTED]"));
+            assert!(message.contains(WASM_DIAGNOSTIC_REDACTION_MARKER));
         }
         other => panic!("expected execution failure, got {other:?}"),
     }
