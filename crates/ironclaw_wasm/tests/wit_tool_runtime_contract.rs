@@ -1,16 +1,14 @@
 use std::sync::Arc;
 
 use ironclaw_wasm::{
-    DenyWasmHostHttp, RecordingWasmHostHttp, WasmError, WasmHostHttp, WasmHttpRequest,
-    WasmHttpResponse, WitToolHost, WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
+    DenyWasmHostHttp, RecordingWasmHostHttp, WASM_DIAGNOSTIC_MAX_BYTES,
+    WASM_DIAGNOSTIC_MAX_ENTRIES_PER_EXECUTION, WASM_DIAGNOSTIC_REDACTION_MARKER, WasmError,
+    WasmHostHttp, WasmHttpRequest, WasmHttpResponse, WitToolHost, WitToolRequest, WitToolRuntime,
+    WitToolRuntimeConfig,
 };
 use serde_json::json;
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::Resolve;
-
-const WASM_DIAGNOSTIC_REDACTED: &str = "[WASM_DIAGNOSTIC_REDACTED]";
-const MAX_WASM_DIAGNOSTIC_BYTES: usize = 4_096;
-const MAX_WASM_DIAGNOSTICS_PER_EXECUTION: usize = 1_000;
 
 const COUNTER_TOOL_WAT: &str = r#"
 (module
@@ -843,15 +841,18 @@ fn guest_response_error_size_boundary_is_fail_closed() {
     let retained_cause = "guest returned status=503; ";
     let exactly_at_limit = format!(
         "{retained_cause}{}",
-        "r".repeat(MAX_WASM_DIAGNOSTIC_BYTES - retained_cause.len())
+        "r".repeat(WASM_DIAGNOSTIC_MAX_BYTES - retained_cause.len())
     );
-    let over_limit = "e".repeat(MAX_WASM_DIAGNOSTIC_BYTES + 1);
+    let over_limit = "e".repeat(WASM_DIAGNOSTIC_MAX_BYTES + 1);
 
     let retained = execute_diagnostic_tool(&[], Some(&exactly_at_limit), false).unwrap();
     assert_eq!(retained.error.as_deref(), Some(exactly_at_limit.as_str()));
 
     let redacted = execute_diagnostic_tool(&[], Some(&over_limit), false).unwrap();
-    assert_eq!(redacted.error.as_deref(), Some(WASM_DIAGNOSTIC_REDACTED));
+    assert_eq!(
+        redacted.error.as_deref(),
+        Some(WASM_DIAGNOSTIC_REDACTION_MARKER)
+    );
 }
 
 #[test]
@@ -902,7 +903,7 @@ fn execution_failure_message_size_boundary_is_fail_closed() {
     let retained_cause = "guest trap: unreachable; ";
     let exactly_at_limit = format!(
         "{retained_cause}{}",
-        "t".repeat(MAX_WASM_DIAGNOSTIC_BYTES - retained_cause.len())
+        "t".repeat(WASM_DIAGNOSTIC_MAX_BYTES - retained_cause.len())
     );
     let retained = WasmError::execution_failed(exactly_at_limit.clone());
     match &retained {
@@ -911,29 +912,29 @@ fn execution_failure_message_size_boundary_is_fail_closed() {
     }
     assert!(retained.to_string().contains(retained_cause));
 
-    let redacted = WasmError::execution_failed("x".repeat(MAX_WASM_DIAGNOSTIC_BYTES + 1));
+    let redacted = WasmError::execution_failed("x".repeat(WASM_DIAGNOSTIC_MAX_BYTES + 1));
     match &redacted {
         WasmError::ExecutionFailed { message, .. } => {
-            assert_eq!(message, WASM_DIAGNOSTIC_REDACTED)
+            assert_eq!(message, WASM_DIAGNOSTIC_REDACTION_MARKER)
         }
         other => panic!("expected execution failure, got {other:?}"),
     }
     assert_eq!(
         redacted.to_string(),
-        format!("failed to execute WIT component: {WASM_DIAGNOSTIC_REDACTED}")
+        format!("failed to execute WIT component: {WASM_DIAGNOSTIC_REDACTION_MARKER}")
     );
 }
 
 #[test]
 fn guest_log_size_boundary_is_fail_closed_and_utf8_safe() {
-    let exactly_at_limit = "é".repeat(MAX_WASM_DIAGNOSTIC_BYTES / 2);
-    let over_limit = "x".repeat(MAX_WASM_DIAGNOSTIC_BYTES + 1);
+    let exactly_at_limit = "é".repeat(WASM_DIAGNOSTIC_MAX_BYTES / 2);
+    let over_limit = "x".repeat(WASM_DIAGNOSTIC_MAX_BYTES + 1);
     let straddling_secret = format!(
         "{}sk-{}",
-        "p".repeat(MAX_WASM_DIAGNOSTIC_BYTES - 4),
+        "p".repeat(WASM_DIAGNOSTIC_MAX_BYTES - 4),
         "S".repeat(24)
     );
-    let split_codepoint = format!("{}é", "u".repeat(MAX_WASM_DIAGNOSTIC_BYTES));
+    let split_codepoint = format!("{}é", "u".repeat(WASM_DIAGNOSTIC_MAX_BYTES));
     let executed = execute_diagnostic_tool(
         &[
             (0, exactly_at_limit.clone()),
@@ -947,10 +948,10 @@ fn guest_log_size_boundary_is_fail_closed_and_utf8_safe() {
     .unwrap();
 
     assert_eq!(executed.logs[0].message, exactly_at_limit);
-    assert_eq!(executed.logs[1].message, WASM_DIAGNOSTIC_REDACTED);
-    assert_eq!(executed.logs[2].message, WASM_DIAGNOSTIC_REDACTED);
+    assert_eq!(executed.logs[1].message, WASM_DIAGNOSTIC_REDACTION_MARKER);
+    assert_eq!(executed.logs[2].message, WASM_DIAGNOSTIC_REDACTION_MARKER);
     assert!(!executed.logs[2].message.contains(&straddling_secret));
-    assert_eq!(executed.logs[3].message, WASM_DIAGNOSTIC_REDACTED);
+    assert_eq!(executed.logs[3].message, WASM_DIAGNOSTIC_REDACTION_MARKER);
     assert!(
         executed
             .logs
@@ -961,27 +962,34 @@ fn guest_log_size_boundary_is_fail_closed_and_utf8_safe() {
 
 #[test]
 fn diagnostic_redaction_marker_is_idempotent() {
-    let executed =
-        execute_diagnostic_tool(&[(2, WASM_DIAGNOSTIC_REDACTED.to_string())], None, false).unwrap();
+    let executed = execute_diagnostic_tool(
+        &[(2, WASM_DIAGNOSTIC_REDACTION_MARKER.to_string())],
+        None,
+        false,
+    )
+    .unwrap();
 
-    assert_eq!(executed.logs[0].message, WASM_DIAGNOSTIC_REDACTED);
+    assert_eq!(executed.logs[0].message, WASM_DIAGNOSTIC_REDACTION_MARKER);
 }
 
 #[test]
 fn guest_log_count_order_levels_and_total_scan_work_are_bounded() {
     assert_eq!(
-        MAX_WASM_DIAGNOSTIC_BYTES.checked_mul(MAX_WASM_DIAGNOSTICS_PER_EXECUTION),
+        WASM_DIAGNOSTIC_MAX_BYTES.checked_mul(WASM_DIAGNOSTIC_MAX_ENTRIES_PER_EXECUTION),
         Some(4_096_000),
         "the count and per-record caps must bound total diagnostic scan work",
     );
 
-    let max_sized = "z".repeat(MAX_WASM_DIAGNOSTIC_BYTES);
-    let logs: Vec<_> = (0..=MAX_WASM_DIAGNOSTICS_PER_EXECUTION)
+    let max_sized = "z".repeat(WASM_DIAGNOSTIC_MAX_BYTES);
+    let logs: Vec<_> = (0..=WASM_DIAGNOSTIC_MAX_ENTRIES_PER_EXECUTION)
         .map(|index| ((index % 5) as u32, max_sized.clone()))
         .collect();
     let executed = execute_diagnostic_tool(&logs, None, false).unwrap();
 
-    assert_eq!(executed.logs.len(), MAX_WASM_DIAGNOSTICS_PER_EXECUTION);
+    assert_eq!(
+        executed.logs.len(),
+        WASM_DIAGNOSTIC_MAX_ENTRIES_PER_EXECUTION
+    );
     assert!(
         executed
             .logs

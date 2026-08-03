@@ -2,10 +2,11 @@ use std::sync::LazyLock;
 
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_safety::LeakDetector;
-use ironclaw_wasm::{WasmError, WasmLogLevel, WasmLogRecord};
+use ironclaw_wasm::{
+    WASM_DIAGNOSTIC_MAX_BYTES, WASM_DIAGNOSTIC_REDACTION_MARKER, WasmError, WasmLogLevel,
+    WasmLogRecord,
+};
 
-const WASM_DIAGNOSTIC_MAX_BYTES: usize = 4096;
-const WASM_DIAGNOSTIC_REDACTION_MARKER: &str = "[WASM_DIAGNOSTIC_REDACTED]";
 const LEAK_DETECTOR_REDACTION_MARKER: &str = "[REDACTED]";
 
 /// Shared leak detector for guest-controlled tracing fields. Building a
@@ -122,8 +123,6 @@ mod tests {
     use super::*;
 
     const DETECTABLE_SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
-    const DIAGNOSTIC_REDACTION_MARKER: &str = "[WASM_DIAGNOSTIC_REDACTED]";
-    const DIAGNOSTIC_MAX_BYTES: usize = 4096;
     const DIAGNOSTIC_TARGET: &str = "ironclaw_host_runtime::services::wasm_diagnostics";
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -282,7 +281,7 @@ mod tests {
         assert!(
             diagnostics
                 .iter()
-                .all(|diagnostic| diagnostic.contains(DIAGNOSTIC_REDACTION_MARKER)),
+                .all(|diagnostic| diagnostic.contains(WASM_DIAGNOSTIC_REDACTION_MARKER)),
             "each unsafe cause must be replaced with the stable marker: {events:?}"
         );
     }
@@ -327,13 +326,13 @@ mod tests {
     fn host_tracing_redaction_marker_is_idempotent_at_the_sink() {
         let capability_id = capability_id();
         let events = capture_events(|| {
-            log_wasm_guest_error(&capability_id, &[], DIAGNOSTIC_REDACTION_MARKER);
+            log_wasm_guest_error(&capability_id, &[], WASM_DIAGNOSTIC_REDACTION_MARKER);
         });
 
         assert_eq!(events.len(), 1);
         assert_eq!(
             field(&events[0], "wasm_error"),
-            DIAGNOSTIC_REDACTION_MARKER,
+            WASM_DIAGNOSTIC_REDACTION_MARKER,
             "re-scanning an already sanitized diagnostic must not rewrite or nest its marker"
         );
     }
@@ -341,10 +340,10 @@ mod tests {
     #[test]
     fn host_tracing_accepts_the_byte_boundary_and_wholly_redacts_oversize_inputs() {
         let capability_id = capability_id();
-        let at_limit = "é".repeat(DIAGNOSTIC_MAX_BYTES / "é".len());
+        let at_limit = "é".repeat(WASM_DIAGNOSTIC_MAX_BYTES / "é".len());
         let over_limit = format!("{at_limit}x");
-        assert_eq!(at_limit.len(), DIAGNOSTIC_MAX_BYTES);
-        assert_eq!(over_limit.len(), DIAGNOSTIC_MAX_BYTES + 1);
+        assert_eq!(at_limit.len(), WASM_DIAGNOSTIC_MAX_BYTES);
+        assert_eq!(over_limit.len(), WASM_DIAGNOSTIC_MAX_BYTES + 1);
 
         let execution_error = WasmError::ExecutionFailed {
             message: over_limit.clone(),
@@ -370,10 +369,10 @@ mod tests {
         for event in &events[1..] {
             let diagnostic = field(event, "wasm_error");
             assert_eq!(
-                diagnostic, DIAGNOSTIC_REDACTION_MARKER,
+                diagnostic, WASM_DIAGNOSTIC_REDACTION_MARKER,
                 "an oversize diagnostic must be replaced wholesale: {event:?}"
             );
-            assert!(diagnostic.len() <= DIAGNOSTIC_MAX_BYTES);
+            assert!(diagnostic.len() <= WASM_DIAGNOSTIC_MAX_BYTES);
             assert!(
                 !diagnostic.contains(&over_limit),
                 "no oversize cause fragment may survive: {event:?}"
