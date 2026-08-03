@@ -152,16 +152,29 @@ h1,h2,h3,p{margin:0}
 .connect .ch svg{width:15px;height:15px;color:var(--v2-accent-text)}
 .connect .ch .t{font-size:13px;font-weight:600;color:var(--v2-text-strong)}
 .connect .ch .s{font-size:12px;color:var(--v2-text-muted)}
-.connect .apps{display:flex;flex-wrap:wrap;gap:9px}
-.appbtn{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--v2-panel-border);background:var(--v2-surface);border-radius:11px;padding:7px 11px 7px 8px;cursor:pointer;font:inherit}
-.appbtn:hover{border-color:color-mix(in srgb,var(--v2-accent) 40%,var(--v2-panel-border))}
-.appbtn .appchip{width:24px;height:24px;border-radius:7px;display:grid;place-items:center;border:1px solid}
-.appbtn .appchip svg{width:14px;height:14px}
-.appbtn .an{font-size:13px;font-weight:560;color:var(--v2-text-strong)}
-.appbtn .ast{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;font-weight:600;padding:3px 7px;border-radius:999px;margin-left:2px;color:var(--v2-text-faint);background:var(--v2-surface-muted)}
-.appbtn.on{border-color:color-mix(in srgb,var(--v2-positive-text) 40%,var(--v2-panel-border))}
-.appbtn.on .ast{color:var(--v2-positive-text);background:var(--v2-positive-soft)}
-.appbtn.on{cursor:default}
+.connect .apps{display:flex;flex-wrap:wrap;gap:9px;align-items:center}
+.connectall{margin-left:auto;display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border-radius:9px;font:inherit;font-size:12.5px;font-weight:600;cursor:pointer;color:#fff;border:1px solid rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
+.connectall:hover{background:radial-gradient(ellipse 200% 220% at 50% 110%,#5BBAF5 0%,#2882c8 60%)}
+.connectall svg{width:14px;height:14px}
+.cpill{display:inline-flex;align-items:center;gap:9px;border:1px solid var(--v2-panel-border);background:var(--v2-surface);border-radius:12px;padding:7px 11px 7px 8px;cursor:pointer;font:inherit;transition:border-color .15s,background .15s}
+.cpill:hover{border-color:color-mix(in srgb,var(--v2-accent) 42%,var(--v2-panel-border))}
+.cpill .appchip{width:24px;height:24px;border-radius:7px;display:grid;place-items:center;border:1px solid;flex:none}
+.cpill .appchip svg{width:14px;height:14px}
+.cpill .an{font-size:13px;font-weight:560;color:var(--v2-text-strong)}
+.cpill .cstate{width:18px;height:18px;border-radius:6px;border:1.5px solid var(--v2-text-faint);display:grid;place-items:center;flex:none;color:transparent;transition:background .15s,border-color .15s}
+.cpill .cstate svg{width:12px;height:12px}
+.cpill.on{border-color:color-mix(in srgb,var(--v2-positive-text) 45%,var(--v2-panel-border));background:color-mix(in srgb,var(--v2-positive-soft) 55%,var(--v2-surface))}
+.cpill.on .cstate{background:var(--v2-positive-text);border-color:var(--v2-positive-text);color:#fff}
+.cstack{display:inline-flex;align-items:center;gap:11px;border:1px solid color-mix(in srgb,var(--v2-positive-text) 32%,var(--v2-panel-border));background:color-mix(in srgb,var(--v2-positive-soft) 55%,var(--v2-surface));border-radius:999px;padding:6px 14px 6px 9px;cursor:pointer;font:inherit;animation:card-in .34s ease both}
+.cstack:hover{border-color:color-mix(in srgb,var(--v2-positive-text) 55%,var(--v2-panel-border))}
+.cstack .stackicons{display:inline-flex;align-items:center}
+.cstack .stackicons .appchip{width:26px;height:26px;border-radius:8px;display:grid;place-items:center;border:2px solid var(--v2-surface);margin-left:-10px;box-shadow:0 1px 3px rgba(0,0,0,.16)}
+.cstack .stackicons .appchip:first-child{margin-left:0}
+.cstack .stackicons .appchip svg{width:14px;height:14px}
+.cstack .stacklbl{font-size:12.5px;color:var(--v2-text-muted)}
+.cstack .stacklbl b{color:var(--v2-text-strong);font-weight:640}
+.cstack .scv{width:15px;height:15px;color:var(--v2-text-faint)}
+@media (prefers-reduced-motion:reduce){.cstack{animation:none}}
 
 /* ---------- carousel strip (Done for you) ---------- */
 .carousel{width:100%}
@@ -352,7 +365,7 @@ h1,h2,h3,p{margin:0}
 
 /* annotation flag */
 .flagwrap{position:relative}
-.flag{position:absolute;top:-9px;right:10px;z-index:4}
+.flag{position:absolute;top:-9px;right:10px;z-index:4;display:inline-flex;gap:5px}
 :root.flags-off .flag,:root.flags-off .legend{display:none!important}
 
 /* footnote */
@@ -405,10 +418,10 @@ h1,h2,h3,p{margin:0}
 
   <div class="legend">
     <span><b>How to read the flags:</b></span>
-    <span><span class="tag ship">shipped in v2</span> exists in PR #6994</span>
-    <span><span class="tag recompose">recompose</span> exists, new placement</span>
-    <span><span class="tag newevt">new event</span> needs a stream payload (#6993)</span>
-    <span><span class="tag native">ironclaw-native</span> new onboarding surface</span>
+    <span><span class="tag ship">Shipped</span> already on main</span>
+    <span><span class="tag recompose">Redesign</span> design update to existing main UI</span>
+    <span><span class="tag newevt">New Feature</span> net-new · needs new events / functionality</span>
+    <span><span class="tag native">New UX</span> new design, not yet on main</span>
   </div>
 
   <div class="beatcap"><span class="n" id="capN">Beat 0 / 4</span><span class="c" id="capC"></span></div>
@@ -434,15 +447,15 @@ h1,h2,h3,p{margin:0}
 
         <div class="slotwrap" id="slotwrap">
           <div class="rev flagwrap" id="connectBlock">
-            <span class="flag tag ship">shipped in v2</span>
+            <span class="flag"><span class="tag ship">Shipped</span></span>
             <div class="connect">
-              <div class="ch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg><span class="t">Connect your tools</span><span class="s">one click each · you can add more later</span></div>
+              <div class="ch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg><span class="t">Connect your tools</span><span class="s" id="connectSub">one tap each · add more later</span><button class="connectall" id="connectAllBtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Connect all</button></div>
               <div class="apps" id="appRow"></div>
             </div>
           </div>
 
           <div class="rev flagwrap ghostwrap" id="ghostBlock">
-            <span class="flag tag native">ironclaw-native</span>
+            <span class="flag"><span class="tag native">New UX</span></span>
             <div class="carousel">
               <div class="chd"><svg class="spk" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l1.9 4.7L18 9l-4 2.7L15.5 17 12 14.4 8.5 17l1.5-5.3L6 9l4.1-1.3z"/></svg><span class="ttl">What I'll handle for you</span><span class="sub">connect a tool to turn these on</span></div>
               <div class="strip" id="ghostStrip"></div>
@@ -451,7 +464,7 @@ h1,h2,h3,p{margin:0}
           </div>
 
           <div class="rev flagwrap" id="carouselBlock">
-            <span class="flag tag ship" id="carouselFlag">shipped in v2</span>
+            <span class="flag"><span class="tag native">New UX</span><span class="tag newevt">New Feature</span></span>
             <div class="carousel">
               <div class="chd"><svg class="spk" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l1.9 4.7L18 9l-4 2.7L15.5 17 12 14.4 8.5 17l1.5-5.3L6 9l4.1-1.3z"/></svg><span class="ttl" id="carTtl">Done for you</span><span class="sub" id="carSub">Completed automatically — review or undo anytime</span></div>
               <div class="strip" id="realStrip"></div>
@@ -465,7 +478,7 @@ h1,h2,h3,p{margin:0}
         </div>
 
         <div class="composer flagwrap">
-          <span class="flag tag ship">shipped in v2</span>
+          <span class="flag"><span class="tag recompose">Redesign</span></span>
           <div class="inputrow">
             <textarea class="field" id="composerField" rows="1" placeholder="Ask me anything, or tell me what to take off your plate…"></textarea>
           </div>
@@ -501,9 +514,9 @@ h1,h2,h3,p{margin:0}
         <div class="threadwrap">
           <div class="tmsg user">My Thursday afternoon is packed — can you clear the conflict on my calendar?</div>
           <div class="tmsg assistant"><span class="lead">Found one overlap.</span>Here's what I'd do — approve it, tweak the time, or skip it:</div>
-          <div class="flagwrap"><span class="flag tag ship">shipped in v2</span><div id="calHost1"></div></div>
+          <div class="flagwrap"><span class="flag"><span class="tag native">New UX</span><span class="tag newevt">New Feature</span></span><div id="calHost1"></div></div>
           <div class="tmsg note">Earlier today, while in Auto mode, I already moved another conflict for you — you can still undo it:</div>
-          <div class="flagwrap"><span class="flag tag newevt">new event</span><div id="calHost2"></div></div>
+          <div class="flagwrap"><span class="flag"><span class="tag native">New UX</span><span class="tag newevt">New Feature</span></span><div id="calHost2"></div></div>
         </div>
       </div>
       <div class="composer dock" aria-hidden="true">
@@ -523,7 +536,7 @@ h1,h2,h3,p{margin:0}
       <div class="threadscroll">
         <div class="threadwrap">
           <div class="tmsg assistant"><span class="lead">You're in Plan mode.</span>Here's a batch I can run together — approve all, or adjust any first:</div>
-          <div class="flagwrap"><span class="flag tag newevt">new event</span><div id="planHost"></div></div>
+          <div class="flagwrap"><span class="flag"><span class="tag native">New UX</span><span class="tag newevt">New Feature</span></span><div id="planHost"></div></div>
         </div>
       </div>
       <div class="composer dock" aria-hidden="true">
@@ -541,7 +554,7 @@ h1,h2,h3,p{margin:0}
 
   <div class="foot">
     <p><b>What this explores.</b> The whole OOBE arc in one place. <b>First run</b> fills the two moments the PR #6994 prototype skips — the cold-start (nothing yet) and the first "Done for you" card appearing — with an Invite vs Coach toggle. <b>Thread</b> and <b>Plan</b> are the two in-thread concepts already prototyped in code: the inline calendar-reschedule rich-preview and the batched-approval Plan card. All three run on the real <code>--v2-*</code> tokens.</p>
-    <p><b>Shipped today</b> (PR #6994, presentational, mock data): the <code>AutomationCarousel</code> + <code>AutomationTaskCard</code>, <code>CalendarRescheduleCard</code>, <code>PlanCard</code>, the shared <code>TaskActionBar</code> (Approve/Modify/Cancel · Modify/Revert), and the agent-mode pill. Busy states use the branded <code>NearProcessIndicator</code> (on <code>main</code>, #6901). Connect uses the existing <code>AuthRequired</code> card.</p>
+    <p><b>Built in PR #6994</b> (presentational, mock data — not yet merged to main): the <code>AutomationCarousel</code> + <code>AutomationTaskCard</code>, <code>CalendarRescheduleCard</code>, <code>PlanCard</code>, the shared <code>TaskActionBar</code> (Approve/Modify/Cancel · Modify/Revert), and the agent-mode pill. Genuinely <b>Shipped on main</b>: the branded <code>NearProcessIndicator</code> (#6901) and the <code>AuthRequired</code> connector the connect row reuses.</p>
     <p><b>Needs a new payload</b> (issue #6993): the empty / anticipatory / reveal states and the durable task lifecycle behind Thread and Plan — the <code>AutomationTaskAutomated</code> / <code>PlanUpdate</code> projection events (see <code>AUTOMATION-TASKS-CONTRACT.md</code> §§2–7). The Coach ghost strip is a net-new onboarding surface.</p>
   </div>
 </div>
@@ -589,19 +602,41 @@ h1,h2,h3,p{margin:0}
     {key:'calendar',label:'Calendar',icon:'calendar',accent:'#4285f4'},
     {key:'slack',label:'Slack',icon:'chat',accent:'#e01e5a'}
   ];
-  var appRow=document.getElementById('appRow');
-  APPS.forEach(function(a){
-    var b=document.createElement('button');b.className='appbtn';b.setAttribute('data-app',a.key);
-    b.innerHTML='<span class="appchip" style="'+chipStyle(a.accent)+'">'+svg(a.icon)+'</span><span class="an">'+a.label+'</span><span class="ast">connect</span>';
-    b.onclick=function(){ if(step<1){step=1; render(); if(playing){clearTimeout(timer);timer=setTimeout(advance,1100);} } };
-    appRow.appendChild(b);
-  });
-  function setAppsConnected(on){
-    document.querySelectorAll('.appbtn').forEach(function(b){
-      var k=b.getAttribute('data-app');var connected=on&&(k==='gmail'||k==='calendar');
-      b.classList.toggle('on',connected);b.querySelector('.ast').textContent=connected?'connected':'connect';
-    });
+  var appRow=document.getElementById('appRow'),connectAllBtn=document.getElementById('connectAllBtn'),connectSub=document.getElementById('connectSub');
+  var connSet=[], condensed=false;
+  function isConn(k){return connSet.indexOf(k)>=0;}
+  function appChip(a){return '<span class="appchip" style="'+chipStyle(a.accent)+'">'+svg(a.icon)+'</span>';}
+  function advanceFromConnect(){ if(step<1){ step=1; render(); if(playing){clearTimeout(timer);timer=setTimeout(advance,1100);} } }
+  function renderConnect(){
+    var all=APPS.length,n=connSet.length;
+    if(condensed && n>0){
+      connectAllBtn.style.display='none';
+      connectSub.textContent='connected — tap to manage';
+      appRow.innerHTML='<button class="cstack" id="cstackBtn" type="button" aria-label="Connected tools — tap to manage">'
+        +'<span class="stackicons">'+APPS.filter(function(a){return isConn(a.key);}).map(function(a){return appChip(a);}).join('')+'</span>'
+        +'<span class="stacklbl"><b>'+n+'</b> connected</span>'
+        +'<svg class="scv" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>';
+      document.getElementById('cstackBtn').onclick=function(){ condensed=false; renderConnect(); };
+    } else {
+      connectAllBtn.style.display=(n>=all)?'none':'';
+      connectSub.textContent='one tap each · add more later';
+      appRow.innerHTML=APPS.map(function(a){
+        var on=isConn(a.key);
+        return '<button class="cpill'+(on?' on':'')+'" data-app="'+a.key+'" type="button" aria-pressed="'+on+'">'
+          +appChip(a)+'<span class="an">'+a.label+'</span>'
+          +'<span class="cstate">'+svg('check',3)+'</span></button>';
+      }).join('');
+      appRow.querySelectorAll('.cpill').forEach(function(b){
+        b.onclick=function(){
+          var k=b.getAttribute('data-app'),i=connSet.indexOf(k);
+          if(i>=0) connSet.splice(i,1); else connSet.push(k);
+          renderConnect();
+          if(connSet.length===all){ setTimeout(function(){ condensed=true; renderConnect(); advanceFromConnect(); },600); }
+        };
+      });
+    }
   }
+  connectAllBtn.onclick=function(){ connSet=APPS.map(function(a){return a.key;}); condensed=true; renderConnect(); advanceFromConnect(); };
   var CARDS=[
     {app:'gmail',label:'Gmail',icon:'mail',accent:'#ea4335',title:'Triaged your inbox',when:'2m ago',metrics:[['12','replied'],['40','archived']]},
     {app:'calendar',label:'Calendar',icon:'calendar',accent:'#4285f4',title:'Accepted 3 invites',when:'just now',metrics:[['3','accepted'],['1','conflicts']]},
@@ -624,21 +659,21 @@ h1,h2,h3,p{margin:0}
       carouselBlock=document.getElementById('carouselBlock'),realStrip=document.getElementById('realStrip'),
       nearStat=document.getElementById('nearStat'),nearVerb=document.getElementById('nearVerb'),nearEl=document.getElementById('nearEl'),
       heroTitle=document.getElementById('heroTitle'),heroSub=document.getElementById('heroSub'),
-      carTtl=document.getElementById('carTtl'),carSub=document.getElementById('carSub'),carouselFlag=document.getElementById('carouselFlag'),
+      carTtl=document.getElementById('carTtl'),carSub=document.getElementById('carSub'),
       capN=document.getElementById('capN'),capC=document.getElementById('capC'),
       trackFill=document.getElementById('trackFill'),beatLbl=document.getElementById('beatLbl');
 
   var MAX=4, step=0, dir='invite', playing=false, timer=null, scene='first';
   var CAP=[
     'The <b>cold start</b>. Zero automations, nothing connected — the screen has to earn the first connect and the first prompt.',
-    'One click connects <b>Gmail</b> and <b>Calendar</b> via the existing connector card. The agent can start.',
+    '<b>Connect all</b> wires up your tools in one tap; the pills condense into a compact stack and the agent can start.',
     'A brief <b>anticipatory</b> beat — the branded indicator + skeleton tiles say "I\'m on it" instead of showing an empty strip.',
     'The <b>first automation appears</b> — the "Done for you" strip is born and the first card reveals. The aha moment.',
     'The strip <b>fills in</b>. Now it matches the populated carousel from PR #6994 — review, modify, or undo any of it.'
   ];
   var HERO=[
     ['Welcome to IronClaw, Ada.',"I'm your agent. Connect a tool or two and I'll start clearing the small stuff off your plate — you'll see it here."],
-    ['Welcome to IronClaw, Ada.',"Nice — Gmail and Calendar are connected. Give me a moment to get the lay of the land."],
+    ['Welcome to IronClaw, Ada.',"Nice — your tools are connected. Give me a moment to get the lay of the land."],
     ['Welcome to IronClaw, Ada.',"Getting oriented — I'll surface the first thing I can take off your plate as soon as it's done."],
     ['Here’s what I did while you got settled.',"I handled a first one on my own. Everything's reversible — take a look."],
     ['Here’s what I did while you got settled.',"A few things are already done. Review, tweak, or undo anything — and tell me what else to take on."]
@@ -656,17 +691,16 @@ h1,h2,h3,p{margin:0}
     show(connectBlock, empty);
     show(ghostBlock, empty && coach);
     show(carouselBlock, step>=2);
-    setAppsConnected(step>=1);
+    if(step===0){ connSet=[]; condensed=false; renderConnect(); }
+    else if(step===1){ connSet=APPS.map(function(a){return a.key;}); condensed=true; renderConnect(); }
     if(step>=2){
       if(working){
         carTtl.textContent='Working on your first automations';
         carSub.textContent='I’ll drop them here the moment they’re done';
-        carouselFlag.className='flag tag newevt';carouselFlag.textContent='new event';
         realStrip.innerHTML='<div class="sk"><div class="ln w40"></div><div class="ln w70"></div><div class="ln w55"></div></div>'.repeat(3);
       } else {
         carTtl.textContent='Done for you';
         carSub.textContent='Completed automatically — review or undo anytime';
-        carouselFlag.className='flag tag ship';carouselFlag.textContent='shipped in v2';
         var n=(step===3)?1:CARDS.length,html='';
         for(var i=0;i<n;i++){ html+=cardHTML(CARDS[i], 'reveal'+(i===0&&step===3?' first':'')); }
         realStrip.innerHTML=html;
