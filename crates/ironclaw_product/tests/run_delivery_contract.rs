@@ -1438,15 +1438,57 @@ async fn observer_delivers_distinct_same_kind_gates_once_each_and_suppresses_rep
         .expect("attempts");
     assert_eq!(
         attempts.len(),
-        5,
-        "same-gate replays reuse their original rows while distinct gates own distinct rows"
+        7,
+        "five run notifications plus cleanup of the two delivered auth prompts"
     );
-    assert!(
+    let mut run_notification_refs: Vec<String> = attempts
+        .iter()
+        .map(|attempt| attempt.candidate.projection_ref.as_str())
+        .filter(|projection_ref| projection_ref.starts_with("run-notification:"))
+        .map(str::to_string)
+        .collect();
+    run_notification_refs.sort();
+    let mut expected_run_notification_refs = vec![
+        format!(
+            "run-notification:approval:{run_id}:\
+             e3206a38703ea974fc4f5902051fcf48593081aa6c025dcb21db98bf886d8c25"
+        ),
+        format!(
+            "run-notification:approval:{run_id}:\
+             78c0c16afee88400ca2434de5c1a4d975cd21733915519104f04e3d580709356"
+        ),
+        format!(
+            "run-notification:auth:{run_id}:\
+             876c0617c31155ca02b78fb0934d45d0dde148fe65fa2a11baf58eac34c72084"
+        ),
+        format!(
+            "run-notification:auth:{run_id}:\
+             62ad57165b8c00856fded1220d7cb8f785b126c640afbcb137831ab819326116"
+        ),
+        format!("run-notification:final:{run_id}"),
+    ];
+    expected_run_notification_refs.sort();
+    assert_eq!(
+        run_notification_refs, expected_run_notification_refs,
+        "same-gate replays reuse their original rows, distinct gates own their pinned digested \
+         rows, and the final identity remains byte-for-byte unchanged"
+    );
+    assert_eq!(
         attempts
             .iter()
-            .any(|attempt| attempt.candidate.projection_ref.as_str()
-                == format!("run-notification:final:{run_id}")),
-        "the non-gate final-reply identity must remain byte-for-byte unchanged"
+            .filter(|attempt| attempt
+                .candidate
+                .projection_ref
+                .as_str()
+                .starts_with("system-notice:cleanup:retract-"))
+            .count(),
+        2,
+        "each delivered auth prompt owns one durable cleanup/retraction row"
+    );
+    assert_eq!(
+        harness.adapter.retracted_refs().len(),
+        2,
+        "both stale auth prompts are retracted after the final reply"
     );
 }
 
