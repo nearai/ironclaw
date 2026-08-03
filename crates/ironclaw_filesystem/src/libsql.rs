@@ -2251,26 +2251,30 @@ impl LibSqlRootFilesystem {
         // Scan the spec catalog for FTS specs whose prefix is path or any
         // ancestor (so callers may declare the index on a higher prefix
         // and query a child path).
-        let candidate_prefixes = crate::index::ancestor_prefixes(path.as_str());
-        let placeholders: Vec<String> = (1..=candidate_prefixes.len())
-            .map(|i| format!("?{i}"))
+        // Same candidate set and same precedence as `query_ordered` over this
+        // table: every ancestor prefix plus `/shared`, with `/shared` ranking
+        // ahead of every path-derived candidate. Omitting it left a shared FTS
+        // declaration undiscoverable from any query outside `/shared`.
+        //
+        // Ordered in SQL rather than by hoping the driver returns insertion
+        // order: the caller keeps the first row it sees per key, so "most
+        // specific wins" only holds if the most specific prefix arrives first.
+        // Without ORDER BY, two declarations at different ancestor prefixes
+        // resolve by rowid.
+        let mut params: Vec<libsql::Value> = crate::index::ancestor_prefixes(path.as_str())
+            .iter()
+            .map(|prefix| libsql::Value::Text((*prefix).to_string()))
             .collect();
-        // Order in SQL, not by hoping the driver returns insertion order. The
-        // caller keeps the first row it sees per key, so "most specific wins"
-        // is only true if the most specific prefix arrives first; without an
-        // explicit ORDER BY, two FTS declarations at different ancestor
-        // prefixes resolve by rowid instead of by specificity. `query_ordered`
-        // in this file already orders the same table this way.
+        params.push(libsql::Value::Text("/shared".to_string()));
+        let placeholders: Vec<String> = (1..=params.len())
+            .map(|position| format!("?{position}"))
+            .collect();
         let sql = format!(
             "SELECT prefix, name, keys FROM root_filesystem_index_specs \
              WHERE kind = 'fts' AND prefix IN ({}) \
-             ORDER BY LENGTH(prefix) DESC",
+             ORDER BY CASE WHEN prefix = '/shared' THEN 0 ELSE 1 END, LENGTH(prefix) DESC",
             placeholders.join(", ")
         );
-        let params: Vec<libsql::Value> = candidate_prefixes
-            .iter()
-            .map(|p| libsql::Value::Text((*p).to_string()))
-            .collect();
         let mut rows = conn
             .query(&sql, params)
             .await
