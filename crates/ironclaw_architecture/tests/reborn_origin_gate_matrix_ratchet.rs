@@ -34,9 +34,10 @@
 //!      per-descriptor self-consistency check, applied to the TOML source);
 //!    - any `ungated` `loop_run` has its id in the reviewed allowlist.
 //!
-//!    The scan covers both the first-party extension assets and the
-//!    host-bundled always-on package assets (`ironclaw_host_runtime/assets`,
-//!    the `ironclaw.memory` manifests). Today the only `ungated` TOML
+//!    The scan covers every shipped package manifest under
+//!    `crates/extensions/packages/` — the twelve extension packages and the
+//!    two host-bundled always-on `ironclaw.memory` providers, which WS2's
+//!    colocation brought under the same root. Today the only `ungated` TOML
 //!    capabilities are the allowlisted read-only memory tools
 //!    (`ironclaw.memory.read`/`search`/`tree`); every installable extension
 //!    capability remains gated.

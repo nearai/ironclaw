@@ -215,17 +215,30 @@ class ProductionPaths:
         )
 
     def diff_pathspecs(self) -> list[str]:
-        """Per-crate `git diff` pathspecs covering every crate's own `src/`.
+        """The pathspec for the production diff: the whole crates root.
 
-        Both forms are needed: git's pathspec `**` does not match the
-        zero-directory case, so `src/*.rs` is not covered by `src/**/*.rs`.
+        Deliberately NOT per-crate `<crate>/src/**` any more. Rename detection
+        needs both sides of a rename inside the same `git diff` invocation, and
+        a pathspec built from the *current* inventory cannot name the source of
+        a file whose crate DIRECTORY moved — `crates/ironclaw_memory_native/`
+        is not in the inventory once the crate lives at
+        `crates/extensions/packages/memory-native/`. `-M` then had nothing to
+        pair against and every surviving line of a moved file landed in the
+        denominator: measured on the WS2 package colocation, **33,026 added
+        production lines** across 95 files, none of them an actual edit.
+
+        That is the same defect `-M` was added for in PR #7005, one level up —
+        there it was a file moving within a crate, here it is the crate itself
+        moving — and it fails in the expensive direction, because the changed-
+        line coverage floor then demands coverage for a pure `git mv`.
+
+        Widening costs nothing in precision: `parse_diff` classifies each
+        destination path with `is_production()` and drops everything else, so
+        the denominator is unchanged for every non-move diff. It only makes the
+        rename pairing possible.
         """
 
-        pathspecs: list[str] = []
-        for directory in self._crate_directories:
-            pathspecs.append(f"{directory}/src/**/*.rs")
-            pathspecs.append(f"{directory}/src/*.rs")
-        return pathspecs
+        return [CRATES_ROOT]
 
 
 @dataclasses.dataclass(frozen=True)

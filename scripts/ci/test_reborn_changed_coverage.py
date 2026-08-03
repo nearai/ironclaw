@@ -335,21 +335,74 @@ class ChangedCoverageDiscoveryTests(unittest.TestCase):
             "directories; discovery must come from the crate inventory",
         )
 
-    def test_diff_pathspecs_are_derived_from_the_crate_inventory(self) -> None:
-        production = gate.ProductionPaths(ROOT)
-        pathspecs = production.diff_pathspecs()
+    def test_diff_pathspec_covers_the_whole_crates_root(self) -> None:
+        """The pathspec must not be built from the *current* inventory.
 
-        self.assertTrue(pathspecs)
-        crate_dirs = {
-            spec.rsplit("/src/", 1)[0] for spec in pathspecs
-        }
-        for crate_dir in crate_dirs:
-            with self.subTest(crate_dir=crate_dir):
-                self.assertTrue(
-                    (ROOT / crate_dir / "Cargo.toml").is_file(),
-                    "every pathspec must name a directory that really owns a Cargo.toml",
+        A per-crate `<crate>/src/**` pathspec cannot name the SOURCE of a
+        rename whose crate directory moved, so `-M` has nothing to pair and a
+        pure `git mv` reads as thousands of added lines. Classification still
+        happens per path in `parse_diff`, so widening costs no precision.
+        """
+        production = gate.ProductionPaths(ROOT)
+        self.assertEqual(production.diff_pathspecs(), [gate.CRATES_ROOT])
+
+    def test_a_crate_directory_move_adds_no_production_lines(self) -> None:
+        """The regression this widening exists for.
+
+        Moves a crate wholesale — the WS2 package-colocation shape — and
+        asserts the gate sees no added production lines. With a per-crate
+        pathspec this returned every surviving line of the moved file.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            def git(*args: str) -> None:
+                subprocess.run(
+                    ["git", *args], cwd=root, check=True, capture_output=True
                 )
-        self.assertEqual(len(pathspecs), 2 * len(crate_dirs))
+
+            git("init", "-q", "-b", "main")
+            git("config", "user.email", "t@example.com")
+            git("config", "user.name", "t")
+            # Clear the discovery floor.
+            for index in range(25):
+                crate = root / "crates" / f"ironclaw_filler{index}"
+                (crate / "src").mkdir(parents=True)
+                (crate / "Cargo.toml").write_text(
+                    f'[package]\nname = "ironclaw_filler{index}"\n', encoding="utf-8"
+                )
+                (crate / "src" / "lib.rs").write_text("pub fn f() {}\n", encoding="utf-8")
+            moved = root / "crates" / "ironclaw_mover"
+            (moved / "src").mkdir(parents=True)
+            (moved / "Cargo.toml").write_text(
+                '[package]\nname = "ironclaw_mover"\n', encoding="utf-8"
+            )
+            body = "".join(f"pub fn f{n}() {{ let _ = {n}; }}\n" for n in range(200))
+            (moved / "src" / "lib.rs").write_text(body, encoding="utf-8")
+            git("add", "-A")
+            git("commit", "-qm", "base")
+            base = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            destination = root / "crates" / "extensions" / "packages" / "mover"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            git("mv", "crates/ironclaw_mover", str(destination.relative_to(root)))
+            git("commit", "-qm", "move the crate")
+
+            production = gate.ProductionPaths(root)
+            changes = gate.parse_diff(
+                gate.git_diff(root, base, "HEAD", production), production
+            )
+            self.assertEqual(
+                {path: sorted(lines) for path, lines in changes.added.items()},
+                {},
+                "a pure crate-directory move must contribute no added lines",
+            )
 
     def test_production_classification_survives_family_nesting(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
