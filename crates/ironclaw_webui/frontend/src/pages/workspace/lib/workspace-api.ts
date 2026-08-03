@@ -74,18 +74,30 @@ function stripRelativePrefix(path, prefix) {
   return value.startsWith(`${base}/`) ? value.slice(base.length + 1) : value;
 }
 
-function userScopedPrefix(currentUser: WorkspaceCurrentUser) {
-  const tenantId = String(currentUser?.tenant_id || "").replace(/^\/+|\/+$/g, "");
-  const userId = String(currentUser?.user_id || "").replace(/^\/+|\/+$/g, "");
-  if (!tenantId || !userId) return "";
-  return `tenants/${tenantId}/users/${userId}`;
-}
-
+// `/fs/*` paths are mount-relative; the server binds each call to the
+// authenticated caller and returns only that caller's files. The frontend
+// never builds tenant/user storage prefixes: `currentUser` is used only as a
+// fail-closed gate when the deployment requires a scoped workspace projection
+// (hosted/multi-user). When a scoped projection is required and the caller
+// identity is unavailable, listings render empty and file reads short-circuit
+// to a directory placeholder, so an unauthenticated or identity-still-loading
+// session can never request a raw mount path.
 function scopedUserUnavailable(
   currentUser: WorkspaceCurrentUser,
   requireScopedWorkspace: boolean,
 ) {
   return requireScopedWorkspace && !userScopedPrefix(currentUser);
+}
+
+// `currentUser` is a fail-closed identity gate, not a path component: the
+// `/fs/*` handlers resolve the caller's scoped mount server-side. When a
+// scoped projection is required and the caller identity is unavailable, the
+// listing renders empty instead of requesting the raw mount root.
+function userScopedPrefix(currentUser: WorkspaceCurrentUser) {
+  const tenantId = String(currentUser?.tenant_id || "").replace(/^\/+|\/+$/g, "");
+  const userId = String(currentUser?.user_id || "").replace(/^\/+|\/+$/g, "");
+  if (!tenantId || !userId) return "";
+  return `tenants/${tenantId}/users/${userId}`;
 }
 
 function emptyDirectoryResponse() {
@@ -94,12 +106,6 @@ function emptyDirectoryResponse() {
 
 function isDirectoryEntry(entry) {
   return entry?.kind === "directory";
-}
-
-function hasDirectoryNamed(response, name) {
-  return (response?.entries || []).some(
-    (entry) => entry.name === name && isDirectoryEntry(entry)
-  );
 }
 
 function isMemorySidecarEntry(entry) {
@@ -142,34 +148,11 @@ async function fetchFsList(mount, relativePath) {
   return apiFetch(fsListUrl(mount, relativePath));
 }
 
-// Hosted WebUI storage exposes caller files below a tenant/user subtree. Local
-// single-user workspaces usually do not, so raw-root fallback is allowed only
-// when the deployment did not require scoped workspace projection and the raw
-// root does not look like the hosted multi-user container.
-async function resolveWorkspaceRootWithOptions(
-  currentUser: WorkspaceCurrentUser,
-  requireScopedWorkspace: boolean,
-) {
-  const prefix = userScopedPrefix(currentUser);
-  if (!prefix) {
-    return {
-      prefix: "",
-      rootResponse: requireScopedWorkspace ? emptyDirectoryResponse() : null,
-    };
-  }
-  try {
-    const rootResponse = await fetchFsList(WORKSPACE_MOUNT, prefix);
-    return { prefix, rootResponse };
-  } catch (error) {
-    if (!isNotFound(error)) throw error;
-    const rootResponse = await fetchFsList(WORKSPACE_MOUNT, "");
-    if (requireScopedWorkspace || hasDirectoryNamed(rootResponse, "tenants")) {
-      return { prefix, rootResponse: emptyDirectoryResponse() };
-    }
-    return { prefix: "", rootResponse };
-  }
-}
-
+// `/fs/*` paths are mount-relative and caller-scoped server-side. The
+// frontend only needs to: (1) fail closed when a scoped projection is
+// required but the caller identity is unavailable, and (2) pass the
+// selected mount-relative path through. No tenant/user prefix is ever
+// prepended — the server is the authority for caller scope.
 async function resolveWorkspaceDirectory(
   relativePath,
   currentUser: WorkspaceCurrentUser,
@@ -178,19 +161,10 @@ async function resolveWorkspaceDirectory(
   if (scopedUserUnavailable(currentUser, requireScopedWorkspace)) {
     return { actualPath: "", response: emptyDirectoryResponse() };
   }
-  const resolved = await resolveWorkspaceRootWithOptions(
-    currentUser,
-    requireScopedWorkspace,
-  );
-  if (resolved.prefix) {
-    const actualPath = joinRelative(resolved.prefix, relativePath);
-    if (!relativePath) return { actualPath, response: resolved.rootResponse };
-    return { actualPath, response: await fetchFsList(WORKSPACE_MOUNT, actualPath) };
-  }
-  if (!relativePath && resolved.rootResponse) {
-    return { actualPath: "", response: resolved.rootResponse };
-  }
-  return { actualPath: relativePath, response: await fetchFsList(WORKSPACE_MOUNT, relativePath) };
+  return {
+    actualPath: relativePath,
+    response: await fetchFsList(WORKSPACE_MOUNT, relativePath),
+  };
 }
 
 async function resolveWorkspacePath(
@@ -198,17 +172,16 @@ async function resolveWorkspacePath(
   currentUser: WorkspaceCurrentUser,
   requireScopedWorkspace: boolean,
 ) {
-  const { prefix } = await resolveWorkspaceRootWithOptions(
-    currentUser,
-    requireScopedWorkspace,
-  );
-  return prefix ? joinRelative(prefix, relativePath) : relativePath;
+  if (scopedUserUnavailable(currentUser, requireScopedWorkspace)) return "";
+  return relativePath;
 }
 
 function shouldCollapseMemoryDirectory(actualPath, directoryName) {
   return (
     directoryName === "agents" ||
     directoryName === "projects" ||
+    actualPath === "agents" ||
+    actualPath === "projects" ||
     actualPath.endsWith("/agents") ||
     actualPath.endsWith("/projects")
   );
@@ -228,20 +201,21 @@ async function collapseMemoryDirectory(actualPath, response) {
   return { actualPath: nextPath, response: nextResponse };
 }
 
+// Memory is caller-scoped server-side: `/fs/list?mount=memory` at the root
+// returns the authenticated caller's memory document tree. The frontend
+// collapses the internal `agents/<agent>/projects/_none` wrapper directories
+// so the user-facing root jumps straight to the caller's memory content, but
+// every request stays mount-relative.
 async function resolveMemoryDirectory(
   relativePath,
   currentUser: WorkspaceCurrentUser,
   requireScopedWorkspace: boolean,
 ) {
-  const prefix = userScopedPrefix(currentUser);
-  if (!prefix) {
-    if (requireScopedWorkspace) {
-      return { actualPath: "", response: emptyDirectoryResponse() };
-    }
-    return { actualPath: relativePath, response: await fetchFsList(MEMORY_MOUNT, relativePath) };
+  if (scopedUserUnavailable(currentUser, requireScopedWorkspace)) {
+    return { actualPath: "", response: emptyDirectoryResponse() };
   }
 
-  let actualPath = prefix;
+  let actualPath = relativePath;
   let response;
   try {
     response = await fetchFsList(MEMORY_MOUNT, actualPath);
@@ -265,6 +239,11 @@ async function resolveMemoryDirectory(
   return { actualPath, response };
 }
 
+// Resolve a memory file's mount-relative path by walking its parent directory
+// through the collapse-walk (which transparently skips the internal
+// `agents/<agent>/projects/_none` wrapper directories the server returns for
+// the caller's own memory tree), then joining the basename. Every request
+// stays mount-relative; the server is the authority for caller scope.
 async function resolveMemoryPath(
   relativePath,
   currentUser: WorkspaceCurrentUser,
@@ -273,7 +252,7 @@ async function resolveMemoryPath(
   const segments = splitRelative(relativePath);
   const basename = segments.pop();
   if (scopedUserUnavailable(currentUser, requireScopedWorkspace)) return "";
-  if (!basename || !userScopedPrefix(currentUser)) return relativePath;
+  if (!basename) return relativePath;
   const { actualPath } = await resolveMemoryDirectory(
     segments.join("/"),
     currentUser,
@@ -285,7 +264,7 @@ async function resolveMemoryPath(
 async function resolveDirectory(
   mount,
   path,
-  { currentUser, requireScopedWorkspace = false }: WorkspaceOptions,
+  { currentUser, requireScopedWorkspace = true }: WorkspaceOptions,
 ) {
   if (mount === WORKSPACE_MOUNT) {
     return resolveWorkspaceDirectory(path, currentUser, requireScopedWorkspace);
@@ -299,7 +278,7 @@ async function resolveDirectory(
 async function resolveFilePath(
   mount,
   path,
-  { currentUser, requireScopedWorkspace = false }: WorkspaceOptions,
+  { currentUser, requireScopedWorkspace = true }: WorkspaceOptions,
 ) {
   if (mount === WORKSPACE_MOUNT) {
     return resolveWorkspacePath(path, currentUser, requireScopedWorkspace);
@@ -409,7 +388,7 @@ export async function listWorkspace(
   qualifiedPath = "",
   {
     currentUser,
-    requireScopedWorkspace = false,
+    requireScopedWorkspace = true,
     threadId,
   }: WorkspaceOptions = {},
 ) {
@@ -466,7 +445,7 @@ export async function readWorkspaceFile(
   qualifiedPath,
   {
     currentUser,
-    requireScopedWorkspace = false,
+    requireScopedWorkspace = true,
     threadId,
   }: WorkspaceOptions = {},
 ) {

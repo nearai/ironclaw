@@ -4,10 +4,12 @@ import { test } from "vitest";
 
 import { listWorkspace, readWorkspaceFile } from "./workspace-api";
 
+// `/fs/*` is caller-scoped server-side: the authenticated caller's tenant/user
+// prefix is resolved by the backend, and the frontend consumes only
+// mount-relative paths. `CURRENT_USER` is a fail-closed identity gate, never a
+// path component.
 const CURRENT_USER = { tenant_id: "tenant-a", user_id: "alice" };
-const SCOPED_USER_PATH = "tenants/tenant-a/users/alice";
-const SCOPED_USER_QUERY = "tenants%2Ftenant-a%2Fusers%2Falice";
-const MEMORY_AGENT_PATH = `${SCOPED_USER_PATH}/agents/reborn-cli-agent`;
+const MEMORY_AGENT_PATH = "agents/reborn-cli-agent";
 const MEMORY_PROJECT_PATH = `${MEMORY_AGENT_PATH}/projects/_none`;
 const MEMORY_AGENT_QUERY = encodeURIComponent(MEMORY_AGENT_PATH);
 const MEMORY_PROJECTS_QUERY = encodeURIComponent(`${MEMORY_AGENT_PATH}/projects`);
@@ -52,15 +54,18 @@ function installFetch(handler) {
   };
 }
 
+// Memory mount-relative collapse walk. The server returns the caller's own
+// memory tree; the frontend collapses the internal `agents/<agent>/projects/_none`
+// wrapper directories so the user-facing root jumps straight to content.
 function memoryScopeListResponse(path, projectEntries = [MEMORY_HELLO_ENTRY]) {
-  if (path === `/api/webchat/v2/fs/list?mount=memory&path=${SCOPED_USER_QUERY}`) {
+  if (path === "/api/webchat/v2/fs/list?mount=memory") {
     return jsonResponse({
       entries: [
-        { name: "agents", path: `${SCOPED_USER_PATH}/agents`, kind: "directory" },
+        { name: "agents", path: "agents", kind: "directory" },
       ],
     });
   }
-  if (path === `/api/webchat/v2/fs/list?mount=memory&path=${SCOPED_USER_QUERY}%2Fagents`) {
+  if (path === "/api/webchat/v2/fs/list?mount=memory&path=agents") {
     return jsonResponse({
       entries: [
         { name: "reborn-cli-agent", path: MEMORY_AGENT_PATH, kind: "directory" },
@@ -114,84 +119,13 @@ test("workspace root keeps workspace visible alongside memory", async () => {
   }
 });
 
-test("hosted workspace lists the caller subtree as home without exposing tenant path", async () => {
+test("hosted workspace lists the caller's own mount-relative root", async () => {
   const harness = installFetch((path) => {
-    assert.equal(
-      path,
-      `/api/webchat/v2/fs/list?mount=workspace&path=${SCOPED_USER_QUERY}`
-    );
+    assert.equal(path, "/api/webchat/v2/fs/list?mount=workspace");
     return jsonResponse({
       entries: [
-        {
-          name: "mine.txt",
-          path: `${SCOPED_USER_PATH}/mine.txt`,
-          kind: "file",
-        },
+        { name: "mine.txt", path: "mine.txt", kind: "file" },
       ],
-    });
-  });
-
-  try {
-    const response = await listWorkspace("workspace", { currentUser: CURRENT_USER });
-
-    assert.deepEqual(response, {
-      entries: [{ name: "mine.txt", path: "workspace/mine.txt", is_dir: false }],
-    });
-  } finally {
-    harness.restore();
-  }
-});
-
-test("local workspace falls back to the raw workspace root when no caller subtree exists", async () => {
-  const harness = installFetch((path) => {
-    if (path === `/api/webchat/v2/fs/list?mount=workspace&path=${SCOPED_USER_QUERY}`) {
-      return jsonResponse({ error: "not_found" }, 404);
-    }
-    assert.equal(path, "/api/webchat/v2/fs/list?mount=workspace");
-    return jsonResponse({
-      entries: [{ name: "local.txt", path: "local.txt", kind: "file" }],
-    });
-  });
-
-  try {
-    const response = await listWorkspace("workspace", { currentUser: CURRENT_USER });
-
-    assert.deepEqual(response, {
-      entries: [{ name: "local.txt", path: "workspace/local.txt", is_dir: false }],
-    });
-  } finally {
-    harness.restore();
-  }
-});
-
-test("hosted workspace does not fall back to the raw tenant root", async () => {
-  const harness = installFetch((path) => {
-    if (path === `/api/webchat/v2/fs/list?mount=workspace&path=${SCOPED_USER_QUERY}`) {
-      return jsonResponse({ error: "not_found" }, 404);
-    }
-    assert.equal(path, "/api/webchat/v2/fs/list?mount=workspace");
-    return jsonResponse({
-      entries: [{ name: "tenants", path: "tenants", kind: "directory" }],
-    });
-  });
-
-  try {
-    const response = await listWorkspace("workspace", { currentUser: CURRENT_USER });
-
-    assert.deepEqual(response, { entries: [] });
-  } finally {
-    harness.restore();
-  }
-});
-
-test("hosted workspace hides a raw shared root when scoped projection is required", async () => {
-  const harness = installFetch((path) => {
-    if (path === `/api/webchat/v2/fs/list?mount=workspace&path=${SCOPED_USER_QUERY}`) {
-      return jsonResponse({ error: "not_found" }, 404);
-    }
-    assert.equal(path, "/api/webchat/v2/fs/list?mount=workspace");
-    return jsonResponse({
-      entries: [{ name: "shared.txt", path: "shared.txt", kind: "file" }],
     });
   });
 
@@ -201,7 +135,31 @@ test("hosted workspace hides a raw shared root when scoped projection is require
       requireScopedWorkspace: true,
     });
 
-    assert.deepEqual(response, { entries: [] });
+    assert.deepEqual(response, {
+      entries: [{ name: "mine.txt", path: "workspace/mine.txt", is_dir: false }],
+    });
+  } finally {
+    harness.restore();
+  }
+});
+
+test("local workspace lists the raw mount root when scoped projection is off", async () => {
+  const harness = installFetch((path) => {
+    assert.equal(path, "/api/webchat/v2/fs/list?mount=workspace");
+    return jsonResponse({
+      entries: [{ name: "local.txt", path: "local.txt", kind: "file" }],
+    });
+  });
+
+  try {
+    const response = await listWorkspace("workspace", {
+      currentUser: CURRENT_USER,
+      requireScopedWorkspace: false,
+    });
+
+    assert.deepEqual(response, {
+      entries: [{ name: "local.txt", path: "workspace/local.txt", is_dir: false }],
+    });
   } finally {
     harness.restore();
   }
@@ -224,23 +182,14 @@ test("hosted workspace stays empty before caller identity is resolved", async ()
   }
 });
 
-test("workspace file preview reads through the hidden caller subtree when it exists", async () => {
+test("workspace file preview reads through the mount-relative path", async () => {
   const harness = installFetch((path) => {
-    if (path === `/api/webchat/v2/fs/list?mount=workspace&path=${SCOPED_USER_QUERY}`) {
-      return jsonResponse({ entries: [] });
-    }
-    if (
-      path ===
-      `/api/webchat/v2/fs/stat?mount=workspace&path=${SCOPED_USER_QUERY}%2Fmine.txt`
-    ) {
+    if (path === "/api/webchat/v2/fs/stat?mount=workspace&path=mine.txt") {
       return jsonResponse({
         stat: { kind: "file", mime_type: "text/plain", size_bytes: 5 },
       });
     }
-    if (
-      path ===
-      `/api/webchat/v2/fs/content?mount=workspace&path=${SCOPED_USER_QUERY}%2Fmine.txt`
-    ) {
+    if (path === "/api/webchat/v2/fs/content?mount=workspace&path=mine.txt") {
       return new Response("hello", {
         status: 200,
         headers: { "content-type": "text/plain" },
@@ -252,6 +201,7 @@ test("workspace file preview reads through the hidden caller subtree when it exi
   try {
     const response = await readWorkspaceFile("workspace/mine.txt", {
       currentUser: CURRENT_USER,
+      requireScopedWorkspace: true,
     });
 
     assert.equal(response.kind, "text");
@@ -259,38 +209,36 @@ test("workspace file preview reads through the hidden caller subtree when it exi
     assert.equal(response.content, "hello");
     assert.equal(
       response.download_path,
-      `/api/webchat/v2/fs/content?mount=workspace&path=${SCOPED_USER_QUERY}%2Fmine.txt`
+      "/api/webchat/v2/fs/content?mount=workspace&path=mine.txt"
     );
   } finally {
     harness.restore();
   }
 });
 
-test("hosted workspace file preview does not read the raw shared root", async () => {
+test("hosted workspace file preview never requests another user's path", async () => {
+  const forbidden = [];
+  const forbiddenQuery = encodeURIComponent("tenants/tenant-a/users/bob/secret.txt");
   const harness = installFetch((path) => {
-    if (path === `/api/webchat/v2/fs/list?mount=workspace&path=${SCOPED_USER_QUERY}`) {
+    if (path.includes(forbiddenQuery)) forbidden.push(path);
+    if (path === "/api/webchat/v2/fs/list?mount=workspace") {
+      return jsonResponse({ entries: [] });
+    }
+    if (path === "/api/webchat/v2/fs/stat?mount=workspace&path=secret.txt") {
       return jsonResponse({ error: "not_found" }, 404);
     }
-    if (path === "/api/webchat/v2/fs/list?mount=workspace") {
-      return jsonResponse({
-        entries: [{ name: "shared.txt", path: "shared.txt", kind: "file" }],
-      });
-    }
-    assert.notEqual(path, "/api/webchat/v2/fs/stat?mount=workspace&path=shared.txt");
-    assert.equal(
-      path,
-      `/api/webchat/v2/fs/stat?mount=workspace&path=${SCOPED_USER_QUERY}%2Fshared.txt`
-    );
-    return jsonResponse({ error: "not_found" }, 404);
+    throw new Error(`unexpected fetch ${path}`);
   });
 
   try {
     await assert.rejects(
-      readWorkspaceFile("workspace/shared.txt", {
+      readWorkspaceFile("workspace/secret.txt", {
         currentUser: CURRENT_USER,
         requireScopedWorkspace: true,
-      })
+      }),
+      /not_found|404|error/i,
     );
+    assert.deepEqual(forbidden, []);
   } finally {
     harness.restore();
   }
@@ -327,7 +275,10 @@ test("memory lists the caller subtree without exposing storage wrapper folders",
   });
 
   try {
-    const response = await listWorkspace("memory", { currentUser: CURRENT_USER });
+    const response = await listWorkspace("memory", {
+      currentUser: CURRENT_USER,
+      requireScopedWorkspace: true,
+    });
 
     assert.deepEqual(response, {
       entries: [{ name: "hello.md", path: "memory/hello.md", is_dir: false }],
@@ -356,12 +307,15 @@ test("hosted memory stays empty before caller identity is resolved", async () =>
 
 test("memory returns an empty scoped view when the caller subtree is missing", async () => {
   const harness = installFetch((path) => {
-    assert.equal(path, `/api/webchat/v2/fs/list?mount=memory&path=${SCOPED_USER_QUERY}`);
+    assert.equal(path, "/api/webchat/v2/fs/list?mount=memory");
     return jsonResponse({ error: "not_found" }, 404);
   });
 
   try {
-    const response = await listWorkspace("memory", { currentUser: CURRENT_USER });
+    const response = await listWorkspace("memory", {
+      currentUser: CURRENT_USER,
+      requireScopedWorkspace: true,
+    });
 
     assert.deepEqual(response, { entries: [] });
   } finally {
@@ -369,7 +323,7 @@ test("memory returns an empty scoped view when the caller subtree is missing", a
   }
 });
 
-test("memory file preview reads through the hidden caller subtree", async () => {
+test("memory file preview reads through the collapsed mount-relative path", async () => {
   const harness = installFetch((path) => {
     const response = memoryScopeListResponse(path);
     if (response) return response;
@@ -396,6 +350,7 @@ test("memory file preview reads through the hidden caller subtree", async () => 
   try {
     const response = await readWorkspaceFile("memory/hello.md", {
       currentUser: CURRENT_USER,
+      requireScopedWorkspace: true,
     });
 
     assert.equal(response.kind, "text");
@@ -411,20 +366,15 @@ test("memory file preview reads through the hidden caller subtree", async () => 
 });
 
 test("memory file preview does not honor raw storage paths for scoped users", async () => {
+  // The frontend passes the path mount-relative; the server is the authority
+  // for caller scope and rejects a cross-user path with 404. The preview must
+  // surface that rejection rather than silently rendering another user's file.
   const rawOtherUserPath = "tenants/tenant-a/users/bob/agents/reborn-cli-agent/projects/_none/secret.md";
   const rawOtherUserQuery = encodeURIComponent(rawOtherUserPath);
   const harness = installFetch((path) => {
-    assert.notEqual(
-      path,
-      `/api/webchat/v2/fs/stat?mount=memory&path=${rawOtherUserQuery}`
-    );
-    assert.notEqual(
-      path,
-      `/api/webchat/v2/fs/content?mount=memory&path=${rawOtherUserQuery}`
-    );
     const response = memoryScopeListResponse(path);
     if (response) return response;
-    if (path === `/api/webchat/v2/fs/list?mount=memory&path=${MEMORY_PROJECT_QUERY}%2Ftenants`) {
+    if (path.includes(rawOtherUserQuery)) {
       return jsonResponse({ error: "not_found" }, 404);
     }
     throw new Error(`unexpected fetch ${path}`);
@@ -432,7 +382,11 @@ test("memory file preview does not honor raw storage paths for scoped users", as
 
   try {
     await assert.rejects(
-      readWorkspaceFile(`memory/${rawOtherUserPath}`, { currentUser: CURRENT_USER })
+      readWorkspaceFile(`memory/${rawOtherUserPath}`, {
+        currentUser: CURRENT_USER,
+        requireScopedWorkspace: true,
+      }),
+      /not_found|404|error/i,
     );
   } finally {
     harness.restore();

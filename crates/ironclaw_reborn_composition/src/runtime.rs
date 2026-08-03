@@ -406,8 +406,11 @@ pub use skills::{
 use skills::skill_asset_error;
 
 use ironclaw_operator::ResolvedRebornLlm;
+#[cfg(any(test, feature = "test-support"))]
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+#[cfg(any(test, feature = "test-support"))]
 use ironclaw_product_contracts::admin_users::AdminUserService;
+#[cfg(any(test, feature = "test-support"))]
 use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
 use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
 
