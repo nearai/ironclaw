@@ -199,14 +199,15 @@ fn tool_call_http_egress_returns_network_error_when_partial_response_is_missing(
 }
 
 #[tokio::test]
-async fn host_http_egress_composes_rfc7617_basic_from_username_and_secret() {
+async fn host_http_egress_composes_and_redacts_rfc7617_basic_credentials() {
+    let encoded = "d2F6dWgtd3VpOnMzY3IzdA==";
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
-        body: br#"{"ok":true}"#.to_vec(),
+        body: encoded.as_bytes().to_vec(),
         usage: NetworkUsage {
             request_bytes: 5,
-            response_bytes: 11,
+            response_bytes: encoded.len() as u64,
             resolved_ip: None,
         },
     });
@@ -219,7 +220,7 @@ async fn host_http_egress_composes_rfc7617_basic_from_username_and_secret() {
     stage_secret_sync(&services, &scope, &capability_id, &handle, "s3cr3t");
     let service = services.host_http_egress(network);
 
-    service
+    let response = service
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
             scope: scope.clone(),
@@ -246,6 +247,9 @@ async fn host_http_egress_composes_rfc7617_basic_from_username_and_secret() {
         .await
         .expect("basic credential should be injected through host egress");
 
+    assert_eq!(response.body, b"[REDACTED]");
+    assert!(response.redaction_applied);
+
     let requests = network_recorder.lock().unwrap();
     assert_eq!(requests.len(), 1);
     let authorization = requests[0]
@@ -256,6 +260,66 @@ async fn host_http_egress_composes_rfc7617_basic_from_username_and_secret() {
     // base64("wazuh-wui:s3cr3t")
     assert_eq!(authorization.1, "Basic d2F6dWgtd3VpOnMzY3IzdA==");
     assert!(!authorization.1.contains("s3cr3t"));
+}
+
+#[tokio::test]
+async fn host_http_egress_rejects_invalid_basic_username_and_secret() {
+    for (username, secret) in [
+        ("", "valid-secret"),
+        ("user:name", "valid-secret"),
+        ("user\nname", "valid-secret"),
+        ("api-user", "bad\nsecret"),
+    ] {
+        let network = RecordingNetwork::ok(NetworkHttpResponse {
+            status: 200,
+            headers: vec![],
+            body: Vec::new(),
+            usage: NetworkUsage {
+                request_bytes: 0,
+                response_bytes: 0,
+                resolved_ip: None,
+            },
+        });
+        let network_recorder = network.requests.clone();
+        let scope = sample_scope();
+        let capability_id = sample_capability_id();
+        let handle = SecretHandle::new("api-token").unwrap();
+        let services = test_obligation_services();
+        stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+        stage_secret_sync(&services, &scope, &capability_id, &handle, secret);
+        let service = services.host_http_egress(network);
+
+        let error = service
+            .execute(RuntimeHttpEgressRequest {
+                runtime: RuntimeKind::Script,
+                scope,
+                capability_id: capability_id.clone(),
+                method: NetworkMethod::Post,
+                url: "https://api.example.test/v1/run".to_string(),
+                headers: vec![],
+                body: Vec::new(),
+                network_policy: sample_policy(),
+                credential_injections: vec![RuntimeCredentialInjection {
+                    handle,
+                    source: RuntimeCredentialSource::StagedObligation { capability_id },
+                    target: RuntimeCredentialTarget::Basic {
+                        username: username.to_string(),
+                    },
+                    required: true,
+                }],
+                response_body_limit: Some(4096),
+                save_body_to: None,
+                timeout_ms: None,
+            })
+            .await
+            .expect_err("invalid Basic credentials must fail before dispatch");
+
+        assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
+        assert!(
+            network_recorder.lock().unwrap().is_empty(),
+            "invalid Basic credentials reached the network for username {username:?}"
+        );
+    }
 }
 
 #[tokio::test]

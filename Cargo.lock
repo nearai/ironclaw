@@ -4053,6 +4053,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "ed25519-dalek",
+ "futures",
  "hex",
  "hmac 0.13.0",
  "ironclaw_extension_contracts",

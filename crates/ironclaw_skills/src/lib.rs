@@ -41,7 +41,7 @@ pub use management::{
     SkillManagementErrorKind, SkillRemoveRequest, SkillRemoveResult, SkillSearchRequest,
     SkillSearchResult, SkillSource as ManagedSkillSource, SkillSummary, SkillUpdateRequest,
     SkillUpdateResult, install_skill, list_skills, read_skill_content, remove_skill, search_skills,
-    skill_summary_json, update_skill,
+    skill_summary_json, update_skill, validate_install_bundle_relative_path,
 };
 pub use parser::{ParsedSkill, SkillParseError, parse_skill_md, set_skill_auto_activate};
 pub use scoped_management::{

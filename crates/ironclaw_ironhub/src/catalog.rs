@@ -328,15 +328,15 @@ fn validate_manifest_artifacts(
         validate_artifact_for_origin(&entry.skill_md, super::model::MAX_METADATA_BYTES, origin)?;
         if entry.files.len() > MAX_INSTALL_BUNDLE_FILES {
             return Err(catalog(format!(
-                "skill '{}' publishes more than {} companion files",
+                "skill '{}' publishes more than {} bundled files",
                 entry.name, MAX_INSTALL_BUNDLE_FILES
             )));
         }
         let mut bundle_bytes: u64 = 0;
         for file in &entry.files {
-            ironclaw_extensions::ExtensionAssetPath::new(file.path.clone()).map_err(|error| {
+            ironclaw_skills::validate_install_bundle_relative_path(&file.path).map_err(|_| {
                 catalog(format!(
-                    "skill '{}' publishes an invalid file path: {error}",
+                    "skill '{}' publishes an invalid bundled file path",
                     entry.name
                 ))
             })?;
@@ -345,7 +345,7 @@ fn validate_manifest_artifacts(
         }
         if bundle_bytes > skill_bundle_total_byte_cap() {
             return Err(catalog(format!(
-                "skill '{}' publishes more than {} bytes of companion files",
+                "skill '{}' publishes more than {} bytes of bundled files",
                 entry.name,
                 skill_bundle_total_byte_cap()
             )));

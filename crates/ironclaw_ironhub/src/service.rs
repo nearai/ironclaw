@@ -3,6 +3,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
+use futures::{StreamExt, TryStreamExt, stream};
 use ironclaw_extension_contracts::lifecycle_id::LifecyclePackageId;
 use ironclaw_extension_contracts::state::InstallationState;
 use ironclaw_host_api::{
@@ -49,6 +50,8 @@ struct CachedManifest {
 
 static MANIFEST_CACHE: LazyLock<std::sync::Mutex<HashMap<String, CachedManifest>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+const MAX_SKILL_FILE_DOWNLOAD_CONCURRENCY: usize = 8;
 
 pub trait RebornIronHubRuntime {
     fn ironhub_skill_management(&self) -> Arc<ScopedSkillManagementPort>;
@@ -308,17 +311,26 @@ impl IronHubService {
                     .as_ref()
                     .map(CatalogOrigin::redacted_source_url)
                     .unwrap_or_else(|| entry.skill_md.url.clone());
-                let mut files = Vec::with_capacity(entry.files.len());
-                for file in &entry.files {
-                    let contents = self
-                        .download_verified(
+                let private_origin_ref = private_origin.as_ref();
+                let file_downloads = entry.files.iter().cloned().enumerate().collect::<Vec<_>>();
+                let mut files = stream::iter(file_downloads)
+                    .map(|(index, file)| async move {
+                        self.download_verified(
                             &file.artifact,
                             skill_file_byte_cap(),
-                            private_origin.as_ref(),
+                            private_origin_ref,
                         )
-                        .await?;
-                    files.push((file.path.clone(), contents));
-                }
+                        .await
+                        .map(|contents| (index, file.path, contents))
+                    })
+                    .buffer_unordered(MAX_SKILL_FILE_DOWNLOAD_CONCURRENCY)
+                    .try_collect::<Vec<_>>()
+                    .await?;
+                files.sort_by_key(|(index, _, _)| *index);
+                let files = files
+                    .into_iter()
+                    .map(|(_, path, contents)| (path, contents))
+                    .collect::<Vec<_>>();
                 let installed = self
                     .install_skill(
                         entry.name.as_str(),

@@ -102,6 +102,9 @@ fn plan_validation_rejects_unsupported_credential_targets() {
         RuntimeCredentialTarget::PathPlaceholder {
             placeholder: "__credential__".to_string(),
         },
+        RuntimeCredentialTarget::Basic {
+            username: "api-user".to_string(),
+        },
     ] {
         let mut plan = sample_plan();
         plan.credentials[0].target = target;

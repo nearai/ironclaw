@@ -10,7 +10,10 @@ use ironclaw_host_api::{
 use ironclaw_network::is_rfc3986_unreserved_segment;
 use ironclaw_safety::redaction_values_for_secret;
 use ironclaw_secrets::{SecretMaterial, SecretStoreError, SecretStorePort};
-use secrecy::{ExposeSecret, zeroize::Zeroize};
+use secrecy::{
+    ExposeSecret,
+    zeroize::{Zeroize, Zeroizing},
+};
 use std::sync::LazyLock;
 
 use crate::obligations::RuntimeSecretInjectionStore;
@@ -164,14 +167,21 @@ where
         // consume raw bytes, but the cache itself never holds a non-zeroizing
         // copy.
         let plaintext = value.expose_secret();
-        if let Err(error) =
-            apply_credential_injection(request, &mut parsed_url, &injection.target, plaintext)
-        {
-            restore_staged_secrets(secret_injections, request, &mut credential_materials);
-            request.credential_injections = credential_injections;
-            return Err(error);
-        }
+        let derived_redaction_values = match apply_credential_injection(
+            request,
+            &mut parsed_url,
+            &injection.target,
+            plaintext,
+        ) {
+            Ok(values) => values,
+            Err(error) => {
+                restore_staged_secrets(secret_injections, request, &mut credential_materials);
+                request.credential_injections = credential_injections;
+                return Err(error);
+            }
+        };
         redaction_values.extend(redaction_values_for_secret(plaintext));
+        redaction_values.extend(derived_redaction_values);
     }
     if let Some(url) = parsed_url {
         request.url = url.to_string();
@@ -379,7 +389,7 @@ fn apply_credential_injection(
     parsed_url: &mut Option<url::Url>,
     target: &RuntimeCredentialTarget,
     value: &str,
-) -> Result<(), RuntimeHttpEgressError> {
+) -> Result<Vec<String>, RuntimeHttpEgressError> {
     target
         .validate_declaration()
         .map_err(|_| RuntimeHttpEgressError::Credential {
@@ -399,19 +409,18 @@ fn apply_credential_injection(
             request.headers.push((name.clone(), injected));
         }
         RuntimeCredentialTarget::Basic { username } => {
-            if username.contains(':')
-                || username.chars().any(char::is_control)
-                || value.chars().any(char::is_control)
-            {
+            if value.chars().any(char::is_control) {
                 return Err(RuntimeHttpEgressError::Credential {
-                    reason: "credential injection basic username or secret is invalid".to_string(),
+                    reason: "credential injection basic secret is invalid".to_string(),
                 });
             }
-            let encoded = base64::engine::general_purpose::STANDARD
-                .encode(format!("{username}:{value}").as_bytes());
+            let joined = Zeroizing::new(format!("{username}:{value}"));
+            let encoded = base64::engine::general_purpose::STANDARD.encode(joined.as_bytes());
+            let authorization = format!("Basic {encoded}");
             request
                 .headers
-                .push(("Authorization".to_string(), format!("Basic {encoded}")));
+                .push(("Authorization".to_string(), authorization.clone()));
+            return Ok(vec![encoded, authorization]);
         }
         RuntimeCredentialTarget::QueryParam { name } => {
             let url = parsed_request_url(&request.url, parsed_url)?;
@@ -517,7 +526,7 @@ fn apply_credential_injection(
                 })?;
         }
     }
-    Ok(())
+    Ok(Vec::new())
 }
 
 /// Insert `value` as a JSON string at the RFC 6901 `pointer`. The parent must
