@@ -22,6 +22,11 @@ FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "sch
 IGNORED_PREFIXES = ("docs/", ".github/ISSUE_TEMPLATE/")
 DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
+INTEGRATION_SUPPORT_OWNERS = {
+    "tests/support/hosted_mcp_registration_server.rs": (
+        "tests/integration/hosted_mcp_registration.rs"
+    ),
+}
 PR_STATIC_CONTROL_PATHS = {
     "Cargo.toml",
     "rust-toolchain",
@@ -361,6 +366,11 @@ def build_plan(
         if path in integration_inventory:
             integration_lanes.add(integration_inventory[path])
             reasons.append(f"integration test changed: {path}")
+            continue
+        if path in INTEGRATION_SUPPORT_OWNERS:
+            owner = INTEGRATION_SUPPORT_OWNERS[path]
+            integration_lanes.add(integration_inventory[owner])
+            reasons.append(f"integration test support changed: {path}")
             continue
         if path.startswith("tests/integration/"):
             integration_lanes.add(0)
