@@ -440,14 +440,13 @@ impl OutboundStateStorePort for RecoveryTestStore {
         request: ClaimDeliveryAttemptForSendRequest,
     ) -> Result<ClaimDeliveryAttemptForSendOutcome, OutboundError> {
         let outcome = self.inner.claim_delivery_attempt_for_send(request).await?;
-        if matches!(&outcome, ClaimDeliveryAttemptForSendOutcome::Claimed) {
-            if let Some(synchronization) = self
+        if matches!(&outcome, ClaimDeliveryAttemptForSendOutcome::Claimed)
+            && let Some(synchronization) = self
                 .claim_ordered_recovery
                 .as_ref()
                 .filter(|synchronization| synchronization.is_owner)
-            {
-                synchronization.owner_claimed.add_permits(1);
-            }
+        {
+            synchronization.owner_claimed.add_permits(1);
         }
         Ok(outcome)
     }
