@@ -319,7 +319,9 @@ test("Chat leaves the composer editable while a run is processing", () => {
   const chatInput = findComponent(tree, components.ChatInput);
   const props = componentProps(chatInput, components.ChatInput);
   assert.equal(props.disabled, false);
-  assert.equal(props.sendDisabled, true);
+  // Queued-message UX: a processing run no longer disables the composer send —
+  // a follow-up is accepted and queued behind the active run.
+  assert.equal(props.sendDisabled, false);
 });
 
 test("Chat shows typing indicator before assistant text streams", () => {
@@ -457,7 +459,7 @@ test("Chat keeps typing indicator for a historical assistant draft without an ac
   assert.ok(findComponent(tree, components.TypingIndicator));
 });
 
-test("Chat refuses composer sends while a run is processing", async () => {
+test("Chat admits composer sends while a run is processing (queued)", async () => {
   let sendCalls = 0;
   const { tree, components } = renderChat({
     hookState: {
@@ -489,8 +491,10 @@ test("Chat refuses composer sends while a run is processing", async () => {
   const props = componentProps(chatInput, components.ChatInput);
   const response = await props.onSend("draft while busy");
 
-  assert.equal(response, null);
-  assert.equal(sendCalls, 0);
+  // Queued-message UX: the send is admitted (reaches useChat.send, which routes
+  // it to the backend queue) rather than being refused locally.
+  assert.notEqual(response, null);
+  assert.equal(sendCalls, 1);
 });
 
 test("Chat cancel button ignores active runs from another thread", () => {

@@ -118,6 +118,7 @@ registerPack("de", {
   "chat.identityUser": "Du",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "Zum Neuesten springen",
+  "chat.queued": "In Warteschlange",
   "shortcuts.title": "Tastaturkürzel",
   "shortcuts.send": "Nachricht senden",
   "shortcuts.newline": "Neue Zeile",

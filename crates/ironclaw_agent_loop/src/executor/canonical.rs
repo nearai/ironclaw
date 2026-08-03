@@ -9,9 +9,9 @@ use super::{
     AgentLoopExecutorError, AssistantReplyInput, BudgetInput, BudgetStep, COMPLETION_NUDGE_LIMIT,
     CancelCheck, CapabilityInput, CheckpointInput, CheckpointKind, CheckpointStage,
     DefaultExecutorPipeline, DrainInput, ExecutorStage, ExitInput, InputStep, ModelInput,
-    ModelStep, PendingInputAck, PromptInput, PromptStep, ReplyAdmissionInput, ReplyAdmissionStep,
-    StageContext, StopInput, StopKind, StopObservationInput, StopObservationStep, StopStep,
-    TurnCompletedStep, UserFacingInputDrainMode, latency,
+    ModelStep, PromptInput, PromptStep, ReplyAdmissionInput, ReplyAdmissionStep, StageContext,
+    StopInput, StopKind, StopObservationInput, StopObservationStep, StopStep, TurnCompletedStep,
+    UserFacingInputDrainMode, latency,
 };
 
 impl DefaultExecutorPipeline {
@@ -23,7 +23,6 @@ impl DefaultExecutorPipeline {
     ) -> Result<LoopExit, AgentLoopExecutorError> {
         let planner = family.planner();
         let ctx = StageContext { planner, host };
-        let mut pending_input_ack = PendingInputAck::default();
 
         loop {
             state = match latency::stage!(
@@ -40,20 +39,10 @@ impl DefaultExecutorPipeline {
                 "budget",
                 host.run_context(),
                 state.iteration,
-                self.budget.process(
-                    ctx,
-                    BudgetInput {
-                        state,
-                        pending_input_ack: std::mem::take(&mut pending_input_ack),
-                    },
-                ),
+                self.budget.process(ctx, BudgetInput { state },),
             )? {
-                BudgetStep::Continue {
-                    state: next,
-                    pending_input_ack: ack,
-                } => {
+                BudgetStep::Continue { state: next } => {
                     state = *next;
-                    pending_input_ack = ack;
                 }
                 BudgetStep::Exit(exit) => return Ok(exit),
             }
@@ -82,18 +71,12 @@ impl DefaultExecutorPipeline {
                     ctx,
                     DrainInput {
                         state,
-                        pending_input_ack: std::mem::take(&mut pending_input_ack),
                         mode: UserFacingInputDrainMode::Steering,
                     },
                 ),
             )? {
-                InputStep::Continue {
-                    state: next,
-                    pending_input_ack: ack,
-                    ..
-                } => {
+                InputStep::Continue { state: next, .. } => {
                     state = *next;
-                    pending_input_ack = ack;
                 }
                 InputStep::Exit(exit) => return Ok(exit),
             }
@@ -102,20 +85,13 @@ impl DefaultExecutorPipeline {
                 "prompt",
                 host.run_context(),
                 state.iteration,
-                self.prompt.process(
-                    ctx,
-                    PromptInput {
-                        state,
-                        pending_input_ack: std::mem::take(&mut pending_input_ack),
-                    },
-                ),
+                self.prompt.process(ctx, PromptInput { state },),
             )? {
                 PromptStep::Exit(exit) => return Ok(exit),
 
                 PromptStep::Prepared(prompt) => {
                     let prompt = *prompt;
                     state = prompt.state;
-                    pending_input_ack = prompt.pending_input_ack;
 
                     state = latency::stage!(
                         "checkpoint_before_model",
@@ -152,13 +128,6 @@ impl DefaultExecutorPipeline {
                             note_started_at,
                         );
                     }
-                    latency::stage!(
-                        "ack_pending_input_before_model",
-                        host.run_context(),
-                        state.iteration,
-                        pending_input_ack.ack(host),
-                    )?;
-
                     let model_response = match latency::stage!(
                         "model",
                         host.run_context(),
@@ -287,18 +256,15 @@ impl DefaultExecutorPipeline {
                                 ctx,
                                 DrainInput {
                                     state: next_state,
-                                    pending_input_ack: std::mem::take(&mut pending_input_ack),
                                     mode: UserFacingInputDrainMode::FollowUp,
                                 },
                             ),
                         )? {
                             InputStep::Continue {
                                 state: next,
-                                pending_input_ack: ack,
                                 drained,
                             } => {
                                 next_state = *next;
-                                pending_input_ack = ack;
                                 if drained {
                                     debug!(
                                         iteration = next_state.iteration,
@@ -322,14 +288,12 @@ impl DefaultExecutorPipeline {
                             StopInput {
                                 state: next_state,
                                 summary,
-                                pending_input_ack: std::mem::take(&mut pending_input_ack),
                             },
                         ),
                     )? {
                         StopStep::Stop {
                             state: mut stop_state,
                             kind,
-                            pending_input_ack: mut ack,
                         } => {
                             if completion_nudge_should_fire(host, &stop_state, &kind) {
                                 // Instead of terminating, re-enter the loop for one
@@ -337,8 +301,7 @@ impl DefaultExecutorPipeline {
                                 // completion-nudge directive, so the model can finish
                                 // the task (e.g. write a required output file) before
                                 // answering. Mirrors the drained-follow-up continue
-                                // (defer the ack returned by stop.decide to the next
-                                // iteration) rather than terminating.
+                                // rather than terminating.
                                 stop_state.completion_nudges_used += 1;
                                 stop_state.completion_nudge_pending = true;
                                 stop_state.last_reply_trailed_off = false;
@@ -349,7 +312,6 @@ impl DefaultExecutorPipeline {
                                     "agent loop issuing tools-capable completion nudge instead of stopping"
                                 );
                                 state = stop_state;
-                                pending_input_ack = ack;
                             } else {
                                 let exit_iteration = stop_state.iteration;
                                 let exit = latency::stage!(
@@ -364,21 +326,12 @@ impl DefaultExecutorPipeline {
                                         },
                                     ),
                                 )?;
-                                latency::stage!(
-                                    "ack_pending_input_before_exit",
-                                    host.run_context(),
-                                    exit_iteration,
-                                    ack.ack(host),
-                                )?;
+                                let _ = exit_iteration;
                                 return Ok(exit);
                             }
                         }
-                        StopStep::Continue {
-                            state: next,
-                            pending_input_ack: ack,
-                        } => {
+                        StopStep::Continue { state: next } => {
                             state = next;
-                            pending_input_ack = ack;
                         }
                         StopStep::Exit(exit) => return Ok(exit),
                     }
@@ -391,13 +344,6 @@ impl DefaultExecutorPipeline {
                 | PromptStep::ResumeExternalTool(resume) => {
                     let resume = *resume;
                     let resume_iteration = resume.state.iteration;
-                    pending_input_ack = resume.pending_input_ack;
-                    latency::stage!(
-                        "ack_pending_input_before_resume_capability",
-                        host.run_context(),
-                        resume_iteration,
-                        pending_input_ack.ack(host),
-                    )?;
                     let completed = latency::stage!(
                         "capabilities_resume",
                         host.run_context(),
@@ -449,14 +395,12 @@ impl DefaultExecutorPipeline {
                             StopInput {
                                 state: next_state,
                                 summary,
-                                pending_input_ack: std::mem::take(&mut pending_input_ack),
                             },
                         ),
                     )? {
                         StopStep::Stop {
                             state: stopped_state,
                             kind,
-                            pending_input_ack: mut ack,
                         } => {
                             let exit_iteration = stopped_state.iteration;
                             let exit = latency::stage!(
@@ -471,20 +415,10 @@ impl DefaultExecutorPipeline {
                                     },
                                 ),
                             )?;
-                            latency::stage!(
-                                "ack_pending_input_before_exit_resume",
-                                host.run_context(),
-                                exit_iteration,
-                                ack.ack(host),
-                            )?;
                             return Ok(exit);
                         }
-                        StopStep::Continue {
-                            state: next,
-                            pending_input_ack: ack,
-                        } => {
+                        StopStep::Continue { state: next } => {
                             state = next;
-                            pending_input_ack = ack;
                         }
                         StopStep::Exit(exit) => return Ok(exit),
                     }
@@ -492,7 +426,7 @@ impl DefaultExecutorPipeline {
                     state.iteration = state.iteration.saturating_add(1);
                 }
 
-                PromptStep::SkipModel(skipped_state, ack) => {
+                PromptStep::SkipModel(skipped_state) => {
                     // Compaction-only turn: the prompt stage ran compaction and
                     // set skip_model_this_iteration. Bypass CheckpointStage
                     // (BeforeModel), ModelStage, reply/capability, and
@@ -501,19 +435,6 @@ impl DefaultExecutorPipeline {
                     // sees the turn (without counting it as AfterCapabilityBatch
                     // evidence).
                     let skipped_state = *skipped_state;
-                    // Restore the inbound ack that PromptStep::SkipModel now
-                    // carries (PromptCompactionStep only acks on Compacted; the
-                    // Skipped branch returns without acking, so without this
-                    // field the ack would be permanently lost).
-                    pending_input_ack = ack;
-                    // Deliver the ack before stop.observe, mirroring the timing
-                    // of the Prepared path (line ~133: ack before ModelStage).
-                    latency::stage!(
-                        "ack_pending_input_skip_model",
-                        host.run_context(),
-                        skipped_state.iteration,
-                        pending_input_ack.ack(host),
-                    )?;
                     let summary = crate::strategies::TurnSummary::compaction_only();
 
                     let (mut next_state, summary) = match latency::stage!(
@@ -544,14 +465,12 @@ impl DefaultExecutorPipeline {
                             StopInput {
                                 state: next_state,
                                 summary,
-                                pending_input_ack: std::mem::take(&mut pending_input_ack),
                             },
                         ),
                     )? {
                         StopStep::Stop {
                             state: stopped_state,
                             kind,
-                            pending_input_ack: mut ack,
                         } => {
                             let exit_iteration = stopped_state.iteration;
                             let exit = latency::stage!(
@@ -566,31 +485,10 @@ impl DefaultExecutorPipeline {
                                     },
                                 ),
                             )?;
-                            latency::stage!(
-                                "ack_pending_input_before_exit_skip_model",
-                                host.run_context(),
-                                exit_iteration,
-                                ack.ack(host),
-                            )?;
                             return Ok(exit);
                         }
-                        StopStep::Continue {
-                            state: next,
-                            pending_input_ack: ack,
-                        } => {
-                            // N3 analysis: do NOT ack here. The ack returned by
-                            // stop.decide is the token for the *next* iteration's
-                            // input, not for the current one. The current-turn ack
-                            // was already consumed at line ~319 (before stop.observe),
-                            // mirroring the Prepared path's ack at line ~133 (before
-                            // ModelStage). After stop.decide, both paths — Prepared
-                            // (lines ~290-296) and SkipModel (here) — defer the
-                            // returned ack to the next iteration via pending_input_ack;
-                            // the next iteration's checkpoint drains it via
-                            // std::mem::take. Acking here would double-consume the
-                            // token before the next iteration has a chance to use it.
+                        StopStep::Continue { state: next } => {
                             next_state = next;
-                            pending_input_ack = ack;
                         }
                         StopStep::Exit(exit) => return Ok(exit),
                     }

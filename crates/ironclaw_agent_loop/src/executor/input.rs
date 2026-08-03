@@ -21,14 +21,12 @@ pub(super) enum UserFacingInputDrainMode {
 
 pub(super) struct DrainInput {
     pub(super) state: LoopExecutionState,
-    pub(super) pending_input_ack: PendingInputAck,
     pub(super) mode: UserFacingInputDrainMode,
 }
 
 pub(super) enum InputStep {
     Continue {
         state: Box<LoopExecutionState>,
-        pending_input_ack: PendingInputAck,
         drained: bool,
     },
     Exit(LoopExit),
@@ -44,12 +42,9 @@ impl ExecutorStage<DrainInput> for InputStage {
         input: DrainInput,
     ) -> Result<InputStep, AgentLoopExecutorError> {
         let mut state = input.state;
-        let mut pending_input_ack = input.pending_input_ack;
 
         let should_drain = match input.mode {
-            UserFacingInputDrainMode::Steering => {
-                pending_input_ack.is_empty() && ctx.planner.drain().drain_steering(&state).await
-            }
+            UserFacingInputDrainMode::Steering => ctx.planner.drain().drain_steering(&state).await,
             UserFacingInputDrainMode::FollowUp => ctx.planner.drain().drain_followup(&state).await,
         };
 
@@ -60,6 +55,15 @@ impl ExecutorStage<DrainInput> for InputStage {
             };
             let drained = self.drain(ctx, state, input.mode).await?;
             state = drained.state;
+            // The ack LIFECYCLE is local to this stage: tokens are collected by
+            // the drain and acked here, after a durable checkpoint of the
+            // advanced input cursor — never deferred to a later stage. The ack
+            // is what flips the queued transcript row to `Submitted`
+            // (model-visible); deferring it past the prompt stage would build
+            // this iteration's prompt while the message is still invisible, so
+            // the model would only see the steering input one full iteration
+            // late — or never, when this is the run's final iteration.
+            let mut pending_input_ack = PendingInputAck::default();
             pending_input_ack.replace(drained.ack_tokens)?;
             if let Some(reason_kind) = drained.cancelled_reason_kind {
                 let checked = CheckpointStage
@@ -73,25 +77,25 @@ impl ExecutorStage<DrainInput> for InputStage {
                     Some(checked.checkpoint_id),
                 )?));
             }
-            state = match CheckpointStage
-                .cancel_if_requested_after_pending_input_ack(ctx, state, &mut pending_input_ack)
-                .await?
-            {
+            if drained.drained {
+                state = CheckpointStage
+                    .write(ctx, state, CheckpointKind::BeforeModel)
+                    .await?
+                    .state;
+                pending_input_ack.ack(ctx.host).await?;
+            }
+            state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
                 CancelCheck::Continue(state) => *state,
                 CancelCheck::Exit(exit) => return Ok(InputStep::Exit(exit)),
             };
             return Ok(InputStep::Continue {
                 state: Box::new(state),
-                pending_input_ack,
                 drained: drained.drained,
             });
         }
 
         if matches!(input.mode, UserFacingInputDrainMode::Steering) {
-            state = match CheckpointStage
-                .cancel_if_requested_after_pending_input_ack(ctx, state, &mut pending_input_ack)
-                .await?
-            {
+            state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
                 CancelCheck::Continue(state) => *state,
                 CancelCheck::Exit(exit) => return Ok(InputStep::Exit(exit)),
             };
@@ -99,7 +103,6 @@ impl ExecutorStage<DrainInput> for InputStage {
 
         Ok(InputStep::Continue {
             state: Box::new(state),
-            pending_input_ack,
             drained: false,
         })
     }
@@ -217,10 +220,17 @@ fn user_facing_input_matches_drain_mode(input: &LoopInput, mode: UserFacingInput
                 LoopInput::UserMessage { .. } | LoopInput::Steering { .. }
             )
         }
+        // Steering inputs are drainable at the reply-only exit boundary too: a
+        // steering message that arrives during the run's FINAL model call is
+        // never seen by the steering drain (which runs at iteration start), so
+        // the follow-up drain must consume it and force one more iteration —
+        // otherwise the input strands unconsumed while the run completes.
         UserFacingInputDrainMode::FollowUp => {
             matches!(
                 input,
-                LoopInput::FollowUp { .. } | LoopInput::UserMessage { .. }
+                LoopInput::FollowUp { .. }
+                    | LoopInput::UserMessage { .. }
+                    | LoopInput::Steering { .. }
             )
         }
     }

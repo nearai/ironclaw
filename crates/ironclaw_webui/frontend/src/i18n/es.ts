@@ -118,6 +118,7 @@ registerPack("es", {
   "chat.identityUser": "Tú",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "Saltar a lo último",
+  "chat.queued": "En cola",
   "shortcuts.title": "Atajos de teclado",
   "shortcuts.send": "Enviar mensaje",
   "shortcuts.newline": "Nueva línea",

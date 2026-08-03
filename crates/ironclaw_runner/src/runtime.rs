@@ -12,9 +12,9 @@ use ironclaw_loop_contracts::{
 use ironclaw_loop_host::{
     AgentTurnRunCancellationFactory, AwaitEdgeSettler, AwaitEdgeWriter,
     CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier, HostIdentityContextSource,
-    HostInputQueue, HostManagedModelGateway, HostSkillContextSource, HostUserProfileSource,
-    LoopAttachmentReadPort, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, PerSurfaceCapabilityDenyDecorator,
+    HostInputQueue, HostInputQueueReconcile, HostManagedModelGateway, HostSkillContextSource,
+    HostUserProfileSource, LoopAttachmentReadPort, LoopCapabilityPortDecorator,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, PerSurfaceCapabilityDenyDecorator,
     ProductLiveCancellationReadiness, RunCancellationFactory, SpawnSubagentFlavorDescriptor,
     SpawnSubagentInputCodec, SubagentDefinitionResolver, SubagentPromptComposer,
     SubagentPromptMaterialSource, SubagentSpawnCapabilityPort, SubagentSpawnDeps,
@@ -311,6 +311,14 @@ where
     /// a bug — the same "genuinely optional" shape as `attachment_read_port`.
     pub gate_record_store: Option<Arc<dyn ironclaw_approvals::GateRecordStorePort>>,
     pub input_queue: Option<Arc<dyn HostInputQueue>>,
+    /// Terminal-reconciliation surface of the SAME queue as `input_queue`.
+    /// When present, the composed [`ProcessTransitionPort`] is decorated with
+    /// [`crate::steering_reconcile::SteeringReconcilingProcessTransitions`],
+    /// so every terminal run transition (complete/fail/cancel) closes the
+    /// run's steering queue, settles stranded `Queued` rows, and reclaims the
+    /// per-run queue record. `None` only for compositions without a steering
+    /// queue (then there is nothing to reconcile).
+    pub input_queue_reconcile: Option<Arc<dyn HostInputQueueReconcile>>,
     /// Required by live planned-runtime composition. Helper-level tests may use
     /// a no-op implementation, but the type signature always requires a valid
     /// identity context source.
@@ -381,6 +389,7 @@ pub enum DefaultPlannedRuntimeBuildError {
     PlannedDriver(DefaultPlannedDriverRegistrationError),
     RunProfile(String),
     SubagentCompletion(String),
+    SteeringReconcileObserver(String),
 }
 
 impl fmt::Display for DefaultPlannedRuntimeBuildError {
@@ -391,6 +400,12 @@ impl fmt::Display for DefaultPlannedRuntimeBuildError {
             Self::RunProfile(error) => write!(formatter, "run profile resolver failed: {error}"),
             Self::SubagentCompletion(error) => {
                 write!(formatter, "subagent completion wiring failed: {error}")
+            }
+            Self::SteeringReconcileObserver(error) => {
+                write!(
+                    formatter,
+                    "steering reconcile observer wiring failed: {error}"
+                )
             }
         }
     }
@@ -646,6 +661,19 @@ where
             parts.turn_event_sink.clone(),
         )))
         .map_err(DefaultPlannedRuntimeBuildError::SubagentCompletion)?;
+    if let Some(reconcile) = parts.input_queue_reconcile.clone() {
+        // Completeness net over the transition-port decoration below: the
+        // scheduler/supervisor terminalizes crash-reclaimed and panicked runs
+        // through the raw runtime handle, but every terminal transition lands
+        // in the journal, and observer delivery is durable (cursor-tracked,
+        // retried, replayed across restarts). Reconciliation is idempotent,
+        // so double delivery with the decorator is a no-op.
+        process_system
+            .subscribe_process_observer(Arc::new(
+                crate::steering_reconcile::SteeringReconcileCommitObserver::new(reconcile),
+            ))
+            .map_err(DefaultPlannedRuntimeBuildError::SteeringReconcileObserver)?;
+    }
     let base_coordinator = DefaultTurnCoordinator::new(Arc::clone(&agent_turn_runtime))
         .with_run_profile_resolver(Arc::clone(&run_profile_resolver))
         .with_wake_notifier(Arc::clone(&wake_notifier))
@@ -809,8 +837,21 @@ where
     }
     let host_factory = Arc::new(host_factory);
 
-    let process_transition_port: Arc<dyn ProcessTransitionPort<Error = ironclaw_turns::TurnError>> =
-        process_system.transitions();
+    let mut process_transition_port: Arc<
+        dyn ProcessTransitionPort<Error = ironclaw_turns::TurnError>,
+    > = process_system.transitions();
+    if let Some(reconcile) = parts.input_queue_reconcile {
+        // Decorate the ONE transition port every terminal path flows through
+        // (loop-exit apply, executor/scheduler failure fallbacks), so a run
+        // that ends without a cancel still closes and reclaims its steering
+        // queue.
+        process_transition_port = Arc::new(
+            crate::steering_reconcile::SteeringReconcilingProcessTransitions::new(
+                process_transition_port,
+                reconcile,
+            ),
+        );
+    }
     let loop_exit_applier = Arc::new(LoopExitApplier::new(
         Arc::clone(&process_transition_port),
         parts.loop_exit_evidence,

@@ -325,6 +325,17 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["integration_lanes"], [])
 
+    def test_e2e_scenario_is_owned_by_dedicated_e2e_workflow(self) -> None:
+        plan = self.plan(
+            "pull_request", ["tests/e2e/scenarios/test_reborn_webui_v2_smoke.py"]
+        )
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["integration_lanes"], [])
+
+    def test_shared_e2e_harness_remains_an_explicit_mapping_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unmapped Reborn test path"):
+            self.plan("pull_request", ["tests/e2e/reborn_webui_harness.py"])
+
     def test_changed_coverage_manifest_does_not_launch_integration_lanes(self) -> None:
         plan = self.plan(
             "pull_request",

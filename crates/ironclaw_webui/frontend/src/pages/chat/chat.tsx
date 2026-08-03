@@ -165,12 +165,13 @@ export function Chat({
             name: pendingOnboardingLabel(pendingOnboarding),
           })
         : "";
+  // Queued-message UX: a running thread no longer disables the composer — a
+  // follow-up sent while a run is active is accepted and queued. Only a
+  // pending gate / onboarding step (which needs the user's input first) or an
+  // active cooldown blocks a send.
   const composerSendDisabled =
     activeThreadHasGate ||
     activeThreadHasOnboarding ||
-    (activeThreadIsProcessing &&
-      !activeThreadHasGate &&
-      !activeThreadHasOnboarding) ||
     cooldownSeconds > 0;
   const composerSendBlockedRef = React.useRef(composerSendDisabled);
   composerSendBlockedRef.current = composerSendDisabled;

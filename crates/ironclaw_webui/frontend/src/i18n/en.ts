@@ -122,6 +122,7 @@ registerPack("en", {
   "chat.identityUser": "You",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "Jump to latest",
+  "chat.queued": "Queued",
   "shortcuts.title": "Keyboard shortcuts",
   "shortcuts.send": "Send message",
   "shortcuts.newline": "New line",
@@ -243,6 +244,8 @@ registerPack("en", {
   "settings.traceCommons": "Trace Commons",
   "settings.users": "Users",
   "settings.language": "Language",
+
+  // Settings — usage tab
 
   // Settings — Trace Commons credits (read-only)
   "traceCommons.title": "Trace Commons credits",

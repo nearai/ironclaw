@@ -118,6 +118,7 @@ registerPack("uk", {
   "chat.identityUser": "Ви",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "Перейти до останнього",
+  "chat.queued": "У черзі",
   "shortcuts.title": "Комбінації клавіш",
   "shortcuts.send": "Надіслати повідомлення",
   "shortcuts.newline": "Новий рядок",

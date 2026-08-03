@@ -1537,6 +1537,20 @@ impl RebornIntegrationHarness {
             .collect()
     }
 
+    /// Every User-role message across the captured model requests, in call
+    /// order. Same per-thread `scripted_llm` source (and the same no-baseline
+    /// rationale) as `captured_system_prompts`. Read by
+    /// `assert_model_saw_user_message` in `assertions.rs`.
+    pub(super) fn captured_model_user_messages(&self) -> Vec<String> {
+        self.scripted_llm
+            .captured_requests()
+            .into_iter()
+            .flatten()
+            .filter(|message| matches!(message.role, Role::User))
+            .map(|message| message.content)
+            .collect()
+    }
+
     pub(super) fn captured_system_prompts(&self) -> Vec<String> {
         self.scripted_llm
             .captured_requests()
