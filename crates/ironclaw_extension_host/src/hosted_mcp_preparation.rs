@@ -21,13 +21,18 @@ use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::package_lifecycle::{
     LifecyclePackageRef, LifecycleProductResponse,
 };
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, Semaphore};
 
 use crate::{
     AvailableExtensionCatalog, ExtensionActivationCredentialGate,
     ExtensionActivationCredentialReadiness, package_runtime_credential_auth_requirements,
 };
 use ironclaw_product_contracts::package_lifecycle::LifecyclePackageKind;
+
+/// Per-process ceiling for registration-time network preflight. It bounds
+/// concurrent third-party probes without queueing callers behind a stalled
+/// endpoint; saturation is returned as a retryable product failure.
+const MAX_CONCURRENT_HOSTED_MCP_REGISTRATION_PREFLIGHTS: usize = 8;
 
 pub struct HostedMcpPreparationService {
     installation_store: Arc<dyn ExtensionInstallationStorePort>,
@@ -37,6 +42,7 @@ pub struct HostedMcpPreparationService {
     discovery_runtime_ports: Option<ironclaw_host_runtime::ProductAuthProviderRuntimePorts>,
     catalog_safety: crate::McpCatalogAdmissionPolicy,
     oauth_client_profiles: Arc<dyn ironclaw_auth::OAuthClientProfileRegistry>,
+    registration_preflight_semaphore: Arc<Semaphore>,
 }
 
 pub struct HostedMcpPreparationDependencies {
@@ -61,6 +67,9 @@ impl HostedMcpPreparationService {
             discovery_runtime_ports: dependencies.runtime_ports,
             catalog_safety: dependencies.catalog_safety,
             oauth_client_profiles: dependencies.oauth_client_profiles,
+            registration_preflight_semaphore: Arc::new(Semaphore::new(
+                MAX_CONCURRENT_HOSTED_MCP_REGISTRATION_PREFLIGHTS,
+            )),
         }
     }
 
@@ -101,6 +110,13 @@ impl HostedMcpPreparationService {
                     selection @ (HostedMcpAuthSelection::Auto
                     | HostedMcpAuthSelection::OAuth { .. }),
                 ) => {
+                    let _preflight_permit = self
+                        .registration_preflight_semaphore
+                        .try_acquire()
+                        .map_err(|_| ProductOperationFailure::Transient {
+                            reason: "hosted MCP registration preflight is temporarily saturated"
+                                .to_string(),
+                        })?;
                     let seed = crate::hosted_mcp_manifest::pending_manifest(
                         &extension_id,
                         &request.desired_name,
@@ -378,10 +394,10 @@ impl HostedMcpPreparationService {
             let endpoint = ironclaw_extension_contracts::hosted_mcp::HostedMcpEndpoint::new(
                 mcp.server.clone(),
             )
-            .map_err(|_| crate::hosted_mcp_manifest::name_unavailable())?;
+            .map_err(crate::hosted_mcp_manifest::endpoint_input_error)?;
             let endpoint =
                 crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint::parse(&endpoint)
-                    .map_err(|_| crate::hosted_mcp_manifest::name_unavailable())?;
+                    .map_err(crate::hosted_mcp_manifest::endpoint_admission_error)?;
             let enriched = crate::hosted_mcp_manifest::pending_manifest(
                 &extension_id,
                 &manifest.resolved().name,
@@ -671,9 +687,9 @@ impl HostedMcpPreparationService {
             .ok_or_else(crate::hosted_mcp_manifest::name_unavailable)?;
         let endpoint =
             ironclaw_extension_contracts::hosted_mcp::HostedMcpEndpoint::new(mcp.server.clone())
-                .map_err(|_| crate::hosted_mcp_manifest::name_unavailable())?;
+                .map_err(crate::hosted_mcp_manifest::endpoint_input_error)?;
         let endpoint = crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint::parse(&endpoint)
-            .map_err(|_| crate::hosted_mcp_manifest::name_unavailable())?;
+            .map_err(crate::hosted_mcp_manifest::endpoint_admission_error)?;
         let unresolved = crate::hosted_mcp_manifest::pending_manifest(
             extension_id,
             &manifest.resolved().name,
@@ -785,11 +801,11 @@ impl HostedMcpPreparationService {
             }
             let endpoint = crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint::parse(
                 &ironclaw_extension_contracts::hosted_mcp::HostedMcpEndpoint::new(endpoint)
-                    .map_err(|_| crate::hosted_mcp_manifest::name_unavailable())?,
+                    .map_err(crate::hosted_mcp_manifest::endpoint_input_error)?,
             )
-            .map_err(|_| crate::hosted_mcp_manifest::name_unavailable())?;
+            .map_err(crate::hosted_mcp_manifest::endpoint_admission_error)?;
             let vendor = crate::hosted_mcp_admission::hosted_mcp_vendor_id(&endpoint)
-                .map_err(|_| crate::hosted_mcp_manifest::name_unavailable())?;
+                .map_err(crate::hosted_mcp_manifest::endpoint_admission_error)?;
             let profiles = Arc::clone(&self.oauth_client_profiles);
             let admitted = ironclaw_auth::OAuthRecipeAdmission::new(SharedOAuthProfiles(profiles))
                 .admit(ironclaw_auth::OAuthRecipeAdmissionRequest {

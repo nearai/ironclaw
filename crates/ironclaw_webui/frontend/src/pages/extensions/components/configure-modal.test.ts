@@ -234,6 +234,36 @@ test("ConfigureModal recovers ambiguous hosted MCP auth with only three explicit
   assert.equal(closeCalls, 1);
 });
 
+test("ConfigureModal keeps setup open when Bearer selection still requires a credential", () => {
+  const saved = [];
+  let closeCalls = 0;
+  const view = renderModal({
+    packageRef: { kind: "extension", id: "linear" },
+    displayName: "Linear MCP",
+    onClose: () => {
+      closeCalls += 1;
+    },
+    onSaved: (result) => saved.push(result),
+    setupResult: {
+      hostedMcpAuthSelectionRequired: true,
+      secrets: [],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+  });
+
+  const result = {
+    success: true,
+    blockers: [{ kind: "credential", ref_id: "bearer_token" }],
+  };
+  const onSuccess = view.hostedMcpAuthArgs[0][1];
+  onSuccess(result);
+
+  assert.deepEqual(saved, []);
+  assert.equal(closeCalls, 0);
+});
+
 function renderFirstComponent(rendered, component, props = {}) {
   if (!rendered || !Array.isArray(rendered.values)) return null;
   if (rendered.values[0] === component) {

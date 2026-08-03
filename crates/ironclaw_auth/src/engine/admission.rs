@@ -10,9 +10,10 @@ use std::fmt;
 use async_trait::async_trait;
 use ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge;
 use ironclaw_extension_contracts::recipe::{
-    BoundedJsonPointer, HttpsEndpoint, OAuth2CodeRecipe, RecipeClientCredentials, TokenResponseMap,
-    VendorAuthRecipe,
+    BoundedJsonPointer, HttpsEndpoint, OAuth2CodeRecipe, RecipeClientCredentials,
+    RecipeValidationError, TokenResponseMap, VendorAuthRecipe,
 };
+use ironclaw_host_api::error::HostApiError;
 
 use crate::{AuthProductError, ResolvedVendorAuthRecipe};
 
@@ -134,15 +135,16 @@ where
             return Err(AuthProductError::MalformedConfig);
         }
         let canonical_resource = HttpsEndpoint::new(canonical_resource.to_string())
-            .map_err(|_| AuthProductError::MalformedConfig)?;
+            .map_err(|error| malformed_config_from_host_api_error("canonical_resource", error))?;
         let mut advertised = BTreeSet::new();
         for location in challenge
             .www_authenticate_metadata
             .iter()
             .chain(challenge.protected_resource_metadata.iter())
         {
-            let parsed = url::Url::parse(location.as_str())
-                .map_err(|_| AuthProductError::MalformedConfig)?;
+            let parsed = url::Url::parse(location.as_str()).map_err(|error| {
+                malformed_config_from_url_parse_error("metadata_location", error)
+            })?;
             if parsed.scheme() != "https"
                 || parsed.host_str().is_none()
                 || !parsed.username().is_empty()
@@ -151,8 +153,9 @@ where
             {
                 return Err(AuthProductError::MalformedConfig);
             }
-            let normalized = HttpsEndpoint::new(parsed.to_string())
-                .map_err(|_| AuthProductError::MalformedConfig)?;
+            let normalized = HttpsEndpoint::new(parsed.to_string()).map_err(|error| {
+                malformed_config_from_host_api_error("metadata_location", error)
+            })?;
             advertised.insert(normalized.as_str().to_string());
         }
         if advertised.len() != 1 {
@@ -164,7 +167,7 @@ where
                 .next()
                 .ok_or(AuthProductError::MalformedConfig)?,
         )
-        .map_err(|_| AuthProductError::MalformedConfig)?;
+        .map_err(|error| malformed_config_from_host_api_error("metadata_url", error))?;
         Ok(ProtectedResourceMetadataFetch {
             canonical_resource,
             metadata_url,
@@ -189,15 +192,15 @@ where
             return Err(AuthProductError::MalformedConfig);
         }
         let canonical_resource = HttpsEndpoint::new(canonical_resource.to_string())
-            .map_err(|_| AuthProductError::MalformedConfig)?;
+            .map_err(|error| malformed_config_from_host_api_error("canonical_resource", error))?;
         let path_metadata_url = HttpsEndpoint::new(super::dcr::protected_resource_metadata_url(
             canonical_resource.as_str(),
         )?)
-        .map_err(|_| AuthProductError::MalformedConfig)?;
+        .map_err(|error| malformed_config_from_host_api_error("path_metadata_url", error))?;
         let root_metadata_url = HttpsEndpoint::new(
             super::dcr::protected_resource_metadata_root_url(canonical_resource.as_str())?,
         )
-        .map_err(|_| AuthProductError::MalformedConfig)?;
+        .map_err(|error| malformed_config_from_host_api_error("root_metadata_url", error))?;
         let mut candidates = vec![ProtectedResourceMetadataFetch {
             canonical_resource: canonical_resource.clone(),
             metadata_url: path_metadata_url.clone(),
@@ -226,7 +229,9 @@ where
         let metadata_url = HttpsEndpoint::new(super::dcr::authorization_server_metadata_url(
             issuer.as_str(),
         )?)
-        .map_err(|_| AuthProductError::MalformedConfig)?;
+        .map_err(|error| {
+            malformed_config_from_host_api_error("authorization_server_metadata_url", error)
+        })?;
         Ok(AuthorizationServerMetadataFetch {
             resource,
             issuer,
@@ -290,11 +295,13 @@ where
             authorization_endpoint: ironclaw_extension_contracts::recipe::HttpsEndpoint::new(
                 authorization_endpoint.to_string(),
             )
-            .map_err(|_| AuthProductError::MalformedConfig)?,
+            .map_err(|error| {
+                malformed_config_from_host_api_error("authorization_endpoint", error)
+            })?,
             token_endpoint: ironclaw_extension_contracts::recipe::HttpsEndpoint::new(
                 token_endpoint.to_string(),
             )
-            .map_err(|_| AuthProductError::MalformedConfig)?,
+            .map_err(|error| malformed_config_from_host_api_error("token_endpoint", error))?,
             scope_param: None,
             scope_join: Default::default(),
             pkce: Default::default(),
@@ -303,16 +310,15 @@ where
             client_credentials: credentials,
             exchange_auth: Default::default(),
             token_response: TokenResponseMap {
-                access_token: BoundedJsonPointer::new("/access_token")
-                    .map_err(|_| AuthProductError::MalformedConfig)?,
-                refresh_token: Some(
-                    BoundedJsonPointer::new("/refresh_token")
-                        .map_err(|_| AuthProductError::MalformedConfig)?,
-                ),
-                expires_in: Some(
-                    BoundedJsonPointer::new("/expires_in")
-                        .map_err(|_| AuthProductError::MalformedConfig)?,
-                ),
+                access_token: BoundedJsonPointer::new("/access_token").map_err(|error| {
+                    malformed_config_from_host_api_error("access_token_pointer", error)
+                })?,
+                refresh_token: Some(BoundedJsonPointer::new("/refresh_token").map_err(
+                    |error| malformed_config_from_host_api_error("refresh_token_pointer", error),
+                )?),
+                expires_in: Some(BoundedJsonPointer::new("/expires_in").map_err(|error| {
+                    malformed_config_from_host_api_error("expires_in_pointer", error)
+                })?),
                 scope: None,
             },
             identity: None,
@@ -321,7 +327,7 @@ where
         };
         recipe
             .validate()
-            .map_err(|_| AuthProductError::MalformedConfig)?;
+            .map_err(malformed_config_from_recipe_validation_error)?;
         Ok(ResolvedVendorAuthRecipe {
             vendor: request.vendor,
             recipe: VendorAuthRecipe::Oauth2Code(Box::new(recipe)),
@@ -331,6 +337,74 @@ where
             ),
         })
     }
+}
+
+/// Record a fixed validation category while keeping the client-facing auth
+/// error free of provider endpoints, paths, and other untrusted metadata.
+fn malformed_config_from_host_api_error(
+    operation: &'static str,
+    error: HostApiError,
+) -> AuthProductError {
+    let (validation_kind, validation_reason) = match error {
+        HostApiError::InvalidId {
+            kind: "https_endpoint",
+            reason,
+            ..
+        } => ("https_endpoint", reason),
+        HostApiError::InvalidId {
+            kind: "json_pointer",
+            reason,
+            ..
+        } => ("json_pointer", reason),
+        _ => ("other", "unclassified validation failure".to_string()),
+    };
+    tracing::debug!(
+        operation,
+        validation_kind,
+        validation_reason,
+        "hosted MCP OAuth admission validation failed"
+    );
+    AuthProductError::MalformedConfig
+}
+
+/// Recipe validation variants can carry request-controlled values. Record only
+/// their fixed category, never the `Display` or `Debug` representation.
+fn malformed_config_from_recipe_validation_error(error: RecipeValidationError) -> AuthProductError {
+    let validation_kind = match error {
+        RecipeValidationError::EmptyDisplayName => "empty_display_name",
+        RecipeValidationError::EmptyScope => "empty_scope",
+        RecipeValidationError::EmptyScopeParam => "empty_scope_param",
+        RecipeValidationError::ReservedAuthorizeParam { .. } => "reserved_authorize_param",
+        RecipeValidationError::ApiKeyWithoutFields => "api_key_without_fields",
+        RecipeValidationError::ProbeWithoutSuccessStatus => "probe_without_success_status",
+        RecipeValidationError::ProbeInjectsUndeclaredHandle { .. } => {
+            "probe_injects_undeclared_handle"
+        }
+        RecipeValidationError::KeepaliveIdleOutOfRange { .. } => "keepalive_idle_out_of_range",
+        RecipeValidationError::EmptySignedPayload => "empty_signed_payload",
+        RecipeValidationError::SignedPayloadBodyFalse => "signed_payload_body_false",
+        RecipeValidationError::IncompleteTimestampRule => "incomplete_timestamp_rule",
+    };
+    tracing::debug!(
+        operation = "oauth_recipe",
+        validation_kind,
+        "hosted MCP OAuth admission validation failed"
+    );
+    AuthProductError::MalformedConfig
+}
+
+/// `url::ParseError` is a closed enum and carries no rejected URL value, so it
+/// is safe to retain as a server-side diagnostic without exposing host paths.
+fn malformed_config_from_url_parse_error(
+    operation: &'static str,
+    error: url::ParseError,
+) -> AuthProductError {
+    tracing::debug!(
+        operation,
+        url_parse_error = ?error,
+        "hosted MCP OAuth admission validation failed"
+    );
+    AuthProductError::MalformedConfig
 }
 
 #[cfg(test)]
@@ -696,6 +770,19 @@ mod tests {
                 "registration_endpoint": "http://auth.example.test/register"
             }))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn endpoint_validation_mapping_keeps_client_error_sanitized() {
+        let raw_endpoint = "http://private.example.test/secret-path";
+        let source = HttpsEndpoint::new(raw_endpoint.to_string()).unwrap_err();
+        let error = malformed_config_from_host_api_error("test_endpoint", source);
+
+        assert_eq!(error, AuthProductError::MalformedConfig);
+        assert!(
+            !error.to_string().contains(raw_endpoint),
+            "client-facing error must not echo rejected endpoint data"
         );
     }
 

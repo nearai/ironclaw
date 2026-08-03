@@ -255,6 +255,7 @@ impl ExtensionLifecycleManager {
             .await
     }
 
+    /// Validates the caller and persists an explicit hosted-MCP authentication selection.
     pub async fn select_hosted_mcp_auth(
         &self,
         package_ref: &LifecyclePackageRef,

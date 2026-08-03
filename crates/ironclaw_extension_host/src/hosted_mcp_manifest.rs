@@ -54,6 +54,28 @@ pub(crate) fn name_unavailable() -> ProductOperationFailure {
     }
 }
 
+/// Preserve a reconstruction failure for operators without logging the raw
+/// endpoint carried by `HostApiError`.
+pub(crate) fn endpoint_input_error(
+    error: ironclaw_host_api::error::HostApiError,
+) -> ProductOperationFailure {
+    let error_kind = match error {
+        ironclaw_host_api::error::HostApiError::InvalidId { kind, .. } => kind,
+        _ => "host_api_validation",
+    };
+    tracing::debug!(error_kind, "hosted MCP endpoint reconstruction rejected");
+    name_unavailable()
+}
+
+/// `HostedMcpAdmissionError` is a closed, endpoint-free enum, so its variant
+/// can safely retain the canonicalization or vendor-ID failure in diagnostics.
+pub(crate) fn endpoint_admission_error(
+    error: hosted_mcp_admission::HostedMcpAdmissionError,
+) -> ProductOperationFailure {
+    tracing::debug!(?error, "hosted MCP endpoint reconstruction rejected");
+    name_unavailable()
+}
+
 /// Prefix every hosted-MCP discovery failure carries, emitted by
 /// [`discovery_error`] below. The post-install classifiers key on it, so it is
 /// a **cross-module contract**, not an incidental message.
@@ -237,7 +259,7 @@ pub(crate) fn pending_manifest(
         HostedMcpAuthSelection::Auto | HostedMcpAuthSelection::NoAuth => String::new(),
         HostedMcpAuthSelection::Bearer => {
             let vendor = hosted_mcp_admission::hosted_mcp_vendor_id(endpoint)
-                .map_err(|_| name_unavailable())?;
+                .map_err(endpoint_admission_error)?;
             format!(
                 r#"
 [[mcp.credentials]]
@@ -376,7 +398,9 @@ pub(crate) fn available_package(
 
 #[cfg(test)]
 mod tests {
-    use super::{discovery_error, oauth_admission_error};
+    use super::{
+        discovery_error, endpoint_admission_error, endpoint_input_error, oauth_admission_error,
+    };
     use crate::HostedMcpDiscoveryError;
     use ironclaw_product_contracts::error::ProductOperationFailure;
 
@@ -496,6 +520,35 @@ mod tests {
             },
             "every admission failure collapses to one non-echoing reason"
         );
+    }
+
+    #[test]
+    fn endpoint_reconstruction_errors_keep_client_responses_sanitized() {
+        let unsafe_endpoint = "https://mcp.example.test/rpc?access_token=not-for-logs";
+        let input_error = endpoint_input_error(ironclaw_host_api::error::HostApiError::invalid_id(
+            "hosted_mcp_endpoint",
+            unsafe_endpoint,
+            "hosted MCP endpoint must not contain credentials",
+        ));
+        let expected = ProductOperationFailure::InvalidBindingRequest {
+            reason: "hosted MCP extension name is unavailable".to_string(),
+        };
+        assert_eq!(input_error, expected);
+        assert!(
+            !format!("{input_error:?}").contains(unsafe_endpoint),
+            "the product response must not echo an unsafe endpoint"
+        );
+
+        for admission_error in [
+            crate::hosted_mcp_admission::HostedMcpAdmissionError::InvalidEndpoint,
+            crate::hosted_mcp_admission::HostedMcpAdmissionError::InvalidVendorId,
+        ] {
+            assert_eq!(
+                endpoint_admission_error(admission_error),
+                expected,
+                "canonicalization and vendor-ID failures retain only safe diagnostics"
+            );
+        }
     }
 
     /// `pending_manifest` builds a manifest by string interpolation, so its two

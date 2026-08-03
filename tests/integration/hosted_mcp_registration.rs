@@ -15,22 +15,27 @@ use hosted_mcp_registration_server::{
     HostedMcpTool, ScriptedMetadataResponse,
 };
 use ironclaw_auth::{
-    AuthContinuationRef, AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId,
-    AuthSurface, AuthorizationCodeHash, CredentialAccountLabel, OAuthAuthorizationCode,
-    OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OAuthProviderExchange,
-    OAuthProviderExchangeContext, OAuthProviderRefresh, OAuthProviderRefreshRequest,
-    OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderScope,
-    RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornOAuthCallbackOutcome,
-    RebornOAuthCallbackRequest, RebornOAuthStartFlowRequest,
+    AdmissionClientProfile, AuthContinuationRef, AuthProductError, AuthProductScope,
+    AuthProviderClient, AuthProviderId, AuthSurface, AuthorizationCodeHash, CredentialAccountLabel,
+    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthClientProfileRegistry,
+    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
+    OAuthProviderRefresh, OAuthProviderRefreshRequest, OpaqueStateHash, PkceVerifierHash,
+    PkceVerifierSecret, ProviderScope, RebornManualTokenSetupRequest,
+    RebornManualTokenSubmitRequest, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
+    RebornOAuthStartFlowRequest,
 };
 use ironclaw_extension_contracts::hosted_mcp::{
     HostedMcpAuthSelection, HostedMcpEndpoint, RegisterHostedMcpRequest,
 };
 use ironclaw_extension_contracts::lifecycle_id::LifecyclePackageId;
+use ironclaw_extension_contracts::recipe::{
+    HttpsEndpoint, RecipeClientCredentials, VendorAuthRecipe,
+};
 use ironclaw_extension_manager::lifecycle_test_support::{
     build_lifecycle_test_services, build_lifecycle_test_services_with_auth_provider,
-    invoke_with_standalone_approval, lifecycle_product_context,
-    rebuild_lifecycle_test_services_with_auth_provider, webui_gate_resource_scope_for_owner,
+    build_lifecycle_test_services_with_oauth_client_profiles, invoke_with_standalone_approval,
+    lifecycle_product_context, rebuild_lifecycle_test_services_with_auth_provider,
+    webui_gate_resource_scope_for_owner,
 };
 use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_host_api::{
@@ -49,7 +54,10 @@ use ironclaw_product_contracts::surface::{ProductSurfaceErrorCode, ProductSurfac
 use ironclaw_secrets::SecretStorePort;
 use secrecy::SecretString;
 use serde_json::json;
-use std::sync::{Arc, OnceLock};
+use std::{
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 fn live_network_egress() -> Arc<dyn ironclaw_network::NetworkHttpEgress> {
     Arc::new(ironclaw_network::PolicyNetworkHttpEgress::new(
@@ -117,8 +125,15 @@ fn runtime_context(
 }
 
 fn registration_request(auth_selection: HostedMcpAuthSelection) -> RegisterHostedMcpRequest {
+    registration_request_with_id("fixture", auth_selection)
+}
+
+fn registration_request_with_id(
+    desired_id: &str,
+    auth_selection: HostedMcpAuthSelection,
+) -> RegisterHostedMcpRequest {
     RegisterHostedMcpRequest {
-        desired_id: LifecyclePackageId::new("fixture").expect("package id"),
+        desired_id: LifecyclePackageId::new(desired_id).expect("package id"),
         desired_name: "Fixture MCP".to_string(),
         endpoint: HostedMcpEndpoint::new("https://mcp.example.test/mcp")
             .expect("public fixture endpoint"),
@@ -133,6 +148,34 @@ fn automatic_request() -> RegisterHostedMcpRequest {
 fn fixture_package_ref() -> LifecyclePackageRef {
     LifecyclePackageRef::new(LifecyclePackageKind::Extension, "mcp-fixture")
         .expect("fixture package ref")
+}
+
+#[derive(Debug)]
+struct FixtureOAuthClientProfileRegistry(AdmissionClientProfile);
+
+#[async_trait]
+impl OAuthClientProfileRegistry for FixtureOAuthClientProfileRegistry {
+    async fn resolve(&self, profile_id: &str) -> Option<AdmissionClientProfile> {
+        (self.0.id == profile_id).then(|| self.0.clone())
+    }
+}
+
+fn fixture_oauth_client_profile() -> AdmissionClientProfile {
+    AdmissionClientProfile {
+        id: "fixture-profile".to_string(),
+        resource: HttpsEndpoint::new("https://mcp.example.test/mcp".to_string())
+            .expect("fixture resource endpoint"),
+        issuer: HttpsEndpoint::new("https://auth.example.test".to_string())
+            .expect("fixture authorization-server issuer"),
+        credentials: RecipeClientCredentials {
+            client_id_handle: SecretHandle::new("fixture-oauth-client-id")
+                .expect("fixture client-id handle"),
+            client_secret_handle: Some(
+                SecretHandle::new("fixture-oauth-client-secret")
+                    .expect("fixture client-secret handle"),
+            ),
+        },
+    }
 }
 
 async fn install_fixture(
@@ -346,6 +389,94 @@ fn notion_style_long_description() -> String {
     assert!(description.len() > 2_048);
     assert!(description.len() <= 16 * 1024);
     description
+}
+
+/// A registration preflight performs real network I/O before the lifecycle
+/// mutation lock. At capacity, the next caller must receive the existing
+/// retryable product failure without joining an unbounded queue or reaching
+/// the MCP server; releasing the first batch must make a later registration
+/// succeed.
+#[tokio::test]
+async fn hosted_mcp_registration_preflight_fails_fast_at_capacity_and_releases_permits() {
+    let server = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::NoAuth,
+        vec![HostedMcpTool::read_only("search", json!("ok"))],
+    )
+    .await;
+    let gate = server.block_mcp_preflight_requests();
+    let services = build_lifecycle_test_services(
+        "hosted-mcp-registration-admission",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+    )
+    .await;
+    let scope = webui_gate_resource_scope_for_owner("hosted-mcp-registration-admission");
+    let mut registrations = Vec::new();
+    for index in 0..8 {
+        let lifecycle_service = Arc::clone(&services.lifecycle_service);
+        let context = lifecycle_product_context(scope.clone());
+        let request = registration_request_with_id(
+            &format!("preflight-{index}"),
+            HostedMcpAuthSelection::Auto,
+        );
+        registrations.push(tokio::spawn(async move {
+            lifecycle_service
+                .execute(
+                    context,
+                    LifecycleProductAction::ExtensionRegisterHostedMcp { request },
+                )
+                .await
+        }));
+    }
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_for_entries(8))
+        .await
+        .expect("eight preflights reach the real MCP request before saturation");
+
+    let saturated = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: registration_request_with_id(
+                    "preflight-saturated",
+                    HostedMcpAuthSelection::Auto,
+                ),
+            },
+        )
+        .await
+        .expect_err("a ninth registration must fail fast instead of waiting for a preflight slot");
+    assert_eq!(saturated.code, ProductSurfaceErrorCode::Unavailable);
+    assert_eq!(saturated.kind, ProductSurfaceErrorKind::ServiceUnavailable);
+    assert_eq!(saturated.status_code, 503);
+    assert!(saturated.retryable, "saturation must remain retryable");
+    assert_eq!(
+        server.requests().len(),
+        8,
+        "the saturated registration must not start its own network preflight"
+    );
+
+    gate.release();
+    for registration in registrations {
+        registration
+            .await
+            .expect("preflight task does not panic")
+            .expect("a released preflight completes registration");
+    }
+    services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope),
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: registration_request_with_id(
+                    "preflight-after-release",
+                    HostedMcpAuthSelection::Auto,
+                ),
+            },
+        )
+        .await
+        .expect("a released preflight permit admits the next registration");
 }
 
 #[tokio::test]
@@ -1493,6 +1624,130 @@ async fn oauth_registration_accepts_path_metadata_without_root_fallback() {
             "/.well-known/oauth-authorization-server",
         ],
         "successful path-specific metadata must skip the origin-root fallback"
+    );
+}
+
+#[tokio::test]
+async fn explicit_oauth_registration_uses_the_selected_client_profile() {
+    let server = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::OAuth {
+            access_token: "oauth-token".to_string(),
+        },
+        vec![HostedMcpTool::read_only("search", json!("ok"))],
+    )
+    .await;
+    let services = build_lifecycle_test_services_with_oauth_client_profiles(
+        "hosted-mcp-oauth-selected-profile",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+        Arc::new(FixtureOAuthClientProfileRegistry(
+            fixture_oauth_client_profile(),
+        )),
+    )
+    .await;
+    let scope = webui_gate_resource_scope_for_owner("hosted-mcp-oauth-selected-profile");
+
+    let registration = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope),
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: registration_request(HostedMcpAuthSelection::OAuth {
+                    client_profile_id: Some("fixture-profile".to_string()),
+                }),
+            },
+        )
+        .await
+        .expect("explicit OAuth registration admits the selected client profile");
+    assert_eq!(
+        registration.phase,
+        ironclaw_extension_contracts::state::InstallationState::Installed
+    );
+    assert!(registration.blockers.is_empty());
+
+    let definition = services
+        .extension_management
+        .installation_store_for_test()
+        .get_registered_package_definition(&ExtensionId::new("mcp-fixture").expect("extension id"))
+        .await
+        .expect("registered-definition lookup")
+        .expect("selected OAuth profile persists an admitted definition");
+    assert!(matches!(
+        definition.resolved().mcp.as_ref().map(|mcp| &mcp.registration_auth),
+        Some(HostedMcpAuthSelection::OAuth {
+            client_profile_id: Some(profile_id),
+        }) if profile_id == "fixture-profile"
+    ));
+    let Some(VendorAuthRecipe::Oauth2Code(recipe)) = definition
+        .resolved()
+        .auth
+        .first()
+        .and_then(|auth| auth.recipe.as_ref())
+    else {
+        panic!("selected profile must persist an OAuth recipe")
+    };
+    let credentials = recipe
+        .client_credentials
+        .as_ref()
+        .expect("selected OAuth profile must persist credential handles");
+    assert_eq!(
+        credentials.client_id_handle.as_str(),
+        "fixture-oauth-client-id"
+    );
+    assert_eq!(
+        credentials
+            .client_secret_handle
+            .as_ref()
+            .map(SecretHandle::as_str),
+        Some("fixture-oauth-client-secret")
+    );
+}
+
+#[tokio::test]
+async fn explicit_oauth_registration_rejects_an_unknown_client_profile_without_persistence() {
+    let server = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::OAuth {
+            access_token: "oauth-token".to_string(),
+        },
+        vec![HostedMcpTool::read_only("search", json!("ok"))],
+    )
+    .await;
+    let services = build_lifecycle_test_services(
+        "hosted-mcp-oauth-unknown-profile",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+    )
+    .await;
+    let scope = webui_gate_resource_scope_for_owner("hosted-mcp-oauth-unknown-profile");
+
+    let error = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope),
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: registration_request(HostedMcpAuthSelection::OAuth {
+                    client_profile_id: Some("unknown-profile".to_string()),
+                }),
+            },
+        )
+        .await
+        .expect_err("an unknown OAuth client profile must be rejected during registration");
+    assert_eq!(error.kind, ProductSurfaceErrorKind::Validation);
+    assert!(
+        services
+            .extension_management
+            .installation_store_for_test()
+            .get_registered_package_definition(
+                &ExtensionId::new("mcp-fixture").expect("extension id")
+            )
+            .await
+            .expect("registered-definition lookup")
+            .is_none(),
+        "an unknown client profile must not persist a definition"
     );
 }
 

@@ -2,7 +2,10 @@
 //! journeys.  It deliberately records only redacted request facts so tests
 //! can prove credential routing without retaining bearer material.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use async_trait::async_trait;
 use axum::extract::State;
@@ -15,7 +18,7 @@ use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
 use serde_json::{Value, json};
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostedMcpAuthPolicy {
@@ -62,6 +65,47 @@ pub struct HostedMcpRegistrationServer {
     state: Arc<StateData>,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Test-only gate that parks real MCP requests after the server has observed
+/// them. It lets a caller-path test hold registration preflight network I/O
+/// without introducing a production-only testing seam.
+#[derive(Clone, Default)]
+pub struct HostedMcpRegistrationProbeGate {
+    entered: Arc<AtomicUsize>,
+    entered_notify: Arc<Notify>,
+    release: Arc<Notify>,
+    released: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl HostedMcpRegistrationProbeGate {
+    pub async fn wait_for_entries(&self, expected: usize) {
+        loop {
+            if self.entered.load(Ordering::SeqCst) >= expected {
+                return;
+            }
+            let notified = self.entered_notify.notified();
+            if self.entered.load(Ordering::SeqCst) >= expected {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    pub fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        self.release.notify_waiters();
+    }
+
+    async fn park(&self) {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        self.entered_notify.notify_waiters();
+        let notified = self.release.notified();
+        if self.released.load(Ordering::SeqCst) {
+            return;
+        }
+        notified.await;
+    }
 }
 
 /// Hermetic public-origin adapter for the real product lifecycle. Admission
@@ -212,6 +256,7 @@ impl HostedMcpRegistrationServer {
             requests: Mutex::new(Vec::new()),
             protected_resource_override: Mutex::new(None),
             authorization_server_override: Mutex::new(None),
+            mcp_probe_gate: Mutex::new(None),
         });
         let (shutdown, receiver) = oneshot::channel();
         let app = Router::new()
@@ -252,6 +297,18 @@ impl HostedMcpRegistrationServer {
     }
     pub fn requests(&self) -> Vec<RecordedHostedMcpRequest> {
         self.state.requests.lock().expect("request lock").clone()
+    }
+
+    /// Parks every currently configured MCP preflight request until the
+    /// returned gate is released.
+    pub fn block_mcp_preflight_requests(&self) -> HostedMcpRegistrationProbeGate {
+        let gate = HostedMcpRegistrationProbeGate::default();
+        *self
+            .state
+            .mcp_probe_gate
+            .lock()
+            .expect("MCP preflight gate lock") = Some(gate.clone());
+        gate
     }
 
     /// Scripts the next `/.well-known/oauth-protected-resource` response,
@@ -311,6 +368,7 @@ struct StateData {
     requests: Mutex<Vec<RecordedHostedMcpRequest>>,
     protected_resource_override: Mutex<Option<ScriptedMetadataResponse>>,
     authorization_server_override: Mutex<Option<ScriptedMetadataResponse>>,
+    mcp_probe_gate: Mutex<Option<HostedMcpRegistrationProbeGate>>,
 }
 
 async fn mcp(
@@ -352,6 +410,14 @@ async fn mcp(
                 .and_then(Value::as_str)
                 .map(str::to_string),
         });
+    let gate = state
+        .mcp_probe_gate
+        .lock()
+        .expect("MCP preflight gate lock")
+        .clone();
+    if let Some(gate) = gate {
+        gate.park().await;
+    }
     if !matches {
         return match state.policy {
             HostedMcpAuthPolicy::OAuth { .. } => oauth_challenge(StatusCode::UNAUTHORIZED),

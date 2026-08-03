@@ -73,6 +73,11 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
   const hostedMcpAuthMutation = useHostedMcpAuthSelection(
     extension?.packageRef,
     (res) => {
+      // Bearer selection can successfully resolve the authentication strategy
+      // while leaving a credential blocker for the token itself. The mutation
+      // refreshes setup state, so keep this modal mounted until that form is
+      // available instead of forcing the user to rediscover Configure.
+      if (res.blockers?.length > 0) return;
       if (onSaved) onSaved(res);
       onClose();
     },
