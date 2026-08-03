@@ -1496,6 +1496,69 @@ async fn oauth_registration_accepts_path_metadata_without_root_fallback() {
     );
 }
 
+#[tokio::test]
+async fn automatic_registration_requires_an_explicit_choice_when_oauth_has_no_dcr_endpoint() {
+    let server = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::OAuth {
+            access_token: "oauth-token".to_string(),
+        },
+        vec![HostedMcpTool::read_only("search", json!("ok"))],
+    )
+    .await;
+    server.script_authorization_server_response(ScriptedMetadataResponse::new(
+        axum::http::StatusCode::OK,
+        serde_json::to_vec(&json!({
+            "issuer": "https://auth.example.test",
+            "authorization_endpoint": "https://auth.example.test/authorize",
+            "token_endpoint": "https://auth.example.test/token",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "code_challenge_methods_supported": ["S256"]
+        }))
+        .expect("GitHub-shaped authorization metadata serializes"),
+    ));
+    let services = build_lifecycle_test_services(
+        "hosted-mcp-oauth-without-dcr",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+    )
+    .await;
+    let registration = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(webui_gate_resource_scope_for_owner(
+                "hosted-mcp-oauth-without-dcr",
+            )),
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: automatic_request(),
+            },
+        )
+        .await
+        .expect("automatic registration returns an actionable auth choice");
+
+    assert!(registration.blockers.iter().any(|blocker| matches!(
+        blocker,
+        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
+            ref_id: Some(ref_id),
+        } if ref_id.as_str()
+            == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
+    )));
+    assert!(
+        services
+            .extension_management
+            .installation_store_for_test()
+            .get_registered_package_definition(
+                &ExtensionId::new("mcp-fixture").expect("extension id")
+            )
+            .await
+            .expect("definition readback")
+            .is_none(),
+        "OAuth metadata without a usable client path must not persist an unusable package"
+    );
+}
+
 /// Drives all four `fetch_oauth_metadata` failure branches (transport error,
 /// non-200 status, oversized body, malformed JSON) through registration
 /// preflight. Each sub-case gets its own fixture server/services (the scripted

@@ -207,17 +207,10 @@ impl HostedMcpPreparationService {
                     .to_string(),
             }),
             Err(crate::HostedMcpDiscoveryError::CredentialsRejected(challenge)) => {
-                let client_profile_id = match selection {
-                    HostedMcpAuthSelection::OAuth { client_profile_id } => {
-                        client_profile_id.clone()
-                    }
-                    HostedMcpAuthSelection::Auto => None,
-                    _ => return Err(crate::hosted_mcp_manifest::name_unavailable()),
-                };
                 self.prepare_oauth_manifest(
                     seed,
                     &challenge,
-                    client_profile_id,
+                    selection.clone(),
                     &scope,
                     &capability_id,
                     ports,
@@ -516,7 +509,7 @@ impl HostedMcpPreparationService {
                             .prepare_oauth_manifest(
                                 manifest.clone(),
                                 &challenge,
-                                client_profile_id,
+                                HostedMcpAuthSelection::OAuth { client_profile_id },
                                 &scope,
                                 &capability_id,
                                 ports,
@@ -539,7 +532,7 @@ impl HostedMcpPreparationService {
                         let Some(enriched) = self.prepare_oauth_manifest(
                             manifest.clone(),
                             &challenge,
-                            None,
+                            HostedMcpAuthSelection::Auto,
                             &scope,
                             &capability_id,
                             ports,
@@ -726,11 +719,16 @@ impl HostedMcpPreparationService {
         &self,
         seed: ExtensionManifestRecord,
         challenge: &ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge,
-        client_profile_id: Option<String>,
+        selection: HostedMcpAuthSelection,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
         ports: &ironclaw_host_runtime::ProductAuthProviderRuntimePorts,
     ) -> Result<Option<ExtensionManifestRecord>, ProductOperationFailure> {
+        let client_profile_id = match &selection {
+            HostedMcpAuthSelection::OAuth { client_profile_id } => client_profile_id.clone(),
+            HostedMcpAuthSelection::Auto => None,
+            _ => return Err(crate::hosted_mcp_manifest::name_unavailable()),
+        };
         let endpoint = seed
             .resolved()
             .mcp
@@ -774,6 +772,17 @@ impl HostedMcpPreparationService {
                     authorization_server_fetch.metadata_url(),
                 )
                 .await?;
+            if matches!(selection, HostedMcpAuthSelection::Auto)
+                && authorization_server_metadata
+                    .registration_endpoint
+                    .is_none()
+            {
+                tracing::debug!(
+                    authorization_server = authorization_server_fetch.issuer(),
+                    "hosted MCP OAuth metadata does not support automatic client registration"
+                );
+                return Ok(None);
+            }
             let endpoint = crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint::parse(
                 &ironclaw_extension_contracts::hosted_mcp::HostedMcpEndpoint::new(endpoint)
                     .map_err(|_| crate::hosted_mcp_manifest::name_unavailable())?,
