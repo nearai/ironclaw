@@ -1293,7 +1293,19 @@ struct SseErrorPayload {
 
 fn webchat_sse_event_from_envelope(envelope: ProductOutboundEnvelope) -> Option<Event> {
     let frame = WebChatV2EventFrame::from_outbound(envelope);
-    let id = cursor_token(frame.cursor());
+    // Keep-alive frames are liveness pings, not durable resume positions.
+    // The product seam stamps an advancing cursor into every envelope
+    // (including `KeepAlive`), and the browser's `EventSource` echoes the
+    // last `id:` back as `Last-Event-ID` on reconnect. If a keep-alive is the
+    // last frame before a disconnect, resuming from its cursor skips real
+    // events that precede it. Omit the `id:` field for keep-alives so the
+    // browser keeps the last real event's id as the resume point.
+    let is_keep_alive = matches!(&frame.event, WebChatV2Event::KeepAlive);
+    let id = if is_keep_alive {
+        None
+    } else {
+        cursor_token(frame.cursor())
+    };
     match serde_json::to_string(&frame) {
         Ok(payload) => {
             let mut event = Event::default().event(frame.event_name()).data(payload);

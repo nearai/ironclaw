@@ -70,18 +70,35 @@ export function useAdminUsers() {
 
     setIsLoadingMore(true);
     setLoadMoreError(null);
-    const request = fetchAdminUsers({
-      limit: ADMIN_USERS_PAGE_SIZE,
-      cursor: nextCursor,
-    })
-      .then((page) => {
-        setAdditionalPages((current) => [...current, page]);
-        return page;
+    // The cursor page load retries once on a transient failure, so a 5xx
+    // or rate-limited response from the admin users endpoint surfaces the
+    // structured retry state instead of a terminal load-more error. This
+    // matches React Query's default retry policy for the initial page query
+    // above and keeps pagination resilient under brief backend hiccups.
+    // Non-retryable failures (4xx authorization/validation) fail fast.
+    const isTransient = (error) => {
+      const status = error?.status;
+      if (typeof status !== "number") return true;
+      if (status === 429 || status >= 500) return true;
+      return Boolean(error?.payload?.retryable);
+    };
+    const attempt = (retriesLeft: number) =>
+      fetchAdminUsers({
+        limit: ADMIN_USERS_PAGE_SIZE,
+        cursor: nextCursor,
       })
-      .catch((error) => {
-        setLoadMoreError(error);
-        return null;
-      })
+        .then((page) => {
+          setAdditionalPages((current) => [...current, page]);
+          return page;
+        })
+        .catch((error) => {
+          if (retriesLeft > 0 && isTransient(error)) {
+            return attempt(retriesLeft - 1);
+          }
+          setLoadMoreError(error);
+          return null;
+        });
+    const request = attempt(1)
       .finally(() => {
         setIsLoadingMore(false);
         if (loadMoreInFlightRef.current === request) {

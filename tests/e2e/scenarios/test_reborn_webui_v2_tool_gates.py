@@ -89,7 +89,18 @@ async def _assert_sse_redacted_until(
         _assert_text_redacted(secret, line, source="post-submit SSE frame")
 
 
-async def _fetch_run_artifact(
+class _ArtifactNotReady(Exception):
+    """Transient 404 from the run artifact endpoint.
+
+    After a gate resolution resumes a run, the terminal turn record and its
+    projection can lag the artifact read by a short window. The polling
+    helper `_wait_for_run_artifact_status` treats this 404 as retryable
+    rather than fatal so a briefly-missing history projection is not
+    mistaken for a permanent authorization or routing failure.
+    """
+
+
+async def _try_fetch_run_artifact(
     client: httpx.AsyncClient,
     base_url: str,
     thread_id: str,
@@ -99,6 +110,8 @@ async def _fetch_run_artifact(
         f"{base_url}/api/webchat/v2/threads/{thread_id}/runs/{run_id}/artifact",
         timeout=15,
     )
+    if response.status_code == 404:
+        raise _ArtifactNotReady(response.text)
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -114,18 +127,29 @@ async def _wait_for_run_artifact_status(
 ) -> dict:
     deadline = asyncio.get_running_loop().time() + timeout
     last_artifact = None
+    last_not_ready: str | None = None
     while asyncio.get_running_loop().time() < deadline:
-        last_artifact = await _fetch_run_artifact(
-            client,
-            base_url,
-            thread_id,
-            run_id,
-        )
+        try:
+            last_artifact = await _try_fetch_run_artifact(
+                client,
+                base_url,
+                thread_id,
+                run_id,
+            )
+            last_not_ready = None
+        except _ArtifactNotReady as error:
+            # The projection may briefly miss the resumed run's terminal
+            # records; keep polling until they land or the deadline elapses.
+            last_not_ready = str(error)
+            await asyncio.sleep(0.25)
+            continue
         if last_artifact.get("run", {}).get("status") == expected_status:
             return last_artifact
         await asyncio.sleep(0.25)
     raise AssertionError(
-        f"Run artifact did not reach {expected_status}; last={last_artifact}"
+        f"Run artifact did not reach {expected_status}; "
+        f"last={last_artifact}; "
+        f"transient_404={last_not_ready}"
     )
 
 
