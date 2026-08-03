@@ -966,10 +966,14 @@ fn shared_store_pair() -> (
     Arc<OutboundStateStore<InMemoryBackend>>,
 ) {
     let filesystem = ironclaw_outbound::test_support::in_memory_backed_outbound_filesystem();
-    #[allow(clippy::disallowed_methods)]
-    let first_store = Arc::new(OutboundStateStore::new(Arc::clone(&filesystem)));
-    #[allow(clippy::disallowed_methods)]
-    let second_store = Arc::new(OutboundStateStore::new(filesystem));
+    let first_store = Arc::new(
+        ironclaw_outbound::test_support::in_memory_backed_outbound_state_store_over(Arc::clone(
+            &filesystem,
+        )),
+    );
+    let second_store = Arc::new(
+        ironclaw_outbound::test_support::in_memory_backed_outbound_state_store_over(filesystem),
+    );
     (first_store, second_store)
 }
 

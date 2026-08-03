@@ -58,9 +58,17 @@ pub fn in_memory_backed_outbound_filesystem() -> Arc<ScopedFilesystem<InMemoryBa
 /// drop-in replacement for the deleted `InMemoryOutboundStateStore`. A single
 /// instance implements all four outbound-store traits.
 pub fn in_memory_backed_outbound_state_store() -> OutboundStateStore<InMemoryBackend> {
+    in_memory_backed_outbound_state_store_over(in_memory_backed_outbound_filesystem())
+}
+
+/// The production outbound-state store over a caller-supplied in-memory-backed
+/// scoped filesystem, for tests that need multiple stores to share one backend.
+pub fn in_memory_backed_outbound_state_store_over(
+    filesystem: Arc<ScopedFilesystem<InMemoryBackend>>,
+) -> OutboundStateStore<InMemoryBackend> {
     // The `disallowed_methods` lint reserves `OutboundStateStore::new`
     // for composition's owned construction site; this test-support constructor
     // is the sanctioned volatile-backend seam for tests (arch-simplification §4.3).
     #[allow(clippy::disallowed_methods)]
-    OutboundStateStore::new(in_memory_backed_outbound_filesystem())
+    OutboundStateStore::new(filesystem)
 }
