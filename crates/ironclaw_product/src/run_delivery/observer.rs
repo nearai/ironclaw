@@ -332,6 +332,7 @@ impl RunDeliveryObserver {
             let feedback = match &error {
                 RunDeliveryError::RunWaitTimedOut { .. } => Some(prompts::DELIVERY_TIMEOUT_MESSAGE),
                 RunDeliveryError::RunWaitTimedOutAfterNotification { .. } => None,
+                RunDeliveryError::DeliveryUnconfirmed { .. } => None,
                 _ => Some(prompts::DELIVERY_ERROR_MESSAGE),
             };
             if let Some(feedback) = feedback {
