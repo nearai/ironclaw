@@ -82,6 +82,9 @@ type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub(crate) const HARNESS_ACTOR_ID: &str = "host-user";
 /// Model profile the planned runtime requests; the gateway policy permits it.
 pub(crate) const INTERACTIVE_MODEL_PROFILE: &str = "interactive_model";
+/// Coverage-instrumented real-runtime paths (notably bundled WASM startup) can
+/// take more than 30 seconds when several tests run concurrently in CI.
+const RUN_STATE_SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Selects the durable storage backend mounted into the integration harness's
 /// `CompositeRootFilesystem`. Both modes ride **one** composite at the
@@ -1730,7 +1733,7 @@ impl RebornIntegrationHarness {
         mut decide: impl FnMut(&TurnRunState) -> ControlFlow<HarnessResult<TurnRunState>>,
         timeout_context: &str,
     ) -> HarnessResult<TurnRunState> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let deadline = tokio::time::Instant::now() + RUN_STATE_SETTLE_TIMEOUT;
         loop {
             let state = self
                 .turn_runtime
