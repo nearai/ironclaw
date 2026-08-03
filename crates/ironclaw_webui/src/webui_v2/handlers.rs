@@ -81,6 +81,9 @@ use ironclaw_product_contracts::inbound_requests::{
     ProductListThreadsRequest, ProductRenameAutomationRequest, ProductResolveGateRequest,
     ProductRetryRunRequest, ProductSetupExtensionRequest, ProductSubmitTurnRequest,
 };
+use ironclaw_product_contracts::ironhub::{
+    IRONHUB_DELIVER_INSTALL_COMMAND, IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult,
+};
 use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmConfigSnapshot, LlmModelsResult, LlmProbeResult, NearAiLoginStart,
     NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
@@ -2403,6 +2406,22 @@ pub async fn import_extension(
     .await?;
     extension_lifecycle_mutation_succeeded(resolution)?;
     let response = extension_action_completed("Extension imported.");
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/ironhub/install`
+pub async fn ironhub_deliver_install(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Json(body): Json<IronhubInstallDeliveryRequest>,
+) -> Result<Json<IronhubInstallDeliveryResult>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        IRONHUB_DELIVER_INSTALL_COMMAND,
+        body,
+    )
+    .await?;
     Ok(Json(response))
 }
 

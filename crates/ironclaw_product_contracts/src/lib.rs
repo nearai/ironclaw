@@ -43,6 +43,7 @@ pub mod error;
 pub mod inbound;
 pub mod inbound_requests;
 pub mod interaction_commands;
+pub mod ironhub;
 pub mod lifecycle_service;
 pub mod operator_llm;
 pub mod operator_service;

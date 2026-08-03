@@ -2930,6 +2930,7 @@ mod tests {
             capability_id: CapabilityId::new(capability_id).unwrap(),
             name: ProviderToolName::new(name).unwrap(),
             description: String::new(),
+            description_trust: Default::default(),
             parameters: serde_json::json!({}),
         }
     }

@@ -126,7 +126,7 @@ pub use admin_configuration_store::{
 };
 pub use available_extension_import::{
     extension_asset_path, imported_extension_package, inline_extension_dir_assets,
-    materialize_available_extension, registry_extension_package,
+    materialize_available_extension, parse_imported_manifest, registry_extension_package,
 };
 pub use available_extensions::{
     AdminConfigurationCatalogUse, AvailableExtensionAsset, AvailableExtensionAssetContent,

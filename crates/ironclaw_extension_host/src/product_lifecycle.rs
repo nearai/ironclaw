@@ -1,6 +1,6 @@
 // arch-exempt: large_file, shared extension removal convergence and compatibility tests, plan #6329
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Weak},
 };
 
@@ -36,7 +36,7 @@ use ironclaw_product_contracts::package_lifecycle::{
     LifecycleReadinessBlocker, LifecycleSearchExtensionSummary,
 };
 use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
-use tokio::sync::{AcquireError, Mutex, RwLock, Semaphore};
+use tokio::sync::{AcquireError, Mutex, Notify, RwLock, Semaphore};
 
 fn unzip_extension_bundle_for_product(
     bundle: &[u8],
@@ -160,11 +160,10 @@ pub struct ExtensionLifecycleManager {
     /// per-request cap into N x 64 MiB of pressure before any lifecycle lock
     /// applies (#5499 review finding #3).
     import_decode_semaphore: Arc<Semaphore>,
-    /// Serializes registry package publication with the lifecycle operations
-    /// it coordinates. The ordinary lifecycle lock remains the state writer;
-    /// this outer lock only prevents two catalog clients from replacing the
-    /// same package between catalog publication and install.
-    registry_install_lock: Arc<Mutex<()>>,
+    /// Tracks registry package publications currently in flight. The map lock
+    /// protects only this in-memory coordination state; waiters never retain a
+    /// mutex guard across lifecycle, filesystem, or store I/O.
+    registry_install_operations: Arc<std::sync::Mutex<BTreeMap<String, Arc<Notify>>>>,
     /// The tenant operator identity (#5459 P1). In standalone this is the base
     /// owner user (`IRONCLAW_REBORN_WEBUI_USER_ID` semantics). Lifecycle
     /// installs by every caller, including this user, make or join the member
@@ -214,6 +213,56 @@ pub struct ExtensionLifecycleManager {
 /// memory at 128 MiB; imports are a rare admin-only operation, so waiting is
 /// the right trade against unbounded memory.
 const MAX_CONCURRENT_IMPORT_DECODES: usize = 2;
+
+struct RegistryInstallPermit {
+    key: String,
+    completion: Arc<Notify>,
+    operations: Arc<std::sync::Mutex<BTreeMap<String, Arc<Notify>>>>,
+}
+
+impl Drop for RegistryInstallPermit {
+    fn drop(&mut self) {
+        let mut operations = self
+            .operations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if operations
+            .get(&self.key)
+            .is_some_and(|active| Arc::ptr_eq(active, &self.completion))
+        {
+            operations.remove(&self.key);
+        }
+        drop(operations);
+        self.completion.notify_waiters();
+    }
+}
+
+async fn acquire_registry_install_permit(
+    operations: Arc<std::sync::Mutex<BTreeMap<String, Arc<Notify>>>>,
+    key: String,
+) -> RegistryInstallPermit {
+    loop {
+        let waiter = {
+            let mut active_operations = operations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(active) = active_operations.get(&key) {
+                Some(Arc::clone(active).notified_owned())
+            } else {
+                let completion = Arc::new(Notify::new());
+                active_operations.insert(key.clone(), Arc::clone(&completion));
+                return RegistryInstallPermit {
+                    key,
+                    completion,
+                    operations: Arc::clone(&operations),
+                };
+            }
+        };
+        if let Some(waiter) = waiter {
+            waiter.await;
+        }
+    }
+}
 
 /// Constructor dependency bundle for [`ExtensionLifecycleManager::new`].
 ///
@@ -287,7 +336,7 @@ impl ExtensionLifecycleManager {
             generic_host: std::sync::OnceLock::new(),
             channel_config: std::sync::OnceLock::new(),
             import_decode_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES)),
-            registry_install_lock: Arc::new(Mutex::new(())),
+            registry_install_operations: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             tenant_operator_user_id,
             removal_cleanup: Arc::new(ExtensionRemovalCleanupRegistry::empty()),
             account_setups: ExtensionAccountSetupRegistry::default(),
@@ -985,12 +1034,16 @@ impl ExtensionLifecycleManager {
                 reason: "registry install requires a registry-validated package".to_string(),
             });
         }
-        let _registry_guard = self.registry_install_lock.lock().await;
         let package_ref = package.package_ref.clone();
         let extension_id = package.package.id.clone();
+        let _registry_permit = acquire_registry_install_permit(
+            Arc::clone(&self.registry_install_operations),
+            extension_id.as_str().to_string(),
+        )
+        .await;
         let previous = {
             let catalog = self.catalog.read().await;
-            catalog.resolve(&package_ref).ok()
+            catalog.resolve_optional(&package_ref)?
         };
         if let Some(previous) = &previous {
             let matches = previous.manifest_toml == package.manifest_toml
@@ -3505,6 +3558,38 @@ mod tests {
             owner,
         )
         .expect("installation fixture")
+    }
+
+    #[tokio::test]
+    async fn registry_install_coordination_serializes_same_extension_without_held_mutex_guard() {
+        let operations = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+        let first =
+            acquire_registry_install_permit(Arc::clone(&operations), "fixture".to_string()).await;
+        let waiting_operations = Arc::clone(&operations);
+        let waiter = tokio::spawn(async move {
+            acquire_registry_install_permit(waiting_operations, "fixture".to_string()).await
+        });
+
+        tokio::task::yield_now().await;
+        assert!(
+            !waiter.is_finished(),
+            "same-extension publication must wait for the active operation"
+        );
+
+        drop(first);
+        let second = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter must be notified")
+            .expect("waiter task must complete");
+        drop(second);
+
+        assert!(
+            operations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty(),
+            "completed operations must leave no coordination entry"
+        );
     }
 
     #[tokio::test]

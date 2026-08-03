@@ -275,7 +275,7 @@ impl SurfaceTrackingLoopCapabilityPort {
 fn capability_may_change_visible_surface(capability_id: &CapabilityId) -> bool {
     matches!(
         capability_id.as_str(),
-        "builtin.extension_install" | "builtin.extension_remove"
+        "builtin.extension_install" | "builtin.extension_remove" | "builtin.ironhub_install"
     )
 }
 
@@ -2863,12 +2863,17 @@ mod compaction_tests;
 mod tests {
     use super::*;
 
-    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::{
+        ids::{AgentId, ProjectId, ResultRef, TenantId, ThreadId, UserId},
+        resolution::{Outcome, OutcomeRefs, ResultPreviewMeta, ToolVerdict},
+        result_meta::{ResultProgress, TerminateHint},
+        safe_summary::SafeSummary,
+    };
     use ironclaw_loop_contracts::{
-        AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
-        InMemoryRunProfileResolver, LoadCheckpointPayloadRequest, LoopCheckpointKind,
-        LoopCheckpointRequest, LoopRunContext, RunProfileResolutionRequest, RunProfileResolver,
-        StageCheckpointPayloadRequest,
+        AgentLoopHostErrorKind, CapabilityInputRef, CapabilitySurfaceVersion, CheckpointSchemaId,
+        InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoadCheckpointPayloadRequest,
+        LoopCheckpointKind, LoopCheckpointRequest, LoopRunContext, RunProfileResolutionRequest,
+        RunProfileResolver, StageCheckpointPayloadRequest,
     };
     use ironclaw_turns::test_support::in_memory_loop_checkpoint_store;
     use ironclaw_turns::{
@@ -2886,6 +2891,91 @@ mod tests {
             .await
             .unwrap();
         LoopRunContext::new(turn_scope, TurnId::new(), TurnRunId::new(), resolved)
+    }
+
+    struct SuccessfulCapabilityPort;
+
+    #[async_trait]
+    impl LoopCapabilityPort for SuccessfulCapabilityPort {
+        async fn visible_capabilities(
+            &self,
+            _request: VisibleCapabilityRequest,
+        ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+            Ok(VisibleCapabilitySurface {
+                version: CapabilitySurfaceVersion::new("surface-before-ironhub-install")
+                    .expect("valid surface version"),
+                descriptors: Vec::new(),
+                callable_capability_ids: None,
+            })
+        }
+
+        async fn invoke_capability(
+            &self,
+            _request: LoopRequest,
+        ) -> Result<Resolution, AgentLoopHostError> {
+            Ok(Resolution::Done(Outcome {
+                refs: OutcomeRefs {
+                    result: ResultRef::parse("018f6a00-0000-7000-8000-000000000001")
+                        .expect("valid result ref"),
+                    byte_len: 0,
+                    preview: None,
+                    preview_meta: ResultPreviewMeta::default(),
+                    origin: None,
+                    output_digest: None,
+                },
+                verdict: ToolVerdict::Success,
+                summary: SafeSummary::new("installed and activated").expect("valid safe summary"),
+                progress: ResultProgress::MadeProgress,
+                terminate_hint: TerminateHint::Continue,
+            }))
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            _request: LoopRequestBatch,
+        ) -> Result<ResolutionBatch, AgentLoopHostError> {
+            unreachable!("batch invocation is not used by this test")
+        }
+    }
+
+    #[tokio::test]
+    async fn ironhub_install_success_invalidates_cached_visible_surface() {
+        let surface_state = Arc::new(CapabilitySurfaceState::default());
+        let port = SurfaceTrackingLoopCapabilityPort::new(
+            Arc::new(SuccessfulCapabilityPort),
+            Arc::clone(&surface_state),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("initial visible surface");
+        assert!(
+            surface_state.current().expect("surface state").is_some(),
+            "precondition: the visible surface is cached before installation"
+        );
+
+        let resolution = port
+            .invoke_capability(LoopRequest {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                surface_version: CapabilitySurfaceVersion::new("surface-before-ironhub-install")
+                    .expect("valid surface version"),
+                capability_id: CapabilityId::new("builtin.ironhub_install")
+                    .expect("valid capability id"),
+                input_ref: CapabilityInputRef::new("input:ironhub-install")
+                    .expect("valid input ref"),
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("IronHub installation succeeds");
+
+        assert!(
+            matches!(resolution, Resolution::Done(ref outcome) if outcome.verdict.is_success()),
+            "test double must model a successful install and activation"
+        );
+        assert!(
+            surface_state.current().expect("surface state").is_none(),
+            "a successful IronHub install must force the next model step to refresh capabilities"
+        );
     }
 
     #[tokio::test]

@@ -1006,6 +1006,7 @@ fn spawn_tool_definition() -> ProviderToolDefinition {
         capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
         name: ProviderToolName::new(SPAWN_SUBAGENT_PROVIDER_TOOL_NAME).expect("provider tool name"),
         description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
+        description_trust: Default::default(),
         parameters: build_spawn_subagent_parameters_schema(&[]),
     }
 }
@@ -1015,6 +1016,7 @@ fn custom_tool_definition() -> ProviderToolDefinition {
         capability_id: CapabilityId::new("builtin.custom_tool").unwrap(),
         name: ProviderToolName::new("demo__custom").expect("provider tool name"),
         description: "Custom delegated tool".to_string(),
+        description_trust: Default::default(),
         parameters: json!({"type": "object"}),
     }
 }

@@ -358,6 +358,14 @@ pub struct RebornRuntimeInput {
     /// Operator boot config. When present, the product surface composes the LLM-config settings service from it so the
     /// settings surface can read/write `providers.json` + `config.toml`.
     pub boot: Option<RebornBootConfig>,
+    /// Shared HMAC key for the IronHub register/install gateway.
+    ///
+    /// Absence is the default-off gate. The runtime constructs one link
+    /// service from this key and reuses that same optional service for both
+    /// product-surface attachment and public register-route attachment.
+    pub ironhub_agent_shared_key: Option<ironclaw_extension_manager::ironhub::IronhubSharedKey>,
+    /// Validated signed-catalog URL resolved by the CLI/config boundary.
+    pub ironhub_manifest_url: ironclaw_extension_manager::ironhub::IronhubManifestUrl,
     pub runner: TurnRunnerSettings,
     pub tool_disclosure: Option<ToolDisclosureMode>,
     pub trigger_poller: TriggerPollerSettings,
@@ -430,10 +438,13 @@ impl RebornRuntimeInput {
     /// the substrate decisions (standalone root, libsql handle, etc.) belong
     /// to the caller, not the assembly.
     pub fn from_build_input(services: RebornHostBindings) -> Self {
+        let ironhub_manifest_url = services.ironhub_manifest_url.clone();
         Self {
             services: Some(services),
             llm: None,
             boot: None,
+            ironhub_agent_shared_key: None,
+            ironhub_manifest_url,
             runner: TurnRunnerSettings::default(),
             tool_disclosure: None,
             trigger_poller: TriggerPollerSettings::default(),
@@ -468,6 +479,23 @@ impl RebornRuntimeInput {
     /// bindings-independent value. Returns `None` only before services are set.
     pub fn config(&self) -> Option<&crate::deployment::DeploymentConfig> {
         self.services.as_ref().map(RebornHostBindings::deployment)
+    }
+
+    /// Enable the IronHub register/install gateway with a validated shared key.
+    pub fn with_ironhub_agent_shared_key(
+        mut self,
+        shared_key: ironclaw_extension_manager::ironhub::IronhubSharedKey,
+    ) -> Self {
+        self.ironhub_agent_shared_key = Some(shared_key);
+        self
+    }
+
+    pub fn with_ironhub_manifest_url(
+        mut self,
+        manifest_url: ironclaw_extension_manager::ironhub::IronhubManifestUrl,
+    ) -> Self {
+        self.ironhub_manifest_url = manifest_url;
+        self
     }
 
     /// Override the deployment config carried by the bindings. Lets a caller
@@ -698,5 +726,43 @@ impl RebornRuntimeInput {
     ) -> Self {
         self.model_cost_table_override = Some(cost_table);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_build_input_preserves_configured_ironhub_manifest_url() {
+        let manifest_url = ironclaw_extension_manager::ironhub::validated_manifest_url(
+            "https://hub.ironclaw.com/test/manifest.json",
+        )
+        .expect("valid manifest URL");
+        let services = RebornHostBindings::disabled("test-owner")
+            .with_ironhub_manifest_url(manifest_url.clone());
+
+        let input = RebornRuntimeInput::from_build_input(services);
+
+        assert_eq!(input.ironhub_manifest_url, manifest_url);
+    }
+
+    #[test]
+    fn ironhub_builder_methods_preserve_validated_inputs() {
+        let shared_key = ironclaw_extension_manager::ironhub::IronhubSharedKey::new(
+            "ihub_sk_RuntimeInputTestKey00000000000000000000000000",
+        )
+        .expect("valid shared key");
+        let manifest_url = ironclaw_extension_manager::ironhub::validated_manifest_url(
+            "https://hub.ironclaw.com/test/other.json",
+        )
+        .expect("valid manifest URL");
+
+        let input = RebornRuntimeInput::default()
+            .with_ironhub_agent_shared_key(shared_key)
+            .with_ironhub_manifest_url(manifest_url.clone());
+
+        assert!(input.ironhub_agent_shared_key.is_some());
+        assert_eq!(input.ironhub_manifest_url, manifest_url);
     }
 }

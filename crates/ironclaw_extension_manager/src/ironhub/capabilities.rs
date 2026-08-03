@@ -22,8 +22,9 @@ use serde::Deserialize;
 
 use ironclaw_extension_host::ExtensionLifecycleManager;
 
+use super::link_service::IronhubLinkStateStore;
 use super::model::{IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubInstallOptions};
-use super::service::execute_reborn_ironhub_service_command;
+use super::service::{IronhubManifestUrl, execute_reborn_ironhub_service_command};
 
 pub const IRONHUB_SEARCH_CAPABILITY_ID: &str = "builtin.ironhub_search";
 pub const IRONHUB_INFO_CAPABILITY_ID: &str = "builtin.ironhub_info";
@@ -52,10 +53,14 @@ pub fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     skill_management: Arc<ScopedSkillManagementPort>,
     extension_management: Arc<ExtensionLifecycleManager>,
+    link_state: Arc<IronhubLinkStateStore>,
+    manifest_url: IronhubManifestUrl,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(IronHubCapabilityHandler {
         skill_management,
         extension_management,
+        link_state,
+        manifest_url,
     });
     for capability_id in IRONHUB_CAPABILITY_IDS {
         registry.insert_handler(CapabilityId::new(capability_id)?, handler.clone());
@@ -131,6 +136,8 @@ fn capability_manifest(
 struct IronHubCapabilityHandler {
     skill_management: Arc<ScopedSkillManagementPort>,
     extension_management: Arc<ExtensionLifecycleManager>,
+    link_state: Arc<IronhubLinkStateStore>,
+    manifest_url: IronhubManifestUrl,
 }
 
 #[derive(Debug, Deserialize)]
@@ -193,6 +200,7 @@ impl FirstPartyCapabilityHandler for IronHubCapabilityHandler {
                         acknowledge_unverified: false,
                         expected_version: input.expected_version,
                         expected_artifact_digest: input.expected_artifact_digest,
+                        private_manifest_url: None,
                     },
                 }
             }
@@ -206,6 +214,8 @@ impl FirstPartyCapabilityHandler for IronHubCapabilityHandler {
             Arc::clone(&self.skill_management),
             Arc::clone(&self.extension_management),
             runtime_http_egress,
+            Arc::clone(&self.link_state),
+            self.manifest_url.clone(),
             request.scope,
             command,
         )
@@ -243,5 +253,54 @@ fn capability_error(error: IronHubCommandError) -> FirstPartyCapabilityError {
         | IronHubCommandError::Install { .. }
         | IronHubCommandError::Product(_) => RuntimeDispatchErrorKind::OperationFailed,
     };
+    tracing::debug!(?kind, "IronHub capability dispatch failed");
     FirstPartyCapabilityError::new(kind)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_errors_map_to_redacted_dispatch_categories() {
+        let cases = [
+            (
+                IronHubCommandError::InvalidInput {
+                    reason: "private".to_string(),
+                },
+                RuntimeDispatchErrorKind::InputEncode,
+            ),
+            (
+                IronHubCommandError::RuntimeHttpEgressUnavailable,
+                RuntimeDispatchErrorKind::Executor,
+            ),
+            (
+                IronHubCommandError::Catalog {
+                    reason: "private".to_string(),
+                },
+                RuntimeDispatchErrorKind::OperationFailed,
+            ),
+            (
+                IronHubCommandError::Install {
+                    reason: "private".to_string(),
+                },
+                RuntimeDispatchErrorKind::OperationFailed,
+            ),
+            (
+                IronHubCommandError::Product(
+                    ironclaw_product_contracts::error::ProductOperationFailure::InvalidBindingRequest {
+                        reason: "private".to_string(),
+                    },
+                ),
+                RuntimeDispatchErrorKind::OperationFailed,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            let FirstPartyCapabilityError::Dispatch { kind, .. } = capability_error(error) else {
+                panic!("IronHub failures must remain redacted dispatch failures");
+            };
+            assert_eq!(kind, expected);
+        }
+    }
 }

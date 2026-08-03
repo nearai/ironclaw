@@ -2778,7 +2778,7 @@ fn strip_process_projection_reexport_block(contents: &str) -> String {
             .trim_start()
             .starts_with("pub use process_projection::{")
         {
-            skipping = true;
+            skipping = !line.trim_end().ends_with("};");
             continue;
         }
         if skipping {
@@ -2791,6 +2791,21 @@ fn strip_process_projection_reexport_block(contents: &str) -> String {
         stripped.push('\n');
     }
     stripped
+}
+
+#[test]
+fn process_projection_reexport_stripping_preserves_following_source() {
+    for source in [
+        "pub use process_projection::{InvocationId};\npub struct InvocationIdLeak;\n",
+        "pub use process_projection::{\n    InvocationId,\n};\npub struct InvocationIdLeak;\n",
+    ] {
+        let stripped = strip_process_projection_reexport_block(source);
+        assert!(!stripped.contains("pub use process_projection"));
+        assert!(
+            stripped.contains("pub struct InvocationIdLeak"),
+            "source following a re-export must remain scannable: {stripped:?}"
+        );
+    }
 }
 
 fn collect_forbidden_string_uses(
