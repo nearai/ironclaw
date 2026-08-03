@@ -350,7 +350,7 @@ pub(super) struct RebornProductionBuildContext {
         Vec<Arc<dyn ironclaw_extension_host::FirstPartyHandlerRegistrar>>,
     pub(super) credential_account_visibility_policy:
         Option<Arc<dyn ironclaw_auth::RuntimeCredentialAccountVisibilityPolicy>>,
-    pub(super) ironhub_manifest_url: ironclaw_ironhub::IronhubManifestUrl,
+    pub(super) ironhub_manifest_url: ironclaw_extension_manager::ironhub::IronhubManifestUrl,
     pub(super) workspace_filesystems: Option<WorkspaceFilesystems>,
     pub(super) standalone_storage_root: Option<PathBuf>,
     pub(super) default_system_prompt_path: Option<PathBuf>,

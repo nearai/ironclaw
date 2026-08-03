@@ -36,7 +36,7 @@ use ironclaw_product_contracts::package_lifecycle::{
     LifecycleReadinessBlocker, LifecycleSearchExtensionSummary,
 };
 use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
-use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
+use tokio::sync::{AcquireError, Mutex, Notify, RwLock, Semaphore};
 
 fn unzip_extension_bundle_for_product(
     bundle: &[u8],
@@ -969,11 +969,11 @@ impl ExtensionLifecycleManager {
         // materialization, and catalog insertion. This bounds the number of
         // fully expanded packages retained by an import in addition to the
         // decode work itself.
-        let _decode_permit = self.import_decode_semaphore.acquire().await.map_err(|_| {
-            ProductOperationFailure::Transient {
-                reason: "import decode limiter is closed".to_string(),
-            }
-        })?;
+        let _decode_permit = self
+            .import_decode_semaphore
+            .acquire()
+            .await
+            .map_err(map_import_decode_acquire_error)?;
         let reserved_bundled_ids = self.catalog.read().await.reserved_bundled_ids().to_vec();
         let package = tokio::task::spawn_blocking(move || {
             let files = unzip_extension_bundle_for_product(&bundle)?;
@@ -2863,6 +2863,30 @@ fn generic_host_error(error: crate::LifecycleError) -> ProductOperationFailure {
     }
 }
 
+/// A closed import-decode limiter becomes a retryable boundary failure.
+///
+/// Named rather than inlined at the `map_err` so the mapping is reachable from
+/// a test. No *production* path closes [`Self::import_decode_semaphore`] — it
+/// lives as long as the manager — so the acquire error is unreachable through
+/// `import_bundle` itself; an inline closure would therefore be a permanently
+/// uncovered branch, which the changed-line coverage gate can only accept as a
+/// standing exemption. Extracting it is the tactic CHECKLIST's WS2 coverage
+/// note prescribes for exactly this shape. A test may still close a
+/// *standalone* [`Semaphore`] to mint a real [`AcquireError`], which is how
+/// this mapping is exercised without weakening the production guarantee.
+///
+/// The `AcquireError` is logged rather than discarded: it is the only signal
+/// distinguishing "limiter shut down" from any other transient failure, and the
+/// `reason` that crosses the boundary is deliberately fixed text. Both halves —
+/// the fixed `reason` and the logged cause — are asserted, so deleting the
+/// event or dropping `%error` fails a test rather than passing silently.
+fn map_import_decode_acquire_error(error: AcquireError) -> ProductOperationFailure {
+    tracing::debug!(%error, "import decode limiter is closed");
+    ProductOperationFailure::Transient {
+        reason: "import decode limiter is closed".to_string(),
+    }
+}
+
 fn map_channel_config_error(error: crate::ChannelConfigError) -> ProductOperationFailure {
     tracing::warn!(error = %error, "effective extension configuration resolution failed");
     ProductOperationFailure::Transient {
@@ -3207,6 +3231,335 @@ mod tests {
     use super::*;
     use crate::{AvailableExtensionAsset, AvailableExtensionAssetContent};
 
+    #[derive(Clone, Default)]
+    struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct SharedLogWriterGuard(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedLogWriterGuard {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogWriter {
+        type Writer = SharedLogWriterGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriterGuard(std::sync::Arc::clone(&self.0))
+        }
+    }
+
+    impl SharedLogWriter {
+        fn contents(&self) -> String {
+            String::from_utf8(
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
+            )
+            .expect("tracing output is UTF-8")
+        }
+    }
+
+    /// The import limiter's acquire failure is retryable, and the mapping runs
+    /// against a real `AcquireError` rather than a stand-in — a closed
+    /// semaphore is the only thing that produces one.
+    ///
+    /// Both halves of the mapper's contract are asserted together, because the
+    /// doc comment claims the debug event is the *only* signal distinguishing a
+    /// shut-down limiter from any other transient failure:
+    ///
+    /// - the `reason` crossing the boundary is deliberately **fixed text**, so
+    ///   the `AcquireError` never leaks into a caller-visible string; and
+    /// - the cause is **not discarded** — it reaches the debug event, where an
+    ///   operator can tell the two apart.
+    ///
+    /// A subscriber has to be installed for the second half to mean anything:
+    /// `tracing` short-circuits on the null dispatcher, so without one the macro
+    /// body never runs and the test could not tell "logged it" from "dropped
+    /// it". Scoped with `with_default` rather than set globally, so parallel
+    /// tests are unaffected. Deleting the event, or dropping `%error` from it,
+    /// now fails here rather than passing silently.
+    #[tokio::test]
+    async fn a_closed_import_decode_limiter_is_retryable_and_logs_the_acquire_error() {
+        let semaphore = Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES);
+        semaphore.close();
+        let error = semaphore
+            .acquire()
+            .await
+            .expect_err("a closed semaphore hands out no permits");
+        let rendered_cause = error.to_string();
+
+        let logs = SharedLogWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(logs.clone())
+            .finish();
+
+        let failure = tracing::subscriber::with_default(subscriber, || {
+            map_import_decode_acquire_error(error)
+        });
+
+        assert_eq!(
+            failure,
+            ProductOperationFailure::Transient {
+                reason: "import decode limiter is closed".to_string(),
+            },
+            "a shut-down limiter must read as retryable, not as a client mistake"
+        );
+
+        let logged = logs.contents();
+        assert!(
+            logged.contains("import decode limiter is closed"),
+            "the event keeps its stable message, got {logged:?}"
+        );
+        assert!(
+            logged.contains(&rendered_cause),
+            "the acquire cause must survive in the log, expected {rendered_cause:?} in {logged:?}"
+        );
+    }
+
+    /// The boundary mappers decide, for every lifecycle failure, whether the
+    /// caller should retry (`Transient`) or fix its request
+    /// (`InvalidBindingRequest`). That classification is the whole contract of
+    /// this layer, so each mapper is pinned on both sides of its own split
+    /// rather than on one representative input.
+    #[test]
+    fn a_corrupt_bundle_is_a_client_mistake_not_a_retryable_failure() {
+        let failure = unzip_extension_bundle_for_product(b"not a zip archive at all")
+            .expect_err("a non-zip payload cannot be unzipped");
+
+        assert!(
+            matches!(
+                failure,
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "a corrupt upload is the caller's to fix, not ours to retry: {failure:?}"
+        );
+    }
+
+    #[test]
+    fn a_generic_host_activation_rejection_is_a_client_mistake() {
+        let failure = generic_host_error(crate::LifecycleError::ActivationHook {
+            reason: "hook refused".to_string(),
+        });
+
+        assert_eq!(
+            failure,
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "generic extension host rejected the activation: activation hook failed: \
+                         hook refused"
+                    .to_string(),
+            },
+            "the host's rejection reason must reach the caller verbatim"
+        );
+    }
+
+    /// Every `ChannelConfigError` collapses to one retryable failure with fixed
+    /// text: the underlying error can name storage internals, so it is logged
+    /// rather than forwarded. Two structurally different inputs are asserted to
+    /// prove the collapse is deliberate and not an artifact of one input.
+    #[test]
+    fn effective_configuration_failures_are_retryable_with_no_detail_leak() {
+        let expected = ProductOperationFailure::Transient {
+            reason: "effective extension configuration is unavailable".to_string(),
+        };
+
+        assert_eq!(
+            map_channel_config_error(crate::ChannelConfigError::Storage {
+                reason: "postgres connection refused on 10.0.0.7".to_string(),
+            }),
+            expected,
+            "storage detail must never cross the product boundary"
+        );
+        assert_eq!(
+            map_channel_config_error(crate::ChannelConfigError::NotInstalled {
+                extension_id: "slack".to_string(),
+            }),
+            expected,
+            "the mapper collapses every configure-surface failure to one class"
+        );
+    }
+
+    /// `LifecyclePackageId` is deliberately looser than `ExtensionId` (it
+    /// accepts uppercase and surrounding whitespace), so a well-formed package
+    /// ref can still carry an id no extension can have. That gap is the only
+    /// way this rejection is reached.
+    #[test]
+    fn a_package_ref_id_that_is_not_a_valid_extension_id_is_rejected() {
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "Slack")
+            .expect("uppercase is a valid lifecycle package id");
+
+        let failure = extension_ids_from_package_ref(&package_ref)
+            .expect_err("uppercase is not a valid extension id");
+
+        assert!(
+            matches!(
+                failure,
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "an unusable extension id is a malformed request: {failure:?}"
+        );
+        assert!(
+            extension_ids_from_package_ref(
+                &LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
+                    .expect("lowercase package ref")
+            )
+            .is_ok(),
+            "the same ref in lowercase must still resolve — the rejection is about the id, \
+             not about the call"
+        );
+    }
+
+    /// A deployment that never enabled the account-setup host is a
+    /// configuration mistake the caller must fix; a status read that failed is
+    /// a retryable outage. Mapping either one to the other would make the
+    /// WebUI either retry forever or give up on a transient blip.
+    #[test]
+    fn account_setup_failures_split_configuration_from_outage() {
+        let extension_id = ExtensionId::new("gmail").expect("valid extension id");
+
+        assert!(
+            matches!(
+                map_account_setup_error(ExtensionAccountSetupError::HostUnavailable {
+                    extension_id: extension_id.clone(),
+                }),
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "a host that is not enabled on this deployment is not retryable"
+        );
+        assert!(
+            matches!(
+                map_account_setup_error(ExtensionAccountSetupError::StatusUnavailable {
+                    extension_id,
+                    source:
+                        ironclaw_product_contracts::account_setup::AccountConnectionStatusError::new(
+                            "backend timed out"
+                        ),
+                }),
+                ProductOperationFailure::Transient { .. }
+            ),
+            "a failed status read is an outage the caller should retry"
+        );
+    }
+
+    #[test]
+    fn extension_errors_split_infrastructure_from_malformed_manifests() {
+        assert!(
+            matches!(
+                map_extension_error(ExtensionError::Filesystem(FilesystemError::MountNotFound {
+                    path: VirtualPath::new("/system/extensions/gmail").expect("valid path"),
+                })),
+                ProductOperationFailure::Transient { .. }
+            ),
+            "a filesystem failure is infrastructure trouble, so it is retryable"
+        );
+        assert!(
+            matches!(
+                map_extension_error(ExtensionError::ManifestParse {
+                    reason: "expected a table".to_string(),
+                }),
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "a manifest the author must fix is not retryable"
+        );
+    }
+
+    /// #4091: a store outage must not read as a malformed request, or callers
+    /// abandon the operation instead of retrying it.
+    #[test]
+    fn installation_store_outages_stay_retryable() {
+        assert!(
+            matches!(
+                map_extension_installation_error(ExtensionInstallationError::StoreUnavailable {
+                    reason: "backend unreachable".to_string(),
+                }),
+                ProductOperationFailure::Transient { .. }
+            ),
+            "a store outage is retryable backend trouble (#4091)"
+        );
+        assert!(
+            matches!(
+                map_extension_installation_error(ExtensionInstallationError::InvalidManifest {
+                    reason: "missing id".to_string(),
+                }),
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "a malformed installation record is the caller's to fix"
+        );
+    }
+
+    /// A shared (tenant-owned) extension may only be mutated by the tenant
+    /// admin. This is an authorization boundary, so it is pinned on both the
+    /// denial and the two ways the check must let a caller through.
+    #[test]
+    fn only_the_tenant_admin_may_mutate_a_shared_installation() {
+        let admin = UserId::new("admin").expect("valid user");
+        let member = UserId::new("member").expect("valid user");
+        let tenant_owned = fixture_installation("shared-tool", InstallationOwner::Tenant);
+        let user_owned =
+            fixture_installation("personal-tool", InstallationOwner::user(member.clone()));
+
+        let denial =
+            ensure_caller_may_mutate_tenant_installation(&tenant_owned, &member, &admin, "remove")
+                .expect_err("a non-admin must not mutate a shared installation");
+        assert!(
+            matches!(
+                denial,
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "the denial is a rejected request, not an outage: {denial:?}"
+        );
+
+        assert!(
+            ensure_caller_may_mutate_tenant_installation(&tenant_owned, &admin, &admin, "remove")
+                .is_ok(),
+            "the tenant admin is exactly who may mutate a shared installation"
+        );
+        assert!(
+            ensure_caller_may_mutate_tenant_installation(&user_owned, &member, &admin, "remove")
+                .is_ok(),
+            "a user-owned installation is not gated on the tenant admin at all"
+        );
+    }
+
+    #[test]
+    fn a_compensation_failure_carries_both_causes_and_stays_retryable() {
+        assert_eq!(
+            compensation_failure("removal rollback failed", "original boom", "rollback boom"),
+            ProductOperationFailure::Transient {
+                reason: "removal rollback failed; original error: original boom; \
+                         compensation error: rollback boom"
+                    .to_string(),
+            },
+            "losing either cause makes a half-applied removal undiagnosable"
+        );
+    }
+
+    fn fixture_installation(id: &str, owner: InstallationOwner) -> ExtensionInstallation {
+        let extension_id = ExtensionId::new(id).expect("valid extension id");
+        ExtensionInstallation::new(
+            ExtensionInstallationId::new(id).expect("valid installation id"),
+            extension_id.clone(),
+            ironclaw_extensions::ExtensionManifestRef::new(extension_id, None),
+            Vec::new(),
+            chrono::Utc::now(),
+            owner,
+        )
+        .expect("installation fixture")
+    }
+
     #[tokio::test]
     async fn registry_install_coordination_serializes_same_extension_without_held_mutex_guard() {
         let operations = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
@@ -3237,69 +3590,6 @@ mod tests {
                 .is_empty(),
             "completed operations must leave no coordination entry"
         );
-    }
-
-    #[tokio::test]
-    async fn registry_package_install_runs_through_production_coordination_and_catalog_lookup() {
-        let services = crate::lifecycle_test_support::build_lifecycle_test_services(
-            "registry-install-owner",
-            None,
-            false,
-        )
-        .await;
-        let scope = crate::lifecycle_test_support::webui_gate_resource_scope_for_owner(
-            "registry-install-owner",
-        );
-        let manifest = r#"
-schema_version = "reborn.extension_manifest.v2"
-id = "registry-fixture"
-name = "Registry Fixture"
-version = "0.1.0"
-description = "Registry install fixture"
-trust = "third_party"
-
-[runtime]
-kind = "wasm"
-module = "wasm/fixture.wasm"
-
-[[host_api]]
-id = "ironclaw.capability_provider/v1"
-section = "capability_provider.tools"
-
-[capability_provider.tools]
-
-[[capability_provider.tools.capabilities]]
-id = "registry-fixture.run"
-description = "Run fixture"
-effects = ["dispatch_capability"]
-default_permission = "allow"
-visibility = "model"
-input_schema_ref = "schemas/input.json"
-output_schema_ref = "schemas/output.json"
-"#;
-        let component = std::fs::read(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm"),
-        )
-        .expect("component fixture");
-        let package = crate::registry_extension_package(
-            vec![
-                ("manifest.toml".to_string(), manifest.as_bytes().to_vec()),
-                ("wasm/fixture.wasm".to_string(), component),
-                ("schemas/input.json".to_string(), b"{}".to_vec()),
-                ("schemas/output.json".to_string(), b"{}".to_vec()),
-            ],
-            &[],
-        )
-        .expect("registry package validates");
-
-        let response = services
-            .extension_management
-            .install_registry_package(package, false, &scope.user_id, &scope)
-            .await
-            .expect("registry package installs through lifecycle manager");
-
-        assert_eq!(response.phase, InstallationState::Active);
     }
 
     #[tokio::test]

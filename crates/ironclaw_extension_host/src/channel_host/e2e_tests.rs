@@ -129,7 +129,7 @@ use e2e_auth_challenge::FakeAuthChallengeProvider;
 struct InertAttachmentLander;
 
 #[async_trait::async_trait]
-impl ironclaw_product::InboundAttachmentLander for InertAttachmentLander {
+impl ironclaw_attachments::InboundAttachmentLander for InertAttachmentLander {
     async fn land(
         &self,
         _thread_scope: &ironclaw_threads::ThreadScope,
@@ -155,10 +155,10 @@ impl ironclaw_product::InboundAttachmentLander for InertAttachmentLander {
         _thread_scope: &ironclaw_threads::ThreadScope,
         _referenced_storage_keys: &[String],
     ) -> Result<
-        ironclaw_product::AttachmentCleanupReport,
+        ironclaw_attachments::AttachmentCleanupReport,
         ironclaw_product_contracts::surface::ProductSurfaceError,
     > {
-        Ok(ironclaw_product::AttachmentCleanupReport::default())
+        Ok(ironclaw_attachments::AttachmentCleanupReport::default())
     }
 }
 
@@ -890,7 +890,7 @@ impl ApprovalInteractionService for ForeignScopeApprovalService {
 ///
 /// `length_prefixed_fingerprint(["T-A", "D123", ""])` = `"3:T-A|4:D123|0:|"`.
 fn dm_conversation_fingerprint() -> String {
-    ironclaw_conversations::ExternalConversationRef::new(Some(TEAM), CHANNEL, None, None)
+    ExternalConversationRef::new(Some(TEAM), CHANNEL, None, None)
         .expect("DM conversation ref") // safety: static test DM ref is valid.
         .conversation_fingerprint()
 }

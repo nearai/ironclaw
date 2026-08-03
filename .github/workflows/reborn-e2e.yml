@@ -121,11 +121,16 @@ jobs:
     if: needs.changes.outputs.has_e2e_scope == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    env:
+      RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     strategy:
       fail-fast: false
       matrix:
         group:
-          - architecture
+          - architecture-boundaries
+          - architecture-runtime
           - runtimes
           - substrates
     steps:
@@ -137,6 +142,11 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install mold and clang
+        run: |
+          scripts/ci/install-ci-apt-packages.sh clang mold
+          test -x /usr/bin/mold
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -153,11 +163,13 @@ jobs:
           ${{ matrix.group }}
 
   webui-v2-smoke:
-    name: Reborn WebUI v2 smoke
+    name: Reborn WebUI v2 build
     needs: changes
     if: needs.changes.outputs.has_e2e_scope == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      product_ref: ${{ steps.live_canary_binary.outputs.product_ref }}
     env:
       IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE: "1"
     steps:
@@ -169,9 +181,6 @@ jobs:
           # continue to use github.sha and test the synthesized merge commit.
           ref: ${{ inputs.ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.sha }}
           persist-credentials: false
-
-      - name: Configure isolated Playwright browser path
-        run: echo "PLAYWRIGHT_BROWSERS_PATH=${RUNNER_TEMP}/ms-playwright" >> "$GITHUB_ENV"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -189,20 +198,6 @@ jobs:
       - name: Enable pnpm
         run: corepack enable pnpm
 
-      - name: Checkout pinned Emulate fork
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          repository: serrrfirat/emulate
-          ref: c85da1ed9b4e1c9cbdcd9b9ec7af2aac93f5ea9e
-          path: .emulate
-          persist-credentials: false
-
-      - name: Build pinned Emulate fork
-        working-directory: .emulate
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm exec turbo build --filter=emulate...
-
       - name: Check Reborn Responses API E2E inventory
         run: python3 scripts/ci/check-reborn-responses-e2e-manifest.py
 
@@ -210,6 +205,13 @@ jobs:
         run: |
           cd crates/ironclaw_webui/frontend
           pnpm install --frozen-lockfile
+
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tests/e2e/pyproject.toml
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -229,35 +231,41 @@ jobs:
           cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
-      - name: Build ironclaw-reborn with WebChat v2 surface
+      - name: Build product and prepare evidence dependencies
         run: |
           set -euo pipefail
-          cargo build -p ironclaw --bin ironclaw
-          cargo build -p ironclaw --bin ironclaw \
-            --features test-support \
-            --target-dir "${CARGO_TARGET_DIR:-target}/e2e-sso"
+          (
+            set -o pipefail
+            {
+              target_dir="${CARGO_TARGET_DIR:-target}"
+              default_binary="${RUNNER_TEMP}/ironclaw-default"
+              cargo build -p ironclaw --bin ironclaw
+              cp "${target_dir}/debug/ironclaw" "${default_binary}"
+              cargo build -p ironclaw --bin ironclaw \
+                --features test-support
+              mkdir -p "${target_dir}/e2e-sso/debug"
+              cp "${target_dir}/debug/ironclaw" \
+                "${target_dir}/e2e-sso/debug/ironclaw"
+              mv "${default_binary}" "${target_dir}/debug/ironclaw"
+            } 2>&1 | sed -u 's/^/[product-build] /'
+          ) &
+          product_build_pid=$!
+          (
+            set -o pipefail
+            {
+              cd tests/e2e
+              pip install -e .
+            } 2>&1 | sed -u 's/^/[evidence-setup] /'
+          ) &
+          evidence_setup_pid=$!
+
+          status=0
+          wait "${product_build_pid}" || status=1
+          wait "${evidence_setup_pid}" || status=1
+          exit "${status}"
 
       - name: Mark OpenAI-compatible binary build
         run: touch target/debug/.ironclaw-reborn-openai-compat.stamp
-
-      - name: Install Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: tests/e2e/pyproject.toml
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('tests/e2e/pyproject.toml') }}
-          restore-keys: ${{ runner.os }}-playwright-
-      - name: Install E2E dependencies
-        run: |
-          cd tests/e2e
-          pip install -e .
-          playwright install --with-deps chromium
 
       - name: Validate product-surface evidence contracts
         run: >-
@@ -293,110 +301,49 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Run Reborn WebUI v2 smoke
-        run: >-
-          scripts/ci/run-hermetic-deterministic-suite.sh
-          command
-          pytest
-          tests/e2e/scenarios/test_reborn_webui_v2_smoke.py
-          tests/e2e/scenarios/test_reborn_webui_v2_sso.py
-          tests/e2e/scenarios/test_reborn_webui_v2_custom_mcp.py
-          -v
-          --timeout=120
-
-      - name: Run harvested QA replay and provider contracts with Emulate
-        env:
-          IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
-        run: >-
-          scripts/ci/run-hermetic-deterministic-suite.sh
-          command
-          pytest
-          tests/e2e/scenarios/test_provider_capability_inventory.py
-          tests/e2e/scenarios/test_journey_coverage.py
-          tests/e2e/scenarios/test_emulate_reborn_provider_contracts.py
-          tests/e2e/scenarios/test_provider_fault_proxy.py
-          tests/e2e/scenarios/test_emulate_build_parity.py
-          tests/e2e/scenarios/test_provider_world_isolation.py
-          tests/e2e/scenarios/test_reborn_qa_trace_replay.py
-          tests/e2e/scenarios/test_reborn_qa_trace_full_path.py
-          -m
-          "not shared_world"
-          -v
-          --timeout=120
-
-      - name: Replay provider journeys in reverse order
-        if: inputs.reversed_journey_order
-        env:
-          IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
-          IRONCLAW_JOURNEY_ORDER: reverse
-        run: >-
-          scripts/ci/run-hermetic-deterministic-suite.sh
-          command
-          pytest
-          tests/e2e/scenarios/test_reborn_qa_trace_full_path.py::test_mutating_qa_journeys_replay_in_reverse_against_shared_provider_world
-          -v
-          --timeout=120
-
-      - name: Replay each mutating journey alone
-        if: inputs.alone_journey_replay
-        env:
-          IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
-        run: |
-          set -euo pipefail
-          # One pytest process per journey: a journey that only passes because
-          # an earlier one left Reborn or a provider in some state fails here,
-          # and nowhere in the ordinary lane. The list is pinned by
-          # test_alone_lane_lists_every_mutating_journey, so an empty loop
-          # cannot quietly pass.
-          journey_list="$(python scripts/ci/list_mutating_journeys.py)"
-          if [[ -z "${journey_list//[[:space:]]/}" ]]; then
-            echo "mutating journey list is empty" >&2
-            exit 1
-          fi
-          mapfile -t journeys <<<"${journey_list}"
-          echo "replaying ${#journeys[@]} journeys alone"
-          for journey in "${journeys[@]}"; do
-            echo "::group::alone: $journey"
-            scripts/ci/run-hermetic-deterministic-suite.sh command \
-              pytest tests/e2e/scenarios/test_reborn_qa_trace_full_path.py \
-              -k "$journey and not isolated" \
-              -v --timeout=120
-            echo "::endgroup::"
-          done
-
-      - name: Run Reborn Responses API E2E
-        run: |
-          mapfile -t responses_tests < <(
-            sed -e 's/#.*//' -e '/^[[:space:]]*$/d' tests/e2e/reborn_responses_e2e_tests.txt
-          )
-          if ((${#responses_tests[@]} == 0)); then
-            echo "No Reborn Responses API E2E tests selected"
-            exit 1
-          fi
-          scripts/ci/run-hermetic-deterministic-suite.sh command \
-            pytest "${responses_tests[@]}" -v --timeout=120
-
-      - name: Package live-canary binary
+      - name: Package Reborn E2E binaries
         id: live_canary_binary
         run: |
           set -euo pipefail
           product_ref="$(git rev-parse HEAD)"
-          artifact_dir="artifacts/reborn-webui-v2-binary"
-          mkdir -p "${artifact_dir}"
+          live_dir="artifacts/reborn-webui-v2-binary"
+          sso_dir="artifacts/reborn-webui-v2-sso-binary"
+          mkdir -p "${live_dir}" "${sso_dir}"
+
           # Temporary compatibility member for downstream QA consumers; remove
           # after every consumer invokes the canonical ironclaw binary.
           cp target/debug/ironclaw target/debug/ironclaw-reborn
-          tar -C target/debug -czf "${artifact_dir}/ironclaw-reborn.tar.gz" ironclaw ironclaw-reborn
+          tar -C target/debug -czf "${live_dir}/ironclaw-reborn.tar.gz" ironclaw ironclaw-reborn &
+          live_package_pid=$!
+          tar -C "${CARGO_TARGET_DIR:-target}/e2e-sso/debug" \
+            -czf "${sso_dir}/ironclaw-sso.tar.gz" ironclaw &
+          sso_package_pid=$!
+          status=0
+          wait "${live_package_pid}" || status=1
+          wait "${sso_package_pid}" || status=1
+          if [[ "${status}" -ne 0 ]]; then
+            echo "Failed to package one or more Reborn E2E binaries" >&2
+            exit "${status}"
+          fi
           (
-            cd "${artifact_dir}"
+            cd "${live_dir}"
             sha256sum ironclaw-reborn.tar.gz > ironclaw-reborn.tar.gz.sha256
           )
           jq -n \
             --arg product_ref "${product_ref}" \
             --argjson features '[]' \
             '{format_version: 1, product_ref: $product_ref, features: $features}' \
-            > "${artifact_dir}/manifest.json"
+            > "${live_dir}/manifest.json"
           echo "product_ref=${product_ref}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload Reborn SSO test binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reborn-webui-v2-sso-binary-${{ steps.live_canary_binary.outputs.product_ref }}
+          path: artifacts/reborn-webui-v2-sso-binary/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
 
       - name: Upload live-canary binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -406,58 +353,85 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Upload screenshots on failure
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: reborn-webui-v2-screenshots
-          path: tests/e2e/screenshots/
-          if-no-files-found: ignore
-
-  blackbox-smoke:
-    name: Reborn black-box smoke
-    needs: changes
-    if: needs.changes.outputs.has_e2e_scope == 'true'
+  webui-v2-test-lanes:
+    name: Reborn WebUI v2 E2E (${{ matrix.lane }})
+    needs:
+      - changes
+      - webui-v2-smoke
+    if: >-
+      needs.changes.outputs.has_e2e_scope == 'true' &&
+      needs.webui-v2-smoke.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     env:
       IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE: "1"
+    strategy:
+      fail-fast: false
+      max-parallel: 7
+      matrix:
+        include:
+          - lane: browser
+            kind: browser
+            shard: ""
+          - lane: fast-contracts
+            kind: fast-contracts
+            shard: ""
+          - lane: provider-contracts
+            kind: provider
+            shard: ""
+          - lane: provider-0
+            kind: provider
+            shard: "0/4"
+          - lane: provider-1
+            kind: provider
+            shard: "1/4"
+          - lane: provider-2
+            kind: provider
+            shard: "2/4"
+          - lane: provider-3
+            kind: provider
+            shard: "3/4"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
-          ref: ${{ inputs.ref || github.sha }}
+          ref: ${{ inputs.ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.sha }}
           persist-credentials: false
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Enable pnpm for setup-node cache
-        run: corepack enable pnpm
-
-      - name: Install Node.js for WebUI bundle build
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+      - name: Download default Reborn E2E binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          node-version: "22"
-          cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+          name: reborn-webui-v2-binary-${{ needs.webui-v2-smoke.outputs.product_ref }}
+          path: artifacts/reborn-webui-v2-binary
 
-      - name: Enable pnpm
-        run: corepack enable pnpm
+      - name: Download Reborn SSO test binary
+        if: matrix.kind == 'browser'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: reborn-webui-v2-sso-binary-${{ needs.webui-v2-smoke.outputs.product_ref }}
+          path: artifacts/reborn-webui-v2-sso-binary
 
-      - name: Install WebUI frontend dependencies
+      - name: Restore Reborn E2E binaries
         run: |
-          cd crates/ironclaw_webui/frontend
-          pnpm install --frozen-lockfile
-
-      - name: Restore Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          key: reborn-e2e-blackbox-smoke
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-
-      - name: Build ironclaw-reborn with WebChat v2 surface
-        run: cargo build -p ironclaw --bin ironclaw
+          mkdir -p target/debug
+          (
+            cd artifacts/reborn-webui-v2-binary
+            sha256sum -c ironclaw-reborn.tar.gz.sha256
+          )
+          tar -C target/debug -xzf \
+            artifacts/reborn-webui-v2-binary/ironclaw-reborn.tar.gz ironclaw
+          chmod +x target/debug/ironclaw
+          # The archive preserves build time, while checkout uses current time.
+          # Mark this same-commit binary fresh so E2E fixtures do not rebuild it.
+          touch target/debug/ironclaw
+          if [[ "${{ matrix.kind }}" == "browser" ]]; then
+            mkdir -p target/e2e-sso/debug
+            tar -C target/e2e-sso/debug -xzf \
+              artifacts/reborn-webui-v2-sso-binary/ironclaw-sso.tar.gz ironclaw
+            chmod +x target/e2e-sso/debug/ironclaw
+            touch target/e2e-sso/debug/ironclaw
+          fi
+          touch target/debug/.ironclaw-reborn-openai-compat.stamp
 
       - name: Install Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -471,14 +445,143 @@ jobs:
           cd tests/e2e
           pip install -e .
 
-      - name: Run Reborn black-box smoke
+      - name: Configure Playwright
+        if: matrix.kind == 'browser'
+        run: echo "PLAYWRIGHT_BROWSERS_PATH=${RUNNER_TEMP}/ms-playwright" >> "$GITHUB_ENV"
+
+      - name: Cache Playwright browsers
+        if: matrix.kind == 'browser'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('tests/e2e/pyproject.toml') }}
+          restore-keys: ${{ runner.os }}-playwright-
+
+      - name: Install Playwright browser
+        if: matrix.kind == 'browser'
+        run: playwright install --with-deps chromium
+
+      - name: Checkout pinned Emulate fork
+        if: matrix.kind == 'provider'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          repository: serrrfirat/emulate
+          ref: c85da1ed9b4e1c9cbdcd9b9ec7af2aac93f5ea9e
+          path: .emulate
+          persist-credentials: false
+
+      - name: Enable pnpm for provider cache
+        if: matrix.kind == 'provider'
+        run: corepack enable pnpm
+
+      - name: Install Node.js for Emulate
+        if: matrix.kind == 'provider'
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+          cache-dependency-path: .emulate/pnpm-lock.yaml
+
+      - name: Build pinned Emulate fork
+        if: matrix.kind == 'provider'
+        working-directory: .emulate
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec turbo build --filter=emulate...
+
+      - name: Run Reborn E2E lane
+        env:
+          LANE: ${{ matrix.lane }}
+          PROVIDER_SHARD: ${{ matrix.shard }}
+          IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
+        run: |
+          set -euo pipefail
+          case "${LANE}" in
+            browser)
+              scripts/ci/run-hermetic-deterministic-suite.sh command pytest \
+                tests/e2e/scenarios/test_reborn_webui_v2_smoke.py \
+                tests/e2e/scenarios/test_reborn_webui_v2_sso.py \
+                tests/e2e/scenarios/test_reborn_webui_v2_custom_mcp.py \
+                -v --timeout=120
+              ;;
+            fast-contracts)
+              mapfile -t responses_tests < <(
+                sed -e 's/#.*//' -e '/^[[:space:]]*$/d' \
+                  tests/e2e/reborn_responses_e2e_tests.txt
+              )
+              ((${#responses_tests[@]} > 0))
+              scripts/ci/run-hermetic-deterministic-suite.sh command pytest \
+                "${responses_tests[@]}" -v --timeout=120
+              scripts/ci/run-hermetic-deterministic-suite.sh command pytest \
+                tests/e2e/scenarios/test_reborn_blackbox_smoke.py \
+                -v --timeout=120
+              ;;
+            provider-contracts)
+              scripts/ci/run-hermetic-deterministic-suite.sh command pytest \
+                tests/e2e/scenarios/test_provider_capability_inventory.py \
+                tests/e2e/scenarios/test_journey_coverage.py \
+                tests/e2e/scenarios/test_emulate_reborn_provider_contracts.py \
+                tests/e2e/scenarios/test_provider_fault_proxy.py \
+                tests/e2e/scenarios/test_emulate_build_parity.py \
+                tests/e2e/scenarios/test_provider_world_isolation.py \
+                tests/e2e/scenarios/test_reborn_qa_trace_replay.py \
+                tests/e2e/scenarios/test_reborn_qa_trace_full_path.py \
+                -k "not provider_operation_case_executes_with_provider_readback" \
+                -m "not shared_world" -v --timeout=120
+              ;;
+            provider-*)
+              IRONCLAW_PROVIDER_OPERATION_SHARD="${PROVIDER_SHARD}" \
+                scripts/ci/run-hermetic-deterministic-suite.sh command pytest \
+                  tests/e2e/scenarios/test_reborn_qa_trace_full_path.py::test_provider_operation_case_executes_with_provider_readback \
+                  -m "not shared_world" -v --timeout=120
+              ;;
+            *)
+              echo "Unknown Reborn E2E lane: ${LANE}" >&2
+              exit 2
+              ;;
+          esac
+
+      - name: Replay provider journeys in reverse order
+        if: matrix.lane == 'provider-0' && inputs.reversed_journey_order
+        env:
+          IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
+          IRONCLAW_JOURNEY_ORDER: reverse
         run: >-
           scripts/ci/run-hermetic-deterministic-suite.sh
           command
           pytest
-          tests/e2e/scenarios/test_reborn_blackbox_smoke.py
+          tests/e2e/scenarios/test_reborn_qa_trace_full_path.py::test_mutating_qa_journeys_replay_in_reverse_against_shared_provider_world
           -v
           --timeout=120
+
+      - name: Replay each mutating journey alone
+        if: matrix.lane == 'provider-0' && inputs.alone_journey_replay
+        env:
+          IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
+        run: |
+          set -euo pipefail
+          journey_list="$(python scripts/ci/list_mutating_journeys.py)"
+          if [[ -z "${journey_list//[[:space:]]/}" ]]; then
+            echo "mutating journey list is empty" >&2
+            exit 1
+          fi
+          mapfile -t journeys <<<"${journey_list}"
+          echo "replaying ${#journeys[@]} journeys alone"
+          for journey in "${journeys[@]}"; do
+            echo "::group::alone: $journey"
+            scripts/ci/run-hermetic-deterministic-suite.sh command \
+              pytest tests/e2e/scenarios/test_reborn_qa_trace_full_path.py \
+              -k "$journey and not isolated" -v --timeout=120
+            echo "::endgroup::"
+          done
+
+      - name: Upload screenshots on failure
+        if: matrix.kind == 'browser' && failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reborn-webui-v2-screenshots
+          path: tests/e2e/screenshots/
+          if-no-files-found: ignore
 
   reborn-e2e:
     name: Reborn E2E
@@ -488,7 +591,7 @@ jobs:
       - changes
       - rust-reborn
       - webui-v2-smoke
-      - blackbox-smoke
+      - webui-v2-test-lanes
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -515,10 +618,10 @@ jobs:
             exit 1
           fi
           if ! job_result_ok "webui-v2-smoke" "${{ needs.webui-v2-smoke.result }}" false "allow"; then
-            echo "Reborn WebUI v2 smoke failed"
+            echo "Reborn WebUI v2 build failed"
             exit 1
           fi
-          if ! job_result_ok "blackbox-smoke" "${{ needs.blackbox-smoke.result }}" false "allow"; then
-            echo "Reborn black-box smoke failed"
+          if ! job_result_ok "webui-v2-test-lanes" "${{ needs.webui-v2-test-lanes.result }}" false "allow"; then
+            echo "Reborn WebUI v2 E2E lanes failed"
             exit 1
           fi

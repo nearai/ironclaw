@@ -1974,7 +1974,8 @@ mod tests {
     #[test]
     fn serve_rejects_a_present_but_short_ironhub_shared_key() {
         let _lock = lock_runtime_env();
-        let _shared_key = EnvGuard::set("IRONHUB_AGENT_SHARED_KEY", "too-short");
+        let too_short = "x".repeat(31);
+        let _shared_key = EnvGuard::set("IRONHUB_AGENT_SHARED_KEY", &too_short);
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
         std::fs::create_dir_all(&reborn_home).expect("mkdir");
@@ -1996,6 +1997,10 @@ mod tests {
                 .to_string()
                 .contains("IRONHUB_AGENT_SHARED_KEY is invalid"),
             "error must identify the invalid setting without exposing it: {error:#}"
+        );
+        assert!(
+            format!("{error:#}").contains("at least 32 bytes"),
+            "error chain must identify the shared-key length floor: {error:#}"
         );
     }
 

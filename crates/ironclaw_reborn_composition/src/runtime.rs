@@ -76,6 +76,7 @@ use ironclaw_product::{
     RunStateApprovalInteractionReadModel,
 };
 use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
+use ironclaw_product_contracts::operator_llm::ActiveModelReader;
 use ironclaw_product_contracts::projection::ProjectionStream;
 use ironclaw_product_contracts::surface::ProductSurface;
 use ironclaw_runner::loop_exit_applier::{
@@ -139,13 +140,13 @@ use crate::outbound::{
 use crate::process_gate_turn_view::{current_turn_gate_runs, first_turn_run_for_gate};
 use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
 use ironclaw_extension_host::AdminConfigurationCatalogUse;
-use ironclaw_extension_host::admin_configuration::{
-    ComposedAdminConfigurationService, ComposedExtensionAdminConfigurationResolver,
-};
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_extension_host::channel_pairing::ChannelPairingConsumeOutcome;
 use ironclaw_extension_host::channel_pairing::ChannelPairingRegistry;
 use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
+use ironclaw_extension_manager::admin_configuration::{
+    ComposedAdminConfigurationService, ComposedExtensionAdminConfigurationResolver,
+};
 use ironclaw_product::projection::{RebornProjectionServices, build_reborn_projection_services};
 pub use ironclaw_product::{blocked_auth_flow_canceller, product_auth_challenge_provider};
 use ironclaw_secrets::SecretStorePort;
@@ -572,8 +573,8 @@ pub struct RebornRuntime {
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     /// Durable nonce and signed-manifest replay state shared by CLI IronHub
     /// installs and the optional deep-link gateway.
-    pub(crate) ironhub_link_state: Arc<ironclaw_ironhub::IronhubLinkStateStore>,
-    pub(crate) ironhub_manifest_url: ironclaw_ironhub::IronhubManifestUrl,
+    pub(crate) ironhub_link_state: Arc<ironclaw_extension_manager::ironhub::IronhubLinkStateStore>,
+    pub(crate) ironhub_manifest_url: ironclaw_extension_manager::ironhub::IronhubManifestUrl,
     /// Single composed IronHub deep-link service. `None` is the default-off
     /// registration gate; the same option controls facade and route wiring.
     pub(crate) ironhub_link_service:
@@ -657,7 +658,7 @@ pub struct RebornRuntime {
     llm_reload: Option<RebornLlmReloadParts>,
 }
 
-impl ironclaw_extension_host::extension_lifecycle_command::RebornExtensionLifecycleRuntime
+impl ironclaw_extension_manager::extension_lifecycle_command::RebornExtensionLifecycleRuntime
     for RebornRuntime
 {
     fn skill_management(&self) -> Arc<ironclaw_skills::ScopedSkillManagementPort> {
@@ -682,7 +683,7 @@ impl ironclaw_extension_host::extension_lifecycle_command::RebornExtensionLifecy
     }
 }
 
-impl ironclaw_ironhub::RebornIronHubRuntime for RebornRuntime {
+impl ironclaw_extension_manager::ironhub::RebornIronHubRuntime for RebornRuntime {
     fn ironhub_skill_management(&self) -> Arc<ironclaw_skills::ScopedSkillManagementPort> {
         Arc::clone(&self.skill_management)
     }
@@ -697,11 +698,13 @@ impl ironclaw_ironhub::RebornIronHubRuntime for RebornRuntime {
         self.runtime_http_egress.clone()
     }
 
-    fn ironhub_link_state(&self) -> Arc<ironclaw_ironhub::IronhubLinkStateStore> {
+    fn ironhub_link_state(
+        &self,
+    ) -> Arc<ironclaw_extension_manager::ironhub::IronhubLinkStateStore> {
         Arc::clone(&self.ironhub_link_state)
     }
 
-    fn ironhub_manifest_url(&self) -> ironclaw_ironhub::IronhubManifestUrl {
+    fn ironhub_manifest_url(&self) -> ironclaw_extension_manager::ironhub::IronhubManifestUrl {
         self.ironhub_manifest_url.clone()
     }
 
@@ -1065,8 +1068,8 @@ impl RebornRuntime {
             run_delivery_settings,
         } = wiring;
         let attachment_filesystem = self.read_write_workspace_filesystem()?;
-        let inbound_attachments: Arc<dyn ironclaw_product::InboundAttachmentLander> =
-            Arc::new(ironclaw_product::ProjectScopedAttachmentLander::new(
+        let inbound_attachments: Arc<dyn ironclaw_attachments::InboundAttachmentLander> =
+            Arc::new(ironclaw_attachments::ProjectScopedAttachmentLander::new(
                 Arc::clone(&attachment_filesystem),
             ));
         let project_filesystem: Arc<dyn ironclaw_product::ProjectFilesystemReader> = Arc::new(
@@ -1239,7 +1242,7 @@ impl RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub fn channel_config_service(&self) -> Option<Arc<dyn ChannelConfigProductService>> {
         Some(Arc::new(
-            ironclaw_extension_host::RebornChannelConfigProductService::new(Arc::clone(
+            ironclaw_extension_manager::RebornChannelConfigProductService::new(Arc::clone(
                 &self.channel_config_service,
             )),
         ))
@@ -1304,9 +1307,9 @@ impl RebornRuntime {
     #[cfg(feature = "test-support")]
     pub fn standalone_inbound_attachment_reader_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product::InboundAttachmentReader>> {
+    ) -> Option<Arc<dyn ironclaw_attachments::InboundAttachmentReader>> {
         Some(self.standalone_workspace_attachment_reader_for_test()?
-            as Arc<dyn ironclaw_product::InboundAttachmentReader>)
+            as Arc<dyn ironclaw_attachments::InboundAttachmentReader>)
     }
 
     #[cfg(feature = "test-support")]
@@ -1318,7 +1321,7 @@ impl RebornRuntime {
         let read_write_workspace_filesystem = self.read_write_workspace_filesystem()?;
         Some(crate::factory::AttachmentTestSupport {
             read_port,
-            lander: Arc::new(ironclaw_product::ProjectScopedAttachmentLander::new(
+            lander: Arc::new(ironclaw_attachments::ProjectScopedAttachmentLander::new(
                 read_write_workspace_filesystem,
             )),
         })
@@ -1444,11 +1447,12 @@ impl RebornRuntime {
         let Some(states) = self.webui_nearai_login_states() else {
             return Ok(None);
         };
-        Ok(Some(
-            crate::llm_admin::nearai_login_serve::nearai_login_callback_mount(
-                session, reload, boot, states,
-            )?,
-        ))
+        // Called through operator's crate-root facade: operator now returns the
+        // host-owned `PublicRouteMount`, so the composition-side repackaging
+        // shim that existed only to convert an operator-local carrier is gone.
+        Ok(Some(ironclaw_operator::nearai_login_callback_mount(
+            session, reload, boot, states,
+        )?))
     }
 
     /// Live LLM-provider reload trigger for the settings service. Returns the
@@ -1473,9 +1477,7 @@ impl RebornRuntime {
     /// against the model that actually ran. Backed by the same hot-swappable
     /// primary provider the model gateway drives, so it tracks operator model
     /// swaps. `None` when no LLM provider was wired at boot.
-    pub(crate) fn webui_active_model_reader(
-        &self,
-    ) -> Option<Arc<dyn ironclaw_product::ActiveModelReader>> {
+    pub(crate) fn webui_active_model_reader(&self) -> Option<Arc<dyn ActiveModelReader>> {
         let parts = self.llm_reload.as_ref()?;
         Some(Arc::new(ironclaw_operator::ProviderActiveModelReader::new(
             parts.reload_handle.primary_provider(),
@@ -3470,9 +3472,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         let skill_learned_notifier: Arc<
             dyn ironclaw_extension_host::skill_learning::SkillLearnedNotifier,
         > = Arc::new(
-            ironclaw_extension_host::skill_learning::LiveSkillLearnedNotifier::new(
-                skill_learning_publisher,
-            ),
+            crate::model_gateway_assembly::LiveSkillLearnedNotifier::new(skill_learning_publisher),
         );
         let extraction_tasks =
             Arc::new(ironclaw_extension_host::skill_learning::SkillLearningExtractionTasks::new());
@@ -3496,7 +3496,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
     > = match (local_runtime, outbound_preferences_facade.clone()) {
         (Some(local_runtime), Some(outbound_preferences_facade)) => {
             let lifecycle_service =
-                ironclaw_extension_host::ExtensionHostLifecycleProductService::new(Arc::clone(
+                ironclaw_extension_manager::ExtensionHostLifecycleProductService::new(Arc::clone(
                     &local_runtime.skill_management,
                 ))
                 .with_extension_management(Arc::clone(&local_runtime.extension_management))
@@ -4071,7 +4071,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                             .to_string(),
                 }
             })?;
-            let service = ironclaw_ironhub::RebornIronhubLinkService::new(
+            let service = ironclaw_extension_manager::ironhub::RebornIronhubLinkService::new(
                 services.skill_management.clone(),
                 services.extension_management.clone(),
                 egress,

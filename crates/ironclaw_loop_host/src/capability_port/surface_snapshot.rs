@@ -170,10 +170,10 @@ impl SurfaceCapabilitySnapshot {
     ) -> Result<Option<ProviderToolDefinition>, AgentLoopHostError> {
         match self {
             Self::Runtime(capability) => {
-                if !super::provider_schema_is_usable(&capability.parameters_schema) {
+                if !super::provider_schema_is_resolved(&capability.parameters_schema) {
                     tracing::debug!(
                         capability_id = capability_id.as_str(),
-                        "capability omitted from provider tool definitions because its parameter schema is not provider-usable"
+                        "capability omitted from provider tool definitions because its parameter schema contains an unresolved reference"
                     );
                     return Ok(None);
                 }
@@ -212,7 +212,7 @@ impl RuntimeSurfaceCapabilitySnapshot {
         capability_id: &CapabilityId,
         tool_call: &ProviderToolCall,
     ) -> Result<PreparedSurfaceCapabilityCall, AgentLoopHostError> {
-        if !super::provider_schema_is_usable(&self.parameters_schema) {
+        if !super::provider_schema_is_resolved(&self.parameters_schema) {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "provider tool call was not advertised to the model",

@@ -982,7 +982,7 @@ pub(super) async fn build_backend_production(
     extension_management.attach_channel_config(&admin_configuration_resolver);
     admin_configuration_credential_slot.fill(Arc::clone(&admin_configuration_resolver));
     let lifecycle_continuation_facade: Arc<dyn LifecycleProductService> = Arc::new(
-        ironclaw_extension_host::ExtensionHostLifecycleProductService::new(Arc::clone(
+        ironclaw_extension_manager::ExtensionHostLifecycleProductService::new(Arc::clone(
             &skill_management,
         ))
         .with_extension_management(Arc::clone(&extension_management))
@@ -1028,9 +1028,11 @@ pub(super) async fn build_backend_production(
     );
     let runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
     let host_runtime_http_egress = services.host_runtime_http_egress_port();
-    let ironhub_link_state = Arc::new(ironclaw_ironhub::IronhubLinkStateStore::new(Arc::clone(
-        &fold_filesystem,
-    )));
+    let ironhub_link_state = Arc::new(
+        ironclaw_extension_manager::ironhub::IronhubLinkStateStore::new(Arc::clone(
+            &fold_filesystem,
+        )),
+    );
     insert_extension_lifecycle_handlers(
         &mut first_party_registry,
         Arc::clone(&extension_management),

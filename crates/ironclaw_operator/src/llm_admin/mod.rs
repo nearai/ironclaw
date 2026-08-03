@@ -19,6 +19,7 @@ pub use llm_catalog::{apply_stored_api_key, resolve_reborn_runtime_llm};
 pub use llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
 pub use llm_key_store::{LlmKeyStore, LlmKeyStoreError};
 pub use llm_reload::RebornLlmReloadAdapter;
+pub use nearai_login_serve::nearai_login_callback_mount;
 pub use provider_admin::{RebornProviderAdmin, RebornProviderAdminError};
 pub use provider_repo::{ProviderRepo, ProviderRepoError};
 pub use resolved_llm::{RebornProviderFactory, ResolvedRebornLlm};

@@ -54,6 +54,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use chrono::Utc;
 use http_body_util::BodyExt;
+use ironclaw_extension_contracts::external::ExternalActorRef;
 use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
@@ -363,9 +364,10 @@ async fn fire_trigger_and_get_run_thread_id(
                 TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID,
             )
             .expect("installation id"),
-            ironclaw_conversations::ExternalActorRef::new(
+            ExternalActorRef::new(
                 TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
                 user_id.as_str(),
+                None::<String>,
             )
             .expect("actor ref"),
             user_id.clone(),

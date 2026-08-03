@@ -9,9 +9,7 @@ use std::{
 };
 
 use ironclaw_auth::{AuthProductError, RebornAuthContinuationDispatcher};
-use ironclaw_conversations::{
-    ConditionalUnpairOutcome, ExternalActorRef as ConversationActorRef, InboundTurnError,
-};
+use ironclaw_conversations::{ConditionalUnpairOutcome, InboundTurnError};
 use ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind;
 use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
@@ -268,7 +266,7 @@ impl ConversationActorPairingService for RecordingActorPairings {
         _tenant_id: TenantId,
         _adapter_kind: AdapterKind,
         _adapter_installation_id: ironclaw_conversations::AdapterInstallationId,
-        _external_actor_ref: ConversationActorRef,
+        _external_actor_ref: ExternalActorRef,
         _user_id: UserId,
     ) -> Result<(), InboundTurnError> {
         Ok(())
@@ -279,7 +277,7 @@ impl ConversationActorPairingService for RecordingActorPairings {
         _tenant_id: TenantId,
         _adapter_kind: AdapterKind,
         _adapter_installation_id: ironclaw_conversations::AdapterInstallationId,
-        _external_actor_ref: ConversationActorRef,
+        _external_actor_ref: ExternalActorRef,
         _user_id: UserId,
         _epoch: ironclaw_conversations::ExternalActorBindingEpoch,
     ) -> Result<(), InboundTurnError> {
@@ -291,7 +289,7 @@ impl ConversationActorPairingService for RecordingActorPairings {
         _tenant_id: TenantId,
         _adapter_kind: AdapterKind,
         _adapter_installation_id: ironclaw_conversations::AdapterInstallationId,
-        _external_actor_ref: ConversationActorRef,
+        _external_actor_ref: ExternalActorRef,
     ) -> Result<(), InboundTurnError> {
         Ok(())
     }
@@ -301,7 +299,7 @@ impl ConversationActorPairingService for RecordingActorPairings {
         _tenant_id: &TenantId,
         _adapter_kind: &AdapterKind,
         adapter_installation_id: &ironclaw_conversations::AdapterInstallationId,
-        external_actor_ref: &ConversationActorRef,
+        external_actor_ref: &ExternalActorRef,
         expected: &ExpectedExternalActorOwner,
     ) -> Result<ConditionalUnpairOutcome, InboundTurnError> {
         self.unpairs.lock().expect("unpairs lock").push((

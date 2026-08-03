@@ -4,9 +4,11 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_product::{
-    OperatorLogsService, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
-    RebornLogQueryResponse, normalize_operator_log_context_value,
+use ironclaw_product_contracts::operator_service::{
+    OperatorLogsService, normalize_operator_log_context_value,
+};
+use ironclaw_product_contracts::product_wire::{
+    RebornLogEntry, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
 };
 use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
 use ironclaw_safety::{LeakDetector, sensitive_paths::is_sensitive_path_str};

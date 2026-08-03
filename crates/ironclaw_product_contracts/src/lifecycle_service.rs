@@ -2,9 +2,10 @@
 //!
 //! [`crate::package_lifecycle`] owns the lifecycle *values*; this module owns
 //! the service that answers in them. The split matters because the only
-//! production implementation lives **below** product, in
-//! `ironclaw_extension_host` — it is the crate that may write lifecycle state —
-//! while product and every transport call it through this port.
+//! production implementation lives **outside** product, in
+//! `ironclaw_extension_manager` (WS2.4) — which calls the lifecycle
+//! *authority* in `ironclaw_extension_host`, the crate that may write lifecycle
+//! state — while product and every transport call it through this port.
 //!
 //! Never here: any lifecycle authority, install policy, or service
 //! implementation (including the unsupported-runtime fallback, which is
@@ -66,6 +67,16 @@ pub trait LifecycleProductService: Send + Sync {
     /// and this test's assertion with it — is owned by the CHECKLIST WS2 row
     /// "The four WS2.1 follow-ups", which sizes it as the behavior change it
     /// is rather than as a signature correction.
+    ///
+    /// ✎ **Known stringly-typed signature, carried verbatim by the WS2.1
+    /// move.** The key should be `ExtensionId`, not `String` — the host
+    /// implementation already holds a typed `ExtensionId` and stringifies only
+    /// to satisfy this signature. Retyping it changes the contract for every
+    /// implementor, which PLAN operating principle 2 keeps out of a move-shaped
+    /// PR; it is owned by the CHECKLIST WS2 row "The four WS2.1 follow-ups".
+    /// It is independent of the `ProductSurfaceFailure` slice — `ExtensionId`
+    /// is `host_api` vocabulary this crate may already name — so it need not
+    /// wait on it.
     async fn import_extension_bundle(
         &self,
         _context: LifecycleProductContext,
@@ -89,16 +100,6 @@ pub trait LifecycleProductService: Send + Sync {
     /// errors reports no reason and the wire's `activation_error` stays absent;
     /// the production extension-host service overrides this to read the
     /// installation records' `last_error`.
-    ///
-    /// ✎ **Known stringly-typed signature, carried verbatim by the WS2.1
-    /// move.** The key should be `ExtensionId`, not `String` — the host
-    /// implementation already holds a typed `ExtensionId` and stringifies only
-    /// to satisfy this signature. Retyping it changes the contract for every
-    /// implementor, which PLAN operating principle 2 keeps out of a move-shaped
-    /// PR; it is owned by the CHECKLIST WS2 row "The four WS2.1 follow-ups".
-    /// It is independent of the `ProductSurfaceFailure` slice — `ExtensionId`
-    /// is `host_api` vocabulary this crate may already name — so it need not
-    /// wait on it.
     async fn installed_activation_errors(
         &self,
         _context: LifecycleProductContext,

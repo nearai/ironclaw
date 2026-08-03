@@ -19,12 +19,12 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_contracts::LoopModelUsage;
 use ironclaw_product::{
-    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, RebornTimelineRequest,
-    TIMELINE_VIEW,
-};
-use ironclaw_product::{
     ProductInboundAck, ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
     ProductProjectionState, ProjectionCursor, ProjectionReadRequest, ProjectionSubscriptionRequest,
+};
+use ironclaw_product::{RebornTimelineRequest, TIMELINE_VIEW};
+use ironclaw_product_contracts::operator_llm::{
+    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot,
 };
 use ironclaw_product_contracts::projection::ProjectionStream;
 use ironclaw_product_contracts::surface::{

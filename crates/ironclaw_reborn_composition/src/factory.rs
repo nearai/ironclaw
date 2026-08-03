@@ -35,10 +35,6 @@ use crate::input::{
     OAuthDcrCallbackConfig, OAuthProviderBackendConfig, PostgresPoolSource,
     RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput,
 };
-use crate::ironhub_capabilities::{
-    extend_builtin_first_party_package as extend_builtin_ironhub_package,
-    insert_handlers as insert_ironhub_handlers,
-};
 use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
 use crate::outbound::outbound_preferences_capability::{
     extend_builtin_first_party_package as extend_builtin_outbound_preferences_package,
@@ -86,12 +82,15 @@ use ironclaw_capabilities::{
     CapabilityObligationPhase, CapabilityObligationRequest,
 };
 use ironclaw_conversations::RebornFilesystemConversationServices;
-use ironclaw_conversations::{
-    AdapterInstallationId, AdapterKind, ConversationActorPairingService, ExternalActorRef,
-};
+use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ConversationActorPairingService};
 use ironclaw_events::{DurableAuditLog, DurableEventLog};
+use ironclaw_extension_contracts::external::ExternalActorRef;
 use ironclaw_extension_contracts::recipe::RecipeClientCredentials;
 use ironclaw_extension_host::channel_pairing::ChannelPairingRegistry;
+use ironclaw_extension_host::extension_lifecycle::{
+    ExtensionCredentialCleanup, RebornLocalExtensionManagementPort,
+    RebornProductAuthCredentialCleanup,
+};
 use ironclaw_extension_host::{
     ActiveExtensionPublisher, AdminConfigurationCatalogUse, AdminConfigurationService,
     AvailableExtensionCatalog, ChannelConfigService, ExtensionRemovalCleanupAdapter,
@@ -100,17 +99,17 @@ use ironclaw_extension_host::{
     product_extension_host_api_contract_registry, provider_instance_readiness_map,
     restore_extension_lifecycle_state,
 };
-use ironclaw_extension_host::{
+use ironclaw_extension_manager::ironhub::{
+    extend_builtin_first_party_package as extend_builtin_ironhub_package,
+    insert_handlers as insert_ironhub_handlers,
+};
+use ironclaw_extension_manager::{
     admin_configuration::{
         ComposedAdminConfigurationService, ComposedExtensionAdminConfigurationResolver,
     },
     admin_configuration_capability::{
         extend_builtin_first_party_package as extend_builtin_admin_configuration_package,
         insert_handler as insert_admin_configuration_handler,
-    },
-    extension_lifecycle::{
-        ExtensionCredentialCleanup, RebornLocalExtensionManagementPort,
-        RebornProductAuthCredentialCleanup,
     },
     extension_lifecycle_capabilities::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
@@ -334,7 +333,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) channel_disconnect_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
-    pub(crate) ironhub_link_state: Arc<ironclaw_ironhub::IronhubLinkStateStore>,
+    pub(crate) ironhub_link_state: Arc<ironclaw_extension_manager::ironhub::IronhubLinkStateStore>,
     pub(crate) skill_mounts: MountView,
     pub(crate) memory_mounts: MountView,
     pub(crate) system_extensions_lifecycle_mounts: MountView,

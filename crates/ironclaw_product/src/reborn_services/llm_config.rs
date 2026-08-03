@@ -1,22 +1,17 @@
-//! LLM configuration port for the WebChat v2 settings surface.
+//! Product's half of the LLM configuration surface.
 //!
-//! This is the product-facing contract the webui2 Inference tab consumes to
-//! list providers, add/edit/remove custom providers (including an API key),
-//! pick the active provider+model, and probe a provider (test connection /
-//! list models). The concrete implementation lives in the composition root
-//! (`ironclaw_reborn_composition`), which owns the provider catalog overlay,
-//! the operator-scoped secret store, the config-file writer, and the live
-//! provider-reload handle. Keeping the port here lets the service stay the
-//! single stable surface the route handlers depend on.
+//! The port itself — `LlmConfigService`, `ActiveModelReader`, and their request
+//! and response DTOs — is declared in
+//! `ironclaw_product_contracts::operator_llm`, because its implementation is
+//! `ironclaw_operator`'s and a port belongs at the boundary its implementor
+//! compiles against (PROPOSAL §6.1.3, §6.9.2; CHECKLIST WS5 operator row).
 //!
-//! Wire-safety: inbound API-key values are typed as [`SecretString`] so they
-//! never land in `Debug`/logs and are deserialize-only (a request carrying a
-//! key can't be serialized back out). Response snapshots never carry a key
-//! value — only a boolean `api_key_set`.
+//! What stays here is what product owns: the frozen `llm_config` view
+//! descriptor, the fail-closed error for "no service wired", and the
+//! `RebornServices` wiring that calls through the port.
 
 use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewProvider};
 
-use async_trait::async_trait;
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     ProductSurfaceValidationCode,
@@ -24,151 +19,14 @@ use ironclaw_product_contracts::surface::{
 
 use super::{ProductCapabilityInvoker, RebornServices};
 
-pub use ironclaw_product_contracts::operator_llm::{
-    CodexLoginStart, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, LlmProviderView, NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, SetActiveLlmRequest,
-    UpsertLlmProviderRequest,
+use ironclaw_product_contracts::operator_llm::{
+    LlmConfigSnapshot, SetActiveLlmRequest, UpsertLlmProviderRequest,
 };
 
 pub const LLM_CONFIG_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "llm_config",
     paginated: false,
 };
-
-/// Read-only port exposing the runtime's current active/default model id.
-///
-/// A WebChat v2 run submitted without an explicit `model` carries no
-/// `resolved_model_route`, so its captured `model_usage` has no model id to
-/// price against and [`RebornGetRunStateResponse::cost`] would be `None` even
-/// though a real model ran. This port lets the service price such a
-/// default-model run against the live provider's active model — which, for a
-/// default (unrouted) run, is exactly the model that ran.
-///
-/// The read must be cheap and synchronous: it is consulted on every run-state
-/// poll while a run is in flight. It should reflect operator model hot-swaps
-/// (the composition impl reads the live swappable provider handle, not a
-/// boot-time snapshot). Returning `None` means "no concrete model to price
-/// against" — the run's cost is then omitted rather than mispriced.
-///
-/// [`RebornGetRunStateResponse::cost`]: crate::RebornGetRunStateResponse::cost
-pub trait ActiveModelReader: Send + Sync {
-    /// The concrete model id currently backing default (unrouted) runs, or
-    /// `None` when no concrete model is configured (cold boot / placeholder) or
-    /// the active model is a non-concrete alias.
-    fn active_model_id(&self) -> Option<String>;
-}
-
-/// Operator-wide LLM configuration management.
-#[async_trait]
-pub trait LlmConfigService: Send + Sync {
-    /// Current merged catalog + active selection, keys masked.
-    async fn snapshot(
-        &self,
-        caller: ProductSurfaceCaller,
-    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError>;
-
-    /// Add or update a custom provider (and optionally its key / active state).
-    async fn upsert_provider(
-        &self,
-        caller: ProductSurfaceCaller,
-        request: UpsertLlmProviderRequest,
-    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError>;
-
-    /// Remove a custom provider and any stored key for it.
-    async fn delete_provider(
-        &self,
-        caller: ProductSurfaceCaller,
-        provider_id: String,
-    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError>;
-
-    /// Select the active provider + model.
-    async fn set_active(
-        &self,
-        caller: ProductSurfaceCaller,
-        request: SetActiveLlmRequest,
-    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError>;
-
-    /// Probe a provider's credentials/endpoint without persisting anything.
-    async fn test_connection(
-        &self,
-        caller: ProductSurfaceCaller,
-        request: LlmProbeRequest,
-    ) -> Result<LlmProbeResult, LlmConfigServiceError>;
-
-    /// List the models a provider exposes, without persisting anything.
-    async fn list_models(
-        &self,
-        caller: ProductSurfaceCaller,
-        request: LlmProbeRequest,
-    ) -> Result<LlmModelsResult, LlmConfigServiceError>;
-
-    /// Begin a NEAR AI browser login through one of the SSO identity providers
-    /// [`NearAiAuthProvider`] enumerates. Returns the provider
-    /// authorization URL for the frontend to open; NEAR AI redirects the browser
-    /// back to this server's public callback route, which stores the session
-    /// token, makes NEAR AI active, and hot-swaps the running provider. The
-    /// caller polls the snapshot until NEAR AI is active.
-    async fn start_nearai_login(
-        &self,
-        caller: ProductSurfaceCaller,
-        request: NearAiLoginRequest,
-    ) -> Result<NearAiLoginStart, LlmConfigServiceError>;
-
-    /// Complete a NEAR AI wallet (NEP-413) login. The frontend connects a NEAR
-    /// wallet, signs the fixed login message, and posts the signature here; this
-    /// exchanges it for a session token at NEAR AI's `/v1/auth/near`, stores the
-    /// token, makes NEAR AI active, and hot-swaps the running provider. Unlike
-    /// the SSO redirect, wallet signing must happen in the browser, so there is
-    /// no server-built auth URL.
-    async fn complete_nearai_wallet_login(
-        &self,
-        caller: ProductSurfaceCaller,
-        request: NearAiWalletLoginRequest,
-    ) -> Result<NearAiWalletLoginResult, LlmConfigServiceError>;
-
-    /// Begin an OpenAI Codex (ChatGPT subscription) device-code login. Returns
-    /// the user code + verification URL for the frontend to display; a
-    /// background task polls the device-auth endpoint, persists the tokens,
-    /// makes Codex the active provider, and hot-swaps the running provider. The
-    /// caller polls the snapshot until Codex is active.
-    async fn start_codex_login(
-        &self,
-        caller: ProductSurfaceCaller,
-    ) -> Result<CodexLoginStart, LlmConfigServiceError>;
-}
-
-/// Port-level error surface. The service maps this to the sanitized
-/// `ProductSurfaceError` taxonomy; no backend strings, paths, or secrets cross
-/// the boundary beyond the user-safe `reason` on `InvalidRequest`.
-#[derive(Debug, Clone)]
-pub enum LlmConfigServiceError {
-    /// Caller-supplied input was invalid. `reason` is user-safe.
-    InvalidRequest {
-        field: Option<String>,
-        reason: String,
-    },
-    /// The named provider does not exist in the merged catalog.
-    NotFound,
-    /// The configuration backend (filesystem / secret store / reload) failed
-    /// transiently or is not wired.
-    Unavailable,
-    /// An internal invariant was violated.
-    Internal,
-}
-
-pub(super) fn map_llm_config_error(error: LlmConfigServiceError) -> ProductSurfaceError {
-    match error {
-        LlmConfigServiceError::InvalidRequest { .. } => {
-            ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
-        }
-        LlmConfigServiceError::NotFound => {
-            ProductSurfaceError::from_status(ProductSurfaceErrorCode::NotFound, 404, false)
-        }
-        LlmConfigServiceError::Unavailable => ProductSurfaceError::service_unavailable(true),
-        LlmConfigServiceError::Internal => ProductSurfaceError::internal_invariant(),
-    }
-}
 
 /// Error returned when an LLM-config method is invoked but no service is wired.
 pub(super) fn llm_config_unavailable() -> ProductSurfaceError {
@@ -198,7 +56,7 @@ where
         service
             .upsert_provider(caller, request)
             .await
-            .map_err(map_llm_config_error)?;
+            .map_err(ProductSurfaceError::from)?;
         Ok(())
     }
 
@@ -220,7 +78,7 @@ where
         service
             .delete_provider(caller, provider_id)
             .await
-            .map_err(map_llm_config_error)?;
+            .map_err(ProductSurfaceError::from)?;
         Ok(())
     }
 
@@ -238,7 +96,7 @@ where
         service
             .set_active(caller, request)
             .await
-            .map_err(map_llm_config_error)?;
+            .map_err(ProductSurfaceError::from)?;
         Ok(())
     }
 
@@ -250,7 +108,10 @@ where
             .llm_config
             .as_ref()
             .ok_or_else(llm_config_unavailable)?;
-        service.snapshot(caller).await.map_err(map_llm_config_error)
+        service
+            .snapshot(caller)
+            .await
+            .map_err(ProductSurfaceError::from)
     }
 }
 

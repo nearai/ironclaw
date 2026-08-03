@@ -8,17 +8,22 @@
 //!
 //! - [`ProductInboundCommand`] — its `CancelRun` variant carries
 //!   `ironclaw_turns::CancelRunRequest`.
-//! - [`ProductAttachmentCapabilities`] / [`product_attachment_capabilities`] —
-//!   the budgets are `ironclaw_attachments` types.
 //! - the validation/normalization that turns a body into a canonical command,
-//!   which produces the two above and is not contract vocabulary in any case.
+//!   which produces the command above and is not contract vocabulary in any case.
+//!
+//! The browser-facing attachment contract that used to live here
+//! (`ProductAttachmentCapabilities` / `product_attachment_capabilities`) went
+//! the other way, to `ironclaw_attachments`, with the WS5 attachments widening:
+//! it is the advertised half of the size ceilings that crate enforces, and one
+//! home for a ceiling is the point (PROPOSAL §6.4.9). Transports import
+//! `ironclaw_attachments::attachment_capabilities` directly.
 //!
 //! Because the DTOs now live in another crate, the normalization is exposed as
 //! the [`IntoProductInboundCommand`] and [`DecodeInboundAttachments`] extension
 //! traits rather than inherent methods; call sites are unchanged apart from
 //! bringing the trait into scope.
 
-use ironclaw_attachments::{AttachmentBudgets, DEFAULT_ATTACHMENT_BUDGETS};
+use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
 use ironclaw_host_api::turn::{IdempotencyKey, SanitizedCancelReason, TurnGateRef, TurnRunId};
 use ironclaw_host_api::{
     attachment::InboundAttachment,
@@ -41,38 +46,6 @@ const USER_MESSAGE_TEXT_MAX_BYTES: usize = 64 * 1024;
 const GATE_REF_MAX_BYTES: usize = 256;
 const CREDENTIAL_REF_MAX_BYTES: usize = 512;
 const ATTACHMENT_FILENAME_MAX_BYTES: usize = 256;
-
-/// Browser-facing inline-attachment contract advertised to the WebUI.
-///
-/// Carries the `accept` tokens generated from the shared
-/// [`ironclaw_common`] format registry (so the file picker can never drift
-/// from the server's allowed MIME set) plus the same budgets
-/// [`DecodeInboundAttachments::decode_attachments`] enforces. The browser
-/// uses this only for pre-submit hints; the server-side decode remains the
-/// sole authority on what is accepted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProductAttachmentCapabilities {
-    /// HTML file-input `accept` tokens from the shared registry: exact MIME
-    /// types plus extensions, e.g. `["image/png", ".png", "application/pdf",
-    /// ".pdf"]` — never `image/*` wildcards (which would advertise unsupported
-    /// formats, and which break folder navigation in the native macOS picker).
-    pub accept: Vec<String>,
-    /// The count/byte budgets `decode_attachments` enforces. Flattened, so the
-    /// wire shape is unchanged and a new budget field reaches the browser
-    /// without an intermediate edit here.
-    #[serde(flatten)]
-    pub budgets: AttachmentBudgets,
-}
-
-/// The inline-attachment contract advertised to browsers. Generated from the
-/// shared format registry and the budgets `decode_attachments` enforces, so
-/// the picker and the server stay in lockstep by construction.
-pub fn product_attachment_capabilities() -> ProductAttachmentCapabilities {
-    ProductAttachmentCapabilities {
-        accept: ironclaw_common::accept_tokens(),
-        budgets: DEFAULT_ATTACHMENT_BUDGETS,
-    }
-}
 
 /// Decode the inline attachments a submit-turn body carries into bytes-bearing
 /// [`InboundAttachment`]s ready for landing.
