@@ -734,8 +734,14 @@ async fn deliver_triggered_notification(
         &projection_access_policy,
         context.authority,
     );
-    let projection_id =
-        prompts::run_notification_projection_id(context.run_id, notification.event_kind);
+    let projection_id = prompts::run_notification_projection_id(
+        context.run_id,
+        notification.event_kind,
+        notification.gate_ref_for_routing.as_deref(),
+    )
+    .map_err(|reason| {
+        TriggeredNotificationFailure::Other(format!("invalid_projection_ref: {reason}"))
+    })?;
     let projection_ref = ProjectionUpdateRef::new(projection_id).map_err(|reason| {
         TriggeredNotificationFailure::Other(format!("invalid_projection_ref: {reason}"))
     })?;

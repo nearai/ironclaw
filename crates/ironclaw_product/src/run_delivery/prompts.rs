@@ -8,6 +8,7 @@
 use crate::{ApprovalPromptContextView, AuthPromptChallengeKind, AuthPromptView, GatePromptView};
 use ironclaw_host_api::turn::{TurnGateRef, TurnRunId};
 use ironclaw_outbound::RunNotificationEventKind;
+use sha2::{Digest, Sha256};
 
 use crate::is_approval_gate_ref;
 
@@ -37,11 +38,28 @@ pub(crate) const BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pending
 /// lookup fails.
 pub(crate) const BUSY_GENERIC_MESSAGE: &str = "Ironclaw is still working on a previous message and can't take this one yet — please resend it once the current task finishes.";
 
-/// Stable per-(run, kind) projection id for run-notification deliveries.
+const RUN_NOTIFICATION_GATE_PROJECTION_DOMAIN: &str =
+    "ironclaw_product:run_notification_gate_projection:v1";
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RunNotificationProjectionIdError {
+    #[error("gate notification requires a canonical gate ref")]
+    MissingGateRef,
+    #[error("gate notification has an invalid gate ref")]
+    InvalidGateRef,
+}
+
+/// Stable projection id for run-notification deliveries.
+///
+/// Non-gate identities retain their legacy per-(run, kind) shape. Gate
+/// identities additionally bind the canonical gate ref through a
+/// domain-separated, length-framed digest so distinct same-kind gates cannot
+/// suppress one another without persisting the gate ref itself.
 pub(crate) fn run_notification_projection_id(
     run_id: TurnRunId,
     event_kind: RunNotificationEventKind,
-) -> String {
+    gate_ref: Option<&str>,
+) -> Result<String, RunNotificationProjectionIdError> {
     let suffix = match event_kind {
         RunNotificationEventKind::FinalReplyReady => "final",
         RunNotificationEventKind::ProgressUpdate => "progress",
@@ -50,7 +68,47 @@ pub(crate) fn run_notification_projection_id(
         RunNotificationEventKind::RunBlocked => "blocked",
         RunNotificationEventKind::DeliveryStatus => "delivery-status",
     };
-    format!("run-notification:{suffix}:{run_id}")
+
+    if !matches!(
+        event_kind,
+        RunNotificationEventKind::ApprovalNeeded | RunNotificationEventKind::AuthRequired
+    ) {
+        return Ok(format!("run-notification:{suffix}:{run_id}"));
+    }
+
+    let gate_ref = gate_ref.ok_or(RunNotificationProjectionIdError::MissingGateRef)?;
+    let gate_ref = TurnGateRef::new(gate_ref.to_string())
+        .map_err(|_| RunNotificationProjectionIdError::InvalidGateRef)?;
+    let mut digest_input = Vec::with_capacity(
+        RUN_NOTIFICATION_GATE_PROJECTION_DOMAIN.len() + suffix.len() + gate_ref.as_str().len() + 24,
+    );
+    push_length_framed_part(
+        &mut digest_input,
+        RUN_NOTIFICATION_GATE_PROJECTION_DOMAIN.as_bytes(),
+    );
+    push_length_framed_part(&mut digest_input, suffix.as_bytes());
+    push_length_framed_part(&mut digest_input, gate_ref.as_str().as_bytes());
+    let digest = Sha256::digest(digest_input);
+
+    Ok(format!(
+        "run-notification:{suffix}:{run_id}:{}",
+        lower_hex(&digest)
+    ))
+}
+
+fn push_length_framed_part(output: &mut Vec<u8>, part: &[u8]) {
+    output.extend_from_slice(&(part.len() as u64).to_be_bytes());
+    output.extend_from_slice(part);
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(char::from(HEX[(byte >> 4) as usize]));
+        output.push(char::from(HEX[(byte & 0x0f) as usize]));
+    }
+    output
 }
 
 /// Build the approval-gate prompt view. The body carries only the semantic
