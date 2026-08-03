@@ -3665,9 +3665,9 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
                 // until the next store-construction repair pass. Release it
                 // here so the aggregate stays visible immediately.
                 // silent-ok: best-effort release racing a concurrent repair
-                // (repair_interrupted_v2_leases) or another mutator; either
-                // outcome still clears the lease, and the original rejection
-                // below is the error the caller must see.
+                // or retry; the matching lease is cleared, while a newer lease
+                // is preserved, and the original rejection remains the error
+                // the caller must see.
                 let _ = self
                     .clear_v2_preparation_lease(
                         installation_id,
