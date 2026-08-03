@@ -41,6 +41,7 @@ use ironclaw_loop_host::{
     RunCancellationHandle, loop_driver_execution_extension_id,
     verify_product_live_cancellation_probe,
 };
+use ironclaw_loop_host::{ModelSelectionMode, ModelSlot};
 use ironclaw_reborn_composition::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
@@ -50,7 +51,6 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_runner::{
     loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
-    model_routes::{ModelSelectionMode, ModelSlot},
     planned_driver_factory::default_planned_run_profile_resolver,
     runtime::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, ProcessRuntimeSystem,

@@ -19,7 +19,14 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
-IGNORED_PREFIXES = ("docs/", ".github/ISSUE_TEMPLATE/")
+# Path classes with no Rust or E2E surface any Reborn lane can exercise.
+# `.claude/` is agent guidance (skills, commands, rules) — prose in the same
+# class as `docs/`. It was unclassified until 2026-08-03, which meant the
+# planner's fail-closed arm rejected every PR that touched agent guidance:
+# the only satisfiable behaviour for that class was "never edit it", which is
+# not a policy anyone chose. Classifying it is the fix; loosening the
+# fail-closed arm is not.
+IGNORED_PREFIXES = ("docs/", ".claude/", ".github/ISSUE_TEMPLATE/")
 DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
 QA_HARNESS_PREFIXES = (
     "scripts/live-canary/",
@@ -39,6 +46,18 @@ PR_STATIC_CONTROL_PATHS = {
     ".cargo/config.toml",
     "tests/integration/coverage-exemptions.toml",
     "tests/integration/coverage-floor.toml",
+    # Repo-root `scripts/` is deliberately NOT prefix-classified — the
+    # `unmapped test or CI path` arm below exists to force a per-file decision.
+    # These two are decided:
+    #   * the panic baseline is enforced by Code Style
+    #     (`check_no_panics.py --reborn-baseline`), which runs on every PR and
+    #     owns the whole check; no Reborn lane reads it.
+    #   * `reborn-e2e-rust.sh` is driven by the `Reborn E2E` workflow, which has
+    #     its own scope detector (`Detect Reborn E2E scope`). This planner
+    #     selects lanes for `Tests (Reborn)` only, and that workflow does not
+    #     invoke the script.
+    "scripts/no_panics_reborn_baseline.txt",
+    "scripts/reborn-e2e-rust.sh",
 }
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/")
 BUCKET_WEIGHTS = {

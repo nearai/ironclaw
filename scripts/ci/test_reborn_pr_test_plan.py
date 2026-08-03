@@ -445,6 +445,65 @@ class RebornPrTestPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
             self.plan("pull_request", ["Dockerfile"])
 
+    def test_agent_guidance_is_classified_and_selects_no_rust_lane(self) -> None:
+        """`.claude/**` is prose, like `docs/**`.
+
+        Regression for the gap #7064 hit: the planner had no rule for
+        `.claude/`, so its fail-closed arm rejected any PR editing a skill, a
+        command, or a rule — failing the whole `Tests (Reborn)` roll-up on a
+        documentation-only change. The assertion is deliberately paired: the
+        path must be *accepted* AND must select no Rust lane, so a future
+        "classification" that quietly turns guidance edits into a full matrix
+        fails here too.
+        """
+        for path in (
+            ".claude/commands/trace.md",
+            ".claude/rules/testing.md",
+            ".claude/skills/reborn-feature/SKILL.md",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none", path)
+                self.assertEqual(plan["crate_buckets"], [], path)
+                self.assertEqual(plan["root_partitions"], [], path)
+                self.assertEqual(plan["integration_lanes"], [], path)
+
+    def test_decided_repo_root_script_paths_are_owned_by_other_workflows(self) -> None:
+        """Repo-root `scripts/` files that another workflow owns.
+
+        The `unmapped test or CI path` arm deliberately refuses `scripts/**`
+        outside `scripts/ci/` so each file gets a decision rather than a
+        blanket prefix. These two have one, recorded beside the constant: the
+        panic baseline belongs to Code Style, and the E2E selector script
+        belongs to the `Reborn E2E` workflow's own scope detector. Neither
+        selects a lane in *this* planner — but the sibling that has no
+        decision must still refuse, which the second half asserts.
+        """
+        for path in (
+            "scripts/no_panics_reborn_baseline.txt",
+            "scripts/reborn-e2e-rust.sh",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none", path)
+                self.assertEqual(plan["crate_buckets"], [], path)
+
+        with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
+            self.plan("pull_request", ["scripts/some-undecided-helper.sh"])
+
+    def test_agent_guidance_does_not_mask_a_real_lane_in_the_same_pr(self) -> None:
+        """Classifying `.claude/` must not swallow its neighbours.
+
+        A guidance edit riding along with a crate change still selects that
+        crate's lane — the ignore is per-path, not per-PR.
+        """
+        plan = self.plan(
+            "pull_request",
+            [".claude/commands/trace.md", "crates/alpha/src/lib.rs"],
+        )
+        self.assertEqual(plan["mode"], "selected")
+        self.assertNotEqual(plan["crate_buckets"], [])
+
     def test_changed_integration_binary_selects_its_exact_lane(self) -> None:
         path, lane = next(iter(planner._integration_test_lanes().items()))
         plan = self.plan("pull_request", [path])

@@ -1,9 +1,17 @@
 // arch-exempt: large_file, targeted model error mapping stays with the gateway adapter, plan #4088
 //! LLM provider-backed Reborn model gateway wiring.
 //!
-//! The loop-host crate owns the host-facing model gateway contract. This
-//! adapter lives in the standalone Reborn composition crate because it bridges
-//! that contract to the shared `ironclaw_llm` provider abstraction.
+//! This crate owns the host-facing `HostManagedModelGateway` contract, and this
+//! module is its only production implementation: the adapter that bridges that
+//! contract to the shared `ironclaw_llm` provider abstraction. It moved here
+//! from `ironclaw_runner` with the WS3 runner sheds (PROPOSAL §6.7.2 — "gains:
+//! runner's model-gateway adapter (a host-port adapter by charter)"); the doc
+//! it replaces claimed the adapter lived "in the standalone Reborn composition
+//! crate", which was never true of any tree.
+//!
+//! This is the one module in `ironclaw_loop_host` permitted to name a provider
+//! client. `families/loop.md` allows "a provider client … beyond what a single
+//! port adapter strictly needs" nowhere else in the crate.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -14,6 +22,13 @@ use std::{
     time::Instant,
 };
 
+use crate::{
+    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
+    HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedModelStreamSink,
+    HostManagedToolResultContent, ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort,
+    ThreadBackedLoopModelPort, ThreadContextWindowCache,
+};
 use async_trait::async_trait;
 use ironclaw_common::llm_costs::{default_cost, model_cost};
 use ironclaw_host_api::{
@@ -35,13 +50,6 @@ use ironclaw_loop_contracts::{
     LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelProfileId, PromptMode, ProviderToolCall,
     ProviderToolDefinition, RegisterProviderToolCallRequest, sanitize_model_visible_text,
 };
-use ironclaw_loop_host::{
-    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedModelStreamSink,
-    HostManagedToolResultContent, ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort,
-    ThreadBackedLoopModelPort, ThreadContextWindowCache,
-};
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_safety::{
     is_provider_arguments_too_large_summary, provider_arguments_exceed_max_bytes,
@@ -59,13 +67,18 @@ use prompt_cache_activity::{
 };
 
 use crate::{
-    failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND,
     model_gateway_error_mapping::host_error_to_model_gateway_error,
     model_routes::{
         ModelRoute, ModelRouteError, ModelRouteErrorKind, ModelRouteProviderKey,
         ModelRouteResolver, ModelSelectionMode, ModelSlot, ResolvedModelRouteSnapshot,
     },
 };
+
+/// The runner's `failure_categories` alias for this reason kind stayed behind
+/// with the drivers that also use it; the gateway now names the contract
+/// variant directly rather than re-exporting a runner-private const.
+const MODEL_CREDITS_EXHAUSTED_REASON_KIND: ironclaw_loop_contracts::AgentLoopHostErrorReasonKind =
+    ironclaw_loop_contracts::AgentLoopHostErrorReasonKind::ModelCreditsExhausted;
 
 const MODEL_CREDITS_EXHAUSTED_SUMMARY: &str = "model provider account is out of credits";
 const PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER: &str =
@@ -958,7 +971,7 @@ where
 fn map_fallback_route_error(error: LlmError, fallback_index: u32) -> HostManagedModelError {
     if fallback_index > 0 && matches!(&error, LlmError::ModelNotAvailable { .. }) {
         let provider_detail = error.to_string();
-        let safe_log_detail = ironclaw_loop_host::scrub_model_visible_detail(&provider_detail);
+        let safe_log_detail = crate::scrub_model_visible_detail(&provider_detail);
         tracing::debug!(
             component = "model_provider",
             operation = "fallback_route",
@@ -2524,7 +2537,7 @@ fn validate_provider_replay_identity(
     expected: &ProviderReplayIdentity,
 ) -> Result<(), HostManagedModelError> {
     provider_call.validate().map_err(|error| {
-        ironclaw_loop_host::raw_host_managed_model_error(
+        crate::raw_host_managed_model_error(
             "provider_tool_replay",
             "validate_provider_call",
             HostManagedModelErrorKind::InvalidRequest,
@@ -2634,7 +2647,7 @@ fn provider_tool_call_from_reference(
 
 fn map_provider_error(error: LlmError) -> HostManagedModelError {
     let provider_detail = error.to_string();
-    let safe_log_detail = ironclaw_loop_host::scrub_model_visible_detail(&provider_detail);
+    let safe_log_detail = crate::scrub_model_visible_detail(&provider_detail);
     tracing::warn!(
         component = "model_provider",
         operation = "complete",
@@ -3396,7 +3409,7 @@ mod tests {
 
     fn user_message_with_images(
         content: &str,
-        image_parts: Vec<ironclaw_loop_host::HostManagedModelImagePart>,
+        image_parts: Vec<crate::HostManagedModelImagePart>,
     ) -> HostManagedModelMessage {
         HostManagedModelMessage {
             role: HostManagedModelMessageRole::User,
@@ -3415,7 +3428,7 @@ mod tests {
     fn convert_messages_emits_image_url_parts_for_user_image_attachments() {
         let message = user_message_with_images(
             "what is in this image?",
-            vec![ironclaw_loop_host::HostManagedModelImagePart {
+            vec![crate::HostManagedModelImagePart {
                 mime_type: "image/png".to_string(),
                 bytes: vec![1, 2, 3, 4],
             }],
@@ -3457,7 +3470,7 @@ mod tests {
         // relies on the transcript's `<attachments>` pointer.
         let message = user_message_with_images(
             "what is in this image?",
-            vec![ironclaw_loop_host::HostManagedModelImagePart {
+            vec![crate::HostManagedModelImagePart {
                 mime_type: "image/png".to_string(),
                 bytes: vec![1, 2, 3, 4],
             }],

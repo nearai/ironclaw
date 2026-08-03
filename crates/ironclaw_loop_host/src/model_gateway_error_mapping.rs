@@ -13,9 +13,7 @@ pub(crate) fn host_error_to_model_gateway_error(
     let retry_after_ms = error.retry_after_ms;
     let next_fallback_index = error.next_fallback_index;
     let usage = error.usage;
-    let existing_detail = error
-        .detail
-        .map(ironclaw_loop_host::scrub_model_visible_detail);
+    let existing_detail = error.detail.map(crate::scrub_model_visible_detail);
     let raw_summary = error.safe_summary;
     let (mut converted, rejected_summary_detail) =
         match LoopModelGatewayError::new(error.kind, raw_summary.clone()) {
@@ -36,7 +34,7 @@ pub(crate) fn host_error_to_model_gateway_error(
                         usage: None,
                         detail: None,
                     },
-                    Some(ironclaw_loop_host::scrub_model_visible_detail(raw_summary)),
+                    Some(crate::scrub_model_visible_detail(raw_summary)),
                 )
             }
         };

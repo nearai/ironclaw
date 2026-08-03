@@ -5,7 +5,11 @@ edition = "2024"
 publish = false
 
 [package.metadata.ironclaw]
-layer = "substrates"
+# PROPOSAL §6.7.4: loop-tier middleware implementing `loop_contracts` ports.
+# `loops` states what it is and legalizes `hooks -> wasm_limiter` (`runtimes`),
+# dissolving the W6 exception. Its consumers are `ironclaw_runner` (`loops`)
+# and `ironclaw_reborn_composition` (`app`); nothing below `loops` depends on it.
+layer = "loops"
 description = "Reborn loop hook framework: trust-tiered points/kinds/decisions, sealed witness types, dispatcher contract."
 
 [features]

@@ -10,7 +10,7 @@
 //! The public surface here is intentionally a **directory of modules**, not a
 //! shopping list of types. Each module is reachable by path
 //! (`ironclaw_runner::driver_registry::DriverRegistry`,
-//! `ironclaw_runner::model_gateway::LlmProviderModelGateway`, …) so that a
+//! `ironclaw_runner::planned_driver_factory::register_default_planned_driver`, …) so that a
 //! glance at this file tells a reader what areas exist without enumerating
 //! every type. We deliberately do **not** flatten the modules via a wall of
 //! `pub use` re-exports — that was the noisy "speculative public API" pattern
@@ -18,7 +18,6 @@
 
 pub mod after_turn_memory;
 pub mod app_loop_family;
-mod context_shadow;
 pub mod driver_registry;
 /// Failure **classification** only — the category identifiers and the
 /// category→summary tables moved to `ironclaw_host_api::failure` with WS1.7
@@ -39,8 +38,6 @@ pub mod loop_driver_host;
 pub mod loop_exit_applier;
 pub mod milestone_events;
 mod model_failure_mapping;
-mod model_gateway_error_mapping;
-pub mod model_routes;
 pub mod planned_driver;
 pub mod planned_driver_factory;
 pub mod production_readiness;
@@ -48,11 +45,6 @@ pub mod runtime;
 pub mod steering_reconcile;
 pub mod subagent;
 pub mod text_loop_driver;
-mod tool_disclosure;
-pub mod tool_disclosure_bridge;
-mod tool_disclosure_port;
 pub mod turn_run_executor;
 pub mod turn_runner;
 pub mod turn_scheduler;
-
-pub mod model_gateway;

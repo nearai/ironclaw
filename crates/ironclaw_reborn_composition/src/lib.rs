@@ -290,9 +290,9 @@ pub fn open_reborn_identity_resolver(
 /// Reborn model purpose slot names exposed for diagnostic callers.
 ///
 /// This keeps CLI diagnostics on the composition boundary instead of making
-/// the CLI mirror `ironclaw_runner::model_routes::ModelSlot`.
+/// the CLI mirror `ironclaw_loop_host::ModelSlot`.
 pub fn reborn_model_slot_names() -> Vec<&'static str> {
-    ironclaw_runner::model_routes::ModelSlot::all()
+    ironclaw_loop_host::ModelSlot::all()
         .iter()
         .map(|slot| slot.as_str())
         .collect()
