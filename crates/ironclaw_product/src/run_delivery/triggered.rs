@@ -99,6 +99,12 @@ enum TriggeredNotificationFailure {
     /// binding resolved to a non-personal-DM target. Handled by cancelling
     /// the run and posting the auth-unavailable notice.
     OAuthTargetNotDm,
+    /// An authoritative delivery row exists, but it does not prove vendor
+    /// delivery and therefore cannot authorize success-side cleanup.
+    DeliveryUnconfirmed {
+        status: ironclaw_outbound::OutboundDeliveryStatus,
+        failure_kind: Option<ironclaw_outbound::DeliveryFailureKind>,
+    },
     /// Any other delivery or transport failure.
     Other(String),
 }
@@ -112,9 +118,23 @@ impl std::fmt::Display for TriggeredNotificationFailure {
                 f,
                 "OAuth authorization_url suppressed: send-time target is not a personal DM"
             ),
+            Self::DeliveryUnconfirmed {
+                status,
+                failure_kind,
+            } => write!(
+                f,
+                "existing delivery is not confirmed: status={status:?}, failure_kind={failure_kind:?}"
+            ),
             Self::Other(reason) => write!(f, "{reason}"),
         }
     }
+}
+
+struct ConfirmedTriggeredDelivery {
+    delivered_messages: Vec<DeliveredChannelMessage>,
+    /// Present only for an authoritative pre-existing `Delivered` row whose
+    /// resolved conversation is known but whose vendor message ref is not.
+    existing_delivered_conversation: Option<crate::ExternalConversationRef>,
 }
 
 /// Drives triggered-run delivery: one background watcher per submitted run,
@@ -411,7 +431,11 @@ async fn deliver_triggered_run(
             deliver_triggered_notification(services, &notification_context, notification).await;
 
         match delivery_result {
-            Ok(delivered_messages) => {
+            Ok(confirmed) => {
+                let ConfirmedTriggeredDelivery {
+                    delivered_messages,
+                    existing_delivered_conversation,
+                } = confirmed;
                 if (event_kind == RunNotificationEventKind::ApprovalNeeded
                     || event_kind == RunNotificationEventKind::AuthRequired)
                     && let Some(gate_ref) = gate_ref_for_routing.as_deref()
@@ -424,7 +448,7 @@ async fn deliver_triggered_run(
                         gate_ref,
                         &scope,
                         &delivered_messages,
-                        None,
+                        existing_delivered_conversation.as_ref(),
                     )
                     .await;
                 }
@@ -497,22 +521,30 @@ async fn deliver_triggered_run(
                     gate_ref_for_routing: None,
                     require_direct_message_target: false,
                 };
-                let outcome =
-                    match deliver_triggered_notification(services, &notification_context, notice)
-                        .await
-                    {
-                        Ok(_) => TriggeredRunDeliveryOutcomeKind::Delivered,
-                        Err(TriggeredNotificationFailure::NoDefaultConfigured) => {
-                            TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
-                        }
-                        Err(TriggeredNotificationFailure::Denied) => {
-                            TriggeredRunDeliveryOutcomeKind::Denied
-                        }
-                        Err(TriggeredNotificationFailure::OAuthTargetNotDm)
-                        | Err(TriggeredNotificationFailure::Other(_)) => {
-                            TriggeredRunDeliveryOutcomeKind::Failed
-                        }
-                    };
+                let replacement =
+                    deliver_triggered_notification(services, &notification_context, notice).await;
+                if matches!(
+                    &replacement,
+                    Err(TriggeredNotificationFailure::DeliveryUnconfirmed { .. })
+                ) {
+                    let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
+                    record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+                    return outcome;
+                }
+                let outcome = match replacement {
+                    Ok(_) => TriggeredRunDeliveryOutcomeKind::Delivered,
+                    Err(TriggeredNotificationFailure::NoDefaultConfigured) => {
+                        TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+                    }
+                    Err(TriggeredNotificationFailure::Denied) => {
+                        TriggeredRunDeliveryOutcomeKind::Denied
+                    }
+                    Err(TriggeredNotificationFailure::OAuthTargetNotDm)
+                    | Err(TriggeredNotificationFailure::DeliveryUnconfirmed { .. })
+                    | Err(TriggeredNotificationFailure::Other(_)) => {
+                        TriggeredRunDeliveryOutcomeKind::Failed
+                    }
+                };
                 // Only after a successful cancel and the replacement notice:
                 // remove the now-stale OAuth prompts.
                 for message in messages_to_delete_after_final.drain(..) {
@@ -538,7 +570,8 @@ async fn deliver_triggered_run(
                     TriggeredNotificationFailure::OAuthTargetNotDm => {
                         unreachable!("OAuthTargetNotDm is handled by the dedicated arm above")
                     }
-                    TriggeredNotificationFailure::Other(_) => {
+                    TriggeredNotificationFailure::DeliveryUnconfirmed { .. }
+                    | TriggeredNotificationFailure::Other(_) => {
                         TriggeredRunDeliveryOutcomeKind::Failed
                     }
                 };
@@ -727,7 +760,7 @@ async fn deliver_triggered_notification(
     services: &RunDeliveryServices,
     context: &TriggeredNotificationContext<'_>,
     notification: TriggeredNotification,
-) -> Result<Vec<DeliveredChannelMessage>, TriggeredNotificationFailure> {
+) -> Result<ConfirmedTriggeredDelivery, TriggeredNotificationFailure> {
     let projection_access_policy = AllowNoProjectionAccess;
     let outbound_policy = OutboundPolicyService::new(
         services.outbound_store.as_ref(),
@@ -795,10 +828,20 @@ async fn deliver_triggered_notification(
         CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
             status,
             failure_kind,
-        } => Err(TriggeredNotificationFailure::Other(format!(
-            "existing delivery is not confirmed: status={status:?}, failure_kind={failure_kind:?}"
-        ))),
-        outcome => Ok(delivered_messages_from_outcome(&outcome)),
+        } => Err(TriggeredNotificationFailure::DeliveryUnconfirmed {
+            status,
+            failure_kind,
+        }),
+        CoordinatedDeliveryOutcome::DuplicateSuppressed { conversation, .. } => {
+            Ok(ConfirmedTriggeredDelivery {
+                delivered_messages: Vec::new(),
+                existing_delivered_conversation: conversation,
+            })
+        }
+        outcome => Ok(ConfirmedTriggeredDelivery {
+            delivered_messages: delivered_messages_from_outcome(&outcome),
+            existing_delivered_conversation: None,
+        }),
     }
 }
 

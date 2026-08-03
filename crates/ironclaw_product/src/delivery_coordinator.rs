@@ -205,6 +205,10 @@ pub enum CoordinatedDeliveryOutcome {
     /// egress occurred for this replay.
     DuplicateSuppressed {
         delivery_id: ironclaw_outbound::OutboundDeliveryId,
+        /// Resolved conversation when the coordinator reached that boundary
+        /// before observing the authoritative delivered row. This confirms a
+        /// route, but does not fabricate a vendor message reference.
+        conversation: Option<ExternalConversationRef>,
     },
     /// Another caller already advanced this durable delivery, but the
     /// authoritative state does not prove successful vendor delivery.
@@ -527,7 +531,7 @@ impl DeliveryCoordinator {
                         Err(CoordinatedDeliveryError::Workflow(error))
                     }
                     FailPreparedDeliveryAttemptOutcome::Existing(existing) => {
-                        Ok(Self::outcome_for_existing_delivery(existing))
+                        Ok(Self::outcome_for_existing_delivery(existing, None))
                     }
                 };
             }
@@ -557,7 +561,10 @@ impl DeliveryCoordinator {
                 return match self.fail_prepared(&attempt, failure_kind).await? {
                     FailPreparedDeliveryAttemptOutcome::Settled => Err(error),
                     FailPreparedDeliveryAttemptOutcome::Existing(existing) => {
-                        Ok(Self::outcome_for_existing_delivery(existing))
+                        Ok(Self::outcome_for_existing_delivery(
+                            existing,
+                            Some(metadata.external_conversation_ref.clone()),
+                        ))
                     }
                 };
             }
@@ -629,7 +636,7 @@ impl DeliveryCoordinator {
                 }
                 FailPreparedDeliveryAttemptOutcome::Existing(existing) => {
                     Ok(ResolvedChannelContextOutcome::ExistingDelivery(
-                        Self::outcome_for_existing_delivery(existing),
+                        Self::outcome_for_existing_delivery(existing, Some(conversation.clone())),
                     ))
                 }
             };
@@ -682,7 +689,10 @@ impl DeliveryCoordinator {
         {
             ClaimDeliveryAttemptForSendOutcome::Claimed => {}
             ClaimDeliveryAttemptForSendOutcome::Existing(existing) => {
-                return Ok(Self::outcome_for_existing_delivery(existing));
+                return Ok(Self::outcome_for_existing_delivery(
+                    existing,
+                    Some(conversation),
+                ));
             }
         }
 
@@ -799,17 +809,22 @@ impl DeliveryCoordinator {
             .await
     }
 
-    fn duplicate_suppressed(attempt: &OutboundDeliveryAttempt) -> CoordinatedDeliveryOutcome {
+    fn duplicate_suppressed(
+        attempt: &OutboundDeliveryAttempt,
+        conversation: Option<ExternalConversationRef>,
+    ) -> CoordinatedDeliveryOutcome {
         CoordinatedDeliveryOutcome::DuplicateSuppressed {
             delivery_id: attempt.delivery_id,
+            conversation,
         }
     }
 
     fn outcome_for_existing_delivery(
         attempt: OutboundDeliveryAttempt,
+        conversation: Option<ExternalConversationRef>,
     ) -> CoordinatedDeliveryOutcome {
         if attempt.status == OutboundDeliveryStatus::Delivered {
-            Self::duplicate_suppressed(&attempt)
+            Self::duplicate_suppressed(&attempt, conversation)
         } else {
             CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
                 status: attempt.status,

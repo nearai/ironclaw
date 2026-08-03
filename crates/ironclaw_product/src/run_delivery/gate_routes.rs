@@ -26,7 +26,7 @@ pub(crate) async fn record_gate_route_if_needed(
     gate_ref: &str,
     scope: &TurnScope,
     delivered: &[DeliveredChannelMessage],
-    source_conversation: Option<&ExternalConversationRef>,
+    confirmed_conversation: Option<&ExternalConversationRef>,
 ) {
     let mut conversation_fingerprints = std::collections::BTreeSet::new();
 
@@ -60,8 +60,10 @@ pub(crate) async fn record_gate_route_if_needed(
         }
     }
 
-    // The originating conversation (without its message ref) also routes:
-    // a bare reply next to the prompt resolves the same gate.
+    // An independently confirmed conversation (without its message ref) also
+    // routes: this is the originating conversation on live delivery, or the
+    // already-resolved destination when an authoritative durable row proves
+    // that a replayed prompt was previously delivered.
     //
     // `None` for the reply target is the *route*, spelled explicitly. It is not
     // load-bearing — `conversation_fingerprint` hashes space + conversation +
@@ -70,11 +72,11 @@ pub(crate) async fn record_gate_route_if_needed(
     // this way because a per-event message id inside a stable route key reads
     // like a bug on every future review, and the previous spelling had to be
     // read together with the fingerprint function to be seen as correct.
-    if let Some(source) = source_conversation
+    if let Some(conversation) = confirmed_conversation
         && let Ok(conv_ref) = ExternalConversationRef::new(
-            source.space_id(),
-            source.conversation_id(),
-            source.topic_id(),
+            conversation.space_id(),
+            conversation.conversation_id(),
+            conversation.topic_id(),
             None,
         )
     {
