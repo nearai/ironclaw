@@ -187,8 +187,8 @@ h1,h2,h3,p{margin:0}
 :root:not(.flags-off) .carousel .chd{padding-right:160px}
 /* relocated agent status line (branded indicator + activity string) — sits above the drawer */
 /* drawer header: agent activity string (title) + subtitle, stacked upper-left */
-#carouselBlock .chd{flex-direction:column;align-items:flex-start;gap:1px}
-#carouselBlock .chd .sub{flex:none;max-width:100%}
+#carouselBlock .chd{flex-direction:row;align-items:center;gap:8px}
+#carouselBlock .chd .sub{flex:0 1 auto;min-width:0}
 .chd .dtrow{display:inline-flex;align-items:center}
 .chd .dtitle{font-size:13px;font-weight:600;color:var(--v2-text-strong);white-space:nowrap}
 /* expand/collapse toggle — pinned top-right of the drawer, floats above pills on overflow */
