@@ -78,7 +78,7 @@ jobs:
             echo "has_clippy=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|docker/reborn/entrypoint\.sh$|scripts/check_no_panics\.py$|scripts/no_panics_reborn_baseline\.txt$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/(code_style|main-ci-slack-alerts)\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|docker/reborn/entrypoint\.sh$|scripts/reborn_webui_v2_live_qa/|scripts/live-canary/|\.github/workflows/(live-canary|reborn-e2e)\.yml$|scripts/check_no_panics\.py$|scripts/no_panics_reborn_baseline\.txt$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/(code_style|main-ci-slack-alerts)\.yml$)'; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
@@ -165,6 +165,11 @@ jobs:
           python3 scripts/ci/test_ws12_workflow_contracts.py
           scripts/ci/test-hermetic-test-process.sh
           scripts/ci/test-reborn-docker-entrypoint.sh
+          # #7144: this 204-test module had never been run by any lane, so five
+          # of its assertions had silently drifted out of sync with the code they
+          # gate — including the live-canary shard roster, which pinned a
+          # `reborn-e2e.yml` string that no longer existed.
+          python3 -m unittest scripts.reborn_webui_v2_live_qa.test_run_live_qa
           bash .github/scripts/test-pr-labeler.sh
       - name: Self-test panic checker
         if: github.event_name != 'push'
