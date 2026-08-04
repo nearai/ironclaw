@@ -10,8 +10,7 @@ use ironclaw_host_runtime::HostProcessPort;
 
 use crate::RebornBuildError;
 use crate::runtime_mounts::{
-    WorkspaceMountPolicy, ambient_workspace_mount_view, scoped_skill_context_mount_view,
-    workspace_mount_view,
+    WorkspaceMountPolicy, scoped_skill_context_mount_view, workspace_mount_view,
 };
 
 pub(crate) type WorkspaceFilesystems = (
@@ -74,20 +73,14 @@ impl HostAccessAssembly {
         } else {
             Vec::new()
         };
-        let runtime_workspace_mounts = if workspace_scoped_per_caller {
-            WorkspaceMountPolicy::PerCaller
-        } else {
-            WorkspaceMountPolicy::Shared(
-                ambient_workspace_mount_view(
-                    MountPermissions::read_write(),
-                    &workspace_aliases,
-                    &host_home_aliases,
-                )
-                .map_err(|error| RebornBuildError::InvalidConfig {
-                    reason: error.to_string(),
-                })?,
-            )
-        };
+        let runtime_workspace_mounts = WorkspaceMountPolicy::resolve(
+            workspace_scoped_per_caller,
+            &workspace_aliases,
+            &host_home_aliases,
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?;
         let skill_filesystem = Arc::new(ScopedFilesystem::new(
             Arc::clone(&filesystem),
             scoped_skill_context_mount_view,

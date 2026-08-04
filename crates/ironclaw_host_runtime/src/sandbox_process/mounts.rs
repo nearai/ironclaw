@@ -348,10 +348,10 @@ mod tests {
             "the /workspace grant replaces the default bind"
         );
         let bind = binds[0].clone().into_docker_bind();
-        let expected_host_dir = source_root
-            .join("workspace/tenants/acme/users/alice")
-            .canonicalize()
-            .expect("the read-write bind target is created on demand");
+        let expected_host_dir =
+            tokio::fs::canonicalize(source_root.join("workspace/tenants/acme/users/alice"))
+                .await
+                .expect("the read-write bind target is created on demand");
         assert!(
             bind.starts_with(expected_host_dir.to_str().unwrap()),
             "bind should map the caller subdirectory, got {bind}"

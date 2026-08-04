@@ -46,8 +46,8 @@ use crate::outbound::{
 use crate::outbound_store_assembly::build_outbound_stores;
 use crate::runtime_input::RebornRuntimeIdentity;
 use crate::runtime_mounts::{
-    ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
-    skill_management_mount_view, workspace_mount_view,
+    memory_mount_view, scoped_skill_context_mount_view, skill_management_mount_view,
+    workspace_mount_view,
 };
 #[cfg(all(test, unix))]
 use crate::standalone_bootstrap_assembly::LEGACY_SKILLS_BACKFILL_MARKER;

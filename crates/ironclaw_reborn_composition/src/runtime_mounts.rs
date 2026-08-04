@@ -192,6 +192,30 @@ pub(crate) enum WorkspaceMountPolicy {
 }
 
 impl WorkspaceMountPolicy {
+    /// The deployment's single workspace scoping decision, turned into the
+    /// policy every write lane reads.
+    ///
+    /// One constructor so the `PerCaller` / `Shared` branch cannot drift
+    /// between assembly sites: a deployment that scopes per caller must never
+    /// end up with an ambient shared view on one lane and a scoped view on
+    /// another. `workspace_aliases` / `host_home_aliases` are the raw host
+    /// aliases only ambient-access profiles may carry; a per-caller deployment
+    /// gets no ambient view at all, so they are ignored on that branch.
+    pub(crate) fn resolve(
+        scoped_per_caller: bool,
+        workspace_aliases: &[&Path],
+        host_home_aliases: &[&Path],
+    ) -> Result<Self, HostApiError> {
+        if scoped_per_caller {
+            return Ok(Self::PerCaller);
+        }
+        Ok(Self::Shared(ambient_workspace_mount_view(
+            MountPermissions::read_write(),
+            workspace_aliases,
+            host_home_aliases,
+        )?))
+    }
+
     /// The workspace view used to mint capability grants and approval lease
     /// terms for a run/gate resolved to `scope`.
     ///
@@ -231,6 +255,11 @@ pub(crate) fn read_write_workspace_filesystem(
         ))),
         WorkspaceMountPolicy::Shared(_) => Some(Arc::new(ScopedFilesystem::with_fixed_view(
             Arc::clone(extension_filesystem),
+            // silent-ok: the alias-free workspace mount view is built from
+            // compile-time constants with no caller input, so the only failure
+            // mode is a malformed constant that every other call site would
+            // reject at startup. `None` here disables the write lane rather
+            // than serving an unscoped one.
             workspace_mount_view(permissions, &[]).ok()?,
         ))),
     }

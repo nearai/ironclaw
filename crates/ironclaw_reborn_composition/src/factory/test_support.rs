@@ -162,7 +162,6 @@ impl RebornRuntimeStores {
         &self.extension_filesystem
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     /// The deployment's workspace mount policy, for tests that build a
     /// production-shaped capability-port factory.
     #[cfg(any(test, feature = "test-support"))]
@@ -175,6 +174,7 @@ impl RebornRuntimeStores {
     /// The ambient shared workspace view. Only deployments whose policy is
     /// `Shared` have one; a per-caller deployment resolves its view from the
     /// run/gate scope and must be driven through the production seam instead.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn workspace_mounts_for_test(&self) -> &MountView {
         shared_workspace_view(&self.workspace_mounts)
             .expect("test runtime uses a shared workspace mount policy")
