@@ -195,33 +195,31 @@ h1,h2,h3,p{margin:0}
 .strip::-webkit-scrollbar{display:none}
 
 /* automation task card (faithful to automation-task-card.tsx) */
-.tcard{flex:none;width:232px;display:flex;flex-direction:column;border:1px solid var(--v2-panel-border);border-radius:13px;background:var(--v2-card-bg);padding:10px;text-align:left}
+.tcard{flex:none;width:260px;display:flex;flex-direction:column;border:1px solid var(--v2-panel-border);border-radius:16px;background:var(--v2-card-bg);padding:14px;text-align:left;box-shadow:0 1px 2px rgba(15,18,25,.04),0 12px 26px -12px rgba(15,18,25,.12)}
 .tcard:hover{border-color:color-mix(in srgb,var(--v2-accent) 32%,var(--v2-panel-border))}
-.tcard .thd{display:flex;align-items:center;gap:6px;margin-bottom:4px}
-.tcard .appchip{width:20px;height:20px;border-radius:6px;display:grid;place-items:center;border:1px solid;flex:none}
-.tcard .appchip svg{width:12px;height:12px}
-.tcard .alab{font-size:11px;font-weight:540;color:var(--v2-text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tcard .when{margin-left:auto;font-size:10px;color:var(--v2-text-faint);white-space:nowrap}
+.tcard .thd{display:flex;align-items:center;gap:9px;margin-bottom:9px}
+.tcard .appchip{width:26px;height:26px;border-radius:8px;display:grid;place-items:center;border:1px solid;flex:none}
+.tcard .appchip svg{width:14px;height:14px}
+.tcard .ttl{flex:1;min-width:0;font-size:14px;font-weight:650;line-height:1.25;color:var(--v2-text-strong);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .badge{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:999px;white-space:nowrap}
 .badge.success{color:var(--v2-positive-text);background:var(--v2-positive-soft)}
 .badge.accent{color:var(--v2-accent-text);background:var(--v2-accent-soft)}
 .badge.muted{color:var(--v2-text-muted);background:var(--v2-surface-muted)}
 .badge .bdot{width:5px;height:5px;border-radius:999px;background:currentColor}
-.tcard .ttl2{display:flex;align-items:center;justify-content:space-between;gap:6px}
-.tcard .ttl2 b{font-size:13px;font-weight:640;line-height:1.15;color:var(--v2-text-strong);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tcard .ttl2 svg{width:14px;height:14px;color:var(--v2-text-faint);flex:none}
-.tcard .metrics{margin-top:4px;display:flex;flex-wrap:wrap;gap:2px 10px;font-size:11px;color:var(--v2-text-muted)}
-.tcard .metrics b{font-weight:640;color:var(--v2-text-strong)}
-.tcard .acts{margin-top:9px;display:flex;gap:6px}
-.tcard .acts button{flex:1;display:inline-flex;align-items:center;justify-content:center;gap:5px;font:inherit;font-size:11px;font-weight:560;height:28px;border-radius:8px;cursor:pointer;border:1px solid var(--v2-panel-border);background:var(--v2-surface);color:var(--v2-text-strong)}
+.tcard .metrics{display:flex;flex-wrap:wrap;align-items:center;gap:2px 8px;font-size:12.5px;color:var(--v2-text-muted)}
+.tcard .metrics b{font-weight:660;color:var(--v2-text-strong)}
+.tcard .metrics span+span::before{content:"·";margin-right:8px;color:var(--v2-text-faint)}
+.tcard .tprov{margin-top:9px;font-size:11px;color:var(--v2-text-faint)}
+.tcard .acts{margin-top:auto;padding-top:13px;display:flex;align-items:center;gap:4px}
+.tcard .acts button{display:inline-flex;align-items:center;justify-content:center;gap:5px;font:inherit;font-size:12px;font-weight:560;height:32px;padding:0 11px;border-radius:9px;cursor:pointer;border:1px solid transparent;background:transparent;color:var(--v2-text-muted)}
 .tcard .acts button svg{width:13px;height:13px}
-.tcard .acts .revert{color:var(--v2-danger-text);border-color:color-mix(in srgb,var(--v2-danger-text) 26%,var(--v2-panel-border))}
-.tcard .acts button:hover{border-color:var(--v2-accent)}
-.tcard .acts .approve{color:#fff;border-color:rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
+.tcard .acts .txt:hover{background:var(--v2-surface);color:var(--v2-text-strong)}
+.tcard .acts .approve{padding:0 16px;color:#fff;font-weight:600;border-color:rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
 .tcard .acts .approve:hover{background:radial-gradient(ellipse 200% 220% at 50% 110%,#5BBAF5 0%,#2882c8 60%)}
-.tcard .acts .cancel{color:var(--v2-text-muted)}
-.tcard.term{opacity:.65}
-.tcard .termrow{margin-top:9px;display:flex;align-items:center;gap:6px;font-size:11px;color:var(--v2-text-muted)}
+.tcard .acts .revert{color:var(--v2-danger-text)}
+.tcard .acts .revert:hover{background:color-mix(in srgb,var(--v2-danger-text) 12%,transparent);color:var(--v2-danger-text)}
+.tcard.term{opacity:.7}
+.tcard .termrow{margin-top:auto;padding-top:12px;display:flex;align-items:center;gap:6px;font-size:11px;color:var(--v2-text-muted)}
 .tcard .termrow svg{width:13px;height:13px;flex:none}
 .tcard.reveal{animation:card-in .42s cubic-bezier(.2,.7,.2,1) both}
 @keyframes card-in{from{opacity:0;transform:translateY(10px) scale(.98)}to{opacity:1;transform:none}}
@@ -229,7 +227,7 @@ h1,h2,h3,p{margin:0}
 .tcard.first{position:relative;animation:conjure .5s cubic-bezier(.2,.8,.2,1.01) both}
 @keyframes conjure{0%{opacity:0;transform:scale(.92);filter:blur(4px)}45%{opacity:1}72%{transform:scale(1.006);filter:blur(0)}100%{transform:scale(1);opacity:1;filter:blur(0)}}
 /* spell lands: a soft glow pulse around the card as the spark completes its loop */
-.tcard.first::after{content:"";position:absolute;inset:-2px;border-radius:14px;pointer-events:none;z-index:1;opacity:0;box-shadow:0 0 14px 1px var(--ais-glow);animation:spell-land .5s ease-out forwards}
+.tcard.first::after{content:"";position:absolute;inset:-2px;border-radius:18px;pointer-events:none;z-index:1;opacity:0;box-shadow:0 0 14px 1px var(--ais-glow);animation:spell-land .5s ease-out forwards}
 @keyframes spell-land{0%,52%{opacity:0}76%{opacity:.4}100%{opacity:0}}
 /* Gemini-style ai-spark: a gradient spark chases the border path once, then dissipates.
    SVG stroke-dashoffset (always repaints) — avoids the conic/@property paint bug. */
@@ -239,7 +237,7 @@ h1,h2,h3,p{margin:0}
 :root[data-theme="dark"]{--ais-1:#5aa8ee;--ais-2:#a684ea;--ais-3:#ec7d9a;--ais-glow:rgba(166,132,234,.62)}
 :root[data-theme="light"]{--ais-1:#1a6fd4;--ais-2:#6f36cf;--ais-3:#cf2b74;--ais-glow:rgba(111,54,207,.4)}
 /* border ring: masks the rotating conic to a thin frame around the card */
-.aispark{position:absolute;inset:0;border-radius:13px;overflow:hidden;pointer-events:none;z-index:2;padding:2px;-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude}
+.aispark{position:absolute;inset:0;border-radius:16px;overflow:hidden;pointer-events:none;z-index:2;padding:2px;-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude}
 /* one smooth, continuous comet: a semi-transparent line tapering from a bright head to nothing, swept around the ring */
 .aispin{position:absolute;inset:-55%;background:conic-gradient(from 0deg,transparent 195deg,color-mix(in srgb,var(--ais-1) 48%,transparent) 285deg,color-mix(in srgb,var(--ais-2) 70%,transparent) 336deg,color-mix(in srgb,var(--ais-3) 86%,transparent) 357deg,transparent 360deg);animation:ai-chase .4s linear forwards}
 @keyframes ai-chase{0%{transform:rotate(0);opacity:0}16%{opacity:1}78%{opacity:1}100%{transform:rotate(360deg);opacity:0}}
@@ -683,22 +681,22 @@ h1,h2,h3,p{margin:0}
     var term=(state==='dismissed'||state==='reverted');
     var m=c.metrics.map(function(x){return '<span><b>'+x[0]+'</b> '+x[1]+'</span>';}).join('');
     var head='<div class="thd"><span class="appchip" style="'+chipStyle(c.accent)+'">'+svg(c.icon)+'</span>'
-      +'<span class="alab">'+c.label+'</span><span class="when">'+c.when+'</span>'+badgeFor(state)+'</div>';
-    var ttl='<div class="ttl2"><b>'+c.title+'</b>'+(term?'':svg('external'))+'</div>';
+      +'<b class="ttl">'+c.title+'</b>'+badgeFor(state)+'</div>';
+    var body=term?'':'<div class="metrics">'+m+'</div><div class="tprov">From '+c.label+' · '+c.when+'</div>';
     var acts;
     if(term){
       acts='<div class="termrow">'+svg('undo')+(state==='dismissed'?'Dismissed — nothing was done.':'Reverted — the change was undone.')+'</div>';
     } else if(state==='suggested'){
       acts='<div class="acts"><button class="approve" data-act="approve" data-i="'+idx+'">Approve</button>'
-        +'<button data-act="modify" data-i="'+idx+'">Modify</button>'
-        +'<button class="cancel" data-act="cancel" data-i="'+idx+'">Cancel</button></div>';
+        +'<button class="txt" data-act="modify" data-i="'+idx+'">Modify</button>'
+        +'<button class="txt" data-act="cancel" data-i="'+idx+'">Dismiss</button></div>';
     } else {
-      acts='<div class="acts"><button data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button>'
-        +'<button class="revert" data-act="revert" data-i="'+idx+'">'+svg('undo')+'Revert</button></div>';
+      acts='<div class="acts"><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button>'
+        +'<button class="txt revert" data-act="revert" data-i="'+idx+'">'+svg('undo')+'Revert</button></div>';
     }
     var cls='tcard'+(opts.ghost?' ghost':'')+(opts.first?' first':'')+(term?' term':'');
     var spark=opts.first?'<div class="aispark" aria-hidden="true"><div class="aispin"></div></div>':'';
-    return '<div class="'+cls+'" data-i="'+idx+'">'+head+ttl+(term?'':'<div class="metrics">'+m+'</div>')+acts+spark+'</div>';
+    return '<div class="'+cls+'" data-i="'+idx+'">'+head+body+acts+spark+'</div>';
   }
   var agentMode='Suggest';
   function modeProposed(){ return agentMode==='Suggest'||agentMode==='Plan'; }
