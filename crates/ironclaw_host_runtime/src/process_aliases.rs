@@ -33,47 +33,12 @@ impl HostWorkdirAlias {
     }
 }
 
-/// Where a command runs when the caller names no working directory.
-///
-/// The workspace, never the server process's own cwd. `std::env::current_dir()` here was a real
-/// defect: a shell command with a relative path landed wherever the operator happened to launch
-/// `ironclaw serve`. Observed on a live local-dev server started from an ironclaw checkout — an agent
-/// asked to save a skill wrote `skills/<name>/SKILL.md`, a `scripts/` tree, and a
-/// `tenants/<t>/users/<u>/skills/` mirror into the repository, and one of those files was then picked
-/// up by `git add -A`.
-///
-/// It also made the agent's own tools disagree. `write_file` resolves through the scoped virtual
-/// filesystem while the shell resolves against this cwd, so the same relative path meant two
-/// different places: the model wrote a file, could not find it from the shell, and spent a dozen tool
-/// calls working out why before rewriting everything through the shell into the wrong tree.
-///
-/// `/workspace` is preferred by name because that is the alias the file tools expose; any other alias
-/// is a fallback, and the process cwd is used only when the caller registered no aliases at all —
-/// which is the ambient-host case that has no workspace to speak of.
-fn default_local_host_workdir(workdir_aliases: &[HostWorkdirAlias]) -> std::io::Result<PathBuf> {
-    if let Some(workspace) = workdir_aliases
-        .iter()
-        .find(|alias| alias.alias == WORKSPACE_WORKDIR_ALIAS)
-    {
-        return Ok(workspace.host_path.clone());
-    }
-    if let Some(first) = workdir_aliases.first() {
-        return Ok(first.host_path.clone());
-    }
-    std::env::current_dir()
-}
-
-/// The alias the workspace filesystem tools expose, and therefore the one a relative shell path must
-/// agree with. Kept as a literal rather than imported: `ironclaw_host_runtime` sits below the crate
-/// that owns `WORKSPACE_ALIAS`, and a test pins the two together.
-pub(crate) const WORKSPACE_WORKDIR_ALIAS: &str = "/workspace";
-
 pub(crate) fn resolve_local_host_workdir(
     workdir: Option<&str>,
     workdir_aliases: &[HostWorkdirAlias],
 ) -> std::io::Result<PathBuf> {
     let Some(workdir) = workdir else {
-        return default_local_host_workdir(workdir_aliases);
+        return std::env::current_dir();
     };
     if let Some((alias, relative)) = workdir_aliases
         .iter()
@@ -477,72 +442,6 @@ mod tests {
         assert_eq!(
             rewrite_local_host_output_aliases("/Users/alice/proj/out.pdf", &[]),
             "/Users/alice/proj/out.pdf"
-        );
-    }
-
-    /// A command with no workdir must run in the WORKSPACE, not wherever the server was launched.
-    ///
-    /// This was `std::env::current_dir()`. On a local-dev server started from an ironclaw checkout, an
-    /// agent asked to save a skill wrote `skills/<name>/SKILL.md`, a `scripts/` tree, and a
-    /// `tenants/<t>/users/<u>/skills/` mirror into the repository, and `git add -A` then committed one
-    /// of them. It also made the agent's file tools and its shell disagree about what a relative path
-    /// means, which cost a dozen tool calls in a single turn.
-    #[test]
-    fn no_workdir_defaults_to_the_workspace_not_the_process_cwd() {
-        let aliases = vec![
-            HostWorkdirAlias::try_new("/host", "/srv/host-root").expect("alias"),
-            HostWorkdirAlias::try_new(WORKSPACE_WORKDIR_ALIAS, "/srv/agent/workspace")
-                .expect("alias"),
-        ];
-
-        let resolved = resolve_local_host_workdir(None, &aliases).expect("resolves");
-
-        assert_eq!(
-            resolved,
-            PathBuf::from("/srv/agent/workspace"),
-            "an omitted workdir must resolve to the workspace alias, whatever order the aliases are \
-             registered in"
-        );
-        assert_ne!(
-            resolved,
-            std::env::current_dir().expect("cwd"),
-            "resolving to the server's own cwd is the defect: relative shell paths then land in the \
-             operator's directory"
-        );
-    }
-
-    /// With no workspace alias, any alias beats the process cwd.
-    #[test]
-    fn no_workdir_falls_back_to_the_first_alias_before_the_process_cwd() {
-        let aliases = vec![HostWorkdirAlias::try_new("/host", "/srv/host-root").expect("alias")];
-
-        assert_eq!(
-            resolve_local_host_workdir(None, &aliases).expect("resolves"),
-            PathBuf::from("/srv/host-root")
-        );
-    }
-
-    /// Only a caller that registered nothing gets the process cwd — the ambient-host case, which has
-    /// no workspace to resolve against.
-    #[test]
-    fn no_aliases_at_all_still_uses_the_process_cwd() {
-        assert_eq!(
-            resolve_local_host_workdir(None, &[]).expect("resolves"),
-            std::env::current_dir().expect("cwd")
-        );
-    }
-
-    /// An explicitly named workdir is untouched by the default.
-    #[test]
-    fn an_explicit_workdir_alias_still_wins() {
-        let aliases = vec![
-            HostWorkdirAlias::try_new(WORKSPACE_WORKDIR_ALIAS, "/srv/agent/workspace")
-                .expect("alias"),
-        ];
-
-        assert_eq!(
-            resolve_local_host_workdir(Some("/workspace/sub/dir"), &aliases).expect("resolves"),
-            PathBuf::from("/srv/agent/workspace/sub/dir")
         );
     }
 }
