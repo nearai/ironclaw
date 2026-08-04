@@ -84,8 +84,10 @@ pub(super) async fn read_file(
             match decode_read_file_text(&bytes) {
                 Ok(content) => (content, ReadRepresentation::RawText),
                 Err(text_error) => {
-                    match extract_document_text_for_read_file(&bytes, resolved.scoped_path.as_str())?
-                    {
+                    match extract_document_text_for_read_file(
+                        &bytes,
+                        resolved.scoped_path.as_str(),
+                    )? {
                         Some(content) => (content, ReadRepresentation::ExtractedText),
                         None => return Err(text_error),
                     }
