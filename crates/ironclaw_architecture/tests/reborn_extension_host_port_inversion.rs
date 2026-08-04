@@ -154,6 +154,98 @@ const PRODUCT_DEFINED_TRAITS_EXTENSION_MANAGER_STILL_IMPLEMENTS: &[(&str, &str)]
      is narrowed out (the same blocker as the host's AuthChallengeProvider row)",
 )];
 
+/// **The full `ironclaw_product` reference ledger** — every production file in
+/// `ironclaw_extension_host` whose code names `ironclaw_product` at all, with
+/// the reason it still does. Exact-match in both directions and shrink-only.
+///
+/// Why this exists when the trait residue above already does: the trait list is
+/// **trait-shaped** — it sees `impl <product trait> for …` headers and nothing
+/// else. A dependency can also be a constant (`adapter_registry::
+/// PRODUCT_ADAPTER_HOST_API_ID`), a free function (`auth_prompt_view_for_
+/// blocked_auth`), or an inline construction of a concrete product type
+/// (`ProductConversationBindingService::new`), and none of those register
+/// there. The manifest biconditional below catches the *sum* loudly, but as a
+/// boolean: it cannot say what remains. The `products → loops` re-layer was
+/// sized five times from proxies of this set and was wrong five times
+/// (PROPOSAL §12.11 D-A and its 2026-08-03 amendment; #7092; #7143; #7145) —
+/// this ledger makes the remaining scope a file-list diff instead of an
+/// estimate.
+///
+/// **Update rule:** removing a reference deletes its row in the same change
+/// (the stale direction fails otherwise); a new production file naming product
+/// fails the gate and is not to be allowlisted here — implement against
+/// `ironclaw_product_contracts` instead (§6.1.3). The row's reason names the
+/// blocker class so the flip's remaining work stays enumerable: `port` (the
+/// trait residue above), `adapter-registry` (manifest projection, owned by
+/// CHECKLIST WS5's `product` narrows row), `product-fn` (a free function that
+/// moves with its vocabulary), or `assembly` (the D-A factory-port scope).
+const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
+    (
+        "available_extensions.rs",
+        "re-export repoint (RebornChannelConnectStrategy, an alias of \
+         product_contracts::package_lifecycle::ChannelConnectStrategy) + \
+         adapter-registry (product_adapter_sections manifest projection; owned \
+         by CHECKLIST WS5's product-narrows row)",
+    ),
+    (
+        "channel_connection.rs",
+        "port: implements ChannelConnectionService and returns \
+         ChannelAuthAccountState — the ironclaw_auth vocabulary residue row",
+    ),
+    (
+        "channel_host.rs",
+        "port: implements ConversationBindingService and ProductActorUserResolver \
+         (their DTOs are product-declared) + assembly: inline-constructs product's \
+         concrete stack — the §12.11 D-A factory-port scope",
+    ),
+    (
+        "channel_lifecycle.rs",
+        "re-export repoint (RebornChannelConnectStrategy) + adapter-registry \
+         (PRODUCT_ADAPTER_HOST_API_ID section filter)",
+    ),
+    (
+        "channel_triggered_delivery.rs",
+        "assembly: drives product's TriggeredRunDeliveryDriver/Request and \
+         triggered_run_delivery_settings — covered by the §12.11 D-A ruling \
+         alongside channel_host.rs",
+    ),
+    (
+        "extension_ingress.rs",
+        "re-export repoint: ChannelInboundSurface{Request,Outcome,RejectedAdmission} \
+         are declared in ironclaw_product_contracts::surface and reached through \
+         product's re-export — falls with an import repoint alone",
+    ),
+    (
+        "host_api_contracts.rs",
+        "adapter-registry: registers product's \
+         register_product_adapter_host_api_contract into the manifest contract \
+         registry (owned by CHECKLIST WS5's product-narrows row)",
+    ),
+    (
+        "product_lifecycle.rs",
+        "port vocabulary (ChannelConnectionService) + \
+         ExtensionAccountSetupRegistry + the RebornChannelConnectStrategy alias",
+    ),
+    (
+        "provider_identity.rs",
+        "port: implements ProductActorUserResolver, whose response carries \
+         ironclaw_conversations::ExternalActorBindingEpoch — the conversations \
+         vocabulary residue row",
+    ),
+    (
+        "run_delivery_ports.rs",
+        "port: implements AuthChallengeProvider (ironclaw_auth vocabulary residue) \
+         + product-fn: calls auth_prompt_view_for_blocked_auth and \
+         projection::approval_prompt_context_view, free functions that move with \
+         the auth-prompt vocabulary",
+    ),
+];
+
+/// Ceiling on the reference ledger. Only ever moves down — growing the frozen
+/// list past it needs this constant raised in the same PR, which is the
+/// deliberate two-edit speed bump against re-widening the edge.
+const EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE: usize = 10;
+
 /// Workspace package metadata, resolved once per test binary.
 ///
 /// The move-order proof (CHECKLIST WS2's last row) turns on this: every path
@@ -603,6 +695,48 @@ fn production_files_naming(
     named
 }
 
+/// Production files in `crate_name` whose *code* names `referenced_crate` as a
+/// whole token, as paths relative to the crate's `src/`.
+///
+/// The sibling of [`production_files_naming`] for crate names rather than type
+/// names. The difference is load-bearing, not stylistic: that helper matches by
+/// substring, and `ironclaw_product` is a substring of
+/// `ironclaw_product_contracts` — a raw `contains` here would count every file
+/// that (correctly) imports the contracts crate and the ledger would freeze
+/// files that never touch product. `names_crate` is the same whole-token
+/// matcher the impl scan uses, so the two scans cannot disagree about what
+/// "names the crate" means. Stripping order and the fatal-I/O rule are
+/// identical to the sibling, for the reasons documented there.
+fn production_files_naming_crate(
+    crate_name: &str,
+    referenced_crate: &str,
+    minimum_files: usize,
+) -> BTreeSet<String> {
+    let src = crate_src(crate_name);
+    let files = production_rust_files(&src);
+    assert!(
+        files.len() >= minimum_files,
+        "expected to walk {crate_name}'s source tree; found {} files (floor {minimum_files}) — \
+         a broken path must fail loudly rather than report an empty, vacuously passing set",
+        files.len()
+    );
+    let mut named = BTreeSet::new();
+    for file in files {
+        let source = std::fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", file.display()));
+        if names_crate(
+            &strip_cfg_test_blocks(&strip_comments_and_strings(&source)),
+            referenced_crate,
+        ) {
+            let relative = file.strip_prefix(&src).unwrap_or_else(|error| {
+                panic!("{} is not under {}: {error}", file.display(), src.display())
+            });
+            named.insert(relative.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    named
+}
+
 #[test]
 fn extension_host_speaks_the_contract_error_everywhere_but_the_frozen_residue_files() {
     let found = production_files_naming(EXTENSION_HOST, "ProductSurfaceFailure", 21);
@@ -655,6 +789,81 @@ fn extension_host_speaks_the_contract_error_everywhere_but_the_frozen_residue_fi
          {} host + {} manager files: {host_users:?} {manager_users:?}",
         host_users.len(),
         manager_users.len()
+    );
+}
+
+/// The reference ledger's enforcement: `ironclaw_extension_host`'s production
+/// tree names `ironclaw_product` in exactly the frozen files, no more (a new
+/// reference, or a proxy-sized estimate about to be wrong again) and no fewer
+/// (a stale row that must fall with the change that removed the reference).
+///
+/// Vacuity guards, in order: the walk floor inside
+/// [`production_files_naming_crate`] (an empty tree cannot read as success);
+/// the exact two-way diff (an empty found-set fails against a non-empty frozen
+/// list); and the ledger⇄manifest consistency assert at the bottom (the ledger
+/// cannot read empty while the manifest still carries the dependency — the
+/// itemization and the biconditional in
+/// [`the_extension_host_manifest_names_product_only_while_a_residue_needs_it`]
+/// must agree about whether the edge exists).
+#[test]
+fn extension_host_production_files_naming_product_are_exactly_the_frozen_ledger() {
+    let found = production_files_naming_crate(EXTENSION_HOST, PRODUCT, 21);
+    let frozen: BTreeSet<String> = EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT
+        .iter()
+        .map(|(file, _)| (*file).to_string())
+        .collect();
+    assert_eq!(
+        frozen.len(),
+        EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT.len(),
+        "the reference ledger lists a file twice — every row must be a distinct file"
+    );
+
+    let mut violations = Vec::new();
+    for file in found.difference(&frozen) {
+        violations.push(format!(
+            "{EXTENSION_HOST}/src/{file} names {PRODUCT} but has no ledger row. Do not add \
+             one: implement against {PRODUCT_CONTRACTS} (PROPOSAL §6.1.3) — the ledger only \
+             shrinks on the way to the products -> loops re-layer (#7145)"
+        ));
+    }
+    for file in frozen.difference(&found) {
+        violations.push(format!(
+            "{file} is in the reference ledger but no longer names {PRODUCT} — delete its \
+             row in the same change so the ledger stays the exact remaining scope"
+        ));
+    }
+    assert!(
+        violations.is_empty(),
+        "WS2 product-reference ledger violated (the residue itemization, #7145):\n{}",
+        violations.join("\n")
+    );
+    assert!(
+        found.len() <= EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE,
+        "the product-reference ledger is shrink-only: {} files > baseline {}",
+        found.len(),
+        EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE
+    );
+
+    // The itemization and the manifest biconditional must tell one story: a
+    // ledger that reads empty while the manifest still lists the dependency
+    // means this scan went blind (or a reference hides somewhere no file-level
+    // scan sees), and an occupied ledger without the manifest edge means the
+    // rows are stale. Either way the fix is in this file, loudly.
+    let host = package(EXTENSION_HOST);
+    let has_normal_dep = host["dependencies"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|dependency| {
+            dependency["name"].as_str() == Some(PRODUCT)
+                && dependency["kind"].as_str().unwrap_or("normal") == "normal"
+        });
+    assert_eq!(
+        !found.is_empty(),
+        has_normal_dep,
+        "ledger occupancy ({} files) disagrees with the manifest edge (present: \
+         {has_normal_dep}) — the itemization has gone vacuous or stale",
+        found.len()
     );
 }
 
