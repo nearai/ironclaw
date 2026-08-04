@@ -20,8 +20,8 @@ use ironclaw_extension_host::ingress::{InboundAdmission, InboundAdmissionAck, In
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::product_adapter::ProductAdapterId;
 use ironclaw_host_api::user_identity::RebornUserIdentityLookupError;
-use ironclaw_product::RebornChannelConnectStrategy;
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
 use ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement;
 use ironclaw_product_contracts::prompt_source::{
     BlockedAuthPromptRequest, BlockedAuthPromptSource,

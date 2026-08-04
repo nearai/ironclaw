@@ -182,10 +182,9 @@ const PRODUCT_DEFINED_TRAITS_EXTENSION_MANAGER_STILL_IMPLEMENTS: &[(&str, &str)]
 const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
     (
         "available_extensions.rs",
-        "re-export repoint (RebornChannelConnectStrategy, an alias of \
-         product_contracts::package_lifecycle::ChannelConnectStrategy) + \
-         adapter-registry (product_adapter_sections manifest projection; owned \
-         by CHECKLIST WS5's product-narrows row)",
+        "adapter-registry: product_adapter_sections manifest projection \
+         (owned by CHECKLIST WS5's product-narrows row; the strategy-alias \
+         half of this row fell to #7143's import repoint)",
     ),
     (
         "channel_connection.rs",
@@ -200,20 +199,14 @@ const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
     ),
     (
         "channel_lifecycle.rs",
-        "re-export repoint (RebornChannelConnectStrategy) + adapter-registry \
-         (PRODUCT_ADAPTER_HOST_API_ID section filter)",
+        "adapter-registry: PRODUCT_ADAPTER_HOST_API_ID section filter (the \
+         strategy-alias half fell to #7143's import repoint)",
     ),
     (
         "channel_triggered_delivery.rs",
         "assembly: drives product's TriggeredRunDeliveryDriver/Request and \
          triggered_run_delivery_settings — covered by the §12.11 D-A ruling \
          alongside channel_host.rs",
-    ),
-    (
-        "extension_ingress.rs",
-        "re-export repoint: ChannelInboundSurface{Request,Outcome,RejectedAdmission} \
-         are declared in ironclaw_product_contracts::surface and reached through \
-         product's re-export — falls with an import repoint alone",
     ),
     (
         "host_api_contracts.rs",
@@ -224,7 +217,7 @@ const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
     (
         "product_lifecycle.rs",
         "port vocabulary (ChannelConnectionService) + \
-         ExtensionAccountSetupRegistry + the RebornChannelConnectStrategy alias",
+         ExtensionAccountSetupRegistry (the strategy alias fell to #7143)",
     ),
     (
         "provider_identity.rs",
@@ -244,7 +237,7 @@ const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
 /// Ceiling on the reference ledger. Only ever moves down — growing the frozen
 /// list past it needs this constant raised in the same PR, which is the
 /// deliberate two-edit speed bump against re-widening the edge.
-const EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE: usize = 10;
+const EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE: usize = 9;
 
 /// Workspace package metadata, resolved once per test binary.
 ///

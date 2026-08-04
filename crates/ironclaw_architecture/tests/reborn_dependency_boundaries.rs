@@ -450,6 +450,35 @@ fn reborn_crate_dependency_boundaries_hold() {
             .collect::<Vec<_>>(),
     );
 
+    // Carrier purity — `ironclaw_host_ingress` (WS2 re-layer, #7092).
+    //
+    // This crate exists for one reason: to keep `axum` out of the contracts
+    // tier while still letting a crate hand a prebuilt router plus its
+    // `ironclaw_host_api` ingress descriptors to whoever binds the listener.
+    // That is the whole charter, and it is why WS2 moved it from `products` to
+    // `substrates` — at `products` it blocked `ironclaw_extension_host`'s
+    // `products -> loops` flip while depending on nothing above `contracts`.
+    //
+    // The layer matrix alone will not hold it there. `substrates -> substrates`
+    // is legal, so the matrix would happily let this crate acquire
+    // `ironclaw_filesystem`, `ironclaw_secrets`, or any other domain — none of
+    // which it may have, because every consumer that wants only the carrier
+    // shapes would then compile that cone. An allowlist, not a blocklist, for
+    // the same reason as the three contracts tiers above: a list of today's
+    // offenders cannot stop tomorrow's. `families/product.md` states the same
+    // rule in prose ("Never depends on: anything else, without exception").
+    //
+    // **Every dependency kind, not just `normal`** — unlike every other rule in
+    // this function. The layer matrix checks normal deps only, and rightly so:
+    // a dev-dependency on a higher layer is legal and used (`extension_host`
+    // dev-depends on `ironclaw_product`). But this crate's charter is absolute
+    // ("without exception"), and the property it protects — that a consumer
+    // wanting only the carrier shapes compiles nothing else — is defeated just
+    // as thoroughly by a dev- or build-dependency, which still has to resolve
+    // and build. The crate has zero dev- and build-dependencies today, so this
+    // costs nothing and closes the hole rather than documenting it.
+    assert_host_ingress_names_no_other_workspace_crate(packages);
+
     for rule in boundary_rules() {
         assert_no_normal_workspace_deps(&dependencies, rule.crate_name, rule.forbidden);
     }
@@ -4522,6 +4551,57 @@ fn workspace_dependency_names(package: &Value) -> impl Iterator<Item = &Value> {
                 .as_str()
                 .is_some_and(|name| name == "ironclaw" || name.starts_with("ironclaw_"))
         })
+}
+
+/// `ironclaw_host_ingress` names no workspace crate but `ironclaw_host_api`, in
+/// **any** dependency kind (`normal`, `dev`, `build`).
+///
+/// Separate from `assert_no_normal_workspace_deps` on purpose: that helper
+/// filters to normal dependencies, which is correct for the layer matrix (a
+/// dev-dependency on a higher layer is legal and used) and wrong for this
+/// crate, whose charter is "Never depends on: anything else, without
+/// exception" (`families/product.md`). A dev- or build-dependency still
+/// resolves and builds, so it defeats the one property this crate exists to
+/// provide just as thoroughly as a normal one would.
+///
+/// An allowlist, not a blocklist: the forbidden set is *every* workspace
+/// `ironclaw_*` crate except the one permitted name, so a dependency nobody
+/// anticipated still fails. The package must be present — a silent `return`
+/// here would make the whole check vacuous the day the crate is renamed.
+fn assert_host_ingress_names_no_other_workspace_crate(packages: &[Value]) {
+    const CRATE: &str = "ironclaw_host_ingress";
+    const ALLOWED: &str = "ironclaw_host_api";
+
+    let package = packages
+        .iter()
+        .find(|package| package["name"].as_str() == Some(CRATE))
+        .unwrap_or_else(|| {
+            panic!("{CRATE} must be a workspace member; without it this check is vacuous")
+        });
+
+    let mut violations = Vec::new();
+    for dependency in package["dependencies"].as_array().into_iter().flatten() {
+        let Some(name) = dependency["name"].as_str() else {
+            continue;
+        };
+        if !is_ironclaw_workspace_package(name) || name == ALLOWED {
+            continue;
+        }
+        let kind = dependency
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("normal");
+        violations.push(format!("{name} ({kind} dependency)"));
+    }
+
+    assert!(
+        violations.is_empty(),
+        "{CRATE} must not depend on any workspace crate but {ALLOWED}, in any dependency \
+         kind — it exists so a consumer needing only the route-mount carrier shapes never \
+         compiles a listener's dependency cone, and a dev/build dependency defeats that as \
+         surely as a normal one. Offenders: {}",
+        violations.join(", ")
+    );
 }
 
 fn is_normal_dependency(dependency: &Value) -> bool {
