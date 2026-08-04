@@ -49,7 +49,7 @@ ironclaw ironhub install <name> --kind skill
 ```
 
 <Note>
-Community entries (provenance `New`) require explicit acknowledgement from the operator. The agent cannot install them autonomously.
+Community entries (provenance `New`) require explicit acknowledgement from the operator. The agent cannot install them autonomously. Pass `--acknowledge-unverified` to confirm.
 </Note>
 
 #### Pin to a version or digest
@@ -86,12 +86,12 @@ Ask your agent to search IronHub, inspect an entry, or install a package. It wil
 
 ## Trust and tool access
 
-Packages installed from IronHub are **attenuated** — they have reduced tool access compared to packages you place directly in your skills directory:
+Packages installed from IronHub have **Installed** trust — the model sees the skill description but not its full prompt body, and the agent cannot self-activate them. Skills you place directly in your skills directory have **Trusted** trust — the full prompt body is loaded and the agent can activate them autonomously.
 
-| Source                                        | Trust     | Tool access                                       |
-|-----------------------------------------------|-----------|---------------------------------------------------|
-| `~/.ironclaw/skills/` or workspace `skills/`  | Trusted   | Full — same access as the agent                   |
-| IronHub install                               | Installed | Read-only — no shell, no file write, no HTTP      |
+| Source                                        | Trust     | Content visibility                          | Model self-activation |
+|-----------------------------------------------|-----------|---------------------------------------------|-----------------------|
+| `~/.ironclaw/skills/` or workspace `skills/`  | Trusted   | Full prompt body available to the model     | Yes                   |
+| IronHub install                               | Installed | Description only — full body not injected   | No                    |
 
 If you fully trust an IronHub skill, move it to `~/.ironclaw/skills/` after reviewing its contents.
 
