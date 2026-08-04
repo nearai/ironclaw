@@ -725,7 +725,7 @@ fn project_fs_download_response(file: ProjectFsFile) -> Result<Response, WebUiV2
             // builder cause so a malformed download header is diagnosable
             // server-side rather than vanishing into an opaque internal error.
             tracing::debug!(
-                target = "ironclaw_webui_v2::project_fs",
+                target: "ironclaw_webui_v2::project_fs",
                 error = %error,
                 "failed to build project-file download response",
             );
@@ -1342,7 +1342,7 @@ fn webchat_sse_event_from_envelope(envelope: ProductOutboundEnvelope) -> Option<
             // user-facing status, and info!/warn! corrupts the REPL/TUI
             // per CLAUDE.md.
             tracing::debug!(
-                target = "ironclaw_webui_v2::sse",
+                target: "ironclaw_webui_v2::sse",
                 error = %error,
                 "failed to serialize WebChatV2EventFrame for SSE",
             );
@@ -1365,7 +1365,7 @@ fn sse_error_event(error: ProductSurfaceError) -> Event {
         Ok(event) => event,
         Err(error) => {
             tracing::debug!(
-                target = "ironclaw_webui_v2::sse",
+                target: "ironclaw_webui_v2::sse",
                 error = %error,
                 "failed to serialize redacted SSE error payload",
             );
@@ -1432,7 +1432,7 @@ fn build_sse_stream(
                     // this bound, an unbounded `.await` on a non-resolving
                     // service would pin the slot indefinitely.
                     tracing::debug!(
-                        target = "ironclaw_webui_v2::sse",
+                        target: "ironclaw_webui_v2::sse",
                         "stream_events drain pending past SSE_MAX_LIFETIME; closing stream"
                     );
                     return;
@@ -1488,7 +1488,7 @@ fn build_sse_stream(
                                 Ok(None) => return,
                                 Err(_) => {
                                     tracing::debug!(
-                                        target = "ironclaw_webui_v2::sse",
+                                        target: "ironclaw_webui_v2::sse",
                                         "stream_events subscription pending past SSE_MAX_LIFETIME; closing stream"
                                     );
                                     return;
@@ -1533,7 +1533,7 @@ fn build_sse_stream(
                     // Surface a redacted error event and close the stream.
                     // Reconnect logic is the browser's responsibility.
                     tracing::debug!(
-                        target = "ironclaw_webui_v2::sse",
+                        target: "ironclaw_webui_v2::sse",
                         error = ?error,
                         "service rejected SSE drain; closing stream",
                     );
@@ -4217,7 +4217,7 @@ async fn ws_drain_loop(
                         }
                         Err(error) => {
                             tracing::debug!(
-                                target = "ironclaw_webui_v2::ws",
+                                target: "ironclaw_webui_v2::ws",
                                 error = %error,
                                 "failed to serialize ProductOutboundEnvelope for WS",
                             );
@@ -4258,7 +4258,7 @@ async fn ws_drain_loop(
             }
             Ok(Err(error)) => {
                 tracing::debug!(
-                    target = "ironclaw_webui_v2::ws",
+                    target: "ironclaw_webui_v2::ws",
                     error = ?error,
                     "service rejected WS drain; closing stream",
                 );
@@ -4306,7 +4306,7 @@ async fn ws_send_with_timeout(
         Ok(result) => result,
         Err(_elapsed) => {
             tracing::debug!(
-                target = "ironclaw_webui_v2::ws",
+                target: "ironclaw_webui_v2::ws",
                 budget_ms = budget.as_millis() as u64,
                 "WS send exceeded lifetime budget; releasing slot",
             );

@@ -205,7 +205,7 @@ impl GenericTriggeredRunDeliveryHook {
             .await
         {
             tracing::warn!(
-                target = "ironclaw::reborn::channel_triggered_delivery",
+                target: "ironclaw::reborn::channel_triggered_delivery",
                 %run_id,
                 %error,
                 "failed to record triggered run delivery outcome (best-effort)"
@@ -221,7 +221,7 @@ impl PostSubmitDeliveryHook for GenericTriggeredRunDeliveryHook {
             Ok(context) => context,
             Err(reason) => {
                 tracing::warn!(
-                    target = "ironclaw::reborn::channel_triggered_delivery",
+                    target: "ironclaw::reborn::channel_triggered_delivery",
                     %run_id,
                     %reason,
                     "triggered run delivery skipped: cannot build trigger context"
@@ -234,7 +234,7 @@ impl PostSubmitDeliveryHook for GenericTriggeredRunDeliveryHook {
             Ok(target) => target,
             Err(reason) => {
                 tracing::warn!(
-                    target = "ironclaw::reborn::channel_triggered_delivery",
+                    target: "ironclaw::reborn::channel_triggered_delivery",
                     %run_id,
                     %reason,
                     "triggered run delivery skipped: per-trigger target could not be resolved"
@@ -250,7 +250,7 @@ impl PostSubmitDeliveryHook for GenericTriggeredRunDeliveryHook {
             Ok(routed) => routed,
             Err(reason) => {
                 tracing::warn!(
-                    target = "ironclaw::reborn::channel_triggered_delivery",
+                    target: "ironclaw::reborn::channel_triggered_delivery",
                     %run_id,
                     %reason,
                     "triggered run delivery skipped: no channel extension owns the delivery"
@@ -263,7 +263,7 @@ impl PostSubmitDeliveryHook for GenericTriggeredRunDeliveryHook {
             Ok(driver) => driver,
             Err(reason) => {
                 tracing::warn!(
-                    target = "ironclaw::reborn::channel_triggered_delivery",
+                    target: "ironclaw::reborn::channel_triggered_delivery",
                     %run_id,
                     extension_id,
                     %reason,

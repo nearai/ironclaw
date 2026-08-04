@@ -617,7 +617,7 @@ mod postgres_backed {
                 return Err(RebornEventStoreError::RemotePostgresClearTextDisabled);
             }
             tracing::warn!(
-                target = "ironclaw::reborn::event_store::postgres",
+                target: "ironclaw::reborn::event_store::postgres",
                 "remote Reborn Postgres cleartext connection explicitly allowed; use only on a trusted private network"
             );
             Manager::from_config(pg_config, NoTls, manager_config)

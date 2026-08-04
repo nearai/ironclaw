@@ -987,7 +987,7 @@ fn panic_handler(
         detail
     };
     tracing::error!(
-        target = "ironclaw::reborn::webui_serve",
+        target: "ironclaw::reborn::webui_serve",
         "Handler panicked: {safe_detail}"
     );
     axum::http::Response::builder()

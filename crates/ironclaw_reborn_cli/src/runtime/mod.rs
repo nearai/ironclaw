@@ -860,7 +860,7 @@ pub(crate) fn resolve_google_oauth_config_from_env(
         GoogleOAuthResolution::Configured(config) => Ok(Some(config)),
         GoogleOAuthResolution::Disabled(state) => {
             tracing::debug!(
-                target = "ironclaw::reborn::cli::google_oauth",
+                target: "ironclaw::reborn::cli::google_oauth",
                 ?state,
                 "Google OAuth backend disabled"
             );
@@ -1072,7 +1072,7 @@ fn resolve_google_oauth_config_state_from_inputs(
         (Some(client_id), Some(redirect_uri)) => (client_id, redirect_uri),
         (Some(_), None) => {
             tracing::debug!(
-                target = "ironclaw::reborn::cli::google_oauth",
+                target: "ironclaw::reborn::cli::google_oauth",
                 missing = "redirect_uri",
                 "Google OAuth partially configured (client_id set, redirect_uri missing); \
                  disabling until IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI or \
@@ -1084,7 +1084,7 @@ fn resolve_google_oauth_config_state_from_inputs(
         }
         (None, Some(_)) => {
             tracing::debug!(
-                target = "ironclaw::reborn::cli::google_oauth",
+                target: "ironclaw::reborn::cli::google_oauth",
                 missing = "client_id",
                 "Google OAuth partially configured (redirect_uri set, client_id missing); \
                  disabling until IRONCLAW_REBORN_GOOGLE_CLIENT_ID or \
@@ -1106,7 +1106,7 @@ fn resolve_google_oauth_config_state_from_inputs(
         .or(store_client_secret);
     if client_secret.is_none() {
         tracing::debug!(
-            target = "ironclaw::reborn::cli::google_oauth",
+            target: "ironclaw::reborn::cli::google_oauth",
             "Google OAuth setup config has no client secret; token exchange will use public-client PKCE",
         );
     }
@@ -1117,7 +1117,7 @@ fn resolve_google_oauth_config_state_from_inputs(
     }
 
     tracing::debug!(
-        target = "ironclaw::reborn::cli::google_oauth",
+        target: "ironclaw::reborn::cli::google_oauth",
         has_client_secret = client.client_secret.is_some(),
         has_hosted_domain_hint = hosted_domain_hint.is_some(),
         "Google OAuth backend config resolved (env / config.toml / secret store)"

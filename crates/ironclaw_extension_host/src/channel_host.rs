@@ -580,7 +580,7 @@ impl GenericChannelHostAssembly {
             Ok(thread_id) => thread_id,
             Err(error) => {
                 tracing::warn!(
-                    target = "ironclaw::reborn::channel_host",
+                    target: "ironclaw::reborn::channel_host",
                     extension_id,
                     %error,
                     "invalid channel-notice thread id; triggered delivery unavailable"
@@ -702,7 +702,7 @@ impl GenericChannelHostAssembly {
                 }
                 Ok(None) => {
                     tracing::debug!(
-                        target = "ironclaw::reborn::channel_host",
+                        target: "ironclaw::reborn::channel_host",
                         extension_id = %extension_id,
                         "active channel declares no verifiable ingress; nothing registered"
                     );
@@ -713,7 +713,7 @@ impl GenericChannelHostAssembly {
                 }
                 Err(reason) => {
                     tracing::warn!(
-                        target = "ironclaw::reborn::channel_host",
+                        target: "ironclaw::reborn::channel_host",
                         extension_id = %extension_id,
                         %reason,
                         "channel ingress graph could not be built; route fails closed"

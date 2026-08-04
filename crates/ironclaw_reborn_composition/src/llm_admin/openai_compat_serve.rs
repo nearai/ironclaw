@@ -776,7 +776,7 @@ fn map_thread_read_error(error: SessionThreadError) -> OpenAiCompatHttpError {
         }
         error => {
             tracing::warn!(
-                target = "ironclaw::reborn::openai_compat",
+                target: "ironclaw::reborn::openai_compat",
                 error = %error,
                 "failed to read thread projection for OpenAI-compatible response"
             );
