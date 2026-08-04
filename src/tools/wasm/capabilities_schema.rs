@@ -35,8 +35,8 @@ use serde::{Deserialize, Serialize};
 use crate::secrets::{CredentialLocation, CredentialMapping};
 use crate::tools::tool::ToolDiscoverySummary;
 use crate::tools::wasm::{
-    Capabilities, EndpointPattern, HttpCapability, RateLimitConfig, SecretsCapability,
-    ToolInvokeCapability, WebhookCapability, WorkspaceCapability,
+    Capabilities, EndpointPattern, HttpCapability, NostrCapability, RateLimitConfig,
+    SecretsCapability, ToolInvokeCapability, WebhookCapability, WorkspaceCapability,
 };
 
 /// Root schema for a capabilities JSON file.
@@ -76,13 +76,17 @@ pub struct CapabilitiesFile {
     #[serde(default)]
     pub workspace: Option<WorkspaceCapabilitySchema>,
 
-    /// Tool webhook authentication/signature configuration.
+    /// Webhook authentication and signature configuration.
     #[serde(default)]
     pub webhook: Option<WebhookCapabilitySchema>,
 
     /// Arbitrary websocket configuration preserved for runtime consumers.
     #[serde(default)]
     pub websocket: Option<serde_json::Value>,
+
+    /// Nostr event signing capability.
+    #[serde(default)]
+    pub nostr: Option<NostrCapabilitySchema>,
 
     /// Authentication setup instructions.
     /// Used by `ironclaw config` to guide users through auth setup.
@@ -166,6 +170,7 @@ impl CapabilitiesFile {
             self.workspace = self.workspace.or(inner.workspace);
             self.webhook = self.webhook.or(inner.webhook);
             self.websocket = self.websocket.or(inner.websocket);
+            self.nostr = self.nostr.or(inner.nostr);
             self.auth = self.auth.or(inner.auth);
             self.setup = self.setup.or(inner.setup);
         }
@@ -267,6 +272,10 @@ impl CapabilitiesFile {
         }
 
         caps.websocket = self.websocket.clone();
+
+        if let Some(nostr) = &self.nostr {
+            caps.nostr = Some(nostr.to_nostr_capability());
+        }
 
         caps
     }
@@ -566,6 +575,20 @@ impl WebhookCapabilitySchema {
             hmac_timestamp_header: self.hmac_timestamp_header.clone(),
             hmac_prefix: self.hmac_prefix.clone(),
         }
+    }
+}
+
+/// Nostr event signing capability schema for tools.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NostrCapabilitySchema {
+    /// Name of the secret containing the Nostr private key (nsec or hex).
+    #[serde(default)]
+    pub secret_name: String,
+}
+
+impl NostrCapabilitySchema {
+    fn to_nostr_capability(&self) -> NostrCapability {
+        NostrCapability::new(&self.secret_name)
     }
 }
 

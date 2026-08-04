@@ -201,6 +201,7 @@ readabilityrs = { version = "0.1.2", optional = true }
 ed25519-dalek = { version = "2.2.0", features = ["std"] }
 bs58 = "0.5"
 hex = "0.4.3"
+secp256k1 = { version = "0.29", features = ["global-context", "rand-std"] }
 
 # OpenClaw import (feature gated)
 json5 = { version = "0.4", optional = true }

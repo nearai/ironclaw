@@ -9,6 +9,7 @@
 //! - **HTTP**: Make HTTP requests to allowlisted endpoints
 //! - **ToolInvoke**: Call other tools via aliases
 //! - **Secrets**: Check if secrets exist (never read values)
+//! - **Nostr**: Sign Nostr events (private key never exposed to WASM)
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,6 +37,8 @@ pub struct Capabilities {
     pub webhook: Option<WebhookCapability>,
     /// Arbitrary websocket configuration preserved from capabilities JSON.
     pub websocket: Option<serde_json::Value>,
+    /// Nostr event signing (host holds the private key).
+    pub nostr: Option<NostrCapability>,
 }
 
 impl Capabilities {
@@ -331,6 +334,26 @@ pub struct WebhookCapability {
     pub hmac_prefix: Option<String>,
 }
 
+/// Nostr event signing capability.
+///
+/// When granted, WASM tools can request the host to sign Nostr events.
+/// The private key never leaves the host — WASM provides the unsigned
+/// event JSON and receives the signed JSON back.
+#[derive(Debug, Clone, Default)]
+pub struct NostrCapability {
+    /// Name of the secret containing the Nostr private key (nsec format or hex).
+    pub secret_name: String,
+}
+
+impl NostrCapability {
+    /// Create a new Nostr capability with the given secret name.
+    pub fn new(secret_name: impl Into<String>) -> Self {
+        Self {
+            secret_name: secret_name.into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::tools::wasm::capabilities::{Capabilities, EndpointPattern, SecretsCapability};
@@ -344,6 +367,7 @@ mod tests {
         assert!(caps.secrets.is_none());
         assert!(caps.webhook.is_none());
         assert!(caps.websocket.is_none());
+        assert!(caps.nostr.is_none());
     }
 
     #[test]

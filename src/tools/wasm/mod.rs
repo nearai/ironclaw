@@ -90,6 +90,7 @@ mod error;
 mod host;
 mod http_security;
 mod limits;
+pub(crate) mod nostr_signer;
 pub(crate) mod loader;
 mod rate_limiter;
 mod runtime;
@@ -108,8 +109,9 @@ pub use wrapper::{OAuthRefreshConfig, WasmToolWrapper};
 
 // Capabilities (V2)
 pub use capabilities::{
-    Capabilities, EndpointPattern, HttpCapability, RateLimitConfig, SecretsCapability,
-    ToolInvokeCapability, WebhookCapability, WorkspaceCapability, WorkspaceReader,
+    Capabilities, EndpointPattern, HttpCapability, NostrCapability, RateLimitConfig,
+    SecretsCapability, ToolInvokeCapability, WebhookCapability, WorkspaceCapability,
+    WorkspaceReader,
 };
 
 // Security components (V2)
@@ -145,6 +147,6 @@ pub use loader::{
 
 // Capabilities schema (for parsing *.capabilities.json files)
 pub use capabilities_schema::{
-    AuthCapabilitySchema, CapabilitiesFile, OAuthConfigSchema, RateLimitSchema,
+    AuthCapabilitySchema, CapabilitiesFile, NostrCapabilitySchema, OAuthConfigSchema, RateLimitSchema,
     ToolFieldSetupSchema, ToolSetupFieldInputType, ToolSetupSchema, ValidationEndpointSchema,
 };

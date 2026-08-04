@@ -31,6 +31,124 @@ use crate::tools::wasm::limits::{ResourceLimits, WasmResourceLimiter};
 use crate::tools::wasm::runtime::{EPOCH_TICK_INTERVAL, PreparedModule, WasmToolRuntime};
 use crate::tools::wasm::{ssrf_safe_client_builder_for_target, validate_and_resolve_http_target};
 use ironclaw_safety::LeakDetector;
+use tokio_tungstenite::tungstenite::Message;
+
+// ── Nostr relay helpers (used by host functions) ────────────────────────
+
+/// Publish a signed Nostr event to a relay via WebSocket.
+///
+/// Connects, sends ["EVENT", ...], reads ["OK", id, accepted], returns event_id.
+async fn publish_nostr_event(relay_url: &str, signed_event_json: &str) -> Result<String, String> {
+    use futures::SinkExt;
+    use futures::StreamExt;
+
+    let (ws_stream, _) = tokio_tungstenite::connect_async(relay_url)
+        .await
+        .map_err(|e| format!("WebSocket connect failed: {e}"))?;
+
+    let (mut write, mut read) = ws_stream.split();
+
+    // Build and send EVENT message
+    let event_val: serde_json::Value = serde_json::from_str(signed_event_json)
+        .map_err(|e| format!("Invalid event JSON: {e}"))?;
+
+    let msg = serde_json::json!(["EVENT", event_val]);
+    write
+        .send(Message::Text(msg.to_string().into()))
+        .await
+        .map_err(|e| format!("WebSocket send failed: {e}"))?;
+
+    // Read OK response with timeout
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(Ok(msg)) = read.next().await {
+            if let Message::Text(text) = msg {
+                if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&text) {
+                    if arr.len() >= 3 && arr[0] == "OK" {
+                        let event_id = arr[1].as_str().unwrap_or("").to_string();
+                        let accepted = arr.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
+                        if accepted {
+                            return Ok(event_id);
+                        } else {
+                            let reason = arr.get(3).and_then(|v| v.as_str()).unwrap_or("unknown");
+                            return Err(format!("Relay rejected: {reason}"));
+                        }
+                    }
+                }
+            }
+        }
+        Err("WebSocket closed without OK".to_string())
+    })
+    .await
+    .map_err(|_| "Timeout waiting for relay OK response".to_string())?;
+
+    result
+}
+
+/// Subscribe to Nostr events from a relay via WebSocket.
+///
+/// Connects, sends ["REQ", sub_id, filters...], collects events for timeout_ms,
+/// sends ["CLOSE", sub_id], returns JSON array of events.
+async fn subscribe_nostr_events(
+    relay_url: &str,
+    filter_json: &str,
+    timeout_ms: u32,
+) -> Result<String, String> {
+    use futures::SinkExt;
+    use futures::StreamExt;
+
+    let (ws_stream, _) = tokio_tungstenite::connect_async(relay_url)
+        .await
+        .map_err(|e| format!("WebSocket connect failed: {e}"))?;
+
+    let (mut write, mut read) = ws_stream.split();
+
+    // Parse filters
+    let filters: Vec<serde_json::Value> = serde_json::from_str(filter_json)
+        .map_err(|e| format!("Invalid filter JSON: {e}"))?;
+
+    // Send REQ with unique subscription ID
+    let sub_id = format!("sub_{}", uuid::Uuid::new_v4().as_simple());
+    let mut req_msg = vec![serde_json::json!(sub_id)];
+    req_msg.extend(filters);
+    let req_text = serde_json::to_string(&req_msg)
+        .map_err(|e| format!("Failed to serialize REQ message: {e}"))?;
+    write
+        .send(Message::Text(req_text.into()))
+        .await
+        .map_err(|e| format!("WebSocket send failed: {e}"))?;
+
+    // Collect events until timeout
+    let events = tokio::time::timeout(
+        std::time::Duration::from_millis(timeout_ms as u64),
+        async {
+            let mut collected = Vec::new();
+            while let Some(Ok(msg)) = read.next().await {
+                if let Message::Text(text) = msg {
+                    if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&text) {
+                        if arr.len() >= 3 && arr[0] == "EVENT" {
+                            if let Some(event) = arr.get(2) {
+                                collected.push(event.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            collected
+        },
+    )
+    .await
+    .unwrap_or_default();
+
+    // Send CLOSE
+    let _ = write
+        .send(Message::Text(
+            serde_json::json!(["CLOSE", sub_id]).to_string().into(),
+        ))
+        .await;
+
+    serde_json::to_string(&events)
+        .map_err(|e| format!("Failed to serialize events: {e}"))
+}
 
 // Generate component model bindings from the WIT file.
 //
@@ -148,6 +266,9 @@ struct StoreData {
     /// Optional HTTP interceptor for testing — returns canned responses
     /// instead of making real requests when set.
     http_interceptor: Option<Arc<dyn HttpInterceptor>>,
+    /// Pre-resolved Nostr private key (hex) for nostr_sign_event host function.
+    /// Only populated when the tool has the Nostr capability.
+    nostr_private_key: Option<String>,
 }
 
 impl StoreData {
@@ -156,6 +277,7 @@ impl StoreData {
         capabilities: Capabilities,
         credentials: HashMap<String, String>,
         host_credentials: Vec<ResolvedHostCredential>,
+        nostr_private_key: Option<String>,
     ) -> Self {
         // Minimal WASI context: no filesystem, no env vars (security)
         let wasi = WasiCtxBuilder::new().build();
@@ -169,6 +291,7 @@ impl StoreData {
             host_credentials,
             http_runtime: None,
             http_interceptor: None,
+            nostr_private_key,
         }
     }
 
@@ -626,6 +749,50 @@ impl near::agent::host::Host for StoreData {
     fn secret_exists(&mut self, name: String) -> bool {
         self.host_state.secret_exists(&name)
     }
+
+    fn nostr_sign_event(&mut self, unsigned_event_json: String) -> Result<String, String> {
+        // Check capability
+        let capability = self
+            .host_state
+            .capabilities()
+            .nostr
+            .as_ref()
+            .ok_or_else(|| "Nostr signing capability not granted".to_string())?;
+
+        // Check private key was pre-resolved
+        let private_key = self
+            .nostr_private_key
+            .as_ref()
+            .ok_or_else(|| {
+                format!(
+                    "Nostr private key '{}' not configured or not resolved",
+                    capability.secret_name
+                )
+            })?;
+
+        // Sign the event
+        crate::tools::wasm::nostr_signer::sign_nostr_event(&unsigned_event_json, private_key)
+            .map_err(|e| format!("Nostr signing failed: {e}"))
+    }
+
+    fn nostr_publish_event(&mut self, relay_url: String, signed_event_json: String) -> Result<String, String> {
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(async {
+            publish_nostr_event(&relay_url, &signed_event_json).await
+        })
+    }
+
+    fn nostr_subscribe_events(
+        &mut self,
+        relay_url: String,
+        filter_json: String,
+        timeout_ms: u32,
+    ) -> Result<String, String> {
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(async {
+            subscribe_nostr_events(&relay_url, &filter_json, timeout_ms).await
+        })
+    }
 }
 
 /// A Tool implementation backed by a WASM component.
@@ -984,6 +1151,7 @@ impl WasmToolWrapper {
         params: serde_json::Value,
         context_json: Option<String>,
         host_credentials: Vec<ResolvedHostCredential>,
+        nostr_private_key: Option<String>,
     ) -> Result<(String, Vec<crate::tools::wasm::host::LogEntry>), WasmError> {
         let engine = self.runtime.engine();
         let limits = &self.prepared.limits;
@@ -994,6 +1162,7 @@ impl WasmToolWrapper {
             self.capabilities.clone(),
             self.credentials.clone(),
             host_credentials,
+            nostr_private_key,
         );
         store_data.http_interceptor = self.http_interceptor.clone();
         let mut store = Store::new(engine, store_data);
@@ -1167,6 +1336,7 @@ pub(super) fn extract_wasm_metadata(
         Capabilities::default(),
         HashMap::new(),
         vec![],
+        None,
     );
     let mut store = Store::new(engine, store_data);
 
@@ -1290,6 +1460,14 @@ impl Tool for WasmToolWrapper {
         }
         let host_credentials = resolution.resolved;
 
+        // Pre-resolve Nostr private key (async, before blocking task).
+        let nostr_private_key = resolve_nostr_key(
+            &self.capabilities,
+            self.secrets_store.as_deref(),
+            &credential_user_id,
+        )
+        .await;
+
         // Serialize context for WASM
         let context_json = serde_json::to_string(ctx).ok();
 
@@ -1319,7 +1497,7 @@ impl Tool for WasmToolWrapper {
             };
 
             tokio::task::spawn_blocking(move || {
-                wrapper.execute_sync(params, context_json, host_credentials)
+                wrapper.execute_sync(params, context_json, host_credentials, nostr_private_key)
             })
             .await
             .map_err(|e| WasmError::ExecutionPanicked(e.to_string()))?
@@ -1532,6 +1710,35 @@ async fn resolve_host_credentials(
     HostCredentialsResolution {
         resolved,
         missing_required,
+    }
+}
+
+/// Pre-resolve the Nostr private key from the secrets store for WASM execution.
+///
+/// Returns `None` if the tool has no Nostr capability, no secrets store,
+/// or the secret is not found. Returns `Some(hex_key)` on success.
+/// Returns an error string if the secret exists but cannot be decrypted.
+async fn resolve_nostr_key(
+    capabilities: &Capabilities,
+    store: Option<&(dyn SecretsStore + Send + Sync)>,
+    user_id: &str,
+) -> Option<String> {
+    let nostr_cap = capabilities.nostr.as_ref()?;
+    let store = store?;
+
+    match store.get_decrypted(user_id, &nostr_cap.secret_name).await {
+        Ok(secret) => {
+            tracing::debug!(secret_name = %nostr_cap.secret_name, "Pre-resolved Nostr key for WASM tool");
+            Some(secret.expose().to_string())
+        }
+        Err(e) => {
+            tracing::warn!(
+                secret_name = %nostr_cap.secret_name,
+                error = ?e,
+                "Could not resolve Nostr private key for WASM tool"
+            );
+            None
+        }
     }
 }
 
@@ -2445,6 +2652,7 @@ mod tests {
             Capabilities::default(),
             HashMap::new(),
             host_credentials,
+            None,
         );
 
         // Should inject for matching host
@@ -2489,6 +2697,7 @@ mod tests {
             Capabilities::default(),
             HashMap::new(),
             host_credentials,
+            None,
         );
 
         // Should inject for matching host + matching path
@@ -2550,6 +2759,7 @@ mod tests {
             Capabilities::default(),
             HashMap::new(),
             host_credentials,
+            None,
         );
 
         // /api/v1 path gets v1 token
@@ -2623,7 +2833,7 @@ mod tests {
             // yield the same WRITE winner under specificity sort
             vec![scoped(), global()],
         ] {
-            let store = StoreData::new(1024 * 1024, Capabilities::default(), HashMap::new(), creds);
+            let store = StoreData::new(1024 * 1024, Capabilities::default(), HashMap::new(), creds, None);
             let mut headers = HashMap::new();
             let mut url = "https://api.example.com/api/v1/write/foo".to_string();
             store.inject_host_credentials("api.example.com", &mut headers, &mut url);
@@ -2658,6 +2868,7 @@ mod tests {
             Capabilities::default(),
             HashMap::new(),
             host_credentials,
+            None,
         );
 
         let mut headers = HashMap::new();
@@ -2686,6 +2897,7 @@ mod tests {
             Capabilities::default(),
             HashMap::new(),
             host_credentials,
+            None,
         );
 
         let text = "Error: request to https://api.example.com?key=super-secret-token failed";

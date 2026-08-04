@@ -1,4 +1,4 @@
-package near:agent@0.3.0;
+package near:agent@0.4.0;
 
 // WASM Tool Sandbox Interface
 //
@@ -103,6 +103,61 @@ interface host {
     ///
     /// Returns true if the secret exists and is accessible to this tool.
     secret-exists: func(name: string) -> bool;
+
+    // ==================== Nostr Capability ====================
+
+    /// Sign a Nostr event (if capability granted).
+    ///
+    /// WASM provides an unsigned event JSON with fields:
+    ///   kind, content, tags, created_at, pubkey
+    ///
+    /// The host:
+    /// 1. Validates the event structure
+    /// 2. Computes the event ID (sha256 of canonical serialization)
+    /// 3. Signs with the agent's Nostr private key (schnorr secp256k1)
+    /// 4. Returns the full signed event JSON with `id` and `sig` fields added
+    ///
+    /// Security:
+    /// - The private key NEVER leaves the host
+    /// - WASM constructs the event, host signs it
+    /// - Capability must be explicitly granted
+    ///
+    /// Returns the complete signed event JSON, or Err with error message.
+    nostr-sign-event: func(unsigned-event-json: string) -> result<string, string>;
+
+    /// Publish a signed Nostr event to a relay via WebSocket.
+    ///
+    /// WASM provides:
+    ///   relay-url — WebSocket URL of the Nostr relay (e.g. wss://relay.example.com)
+    ///   signed-event-json — Complete signed event JSON (from nostr-sign-event or pre-signed)
+    ///
+    /// The host:
+    /// 1. Opens a WebSocket connection to the relay
+    /// 2. Sends ["EVENT", <signed_event>]
+    /// 3. Reads the ["OK", event_id, accepted, message] response
+    /// 4. Returns the event_id on success
+    /// 5. Closes the connection
+    ///
+    /// Returns the event ID on success, or Err with error message.
+    nostr-publish-event: func(relay-url: string, signed-event-json: string) -> result<string, string>;
+
+    /// Subscribe to Nostr events from a relay via WebSocket.
+    ///
+    /// WASM provides:
+    ///   relay-url — WebSocket URL of the Nostr relay
+    ///   filter-json — JSON array of Nostr filter objects (NIP-01)
+    ///   timeout-ms — How long to listen for events before returning
+    ///
+    /// The host:
+    /// 1. Opens a WebSocket connection to the relay
+    /// 2. Sends ["REQ", <sub_id>, <filters...>]
+    /// 3. Collects all EVENT messages until timeout_ms
+    /// 4. Sends ["CLOSE", <sub_id>]
+    /// 5. Returns JSON array of event objects
+    ///
+    /// Returns a JSON string containing an array of Nostr events,
+    /// or Err with error message.
+    nostr-subscribe-events: func(relay-url: string, filter-json: string, timeout-ms: u32) -> result<string, string>;
 }
 
 /// Tool interface that sandboxed tools must implement.
