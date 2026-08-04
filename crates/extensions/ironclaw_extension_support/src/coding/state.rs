@@ -105,7 +105,7 @@ impl CodingReadStates {
             .copied()
     }
 
-    fn lock_entries(&self) -> std::sync::MutexGuard<'_, HashMap<ReadStateKey, u64>> {
+    fn lock_entries(&self) -> std::sync::MutexGuard<'_, HashMap<ReadStateKey, ReadState>> {
         // A poisoned lock means another thread panicked mid-update; the map
         // itself stays coherent (single insert/remove ops), so keep serving.
         match self.entries.lock() {
