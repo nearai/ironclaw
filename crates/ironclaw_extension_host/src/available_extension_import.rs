@@ -851,23 +851,46 @@ setup_url = "{expected_url}"
         assert_eq!(reloaded.source, ManifestSource::InstalledLocal);
     }
 
+    /// A v3 manifest asserting first-party trust. Inline rather than an
+    /// `include_str!` of `packages/github/manifest.toml`: the only property
+    /// this test needs is `trust = "first_party_requested"` on a v3 manifest,
+    /// and reaching into a shipped product package for a fixture coupled the
+    /// test to 200 lines it does not own (WS2 §11.2.7 cross-package reach-ins).
+    const FIRST_PARTY_TRUST_CLAIM_FIXTURE: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "veridian"
+name = "Veridian"
+version = "0.1.0"
+description = "fixture: an imported manifest claiming first-party trust"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/veridian_tool.wasm"
+
+[[tools]]
+id = "veridian.echo"
+description = "Echoes input"
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/veridian/echo.input.v1.json"
+"#;
+
     #[test]
     fn imported_extension_package_rejects_first_party_trust_claims() {
         let error = imported_extension_package(
             vec![(
                 "manifest.toml".to_string(),
-                include_str!("../../extensions/packages/github/manifest.toml")
-                    .as_bytes()
-                    .to_vec(),
+                FIRST_PARTY_TRUST_CLAIM_FIXTURE.as_bytes().to_vec(),
             )],
             &[],
         )
         .expect_err("first-party trust claims must be rejected");
-        // The bundled github manifest is v3, so the rejection comes from the
-        // v3 reader's source/trust gate ("trust `FirstPartyRequested` is not
-        // allowed for this manifest source"); the v2 wording is "not allowed
-        // to assert trust". Pin the shared semantic: the error names trust
-        // and ties the rejection to the manifest source.
+        // The fixture is v3, so the rejection comes from the v3 reader's
+        // source/trust gate ("trust `FirstPartyRequested` is not allowed for
+        // this manifest source"); the v2 wording is "not allowed to assert
+        // trust". Pin the shared semantic: the error names trust and ties the
+        // rejection to the manifest source.
         let message = format!("{error}");
         assert!(
             message.contains("trust") && message.contains("not allowed for this manifest source"),

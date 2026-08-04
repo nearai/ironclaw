@@ -1220,10 +1220,14 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // lane-4: nearai-slice — the last catalog package (nearai_mcp) is still
     // patched from LLM-admin bootstrap config; it now lives with the generic
     // available-extension catalog in ironclaw_extension_host.
-    (
-        "crates/ironclaw_extension_host/src/available_extensions.rs",
-        "nearai-mcp",
-    ),
+    //
+    // The `nearai-mcp` *asset-directory* carve-out for this file is gone (WS2
+    // include_str kills): the package's embeds moved to the inventory module
+    // `ironclaw_extension_support::packages::nearai`, which is a sanctioned
+    // scan-exempt crate, so this file no longer names the directory. The
+    // `nearai_mcp` / `nearaimcp` entries below stay — the endpoint patch and
+    // the `nearai_mcp` module it reads are still here, by §6.8.2 (the fork is
+    // what prevents an `extension_host -> operator` upward edge).
     (
         "crates/ironclaw_extension_host/src/available_extensions.rs",
         "nearai_mcp",

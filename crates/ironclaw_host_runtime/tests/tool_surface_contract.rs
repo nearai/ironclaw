@@ -24,6 +24,7 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::result_meta::FailureKind;
+use ironclaw_host_api::trust::TrustPolicyInput;
 use ironclaw_host_api::{
     action::{Action, NetworkPolicy},
     approval::ApprovalRequest,
@@ -58,7 +59,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, TrustPolicyInput, TrustProvenance,
+    HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, TrustProvenance,
 };
 use serde_json::json;
 use tempfile::tempdir;

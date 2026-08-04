@@ -10,7 +10,8 @@
 
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
 use ironclaw_host_api::ids::CapabilityId;
-use ironclaw_trust::{TrustDecision, TrustPolicy, TrustPolicyInput};
+use ironclaw_host_api::trust::TrustPolicyInput;
+use ironclaw_trust::{TrustDecision, TrustPolicy};
 use tracing::debug;
 
 /// Why trust classification refused to produce a `TrustDecision`.
