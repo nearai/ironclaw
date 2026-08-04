@@ -490,7 +490,7 @@ jobs:
 
       - name: Install Node.js for Emulate
         if: matrix.kind == 'provider'
-        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
         with:
           node-version: "24"
           cache: "pnpm"
