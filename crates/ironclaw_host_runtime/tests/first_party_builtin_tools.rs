@@ -10357,3 +10357,133 @@ fn trust_decision() -> TrustDecision {
         evaluated_at: chrono::Utc::now(),
     }
 }
+#[tokio::test]
+async fn builtin_write_file_rejects_extracted_read_representation_at_unlisted_extension() {
+    // The extension guard names the OOXML/PDF containers, but `read_file` also
+    // extracts .rtf — which the guard deliberately does not list. This is the
+    // only live surface of the second defense (the recorded READ REPRESENTATION),
+    // and it is what stops an extracted-text read from authorizing a raw
+    // overwrite for any format the extension list does not enumerate.
+    let temp = tempfile::tempdir().unwrap();
+    let original = br"{\rtf1\ansi Original clause text.\par}".to_vec();
+    let document_path = temp.path().join("contract.rtf");
+    std::fs::write(&document_path, &original).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/contract.rtf"}),
+        context.clone(),
+    )
+    .await
+    .expect("rtf reads as extracted text");
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/contract.rtf", "content": "Revised clause text."}),
+        context,
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("binary documents cannot be edited with text tools")
+    );
+    assert_eq!(std::fs::read(document_path).unwrap(), original);
+}
+
+#[tokio::test]
+async fn builtin_write_file_still_overwrites_text_log_with_stray_nul() {
+    // The binary backstop on the write path must use the SAME leniency as the
+    // read path (`read_file_tolerates_stray_nul_and_invalid_utf8_in_text_logs`).
+    // A strict any-NUL probe here makes a syslog the model just read
+    // unwritable — and reports it as a "binary document", which it is not.
+    let temp = tempfile::tempdir().unwrap();
+    let mut original = b"Jan  1 00:00:00 host sshd[1]: Failed password for root\n".to_vec();
+    original.push(0u8); // one stray NUL: tolerated on read, must stay writable
+    original.extend_from_slice(b"Jan  1 00:00:01 host sshd[1]: more log line\n");
+    let log_path = temp.path().join("syslog.log");
+    std::fs::write(&log_path, &original).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/syslog.log"}),
+        context.clone(),
+    )
+    .await
+    .expect("text log with a stray NUL must read");
+
+    invoke_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/syslog.log", "content": "redacted log\n"}),
+        context,
+    )
+    .await
+    .expect("a text log the model could read must stay writable");
+    assert_eq!(std::fs::read(&log_path).unwrap(), b"redacted log\n");
+}
+
+#[tokio::test]
+async fn builtin_apply_patch_rejects_a_binary_document_with_an_actionable_reason() {
+    // #6898 named this as the sibling defect: apply_patch already refused a
+    // docx, but via the bare binary probe, so the model saw an opaque failure
+    // and could not tell why. It must now fail for the SAME stated reason
+    // write_file does, and leave the bytes alone.
+    let temp = tempfile::tempdir().unwrap();
+    let original = skill_bundle_zip(&[(
+        "word/document.xml",
+        br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Original text</w:t></w:r></w:p></w:body></w:document>"#,
+    )]);
+    let document_path = temp.path().join("review.docx");
+    std::fs::write(&document_path, &original).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/review.docx"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/review.docx",
+            "old_string": "Original text",
+            "new_string": "Revised text",
+        }),
+        context,
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("binary documents cannot be edited with text tools"),
+        "apply_patch must explain itself like write_file does, got {:?}",
+        failure.message
+    );
+    assert_eq!(std::fs::read(document_path).unwrap(), original);
+}

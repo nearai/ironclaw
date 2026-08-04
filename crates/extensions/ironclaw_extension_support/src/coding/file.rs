@@ -501,7 +501,13 @@ async fn verify_read_before_edit(
     if content_fingerprint(&bytes) != recorded.fingerprint {
         return Err(stale_read_error(operation, resolved.scoped_path.as_str()));
     }
-    reject_binary_probe(&bytes)
+    // Backstop for binary targets the extension guards cannot name. Deliberately
+    // the LENIENT probe: `read_file` admits text carrying a few stray NULs
+    // (`reject_binary_probe_lenient` in `decode_read_file_text`), so the strict
+    // probe here rejected a syslog the model had just read successfully — and
+    // called it a "binary document". `apply_patch` still applies the strict
+    // probe itself, where byte-fidelity for write-back demands it.
+    reject_binary_probe_lenient(&bytes)
         .map_err(|_| binary_document_write_error(operation, resolved.scoped_path.as_str()))?;
     Ok(bytes)
 }
