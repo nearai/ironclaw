@@ -489,19 +489,26 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertEqual(plan["integration_lanes"], [])
 
     def test_decided_repo_root_script_paths_are_owned_by_other_workflows(self) -> None:
-        """Repo-root `scripts/` files that another workflow owns.
+        """Repo-root `scripts/` and `tests/` files another workflow owns.
 
         The `unmapped test or CI path` arm deliberately refuses `scripts/**`
-        outside `scripts/ci/` so each file gets a decision rather than a
-        blanket prefix. These two have one, recorded beside the constant: the
-        panic baseline belongs to Code Style, and the E2E selector script
-        belongs to the `Reborn E2E` workflow's own scope detector. Neither
-        selects a lane in *this* planner — but the sibling that has no
-        decision must still refuse, which the second half asserts.
+        outside `scripts/ci/`, and bare `tests/**`, so each file gets a
+        decision rather than a blanket prefix. These have one, recorded beside
+        the constant: the panic baseline belongs to Code Style, the E2E
+        selector script belongs to the `Reborn E2E` workflow's own scope
+        detector, and the release-binary smoke's unit tests are run by Code
+        Style with `unittest`. None selects a lane in *this* planner — but the
+        sibling that has no decision must still refuse, which the second half
+        asserts.
+
+        The smoke entry is a regression: left undecided it aborted the whole
+        planner, failing `Detect Reborn test scope` and `Tests (Reborn)` on
+        any PR that touched the file.
         """
         for path in (
             "scripts/no_panics_reborn_baseline.txt",
             "scripts/reborn-e2e-rust.sh",
+            "tests/test_smoke_release_binary.py",
         ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])

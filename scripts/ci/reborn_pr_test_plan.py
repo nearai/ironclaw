@@ -53,7 +53,7 @@ PR_STATIC_CONTROL_PATHS = {
     "tests/integration/coverage-floor.toml",
     # Repo-root `scripts/` is deliberately NOT prefix-classified — the
     # `unmapped test or CI path` arm below exists to force a per-file decision.
-    # These two are decided:
+    # These are decided:
     #   * the panic baseline is enforced by Code Style
     #     (`check_no_panics.py --reborn-baseline`), which runs on every PR and
     #     owns the whole check; no Reborn lane reads it.
@@ -61,8 +61,15 @@ PR_STATIC_CONTROL_PATHS = {
     #     its own scope detector (`Detect Reborn E2E scope`). This planner
     #     selects lanes for `Tests (Reborn)` only, and that workflow does not
     #     invoke the script.
+    #   * `tests/test_smoke_release_binary.py` is run by Code Style
+    #     (`python3 -m unittest tests/test_smoke_release_binary.py`), whose
+    #     changed-path filter already names it. It exercises a CI script with
+    #     `unittest`, not Reborn behavior with cargo, so no lane here reads it.
+    #     Its subject, `scripts/ci/smoke-release-binary.py`, is already covered
+    #     by the `scripts/ci/` prefix below.
     "scripts/no_panics_reborn_baseline.txt",
     "scripts/reborn-e2e-rust.sh",
+    "tests/test_smoke_release_binary.py",
 }
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/")
 BUCKET_WEIGHTS = {
