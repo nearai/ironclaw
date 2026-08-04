@@ -21,9 +21,9 @@ use super::{
     patch::{parse_apply_patch_input, replacement_error},
     paths::{
         create_parent_dir_unless_sensitive, deny_sensitive_existing_path, filesystem_error,
-        is_excluded_name, is_sensitive_scoped_path, is_workspace_path, operation_allowed,
-        resolve_optional_path, resolve_required_path, scoped_child_path, stat_optional,
-        virtual_to_relative,
+        filesystem_error_with_summary, is_excluded_name, is_sensitive_scoped_path,
+        is_workspace_path, operation_allowed, resolve_optional_path, resolve_required_path,
+        safe_summary_path, scoped_child_path, stat_optional, virtual_to_relative,
     },
     state::{
         CodingReadScopeKey, ReadRepresentation, SharedCodingEditLocks, SharedCodingReadStates,
@@ -739,46 +739,6 @@ pub(super) async fn apply_patch(
         result,
         Some(display_preview),
     ))
-}
-
-fn filesystem_error_with_summary(
-    operation: &str,
-    scoped_path: &str,
-    error: ironclaw_filesystem::FilesystemError,
-) -> CodingCapabilityError {
-    let scoped_path = safe_summary_path(scoped_path);
-    let summary = match &error {
-        ironclaw_filesystem::FilesystemError::NotFound { .. } => {
-            format!("{operation} failed for {scoped_path}: file not found")
-        }
-        ironclaw_filesystem::FilesystemError::PermissionDenied { .. }
-        | ironclaw_filesystem::FilesystemError::MountNotFound { .. }
-        | ironclaw_filesystem::FilesystemError::PathOutsideMount { .. }
-        | ironclaw_filesystem::FilesystemError::SymlinkEscape { .. }
-        | ironclaw_filesystem::FilesystemError::MountConflict { .. }
-        | ironclaw_filesystem::FilesystemError::VersionMismatch { .. }
-        | ironclaw_filesystem::FilesystemError::Unsupported { .. }
-        | ironclaw_filesystem::FilesystemError::IndexConflict { .. } => {
-            format!("{operation} failed for {scoped_path}: permission denied or unsupported path")
-        }
-        ironclaw_filesystem::FilesystemError::Backend { .. }
-        | ironclaw_filesystem::FilesystemError::BackendInfrastructure { .. } => {
-            format!("{operation} failed for {scoped_path}: filesystem backend error")
-        }
-        ironclaw_filesystem::FilesystemError::Contract(_) => {
-            format!("{operation} failed for {scoped_path}: invalid path")
-        }
-        _ => format!("{operation} failed for {scoped_path}: filesystem error"),
-    };
-    let kind = filesystem_error(error).kind();
-    CodingCapabilityError::with_safe_summary(kind, summary)
-}
-
-fn safe_summary_path(scoped_path: &str) -> String {
-    let path_hint = scoped_path
-        .trim_start_matches('/')
-        .replace(['/', '\\'], " ");
-    format!("path {path_hint}")
 }
 
 fn existing_text_for_preview(stat: &ironclaw_filesystem::FileStat, bytes: &[u8]) -> Option<String> {
