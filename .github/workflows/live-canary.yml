@@ -796,9 +796,16 @@ jobs:
         with:
           key: live-canary-reborn-webui-v2-live-qa
 
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        if: steps.lookup.outputs.found != '1'
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+          path: .canonical-live-canary-actions
+
       - name: Setup OVH sccache
         if: steps.lookup.outputs.found != '1'
-        uses: ./.github/actions/setup-sccache-dist
+        uses: ./.canonical-live-canary-actions/.github/actions/setup-sccache-dist
         with:
           scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
           auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
@@ -808,6 +815,11 @@ jobs:
           cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
           cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
+
+      - name: Remove canonical action checkout
+        if: steps.lookup.outputs.found != '1'
+        shell: bash
+        run: rm -rf .canonical-live-canary-actions
 
       - name: Build fallback Reborn WebUI v2 binary once
         if: steps.lookup.outputs.found != '1'
