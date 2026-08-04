@@ -476,27 +476,38 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
     // weaken redaction. Not extension routing (the classifier has only the
     // tool-name string at trace-analysis time). Pinned by
     // `tool_payload_redaction_profile_is_a_safety_denylist_not_inventory_routing`.
+    //
+    // Scoped to two files since the `contribution.rs` split (WS6): the rule
+    // tables live in `tool_payloads.rs` and only the external-write detector
+    // (`classify_tool_side_effect`, `slack` alone) is in `classification.rs`.
+    // Both carve-outs are narrower than the single whole-file one they
+    // replace, so the gate now polices the rest of the module.
     (
-        "crates/ironclaw_reborn_traces/src/contribution.rs",
+        "crates/ironclaw_reborn_traces/src/contribution/tool_payloads.rs",
         "slack",
-        "trace payload-redaction/side-effect safety classifier keyed off tool-name \
-         keywords (messaging profile + external-write detection); a safety denylist, \
-         not extension routing",
+        "trace payload-redaction safety classifier keyed off tool-name keywords \
+         (messaging profile); a safety denylist, not extension routing",
     ),
     (
-        "crates/ironclaw_reborn_traces/src/contribution.rs",
+        "crates/ironclaw_reborn_traces/src/contribution/classification.rs",
+        "slack",
+        "trace external-write side-effect detection keyed off tool-name keywords \
+         (`classify_tool_side_effect`); a safety denylist, not extension routing",
+    ),
+    (
+        "crates/ironclaw_reborn_traces/src/contribution/tool_payloads.rs",
         "telegram",
         "trace payload-redaction safety classifier keyed off tool-name keywords \
          (messaging profile); a safety denylist, not extension routing",
     ),
     (
-        "crates/ironclaw_reborn_traces/src/contribution.rs",
+        "crates/ironclaw_reborn_traces/src/contribution/tool_payloads.rs",
         "gmail",
         "trace payload-redaction safety classifier keyed off tool-name keywords \
          (email profile); a safety denylist, not extension routing",
     ),
     (
-        "crates/ironclaw_reborn_traces/src/contribution.rs",
+        "crates/ironclaw_reborn_traces/src/contribution/tool_payloads.rs",
         "github",
         "trace payload-redaction safety classifier keyed off tool-name keywords \
          (issue-tracker profile); a safety denylist, not extension routing",
