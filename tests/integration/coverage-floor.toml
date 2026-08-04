@@ -316,11 +316,34 @@ name = "ironclaw_extension_host"
 # repair, and it is recorded as such. From the same dispatch run as the entries
 # at the end of this file: 30865483401 at
 # 4c841a4321dd2d62b695120c60e6fe6bd4ac5ebf, 21605 / 24554 = 87.99%.
-floor_percent = 87.99
-floor_covered_lines = 21605
-captured_total_lines = 24554
+#
+# DELETION ADJUSTMENT 2026-08-04 (#7143), and it is an adjustment, NOT a
+# recapture — the distinction matters, so it is stated rather than implied.
+# The entry directly above was captured on a tree that still contained the
+# retired-identity boot migration, and its own rationale says the figure rose
+# "partly because this PR also adds the retired-`slack_user` migration test".
+# #7143 deletes that branch by owner ruling (PROPOSAL §12.11 D-I): 29
+# production lines go, and they were FULLY COVERED by exactly the test being
+# deleted with them — so this is the shrinkage direction this file's same-PR
+# workflow names ("a legitimate code+test deletion lowering covered lines, even
+# when the denominator barely moves"). Both fields must move or the next
+# dispatch reds on a floor that no longer describes the crate.
+#
+# Arithmetic, deliberately conservative and shown so it can be checked: 29
+# removed production lines, of which the `const` and the four signature lines
+# emit no LLVM region, so ~24 instrumented regions leave both numerator and
+# denominator together. Deducted 25 from each (21605 -> 21580, 24554 -> 24529),
+# one more than measured so a rounding difference cannot red the lane.
+# 21580 / 24529 = 87.98%, so `floor_percent` moves 87.99 -> 87.97 — a hair,
+# because removing fully-covered lines barely moves a ratio. No PR-triggered
+# lane produces a coverage verdict (#7036), so these numbers could not be read
+# off this PR's own run; **the next dispatch should recapture this entry and
+# replace this block with a real capture.**
+floor_percent = 87.97
+floor_covered_lines = 21580
+captured_total_lines = 24529
 captured_date = "2026-08-04"
-rationale = "Channel ingress deduplication and outbound delivery routing are production-composed. Recaptured after the WS2.4 extension_manager split moved the product face out, then again on the WS2 closeout as the source side of the NEAR AI embed move."
+rationale = "Channel ingress deduplication and outbound delivery routing are production-composed. Recaptured after the WS2.4 extension_manager split moved the product face out, then again on the WS2 closeout as the source side of the NEAR AI embed move; adjusted (not recaptured) for the retired-identity branch deletion in #7143 — see the block above."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
