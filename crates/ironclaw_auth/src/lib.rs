@@ -10,6 +10,7 @@
 //! pending maps, V1 extension manager authority, or V1 secret stores.
 
 mod account_state;
+mod channel_connection;
 mod cleanup;
 mod credential;
 pub mod domain;
@@ -25,12 +26,14 @@ mod ids;
 mod interaction;
 pub mod oauth;
 pub mod product_auth;
+pub mod product_prompt;
 mod provider;
 mod scope;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
 pub use account_state::{AuthAccountLastError, AuthAccountState, project_auth_account_state};
+pub use channel_connection::{ChannelAuthAccountState, ChannelConnectionService};
 pub use cleanup::{
     CanceledCleanupFlow, SecretCleanupAction, SecretCleanupQuarantine,
     SecretCleanupQuarantineReason, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,

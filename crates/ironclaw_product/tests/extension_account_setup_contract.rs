@@ -12,7 +12,7 @@ use ironclaw_product::{
 };
 use ironclaw_product_contracts::account_setup::{
     AccountConnectionStatusError, AccountConnectionStatusSource, ChannelConnectionNoticePolicy,
-    ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
+    ExtensionAccountSetupDescriptor, ExtensionAccountSetupError, ExtensionAccountSetupReader,
 };
 
 fn extension_id(value: &str) -> ExtensionId {

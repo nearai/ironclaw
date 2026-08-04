@@ -35,7 +35,7 @@ use ironclaw_outbound::{
 };
 use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnRunState};
 
-use crate::auth_prompt::BlockedAuthFlowCanceller;
+use ironclaw_auth::product_prompt::BlockedAuthFlowCanceller;
 use ironclaw_product_contracts::prompt_source::{
     ApprovalPromptContextSource, BlockedAuthPromptSource,
 };

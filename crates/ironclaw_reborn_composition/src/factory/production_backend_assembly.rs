@@ -931,7 +931,7 @@ pub(super) async fn build_backend_production(
     );
     let account_setups = ExtensionAccountSetupRegistry::default();
     let channel_disconnect_slot: Arc<
-        std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>,
+        std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>,
     > = Arc::new(std::sync::OnceLock::new());
     let extension_management = Arc::new(
         RebornLocalExtensionManagementPort::new(
@@ -957,7 +957,7 @@ pub(super) async fn build_backend_production(
                     },
             },
         )
-        .with_account_setup_registry(account_setups.clone())
+        .with_account_setup_registry(Arc::new(account_setups.clone()))
         .with_removal_cleanup_registry(removal_cleanup)
         .with_provider_instance_readiness(provider_instance_readiness)
         .with_channel_disconnect_slot(Arc::clone(&channel_disconnect_slot)),

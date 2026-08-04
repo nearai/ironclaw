@@ -64,9 +64,8 @@ pub use types::{
     AcceptConversationMessageRequest, AcceptedConversationMessage,
     AcceptedConversationMessageLookup, AcceptedConversationMessageReplay, ConditionalUnpairOutcome,
     ConversationBindingResolution, ConversationMessageRecord, ConversationRouteKind,
-    ExpectedExternalActorOwner, ExternalActorBindingEpoch, InboundTurnRequest, InboundTurnResponse,
-    LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
-    ReplyTargetBinding, ResolveConversationRequest, ResolveStoredReplyTargetRequest,
-    StoredReplyTargetAccess, StoredReplyTargetBinding, ThreadAccessDecision,
-    ValidateReplyTargetRequest,
+    ExpectedExternalActorOwner, InboundTurnRequest, InboundTurnResponse, LinkConversationRequest,
+    LinkedConversationBinding, MessageIdempotencyStatus, ReplyTargetBinding,
+    ResolveConversationRequest, ResolveStoredReplyTargetRequest, StoredReplyTargetAccess,
+    StoredReplyTargetBinding, ThreadAccessDecision, ValidateReplyTargetRequest,
 };

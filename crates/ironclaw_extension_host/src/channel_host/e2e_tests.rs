@@ -110,6 +110,7 @@ use crate::extension_ingress::{
     extension_ingress_route_mount,
 };
 use crate::run_delivery_ports::ProductAuthBlockedAuthPromptSource;
+use ironclaw_auth::product_prompt::AuthChallengeProvider;
 use ironclaw_extension_host::{
     AdminConfigurationService, ChannelConfigReactivation, ChannelConfigService,
     FilesystemAdminConfigurationStore,
@@ -117,7 +118,6 @@ use ironclaw_extension_host::{
 use ironclaw_extension_host::{IngressReplyContextSource, SnapshotChannelDeliveryResolver};
 use ironclaw_host_api::user_identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
 use ironclaw_host_ingress::PublicRouteMount;
-use ironclaw_product::AuthChallengeProvider;
 use ironclaw_product_contracts::prompt_source::BlockedAuthPromptSource;
 
 #[path = "e2e_auth_challenge.rs"]

@@ -1,26 +1,45 @@
-//! Product-neutral rendering support for blocked-auth prompts.
+//! The product-facing auth-challenge surface: the redacted challenge view, the
+//! two ports that materialize and cancel a challenge, and the prompt-view
+//! constructor both the delivery path and the projection layer render through.
 //!
-//! One owner for the blocked-auth prompt vocabulary: the challenge view, the
-//! challenge/cancel ports composition implements, and the prompt-view
-//! constructor both the delivery path and the projection layer render
-//! through. Composition consumes these — it must not re-declare them.
+//! **Why here.** Every type in these signatures is this crate's own vocabulary
+//! — [`AuthProviderId`], [`CredentialAccountLabel`], [`OAuthAuthorizationUrl`],
+//! [`AuthProductError`] — and the ports have implementors on both sides of the
+//! product boundary: `ironclaw_product`'s `RebornProductAuthServices` and
+//! `ironclaw_extension_host`'s `RecipeAuthChallengeProvider`. Declaring them in
+//! `ironclaw_product_contracts` would mean narrowing four validated auth types
+//! down to `String` to satisfy that crate's `host_api` + `extension_contracts`
+//! ceiling; declaring them here costs nothing and is what
+//! `.claude/rules/type-placement.md` §2/§3 asks for — a domain's port belongs
+//! in the domain, not in the vocabulary crate that describes it
+//! (`families/contracts.md:46`).
+//!
+//! The prompt DTOs these produce ([`AuthPromptView`], [`PairingPromptView`],
+//! [`ConnectionPromptContext`]) stay in `ironclaw_extension_contracts::auth_prompt`,
+//! which owns the channel-rendered half of the family; this module is their
+//! auth-side producer.
 
-use crate::{
-    AuthPromptChallengeKind, AuthPromptView, ConnectionPromptContext, ProductAdapterError,
-    RedactedString,
-};
 use async_trait::async_trait;
-use ironclaw_auth::{
-    AuthProductError, AuthProviderId, CredentialAccountLabel, OAuthAuthorizationUrl,
+use ironclaw_extension_contracts::auth_prompt::{
+    AuthPromptChallengeKind, AuthPromptView, ConnectionPromptContext, PairingPromptView,
 };
-use ironclaw_extension_contracts::auth_prompt::PairingPromptView;
+use ironclaw_host_api::product_adapter_error::{ProductAdapterError, RedactedString};
+use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 use ironclaw_host_api::{
     capability::RuntimeCredentialAccountSetup, decision::RuntimeCredentialAuthRequirement,
     ids::UserId,
 };
 use ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement;
 use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
-use ironclaw_turns::{TurnRunId, TurnScope};
+
+use std::sync::Arc;
+
+use crate::RebornProductAuthServices;
+use crate::error::AuthProductError;
+use crate::flow::{AuthChallenge, AuthFlowOwnerScope, TurnGateAuthFlowQuery};
+use crate::ids::{
+    AuthGateRef, AuthProviderId, CredentialAccountLabel, OAuthAuthorizationUrl, TurnRunRef,
+};
 
 /// Map a manifest display string onto the projection's optional field: a blank
 /// value means the affordance does not exist, which is `None` on the wire. The
@@ -259,6 +278,144 @@ fn auth_prompt_from_credential_requirement(
     view
 }
 
+/// The composed product-auth services as a challenge provider, when a durable
+/// flow record source is wired in.
+pub fn product_auth_challenge_provider(
+    product_auth: &Arc<RebornProductAuthServices>,
+) -> Option<Arc<dyn AuthChallengeProvider>> {
+    product_auth
+        .flow_record_source()
+        .map(|_| Arc::clone(product_auth) as Arc<dyn AuthChallengeProvider>)
+}
+
+pub fn blocked_auth_flow_canceller(
+    product_auth: &Arc<RebornProductAuthServices>,
+) -> Option<Arc<dyn BlockedAuthFlowCanceller>> {
+    product_auth
+        .flow_record_source()
+        .map(|_| Arc::clone(product_auth) as Arc<dyn BlockedAuthFlowCanceller>)
+}
+
+#[async_trait]
+impl AuthChallengeProvider for RebornProductAuthServices {
+    async fn challenge_for_gate(
+        &self,
+        scope: &TurnScope,
+        owner_user_id: &UserId,
+        run_id: TurnRunId,
+        gate_ref: &str,
+        credential_requirements: &[RuntimeCredentialAuthRequirement],
+    ) -> Result<Option<AuthChallengeView>, AuthProductError> {
+        let gate_ref = AuthGateRef::new(gate_ref.to_string()).map_err(|error| {
+            tracing::debug!(%error, "invalid gate_ref in auth challenge lookup");
+            AuthProductError::BackendUnavailable
+        })?;
+        let Some(source) = self.flow_record_source() else {
+            return Ok(None);
+        };
+        let flow_manager = self.flow_manager();
+        if let Some(driver) = self.oauth_gate_driver()
+            && let Some(flow) = driver
+                .challenge_for_blocked_gate(crate::OAuthGateChallengeRequest {
+                    flow_manager: &flow_manager,
+                    flow_source: &source,
+                    requirements: credential_requirements,
+                    scope,
+                    owner_user_id,
+                    run_id,
+                    gate_ref: &gate_ref,
+                })
+                .await?
+        {
+            let Some(challenge) = flow.challenge.as_ref() else {
+                return Ok(None);
+            };
+            return Ok(Some(auth_challenge_to_view(challenge, &flow.provider)));
+        }
+        let flow = source
+            .flow_for_turn_gate(TurnGateAuthFlowQuery {
+                owner: AuthFlowOwnerScope {
+                    tenant_id: scope.tenant_id.clone(),
+                    user_id: owner_user_id.clone(),
+                    agent_id: scope.agent_id.clone(),
+                    project_id: scope.project_id.clone(),
+                    thread_id: scope.thread_id.clone(),
+                },
+                turn_run_ref: TurnRunRef::new(run_id.to_string()).map_err(|error| {
+                    tracing::debug!(%error, "invalid run_id in auth challenge lookup");
+                    AuthProductError::BackendUnavailable
+                })?,
+                gate_ref,
+                include_terminal: false,
+            })
+            .await?;
+        let Some(flow) = flow else {
+            return Ok(None);
+        };
+        let Some(challenge) = flow.challenge.as_ref() else {
+            return Ok(None);
+        };
+        Ok(Some(auth_challenge_to_view(challenge, &flow.provider)))
+    }
+}
+
+#[async_trait]
+impl BlockedAuthFlowCanceller for RebornProductAuthServices {
+    async fn cancel_blocked_auth_flow(
+        &self,
+        scope: &TurnScope,
+        owner_user_id: &UserId,
+        run_id: TurnRunId,
+        gate_ref: &str,
+    ) -> Result<(), AuthProductError> {
+        self.cancel_blocked_auth_flow(scope, owner_user_id, run_id, gate_ref)
+            .await
+    }
+}
+
+fn auth_challenge_to_view(
+    challenge: &AuthChallenge,
+    provider: &AuthProviderId,
+) -> AuthChallengeView {
+    match challenge {
+        AuthChallenge::OAuthUrl {
+            authorization_url,
+            expires_at,
+        } => AuthChallengeView {
+            kind: AuthPromptChallengeKind::OAuthUrl,
+            provider: provider.clone(),
+            account_label: None,
+            authorization_url: Some(authorization_url.clone()),
+            expires_at: Some(*expires_at),
+            // Product-auth OAuth relay: no channel-connection context.
+            pairing: None,
+        },
+        AuthChallenge::ManualTokenRequired {
+            provider,
+            label,
+            expires_at,
+            ..
+        } => AuthChallengeView {
+            kind: AuthPromptChallengeKind::ManualToken,
+            provider: provider.clone(),
+            account_label: Some(label.clone()),
+            authorization_url: None,
+            expires_at: Some(*expires_at),
+            pairing: None,
+        },
+        AuthChallenge::AccountSelectionRequired { .. }
+        | AuthChallenge::ReauthorizeRequired { .. }
+        | AuthChallenge::SetupRequired { .. } => AuthChallengeView {
+            kind: AuthPromptChallengeKind::Other,
+            provider: provider.clone(),
+            account_label: None,
+            authorization_url: None,
+            expires_at: None,
+            pairing: None,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,7 +434,7 @@ mod tests {
 
     fn base_view() -> AuthPromptView {
         AuthPromptView {
-            turn_run_id: ironclaw_turns::TurnRunId::new(),
+            turn_run_id: TurnRunId::new(),
             auth_request_ref: "gate:auth:1".to_string(),
             invocation_id: None,
             headline: "Authentication required".to_string(),

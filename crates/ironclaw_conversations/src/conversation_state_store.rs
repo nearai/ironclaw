@@ -48,10 +48,10 @@ use crate::{
     AcceptedConversationMessageLookup, AcceptedConversationMessageReplay, AdapterInstallationId,
     AdapterKind, ConditionalUnpairOutcome, ConversationActorPairingService,
     ConversationBindingResolution, ConversationBindingService, ConversationMessageRecord,
-    ExpectedExternalActorOwner, ExternalActorBindingEpoch, ExternalConversationIdentity,
-    InMemoryConversationServices, InboundConversationService, InboundTurnError,
-    LinkConversationRequest, LinkedConversationBinding, ReplyTargetBinding,
-    ResolveConversationRequest, ValidateReplyTargetRequest,
+    ExpectedExternalActorOwner, ExternalConversationIdentity, InMemoryConversationServices,
+    InboundConversationService, InboundTurnError, LinkConversationRequest,
+    LinkedConversationBinding, ReplyTargetBinding, ResolveConversationRequest,
+    ValidateReplyTargetRequest,
     memory::{
         AcceptedMessageReplayKey, ActorKey, BindingKey, BindingRecord, ExternalEventRouteKey,
         InMemoryState, MessageIdempotencyKey, ReplyTargetRecord, StoredAcceptedMessageReplay,
@@ -59,7 +59,7 @@ use crate::{
     },
     state_store::{ConversationStateRepository, PersistedConversationState},
 };
-use ironclaw_extension_contracts::external::ExternalActorRef;
+use ironclaw_extension_contracts::external::{ExternalActorBindingEpoch, ExternalActorRef};
 
 const STATE_PREFIX: &str = "/conversations";
 

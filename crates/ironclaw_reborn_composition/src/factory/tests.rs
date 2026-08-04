@@ -306,7 +306,7 @@ impl ConversationActorPairingService for FailingConversationActorPairingService 
         _adapter_installation_id: AdapterInstallationId,
         _external_actor_ref: ExternalActorRef,
         _user_id: UserId,
-        _binding_epoch: ironclaw_conversations::ExternalActorBindingEpoch,
+        _binding_epoch: ironclaw_extension_contracts::external::ExternalActorBindingEpoch,
     ) -> Result<(), ironclaw_conversations::InboundTurnError> {
         Err(ironclaw_conversations::InboundTurnError::DurableState {
             reason: "raw durable store error".to_string(),

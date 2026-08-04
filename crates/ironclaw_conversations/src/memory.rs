@@ -20,14 +20,15 @@ use crate::{
     AcceptedConversationMessageLookup, AcceptedConversationMessageReplay, AdapterInstallationId,
     AdapterKind, ConditionalUnpairOutcome, ConversationActorPairingService,
     ConversationBindingResolution, ConversationBindingService, ConversationMessageRecord,
-    ConversationRouteKind, ExpectedExternalActorOwner, ExternalActorBindingEpoch,
-    ExternalConversationIdentity, InboundConversationService, InboundTurnError,
-    LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
-    ReplyTargetBinding, ResolveConversationRequest, ResolveStoredReplyTargetRequest,
-    StoredReplyTargetAccess, StoredReplyTargetBinding, ThreadAccessDecision,
-    ValidateReplyTargetRequest,
+    ConversationRouteKind, ExpectedExternalActorOwner, ExternalConversationIdentity,
+    InboundConversationService, InboundTurnError, LinkConversationRequest,
+    LinkedConversationBinding, MessageIdempotencyStatus, ReplyTargetBinding,
+    ResolveConversationRequest, ResolveStoredReplyTargetRequest, StoredReplyTargetAccess,
+    StoredReplyTargetBinding, ThreadAccessDecision, ValidateReplyTargetRequest,
 };
-use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
+use ironclaw_extension_contracts::external::{
+    ExternalActorBindingEpoch, ExternalActorRef, ExternalConversationRef,
+};
 
 #[derive(Clone)]
 pub struct InMemoryConversationServices {

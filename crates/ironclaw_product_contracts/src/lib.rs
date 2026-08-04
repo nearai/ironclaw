@@ -34,7 +34,9 @@
 
 pub mod account_setup;
 pub mod action;
+pub mod actor_identity;
 pub mod admin_users;
+pub mod approval_prompt;
 pub mod channel_config;
 pub mod command;
 pub mod delivery;

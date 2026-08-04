@@ -30,7 +30,6 @@ mod approval_interaction;
 mod approval_prompt;
 mod auth_continuation;
 mod auth_interaction;
-mod auth_prompt;
 mod automation_product_service;
 mod automation_thread_metadata;
 mod binding;
@@ -57,7 +56,6 @@ mod lifecycle;
 mod outbound_delivery;
 mod policy;
 mod process_gate_turn_view;
-mod product_auth_prompt;
 mod product_surface_inbound;
 mod project_create_capability;
 mod project_service;
@@ -68,7 +66,6 @@ mod scoped_fs;
 mod steering;
 mod workflow;
 
-pub use product_auth_prompt::{blocked_auth_flow_canceller, product_auth_challenge_provider};
 pub use project_create_capability::{PROJECT_CREATE_CAPABILITY_ID, project_create_capability};
 pub use project_service::RebornProjectService;
 
@@ -105,10 +102,12 @@ pub use auth_interaction::{
     ListPendingAuthInteractionsResponse, PendingAuthInteractionView, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, is_auth_gate_ref,
 };
-pub use auth_prompt::{
-    AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller, PairingAuthChallengeView,
-    auth_prompt_view_for_blocked_auth,
-};
+// `AuthChallengeProvider`, `AuthChallengeView`, `BlockedAuthFlowCanceller`,
+// `PairingAuthChallengeView` and `auth_prompt_view_for_blocked_auth` moved to
+// `ironclaw_auth::product_prompt` (WS2.5): every type in their signatures is
+// auth's own vocabulary, and the extension host implements the challenge port.
+// No re-export here — consumers import from the owner
+// (`.claude/rules/type-placement.md`).
 pub use automation_product_service::RebornAutomationProductService;
 pub use automation_thread_metadata::{
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, automation_trigger_thread_metadata_json,
@@ -138,10 +137,12 @@ pub use process_gate_turn_view::{current_turn_gate_runs, first_turn_run_for_gate
 // and `ProductConversationSubjectRouteResolver` are deliberately absent: they
 // moved to `ironclaw_product_contracts::subject_route` (WS2.2), and that crate
 // grants no second import path (`reborn_product_contract_location_scan.rs`).
+// `ProductActorUserResolutionRequest`, `ProductActorUserResolver` and
+// `ResolvedProductActorUser` left for the same reason and under the same rule:
+// `ironclaw_product_contracts::actor_identity` (WS2.5).
 pub use conversation_binding::{
-    ProductActorBindingPolicy, ProductActorUserResolutionRequest, ProductActorUserResolver,
-    ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
-    ResolvedProductActorUser, StaticProductActorUserResolver, StaticProductInstallationResolver,
+    ProductActorBindingPolicy, ProductConversationBindingService, ProductInstallationKey,
+    ProductInstallationScope, StaticProductActorUserResolver, StaticProductInstallationResolver,
 };
 pub use error::{
     AuthContinuationRejectionKind, ProductSurfaceFailure, lifecycle_product_surface_error,
@@ -313,8 +314,8 @@ pub use reborn_services::{
     AUTOMATION_RENAME_COMMAND, AUTOMATION_RESUME_CAPABILITY, AUTOMATION_RESUME_CAPABILITY_ID,
     AUTOMATION_RESUME_COMMAND, AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATIONS_VIEW, AutomationListRequest,
-    AutomationProductService, CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, ChannelAuthAccountState,
-    ChannelConnectionService, ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
+    AutomationProductService, CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND,
+    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
     EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY,
     EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY, EXTENSION_INSTALL_CAPABILITY_ID,

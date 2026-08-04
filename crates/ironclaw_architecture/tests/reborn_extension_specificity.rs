@@ -1214,7 +1214,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // forbidden outright, so the example was rewritten generically rather than
     // re-carved. The entry is deleted, not repointed — the allowlist shrinks.
     ("crates/ironclaw_product/src/lib.rs", "telegram"),
-    ("crates/ironclaw_product/src/reborn_services.rs", "slack"),
     // WS5 port inversion: these three wire-DTO sites moved to the contracts
     // crate with their code (`NearAiAuthProvider`'s OAuth identity providers and
     // the project-metadata doc example). Same terms, same debt, new file.
@@ -1667,7 +1666,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// above, by the ratchet's own failure message with the constant set to 0:
 /// the batch union is **123** — #7161's conversions repoint entries in place
 /// and add none.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 123;
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 122;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///
