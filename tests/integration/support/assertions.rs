@@ -19,6 +19,7 @@
 
 use ironclaw_events::{SecurityBoundary, SecurityDecision};
 use ironclaw_host_api::ids::ProcessId;
+use ironclaw_llm::Role;
 use ironclaw_loop_contracts::{LoopHostMilestoneKind, LoopRecoveryClass};
 use ironclaw_processes::ProcessKind;
 use ironclaw_reborn_config::BudgetDefaults;
@@ -29,6 +30,7 @@ use rust_decimal::Decimal;
 
 use super::builder::RebornIntegrationHarness;
 use super::doubles::TRANSCRIPT_FAILURE_SECRET;
+use crate::support::trace_llm::{first_divergence, leading_system_block};
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -506,39 +508,145 @@ impl RebornIntegrationHarness {
     /// conversation tail, never rewrite the cached prefix. Requires at least
     /// two captured requests so the assertion cannot pass vacuously.
     pub async fn assert_system_prompts_identical(&self) -> HarnessResult<()> {
-        let prompts = self.captured_system_prompts();
-        if prompts.len() < 2 {
+        // Per REQUEST, not a flattened message list: flattening loses which
+        // request produced which block, so a request that shipped no system
+        // prompt at all would pass silently and a request that legitimately
+        // shipped two identical blocks would fail.
+        let requests = self.scripted_llm.captured_requests();
+        if requests.len() < 2 {
             return Err(format!(
-                "need at least two captured system prompts to prove stability; saw {}",
-                prompts.len()
+                "need at least two captured model requests to prove stability; saw {}",
+                requests.len()
             )
             .into());
         }
-        let first = &prompts[0];
-        for (index, prompt) in prompts.iter().enumerate().skip(1) {
-            if prompt != first {
-                let diff_at = first
-                    .char_indices()
-                    .zip(prompt.chars())
-                    .find(|((_, a), b)| a != b)
-                    .map(|((byte, _), _)| byte)
-                    .unwrap_or_else(|| first.len().min(prompt.len()));
-                let context_start = diff_at.saturating_sub(80);
-                let excerpt = |s: &str| -> String {
-                    s.get(context_start..(diff_at + 120).min(s.len()))
-                        .unwrap_or("[non-boundary]")
-                        .to_string()
-                };
+        let mut blocks = Vec::with_capacity(requests.len());
+        for (index, messages) in requests.iter().enumerate() {
+            let block = leading_system_block(messages);
+            if block.is_empty() {
                 return Err(format!(
-                    "system prompt of request {index} diverged from request 0 at byte {diff_at}:\n\
-                     request 0: ...{:?}...\nrequest {index}: ...{:?}...",
-                    excerpt(first),
-                    excerpt(prompt),
+                    "request {index} carried no leading system block; \
+                     cannot compare cached prefixes"
+                )
+                .into());
+            }
+            blocks.push(block);
+        }
+        for (index, block) in blocks.iter().enumerate().skip(1) {
+            if block != &blocks[0] {
+                return Err(format!(
+                    "system prompt of request {index} diverged from request 0 — \
+                     the provider-cached prefix is not stable (#6985):\n{}",
+                    first_divergence(&blocks[0], block)
                 )
                 .into());
             }
         }
         Ok(())
+    }
+
+    /// Assert `needle` reached the model as a [`Role::HostReminder`] message
+    /// positioned AFTER every thread message in that request (#6985).
+    ///
+    /// Presence plus system-prefix exclusion is not enough on its own: a
+    /// regression that emitted the value before the thread messages, or at the
+    /// wrong role, satisfies both and still destroys cache reuse (a message
+    /// ahead of the transcript relocates every byte after it) or hijacks the
+    /// last-user-message consumers. This pins position and role directly.
+    pub async fn assert_rides_conversation_tail(&self, needle: &str) -> HarnessResult<()> {
+        let requests = self.scripted_llm.captured_requests();
+        for messages in &requests {
+            let Some(at) = messages
+                .iter()
+                .position(|message| message.content.contains(needle))
+            else {
+                continue;
+            };
+            if messages[at].role != Role::HostReminder {
+                return Err(format!(
+                    "{needle:?} reached the model at role {:?}; host guidance pinned to a \
+                     transcript position must be Role::HostReminder so last-user-message \
+                     consumers (capability guard, smart routing, trace hints) skip it",
+                    messages[at].role
+                )
+                .into());
+            }
+            // Every thread message — the user's turns, the assistant's replies,
+            // tool results — must precede it.
+            if let Some(last_thread) = messages
+                .iter()
+                .rposition(|message| !matches!(message.role, Role::System | Role::HostReminder))
+                && last_thread > at
+            {
+                return Err(format!(
+                    "{needle:?} sat at index {at}, ahead of the thread message at index \
+                     {last_thread}; per-call context must ride the conversation TAIL or it \
+                     relocates every byte of transcript after it"
+                )
+                .into());
+            }
+            return Ok(());
+        }
+        Err(format!(
+            "no captured model request carried {needle:?} in any message ({} request(s) captured)",
+            requests.len()
+        )
+        .into())
+    }
+
+    /// Assert the last `Role::User` message of every captured request is the
+    /// user's own speech — the seam three production consumers read (#6985).
+    ///
+    /// `unavailable_requested_capability_guard`, `SmartRoutingProvider::classify`
+    /// and the trace-replay request hint each scan back for `Role::User`. The
+    /// host reminder is the final message on nearly every call, so if it ever
+    /// carried the user role those consumers would silently read host
+    /// boilerplate instead of the request.
+    pub async fn assert_last_user_message_is(&self, expected: &str) -> HarnessResult<()> {
+        let requests = self.scripted_llm.captured_requests();
+        if requests.is_empty() {
+            return Err("vacuous: no model requests were captured"
+                .to_string()
+                .into());
+        }
+        for (index, messages) in requests.iter().enumerate() {
+            let last_user = messages
+                .iter()
+                .rev()
+                .find(|message| message.role == Role::User)
+                .ok_or_else(|| format!("request {index} carried no Role::User message"))?;
+            if !last_user.content.contains(expected) {
+                return Err(format!(
+                    "request {index}: last Role::User message was {:?}, expected it to contain \
+                     {expected:?} — host guidance must not displace the user's own message",
+                    last_user.content
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Assert no captured request rewrote the cached prompt prefix without a
+    /// tool-surface change to explain it (#6985).
+    ///
+    /// Weaker than [`assert_system_prompts_identical`] and usable on threads
+    /// that legitimately change their tool surface mid-run (installing an
+    /// extension rewrites the capability list, and that invalidation is the
+    /// correct price of a real change). Mirrors the gate every
+    /// `tests/e2e/mock_llm.py` test gets from the `assert_prompt_cache_reuse`
+    /// fixture.
+    pub async fn assert_prompt_cache_prefix_stable(&self) -> HarnessResult<()> {
+        let churn = self.scripted_llm.prompt_cache_prefix_churn();
+        if churn.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "the cached system prefix changed while the advertised tool surface \
+             stayed identical — per-call content is sitting in the cached prefix \
+             and every model call pays full input cost for it (#6985): {churn:#?}"
+        )
+        .into())
     }
 
     /// Assert that some model request this thread sent to the scripted provider

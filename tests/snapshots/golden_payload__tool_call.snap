@@ -14,7 +14,7 @@ source: tests/integration/support/golden.rs
     },
     {
       "content": "<system-reminder>\nCurrent date/time at loop start: <TIMESTAMP>. The user's timezone is unknown - if local time matters, ask the user and offer to save it with the profile_set capability (a saved location is not a timezone), or use the time capability if it is visible.\nRun origin: inbound message via reborn-itest; replies post back to that conversation automatically — do not also send your reply with messaging capabilities.\n</system-reminder>",
-      "role": "user"
+      "role": "host_reminder"
     }
   ],
   "tool_surface": [
@@ -67,7 +67,7 @@ source: tests/integration/support/golden.rs
     },
     {
       "content": "<system-reminder>\nCurrent date/time at loop start: <TIMESTAMP>. The user's timezone is unknown - if local time matters, ask the user and offer to save it with the profile_set capability (a saved location is not a timezone), or use the time capability if it is visible.\nRun origin: inbound message via reborn-itest; replies post back to that conversation automatically — do not also send your reply with messaging capabilities.\n</system-reminder>",
-      "role": "user"
+      "role": "host_reminder"
     }
   ],
   "tool_surface": [

@@ -52,4 +52,9 @@ xfail_strict = true
 # test anyway.
 markers = [
     "shared_world: replays journeys against one shared, un-reset provider world",
+    # The autouse `assert_prompt_cache_reuse` fixture fails any test whose
+    # system prompt changes without a tool-surface change. A test that
+    # deliberately reconfigures the prompt mid-conversation opts out here —
+    # and must say why at the marker, so the exemption stays reviewable.
+    "allow_prompt_cache_churn: the test deliberately rewrites the cached system prefix",
 ]
