@@ -158,17 +158,19 @@ fn parse_blocks(html: &str) -> Vec<Block> {
             let raw = &html[index + 1..close];
             index = close + 1;
 
-            // Comments and declarations carry no content.
-            if raw.starts_with('!') || raw.starts_with('?') {
-                text.clear();
-                continue;
-            }
+            // Comments and declarations carry no content of their own, but the
+            // text buffered BEFORE them does — clearing it here dropped
+            // everything preceding a comment.
+            let is_comment = raw.starts_with('!') || raw.starts_with('?');
             if !text.is_empty() {
                 spans.push(Span {
                     text: decode_entities(&text),
                     style,
                 });
                 text.clear();
+            }
+            if is_comment {
+                continue;
             }
 
             let closing = raw.starts_with('/');
@@ -287,7 +289,13 @@ fn trim_spans(spans: Vec<Span>) -> Vec<Span> {
             continue;
         }
         match collapsed.last_mut() {
-            Some(last) if last.style == span.style => last.text.push_str(&text),
+            Some(last) if last.style == span.style => {
+                // Collapse across the join too: two spans split by a comment or
+                // an ignored tag each keep their own edge space, which would
+                // otherwise render as a double space.
+                let joined = format!("{}{}", last.text, text);
+                last.text = collapse_whitespace(&joined);
+            }
             _ => collapsed.push(Span {
                 text,
                 style: span.style,
@@ -355,10 +363,14 @@ fn decode_entities(text: &str) -> String {
                     terminated = true;
                     break;
                 }
-                Some(next) => {
+                // A stray `&` must not swallow the entity that follows it:
+                // stop at anything that cannot appear in an entity name and let
+                // the next round parse that character normally.
+                Some(next) if next.is_ascii_alphanumeric() || *next == '#' => {
                     entity.push(*next);
                     characters.next();
                 }
+                Some(_) => break,
                 None => break,
             }
         }
@@ -847,5 +859,42 @@ mod tests {
             html_to_pdf("<p>x</p>", &options),
             Err(DocumentError::Html(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod review_regressions {
+    use super::*;
+
+    #[test]
+    fn text_before_a_comment_is_not_dropped() {
+        let parsed = parse_blocks("<p>hello <!-- note --> world</p>");
+        let Block::Paragraph { spans } = &parsed[0] else {
+            panic!("expected a paragraph, got {parsed:?}");
+        };
+        let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(
+            joined, "hello world",
+            "a comment must not eat preceding text"
+        );
+    }
+
+    #[test]
+    fn a_stray_ampersand_does_not_swallow_the_next_entity() {
+        let parsed = parse_blocks("<p>Tom &amp; Jerry &amp; Co</p>");
+        let Block::Paragraph { spans } = &parsed[0] else {
+            panic!("expected a paragraph");
+        };
+        let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(joined, "Tom & Jerry & Co");
+
+        // A bare `&` followed by text is emitted verbatim, and a later real
+        // entity still decodes.
+        let parsed = parse_blocks("<p>a & b &amp; c</p>");
+        let Block::Paragraph { spans } = &parsed[0] else {
+            panic!("expected a paragraph");
+        };
+        let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(joined, "a & b & c");
     }
 }

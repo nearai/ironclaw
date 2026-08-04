@@ -23,6 +23,7 @@ use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 
 const WORKBOOK_PART: &str = "xl/workbook.xml";
 const SHARED_STRINGS_PART: &str = "xl/sharedStrings.xml";
+const WORKBOOK_RELS_PART: &str = "xl/_rels/workbook.xml.rels";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sheet {
@@ -190,7 +191,7 @@ fn sheet_parts(package: &OoxmlPackage) -> Result<Vec<(String, String)>, Document
     let mut reader = quick_xml::Reader::from_str(&workbook);
     reader.config_mut().check_end_names = false;
 
-    let mut names = Vec::new();
+    let mut names: Vec<(String, String)> = Vec::new();
     loop {
         let event = reader
             .read_event()
@@ -204,17 +205,35 @@ fn sheet_parts(package: &OoxmlPackage) -> Result<Vec<(String, String)>, Document
                 if local_name(tag.name().as_ref()) == b"sheet"
                     && let Some(name) = attribute(tag, b"name")
                 {
-                    names.push(name);
+                    names.push((name, attribute(tag, b"id").unwrap_or_default()));
                 }
             }
             _ => {}
         }
     }
 
-    // Worksheet parts are conventionally `xl/worksheets/sheetN.xml` in workbook
-    // order. Paired positionally rather than resolved through r:id in the rels
-    // part: the mapping is order-preserving for every producer observed, and
-    // this keeps the crate off a second relationship parser.
+    // Resolve each sheet's `r:id` through `xl/_rels/workbook.xml.rels`. Sheet
+    // declaration order does NOT have to match worksheet file numbering, so
+    // pairing positionally can route an edit into the wrong worksheet.
+    if let Ok(rels) = package.part_str(WORKBOOK_RELS_PART) {
+        let targets = relationship_targets(&rels);
+        let resolved: Vec<(String, String)> = names
+            .iter()
+            .filter_map(|(name, rid)| {
+                let target = targets.get(rid.as_str())?;
+                let part = format!(
+                    "xl/{}",
+                    target.trim_start_matches("/xl/").trim_start_matches('/')
+                );
+                package.has_part(&part).then(|| (name.clone(), part))
+            })
+            .collect();
+        if resolved.len() == names.len() && !resolved.is_empty() {
+            return Ok(resolved);
+        }
+    }
+
+    // Fallback for a package with no workbook rels part: pair positionally.
     let mut parts: Vec<String> = package
         .names()
         .iter()
@@ -233,7 +252,7 @@ fn sheet_parts(package: &OoxmlPackage) -> Result<Vec<(String, String)>, Document
             part: "xl/worksheets/sheet1.xml".to_string(),
         });
     }
-    Ok(names.into_iter().zip(parts).collect())
+    Ok(names.into_iter().map(|(name, _)| name).zip(parts).collect())
 }
 
 fn parse_cells(xml: &str, shared: &[String]) -> Result<Vec<Cell>, DocumentError> {
@@ -377,18 +396,25 @@ fn set_cell_formula(xml: &str, target: &str, formula: &str) -> Result<String, Do
                         };
                         let index = column_index(&column);
                         if index == target_column_index {
-                            // Replace this cell wholesale.
+                            // Replace the cell, but carry its `s` style index
+                            // across: dropping it silently reverts a currency
+                            // or date column to General formatting.
                             wrote = true;
                             if matches!(event, Event::Start(_)) {
                                 dropping = 1;
                             }
-                            return Ok(EventAction::Replace(formula_cell(target, formula)));
+                            let style = attribute(tag, b"s");
+                            return Ok(EventAction::Replace(formula_cell(
+                                target,
+                                formula,
+                                style.as_deref(),
+                            )));
                         }
                         if index > target_column_index {
                             // Cells must stay in ascending column order, so the
                             // new one goes in *before* the first later column.
                             wrote = true;
-                            let mut events = formula_cell(target, formula);
+                            let mut events = formula_cell(target, formula, None);
                             events.push(clone_event(event));
                             return Ok(EventAction::Replace(events));
                         }
@@ -411,7 +437,7 @@ fn set_cell_formula(xml: &str, target: &str, formula: &str) -> Result<String, Do
                     if !wrote {
                         // Target column is past every existing cell in the row.
                         wrote = true;
-                        let mut events = formula_cell(target, formula);
+                        let mut events = formula_cell(target, formula, None);
                         events.push(Event::End(BytesEnd::new("row")));
                         return Ok(EventAction::Replace(events));
                     }
@@ -436,16 +462,19 @@ fn new_row(row: u32, reference: &str, formula: &str) -> Vec<Event<'static>> {
     let mut row_tag = BytesStart::new("row");
     row_tag.push_attribute(("r", row.to_string().as_str()));
     let mut events = vec![Event::Start(row_tag.into_owned())];
-    events.extend(formula_cell(reference, formula));
+    events.extend(formula_cell(reference, formula, None));
     events.push(Event::End(BytesEnd::new("row")));
     events
 }
 
 /// A `<c>` element carrying only a formula — no `t` (a formula result is not a
 /// shared string) and no `<v>` (Excel recomputes it).
-fn formula_cell(reference: &str, formula: &str) -> Vec<Event<'static>> {
+fn formula_cell(reference: &str, formula: &str, style: Option<&str>) -> Vec<Event<'static>> {
     let mut cell = BytesStart::new("c");
     cell.push_attribute(("r", reference));
+    if let Some(style) = style {
+        cell.push_attribute(("s", style));
+    }
     vec![
         Event::Start(cell),
         Event::Start(BytesStart::new("f")),
@@ -515,6 +544,28 @@ fn column_index(column: &str) -> u32 {
         .fold(0u32, |acc, byte| {
             acc * 26 + u32::from(byte.to_ascii_uppercase() - b'A' + 1)
         })
+}
+
+/// `Id -> Target` for every `<Relationship>` in a rels part.
+fn relationship_targets(rels_xml: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let mut reader = quick_xml::Reader::from_str(rels_xml);
+    reader.config_mut().check_end_names = false;
+    while let Ok(event) = reader.read_event() {
+        match event {
+            Event::Eof => break,
+            Event::Start(ref tag) | Event::Empty(ref tag) => {
+                if local_name(tag.name().as_ref()) == b"Relationship"
+                    && let (Some(id), Some(target)) =
+                        (attribute(tag, b"Id"), attribute(tag, b"Target"))
+                {
+                    out.insert(id, target);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 fn attribute(tag: &BytesStart<'_>, name: &[u8]) -> Option<String> {
@@ -779,5 +830,88 @@ mod tests {
         assert_eq!(column_index("A"), 1);
         assert_eq!(column_index("Z"), 26);
         assert_eq!(column_index("AA"), 27);
+    }
+}
+
+#[cfg(test)]
+mod review_regressions {
+    use super::*;
+    use crate::test_fixtures::expenses_xlsx;
+
+    /// A cell's `s` attribute is its style index. Replacing a cell wholesale
+    /// drops it, so a currency/date column silently reverts to General — the
+    /// exact "preserve what you did not touch" promise this crate exists for.
+    #[test]
+    fn replacing_a_cell_keeps_its_style_attribute() {
+        let original = expenses_xlsx();
+        let before = OoxmlPackage::read(&original)
+            .unwrap()
+            .part_str("xl/worksheets/sheet1.xml")
+            .unwrap();
+        assert!(
+            before.contains(r#"<c r="C5" s="7">"#),
+            "fixture must carry a styled target cell: {before}"
+        );
+
+        let edited = edit_xlsx(
+            &original,
+            &[XlsxEdit::SetCellFormula {
+                sheet: "Expenses".to_string(),
+                cell: "C5".to_string(),
+                formula: "SUM(C2:C4)".to_string(),
+            }],
+        )
+        .unwrap();
+        let after = OoxmlPackage::read(&edited)
+            .unwrap()
+            .part_str("xl/worksheets/sheet1.xml")
+            .unwrap();
+        assert!(
+            after.contains(r#"s="7""#),
+            "the cell's style index must survive the edit: {after}"
+        );
+    }
+
+    /// Sheet display names map to parts through `r:id` in the workbook rels,
+    /// not by position. A workbook whose sheet order differs from its file
+    /// numbering would otherwise route an edit into the wrong worksheet.
+    #[test]
+    fn sheet_names_resolve_through_relationships_not_file_order() {
+        let edited = edit_xlsx(
+            &two_sheet_reversed_xlsx(),
+            &[XlsxEdit::SetCellFormula {
+                sheet: "Second".to_string(),
+                cell: "B2".to_string(),
+                formula: "1+1".to_string(),
+            }],
+        )
+        .unwrap();
+        let package = OoxmlPackage::read(&edited).unwrap();
+        let sheet1 = package.part_str("xl/worksheets/sheet1.xml").unwrap();
+        let sheet2 = package.part_str("xl/worksheets/sheet2.xml").unwrap();
+        // "Second" is declared first but points at sheet2.xml.
+        assert!(
+            sheet2.contains("1+1"),
+            "the edit must land in the part the relationship names: {sheet2}"
+        );
+        assert!(
+            !sheet1.contains("1+1"),
+            "the other worksheet must be untouched: {sheet1}"
+        );
+    }
+
+    /// A workbook whose FIRST declared sheet points at `sheet2.xml`.
+    fn two_sheet_reversed_xlsx() -> Vec<u8> {
+        let content_types = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"#;
+        let workbook = r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Second" sheetId="2" r:id="rId2"/><sheet name="First" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+        let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#;
+        let empty = r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="2"><c r="A2"><v>0</v></c></row></sheetData></worksheet>"#;
+        crate::test_fixtures::package(&[
+            ("[Content_Types].xml", content_types.as_bytes().to_vec()),
+            ("xl/workbook.xml", workbook.as_bytes().to_vec()),
+            ("xl/_rels/workbook.xml.rels", rels.as_bytes().to_vec()),
+            ("xl/worksheets/sheet1.xml", empty.as_bytes().to_vec()),
+            ("xl/worksheets/sheet2.xml", empty.as_bytes().to_vec()),
+        ])
     }
 }

@@ -75,7 +75,7 @@ pub(crate) fn expenses_xlsx() -> Vec<u8> {
         r#"<row r="4"><c r="A4" t="s"><v>5</v></c><c r="B4"><v>1</v></c><c r="C4"><v>450</v></c></row>"#,
         // A cached value that is deliberately WRONG for the formula, so a test
         // can prove the editor drops it rather than leaving it on screen.
-        r#"<row r="5"><c r="C5"><f>SUM(C2:C4)</f><v>9999</v></c></row>"#,
+        r#"<row r="5"><c r="C5" s="7"><f>SUM(C2:C4)</f><v>9999</v></c></row>"#,
         r#"</sheetData></worksheet>"#,
     );
     let styles = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
