@@ -4209,6 +4209,52 @@ async fn builtin_json_parse_query_stringify_and_validate_work() {
 }
 
 #[tokio::test]
+async fn builtin_json_parse_and_stringify_report_actionable_invalid_json() {
+    for (operation, data) in [
+        ("parse", "/workspace/source.json"),
+        ("stringify", "100 * 1.25"),
+    ] {
+        let runtime = runtime();
+        let failure = invoke_failure_with_context(
+            &runtime,
+            JSON_CAPABILITY_ID,
+            json!({"operation": operation, "data": data}),
+            execution_context([JSON_CAPABILITY_ID]),
+        )
+        .await;
+
+        assert_eq!(failure.kind, FailureKind::InputEncode, "{operation}");
+        assert_eq!(
+            failure.message.as_deref(),
+            Some("JSON input is not valid JSON"),
+            "{operation}"
+        );
+        let issue = failure_input_issue(
+            &failure,
+            "data",
+            DispatchInputIssueCode::InvalidValue,
+            operation,
+        );
+        assert_eq!(issue.expected.as_deref(), Some("valid JSON"), "{operation}");
+        assert!(
+            issue
+                .received
+                .as_deref()
+                .is_some_and(|received| received.starts_with("invalid JSON at line ")),
+            "{operation}: expected bounded parser location, got {:?}",
+            issue.received
+        );
+        assert!(
+            issue
+                .received
+                .as_ref()
+                .is_some_and(|received| received.len() < 80),
+            "{operation}: parser diagnostic must remain bounded"
+        );
+    }
+}
+
+#[tokio::test]
 async fn builtin_json_queries_authorized_workspace_file_with_adjacent_indices() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(

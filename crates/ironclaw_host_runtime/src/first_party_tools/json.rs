@@ -41,12 +41,12 @@ pub(super) async fn dispatch(
         "parse" => {
             let data = input.get("data").ok_or_else(input_error)?;
             let text = data.as_str().ok_or_else(input_error)?;
-            serde_json::from_str::<Value>(text).map_err(|_| input_error())
+            serde_json::from_str::<Value>(text).map_err(|error| invalid_json("data", error))
         }
         "stringify" => {
             let data = input.get("data").ok_or_else(input_error)?;
             let value = if let Some(text) = data.as_str() {
-                serde_json::from_str::<Value>(text).map_err(|_| input_error())?
+                serde_json::from_str::<Value>(text).map_err(|error| invalid_json("data", error))?
             } else {
                 data.clone()
             };
@@ -223,6 +223,27 @@ fn parse_query_path(path: &str) -> Result<Vec<QueryPathComponent<'_>>, FirstPart
     let mut components = Vec::new();
     let mut first = true;
 
+    if bytes.first() == Some(&b'$') {
+        match bytes.get(1) {
+            None => return Ok(components),
+            Some(b'.') => {
+                cursor = 2;
+                if cursor == bytes.len() || matches!(bytes[cursor], b'.' | b'[' | b']') {
+                    return Err(invalid_query_path(
+                        cursor,
+                        "an object field after the '$.' root marker",
+                    ));
+                }
+            }
+            Some(b'[') => {
+                cursor = 1;
+                parse_indices(path, &mut cursor, &mut components)?;
+                first = false;
+            }
+            Some(_) => {}
+        }
+    }
+
     while cursor < bytes.len() {
         if !first {
             if bytes[cursor] != b'.' {
@@ -356,14 +377,25 @@ mod tests {
     }
 
     #[test]
-    fn query_path_supports_repeated_indices_and_root_arrays() {
+    fn query_path_supports_repeated_indices_root_arrays_and_jsonpath_roots() {
         let value = json!({"nodes": [null, null, {"data": vec![vec![0]; 16]}]});
         assert_eq!(
             query_json(&value, "nodes[2].data[15][0]").expect("nested path resolves"),
             &json!(0)
         );
+        assert_eq!(query_json(&value, "$"), Ok(&value));
+        assert_eq!(
+            query_json(&value, "$.nodes[2].data[15][0]")
+                .expect("JSONPath-style object root resolves"),
+            &json!(0)
+        );
         assert_eq!(
             query_json(&json!([["zero"], ["one"]]), "[1][0]").expect("root-array path resolves"),
+            &json!("one")
+        );
+        assert_eq!(
+            query_json(&json!([["zero"], ["one"]]), "$[1][0]")
+                .expect("JSONPath-style array root resolves"),
             &json!("one")
         );
     }

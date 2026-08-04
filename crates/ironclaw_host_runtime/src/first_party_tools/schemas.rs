@@ -91,7 +91,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "path": {
                     "type": "string",
                     "maxLength": 4096,
-                    "description": "Dot/bracket query path, including root arrays and repeated indices such as [1][0] or nodes[2].data[15][0]"
+                    "description": "Dot/bracket query path with an optional JSONPath-style $ root, including $, $[1][0], $.nodes[2].data[15][0], [1][0], or nodes[2].data[15][0]"
                 }
             },
             "oneOf": [
@@ -1026,6 +1026,11 @@ mod tests {
         }));
         assert_eq!(schema["properties"]["file_path"]["maxLength"], 4096);
         assert_eq!(schema["properties"]["path"]["maxLength"], 4096);
+        assert!(
+            schema["properties"]["path"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("$.nodes"))
+        );
     }
 
     #[test]

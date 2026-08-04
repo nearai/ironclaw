@@ -350,8 +350,9 @@ async fn runs_http_save_tool_call_through_real_egress_and_persists_body() {
 
 /// Regression for the IPO JSON-tool failure: a response already saved under
 /// `/workspace` must be queryable without shell or copying the file inline.
-/// The same caller-level turn also pins adjacent indices, root-array paths,
-/// and the operation-specific schema disclosed to the model.
+/// The same caller-level turn also pins adjacent indices, optional JSONPath
+/// roots, actionable invalid-JSON feedback, and the operation-specific schema
+/// disclosed to the model.
 #[tokio::test]
 async fn json_queries_scoped_file_and_adjacent_array_indices() {
     let source = serde_json::json!({
@@ -383,8 +384,20 @@ async fn json_queries_scoped_file_and_adjacent_array_indices() {
                 json!({
                     "operation": "query",
                     "data": [["zero"], ["root-array-value"]],
-                    "path": "[1][0]"
+                    "path": "$[1][0]"
                 }),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({
+                    "operation": "query",
+                    "data": {"items": [{"name": "jsonpath-root-value"}]},
+                    "path": "$.items[0].name"
+                }),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.json",
+                json!({"operation": "stringify", "data": "100 * 1.25"}),
             ),
             RebornScriptedReply::text("queried"),
         ])
@@ -409,7 +422,13 @@ async fn json_queries_scoped_file_and_adjacent_array_indices() {
         .expect("file-backed query traversed repeated adjacent indices");
     h.assert_tool_result_contains("root-array-value")
         .await
-        .expect("inline compatibility includes root-array queries");
+        .expect("inline compatibility includes JSONPath-style root-array queries");
+    h.assert_tool_result_contains("jsonpath-root-value")
+        .await
+        .expect("JSONPath-style object roots resolve through the real capability path");
+    h.assert_tool_error_summary_contains("JSON input is not valid JSON")
+        .await
+        .expect("invalid JSON is explained to the model with an actionable safe summary");
 
     let definitions = h.scripted_llm.captured_tool_definitions();
     let definition = definitions
@@ -425,6 +444,12 @@ async fn json_queries_scoped_file_and_adjacent_array_indices() {
         definition.parameters["properties"]["file_path"]["description"]
             .as_str()
             .is_some_and(|description| description.contains("/workspace"))
+    );
+    assert!(
+        definition.parameters["properties"]["path"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("$.nodes")),
+        "model-visible schema must advertise optional JSONPath-style roots"
     );
     assert!(
         definition.parameters["oneOf"]
