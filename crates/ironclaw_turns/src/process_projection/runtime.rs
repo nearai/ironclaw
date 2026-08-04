@@ -204,6 +204,7 @@ impl AgentTurnProcessRuntime {
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
             resolved_run_profile_id: profile.id.clone(),
             resolved_run_profile_version: profile.version,
+            allow_steering: profile.allow_steering,
             resolved_run_profile: Some(resolved),
             resolved_model_route: request
                 .requested_model
@@ -308,6 +309,7 @@ impl AgentTurnProcessRuntime {
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
             resolved_run_profile_id: profile.id.clone(),
             resolved_run_profile_version: profile.version,
+            allow_steering: profile.allow_steering,
             resolved_run_profile: Some(resolved),
             resolved_model_route: None,
             model_usage: None,
@@ -1126,6 +1128,7 @@ pub fn turn_run_state_from_process_snapshot(
         reply_target_binding_ref: metadata.reply_target_binding_ref,
         resolved_run_profile_id: metadata.resolved_run_profile_id,
         resolved_run_profile_version: metadata.resolved_run_profile_version,
+        allow_steering: metadata.allow_steering,
         resolved_model_route: metadata.resolved_model_route,
         model_usage: metadata.model_usage,
         received_at: snapshot.created_at,

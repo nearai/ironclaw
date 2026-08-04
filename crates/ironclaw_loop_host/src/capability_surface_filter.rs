@@ -933,6 +933,7 @@ mod tests {
             capability_id: capability_id(capability),
             name: ProviderToolName::new(name).expect("provider tool name"),
             description: format!("{capability} description"),
+            description_trust: Default::default(),
             parameters: serde_json::json!({"type":"object"}),
         }
     }

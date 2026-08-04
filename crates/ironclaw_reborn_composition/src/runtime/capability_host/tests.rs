@@ -71,8 +71,8 @@ mod tests {
     };
     use crate::runtime::filesystem_skill_context_source;
     use ironclaw_extension_manager::extension_lifecycle_capabilities::{
-        EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REMOVE_CAPABILITY_ID,
-        EXTENSION_SEARCH_CAPABILITY_ID,
+        EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
+        EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     };
 
     /// The §5.3 flip collapsed `CapabilityOutcome::Completed` into
@@ -2210,6 +2210,37 @@ mod tests {
         assert_eq!(
             extension_search_grant.constraints.network,
             NetworkPolicy::default()
+        );
+
+        let extension_register_grant = grant_for(EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID);
+        assert_eq!(
+            extension_register_grant.constraints.allowed_effects,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::Network
+            ]
+        );
+        assert_eq!(
+            extension_register_grant.constraints.mounts,
+            system_extensions_lifecycle_mounts
+        );
+        assert_eq!(
+            extension_register_grant
+                .constraints
+                .network
+                .allowed_targets
+                .iter()
+                .map(|target| target.host_pattern.as_str())
+                .collect::<Vec<_>>(),
+            vec!["*"]
+        );
+        assert!(
+            extension_register_grant
+                .constraints
+                .network
+                .deny_private_ip_ranges
         );
 
         let extension_remove_grant = grant_for(EXTENSION_REMOVE_CAPABILITY_ID);

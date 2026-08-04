@@ -1176,6 +1176,7 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
 
     shared
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             // Flow must carry the same thread_id as the TurnScope — thread_id matching
             // is fail-closed: a flow with None thread_id does not match any scoped request.
@@ -1306,6 +1307,7 @@ async fn challenge_for_gate_cancelled_flow_returns_none() {
 
     let flow = shared
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
@@ -1383,6 +1385,7 @@ async fn challenge_for_gate_threadless_flow_returns_none_for_thread_scope() {
     let turn_run_id = TurnRunId::new();
     shared
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: caller_scope_with_invocation(InvocationId::new()),
             kind: AuthFlowKind::IntegrationCredential,
@@ -1464,6 +1467,7 @@ async fn challenge_for_gate_wrong_tenant_returns_none() {
     // Create the flow under TENANT (the test tenant).
     shared
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: caller_scope_with_invocation(InvocationId::new()),
             kind: AuthFlowKind::IntegrationCredential,
@@ -1542,6 +1546,7 @@ async fn challenge_for_gate_returns_manual_token_view_for_seeded_flow() {
 
     shared
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: caller_scope_with_invocation_and_thread(InvocationId::new(), thread_id.clone()),
             kind: AuthFlowKind::IntegrationCredential,
@@ -1624,6 +1629,7 @@ async fn challenge_for_gate_returns_other_kind_view_for_setup_required_flow() {
 
     shared
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: caller_scope_with_invocation_and_thread(InvocationId::new(), thread_id.clone()),
             kind: AuthFlowKind::IntegrationCredential,

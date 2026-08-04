@@ -118,6 +118,7 @@ registerPack("ko", {
   "chat.identityUser": "나",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "최신 항목으로 이동",
+  "chat.queued": "대기 중",
   "shortcuts.title": "키보드 단축키",
   "shortcuts.send": "메시지 보내기",
   "shortcuts.newline": "새 줄",

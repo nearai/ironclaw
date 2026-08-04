@@ -320,6 +320,7 @@ impl ironclaw_product_contracts::surface::ProductSurface for UnusedServices {
                                 package_ref,
                                 phase: LifecyclePublicState::SetupNeeded,
                                 blockers: Vec::new(),
+                                message: None,
                                 payload: None,
                                 secrets: vec![RebornExtensionSetupSecret {
                                     name: "google_oauth".to_string(),
@@ -1373,6 +1374,7 @@ async fn product_auth_oauth_flow_status_hides_cross_scope_flow_as_not_found() {
     );
     let flow = shared
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: Some(AuthFlowId::new()),
             scope: other_scope,
             kind: AuthFlowKind::IntegrationCredential,

@@ -13,17 +13,16 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_turns::{
     GetLoopCheckpointRequest, LoopCheckpointStore, PutLoopCheckpointRequest, TurnCheckpointId,
+    TurnError,
 };
 
-use super::turn_error_to_host_error;
-
 #[derive(Clone)]
-pub(super) struct NoExtraLoopInputPort {
+pub struct NoExtraLoopInputPort {
     run_context: LoopRunContext,
 }
 
 impl NoExtraLoopInputPort {
-    pub(super) fn new(run_context: LoopRunContext) -> Self {
+    pub fn new(run_context: LoopRunContext) -> Self {
         Self { run_context }
     }
 
@@ -73,7 +72,7 @@ impl LoopInputPort for NoExtraLoopInputPort {
 }
 
 #[derive(Clone)]
-pub(super) struct HostManagedLoopCheckpointPort {
+pub struct HostManagedLoopCheckpointPort {
     run_context: LoopRunContext,
     loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
@@ -81,7 +80,7 @@ pub(super) struct HostManagedLoopCheckpointPort {
 }
 
 impl HostManagedLoopCheckpointPort {
-    pub(super) fn new(
+    pub fn new(
         run_context: LoopRunContext,
         loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
@@ -253,13 +252,13 @@ impl LoopCheckpointPort for HostManagedLoopCheckpointPort {
 }
 
 #[derive(Clone)]
-pub(super) struct HostManagedLoopProgressPort {
+pub struct HostManagedLoopProgressPort {
     run_context: LoopRunContext,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
 }
 
 impl HostManagedLoopProgressPort {
-    pub(super) fn new(
+    pub fn new(
         run_context: LoopRunContext,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     ) -> Self {
@@ -392,3 +391,162 @@ impl LoopProgressPort for HostManagedLoopProgressPort {
         }
     }
 }
+
+/// `TurnError` -> `AgentLoopHostError` at the checkpoint-state seam.
+///
+/// Moved here with the checkpoint port that calls it (WS3 runner sheds). It is
+/// `pub` because `ironclaw_runner`'s driver host maps the same errors on its
+/// own checkpoint path; every arm is typed on `ironclaw_turns` and
+/// `ironclaw_loop_contracts` vocabulary, with no runner-specific concept in it.
+pub fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
+    match &error {
+        TurnError::Unauthorized => crate::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "access",
+            AgentLoopHostErrorKind::Unauthorized,
+            "checkpoint state access was unauthorized",
+            &error,
+        ),
+        TurnError::InvalidRequest { .. } => crate::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "request",
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "checkpoint state request is invalid",
+            &error,
+        ),
+        TurnError::Unavailable { .. } => crate::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "store",
+            AgentLoopHostErrorKind::Unavailable,
+            "checkpoint state store is unavailable",
+            &error,
+        ),
+        TurnError::ScopeNotFound => crate::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "scope_lookup",
+            AgentLoopHostErrorKind::CheckpointRejected,
+            "checkpoint state scope was not found for this loop run",
+            &error,
+        ),
+        TurnError::Conflict { .. } | TurnError::RunNotRetryable { .. } => {
+            crate::raw_agent_loop_host_error(
+                "checkpoint_state",
+                "write",
+                AgentLoopHostErrorKind::CheckpointRejected,
+                "checkpoint state write conflicted with current turn state",
+                &error,
+            )
+        }
+        TurnError::CapacityExceeded { .. } => crate::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "write",
+            AgentLoopHostErrorKind::Unavailable,
+            "checkpoint state store capacity was exceeded",
+            &error,
+        ),
+        TurnError::InvalidTransition { .. } => crate::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "write",
+            AgentLoopHostErrorKind::CheckpointRejected,
+            "checkpoint state write was invalid for current turn state",
+            &error,
+        ),
+        TurnError::LeaseMismatch => crate::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "write",
+            AgentLoopHostErrorKind::CheckpointRejected,
+            "checkpoint state write lease no longer matches current run",
+            &error,
+        ),
+        TurnError::ThreadBusy(_) | TurnError::AdmissionRejected(_) => {
+            crate::raw_agent_loop_host_error(
+                "checkpoint_state",
+                "admission",
+                AgentLoopHostErrorKind::Unavailable,
+                "checkpoint state store returned unsupported turn admission status",
+                &error,
+            )
+        }
+        TurnError::InvalidRunOriginAdapter => crate::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "request",
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "checkpoint state request contains an invalid run origin adapter",
+            &error,
+        ),
+    }
+}
+
+#[cfg(test)]
+mod turn_error_to_host_error_tests {
+    use super::*;
+    use ironclaw_turns::{TurnCapacityResource, TurnError, TurnRunId};
+
+    /// The security-relevant arm. It moved crates with the shed and became
+    /// `pub`, so a future edit could reclassify an authorization failure as a
+    /// generic one with nothing failing — raised in review on #7064.
+    #[test]
+    fn unauthorized_maps_to_unauthorized() {
+        let error = turn_error_to_host_error(TurnError::Unauthorized);
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unauthorized);
+    }
+
+    /// Both request-shaped arms, so neither can drift into a retryable or
+    /// authorization kind unnoticed.
+    #[test]
+    fn request_shaped_errors_map_to_invalid_invocation() {
+        for turn_error in [
+            TurnError::InvalidRequest {
+                reason: "bad checkpoint request".to_string(),
+            },
+            TurnError::InvalidRunOriginAdapter,
+        ] {
+            let error = turn_error_to_host_error(turn_error);
+            assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        }
+    }
+
+    #[test]
+    fn capacity_exceeded_maps_to_unavailable() {
+        let error = turn_error_to_host_error(TurnError::capacity_exceeded(
+            TurnCapacityResource::SpawnTreeDescendants,
+            3,
+        ));
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    }
+
+    #[test]
+    fn conflict_maps_to_checkpoint_rejected() {
+        let error = turn_error_to_host_error(TurnError::Conflict {
+            reason: "checkpoint conflict".to_string(),
+        });
+        assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
+    }
+
+    #[test]
+    fn run_not_retryable_maps_to_checkpoint_rejected() {
+        let error = turn_error_to_host_error(TurnError::RunNotRetryable {
+            run_id: TurnRunId::new(),
+        });
+        assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
+    }
+
+    #[test]
+    fn scope_not_found_maps_to_checkpoint_rejected() {
+        let error = turn_error_to_host_error(TurnError::ScopeNotFound);
+        assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
+    }
+
+    #[test]
+    fn invalid_transition_maps_to_checkpoint_rejected() {
+        use ironclaw_turns::TurnStatus;
+        let error = turn_error_to_host_error(TurnError::InvalidTransition {
+            from: TurnStatus::Running,
+            to: TurnStatus::Completed,
+        });
+        assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -375,6 +375,7 @@ async fn create_flow_with_continuation(
     services
         .flow_manager()
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope,
             kind: AuthFlowKind::IntegrationCredential,

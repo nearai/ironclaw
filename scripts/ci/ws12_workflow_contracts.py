@@ -244,6 +244,9 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
         kind="regex",
         crates=(
             ("ironclaw_runner", "src/lib.rs"),
+            # WS3 runner sheds: the model gateway and the tool-disclosure
+            # decorator live here now, so the lane must follow them.
+            ("ironclaw_loop_host", "src/model_gateway.rs"),
             ("ironclaw_reborn_cli", "src/main.rs"),
             ("ironclaw_reborn_config", "src/lib.rs"),
             ("ironclaw_architecture", "tests/reborn_dependency_boundaries.rs"),

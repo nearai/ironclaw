@@ -3,7 +3,7 @@ import { Button } from "../../../design-system/button";
 import { Modal, ModalBody, ModalFooter } from "../../../design-system/modal";
 import { useT } from "../../../lib/i18n";
 
-export type CustomMcpAuthKind = "auto";
+export type CustomMcpAuthKind = "auto" | "bearer" | "oauth";
 
 export type CustomMcpAuthSelection = { kind: CustomMcpAuthKind };
 
@@ -13,6 +13,7 @@ export type CustomMcpRegistrationPayload = {
   endpoint: string;
   authSelection: CustomMcpAuthSelection;
   onRegistered: () => void;
+  onAuthSelectionRequired: () => void;
   onRegistrationError: (message: string) => void;
 };
 
@@ -102,6 +103,8 @@ export function CustomMcpRegistrationModal({
   const [error, setError] = React.useState("");
   const [showConnectionErrors, setShowConnectionErrors] = React.useState(false);
   const [registered, setRegistered] = React.useState(false);
+  const [authSelection, setAuthSelection] = React.useState<CustomMcpAuthSelection>({ kind: "auto" });
+  const [authSelectionRequired, setAuthSelectionRequired] = React.useState(false);
 
   React.useEffect(() => {
     if (!open) {
@@ -113,6 +116,8 @@ export function CustomMcpRegistrationModal({
       setDesiredId("");
       setIsIdAdvanced(false);
       setEndpoint("");
+      setAuthSelection({ kind: "auto" });
+      setAuthSelectionRequired(false);
     }
   }, [open]);
 
@@ -133,16 +138,28 @@ export function CustomMcpRegistrationModal({
     setStep(2);
   };
 
+  const backToConnection = () => {
+    setAuthSelection({ kind: "auto" });
+    setAuthSelectionRequired(false);
+    setError("");
+    setStep(1);
+  };
+
   const submit = () => {
     setError("");
     onRegister({
       desiredName: desiredName.trim(),
       desiredId: effectiveDesiredId.trim(),
       endpoint: endpoint.trim(),
-      authSelection: { kind: "auto" },
+      authSelection,
       onRegistered: () => {
         setRegistered(true);
         setStep(3);
+      },
+      onAuthSelectionRequired: () => {
+        setAuthSelectionRequired(true);
+        setAuthSelection({ kind: "oauth" });
+        setError("");
       },
       onRegistrationError: setError,
     });
@@ -246,6 +263,25 @@ export function CustomMcpRegistrationModal({
                 <dd className="break-all text-[var(--v2-text-strong)]">{endpoint.trim()}</dd>
               </div>
             </dl>
+            {authSelectionRequired && (
+              <fieldset className="mt-4 rounded-md border border-[var(--v2-panel-border)] p-3">
+                <legend className="px-1 text-sm font-medium text-[var(--v2-text-strong)]">
+                  {t("extensions.customMcpAuthHint")}
+                </legend>
+                {(["oauth", "bearer"] as const).map((kind) => (
+                  <label key={kind} className="mb-2 flex items-center gap-2 text-sm last:mb-0">
+                    <input
+                      type="radio"
+                      name="custom-mcp-auth"
+                      value={kind}
+                      checked={authSelection.kind === kind}
+                      onChange={() => setAuthSelection({ kind })}
+                    />
+                    {t(`extensions.customMcpAuth.${kind}`)}
+                  </label>
+                ))}
+              </fieldset>
+            )}
           </>
         ) : registered ? (
           <div role="status" className="rounded-md border border-[var(--v2-panel-border)] p-4">
@@ -265,7 +301,7 @@ export function CustomMcpRegistrationModal({
       </ModalBody>
       <ModalFooter>
         {step === 2 && (
-          <Button variant="ghost" onClick={() => setStep(1)} disabled={isRegistering}>
+          <Button variant="ghost" onClick={backToConnection} disabled={isRegistering}>
             {t("common.back")}
           </Button>
         )}

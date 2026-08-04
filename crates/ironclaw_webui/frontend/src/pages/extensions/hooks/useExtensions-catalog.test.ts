@@ -448,6 +448,29 @@ test("custom MCP registration transport errors return to the registration modal"
   );
 });
 
+test("ambiguous custom MCP auth is routed back to the registration chooser", () => {
+  const harness = installMutationHarness(null);
+  const authSelections = [];
+  const modalErrors = [];
+
+  harness.registerConfig.onError(
+    {
+      message: "Auth selection required",
+      payload: { validation_code: "auth_selection_required", field: "auth_selection" },
+    },
+    {
+      desiredId: "linear",
+      desiredName: "Linear MCP",
+      onAuthSelectionRequired: () => authSelections.push(true),
+      onRegistrationError: (message) => modalErrors.push(message),
+    },
+  );
+
+  assert.deepEqual(authSelections, [true]);
+  assert.deepEqual(modalErrors, []);
+  assert.deepEqual(harness.refetches, []);
+});
+
 test("install refreshes the authoritative projection before opening setup", async () => {
   const packageRef = { kind: "extension", id: "notion" };
   const authoritativeExtension = {

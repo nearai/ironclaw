@@ -35,6 +35,10 @@ use crate::trace_binding::{ObservedToolResult, canonical_tool_result_payload};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceFile {
     pub model_name: String,
+    /// Aggregate provider-reported scalar usage for this trace. Optional for
+    /// backward compatibility with existing replay fixtures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TraceUsage>,
     /// Workspace memory documents captured before the recording session.
     /// Replay should restore these before running the trace.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -44,6 +48,23 @@ pub struct TraceFile {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub http_exchanges: Vec<HttpExchange>,
     pub steps: Vec<TraceStep>,
+}
+
+/// Privacy-safe aggregate usage recorded alongside response-bearing steps.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TraceUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cache_read_input_tokens: u32,
+    pub cache_creation_input_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_cost_usd: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct RecordingUsage {
+    trace: TraceUsage,
+    total_cost: Decimal,
 }
 
 /// A memory document captured at recording start.
@@ -912,6 +933,7 @@ fn escape_json_pointer_token(token: &str) -> String {
 pub struct RecordingLlm {
     inner: Arc<dyn LlmProvider>,
     steps: Mutex<Vec<TraceStep>>,
+    usage: Mutex<RecordingUsage>,
     prev_message_count: Mutex<usize>,
     output_path: PathBuf,
     model_name: String,
@@ -926,6 +948,7 @@ impl RecordingLlm {
         Self {
             inner,
             steps: Mutex::new(Vec::new()),
+            usage: Mutex::new(RecordingUsage::default()),
             prev_message_count: Mutex::new(0),
             output_path,
             model_name,
@@ -1002,11 +1025,13 @@ impl RecordingLlm {
         // completions can continue recording while a checkpoint is written.
         let _flush_guard = self.flush_lock.lock().await;
         let steps = self.steps.lock().await.clone();
+        let usage = self.usage.lock().await.trace.clone();
         let memory_snapshot = self.memory_snapshot.lock().await.clone();
         let http_exchanges = self.http_interceptor.take_exchanges().await;
 
         let trace = TraceFile {
             model_name: self.model_name.clone(),
+            usage: Some(usage),
             memory_snapshot,
             http_exchanges,
             steps,
@@ -1135,6 +1160,17 @@ impl RecordingLlm {
         tool_results: Vec<ExpectedToolResult>,
         response: &CompletionResponse,
     ) {
+        // Publish the step and its aggregate usage as one snapshot. `flush`
+        // takes the same lock, so an eager flush cannot observe usage ahead of
+        // steps (or vice versa) when model calls complete concurrently.
+        let publication_guard = self.flush_lock.lock().await;
+        self.record_usage(
+            response.input_tokens,
+            response.output_tokens,
+            response.cache_read_input_tokens,
+            response.cache_creation_input_tokens,
+        )
+        .await;
         self.steps.lock().await.push(TraceStep {
             request_hint: hint,
             response: TraceResponse::Text {
@@ -1144,6 +1180,7 @@ impl RecordingLlm {
             },
             expected_tool_results: tool_results,
         });
+        drop(publication_guard);
         self.flush_after_step().await;
     }
 
@@ -1154,6 +1191,14 @@ impl RecordingLlm {
         prior_tool_lookup: &PriorToolLookup,
         response: &ToolCompletionResponse,
     ) {
+        let publication_guard = self.flush_lock.lock().await;
+        self.record_usage(
+            response.input_tokens,
+            response.output_tokens,
+            response.cache_read_input_tokens,
+            response.cache_creation_input_tokens,
+        )
+        .await;
         let step = if response.tool_calls.is_empty() {
             TraceStep {
                 request_hint: hint,
@@ -1189,7 +1234,48 @@ impl RecordingLlm {
         };
 
         self.steps.lock().await.push(step);
+        drop(publication_guard);
         self.flush_after_step().await;
+    }
+
+    async fn record_usage(
+        &self,
+        input_tokens: u32,
+        output_tokens: u32,
+        cache_read_input_tokens: u32,
+        cache_creation_input_tokens: u32,
+    ) {
+        let mut usage = self.usage.lock().await;
+        usage.trace.input_tokens = usage.trace.input_tokens.saturating_add(input_tokens);
+        usage.trace.output_tokens = usage.trace.output_tokens.saturating_add(output_tokens);
+        usage.trace.cache_read_input_tokens = usage
+            .trace
+            .cache_read_input_tokens
+            .saturating_add(cache_read_input_tokens);
+        usage.trace.cache_creation_input_tokens = usage
+            .trace
+            .cache_creation_input_tokens
+            .saturating_add(cache_creation_input_tokens);
+
+        let (input_rate, output_rate) = self.inner.cost_per_token();
+        if input_rate.is_zero() && output_rate.is_zero() {
+            return;
+        }
+        let cache_read_discount = self.inner.cache_read_discount();
+        let cache_read_rate = if cache_read_discount > Decimal::ZERO {
+            input_rate / cache_read_discount
+        } else {
+            input_rate
+        };
+        let uncached_input_tokens = input_tokens.saturating_sub(cache_read_input_tokens);
+        let step_cost = input_rate * Decimal::from(uncached_input_tokens)
+            + cache_read_rate * Decimal::from(cache_read_input_tokens)
+            + input_rate
+                * self.inner.cache_write_multiplier()
+                * Decimal::from(cache_creation_input_tokens)
+            + output_rate * Decimal::from(output_tokens);
+        usage.total_cost += step_cost;
+        usage.trace.total_cost_usd = Some(usage.total_cost.normalize().to_string());
     }
 }
 
@@ -1385,7 +1471,7 @@ mod tests {
         }
 
         fn cost_per_token(&self) -> (Decimal, Decimal) {
-            (Decimal::ZERO, Decimal::ZERO)
+            (Decimal::new(1, 6), Decimal::new(2, 6))
         }
 
         async fn complete(
@@ -1411,8 +1497,8 @@ mod tests {
                 output_tokens: 2,
                 finish_reason: crate::provider::FinishReason::Stop,
                 reasoning: None,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 1,
+                cache_creation_input_tokens: 2,
             })
         }
 
@@ -1439,7 +1525,7 @@ mod tests {
                 input_tokens: 4,
                 output_tokens: 2,
                 finish_reason: crate::provider::FinishReason::Stop,
-                cache_read_input_tokens: 0,
+                cache_read_input_tokens: 1,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
                 reasoning_details: None,
@@ -1679,6 +1765,12 @@ mod tests {
             &trace.steps.last().expect("recorded response").response,
             TraceResponse::Text { content, .. } if content == "streamed answer"
         ));
+        let usage = trace.usage.expect("new traces include aggregate usage");
+        assert_eq!(usage.input_tokens, 3);
+        assert_eq!(usage.output_tokens, 2);
+        assert_eq!(usage.cache_read_input_tokens, 1);
+        assert_eq!(usage.cache_creation_input_tokens, 2);
+        assert_eq!(usage.total_cost_usd.as_deref(), Some("0.000009"));
     }
 
     #[tokio::test]
@@ -2137,6 +2229,7 @@ mod tests {
     fn serde_roundtrip_extended_format() {
         let trace = TraceFile {
             model_name: "test".to_string(),
+            usage: None,
             memory_snapshot: vec![MemorySnapshotEntry {
                 path: "context/vision.md".to_string(),
                 content: "Be helpful.".to_string(),
@@ -2249,6 +2342,7 @@ mod tests {
         assert_eq!(trace.model_name, "old-trace");
         assert!(trace.memory_snapshot.is_empty());
         assert!(trace.http_exchanges.is_empty());
+        assert!(trace.usage.is_none());
         assert!(trace.steps[0].expected_tool_results.is_empty());
     }
 

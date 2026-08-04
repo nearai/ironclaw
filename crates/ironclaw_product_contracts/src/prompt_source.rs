@@ -26,7 +26,12 @@ pub struct BlockedAuthPromptRequest<'a> {
     pub fallback_owner_user_id: &'a UserId,
     pub scope: &'a TurnScope,
     pub run_id: TurnRunId,
-    pub gate_ref: &'a str,
+    /// The gate the run is parked on. Typed for the same reason the sibling
+    /// [`ApprovalPromptContextSource::approval_prompt_context`] is: every
+    /// producer already holds a `TurnGateRef` (the run state's `gate_ref`), and
+    /// a bare `&str` here let any other string in the request — the body, an
+    /// id — take its place without a compile error.
+    pub gate_ref: &'a TurnGateRef,
     /// Invocation the blocked capability ran under, when the renderer has it
     /// (the projection layer does; the delivery path renders without one).
     pub invocation_id: Option<InvocationId>,
@@ -115,17 +120,22 @@ mod tests {
         // slice onto the heap for a prompt that may never be sent.
         let owner = UserId::new("user-1").expect("valid user");
         let scope = scope();
+        // The gate ref is typed, matching the sibling port above: both prompt
+        // sources now take the gate the same way, so a renderer cannot hand
+        // one of them the run's body or an id where the gate belongs.
+        let gate_ref = TurnGateRef::new("gate-1").expect("valid gate ref");
         let request = BlockedAuthPromptRequest {
             fallback_owner_user_id: &owner,
             scope: &scope,
             run_id: TurnRunId::new(),
-            gate_ref: "gate-1",
+            gate_ref: &gate_ref,
             invocation_id: None,
             body: "needs auth".to_string(),
             credential_requirements: &[],
         };
         assert_eq!(request.fallback_owner_user_id, &owner);
-        assert_eq!(request.gate_ref, "gate-1");
+        assert_eq!(request.gate_ref, &gate_ref);
+        assert_eq!(request.gate_ref.as_str(), "gate-1");
         assert!(request.credential_requirements.is_empty());
         assert!(request.invocation_id.is_none());
     }

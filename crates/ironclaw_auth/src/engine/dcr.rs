@@ -242,10 +242,25 @@ pub(crate) fn protected_resource_metadata_url(resource: &str) -> Result<String, 
         return Err(AuthProductError::MalformedConfig);
     }
     let mut metadata = parsed.clone();
-    let resource_path = parsed.path().trim_end_matches('/');
+    let resource_path = match parsed.path() {
+        "/" => "",
+        path => path,
+    };
     metadata.set_path(&format!(
-        "{resource_path}/.well-known/oauth-protected-resource"
+        "/.well-known/oauth-protected-resource{resource_path}"
     ));
+    metadata.set_fragment(None);
+    Ok(metadata.to_string())
+}
+
+pub(crate) fn protected_resource_metadata_root_url(
+    resource: &str,
+) -> Result<String, AuthProductError> {
+    let mut metadata = url::Url::parse(resource).map_err(|_| AuthProductError::MalformedConfig)?;
+    if metadata.scheme() != "https" {
+        return Err(AuthProductError::MalformedConfig);
+    }
+    metadata.set_path("/.well-known/oauth-protected-resource");
     metadata.set_query(None);
     metadata.set_fragment(None);
     Ok(metadata.to_string())
@@ -285,7 +300,15 @@ mod tests {
     fn metadata_urls_are_well_formed() {
         assert_eq!(
             protected_resource_metadata_url("https://mcp.example.com/mcp").unwrap(),
-            "https://mcp.example.com/mcp/.well-known/oauth-protected-resource"
+            "https://mcp.example.com/.well-known/oauth-protected-resource/mcp"
+        );
+        assert_eq!(
+            protected_resource_metadata_url("https://mcp.example.com/mcp/?tenant=one").unwrap(),
+            "https://mcp.example.com/.well-known/oauth-protected-resource/mcp/?tenant=one"
+        );
+        assert_eq!(
+            protected_resource_metadata_root_url("https://mcp.example.com/mcp?tenant=one").unwrap(),
+            "https://mcp.example.com/.well-known/oauth-protected-resource"
         );
         assert_eq!(
             authorization_server_metadata_url("https://auth.example.com").unwrap(),

@@ -17,6 +17,7 @@ pub(super) enum ProductCommandHandler {
     ProjectFsRead,
     FsRead,
     AttachmentRead,
+    IronhubDeliverInstall,
     TraceAccountLoginLink,
     TraceHoldAuthorize,
     OperatorConfigSetKey,
@@ -51,6 +52,7 @@ impl ProductCommandHandler {
             PROJECT_FS_READ_COMMAND_ID => Some(Self::ProjectFsRead),
             FS_READ_COMMAND_ID => Some(Self::FsRead),
             ATTACHMENT_READ_COMMAND_ID => Some(Self::AttachmentRead),
+            IRONHUB_DELIVER_INSTALL_COMMAND_ID => Some(Self::IronhubDeliverInstall),
             TRACE_ACCOUNT_LOGIN_LINK_COMMAND_ID => Some(Self::TraceAccountLoginLink),
             TRACE_HOLD_AUTHORIZE_COMMAND_ID => Some(Self::TraceHoldAuthorize),
             OPERATOR_CONFIG_SET_KEY_COMMAND_ID => Some(Self::OperatorConfigSetKey),
@@ -172,6 +174,11 @@ impl ProductCommandHandler {
             Self::AttachmentRead => command_output(
                 services
                     .read_attachment(caller, product_command_input(input)?)
+                    .await?,
+            ),
+            Self::IronhubDeliverInstall => command_output(
+                services
+                    .ironhub_deliver_install(caller, product_command_input(input)?)
                     .await?,
             ),
             Self::TraceAccountLoginLink => {
@@ -393,7 +400,7 @@ impl ProductCapabilityHandler {
             Self::ExtensionRegisterHostedMcp => {
                 let request: ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest =
                     product_command_input(input)?;
-                services
+                let response = services
                     .lifecycle_service
                     .execute(
                         LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
@@ -405,6 +412,18 @@ impl ProductCapabilityHandler {
                         LifecycleProductAction::ExtensionRegisterHostedMcp { request },
                     )
                     .await?;
+                if response.blockers.iter().any(|blocker| matches!(
+                    blocker,
+                    ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
+                        ref_id: Some(ref_id),
+                    } if ref_id.as_str()
+                        == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
+                )) {
+                    return Err(ProductSurfaceError::validation(
+                        "auth_selection",
+                        ProductSurfaceValidationCode::AuthSelectionRequired,
+                    ));
+                }
                 Ok(())
             }
             Self::ExtensionImport => {

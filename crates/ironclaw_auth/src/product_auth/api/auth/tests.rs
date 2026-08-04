@@ -690,6 +690,7 @@ async fn lifecycle_dispatch_fence_failure_stays_retryable() {
 
     let now = chrono::Utc::now();
     let completed = AuthFlowRecord {
+        requested_scopes: Vec::new(),
         id: AuthFlowId::new(),
         scope: test_auth_product_scope(),
         kind: AuthFlowKind::IntegrationCredential,
@@ -737,6 +738,7 @@ async fn create_test_flow(
     let turn_run_ref = TurnRunRef::new(run_id.to_string()).expect("turn run ref");
     auth_svc
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope,
             kind: AuthFlowKind::IntegrationCredential,

@@ -341,6 +341,7 @@ pub(super) async fn build_backend_production(
         first_party_bundles,
         first_party_registrars,
         credential_account_visibility_policy,
+        ironhub_manifest_url,
         workspace_filesystems,
         standalone_storage_root,
         default_system_prompt_path,
@@ -1025,7 +1026,13 @@ pub(super) async fn build_backend_production(
             channel_egress_scope.user_id.clone(),
         ),
     );
+    let runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
     let host_runtime_http_egress = services.host_runtime_http_egress_port();
+    let ironhub_link_state = Arc::new(
+        ironclaw_extension_manager::ironhub::IronhubLinkStateStore::new(Arc::clone(
+            &fold_filesystem,
+        )),
+    );
     insert_extension_lifecycle_handlers(
         &mut first_party_registry,
         Arc::clone(&extension_management),
@@ -1038,6 +1045,8 @@ pub(super) async fn build_backend_production(
         &mut first_party_registry,
         Arc::clone(&skill_management),
         Arc::clone(&extension_management),
+        Arc::clone(&ironhub_link_state),
+        ironhub_manifest_url,
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("IronHub handlers are invalid: {error}"),
@@ -1132,8 +1141,7 @@ pub(super) async fn build_backend_production(
             })
             .map(|descriptor| descriptor.id.clone())
             .collect();
-        reserved_capability_ids
-            .extend(ironclaw_runner::tool_disclosure_bridge::bridge_capability_ids());
+        reserved_capability_ids.extend(ironclaw_loop_host::bridge_capability_ids());
         let generic_installation_store = extension_management.installation_store_handle();
         let backend_extension_host =
             build_backend_extension_host(BackendExtensionHostAssemblyInput {
@@ -1237,7 +1245,8 @@ pub(super) async fn build_backend_production(
         channel_identity_store,
         channel_dm_target_store,
         channel_disconnect_slot,
-        host_runtime_http_egress,
+        runtime_http_egress,
+        ironhub_link_state,
         skill_mounts,
         memory_mounts,
         system_extensions_lifecycle_mounts,

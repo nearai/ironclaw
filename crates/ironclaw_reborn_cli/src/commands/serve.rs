@@ -589,10 +589,18 @@ impl ServeCommand {
                     .context("failed to compose the extension ingress route mount")?;
                 serve_config = serve_config.with_public_route_mount(ingress_mount);
             }
+            if let Some(ironhub_mount) = runtime
+                .ironhub_register_route_mount()
+                .context("failed to compose the IronHub register route mount")?
+            {
+                serve_config = serve_config.with_public_route_mount(ironhub_mount);
+            }
             // Generic WebGeneratedCode pairing routes (mint/status/unpair per
             // extension), riding the shared protected-route seam.
-            if let Some(pairing_mount) = runtime.channel_pairing_route_mount() {
-                serve_config = serve_config.with_protected_route_mount(pairing_mount);
+            if let Some(pairing_registry) = runtime.channel_pairing_registry() {
+                serve_config = serve_config.with_protected_route_mount(
+                    ironclaw_webui::channel_pairing_route_mount(pairing_registry),
+                );
             }
             // Public NEAR AI login callback route (token redirect target). Built
             // from the runtime's LLM seam; absent when no LLM was wired.

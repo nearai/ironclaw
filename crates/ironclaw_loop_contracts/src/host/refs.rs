@@ -268,8 +268,25 @@ impl TryFrom<String> for LoopInlineMessageBody {
 // `LoopSafeSummary`'s AsRef/Display/Deserialize come from
 // `impl_bounded_ref_traits!` at its definition above.
 
+impl LoopInputCursorToken {
+    /// Canonical run-start origin cursor — the read position before the first
+    /// input. The single source of truth for the origin token so host queue
+    /// adapters do not re-hardcode the literal.
+    pub const ORIGIN: &'static str = "input-cursor:origin";
+
+    /// The run-start origin cursor.
+    pub fn origin() -> Self {
+        Self(Self::ORIGIN.to_string())
+    }
+
+    /// True when this token is the run-start origin cursor.
+    pub fn is_origin(&self) -> bool {
+        self.as_str() == Self::ORIGIN
+    }
+}
+
 pub(crate) fn origin_input_cursor_token() -> LoopInputCursorToken {
-    LoopInputCursorToken("input-cursor:origin".to_string())
+    LoopInputCursorToken::origin()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]

@@ -578,12 +578,11 @@ fn result_preview_parts(
     else {
         return empty;
     };
-    // `.ok()` intentionally degrades content that fails the credential redaction
-    // contract to an absent preview (a pure text-to-redacted-content conversion).
+    // Credential material is masked instead of discarding the whole preview.
     // The result ref and paging metadata are independent host-authored authority:
-    // keep them so replay can continue against the durable source without
-    // exposing the rejected content or the current invocation's ephemeral ref.
-    let preview = preview.and_then(|text| ModelResultPreview::new(text).ok());
+    // keep them even when no preview was supplied or the remaining content is
+    // rejected, so replay can continue against the durable source.
+    let preview = preview.and_then(|text| ModelResultPreview::redacted(text).ok());
     let referenced_result_ref = if result_ref == own_result_ref.as_str() {
         None
     } else {
@@ -1596,7 +1595,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_observation_preview_carries_delimiter_content_and_drops_credentials() {
+    fn completed_observation_preview_masks_credentials_and_preserves_continuation() {
         let outcome_refs = |content: &str| match completed(
             result_ref(),
             "ok".to_string(),
@@ -1619,24 +1618,54 @@ mod tests {
                 .map(ModelResultPreview::as_str),
             Some(content)
         );
-        // A genuine credential in the content drops only the inline preview.
-        // The referenced durable result remains authoritative for replay.
-        let refs = outcome_refs("token sk-ant-abc123def456");
-        assert_eq!(refs.preview, None);
+
+        // A genuine credential is MASKED, not allowed through — the security
+        // property is unchanged. Masking keeps the surrounding output visible
+        // while the secret still never reaches the model.
+        // The PRODUCTION trigger is credential VOCABULARY, not a secret value:
+        // extension_search / ironhub results carry "Authenticated with an Attio
+        // workspace API key presented as a Bearer header", which refused the whole
+        // payload and left the model an unreadable reference (1088 bytes, no preview).
+        let vocab_refs = outcome_refs(
+            "{\"name\": \"attio\", \"description\": \"Authenticated with a workspace API key presented as a Bearer header.\"}",
+        );
         assert_eq!(
-            refs.preview_meta
+            vocab_refs
+                .preview_meta
                 .referenced_result_ref
                 .as_ref()
-                .map(LoopRef::as_str),
+                .map(|reference| reference.as_str()),
             Some("result:staged")
         );
-        assert_eq!(
-            refs.preview_meta.summary.as_ref().map(SafeSummary::as_str),
-            Some("tool completed")
+        let vocab = vocab_refs
+            .preview
+            .as_ref()
+            .expect("credential VOCABULARY must not drop the preview")
+            .as_str();
+        assert!(
+            vocab.contains("attio"),
+            "the payload must survive vocabulary redaction: {vocab}"
         );
 
-        let mut suppressed_array = observation("secret");
+        let masked_refs = outcome_refs("token sk-ant-abc123def456");
+        let masked = masked_refs
+            .preview
+            .as_ref()
+            .expect("preview is masked, not dropped")
+            .as_str();
+        assert!(
+            !masked.contains("sk-ant-abc123def456"),
+            "credential material must never reach the model: {masked}"
+        );
+        assert!(
+            masked.contains("token"),
+            "surrounding content must survive redaction: {masked}"
+        );
+
+        // Continuation authority is independent of the optional preview.
+        let mut suppressed_array = observation("unused");
         let ToolObservationDetail::ResultReference {
+            preview,
             total_bytes,
             next_offset,
             item_count,
@@ -1645,6 +1674,7 @@ mod tests {
         else {
             panic!("test observation must be a result reference");
         };
+        *preview = None;
         *total_bytes = Some(4096);
         *next_offset = Some(2048);
         *item_count = Some(600);

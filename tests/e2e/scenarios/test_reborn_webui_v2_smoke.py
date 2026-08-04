@@ -1689,11 +1689,19 @@ async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v
     ).to_be_visible(timeout=15000)
 
     await expect(composer).to_be_enabled()
+    # A busy run no longer gates the composer: sends are queued behind the
+    # active run rather than blocked, so the send affordance stays enabled.
+    await expect(composer).to_have_attribute("data-send-disabled", "false")
     await composer.fill("draft while the reply is still running")
     await expect(composer).to_have_value("draft while the reply is still running")
+    await expect(composer).to_have_attribute("data-send-disabled", "false")
 
     await composer.press("Enter")
-    await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(1, timeout=1000)
+
+    await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(2, timeout=5000)
+    await expect(reborn_v2_page.locator(SEL_V2["msg_user"]).nth(1)).to_contain_text(
+        "draft while the reply is still running"
+    )
 
 
 async def test_reborn_v2_failed_cancel_keeps_active_run_visible(reborn_v2_page):
@@ -1728,7 +1736,9 @@ async def test_reborn_v2_failed_cancel_keeps_active_run_visible(reborn_v2_page):
 
     await expect(cancel_button).to_be_visible(timeout=10000)
     await expect(cancel_button).to_be_enabled(timeout=10000)
-    await expect(composer).to_have_attribute("data-send-disabled", "true")
+    # The run is still active after the failed cancel, and a busy run no
+    # longer gates the composer: sends are queued behind the active run.
+    await expect(composer).to_have_attribute("data-send-disabled", "false")
     error_toast = reborn_v2_page.locator(SEL_V2["toast"]).filter(
         has_text="Couldn't stop this run"
     )

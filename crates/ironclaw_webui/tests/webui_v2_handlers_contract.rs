@@ -113,6 +113,9 @@ use ironclaw_product::{
 use ironclaw_product_contracts::admin_users::{
     AdminUserRecord, AdminUserRole, AdminUserSecretMeta, AdminUserStatus,
 };
+use ironclaw_product_contracts::ironhub::{
+    IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult,
+};
 use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
     LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
@@ -152,6 +155,7 @@ enum ProductSurfaceCallId {
     ProjectFsRead,
     FsRead,
     AttachmentRead,
+    IronhubDeliverInstall,
     TraceAccountLoginLink,
     TraceHoldAuthorize,
     OperatorConfigSetKey,
@@ -181,6 +185,7 @@ impl ProductSurfaceCallId {
             Self::ProjectFsRead => "project.fs.read",
             Self::FsRead => "fs.read",
             Self::AttachmentRead => "attachment.read",
+            Self::IronhubDeliverInstall => "ironhub.deliver_install",
             Self::TraceAccountLoginLink => "trace.account_login_link",
             Self::TraceHoldAuthorize => "trace.hold_authorize",
             Self::OperatorConfigSetKey => "operator.config.set_key",
@@ -210,6 +215,7 @@ impl ProductSurfaceCallId {
             "project.fs.read" => Some(Self::ProjectFsRead),
             "fs.read" => Some(Self::FsRead),
             "attachment.read" => Some(Self::AttachmentRead),
+            "ironhub.deliver_install" => Some(Self::IronhubDeliverInstall),
             "trace.account_login_link" => Some(Self::TraceAccountLoginLink),
             "trace.hold_authorize" => Some(Self::TraceHoldAuthorize),
             "operator.config.set_key" => Some(Self::OperatorConfigSetKey),
@@ -233,13 +239,19 @@ impl ProductSurfaceCallId {
 #[derive(Debug, Clone, PartialEq)]
 struct RecordedProductSurfaceCallRequest {
     call_id: String,
+    caller_user_id: String,
     input: Value,
 }
 
 impl RecordedProductSurfaceCallRequest {
-    fn from_value(call_id: ProductSurfaceCallId, input: Value) -> Self {
+    fn from_value(
+        call_id: ProductSurfaceCallId,
+        caller: &ProductSurfaceCaller,
+        input: Value,
+    ) -> Self {
         Self {
             call_id: call_id.as_str().to_string(),
+            caller_user_id: caller.user_id.as_str().to_string(),
             input,
         }
     }
@@ -1616,6 +1628,15 @@ impl StubServices {
                     .await?,
                 ))
             }
+            ProductSurfaceCallId::IronhubDeliverInstall => {
+                let request: IronhubInstallDeliveryRequest =
+                    serde_json::from_value(request.input).expect("input");
+                RecordedProductSurfaceCallResponse::json(IronhubInstallDeliveryResult {
+                    installed: true,
+                    slug: request.slug,
+                    message: "installed".to_string(),
+                })
+            }
             ProductSurfaceCallId::TraceAccountLoginLink => {
                 RecordedProductSurfaceCallResponse::json(
                     self.trace_account_login_link(caller).await?,
@@ -1759,8 +1780,8 @@ impl ProductSurface for StubServices {
         if let Some(call_id) = ProductSurfaceCallId::parse(request.operation_id.as_str()) {
             let output = self
                 .record_product_surface_call(
-                    caller,
-                    RecordedProductSurfaceCallRequest::from_value(call_id, request.input),
+                    caller.clone(),
+                    RecordedProductSurfaceCallRequest::from_value(call_id, &caller, request.input),
                 )
                 .await?
                 .into_value()?;
@@ -1909,6 +1930,7 @@ fn extension_setup_response(package_ref: LifecyclePackageRef) -> RebornSetupExte
         package_ref,
         phase: LifecyclePublicState::SetupNeeded,
         blockers: Vec::new(),
+        message: None,
         payload: None,
         secrets: Vec::new(),
         fields: Vec::new(),
@@ -5502,6 +5524,58 @@ async fn install_extension_invokes_lifecycle_capability_with_body_package_ref() 
 }
 
 #[tokio::test]
+async fn ironhub_deliver_install_dispatches_with_authenticated_caller_and_typed_body() {
+    let services = Arc::new(StubServices::default());
+    let authenticated_caller = caller_for_user("user-ironhub");
+    let router = router_with_caller(
+        services.clone(),
+        WebUiV2Capabilities::default(),
+        authenticated_caller,
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/ironhub/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"slug":"my-skill","version":"1.0.0","uid":"u","aid":"a","ts":1700000000,"nonce":"n","artifact_digest":"sha256:deadbeef","sig":"sig-1","private_manifest_url":"https://catalog.example/private/repo?token=rotating"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["installed"], true);
+    assert_eq!(body["slug"], "my-skill");
+
+    let calls = services.surface_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].call_id,
+        ProductSurfaceCallId::IronhubDeliverInstall.as_str()
+    );
+    assert_eq!(calls[0].caller_user_id, "user-ironhub");
+    assert_eq!(
+        calls[0].input,
+        serde_json::json!({
+            "slug": "my-skill",
+            "version": "1.0.0",
+            "uid": "u",
+            "aid": "a",
+            "ts": 1_700_000_000_u64,
+            "nonce": "n",
+            "artifact_digest": "sha256:deadbeef",
+            "sig": "sig-1",
+            "private_manifest_url": "https://catalog.example/private/repo?token=rotating"
+        })
+    );
+}
+
+#[tokio::test]
 async fn register_hosted_mcp_uses_closed_wire_without_extension_readback() {
     let services = Arc::new(StubServices::default());
     services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
@@ -5546,6 +5620,36 @@ async fn register_hosted_mcp_uses_closed_wire_without_extension_readback() {
         services.view_queries.lock().expect("lock").is_empty(),
         "registration is admission only and must not read an installation projection"
     );
+}
+
+#[tokio::test]
+async fn register_hosted_mcp_surfaces_ambiguous_auth_as_a_typed_registration_choice() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Err(ProductSurfaceError::validation(
+        "auth_selection",
+        ProductSurfaceValidationCode::AuthSelectionRequired,
+    )));
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/register-hosted-mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"desired_id":"stripe","desired_name":"Stripe MCP","endpoint":"https://mcp.stripe.com","auth_selection":{"kind":"auto"}}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["field"], "auth_selection");
+    assert_eq!(body["validation_code"], "auth_selection_required");
 }
 
 #[tokio::test]
@@ -7028,6 +7132,101 @@ async fn stream_events_emits_application_keep_alive_while_subscription_is_idle()
     let text = String::from_utf8_lossy(&bytes);
     assert!(text.contains("event: keep_alive"), "{text}");
     assert!(text.contains(r#"data: {"type":"keep_alive"}"#), "{text}");
+}
+
+// Keep-alive frames are liveness pings, not durable resume positions.
+// The product seam stamps an advancing cursor into every envelope
+// (including `KeepAlive`), and the browser's `EventSource` echoes the
+// last `id:` back as `Last-Event-ID` on reconnect. If a keep-alive is
+// the last frame before a disconnect, resuming from its cursor would
+// skip real events that precede it. Pin that keep-alive envelopes never
+// carry an SSE `id:` so the browser keeps the last real event's id as
+// the resume point.
+#[tokio::test]
+async fn stream_events_keep_alive_frame_carries_no_sse_id() {
+    let services = Arc::new(StubServices::default());
+
+    let real_envelope = make_projection_envelope("cursor:real", "hello");
+    let keep_alive_envelope =
+        make_outbound_envelope("cursor:keepalive", ProductOutboundPayload::KeepAlive);
+
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+        events: vec![real_envelope.clone(), keep_alive_envelope],
+    }));
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse { events: Vec::new() }));
+
+    let router = router_with(services.clone());
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body();
+    let mut bytes = Vec::<u8>::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let have_events = bytes.windows(2).filter(|w| *w == b"\n\n").count() >= 2;
+        let saw_second_call = services.stream_events_calls.lock().expect("lock").len() >= 2;
+        if have_events && saw_second_call {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(remaining, body.frame()).await {
+            Ok(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    bytes.extend_from_slice(data.as_ref());
+                }
+            }
+            _ => break,
+        }
+    }
+    drop(body);
+
+    let events = parse_sse_events(&bytes);
+    let keep_alive = events
+        .iter()
+        .find(|event| event.event.as_deref() == Some("keep_alive"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a keep_alive event; got: {events:?}; raw: {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        });
+    assert!(
+        keep_alive.id.is_none(),
+        "keep_alive frame must not carry an SSE id (resume cursor); got: {keep_alive:?}"
+    );
+    let keep_alive_json: Value =
+        serde_json::from_str(keep_alive.data.as_deref().expect("data")).expect("keep_alive json");
+    assert_eq!(keep_alive_json["type"], "keep_alive");
+    // The cursor field may be present on the frame (it is the envelope's
+    // projection cursor), but it must not be surfaced as the SSE `id:`
+    // field — that is the contract the assertion above pins.
+    assert_eq!(
+        keep_alive_json.get("cursor"),
+        Some(&Value::String("cursor:keepalive".to_string())),
+        "keep_alive frame data carries its envelope cursor as a data field, {keep_alive_json}"
+    );
+
+    // The preceding real event still carries its cursor id, so the browser
+    // keeps it as the Last-Event-ID resume point across the keep-alive.
+    let real_event = events
+        .iter()
+        .find(|event| event.event.as_deref() == Some("final_reply"))
+        .expect("real event precedes keep-alive");
+    let real_cursor_json =
+        serde_json::to_string(real_envelope.projection_cursor()).expect("cursor json");
+    assert_eq!(real_event.id.as_deref(), Some(real_cursor_json.as_str()));
 }
 
 // Pins the *wire* contract the browser sees, not just the handler being

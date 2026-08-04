@@ -88,6 +88,7 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 | `OidcAuthenticator` | OIDC bearer-token verifier (JWKS + standard claims); accepted tokens map to non-operator WebUI capabilities |
 | `webui_v2_auth_router(config) -> PublicRouteMount` | OAuth login router + route descriptors. The descriptors travel with the router so composition can fold them into the descriptor-driven per-route rate-limit / body-limit middleware — same machinery the v2 facade and product-auth callback already use, no side door. |
 | `product_auth_route_mount(state) -> ProductAuthRouteMount` | Product-auth route router + descriptors for OAuth start/callback/status, manual-token setup/submit, account selection/recovery/refresh, and lifecycle cleanup. |
+| `channel_pairing_route_mount(registry) -> ProtectedRouteMount` | Bearer-authed generic pairing routes for `WebGeneratedCode` channels (`/api/webchat/v2/extensions/{extension_id}/pairing/{mint,status,unpair}`). Moved here from `ironclaw_extension_host` (PROPOSAL §6.8.2 shed list, §6.9.4). **The pairing *service core* stays in `ironclaw_extension_host`** — this module is transport over it and holds no pairing semantics, which is why this crate names `ironclaw_extension_host` at all. Its three patterns are a separate mount and are **not** rows of the frozen `webui_v2/descriptors.rs` table. Composition hands out the *registry*, not the mount (it only dev-depends on this crate); the binary builds the mount. |
 | `PublicRouteMount` | `{ router, descriptors }` pair handed to `WebuiServeConfig::with_public_route_mount` |
 | `OAuthProvider` trait (in `auth/provider.rs`) | Extension point for per-provider URL / code-exchange logic. Deliberately lives in its own module so each provider does not depend on the others. `GoogleProvider` and `GitHubProvider` ship today. |
 | `GoogleProvider` (in `auth/google.rs`) | Google OIDC provider (scopes `openid email profile`, PKCE S256, optional `hd` hosted-domain restriction). Built from `GoogleOAuthConfig`. |
@@ -121,6 +122,7 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.cancel_run` / `retry_run` / `resolve_gate` | POST | `…/runs/{run_id}/…` | — | `TurnCoordinator` |
 | `webui.v2.list/pause/resume/rename/delete_automation` | GET/POST/DELETE | `/api/webchat/v2/automations…` | — | `ProductSurface` |
 | `webui.v2.list/install/import/remove/get_setup/setup_extension/register_hosted_mcp` | GET/POST | `/api/webchat/v2/extensions…` | — | `ProjectionOnly` / `ProductSurface` |
+| `webui.v2.ironhub_deliver_install` | POST | `/api/webchat/v2/ironhub/install` | — | `ProductSurface` |
 | `webui.v2.*_llm_*` | GET/POST | `/api/webchat/v2/llm/…` | — | `ProjectionOnly` / `ProductSurface` |
 | `webui.v2.settings.list_tools` / `set_tools_auto_approve` / `set_tool_permission` | GET/POST | `/api/webchat/v2/settings/tools…` | — | `ProjectionOnly` / `ProductSurface` |
 | `webui.v2.operator.*` (setup, config, config/{key}, validate, diagnostics, status, logs, service) | GET/POST | `/api/webchat/v2/operator/…` | — | `ProjectionOnly` / `ProductSurface` |

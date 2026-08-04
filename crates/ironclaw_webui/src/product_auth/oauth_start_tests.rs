@@ -473,5 +473,40 @@ mod tests {
             .map(|(_, value)| value.into_owned())
             .expect("scope param");
         assert_eq!(scope, "msg:read msg:write");
+
+        // Settings-initiated connect: an extension asking for only its OWN
+        // slice of a shared vendor still consents to the whole shared-vendor
+        // ceiling. The vendor account is shared by every installed extension
+        // using it, so a per-extension request leaves each sibling
+        // re-consenting and returning `auth_required` (#7069). Chat and
+        // Settings must resolve this identically — this pins the Settings
+        // caller; the gate caller is pinned in `oauth_gate.rs`.
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let state = engine_backed_route_state(
+            shared.clone(),
+            "acme-messenger",
+            vec!["msg:read".to_string()],
+            vec![vendor_recipe("acmevendor", &["msg:read", "msg:write"])],
+        );
+        let app = product_auth_route_mount(state)
+            .protected
+            .layer(axum::Extension(test_caller()));
+        let response = start(app).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("start json");
+        let url = url::Url::parse(json["authorization_url"].as_str().expect("url")).expect("parse");
+        let scope = url
+            .query_pairs()
+            .find(|(key, _)| key == "scope")
+            .map(|(_, value)| value.into_owned())
+            .expect("scope param");
+        assert!(
+            scope.contains("msg:read") && scope.contains("msg:write"),
+            "a partial in-ceiling request from Settings must still consent to the \
+             shared-vendor ceiling; got {scope}"
+        );
     }
 }

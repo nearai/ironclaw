@@ -31,6 +31,11 @@ hmac = "0.13"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version = "0.1.0" }
 ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
+# The generic channel-pairing routes (`channel_pairing.rs`) are transport over
+# the pairing *service core*, which PROPOSAL §6.8.2 reserves to the extension
+# host. §6.9.4 puts the routes here, so this crate names the service; it must
+# never reach past it into lifecycle authority or the installation stores.
+ironclaw_extension_host = { path = "../ironclaw_extension_host" }
 ironclaw_host_ingress = { path = "../ironclaw_host_ingress" }
 ironclaw_auth = { path = "../ironclaw_auth" }
 # The advertised attachment ceilings the WebUI hands the browser: one home

@@ -226,6 +226,12 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 16)]
     pub(crate) api_setup_concurrency: usize,
 
+    /// Threads created per API user during setup. Values above 1 exercise
+    /// listing/read paths against large sidebars; sends still target each
+    /// user's first thread.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) api_threads_per_user: usize,
+
     /// Background long-running API users to run alongside foreground api-user-capacity sends.
     #[arg(long, default_value_t = 0)]
     pub(crate) api_background_users: usize,
@@ -425,6 +431,11 @@ pub(crate) struct Args {
     /// Owners across which thread-list seed rows are distributed.
     #[arg(long, default_value_t = 1)]
     pub(crate) thread_list_users: usize,
+
+    /// Seed thread-list threads without titles, each carrying one accepted
+    /// user message — the shape that exercises sidebar title derivation.
+    #[arg(long, default_value_t = false)]
+    pub(crate) thread_list_untitled: bool,
 
     /// Page size used while walking the thread-list workload.
     #[arg(long, default_value_t = 50)]
@@ -2315,12 +2326,21 @@ pub(crate) fn default_libsql_path() -> PathBuf {
     ))
 }
 
-async fn cleanup_generated_libsql_path(path: &Path) {
-    for candidate in [
-        path.to_path_buf(),
-        path.with_extension("db-wal"),
-        path.with_extension("db-shm"),
-    ] {
+pub(crate) async fn cleanup_generated_libsql_path(path: &Path) {
+    // SQLite appends `-wal`/`-shm` to the whole file name; it does not replace
+    // the extension. `with_extension("db-wal")` only lined up when the path
+    // ended in `.db`, so an explicit `--libsql-path bench.sqlite` left
+    // `bench-<case>.sqlite-wal` and `-shm` behind on every run.
+    // Appended as `OsString`, not through `to_string_lossy`: a lossy round trip
+    // substitutes replacement characters for a valid non-UTF-8 filename, so the
+    // derived paths would not name the files SQLite actually created and the
+    // sidecars would survive the cleanup meant to remove them.
+    let sidecars = ["-wal", "-shm"].map(|suffix| {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        PathBuf::from(sidecar)
+    });
+    for candidate in [path.to_path_buf(), sidecars[0].clone(), sidecars[1].clone()] {
         match tokio::fs::remove_file(&candidate).await {
             Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => {}

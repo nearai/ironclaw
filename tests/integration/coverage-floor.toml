@@ -68,15 +68,63 @@ captured_from = "dd9b9d961dc302fc50ac4b08b137997c092eefb7"
 
 [[crate]]
 name = "ironclaw_runner"
-# LLVM 21 reports 14658 / 17133 = 85.55%; calibrate the absolute floor to
-# the same observed artifact rather than mixing source mappings.
-floor_percent = 85.55
-floor_covered_lines = 14658
+# WS3 runner sheds moved the model-gateway cluster (model_gateway,
+# model_routes, the driver-host port adapters) and the whole progressive
+# tool-disclosure cluster to `ironclaw_loop_host` — ~10.5k source lines out of
+# a 33.2k crate, plus the two integration test targets that covered them
+# (`llm_gateway`, `model_routes`). The pre-shed `floor_covered_lines = 14658`
+# numerator captured at 17,133 instrumented lines therefore no longer describes
+# this crate: it is structurally unreachable, not a regression.
+#
+# RECAPTURED — both fields, from this PR's own merged coverage artifact
+# (`reborn-integration-coverage-merged` from merge_group run 30855460733), read
+# through the same `scripts/ci/lib/reborn_coverage_lcov.py` aggregation that
+# enforces this file: 9,470 / 11,474 = 82.53%. Not estimated, not carried
+# forward. Applying the WS2.4 `ironclaw_extension_host` resolution below (both
+# numbers recaptured in the same PR) rather than the WS1.2 `ironclaw_turns` one
+# (percentage-only for a release), so no release runs on a half-captured entry.
+#
+# `floor_percent` FALLS 85.55 -> 82.53, and that is the honest number rather
+# than a weakening. An earlier draft of this entry held 85.55 on the assumption
+# that "the moved half is adapter code with roughly the crate's own coverage
+# profile, so the ratio is the invariant that survives a split". MEASURED, that
+# assumption is false and the merge queue is where it failed: the moved files
+# score 6,108 / 6,577 = 92.87% at their new home — 10.33pp ABOVE the 82.53% of
+# what stayed — so the shed removed the crate's better-covered half and
+# un-masked the weaker remainder. Proof this is composition and not lost tests:
+# adding the moved files back gives 15,578 / 18,051 = 86.30%, which CLEARS the
+# old 85.55% floor by 0.75pp; and the `#[test]`/`#[tokio::test]` roster across
+# the two crates goes 1,070 -> 1,072 (+2 added, zero names lost). A shed
+# re-captures the SOURCE crate's floor; it does not merely floor the
+# destination. See docs/reborn/target-architecture/ (WS3 landing note).
+floor_percent = 82.53
+floor_covered_lines = 9470
 tolerance_percent = 0.5
-tolerance_lines = 20
-captured_total_lines = 17133
-captured_date = "2026-07-30"
-rationale = "Protects generated lifecycle, restart, and double-submit runner orchestration while reconciling LLVM 21 source mapping."
+captured_total_lines = 11474
+captured_date = "2026-08-03"
+rationale = "Protects generated lifecycle, restart, and double-submit runner orchestration. Recaptured after the WS3 model-gateway/tool-disclosure sheds moved the better-covered half to ironclaw_loop_host."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+
+[[crate]]
+name = "ironclaw_loop_host"
+# Added by the WS3 runner sheds so the ~10.5k lines that left
+# `ironclaw_runner` (above) keep a ratchet instead of falling out of per-crate
+# enforcement entirely — the gap the WS1.2 `ironclaw_turns` split left open for
+# `ironclaw_loop_contracts`, not repeated here.
+#
+# CAPTURED from the same merged artifact as the entry above (merge_group run
+# 30855460733): 24,598 / 27,063 = 90.89%. `floor_percent` is RAISED to the
+# observed value rather than inherited from the source crate — an earlier draft
+# carried 85.55 across from `ironclaw_runner`, which would have left the
+# absorbed code 5.34pp of unratcheted slack on arrival, i.e. room to lose ~1.4k
+# covered lines silently. The destination is floored at what it actually
+# measures, on arrival, in the same PR.
+floor_percent = 90.89
+floor_covered_lines = 24598
+tolerance_percent = 0.5
+captured_total_lines = 27063
+captured_date = "2026-08-03"
+rationale = "Protects the model-gateway adapter, model-route policy, driver-host port adapters, and the progressive tool-disclosure decorator this crate absorbed in WS3."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]

@@ -65,6 +65,7 @@ use ironclaw_host_api::{
     safe_summary::SafeSummary,
     scope::Principal,
 };
+use ironclaw_loop_host::{HostInputEnqueuePort, RejectingInputEnqueue};
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     ProductSurfaceValidationCode,
@@ -120,6 +121,7 @@ mod extension_onboarding;
 mod extension_setup_credentials;
 mod extensions;
 mod fs_browse;
+mod ironhub_link;
 mod lifecycle_setup;
 mod llm_config;
 mod log_views;
@@ -180,6 +182,10 @@ pub use fs_browse::{
 pub use ironclaw_product_contracts::descriptors::{
     EmptyProductCommandInput, ProductCapabilityDescriptor, ProductSurfaceCommandDescriptor,
     ProductView,
+};
+use ironclaw_product_contracts::ironhub::{
+    IRONHUB_DELIVER_INSTALL_COMMAND_ID, IronhubInstallDeliveryRequest,
+    IronhubInstallDeliveryResult, IronhubLinkService,
 };
 pub use ironclaw_product_contracts::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
 pub use ironclaw_product_contracts::product_wire::{
@@ -2186,6 +2192,7 @@ pub struct RebornServices<
     view_provider: V,
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    input_enqueue: Arc<dyn HostInputEnqueuePort>,
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
     project_filesystem: Option<Arc<dyn ProjectFilesystemReader>>,
     filesystem_browser: Option<Arc<dyn FilesystemBrowseReader>>,
@@ -2208,6 +2215,7 @@ pub struct RebornServices<
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
+    ironhub_link: Option<Arc<dyn IronhubLinkService>>,
     // arch-exempt: optional_arc, genuinely optional — the active-model reader is wired only when the runtime has an LLM reload handle; runtimes built without one, and tests, run without it (mirrors the sibling optional llm_config field), plan #5985
     active_model_reader: Option<Arc<dyn ActiveModelReader>>,
     operator_approval_config: Option<RebornOperatorApprovalConfig>,
@@ -2262,6 +2270,7 @@ where
             view_provider,
             thread_service,
             turn_coordinator,
+            input_enqueue: Arc::new(RejectingInputEnqueue),
             inbound_attachments: None,
             project_filesystem: None,
             filesystem_browser: None,
@@ -2288,6 +2297,7 @@ where
             skill_activation_recorder: None,
             skill_activation_clearer: None,
             llm_config: None,
+            ironhub_link: None,
             active_model_reader: None,
             operator_approval_config: None,
             thread_operation_locks: Arc::new(StdMutex::new(HashMap::new())),
@@ -2296,6 +2306,11 @@ where
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
         self.event_stream = Some(event_stream);
+        self
+    }
+
+    pub fn with_input_enqueue(mut self, input_enqueue: Arc<dyn HostInputEnqueuePort>) -> Self {
+        self.input_enqueue = input_enqueue;
         self
     }
 
@@ -2355,6 +2370,26 @@ where
     pub fn with_llm_config_service(mut self, llm_config: Arc<dyn LlmConfigService>) -> Self {
         self.llm_config = Some(llm_config);
         self
+    }
+
+    pub fn with_ironhub_link_service(mut self, ironhub_link: Arc<dyn IronhubLinkService>) -> Self {
+        self.ironhub_link = Some(ironhub_link);
+        self
+    }
+
+    pub async fn ironhub_deliver_install(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: IronhubInstallDeliveryRequest,
+    ) -> Result<IronhubInstallDeliveryResult, ProductSurfaceError> {
+        let service = self
+            .ironhub_link
+            .as_ref()
+            .ok_or_else(ironhub_link::ironhub_link_unavailable)?;
+        service
+            .deliver_install(caller, request)
+            .await
+            .map_err(ironhub_link::map_ironhub_link_error)
     }
 
     /// Wire the read-only port exposing the runtime's live active/default model
@@ -3434,6 +3469,56 @@ where
                         notice: NOTICE_BUSY_GENERIC.to_string(),
                     });
                 }
+                MessageStatus::Queued => {
+                    // Crash-orphan recovery: re-enqueue idempotently before
+                    // replaying `DeferredBusy` (see `steering.rs`); a queued
+                    // replay whose run is gone settles as `RejectedBusy`.
+                    let run_id = parse_replay_run_id(replay.turn_run_id)?;
+                    let accepted_ref = accepted_message_ref(replay.message_id.to_string())?;
+                    match crate::steering::readmit_queued_steering(
+                        &*self.turn_coordinator,
+                        self.input_enqueue.as_ref(),
+                        &*self.thread_service,
+                        crate::steering::SteeringAdmissionRequest {
+                            turn_scope: scope.clone(),
+                            thread_scope: thread_scope.clone(),
+                            message_id: replay.message_id,
+                            accepted_message_ref: accepted_ref.clone(),
+                            active_run_id: run_id,
+                        },
+                    )
+                    .await
+                    {
+                        Ok(crate::steering::SteeringAdmission::Deferred { run }) => {
+                            return Ok(RebornSubmitTurnResponse::DeferredBusy {
+                                thread_id: replay.thread_id,
+                                accepted_message_ref: accepted_ref,
+                                active_run_id: run_id,
+                                status: run.status,
+                                event_cursor: run.event_cursor,
+                                notice: rejected_busy_notice(run.status),
+                            });
+                        }
+                        Ok(crate::steering::SteeringAdmission::Rejected) => {
+                            return Ok(RebornSubmitTurnResponse::RejectedBusy {
+                                thread_id: replay.thread_id,
+                                accepted_message_ref: accepted_ref,
+                                active_run_id: Some(run_id),
+                                status: None,
+                                event_cursor: None,
+                                notice: NOTICE_BUSY_GENERIC.to_string(),
+                            });
+                        }
+                        Err(error) => {
+                            return Err(steering_admission_error(
+                                error,
+                                &replay.thread_id,
+                                replay.message_id,
+                                run_id,
+                            ));
+                        }
+                    }
+                }
                 MessageStatus::Accepted | MessageStatus::DeferredBusy => AcceptedWebUiMessage {
                     thread_id: replay.thread_id,
                     message_id: replay.message_id,
@@ -3566,22 +3651,49 @@ where
                     "webui submit_turn deferred: thread busy with an active run"
                 );
                 self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
-                mark_message_rejected_busy_or_replay(
+                match crate::steering::admit_busy_steering(
+                    &*self.turn_coordinator,
+                    self.input_enqueue.as_ref(),
                     &*self.thread_service,
-                    &thread_scope,
-                    &handoff,
-                    &client_action_id,
+                    crate::steering::SteeringAdmissionRequest {
+                        turn_scope: scope.clone(),
+                        thread_scope: thread_scope.clone(),
+                        message_id: handoff.message_id,
+                        accepted_message_ref: accepted_message_ref.clone(),
+                        active_run_id: busy.active_run_id,
+                    },
                 )
-                .await?;
-                let notice = rejected_busy_notice(busy.status);
-                Ok(RebornSubmitTurnResponse::RejectedBusy {
-                    thread_id: handoff.thread_id,
-                    accepted_message_ref,
-                    active_run_id: Some(busy.active_run_id),
-                    status: Some(busy.status),
-                    event_cursor: Some(busy.event_cursor),
-                    notice,
-                })
+                .await
+                {
+                    Ok(crate::steering::SteeringAdmission::Deferred { run }) => {
+                        let notice = rejected_busy_notice(run.status);
+                        Ok(RebornSubmitTurnResponse::DeferredBusy {
+                            thread_id: handoff.thread_id,
+                            accepted_message_ref,
+                            active_run_id: busy.active_run_id,
+                            status: run.status,
+                            event_cursor: run.event_cursor,
+                            notice,
+                        })
+                    }
+                    Ok(crate::steering::SteeringAdmission::Rejected) => {
+                        let notice = rejected_busy_notice(busy.status);
+                        Ok(RebornSubmitTurnResponse::RejectedBusy {
+                            thread_id: handoff.thread_id,
+                            accepted_message_ref,
+                            active_run_id: Some(busy.active_run_id),
+                            status: Some(busy.status),
+                            event_cursor: Some(busy.event_cursor),
+                            notice,
+                        })
+                    }
+                    Err(error) => Err(steering_admission_error(
+                        error,
+                        &handoff.thread_id,
+                        handoff.message_id,
+                        busy.active_run_id,
+                    )),
+                }
             }
             Err(error) => {
                 tracing::debug!(
@@ -5338,37 +5450,6 @@ async fn mark_message_submitted_or_replay(
     }
 }
 
-async fn mark_message_rejected_busy_or_replay(
-    thread_service: &dyn SessionThreadService,
-    thread_scope: &ThreadScope,
-    handoff: &AcceptedWebUiMessage,
-    client_action_id: &IdempotencyKey,
-) -> Result<(), ProductSurfaceError> {
-    match thread_service
-        .mark_message_rejected_busy(thread_scope, &handoff.thread_id, handoff.message_id)
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(error) => {
-            // Only RejectedBusy is the terminal settled state here.
-            // DeferredBusy is non-terminal legacy — a later replay may
-            // resubmit it, so claiming it settled would violate the
-            // no-resubmit guarantee. Let a DeferredBusy replay fall
-            // through to the `_` arm so the original mark failure
-            // surfaces honestly instead of being masked as settled.
-            reconcile_terminal_duplicate(
-                thread_service,
-                thread_scope,
-                handoff,
-                client_action_id,
-                |replay| matches!(replay.status, MessageStatus::RejectedBusy),
-                error,
-            )
-            .await
-        }
-    }
-}
-
 async fn reconcile_terminal_duplicate(
     thread_service: &dyn SessionThreadService,
     thread_scope: &ThreadScope,
@@ -6302,25 +6383,43 @@ fn accepted_message_ref(message_id: String) -> Result<AcceptedMessageRef, Produc
     })
 }
 
+/// Map a fatal steering-admission failure into this surface's sanitized
+/// error. Classification already happened in the gateway; this is pure
+/// error-shape translation plus server-side diagnosis.
+fn steering_admission_error(
+    error: crate::steering::SteeringAdmissionError,
+    thread_id: &ThreadId,
+    message_id: ThreadMessageId,
+    run_id: TurnRunId,
+) -> ProductSurfaceError {
+    use crate::steering::SteeringAdmissionError;
+    match error {
+        SteeringAdmissionError::InvalidMessageRef(reason) => {
+            tracing::debug!(%reason, %thread_id, %message_id, %run_id, "invalid steering message ref");
+            ProductSurfaceError::internal_invariant()
+        }
+        SteeringAdmissionError::RunState(error) => map_turn_error(error),
+        SteeringAdmissionError::MarkQueued(error)
+        | SteeringAdmissionError::SettleRejected(error) => map_thread_error(error),
+        SteeringAdmissionError::Enqueue(error) => {
+            // Carry the cause to the server log; the user-facing surface stays
+            // the sanitized retryable 503 (error-handling.md).
+            tracing::debug!(%error, %thread_id, %message_id, %run_id, "steering enqueue failed for busy run");
+            ProductSurfaceError::service_unavailable(true)
+        }
+    }
+}
+
 fn parse_replay_run_id(value: Option<String>) -> Result<TurnRunId, ProductSurfaceError> {
-    let Some(value) = value else {
-        return Err(ProductSurfaceError::from_status_kind(
+    crate::steering::parse_stored_run_id(value.as_deref()).map_err(|reason| {
+        tracing::debug!(%reason, "stored replay turn_run_id could not be parsed");
+        ProductSurfaceError::from_status_kind(
             ProductSurfaceErrorCode::Conflict,
             ProductSurfaceErrorKind::ReplayUnavailable,
             409,
             false,
-        ));
-    };
-    Uuid::parse_str(&value)
-        .map(TurnRunId::from_uuid)
-        .map_err(|_| {
-            ProductSurfaceError::from_status_kind(
-                ProductSurfaceErrorCode::Conflict,
-                ProductSurfaceErrorKind::ReplayUnavailable,
-                409,
-                false,
-            )
-        })
+        )
+    })
 }
 
 fn webui_source_binding_ref_from_raw(
@@ -6643,12 +6742,22 @@ fn map_timeline_probe_error(error: SessionThreadError) -> ProductSurfaceError {
         SessionThreadError::Serialization(_)
         | SessionThreadError::Deserialization(_)
         | SessionThreadError::InvalidMessageTimestamp { .. }
-        | SessionThreadError::Backend(_) => ProductSurfaceError::from_status_kind(
-            ProductSurfaceErrorCode::Unavailable,
-            ProductSurfaceErrorKind::TimelineUnavailable,
-            503,
-            true,
-        ),
+        | SessionThreadError::Backend(_) => {
+            // The boundary error is sanitized to a retryable 503; the failure
+            // still has to be visible server-side or it is undiagnosable. Log
+            // the detail-free kind rather than the Display, whose Backend
+            // variant carries virtual tenant/user paths and raw backend text.
+            tracing::warn!(
+                error_kind = error.kind_name(),
+                "timeline probe failed; returning retryable TimelineUnavailable"
+            );
+            ProductSurfaceError::from_status_kind(
+                ProductSurfaceErrorCode::Unavailable,
+                ProductSurfaceErrorKind::TimelineUnavailable,
+                503,
+                true,
+            )
+        }
         _ => map_ownership_probe_error(error),
     }
 }

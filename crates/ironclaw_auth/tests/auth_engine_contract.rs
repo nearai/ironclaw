@@ -509,6 +509,55 @@ async fn google_extra_authorize_params_come_from_recipe_data() {
     );
 }
 
+/// An extension-scoped flow authorizes the SHARED vendor account, so it must
+/// ask for the whole shared-vendor ceiling — the union across the user's
+/// installed extensions for that vendor — not just the scopes of the extension
+/// that happened to raise the gate.
+///
+/// The account holds ONE scope set that each exchange replaces, and dispatch
+/// requires a capability's scopes to already be on it
+/// (`account_has_provider_scopes`). Asking for only the requester's scopes
+/// therefore forces a separate consent per sibling extension, and every
+/// not-yet-authorized sibling keeps returning `auth_required` (#7069).
+#[tokio::test]
+async fn extension_scoped_flow_requests_the_shared_vendor_ceiling() {
+    const GMAIL_READONLY: &str = "https://www.googleapis.com/auth/gmail.readonly";
+    const DRIVE_READONLY: &str = "https://www.googleapis.com/auth/drive.readonly";
+
+    // What the production resolver hands back once gmail and google-drive are
+    // both installed: one google recipe whose ceiling is the union.
+    let harness = Harness::new(vec![unified_manifest_recipe(
+        "google",
+        &["gmail", "google-drive"],
+    )]);
+    let prepared = harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "google".to_string(),
+            requester_extension: Some(ironclaw_host_api::ids::ExtensionId::new("gmail").unwrap()),
+            scope: test_scope(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").unwrap(),
+            requested_scopes: vec![ProviderScope::new(GMAIL_READONLY).unwrap()],
+        })
+        .await
+        .unwrap();
+
+    let url = url::Url::parse(prepared.authorization_url.as_str()).unwrap();
+    let pairs: HashMap<String, String> = url.query_pairs().into_owned().collect();
+    let requested = pairs.get("scope").expect("authorize URL carries scopes");
+    assert!(
+        requested.contains(GMAIL_READONLY),
+        "the requesting extension's own scopes must still be requested; got {requested}"
+    );
+    assert!(
+        requested.contains(DRIVE_READONLY),
+        "one consent must cover every installed extension sharing the google \
+         account, otherwise google-drive re-gates after gmail is connected; \
+         got {requested}"
+    );
+}
+
 #[tokio::test]
 async fn recipes_cannot_supply_or_override_reserved_authorize_params() {
     // The resolver hands back a recipe that names reserved params — as if P1
@@ -591,6 +640,24 @@ async fn scope_widening_is_rejected_before_any_vendor_call() {
         })
         .await
         .expect_err("scope outside the ceiling must be rejected");
+    assert_eq!(error.code(), ironclaw_auth::AuthErrorCode::InvalidRequest);
+
+    // An EXTENSION-scoped flow requests the whole ceiling, but its own
+    // requested scopes are still validated FIRST — validate-then-widen. If that
+    // ordering is ever flipped, an extension could name a scope no installed
+    // manifest declares and have it silently swallowed by the widening.
+    let error = harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "slack".to_string(),
+            requester_extension: Some(ironclaw_host_api::ids::ExtensionId::new("slack").unwrap()),
+            scope: scope.clone(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").unwrap(),
+            requested_scopes: vec![ProviderScope::new("admin").unwrap()],
+        })
+        .await
+        .expect_err("an extension-scoped flow may not name a scope outside the ceiling");
     assert_eq!(error.code(), ironclaw_auth::AuthErrorCode::InvalidRequest);
 
     // Exchange-time widening (defense in depth): rejected before egress.
@@ -820,6 +887,82 @@ async fn exchange_clamps_echoed_scopes_to_recipe_ceiling() {
         vec![ProviderScope::new("search:read").unwrap()],
         "stored grant is granted ∩ ceiling: the undeclared scope is dropped, \
          channels:read never widened in"
+    );
+}
+
+/// `exchange_callback_for_requester`'s HOST arm (`requester_extension: None`)
+/// must behave like `exchange_callback` — an out-of-ceiling scope in the
+/// callback request is rejected, not silently clamped away. There is no
+/// sibling extension whose uninstall could legitimately shrink the ceiling
+/// for a host-scoped flow, so clamping here would only hide misconfiguration.
+#[tokio::test]
+async fn exchange_callback_for_requester_host_scoped_rejects_out_of_ceiling_scope() {
+    let harness = Harness::new(vec![synthetic_recipe("acme", &acme_recipe_toml(""))]);
+    let scope = test_scope();
+    let error = harness
+        .engine
+        .exchange_callback_for_requester(
+            None,
+            exchange_context(&scope),
+            callback_request("acme", vec![ProviderScope::new("admin").unwrap()]),
+        )
+        .await
+        .expect_err("host-scoped exchange with an out-of-ceiling scope must be rejected");
+    assert_eq!(error.code(), ironclaw_auth::AuthErrorCode::InvalidRequest);
+    assert_eq!(
+        harness.server.request_count(),
+        0,
+        "rejection happens before any vendor call"
+    );
+}
+
+/// `exchange_callback_for_requester`'s EXTENSION arm (`requester_extension:
+/// Some(..)`) clamps instead of rejecting: the persisted request is the
+/// prepare-time shared-vendor ceiling, and a sibling extension uninstalled
+/// while the user was on the vendor's consent screen can shrink the CURRENT
+/// ceiling out from under it. The flow must still succeed, granting only
+/// what remains inside the current ceiling.
+#[tokio::test]
+async fn exchange_callback_for_requester_extension_scoped_clamps_to_current_ceiling() {
+    // The current (post-uninstall) ceiling is narrower than what the
+    // persisted callback request still names, and the response carries no
+    // `scope` field — so the surviving `msg:read` scope must come from the
+    // fallback-to-requested clamped set, not an echoed grant.
+    let toml_text = acme_recipe_toml("").replace(
+        r#"scopes = ["msg:read", "msg:write"]"#,
+        r#"scopes = ["msg:read"]"#,
+    ) + "scope = { path = \"/scope\", missing = \"fallback_to_requested\" }\n";
+    let row = synthetic_recipe("acme", &toml_text);
+    let harness = Harness::new(vec![row]);
+    let scope = test_scope();
+    harness.server.script(
+        "https://auth.acme.example/token",
+        200,
+        serde_json::json!({
+            "access_token": "acme-clamped-access",
+            "expires_in": 3600
+        }),
+    );
+    let exchange = harness
+        .engine
+        .exchange_callback_for_requester(
+            Some(ironclaw_host_api::ids::ExtensionId::new("acme-ext").unwrap()),
+            exchange_context(&scope),
+            callback_request(
+                "acme",
+                vec![
+                    ProviderScope::new("msg:read").unwrap(),
+                    ProviderScope::new("msg:write").unwrap(),
+                ],
+            ),
+        )
+        .await
+        .expect("extension-scoped exchange clamps instead of rejecting");
+    assert_eq!(
+        exchange.scopes,
+        vec![ProviderScope::new("msg:read").unwrap()],
+        "msg:write is outside the current ceiling and must be dropped, not \
+         rejected"
     );
 }
 
@@ -1197,7 +1340,7 @@ async fn refresh_invalid_grant_is_a_typed_permanent_failure() {
 async fn dcr_requires_advertised_protected_resource_metadata() {
     let harness = Harness::new(vec![manifest_recipe("notion-mcp", "notion")]);
     harness.server.script(
-        "https://mcp.notion.com/mcp/.well-known/oauth-protected-resource",
+        "https://mcp.notion.com/.well-known/oauth-protected-resource/mcp",
         404,
         serde_json::json!({}),
     );
@@ -1276,7 +1419,7 @@ async fn dcr_uses_the_admitted_non_well_known_protected_resource_metadata_url() 
     assert!(
         harness
             .server
-            .requests_for("https://mcp.example.test/mcp/.well-known/oauth-protected-resource")
+            .requests_for("https://mcp.example.test/.well-known/oauth-protected-resource/mcp")
             .is_empty(),
         "DCR must not reconstruct a different metadata URL from the resource"
     );
@@ -1287,7 +1430,7 @@ async fn dcr_vendor_registers_once_and_runs_standard_oauth_afterwards() {
     let harness = Harness::new(vec![manifest_recipe("notion-mcp", "notion")]);
     let scope = test_scope();
     harness.server.script(
-        "https://mcp.notion.com/mcp/.well-known/oauth-protected-resource",
+        "https://mcp.notion.com/.well-known/oauth-protected-resource/mcp",
         200,
         serde_json::json!({
             "resource": "https://mcp.notion.com/mcp",
@@ -1411,7 +1554,7 @@ async fn dcr_rejects_protected_metadata_for_a_different_resource_before_issuer_f
     recipe.token_exchange_resource = Some("https://mcp.example.co.uk/mcp".to_string());
     let harness = Harness::new(vec![recipe]);
     harness.server.script(
-        "https://mcp.example.co.uk/mcp/.well-known/oauth-protected-resource",
+        "https://mcp.example.co.uk/.well-known/oauth-protected-resource/mcp",
         200,
         serde_json::json!({
             "resource": "https://different.example.co.uk/mcp",
@@ -1457,7 +1600,7 @@ async fn dcr_accepts_exact_resource_binding_to_a_cross_origin_issuer() {
     recipe.token_exchange_resource = Some("https://mcp.example.co.uk/mcp".to_string());
     let harness = Harness::new(vec![recipe]);
     harness.server.script(
-        "https://mcp.example.co.uk/mcp/.well-known/oauth-protected-resource",
+        "https://mcp.example.co.uk/.well-known/oauth-protected-resource/mcp",
         200,
         serde_json::json!({
             "resource": "https://mcp.example.co.uk/mcp",
@@ -1510,7 +1653,7 @@ async fn dcr_rejects_authorization_server_metadata_with_a_different_issuer() {
     recipe.token_exchange_resource = Some("https://mcp.example.test/mcp".to_string());
     let harness = Harness::new(vec![recipe]);
     harness.server.script(
-        "https://mcp.example.test/mcp/.well-known/oauth-protected-resource",
+        "https://mcp.example.test/.well-known/oauth-protected-resource/mcp",
         200,
         serde_json::json!({
             "resource": "https://mcp.example.test/mcp",
@@ -1595,6 +1738,7 @@ fn new_flow(
 ) -> NewAuthFlow {
     let expires_at = Utc::now() + Duration::minutes(5);
     NewAuthFlow {
+        requested_scopes: Vec::new(),
         id: None,
         scope: scope.clone(),
         kind: AuthFlowKind::IntegrationCredential,
@@ -2126,6 +2270,7 @@ impl AuthRecipeResolver for RequesterAwareRecipeResolver {
     async fn resolve(
         &self,
         requester_extension: Option<&ExtensionId>,
+        _caller: Option<&ironclaw_host_api::ids::UserId>,
         vendor: &str,
     ) -> Option<ResolvedVendorAuthRecipe> {
         let extension = requester_extension?;

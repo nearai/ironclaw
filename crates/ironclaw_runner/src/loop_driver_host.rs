@@ -37,18 +37,16 @@ use ironclaw_threads::{SessionThreadService, ThreadScope};
 
 use crate::driver_registry::{DriverRequirements, LoopDriverRegistryKey, RequirementLevel};
 use crate::hook_gate_refs::HookGateInvocationScopePort;
-use crate::model_routes::{ModelRouteError, ModelRouteResolver, ModelSlot};
 use crate::planned_driver_factory::is_subagent_planned_run_profile;
 use crate::text_loop_driver::{TEXT_ONLY_DRIVER_ID, TEXT_ONLY_DRIVER_VERSION};
+use ironclaw_loop_host::{ModelRouteError, ModelRouteResolver, ModelSlot};
 
 mod config;
-mod model_gateway;
-mod port_adapters;
 
 pub use config::{RebornLoopDriverHostError, RebornLoopDriverHostRequest, TextOnlyLoopHostConfig};
-use model_gateway::ThreadResolvingLoopModelGateway;
-use port_adapters::{
+use ironclaw_loop_host::{
     HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, NoExtraLoopInputPort,
+    ThreadResolvingLoopModelGateway, ThreadResolvingLoopModelGatewayParts,
 };
 
 // Legacy text-only driver key used by `is_text_only_driver_key`'s fail-closed
@@ -131,8 +129,8 @@ use ironclaw_loop_contracts::{
     UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 use ironclaw_turns::{
-    AgentTurnRuntimePort, LoopCheckpointStore, RunProfileId, TurnCheckpointId, TurnError,
-    TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnStatus, runner::ClaimedTurnRun,
+    AgentTurnRuntimePort, LoopCheckpointStore, RunProfileId, TurnCheckpointId, TurnRunWake,
+    TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnStatus, runner::ClaimedTurnRun,
 };
 use ironclaw_turns::{HostManagedLoopModelPort, HostManagedLoopPromptPort};
 use tokio::task::JoinHandle;
@@ -275,7 +273,7 @@ impl SurfaceTrackingLoopCapabilityPort {
 fn capability_may_change_visible_surface(capability_id: &CapabilityId) -> bool {
     matches!(
         capability_id.as_str(),
-        "builtin.extension_install" | "builtin.extension_remove"
+        "builtin.extension_install" | "builtin.extension_remove" | "builtin.ironhub_install"
     )
 }
 
@@ -1892,37 +1890,41 @@ where
         let model_gateway_ports_started_at = ironclaw_observability::live_latency_started_at();
         let model_gateway: Arc<dyn LoopModelGateway> =
             if let Some(gw) = self.model_gateway.resolve_for_scope(&run_context.scope) {
-                Arc::new(ThreadResolvingLoopModelGateway {
-                    thread_service: Arc::clone(&self.thread_service),
-                    thread_scope: effective_scope.clone(),
-                    host_gateway: gw,
-                    max_messages,
-                    skill_context_source: self.skill_context_source.clone(),
-                    identity_context_source: self.identity_context_source.clone(),
-                    instruction_materialization_store: Some(Arc::clone(
-                        &instruction_materialization_store,
-                    )),
-                    capabilities: Some(Arc::clone(&capabilities)),
-                    prompt_authority,
-                    context_window_cache: Some(context_window_cache),
-                    attachment_read_port: self.attachment_read_port.clone(),
-                })
+                Arc::new(ThreadResolvingLoopModelGateway::new(
+                    ThreadResolvingLoopModelGatewayParts {
+                        thread_service: Arc::clone(&self.thread_service),
+                        thread_scope: effective_scope.clone(),
+                        host_gateway: gw,
+                        max_messages,
+                        skill_context_source: self.skill_context_source.clone(),
+                        identity_context_source: self.identity_context_source.clone(),
+                        instruction_materialization_store: Some(Arc::clone(
+                            &instruction_materialization_store,
+                        )),
+                        capabilities: Some(Arc::clone(&capabilities)),
+                        prompt_authority,
+                        context_window_cache: Some(context_window_cache),
+                        attachment_read_port: self.attachment_read_port.clone(),
+                    },
+                ))
             } else {
-                Arc::new(ThreadResolvingLoopModelGateway {
-                    thread_service: Arc::clone(&self.thread_service),
-                    thread_scope: effective_scope.clone(),
-                    host_gateway: Arc::clone(&self.model_gateway),
-                    max_messages,
-                    skill_context_source: self.skill_context_source.clone(),
-                    identity_context_source: self.identity_context_source.clone(),
-                    instruction_materialization_store: Some(Arc::clone(
-                        &instruction_materialization_store,
-                    )),
-                    capabilities: Some(Arc::clone(&capabilities)),
-                    prompt_authority,
-                    context_window_cache: Some(context_window_cache),
-                    attachment_read_port: self.attachment_read_port.clone(),
-                })
+                Arc::new(ThreadResolvingLoopModelGateway::new(
+                    ThreadResolvingLoopModelGatewayParts {
+                        thread_service: Arc::clone(&self.thread_service),
+                        thread_scope: effective_scope.clone(),
+                        host_gateway: Arc::clone(&self.model_gateway),
+                        max_messages,
+                        skill_context_source: self.skill_context_source.clone(),
+                        identity_context_source: self.identity_context_source.clone(),
+                        instruction_materialization_store: Some(Arc::clone(
+                            &instruction_materialization_store,
+                        )),
+                        capabilities: Some(Arc::clone(&capabilities)),
+                        prompt_authority,
+                        context_window_cache: Some(context_window_cache),
+                        attachment_read_port: self.attachment_read_port.clone(),
+                    },
+                ))
             };
         let mut model: Arc<dyn LoopModelPort> = Arc::new(HostManagedLoopModelPort::with_guards(
             run_context.clone(),
@@ -2049,7 +2051,7 @@ where
                 });
             };
             let slot = slot_for_model_profile(&run_context)?;
-            let route = crate::model_routes::ModelRoute::new(
+            let route = ironclaw_loop_host::ModelRoute::new(
                 snapshot.provider_id().to_string(),
                 snapshot.model_id().to_string(),
             )
@@ -2558,7 +2560,7 @@ pub(crate) fn apply_capability_surface_profile(
     // capabilities — exempt them so narrowed profiles keep bridged disclosure.
     Arc::new(
         CapabilitySurfaceProfileFilter::new(capabilities, allow_set)
-            .with_host_exempt_capability_ids(crate::tool_disclosure::bridge_capability_ids()),
+            .with_host_exempt_capability_ids(ironclaw_loop_host::bridge_capability_ids()),
     )
 }
 
@@ -2622,85 +2624,6 @@ fn validate_thread_scope(
         });
     }
     Ok(())
-}
-
-fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
-    match &error {
-        TurnError::Unauthorized => ironclaw_loop_host::raw_agent_loop_host_error(
-            "checkpoint_state",
-            "access",
-            AgentLoopHostErrorKind::Unauthorized,
-            "checkpoint state access was unauthorized",
-            &error,
-        ),
-        TurnError::InvalidRequest { .. } => ironclaw_loop_host::raw_agent_loop_host_error(
-            "checkpoint_state",
-            "request",
-            AgentLoopHostErrorKind::InvalidInvocation,
-            "checkpoint state request is invalid",
-            &error,
-        ),
-        TurnError::Unavailable { .. } => ironclaw_loop_host::raw_agent_loop_host_error(
-            "checkpoint_state",
-            "store",
-            AgentLoopHostErrorKind::Unavailable,
-            "checkpoint state store is unavailable",
-            &error,
-        ),
-        TurnError::ScopeNotFound => ironclaw_loop_host::raw_agent_loop_host_error(
-            "checkpoint_state",
-            "scope_lookup",
-            AgentLoopHostErrorKind::CheckpointRejected,
-            "checkpoint state scope was not found for this loop run",
-            &error,
-        ),
-        TurnError::Conflict { .. } | TurnError::RunNotRetryable { .. } => {
-            ironclaw_loop_host::raw_agent_loop_host_error(
-                "checkpoint_state",
-                "write",
-                AgentLoopHostErrorKind::CheckpointRejected,
-                "checkpoint state write conflicted with current turn state",
-                &error,
-            )
-        }
-        TurnError::CapacityExceeded { .. } => ironclaw_loop_host::raw_agent_loop_host_error(
-            "checkpoint_state",
-            "write",
-            AgentLoopHostErrorKind::Unavailable,
-            "checkpoint state store capacity was exceeded",
-            &error,
-        ),
-        TurnError::InvalidTransition { .. } => ironclaw_loop_host::raw_agent_loop_host_error(
-            "checkpoint_state",
-            "write",
-            AgentLoopHostErrorKind::CheckpointRejected,
-            "checkpoint state write was invalid for current turn state",
-            &error,
-        ),
-        TurnError::LeaseMismatch => ironclaw_loop_host::raw_agent_loop_host_error(
-            "checkpoint_state",
-            "write",
-            AgentLoopHostErrorKind::CheckpointRejected,
-            "checkpoint state write lease no longer matches current run",
-            &error,
-        ),
-        TurnError::ThreadBusy(_) | TurnError::AdmissionRejected(_) => {
-            ironclaw_loop_host::raw_agent_loop_host_error(
-                "checkpoint_state",
-                "admission",
-                AgentLoopHostErrorKind::Unavailable,
-                "checkpoint state store returned unsupported turn admission status",
-                &error,
-            )
-        }
-        TurnError::InvalidRunOriginAdapter => ironclaw_loop_host::raw_agent_loop_host_error(
-            "checkpoint_state",
-            "request",
-            AgentLoopHostErrorKind::InvalidInvocation,
-            "checkpoint state request contains an invalid run origin adapter",
-            &error,
-        ),
-    }
 }
 
 #[cfg(test)]
@@ -2852,8 +2775,93 @@ mod hook_resolver_adapter_tests {
 }
 
 #[cfg(test)]
-#[path = "loop_driver_host/tests.rs"]
-mod port_adapter_tests;
+mod thread_scope_tests {
+    //! Thread-scope validation for `validate_thread_scope`.
+    //!
+    //! Split out of `loop_driver_host/tests.rs` when the port adapters that
+    //! file also covered moved to `ironclaw_loop_host` (WS3 runner sheds).
+    //! The three tests are unchanged; only the module they live in moved.
+    //! Inline rather than a sibling file, matching the four test modules
+    //! this file already carries — and because `check_no_panics.py` only
+    //! recognises a flat `#[path = "x.rs"]`, so a `#[cfg(test)]` module in
+    //! its own directory-prefixed file reads as production to that scanner.
+
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest, RunProfileResolver,
+    };
+    use ironclaw_threads::ThreadScope;
+    use ironclaw_turns::{TurnActor, TurnId, TurnRunId, TurnScope};
+
+    async fn test_run_context() -> LoopRunContext {
+        let tenant_id = TenantId::new("tenant-surf-prompt-test").unwrap();
+        let agent_id = AgentId::new("agent-surf-prompt-test").unwrap();
+        let project_id = ProjectId::new("project-surf-prompt-test").unwrap();
+        let thread_id = ThreadId::new("thread-surf-prompt-test").unwrap();
+        let turn_scope = TurnScope::new(tenant_id, Some(agent_id), Some(project_id), thread_id);
+        let resolved = InMemoryRunProfileResolver::default()
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .unwrap();
+        LoopRunContext::new(turn_scope, TurnId::new(), TurnRunId::new(), resolved)
+    }
+
+    fn thread_scope_for(context: &LoopRunContext, owner: Option<UserId>) -> ThreadScope {
+        ThreadScope {
+            tenant_id: context.scope.tenant_id.clone(),
+            agent_id: context
+                .scope
+                .agent_id
+                .clone()
+                .expect("test run context is agent-scoped"),
+            project_id: context.scope.project_id.clone(),
+            owner_user_id: owner,
+            mission_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn validate_thread_scope_rejects_owner_mismatch() {
+        // Defense in depth for the thread-owner MountView divergence: the thread
+        // store keys threads by owner, so a host thread scope whose owner differs
+        // from the run's authenticated actor silently reads the wrong
+        // `owners/<user>` subtree and fails with `UnknownThread`. Fail loud here
+        // instead.
+        let context = test_run_context()
+            .await
+            .with_actor(TurnActor::new(UserId::new("local-user").unwrap()));
+        let thread_scope = thread_scope_for(&context, Some(UserId::new("reborn-cli").unwrap()));
+
+        let error = super::validate_thread_scope(&thread_scope, &context)
+            .expect_err("owner mismatch must be rejected");
+        assert!(matches!(
+            error,
+            super::RebornLoopDriverHostError::ScopeMismatch { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn validate_thread_scope_accepts_matching_owner() {
+        let context = test_run_context()
+            .await
+            .with_actor(TurnActor::new(UserId::new("local-user").unwrap()));
+        let thread_scope = thread_scope_for(&context, Some(UserId::new("local-user").unwrap()));
+
+        super::validate_thread_scope(&thread_scope, &context)
+            .expect("matching owner must validate");
+    }
+
+    #[tokio::test]
+    async fn validate_thread_scope_skips_owner_check_without_actor() {
+        // When the run carries no actor (system/legacy turns), the owner axis
+        // cannot be cross-checked; the guard must not reject these.
+        let context = test_run_context().await;
+        let thread_scope = thread_scope_for(&context, Some(UserId::new("local-user").unwrap()));
+
+        super::validate_thread_scope(&thread_scope, &context)
+            .expect("absent actor must skip the owner check");
+    }
+}
 
 #[cfg(test)]
 #[path = "loop_driver_host/compaction_tests.rs"]
@@ -2863,12 +2871,17 @@ mod compaction_tests;
 mod tests {
     use super::*;
 
-    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::{
+        ids::{AgentId, ProjectId, ResultRef, TenantId, ThreadId, UserId},
+        resolution::{Outcome, OutcomeRefs, ResultPreviewMeta, ToolVerdict},
+        result_meta::{ResultProgress, TerminateHint},
+        safe_summary::SafeSummary,
+    };
     use ironclaw_loop_contracts::{
-        AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
-        InMemoryRunProfileResolver, LoadCheckpointPayloadRequest, LoopCheckpointKind,
-        LoopCheckpointRequest, LoopRunContext, RunProfileResolutionRequest, RunProfileResolver,
-        StageCheckpointPayloadRequest,
+        AgentLoopHostErrorKind, CapabilityInputRef, CapabilitySurfaceVersion, CheckpointSchemaId,
+        InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoadCheckpointPayloadRequest,
+        LoopCheckpointKind, LoopCheckpointRequest, LoopRunContext, RunProfileResolutionRequest,
+        RunProfileResolver, StageCheckpointPayloadRequest,
     };
     use ironclaw_turns::test_support::in_memory_loop_checkpoint_store;
     use ironclaw_turns::{
@@ -2886,6 +2899,91 @@ mod tests {
             .await
             .unwrap();
         LoopRunContext::new(turn_scope, TurnId::new(), TurnRunId::new(), resolved)
+    }
+
+    struct SuccessfulCapabilityPort;
+
+    #[async_trait]
+    impl LoopCapabilityPort for SuccessfulCapabilityPort {
+        async fn visible_capabilities(
+            &self,
+            _request: VisibleCapabilityRequest,
+        ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+            Ok(VisibleCapabilitySurface {
+                version: CapabilitySurfaceVersion::new("surface-before-ironhub-install")
+                    .expect("valid surface version"),
+                descriptors: Vec::new(),
+                callable_capability_ids: None,
+            })
+        }
+
+        async fn invoke_capability(
+            &self,
+            _request: LoopRequest,
+        ) -> Result<Resolution, AgentLoopHostError> {
+            Ok(Resolution::Done(Outcome {
+                refs: OutcomeRefs {
+                    result: ResultRef::parse("018f6a00-0000-7000-8000-000000000001")
+                        .expect("valid result ref"),
+                    byte_len: 0,
+                    preview: None,
+                    preview_meta: ResultPreviewMeta::default(),
+                    origin: None,
+                    output_digest: None,
+                },
+                verdict: ToolVerdict::Success,
+                summary: SafeSummary::new("installed and activated").expect("valid safe summary"),
+                progress: ResultProgress::MadeProgress,
+                terminate_hint: TerminateHint::Continue,
+            }))
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            _request: LoopRequestBatch,
+        ) -> Result<ResolutionBatch, AgentLoopHostError> {
+            unreachable!("batch invocation is not used by this test")
+        }
+    }
+
+    #[tokio::test]
+    async fn ironhub_install_success_invalidates_cached_visible_surface() {
+        let surface_state = Arc::new(CapabilitySurfaceState::default());
+        let port = SurfaceTrackingLoopCapabilityPort::new(
+            Arc::new(SuccessfulCapabilityPort),
+            Arc::clone(&surface_state),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("initial visible surface");
+        assert!(
+            surface_state.current().expect("surface state").is_some(),
+            "precondition: the visible surface is cached before installation"
+        );
+
+        let resolution = port
+            .invoke_capability(LoopRequest {
+                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                surface_version: CapabilitySurfaceVersion::new("surface-before-ironhub-install")
+                    .expect("valid surface version"),
+                capability_id: CapabilityId::new("builtin.ironhub_install")
+                    .expect("valid capability id"),
+                input_ref: CapabilityInputRef::new("input:ironhub-install")
+                    .expect("valid input ref"),
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("IronHub installation succeeds");
+
+        assert!(
+            matches!(resolution, Resolution::Done(ref outcome) if outcome.verdict.is_success()),
+            "test double must model a successful install and activation"
+        );
+        assert!(
+            surface_state.current().expect("surface state").is_none(),
+            "a successful IronHub install must force the next model step to refresh capabilities"
+        );
     }
 
     #[tokio::test]
@@ -3523,52 +3621,5 @@ mod event_subscription_scope_tests {
             "expected EventSubscriptionTerminated milestone, got {:?}",
             milestones[0].kind
         );
-    }
-}
-
-#[cfg(test)]
-mod turn_error_to_host_error_tests {
-    use super::*;
-    use ironclaw_turns::{TurnCapacityResource, TurnError, TurnRunId};
-
-    #[test]
-    fn capacity_exceeded_maps_to_unavailable() {
-        let error = turn_error_to_host_error(TurnError::capacity_exceeded(
-            TurnCapacityResource::SpawnTreeDescendants,
-            3,
-        ));
-        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
-    }
-
-    #[test]
-    fn conflict_maps_to_checkpoint_rejected() {
-        let error = turn_error_to_host_error(TurnError::Conflict {
-            reason: "checkpoint conflict".to_string(),
-        });
-        assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
-    }
-
-    #[test]
-    fn run_not_retryable_maps_to_checkpoint_rejected() {
-        let error = turn_error_to_host_error(TurnError::RunNotRetryable {
-            run_id: TurnRunId::new(),
-        });
-        assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
-    }
-
-    #[test]
-    fn scope_not_found_maps_to_checkpoint_rejected() {
-        let error = turn_error_to_host_error(TurnError::ScopeNotFound);
-        assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
-    }
-
-    #[test]
-    fn invalid_transition_maps_to_checkpoint_rejected() {
-        use ironclaw_turns::TurnStatus;
-        let error = turn_error_to_host_error(TurnError::InvalidTransition {
-            from: TurnStatus::Running,
-            to: TurnStatus::Completed,
-        });
-        assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
     }
 }

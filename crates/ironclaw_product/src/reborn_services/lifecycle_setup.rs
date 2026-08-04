@@ -7,6 +7,7 @@ use ironclaw_product_contracts::views::RebornViewDescriptor;
 use std::collections::BTreeSet;
 
 use ironclaw_auth::AuthProductScope;
+use ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection;
 use ironclaw_extension_contracts::state::{InstallationState, LifecyclePublicState};
 use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_product_contracts::surface::{
@@ -37,6 +38,7 @@ pub const EXTENSION_SETUP_VIEW: RebornViewDescriptor = RebornViewDescriptor {
 enum SetupAction {
     View,
     Submit,
+    SelectAuth,
 }
 
 pub(super) async fn setup_extension_view(
@@ -119,6 +121,31 @@ pub(super) async fn setup_extension(
         agent_id: caller.agent_id,
         project_id: caller.project_id,
     });
+    if action == SetupAction::SelectAuth {
+        let auth_selection = parse_hosted_mcp_auth_selection(&request)?;
+        let selection = service
+            .execute(
+                context.clone(),
+                LifecycleProductAction::ExtensionSelectHostedMcpAuth {
+                    package_ref: package_ref.clone(),
+                    auth_selection,
+                },
+            )
+            .await?;
+        let refreshed =
+            project_package_after_mutation(service, context, package_ref, selection.message)
+                .await?;
+        let refreshed_requirements = extension_setup_credentials::requirements(&refreshed);
+        return setup_extension_response(
+            extension_credentials,
+            channel_config,
+            scope,
+            &extension_id,
+            refreshed,
+            &refreshed_requirements,
+        )
+        .await;
+    }
     let lifecycle = project_package(service, context.clone(), package_ref.clone()).await?;
     let requirements = extension_setup_credentials::requirements(&lifecycle);
     if action == SetupAction::Submit {
@@ -142,7 +169,7 @@ pub(super) async fn setup_extension(
             submit.secrets,
         )
         .await?;
-        let _activation = service
+        let activation = service
             .execute(
                 context.clone(),
                 LifecycleProductAction::ExtensionActivate {
@@ -150,7 +177,9 @@ pub(super) async fn setup_extension(
                 },
             )
             .await?;
-        let refreshed = project_package(service, context, package_ref).await?;
+        let refreshed =
+            project_package_after_mutation(service, context, package_ref, activation.message)
+                .await?;
         let refreshed_requirements = extension_setup_credentials::requirements(&refreshed);
         return setup_extension_response(
             extension_credentials,
@@ -179,6 +208,19 @@ async fn project_package(
     package_ref: LifecyclePackageRef,
 ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
     service.project_package(context, package_ref).await
+}
+
+async fn project_package_after_mutation(
+    service: &dyn LifecycleProductService,
+    context: LifecycleProductContext,
+    package_ref: LifecyclePackageRef,
+    mutation_message: Option<String>,
+) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+    let mut projected = project_package(service, context, package_ref).await?;
+    if projected.message.is_none() {
+        projected.message = mutation_message;
+    }
+    Ok(projected)
 }
 
 async fn channel_field_status(
@@ -283,6 +325,7 @@ async fn setup_extension_response(
         package_ref,
         phase: setup_public_phase(lifecycle.phase, credential_readiness),
         blockers: lifecycle.blockers,
+        message: lifecycle.message,
         onboarding,
         payload: lifecycle.payload,
         secrets,
@@ -313,11 +356,36 @@ fn setup_action(
     match request.action.as_deref() {
         None => Ok(SetupAction::View),
         Some("submit") => Ok(SetupAction::Submit),
+        Some("select_auth") => Ok(SetupAction::SelectAuth),
         Some(_) => Err(validation_error(
             "action",
             ProductSurfaceValidationCode::InvalidValue,
         )),
     }
+}
+
+fn parse_hosted_mcp_auth_selection(
+    request: &ProductSetupExtensionRequest,
+) -> Result<HostedMcpAuthSelection, ProductSurfaceError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SelectionPayload {
+        auth_selection: HostedMcpAuthSelection,
+    }
+    let payload = request
+        .payload
+        .clone()
+        .ok_or_else(|| validation_error("payload", ProductSurfaceValidationCode::MissingField))?;
+    let selection = serde_json::from_value::<SelectionPayload>(payload)
+        .map_err(|_| validation_error("payload", ProductSurfaceValidationCode::InvalidValue))?
+        .auth_selection;
+    if matches!(selection, HostedMcpAuthSelection::Auto) {
+        return Err(validation_error(
+            "payload",
+            ProductSurfaceValidationCode::InvalidValue,
+        ));
+    }
+    Ok(selection)
 }
 
 pub(super) fn validation_error(
@@ -336,8 +404,9 @@ mod tests {
     use super::*;
     use crate::{
         ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest,
-        LifecycleExtensionCredentialSetup, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-        LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecycleProductPayload,
+        LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding,
+        LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSummary,
+        LifecycleInstalledExtensionSummary, LifecycleProductPayload, LifecycleReadinessBlocker,
     };
     use async_trait::async_trait;
     use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
@@ -372,6 +441,7 @@ mod tests {
         let activated = Arc::new(AtomicBool::new(false));
         let service = RecordingLifecycleService {
             activated: Arc::clone(&activated),
+            auth_selected: Arc::new(AtomicBool::new(false)),
         };
         let credentials = AcceptingCredentialSetupService;
         let caller = ProductSurfaceCaller::new(
@@ -404,6 +474,7 @@ mod tests {
 
         assert!(activated.load(Ordering::SeqCst));
         assert_eq!(response.phase, LifecyclePublicState::Active);
+        assert_eq!(response.message.as_deref(), Some("activation complete"));
         assert!(
             response
                 .secrets
@@ -412,8 +483,64 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn select_auth_returns_the_reprojected_setup_contract() {
+        let auth_selected = Arc::new(AtomicBool::new(false));
+        let service = RecordingLifecycleService {
+            activated: Arc::new(AtomicBool::new(false)),
+            auth_selected: Arc::clone(&auth_selected),
+        };
+        let credentials = AcceptingCredentialSetupService;
+        let caller = ProductSurfaceCaller::new(
+            TenantId::new("setup-tenant").expect("tenant"),
+            UserId::new("setup-user").expect("user"),
+            None,
+            None,
+        );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "mcp-custom")
+            .expect("package ref");
+
+        let response = setup_extension(
+            &service,
+            Some(&credentials),
+            None,
+            caller,
+            package_ref,
+            ProductSetupExtensionRequest {
+                client_action_id: None,
+                action: Some("select_auth".to_string()),
+                payload: Some(serde_json::json!({
+                    "auth_selection": { "kind": "bearer" }
+                })),
+            },
+        )
+        .await
+        .expect("auth selection should return its post-selection setup state");
+
+        assert!(auth_selected.load(Ordering::SeqCst));
+        assert_eq!(response.phase, LifecyclePublicState::SetupNeeded);
+        assert!(
+            response
+                .blockers
+                .iter()
+                .any(|blocker| matches!(blocker, LifecycleReadinessBlocker::Credential { .. }))
+        );
+        assert!(response.secrets.iter().any(|secret| {
+            secret.name == "hosted_mcp_bearer_token" && !secret.provided && !secret.optional
+        }));
+        assert_eq!(
+            response
+                .onboarding
+                .as_ref()
+                .and_then(|onboarding| onboarding.credential_instructions.as_deref()),
+            Some("Paste the bearer token for this MCP server.")
+        );
+        assert_eq!(response.message.as_deref(), Some("auth selection complete"));
+    }
+
     struct RecordingLifecycleService {
         activated: Arc<AtomicBool>,
+        auth_selected: Arc<AtomicBool>,
     }
 
     #[async_trait]
@@ -430,12 +557,22 @@ mod tests {
                         package_ref: Some(package_ref),
                         phase: InstallationState::Active,
                         blockers: Vec::new(),
-                        message: None,
+                        message: Some("activation complete".to_string()),
                         payload: Some(LifecycleProductPayload::ExtensionActivate {
                             activated: true,
                             visible_capability_ids: vec!["github.get_workflow_runs".to_string()],
                             connection_required: None,
                         }),
+                    })
+                }
+                LifecycleProductAction::ExtensionSelectHostedMcpAuth { package_ref, .. } => {
+                    self.auth_selected.store(true, Ordering::SeqCst);
+                    Ok(LifecycleProductResponse {
+                        package_ref: Some(package_ref),
+                        phase: InstallationState::Installed,
+                        blockers: Vec::new(),
+                        message: Some("auth selection complete".to_string()),
+                        payload: None,
                     })
                 }
                 _ => Err(ProductSurfaceError::service_unavailable(false)),
@@ -447,23 +584,23 @@ mod tests {
             _context: LifecycleProductContext,
             package_ref: LifecyclePackageRef,
         ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
+            let auth_selected = self.auth_selected.load(Ordering::SeqCst);
             Ok(LifecycleProductResponse {
-                package_ref: Some(package_ref),
+                package_ref: Some(package_ref.clone()),
                 phase: if self.activated.load(Ordering::SeqCst) {
                     InstallationState::Active
                 } else {
                     InstallationState::Installed
                 },
-                blockers: Vec::new(),
+                blockers: auth_selected
+                    .then_some(LifecycleReadinessBlocker::Credential { ref_id: None })
+                    .into_iter()
+                    .collect(),
                 message: None,
                 payload: Some(LifecycleProductPayload::ExtensionList {
                     extensions: vec![LifecycleInstalledExtensionSummary {
                         summary: LifecycleExtensionSummary {
-                            package_ref: LifecyclePackageRef::new(
-                                LifecyclePackageKind::Extension,
-                                "github",
-                            )
-                            .expect("package ref"),
+                            package_ref: package_ref.clone(),
                             name: "github".to_string(),
                             version: "1.0.0".to_string(),
                             description: "GitHub".to_string(),
@@ -477,13 +614,30 @@ mod tests {
                             visible_read_only_capability_ids: Vec::new(),
                             credential_requirements: vec![
                                 LifecycleExtensionCredentialRequirement {
-                                    name: "github_runtime_token".to_string(),
-                                    provider: "github".to_string(),
+                                    name: if auth_selected {
+                                        "hosted_mcp_bearer_token".to_string()
+                                    } else {
+                                        "github_runtime_token".to_string()
+                                    },
+                                    provider: if auth_selected {
+                                        "mcp-custom".to_string()
+                                    } else {
+                                        "github".to_string()
+                                    },
                                     required: true,
                                     setup: LifecycleExtensionCredentialSetup::ManualToken,
                                 },
                             ],
-                            onboarding: None,
+                            onboarding: auth_selected.then_some(LifecycleExtensionOnboarding {
+                                instructions: "Configure MCP authentication.".to_string(),
+                                credential_instructions: Some(
+                                    "Paste the bearer token for this MCP server.".to_string(),
+                                ),
+                                setup_url: None,
+                                credential_next_step: Some(
+                                    "Save the token to activate this MCP server.".to_string(),
+                                ),
+                            }),
                         },
                         phase: if self.activated.load(Ordering::SeqCst) {
                             InstallationState::Active

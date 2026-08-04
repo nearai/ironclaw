@@ -6,12 +6,12 @@ use std::{
     sync::LazyLock,
 };
 
+use crate::CapabilityAllowSet;
 use ironclaw_host_api::{
     ids::{CapabilityId, ProviderToolName},
     runtime::RuntimeKind,
 };
 use ironclaw_loop_contracts::{CapabilityDescriptorView, ConcurrencyHint, ProviderToolDefinition};
-use ironclaw_loop_host::CapabilityAllowSet;
 use serde_json::{Map, Value, json};
 
 /// Canonical core tool names from the progressive-disclosure policy.
@@ -43,9 +43,10 @@ pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     "http",
     "web_search",
     // onboarding entry points — the full extension lifecycle is core so a weak
-    // model can run search -> install -> remove directly, without
+    // model can run search -> register custom MCP -> install -> remove directly, without
     // routing the install/remove steps through tool_search.
     "extension_search",
+    "extension_register_hosted_mcp",
     "extension_install",
     "extension_remove",
     // routine / scheduled-trigger lifecycle — core so the model can list and
@@ -582,7 +583,7 @@ pub(crate) fn is_bridge_capability_id(capability_id: &CapabilityId) -> bool {
 
 /// The synthetic `ironclaw.*` bridge ids, exempted from profile allow-set
 /// narrowing at the composition root (#5647).
-pub(crate) fn bridge_capability_ids() -> impl Iterator<Item = CapabilityId> {
+pub fn bridge_capability_ids() -> impl Iterator<Item = CapabilityId> {
     bridge_tool_definitions_with_tokens().map(|(definition, _)| definition.capability_id.clone())
 }
 
@@ -880,6 +881,7 @@ fn bridge_tool_definition(
         capability_id: bridge_capability_id(name),
         name: tool_name,
         description: description.to_string(),
+        description_trust: Default::default(),
         parameters,
     }
 }
@@ -916,7 +918,7 @@ fn catalog_descriptor(entry: &CatalogEntry) -> CapabilityDescriptorView {
         runtime: RuntimeKind::FirstParty,
         safe_name: entry.definition.name.to_string(),
         safe_description: entry.definition.description.clone(),
-        description_trust: Default::default(),
+        description_trust: entry.definition.description_trust,
         concurrency_hint: ConcurrencyHint::Exclusive,
         parameters_schema: entry.definition.parameters.clone(),
     }
@@ -1011,6 +1013,10 @@ mod tests {
             ("shell", ironclaw_host_runtime::SHELL_CAPABILITY_ID),
             ("http", ironclaw_host_runtime::HTTP_CAPABILITY_ID),
             ("extension_search", "builtin.extension_search"),
+            (
+                "extension_register_hosted_mcp",
+                "builtin.extension_register_hosted_mcp",
+            ),
             ("extension_install", "builtin.extension_install"),
             ("extension_remove", "builtin.extension_remove"),
             ("trigger_list", "builtin.trigger_list"),
@@ -1036,6 +1042,7 @@ mod tests {
                 name: ProviderToolName::new(encode_provider_tool_name(capability_id))
                     .expect("valid provider tool name"),
                 description: format!("Core loop primitive for {name}."),
+                description_trust: Default::default(),
                 parameters: small_no_arg_schema(),
             };
             assert!(
@@ -1077,6 +1084,7 @@ mod tests {
                 .expect("valid capability id"),
             name: ProviderToolName::new("builtin__read_file").expect("valid provider tool name"),
             description: "Read files from the workspace.".to_string(),
+            description_trust: Default::default(),
             parameters: medium_schema(0),
         }];
 
@@ -1098,6 +1106,7 @@ mod tests {
                 name: ProviderToolName::new(encode_provider_tool_name(capability_id))
                     .expect("valid provider tool name"),
                 description: format!("Memory tool {legacy_name}."),
+                description_trust: Default::default(),
                 parameters: medium_schema(0),
             };
 
@@ -1146,6 +1155,7 @@ mod tests {
                 .expect("valid capability id"),
             name: ProviderToolName::new(stored_name).expect("valid provider tool name"),
             description: "List events on a Google Calendar.".to_string(),
+            description_trust: Default::default(),
             parameters: medium_schema(0),
         };
         assert!(
@@ -1179,6 +1189,7 @@ mod tests {
             name: ProviderToolName::new("google-calendar__list_events")
                 .expect("valid provider tool name"),
             description: "List events on a Google Calendar.".to_string(),
+            description_trust: Default::default(),
             parameters: medium_schema(0),
         };
         let catalog = CapabilityCatalog::new(&[definition], &[]);
@@ -1200,6 +1211,37 @@ mod tests {
                 .search_result("google-calendar.list_calendars")
                 .is_none(),
             "an unrelated name must not resolve"
+        );
+    }
+
+    #[test]
+    fn catalog_descriptor_preserves_verified_description_provenance() {
+        let definition = ProviderToolDefinition {
+            capability_id: CapabilityId::new("builtin.ironhub_search")
+                .expect("valid capability id"),
+            name: ProviderToolName::new("builtin__ironhub_search")
+                .expect("valid provider tool name"),
+            description: "Search the verified IronHub catalog.".to_string(),
+            description_trust:
+                ironclaw_host_api::capability::CapabilityDescriptionTrust::VerifiedCatalog,
+            parameters: small_no_arg_schema(),
+        };
+        let catalog = CapabilityCatalog::new(&[definition], &[]);
+        let disclosed_names = BTreeSet::from(["builtin__ironhub_search".to_string()]);
+
+        let descriptors = catalog.active_or_disclosed_descriptors(
+            &ActiveSet {
+                definitions: Vec::new(),
+                deferred: true,
+                advertised_tokens: 0,
+            },
+            &disclosed_names,
+        );
+
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(
+            descriptors[0].description_trust,
+            ironclaw_host_api::capability::CapabilityDescriptionTrust::VerifiedCatalog
         );
     }
 
@@ -1291,6 +1333,7 @@ mod tests {
                 name: ProviderToolName::new("ordinary_tool_name")
                     .expect("valid provider tool name"),
                 description: "Conflicting real tool with a reserved bridge id".to_string(),
+                description_trust: Default::default(),
                 parameters: small_no_arg_schema(),
             },
             fixture_tool(
@@ -2111,6 +2154,7 @@ mod tests {
             capability_id: CapabilityId::new(format!("fixture.{name}")).expect("fixture id"),
             name: ProviderToolName::new(name).expect("valid fixture tool name"),
             description: description.into(),
+            description_trust: Default::default(),
             parameters,
         }
     }
@@ -2249,5 +2293,24 @@ mod tests {
             "required": ["request"],
             "additionalProperties": false
         })
+    }
+
+    /// Moved verbatim from the deleted `ironclaw_runner::tool_disclosure_bridge`
+    /// delegate module (WS3 runner sheds): `bridge_capability_ids` is `pub` on
+    /// this crate now, so the one-function forwarding module it needed is gone.
+    #[test]
+    fn bridge_capability_ids_exposes_exact_synthetic_bridge_set() {
+        let capability_ids: Vec<String> = bridge_capability_ids()
+            .map(|capability_id| capability_id.into_string())
+            .collect();
+
+        assert_eq!(
+            capability_ids,
+            vec![
+                "ironclaw.tool_search".to_string(),
+                "ironclaw.tool_describe".to_string(),
+                "ironclaw.tool_call".to_string(),
+            ]
+        );
     }
 }

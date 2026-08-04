@@ -213,6 +213,7 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | `crates/ironclaw_webui/` | `crates/ironclaw_webui/CLAUDE.md` |
 | `crates/ironclaw_reborn_composition/` | `crates/ironclaw_reborn_composition/CLAUDE.md` |
 | `crates/ironclaw_reborn_identity/` | `crates/ironclaw_reborn_identity/CONTRACT.md` |
+| `tests/` (scenario coverage map) | `tests/CLAUDE.md` |
 | `tests/integration/` | `tests/integration/CLAUDE.md` |
 | `tests/support/reborn_parity_qa/` | `tests/support/reborn_parity_qa/CLAUDE.md` |
 | `tests/e2e/` | `tests/e2e/CLAUDE.md` |

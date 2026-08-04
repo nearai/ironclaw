@@ -545,6 +545,7 @@ impl SubagentSpawnCapabilityPort {
             name: ProviderToolName::new(SPAWN_SUBAGENT_PROVIDER_TOOL_NAME)
                 .expect("spawn_subagent provider tool name is static and provider-safe"), // safety: static provider-safe literal covered by unit tests.
             description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
+            description_trust: Default::default(),
             parameters: (*self.parameters_schema).clone(),
         }
     }
