@@ -806,9 +806,21 @@ jobs:
         run: python3 scripts/ci/test_reborn_changed_coverage.py
 
       - name: Gate changed Reborn lines and branches
-        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push'
+        # Owner decision 2026-08-04 (Ben + Firat, reversing the "leave CI
+        # policy as-is" note recorded on #7036): the changed-line verdict no
+        # longer blocks PRs or the merge queue. For move-heavy refactors it
+        # re-attributes relocated code as new-and-uncovered, and because this
+        # job runs last its verdict lands after the full hour of test lanes —
+        # the worst feedback shape the program has. It still RUNS on both
+        # lanes for visibility (step summary, sticky comment, and this step's
+        # red annotation), and it ENFORCES on pushes to main, where
+        # main-ci-slack-alerts.yml surfaces a breach. The aggregate and
+        # per-crate coverage floors are untouched and still gate everywhere
+        # they always did.
+        continue-on-error: ${{ github.event_name != 'push' }}
         env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           # `gh` resolves the base commit's merged-lcov artifact. The checkout
           # runs with persist-credentials: false, so the token is passed here
