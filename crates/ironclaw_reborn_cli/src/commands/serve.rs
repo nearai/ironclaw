@@ -15,7 +15,7 @@ use ironclaw_reborn_composition::{
     RebornHostBindings, RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput,
     TriggerFireAccessPolicy, build_reborn_runtime,
 };
-use ironclaw_reborn_config::{IdentitySection, RebornProfile, seed_default_config_file_if_missing};
+use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
 use ironclaw_webui::{
     DeferredWebuiRouterHandle, EnvBearerAuthenticator, ProductAuthRouteState,
     RebornWebuiServeError, RebornWebuiServeOptions, WebuiAuthenticator, WebuiServeConfig,
@@ -430,14 +430,19 @@ impl ServeCommand {
             // ONE decision for both sides of the workspace. The browser
             // confines every non-operator caller's Workspace reads to
             // `tenants/{tenant}/users/{user}`; if the agent's writes were not
-            // scoped to the same subtree those users would see an empty
-            // workspace. SSO is what introduces non-operator callers, so a
-            // standalone-composed deployment that turns SSO on must scope its
-            // writes too --- the profile default alone would leave that
-            // combination mismatched.
-            let workspace_scoped_per_caller = workspace_scoped_per_caller(profile, sso_enabled);
-            runtime_input = runtime_input
-                .with_workspace_scoped_per_caller_services(workspace_scoped_per_caller);
+            // scoped to the same subtree those callers see an empty workspace.
+            //
+            // `serve` raises unconditionally because it can ALWAYS produce a
+            // non-operator caller: the admin-API token minter is installed on
+            // every start (see `SignedSessionTokenMinter`, which stamps
+            // `operator = false`), and the no-SSO branch composes a
+            // `SessionAuthenticator` so those tokens validate. Gating this on
+            // SSO left `POST /admin/users` as an open door onto the same
+            // mismatch.
+            runtime_input = runtime_input.with_workspace_scoped_per_caller_services(true);
+            let effective_workspace_scoping = runtime_input
+                .config()
+                .is_some_and(ironclaw_reborn_composition::deployment::DeploymentConfig::workspace_scoped_per_caller);
 
             let runtime = build_reborn_runtime(runtime_input)
                 .await
@@ -556,7 +561,12 @@ impl ServeCommand {
             let mut serve_config =
                 WebuiServeConfig::new(tenant_id.clone(), authenticator, allowed_origins)
                     .with_default_agent_id(default_agent_id.clone())
-                    .with_workspace_requires_scoped_projection(workspace_scoped_per_caller);
+                    // Read back what the runtime actually received rather than
+                    // recomputing it: the raise is a request, and composition
+                    // owns the answer. Any future reason for composition to
+                    // decline (see `WorkspaceMountPolicy::resolve`) moves the
+                    // browser with it instead of silently drifting.
+                    .with_workspace_requires_scoped_projection(effective_workspace_scoping);
             if let Some(project_id) = default_project_id.clone() {
                 serve_config = serve_config.with_default_project_id(project_id);
             }
@@ -667,27 +677,6 @@ impl ServeCommand {
 
         Ok(())
     }
-}
-
-/// Whether the WebUI workspace browser projects the caller's own subtree.
-///
-/// Delegates to composition's deployment policy so the browser reads exactly
-/// the subtree the agent's tool grants, approval leases, and attachment
-/// handles write to. One predicate, no view/write drift.
-fn profile_requires_scoped_workspace_projection(profile: RebornProfile) -> bool {
-    crate::runtime::composition_profile(profile).workspace_scoped_per_caller()
-}
-
-/// The deployment's effective workspace scoping decision: the profile default,
-/// raised when SSO is on.
-///
-/// Both sides of the workspace read it --- the composition write lanes
-/// (capability grants, approval leases, attachment landing) and the WebUI
-/// browser's `/fs/*` projection --- so a caller always reads the subtree the
-/// agent writes to. SSO is the condition because the browser scopes every
-/// non-operator caller, and SSO sessions are what produce them.
-fn workspace_scoped_per_caller(profile: RebornProfile, sso_enabled: bool) -> bool {
-    profile_requires_scoped_workspace_projection(profile) || sso_enabled
 }
 
 struct StartupServe {
@@ -1111,27 +1100,33 @@ mod tests {
 
     const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
 
+    /// The per-profile DEFAULT, which `serve` then raises (see
+    /// `serve_scopes_workspace_writes_even_on_standalone_without_sso`). A
+    /// binary that cannot mint non-operator callers still gets the raw
+    /// workspace root on a local profile.
     #[test]
-    fn workspace_projection_scope_follows_deployment_profile() {
+    fn workspace_scoping_default_follows_deployment_profile() {
+        use ironclaw_reborn_composition::RebornCompositionProfile;
+
         for profile in [
-            RebornProfile::Standalone,
-            RebornProfile::StandaloneUnrestricted,
+            RebornCompositionProfile::Standalone,
+            RebornCompositionProfile::StandaloneUnrestricted,
         ] {
             assert!(
-                !profile_requires_scoped_workspace_projection(profile),
-                "local profile {profile:?} must retain raw workspace fallback"
+                !profile.workspace_scoped_per_caller(),
+                "local profile {profile:?} defaults to the raw workspace root"
             );
         }
 
         for profile in [
-            RebornProfile::HostedSingleTenant,
-            RebornProfile::HostedSingleTenantVolume,
-            RebornProfile::Production,
-            RebornProfile::MigrationDryRun,
+            RebornCompositionProfile::HostedSingleTenant,
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            RebornCompositionProfile::Production,
+            RebornCompositionProfile::MigrationDryRun,
         ] {
             assert!(
-                profile_requires_scoped_workspace_projection(profile),
-                "hosted profile {profile:?} must require caller-scoped workspace projection"
+                profile.workspace_scoped_per_caller(),
+                "hosted profile {profile:?} defaults to caller-scoped workspace"
             );
         }
     }
@@ -1794,28 +1789,44 @@ slack_user_id = "U123"
         clear_webui_env();
     }
 
-    /// The WebUI workspace browser and the agent's workspace writes must agree
-    /// per profile. They read one predicate now, so this pins the values that
-    /// predicate produces -- flipping a profile here changes where a deployment's
-    /// files live and must be a deliberate edit.
+    /// `serve` can always mint a non-operator caller --- the admin-API token
+    /// minter is installed on every start and stamps `operator = false`, and
+    /// the no-SSO branch composes a `SessionAuthenticator` so those bearers
+    /// validate. The browser scopes every non-operator caller's Workspace
+    /// reads, so the writes must be scoped too, even on a Standalone profile
+    /// with SSO off. Before this, `POST /admin/users` on a local-dev box gave
+    /// that user scoped reads over a shared write root: an empty workspace.
     #[test]
-    fn workspace_projection_matches_composition_write_policy_for_every_profile() {
-        for profile in RebornProfile::all() {
-            let expected = !matches!(
-                profile,
-                RebornProfile::Standalone | RebornProfile::StandaloneUnrestricted
-            );
-            assert_eq!(
-                profile_requires_scoped_workspace_projection(*profile),
-                expected,
-                "unexpected workspace projection policy for profile {profile}"
-            );
-            assert_eq!(
-                profile_requires_scoped_workspace_projection(*profile),
-                crate::runtime::composition_profile(*profile).workspace_scoped_per_caller(),
-                "browser projection and composition write policy disagree for {profile}"
-            );
-        }
+    fn serve_scopes_workspace_writes_even_on_standalone_without_sso() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let input = RebornRuntimeInput::from_build_input(
+            ironclaw_reborn_composition::local_runtime_build_input(
+                ironclaw_reborn_composition::RebornCompositionProfile::Standalone,
+                "serve-owner",
+                root.path().to_path_buf(),
+            )
+            .expect("standalone build input"),
+        );
+        assert!(
+            !input
+                .config()
+                .expect("build input carries a deployment config")
+                .workspace_scoped_per_caller(),
+            "the Standalone profile default is unscoped"
+        );
+
+        // The raise `serve` applies unconditionally.
+        let input = input.with_workspace_scoped_per_caller_services(true);
+
+        // The browser flag is read back from what the runtime received, so the
+        // two sides cannot drift.
+        let effective = input.config().is_some_and(
+            ironclaw_reborn_composition::deployment::DeploymentConfig::workspace_scoped_per_caller,
+        );
+        assert!(
+            effective,
+            "serve must scope workspace writes whenever it can mint a non-operator caller"
+        );
     }
 }
 // arch-exempt: large_file, serve composition remains centralized during assembly cleanup, plan #6175

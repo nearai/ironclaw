@@ -1211,7 +1211,7 @@ pub(crate) async fn initialize_local_runtime_storage_root(
     Ok(())
 }
 
-pub(crate) fn composition_profile(profile: RebornProfile) -> RebornCompositionProfile {
+fn composition_profile(profile: RebornProfile) -> RebornCompositionProfile {
     match profile {
         RebornProfile::Standalone => RebornCompositionProfile::Standalone,
         RebornProfile::StandaloneUnrestricted => RebornCompositionProfile::StandaloneUnrestricted,
