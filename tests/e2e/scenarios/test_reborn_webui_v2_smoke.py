@@ -220,6 +220,14 @@ async def _install_fake_v2_event_stream(page) -> None:
             return activeStream;
           };
 
+          // Readiness probes so tests do not race forced failures against the
+          // fake stream lifecycle. A hidden RECONNECTING badge can no longer
+          // double as a wait for reconnect readiness.
+          window.__v2SseHasOpenStream = () =>
+            Boolean(activeStream && !activeStream.closed && activeStream.controller);
+          window.__v2SseHasHeldConnection = () =>
+            Boolean(activeStream && !activeStream.closed && activeStream.resolve);
+
           const closeStream = (stream, error = null) => {
             if (!stream || stream.closed) return;
             stream.closed = true;
@@ -1680,6 +1688,7 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
 
         await page.set_viewport_size({"width": 1280, "height": 720})
         await context.set_offline(False)
+        await page.wait_for_function("() => window.__v2SseHasOpenStream?.() === true")
         await expect(connection_status).to_have_count(0, timeout=5000)
 
         await composer.fill("summarize 3 X/Twitter posts")
@@ -1687,8 +1696,13 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
         await expect(page.locator(SEL_V2["typing_indicator"])).to_be_visible(timeout=5000)
 
         # A retryable stream interruption (readyState 0) stays RECONNECTING
-        # internally and is not rendered; the badge remains absent.
+        # internally and is not rendered; the badge remains absent. Wait for
+        # an open stream first so the forced failure does not race the fake
+        # stream lifecycle, then wait for the held pending connection so the
+        # terminal failure below targets the held promise.
+        await page.wait_for_function("() => window.__v2SseHasOpenStream?.() === true")
         await page.evaluate("() => window.__failLatestV2Sse(0)")
+        await page.wait_for_function("() => window.__v2SseHasHeldConnection?.() === true")
         await expect(connection_status).to_have_count(0, timeout=5000)
 
         # A terminal (non-retryable) failure escalates to DISCONNECTED, which
