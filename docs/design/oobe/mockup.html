@@ -238,11 +238,11 @@ h1,h2,h3,p{margin:0}
 @media (prefers-color-scheme:dark){:root{--ais-1:#5aa8ee;--ais-2:#a684ea;--ais-3:#ec7d9a;--ais-glow:rgba(166,132,234,.62)}}
 :root[data-theme="dark"]{--ais-1:#5aa8ee;--ais-2:#a684ea;--ais-3:#ec7d9a;--ais-glow:rgba(166,132,234,.62)}
 :root[data-theme="light"]{--ais-1:#1a6fd4;--ais-2:#6f36cf;--ais-3:#cf2b74;--ais-glow:rgba(111,54,207,.4)}
-.aispark{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none;z-index:2}
-.aispark .ais0{stop-color:var(--ais-1)}.aispark .ais1{stop-color:var(--ais-2)}.aispark .ais2{stop-color:var(--ais-3)}
-/* tapered comet: a solid head fading to sparser dashes for the tail; the glow blurs it smooth */
-.aispark .asrect{stroke-dasharray:7,1.2,3,1.6,2,2.2,1.4,3,0.9,4,0.6,73.1;filter:drop-shadow(0 0 2px var(--ais-glow)) drop-shadow(0 0 5px var(--ais-glow));animation:ai-chase .5s linear forwards}
-@keyframes ai-chase{0%{stroke-dashoffset:0;opacity:0}10%{opacity:1}80%{opacity:1}100%{stroke-dashoffset:-100;opacity:0}}
+/* border ring: masks the rotating conic to a thin frame around the card */
+.aispark{position:absolute;inset:0;border-radius:13px;overflow:hidden;pointer-events:none;z-index:2;padding:2px;-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude}
+/* one smooth, continuous comet: a semi-transparent line tapering from a bright head to nothing, swept around the ring */
+.aispin{position:absolute;inset:-55%;background:conic-gradient(from 0deg,transparent 195deg,color-mix(in srgb,var(--ais-1) 48%,transparent) 285deg,color-mix(in srgb,var(--ais-2) 70%,transparent) 336deg,color-mix(in srgb,var(--ais-3) 86%,transparent) 357deg,transparent 360deg);animation:ai-chase .4s linear forwards}
+@keyframes ai-chase{0%{transform:rotate(0);opacity:0}16%{opacity:1}78%{opacity:1}100%{transform:rotate(360deg);opacity:0}}
 @media (prefers-reduced-motion:reduce){.tcard.reveal{animation:none}.tcard.first{animation:none}.tcard.first::after{display:none}.aispark{display:none}}
 
 /* ghost / preview cards (Coach direction) */
@@ -697,7 +697,7 @@ h1,h2,h3,p{margin:0}
         +'<button class="revert" data-act="revert" data-i="'+idx+'">'+svg('undo')+'Revert</button></div>';
     }
     var cls='tcard'+(opts.ghost?' ghost':'')+(opts.first?' first':'')+(term?' term':'');
-    var spark=opts.first?'<svg class="aispark" aria-hidden="true"><defs><linearGradient id="aiGrad" x1="0" y1="0" x2="1" y2="1"><stop class="ais0" offset="0"/><stop class="ais1" offset=".5"/><stop class="ais2" offset="1"/></linearGradient></defs><rect class="asrect" x="0" y="0" width="100%" height="100%" rx="13" pathLength="100" fill="none" stroke="url(#aiGrad)" stroke-width="2.1" stroke-linecap="round"/></svg>':'';
+    var spark=opts.first?'<div class="aispark" aria-hidden="true"><div class="aispin"></div></div>':'';
     return '<div class="'+cls+'" data-i="'+idx+'">'+head+ttl+(term?'':'<div class="metrics">'+m+'</div>')+acts+spark+'</div>';
   }
   var agentMode='Suggest';
