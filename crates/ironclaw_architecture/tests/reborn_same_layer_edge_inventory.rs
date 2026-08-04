@@ -61,6 +61,18 @@
 //! promotions (`hooks` `substrates` → `loops`, `runner` `kernel` → `loops`)
 //! which need no pin because moving up narrows reach.
 //!
+//! ✎ **That census is a snapshot of when this gate was authored and is no
+//! longer the live count — read [`DOWNGRADE_PINS`], not this paragraph.** Three
+//! more demotions have landed since: `ironclaw_host_ingress` `products` →
+//! `substrates` (#7143, the move that motivated the rule), `ironclaw_skills`
+//! `loops` → `substrates` (#7141 / WS4), and `ironclaw_extension_support`
+//! `loops` → `runtimes` (WS3 closeout). The last of those is worth naming here
+//! because it is the first demotion taken *for* the exception register rather
+//! than alongside it: it deleted `LAYER_MATRIX_EXCEPTIONS`' final entry, so the
+//! consumer-side pin is now the only structural check standing over that edge.
+//! Kept as four rows rather than folded into a count, since a pin's whole value
+//! is naming who may reach the demoted crate.
+//!
 //! ⚠ **Every test function here must keep its `reborn_` prefix.** The file name
 //! is not what selects it: `code_style.yml` runs
 //! `cargo test -p ironclaw_architecture reborn`, and that argument is a **test
@@ -781,6 +793,34 @@ const DOWNGRADE_PINS: &[DowngradePin] = &[
             "ironclaw_extension_support",
             "ironclaw_first_party_extension_ports",
             "ironclaw_loop_host",
+            "ironclaw_reborn_composition",
+        ],
+    },
+    DowngradePin {
+        crate_name: "ironclaw_extension_support",
+        from_layer: "loops",
+        to_layer: "runtimes",
+        demoted_in: "WS3 closeout (the move that emptied LAYER_MATRIX_EXCEPTIONS)",
+        // The demotion that deleted the register's last entry,
+        // `host_runtime -> extension_support`. WS3's executor/adapter seam makes
+        // the kernel a *designed* consumer of this crate — a tool moves here as
+        // an executor and leaves its handler, manifest and registry wiring in
+        // `ironclaw_host_runtime` — so a `loops` declaration contradicted the
+        // design rather than describing it. `runtimes` is the least demotion
+        // that legalizes a kernel consumer and creates no same-layer edge
+        // (`substrates` would have hidden six of the crate's seven
+        // dependencies from the matrix). Frozen at the five consumers that
+        // existed at the move; a sixth is a reviewed decision, and that review
+        // is the whole point of the pin, because the widening here reaches down
+        // two rungs rather than one.
+        // (`ironclaw` is the binary crate at `crates/ironclaw_reborn_cli/` —
+        // the pin is keyed on package names, which is what `cargo metadata`
+        // reports and what makes a row able to fire at all.)
+        permitted_consumers: &[
+            "ironclaw",
+            "ironclaw_extension_host",
+            "ironclaw_extension_manager",
+            "ironclaw_host_runtime",
             "ironclaw_reborn_composition",
         ],
     },
