@@ -1250,10 +1250,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_extension_host/src/lib.rs", "nearai_mcp"),
     ("crates/ironclaw_extension_host/src/lib.rs", "nearaimcp"),
     (
-        "crates/ironclaw_extension_host/src/lifecycle_restore.rs",
-        "slack",
-    ),
-    (
         "crates/ironclaw_extension_host/src/nearai_mcp.rs",
         "nearai_mcp",
     ),
@@ -1519,7 +1515,45 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// the gate above (an entry that no longer matches fails); this ceiling is the
 /// other half — the list cannot *grow* untracked either. Lower it in the same
 /// PR that deletes entries so the new floor is locked in.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 124;
+///
+/// ✎ **129 → 125 (2026-08-04, #7143).** Two separate things, both owed by the
+/// sentence directly above and neither done until now:
+///
+/// - **This PR deleted an entry** — `("…/lifecycle_restore.rs", "slack")`, made
+///   stale by the retired-identity branch deletion — and lowering the ceiling
+///   in the same PR is exactly what that sentence requires. Shipping without it
+///   would have banked the deletion as slack rather than as a floor.
+/// - **The ceiling was already carrying 3 entries of slack before this PR.**
+///   Recounted on `origin/main`: the list holds **126** pairs against a
+///   constant of 129, so three earlier deletions lowered the list without
+///   lowering the ceiling. That slack is silent — the ratchet only refuses
+///   *growth*, so three new vendor carve-outs could have been added without
+///   any gate objecting. Setting the constant to the live count (**125** on
+///   this branch) closes the pre-existing gap as well as this PR's.
+///
+/// Counted with a script over the entries between `const ALLOWLIST` and its
+/// closing `];`, ignoring comment lines, on the **pushed ref** — not by eye and
+/// not with `grep`, which also matches prose. Tracked as #7147; whichever of
+/// the concurrent branches touching this list merges last must recount the
+/// union rather than trusting any single branch's number.
+///
+/// ✎ **125 → 123 (2026-08-04, #7139 — the Wave 4 consolidation).** Neither
+/// side of this merge was right for the union, so it was recounted rather than
+/// picked. #7143 set **125** measuring its own branch; this branch had **124**
+/// measuring its own. #7143 additionally *deleted* an entry
+/// (`lifecycle_restore.rs`/`slack`) that this branch never saw, so the merged
+/// list is lower than either: 126 on `main` after #7094, minus this branch's
+/// two net vendor-config removals, minus #7143's one, is **123**.
+///
+/// Read off the ratchet's own failure message with this constant temporarily
+/// set to `0` (`ALLOWLIST grew to 123 entries`) — never counted by eye, and
+/// never with `grep`, which also matches prose (a paren count over the literal
+/// once answered 142 because the entries' comments contain parentheses).
+///
+/// ⚠ **#7141 and #7152 are still open and both touch this list** (#7147).
+/// Whichever merges last must recount the union the same way rather than
+/// inheriting 123, 124 or 125 from any single branch.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 123;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 #[test]

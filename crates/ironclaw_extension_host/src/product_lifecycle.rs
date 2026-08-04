@@ -23,13 +23,12 @@ use ironclaw_host_api::{
     ids::{ExtensionId, UserId, VendorId},
     resource::ResourceScope,
 };
-use ironclaw_product::{
-    ChannelConnectionService, ExtensionAccountSetupRegistry, RebornChannelConnectStrategy,
-};
+use ironclaw_product::{ChannelConnectionService, ExtensionAccountSetupRegistry};
 use ironclaw_product_contracts::account_setup::{
     ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
 };
 use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
 use ironclaw_product_contracts::package_lifecycle::{
     LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
     LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,

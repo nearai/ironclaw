@@ -10,8 +10,19 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+# Layer `substrates`, not `products` (WS2 re-layer, #7092). This crate is
+# carrier vocabulary: a prebuilt `axum::Router` paired with the neutral
+# `ironclaw_host_api` ingress descriptors that a listener-owning crate layers
+# policy around. It holds no product behavior, and the only reason it is not a
+# `contracts` crate is that `axum` is on the contracts-tier denied list
+# (`reborn_contracts_crates_hold_no_framework_dependencies`) — which is the
+# crate's entire stated purpose, "keeps Axum out of contracts". `products` was
+# therefore a position it never earned, and it blocked
+# `ironclaw_extension_host`'s own `products -> loops` flip for no structural
+# reason. Its dependency ceiling is pinned as an allowlist in
+# `reborn_dependency_boundaries.rs`.
 [package.metadata.ironclaw]
-layer = "products"
+layer = "substrates"
 
 [dependencies]
 axum = "0.8"

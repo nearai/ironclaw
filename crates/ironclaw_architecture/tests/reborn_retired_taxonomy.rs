@@ -46,6 +46,21 @@ const RETIRED_TERMS: &[&str] = &[
     // ProviderIdentityActorResolver parameterized by manifest data).
     "slack_actor_identity",
     "SlackUserIdentityActorResolver",
+    // The retired-identity boot migration, deleted 2026-08-04 by owner ruling
+    // (PROPOSAL §12.11 D-I: "just get rid of slack_bot and slack_personal
+    // etc.. those can get nuked. Don't worry about migration data").
+    //
+    // The *identifiers* are banned, not the string `"slack_user"`: that literal
+    // is still legitimate as a persisted id a deployed host may carry, as a
+    // test fixture, and as a prefix of the live `slack_user_token` credential
+    // handle. What must never come back is code that keys behaviour on it. The
+    // behavioural half is
+    // `restore_special_cases_no_extension_id_and_leaves_every_uncatalogued_row_intact`
+    // (`ironclaw_extension_host/tests/lifecycle_restore_contract.rs`), which
+    // fails if boot restore deletes the row; this pair fails earlier and more
+    // cheaply, on the constant and the function themselves.
+    "RETIRED_SLACK_USER_EXTENSION_ID",
+    "remove_retired_internal_installation",
     // Contract-free / legacy manifest parse paths (one parse entry point
     // remains: ExtensionManifestV2::parse with a contract registry).
     "parse_with_host_api_contracts",

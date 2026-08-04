@@ -119,21 +119,6 @@ def _latest_projection_items(events: list[dict]) -> dict[tuple[str, str], str]:
     return latest
 
 
-def _durable_cursor_position(event: dict) -> tuple[int | None, int, int | None]:
-    """Return the durable resume position, excluding volatile live cursor state."""
-    cursor = json.loads(json.loads(event["id"]))
-    runtime = cursor.get("runtime")
-    runtime_position = cursor.get("runtime_item")
-    if runtime_position is None and runtime is not None:
-        runtime_position = runtime["runtime"]
-    turn = cursor.get("turn")
-    return (
-        runtime_position,
-        cursor.get("runtime_payloads_delivered", 0),
-        None if turn is None else turn["event"],
-    )
-
-
 async def _collect_sse_until_run_status(
     response,
     run_id: str,
@@ -167,6 +152,94 @@ async def _collect_sse_until_run_status(
         f"Timed out waiting for run {run_id} to reach {status}; "
         f"observed={len(events)}, recent={recent}"
     )
+
+
+async def _collect_sse_until_projection_items(
+    response,
+    expected_items: dict[tuple[str, str], str],
+    *,
+    timeout: float = 60,
+) -> list[dict]:
+    """Read replay frames until their reduced projection matches the source state.
+
+    A resumed stream can emit a compacted terminal run-status snapshot before
+    the turn-event frames that carry text. Stopping at the first `Completed`
+    frame therefore observes a valid intermediate replay cursor, not the
+    complete post-cursor state this reconnect scenario is meant to verify.
+    """
+    events = []
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        try:
+            event = await _next_sse_event(response, timeout=remaining)
+        except TimeoutError:
+            break
+        events.append(event)
+        cursor_events = [candidate for candidate in events if candidate["id"]]
+        if cursor_events and _latest_projection_items(cursor_events) == expected_items:
+            return events
+    raise AssertionError(
+        "Timed out waiting for replayed projection state; "
+        f"observed={len(events)}, "
+        f"actual={_latest_projection_items([event for event in events if event['id']])}, "
+        f"expected={expected_items}"
+    )
+
+
+class _ScriptedSseContent:
+    def __init__(self, events: list[dict]):
+        self._lines = []
+        for index, event in enumerate(events, start=1):
+            self._lines.extend(
+                [
+                    f"id: cursor-{index}\n".encode(),
+                    b"event: projection_update\n",
+                    f"data: {json.dumps(event)}\n".encode(),
+                    b"\n",
+                ]
+            )
+
+    async def readline(self) -> bytes:
+        return self._lines.pop(0) if self._lines else b""
+
+
+class _ScriptedSseResponse:
+    def __init__(self, events: list[dict]):
+        self.content = _ScriptedSseContent(events)
+
+
+async def test_collect_sse_until_projection_items_waits_past_early_terminal_status():
+    terminal = {
+        "state": {
+            "items": [
+                {"run_status": {"run_id": "run-1", "status": "completed"}}
+            ]
+        }
+    }
+    later_text = {
+        "state": {
+            "items": [{"text": {"id": "message-1", "content": "complete"}}]
+        }
+    }
+    expected_items = _latest_projection_items(
+        [
+            {"data": terminal},
+            {"data": later_text},
+        ]
+    )
+
+    events = await _collect_sse_until_projection_items(
+        _ScriptedSseResponse([terminal, later_text]),
+        expected_items,
+        timeout=1,
+    )
+
+    assert len(events) == 2
+    assert _latest_projection_items(events) == expected_items
 
 
 async def _submit_message(
@@ -471,10 +544,9 @@ async def test_reborn_v2_sse_reconnect_resumes_without_gap_or_duplicate_served(
             timeout=45,
         ) as resumed_stream:
             assert resumed_stream.status == 200
-            replayed_events = await _collect_sse_until_run_status(
+            replayed_events = await _collect_sse_until_projection_items(
                 resumed_stream,
-                submitted["run_id"],
-                "completed",
+                expected_items,
                 timeout=40,
             )
 
@@ -482,9 +554,6 @@ async def test_reborn_v2_sse_reconnect_resumes_without_gap_or_duplicate_served(
         replayed_ids = [event["id"] for event in replayed_cursor_events]
         assert len(replayed_ids) == len(set(replayed_ids)), replayed_ids
         assert replay_from not in replayed_ids
-        assert _durable_cursor_position(
-            replayed_cursor_events[-1]
-        ) == _durable_cursor_position(initial_cursor_events[-1])
         # Live projection updates may compact by stable item identity during
         # replay. Compare the complete reduced post-cursor state, not only the
         # terminal run status: dropping intermediate durable state would omit
