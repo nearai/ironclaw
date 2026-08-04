@@ -3450,7 +3450,7 @@ checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
 name = "ironclaw"
-version = "1.0.0-rc.1"
+version = "1.1.0-rc.1"
 dependencies = [
  "anyhow",
  "async-trait",

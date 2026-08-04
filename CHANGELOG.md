@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0-rc.1] - 2026-08-03
+
+First release candidate since 1.0.0. The headline work is extension reach —
+registering arbitrary hosted MCP servers, installing from IronHub deep links,
+durable file attachments that cross channels, and Slack `/ironclaw` slash
+commands — plus a broad pass on making failures legible: to the model, which
+now gets told what to do next instead of an opaque stop, and to the user, who
+gets localized, actionable errors instead of silent dead ends.
+
+**Upgrading from 1.0.0.** No migration steps. Extension lifecycle state moved
+to a normalized on-disk shape; rows written by 1.0.0 keep deserializing. The
+one behavioral removal is the `/webhooks/slack/events` compatibility alias
+(see Removed).
+
+### Added
+
+- **Custom MCP servers.** Register a hosted MCP server from the WebUI and use
+  its tools like any other extension: discovery accepts bounded
+  OpenAPI-derived tool catalogs within the manifest's declared tool budget,
+  auth is resolved during registration, and the registered tools are exposed
+  to the model.
+- **IronHub install flow.** Install extensions from an IronHub deep link,
+  including private manifest sources, through a register/install gateway.
+- **Attachments.** Durable cross-channel file flows: a file sent on one
+  channel stays retrievable from the others and from the WebUI.
+- **Slack slash commands.** Native `/ironclaw` commands in Slack, backed by a
+  role-filtered command palette in the WebUI and role gating on admin command
+  actions.
+- **Memory as an extension.** The memory provider is modeled as a userland
+  extension with a host-managed lifecycle and a contract built around declared
+  capabilities, so a provider advertises what it can actually do instead of
+  being assumed uniform.
+- **Sandbox lane (opt-in, partly unwired).** A `RuntimeKind::Sandbox` runtime
+  lane with credential reuse, leaf-scoped mount containment, per-user sandbox
+  identity primitives, and a credential placeholder registry. Docker-connect
+  retry, the egress allowlist, and shell limits ship unwired in this release.
+- **Trigger poller on production-shaped runtimes** (opt-in), and the SSO/admin
+  identity resolver wired into those runtimes.
+- **QA run artifacts.** Caller-scoped run and full-thread artifact export,
+  gated off by default, plus a regression promotion loop for the test suite.
+- **`BENCHMARKING_MODE`.** An opt-in system-prompt addendum for unattended
+  evaluation runs.
+
 ### Changed
 
 - **Extension persistence:** normalize filesystem-backed extension lifecycle
@@ -18,6 +61,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   diagnostic health snapshot: it was always `healthy`, never read, and never
   surfaced, while the host's activation record already owns extension failure
   state. Rows written by the previous release keep deserializing.
+- **Model failures now carry a next step.** Every termination path — no
+  progress, iteration limit, disabled capability, denied call, provider error
+  — tells the model what would unlock the call instead of stopping opaquely.
+- **WebUI performance:** route-level code splitting, deferred Markdown and
+  syntax highlighting during chat streaming, optimized embedded static-asset
+  delivery, and pagination for the sidebar thread list, admin users list, and
+  older logs.
+- **Shared WebUI controls:** a common settings `Switch`, a shared
+  `ConfirmDialog` replacing native browser confirmations, and normalized
+  control typography.
 
 ### Fixed
 
@@ -78,6 +131,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Channel removal:** revoke caller-owned OAuth or proof-code pairing state
   through the shared lifecycle before deleting any channel installation, so
   removing Telegram, Slack, or a future channel unpairs it on every surface.
+- **One authorization per vendor account:** authorizing a vendor now covers
+  every installed extension sharing that account, instead of re-prompting per
+  extension. Token response scopes are trusted over the OAuth redirect echo.
+- **Extension package roots** are persisted rather than fabricated on load, so
+  a stale or partial catalog entry no longer takes down startup.
+- **Tool disclosure** is narrowed by the caller's allow-set, closing three
+  paths that leaked tool definitions the caller was not granted.
+- **Provider errors are classified correctly:** rate limits are no longer read
+  as auth failures, a missing model is not retried, adapters report the
+  provider's real finish reason, and the runner stops silently retrying
+  model-stage failures that cannot succeed.
+- **Context overflow and compaction:** secret matches are redacted during
+  compaction and a run recovers from context overflow instead of terminating.
+- **libSQL durability:** writers are serialized, cancelled transactions and
+  interrupted history migrations recover, and transient writer contention no
+  longer surfaces as a failed run.
+- **Panic and cancellation safety** on the run path, plus bounded
+  deterministic gateway failures so a wedged model stage cannot hang a turn.
+- **WebUI streaming and navigation:** smooth streaming with preserved model
+  phases, route state and workspace-tree state preserved across SPA
+  navigation, viewport preserved while loading older messages, message actions
+  kept visible, and active run state preserved when cancellation fails.
+- **WebUI correctness and a11y:** localized chat/extension/OAuth failure
+  messages, surfaced admin user-management failures, recovery from transient
+  session checks, focus trapping in the extension configuration modal, no
+  crash on admin configuration paste, pairing prompts rendered without a text
+  input, tool-permission selection retained while saving, always-allow reset
+  when the approval gate changes, and authenticated previews for workspace
+  file links.
+- **Automations** inherit the implicit source channel target, and the
+  outbound delivery-target registry is caller-scoped structurally rather than
+  by convention.
+- **Skills:** the model is told to review the available skills before
+  answering.
+- **`ironclaw service`:** the generated systemd unit no longer quotes
+  `WorkingDirectory=`.
+- **Projects** show only API-backed data instead of placeholder rows.
+
+### Performance
+
+- **Hosted Postgres API capacity** regressed by the row-native process journal
+  is recovered.
+- **Durable turn-event reads** are served by an indexed scope+cursor query
+  instead of a scan.
 
 ### Removed
 
