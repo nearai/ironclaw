@@ -64,7 +64,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
 Totals: **50** group scenarios · **54** flat integration bins (48 in
-`tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
+`tests/integration/`, 6 in `tests/integration/auth/`) · **40** top-level Rust bins ·
 **102** Python scenario files (**867** test functions).
 
 ---
@@ -350,6 +350,35 @@ Each is anchored to a bug QA has actually filed against these flows.
 | Responses API: custom-tool BTC analysis | — §7.2 |
 | Responses API: "every 5 min…" → routine created | — §7.2 |
 
+### 5.2 Assistant workflow families — `reborn_qa_workflow_use_cases.rs` (11)
+
+The ten workflow families, in their **one-shot working-turn** form (the scheduled
+form is §5.1's routines; the channel-inbound form is `reborn_qa_channel_delivery`).
+
+Each test pins the data path and the effects, never the model's wording: every
+source fetched (request log, in order), every payload actually reaching the model
+(recorded capability results), every write leg carrying its real payload (captured
+request body). Where a fixture offers a negative — a newsletter that must not be
+answered, a back-to-back meeting pair that is not a conflict, an unqualified lead —
+the test asserts the negative *reached* the model and that the write *excluded* it.
+
+| # | The user can… | Evidence |
+|---|---|---|
+| 1 | Have unread mail triaged and a reply drafted to the one thread that needs it | `reborn_qa_inbox_triage_drafts_reply_to_the_urgent_thread_only` |
+| 2 | Get a morning briefing that fans in calendar + email + tasks in one turn | `reborn_qa_morning_briefing_fans_in_calendar_email_and_tasks` — the only case issuing three *different* parallel provider reads, so it is the coverage for three independent results returning into one turn |
+| 3 | Have the day's calendar scanned for real clashes | `reborn_qa_calendar_conflict_scan_sees_overlap_and_back_to_back` |
+| 4 | Get a post-meeting recap that actually carries the decisions | `reborn_qa_meeting_followup_reads_the_record_and_sends_a_populated_recap` |
+| 6 | Turn a request into a tracked task with an assignee and a link back | `reborn_qa_request_becomes_tracked_task_with_assignee_and_source` |
+| 7 | Have open issues triaged — labelled and commented, leaving triaged ones alone | `reborn_qa_issue_triage_labels_and_comments_on_the_untriaged_issue` |
+| 7 | Be alerted when CI is red **even though the API returned HTTP 200** | `reborn_qa_ci_failure_payload_on_a_200_still_raises_an_alert` — the failure is in the payload, the shape a status-code-only check misreads as green |
+| 8 | Have one inbound event fan out to *every* downstream system | `reborn_qa_cross_app_event_fans_out_to_every_downstream_system` — asserts both writes, because a partial fan-out is the bug |
+| 9 | Have leads scored with only the qualified one recorded | `reborn_qa_lead_scoring_records_only_the_qualified_lead` |
+| 10 | Track expenses in their own workspace and read the ledger back in the same turn | `reborn_qa_expense_is_recorded_to_the_workspace_ledger_and_read_back` |
+| — | **Set up a tool by talking to the agent, with no UI navigation** | `reborn_qa_chat_only_extension_install_reaches_installed_state` — search → install → confirm installed, all in one ordinary chat turn |
+
+Family 5 (team chat as a control layer) is covered by `reborn_qa_channel_delivery`
+rather than duplicated here.
+
 **Binary-level behavior**
 | Behavior | Evidence |
 |---|---|
@@ -566,6 +595,7 @@ crate tier — a weaker but real signal; say so if you verify it.
 
 | Gap | Notes |
 |---|---|
+| **`builtin.http.save` produces no capability result** | Found while writing `reborn_qa_workflow_use_cases.rs`. The capability is granted by the core-builtin profile (`core_builtin_tools_capability_ids()` lists `HTTP_SAVE_CAPABILITY_ID`) and a scripted call IS recorded as an invocation, but **no capability result comes back and no file appears** — tried with `save_to` both mount-relative (`meetings/x.md`) and workspace-absolute (`/workspace/meetings/x.md`). Whether the cause is the harness mounts, the input shape, or the capability itself was **not** determined; nothing else in the repo exercises `http.save` through a turn. Worth a focused look before trusting it in production. The meeting-follow-up test was rewritten to plain `builtin.http` because of this. |
 | **Channel-confusion, the assertable half** | Independent of #6478/#6716 above: `reborn_qa_connect_flows.rs` proves connecting works, but nothing asserts a **subsequent** turn on shared storage sees that channel as connected. That two-turn case is writable today and would catch a regression in the working path. |
 | **UC10: custom tool invoked for a domain ask** | Custom-tool import/install/dispatch is covered (`test_reborn_private_tool_installs.py`), and the recurring form is covered (`reborn_qa_routine_created_for_btc_technical_analysis_telegram_every_5_minutes`). The one-shot "give me a quick technical analysis on BTC" → *this specific uploaded tool* runs → chart output is not. Needs a custom-tool fixture with a known output shape. |
 | **UC11: Responses API as a scenario surface** | The API surface is covered mechanically (`test_reborn_responses_api.py`, 14 tests). What is missing is the three QA rows that drive *the same use-case asks* through it (BTC news summary, custom-tool analysis, routine creation) — i.e. proof that the Responses API is a first-class entry point for these journeys, not just for chat. Python tier, since it drives real HTTP against the served binary. |
