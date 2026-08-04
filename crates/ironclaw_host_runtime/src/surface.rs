@@ -283,8 +283,29 @@ impl<'a> CapabilityCatalog<'a> {
             Decision::RequireApproval { .. } | Decision::Deny { .. } => return Ok(None),
         };
 
+        let surfaced_descriptor = match self.surface_descriptor(descriptor).await {
+            Ok(surfaced_descriptor) => surfaced_descriptor,
+            // Per-capability schema resolution failure is fail-open: a single
+            // extension's stale/missing input_schema_ref (the nearai outage
+            // this fixes) must not delist every other capability, nor abort
+            // the whole surface. `Unavailable` (storage/backend broken) stays
+            // fail-closed so a real infrastructure outage is never silently
+            // swallowed as "one bad schema" (mirrors #5967's per-entry
+            // fail-open / infrastructure fail-closed split).
+            Err(HostRuntimeError::InvalidRequest { reason }) => {
+                tracing::warn!(
+                    extension_id = %descriptor.provider,
+                    capability_id = %descriptor.id,
+                    %reason,
+                    "skipping capability with unresolved or invalid schema"
+                );
+                return Ok(None);
+            }
+            Err(error @ HostRuntimeError::Unavailable { .. }) => return Err(error),
+        };
+
         Ok(Some(VisibleCapability {
-            descriptor: self.surface_descriptor(descriptor).await?,
+            descriptor: surfaced_descriptor,
             description_trust: self.description_trust(descriptor),
             access,
             estimated_resources: estimate,
@@ -298,9 +319,12 @@ impl<'a> CapabilityCatalog<'a> {
             .map(|package| package.manifest.source)
         {
             Some(ManifestSource::RegistryInstalled) => CapabilityDescriptionTrust::VerifiedCatalog,
-            Some(ManifestSource::HostBundled | ManifestSource::InstalledLocal) | None => {
-                CapabilityDescriptionTrust::Untrusted
-            }
+            Some(
+                ManifestSource::HostBundled
+                | ManifestSource::InstalledLocal
+                | ManifestSource::UserRegistered,
+            )
+            | None => CapabilityDescriptionTrust::Untrusted,
         }
     }
 
@@ -373,6 +397,11 @@ impl<'a> CapabilityCatalog<'a> {
         let Some(package) = self.registry.get_extension(&descriptor.provider) else {
             return Ok(descriptor);
         };
+        if package.descriptor_schema_mode
+            == ironclaw_extensions::CapabilityDescriptorSchemaMode::InlineDynamic
+        {
+            return Ok(descriptor);
+        }
         descriptor.parameters_schema =
             resolve_package_input_schema_ref(filesystem, package, &descriptor.id, &reference)
                 .await?;
@@ -402,9 +431,14 @@ async fn resolve_package_input_schema_ref(
             declaration.input_schema_ref.as_str()
         )));
     }
+    let root = package.materialized_root().map_err(|error| {
+        HostRuntimeError::invalid_request(format!(
+            "capability {capability_id} requires a package filesystem schema: {error}"
+        ))
+    })?;
     read_json_ref(
         filesystem,
-        &package.root,
+        root,
         &declaration.input_schema_ref,
         "input_schema_ref",
     )
@@ -711,6 +745,248 @@ mod tests {
             matches!(error, HostRuntimeError::InvalidRequest { ref reason }
                 if reason.contains("must publish from an input schema ref")),
             "unexpected error: {error:?}"
+        );
+    }
+
+    // ─── per-capability isolation (nearai-outage amplifier fix) ────────────
+
+    use crate::SurfaceKind;
+    use async_trait::async_trait;
+    use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ManifestSource};
+    use ironclaw_filesystem::{
+        DirEntry, FileStat, FilesystemError, FilesystemOperation, InMemoryBackend, RootFilesystem,
+    };
+    use ironclaw_host_api::{
+        capability::CapabilitySet, decision::Obligations, host_port::HostPortCatalog, ids::UserId,
+        mount::MountView, path::VirtualPath, resource::ResourceEstimate, scope::ExecutionContext,
+    };
+    use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+
+    const TWO_CAPABILITY_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "isolation-test"
+name = "Isolation Test"
+version = "1.0.0"
+description = "Two capabilities, one with a broken schema ref"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "isolation-test.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "isolation-test.healthy"
+description = "Healthy capability"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/healthy.input.json"
+
+[[capability_provider.tools.capabilities]]
+id = "isolation-test.broken"
+description = "Capability with a missing schema ref"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/broken.input.json"
+"#;
+
+    fn isolation_test_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                    .expect("capability provider contract"),
+            ))
+            .expect("register capability provider contract");
+        contracts
+    }
+
+    fn isolation_test_package() -> ExtensionPackage {
+        let manifest = ExtensionManifest::parse(
+            TWO_CAPABILITY_MANIFEST,
+            ManifestSource::InstalledLocal,
+            &HostPortCatalog::empty(),
+            &isolation_test_contracts(),
+        )
+        .expect("manifest must parse");
+        let root = VirtualPath::new("/system/extensions/isolation-test").expect("valid root");
+        ExtensionPackage::from_manifest(manifest, root).expect("package must build")
+    }
+
+    fn allow_all_trust_decision() -> TrustDecision {
+        TrustDecision {
+            effective_trust: EffectiveTrustClass::user_trusted(),
+            authority_ceiling: AuthorityCeiling::empty(),
+            provenance: TrustProvenance::Default,
+            evaluated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn isolation_test_context() -> ExecutionContext {
+        ExecutionContext::local_default(
+            UserId::new("user").expect("user id"),
+            ExtensionId::new("isolation-test").expect("extension id"),
+            RuntimeKind::Wasm,
+            TrustClass::UserTrusted,
+            CapabilitySet::default(),
+            MountView::default(),
+        )
+        .expect("execution context")
+    }
+
+    /// Test double that always allows dispatch, so the test exercises schema
+    /// resolution/isolation without needing to model real grant matching.
+    struct AlwaysAllow;
+
+    #[async_trait]
+    impl TrustAwareCapabilityDispatchAuthorizer for AlwaysAllow {
+        async fn authorize_dispatch_with_trust(
+            &self,
+            _context: &ExecutionContext,
+            _descriptor: &CapabilityDescriptor,
+            _estimate: &ResourceEstimate,
+            _trust_decision: &TrustDecision,
+        ) -> Decision {
+            Decision::Allow {
+                obligations: Obligations::new(Vec::new()).expect("empty obligations"),
+            }
+        }
+    }
+
+    fn isolation_test_request() -> VisibleCapabilityRequest {
+        let mut provider_trust = std::collections::BTreeMap::new();
+        provider_trust.insert(
+            ExtensionId::new("isolation-test").expect("extension id"),
+            allow_all_trust_decision(),
+        );
+        VisibleCapabilityRequest::new(
+            isolation_test_context(),
+            SurfaceKind::new("test").expect("surface kind"),
+        )
+        .with_provider_trust(provider_trust)
+        .with_policy(CapabilitySurfacePolicy::allow_all())
+    }
+
+    /// Filesystem wrapper that answers every read with a simulated storage
+    /// outage (`FilesystemError::Backend`), regardless of path. Used to prove
+    /// that per-capability isolation does not soften a genuine infrastructure
+    /// failure into a silent "no capabilities" surface.
+    struct BackendFailingFilesystem {
+        inner: InMemoryBackend,
+    }
+
+    #[async_trait]
+    impl RootFilesystem for BackendFailingFilesystem {
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            self.inner.list_dir(path).await
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            self.inner.stat(path).await
+        }
+
+        async fn read_file_bounded(
+            &self,
+            path: &VirtualPath,
+            _max_bytes: usize,
+        ) -> Result<Option<Vec<u8>>, FilesystemError> {
+            Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+                reason: "simulated storage outage".to_string(),
+            })
+        }
+    }
+
+    /// One broken capability (missing `input_schema_ref`) must not delist its
+    /// healthy sibling in the same package. This is the direct regression test
+    /// for the production outage: a single extension's dynamic schema going
+    /// missing must not take down the whole visible-capability surface.
+    #[tokio::test]
+    async fn broken_capability_schema_is_isolated_not_fatal() {
+        let mut registry = ExtensionRegistry::new();
+        registry
+            .insert(isolation_test_package())
+            .expect("insert package");
+
+        let fs = InMemoryBackend::new();
+        let healthy_schema_path =
+            VirtualPath::new("/system/extensions/isolation-test/schemas/healthy.input.json")
+                .expect("valid path");
+        fs.write_file(
+            &healthy_schema_path,
+            br#"{"type": "object", "properties": {}}"#,
+        )
+        .await
+        .expect("seed healthy schema");
+        // Deliberately do NOT write schemas/broken.input.json — its
+        // `resolve_package_input_schema_ref` read must fail with `NotFound`.
+
+        let runtime_policy = test_runtime_policy();
+        let surface_version = CapabilitySurfaceVersion::new("surface-v1").unwrap();
+        let authorizer = AlwaysAllow;
+        let catalog =
+            CapabilityCatalog::new(&registry, &authorizer, &surface_version, &runtime_policy)
+                .with_filesystem(&fs);
+
+        let surface = catalog
+            .visible_capabilities(isolation_test_request())
+            .await
+            .expect("one broken capability must not fail the whole surface");
+
+        assert_eq!(
+            surface.capabilities.len(),
+            1,
+            "only the healthy capability should publish; got {:?}",
+            surface
+                .capabilities
+                .iter()
+                .map(|c| c.descriptor.id.to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            surface.capabilities[0].descriptor.id.as_str(),
+            "isolation-test.healthy"
+        );
+    }
+
+    /// A storage backend outage must abort the whole call (`Unavailable`),
+    /// never be silently absorbed by per-capability isolation. Proves the
+    /// abort-vs-isolate split: isolation only applies to "this reference is
+    /// bad", not to "storage itself is broken".
+    #[tokio::test]
+    async fn backend_outage_aborts_the_whole_call_as_unavailable() {
+        let mut registry = ExtensionRegistry::new();
+        registry
+            .insert(isolation_test_package())
+            .expect("insert package");
+
+        let fs = BackendFailingFilesystem {
+            inner: InMemoryBackend::new(),
+        };
+
+        let runtime_policy = test_runtime_policy();
+        let surface_version = CapabilitySurfaceVersion::new("surface-v1").unwrap();
+        let authorizer = AlwaysAllow;
+        let catalog =
+            CapabilityCatalog::new(&registry, &authorizer, &surface_version, &runtime_policy)
+                .with_filesystem(&fs);
+
+        let error = catalog
+            .visible_capabilities(isolation_test_request())
+            .await
+            .expect_err("a backend outage must abort the whole call");
+
+        assert!(
+            matches!(error, HostRuntimeError::Unavailable { .. }),
+            "backend outage must surface as Unavailable, not be swallowed by isolation: {error:?}"
         );
     }
 }

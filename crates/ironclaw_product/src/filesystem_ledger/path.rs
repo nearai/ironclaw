@@ -1,5 +1,6 @@
-use crate::{ActionFingerprintKey, ProductSurfaceFailure};
+use crate::ProductSurfaceFailure;
 use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
+use ironclaw_product_contracts::action::ActionFingerprintKey;
 
 use super::durable_error;
 

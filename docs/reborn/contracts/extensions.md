@@ -432,6 +432,7 @@ Rules:
 - Model-visible capability-provider sections must carry enough cold metadata to project an LLM-facing tool descriptor: stable capability ID, human description, input schema ref, output schema ref, effects, permission default, and visibility. `prompt_doc_ref` is optional lazy help metadata, not part of the mandatory per-turn surface.
 - The LLM consumes the projected hot capability surface, not the raw manifest section. Catalog publication resolves schema refs into compact per-turn tool descriptors and resolves `prompt_doc_ref` only when one is declared.
 - Descriptions from registry packages whose signature, provenance, and artifact digests were verified carry that provenance into prompt assembly. They may bypass vocabulary/path/credential-shape false-positive checks, but never structural prompt limits or execution authorization. Unknown, local, and synthetic sources remain fully checked.
+- Registry package schema references resolve only to path-keyed artifacts whose bytes and hashes are covered by the signed catalog. The host must not replace a missing publisher schema with a permissive generic schema; missing, extra, invalid, or digest-mismatched schemas fail before lifecycle mutation.
 - Unknown `host_api.id` values fail closed.
 - Repeating the same `host_api.id` is allowed only when that contract declares multi-instance support.
 - Every `[[host_api]]` must reference an existing explicit `section` path.

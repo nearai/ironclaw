@@ -159,6 +159,9 @@ pub enum MessageKind {
 #[serde(rename_all = "snake_case")]
 pub enum MessageStatus {
     Accepted,
+    /// Message is accepted and queued for an active run to consume at the next
+    /// steering/input boundary.
+    Queued,
     Submitted,
     /// Message arrived while the thread was busy; it will NOT be auto-resubmitted.
     /// The user must resend the message once the current task finishes.
@@ -583,6 +586,14 @@ pub struct ThreadHistoryRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedThreadMessagesRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub max_messages: usize,
+    pub max_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadMessageRangeRequest {
     pub scope: ThreadScope,
     pub thread_id: ThreadId,
@@ -629,6 +640,18 @@ pub struct ThreadHistory {
     pub thread: SessionThreadRecord,
     pub messages: Vec<ThreadMessageRecord>,
     pub summary_artifacts: Vec<SummaryArtifact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundedThreadMessages {
+    Complete(Box<BoundedThreadMessageSnapshot>),
+    LimitExceeded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedThreadMessageSnapshot {
+    pub history: ThreadMessageRange,
+    pub context: ContextMessages,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -735,6 +758,30 @@ pub struct CreateSummaryArtifactRequest {
 pub struct UpdateThreadGoalRequest {
     pub thread_id: ThreadId,
     pub goal: ThreadGoal,
+}
+
+/// Whether `append_assistant_draft` / `append_finalized_assistant_message`
+/// should reuse an existing assistant row for the same run instead of starting
+/// a sibling. Retries of the same draft/final content reuse the record (and
+/// redacted/deleted rows are never resurrected); a DIFFERENT finalized reply
+/// starts a sibling — a steered run replies more than once. Reuse identity for
+/// a finalized row is the full persisted payload — text AND attachment refs —
+/// because attachments are stored beside `content`; matching on text alone
+/// would return the old row and silently drop a retry's new attachment set.
+/// Shared by both backends so the dedup policy cannot drift.
+pub(crate) fn should_reuse_assistant_run_message(
+    message: &ThreadMessageRecord,
+    requested_content: &str,
+    requested_attachments: &[AttachmentRef],
+) -> bool {
+    match message.status {
+        MessageStatus::Draft | MessageStatus::Redacted | MessageStatus::Deleted => true,
+        MessageStatus::Finalized => {
+            message.content.as_deref() == Some(requested_content)
+                && message.attachments.as_slice() == requested_attachments
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -905,6 +952,14 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<AttachmentKind>(r#""document""#).unwrap(),
             AttachmentKind::Document
+        );
+        assert_eq!(
+            serde_json::to_string(&AttachmentKind::Video).unwrap(),
+            r#""video""#
+        );
+        assert_eq!(
+            serde_json::from_str::<AttachmentKind>(r#""other""#).unwrap(),
+            AttachmentKind::Other
         );
     }
 

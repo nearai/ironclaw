@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { useT } from "../lib/i18n";
 import { Button } from "./button";
 import { Modal, ModalBody, ModalFooter } from "./modal";
@@ -10,6 +10,7 @@ type ConfirmDialogProps = {
   confirmLabel: string;
   cancelLabel?: string;
   isConfirming?: boolean;
+  returnFocusTo?: HTMLElement | null;
   onConfirm: () => void;
   onCancel: () => void;
 };
@@ -21,11 +22,20 @@ export function ConfirmDialog({
   confirmLabel,
   cancelLabel,
   isConfirming = false,
+  returnFocusTo,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
   const t = useT();
   const resolvedCancelLabel = cancelLabel || t("common.cancel");
+  useEffect(() => {
+    if (!open || !returnFocusTo) return undefined;
+
+    return () => {
+      if (returnFocusTo.isConnected) returnFocusTo.focus();
+    };
+  }, [open, returnFocusTo]);
+
   const handleCancel = () => {
     if (!isConfirming) onCancel();
   };

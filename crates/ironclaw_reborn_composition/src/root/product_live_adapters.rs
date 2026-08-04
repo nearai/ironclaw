@@ -23,6 +23,11 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, HostRuntime, SurfaceKind, VisibleCapabilityRequest,
 };
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, InstructionSafetyContext,
+    LoopCapabilityPort, LoopHostMilestoneSink, LoopModelBudgetAccountant, LoopModelPolicyGuard,
+    LoopRunContext, ProviderToolCall,
+};
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, CapabilityWriteResult, HostIdentityContextSource,
@@ -30,19 +35,12 @@ use ironclaw_loop_host::{
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, RunCancellationFactory,
     loop_driver_execution_extension_id,
 };
-use ironclaw_runner::model_routes::{
+use ironclaw_loop_host::{
     ModelRoute, ModelRouteError, ModelRoutePolicy, ModelRouteResolver, ModelSelectionMode,
     ModelSlot, StaticModelRouteResolver,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-use ironclaw_turns::{
-    LoopResultRef,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, InstructionSafetyContext,
-        LoopCapabilityPort, LoopHostMilestoneSink, LoopModelBudgetAccountant, LoopModelPolicyGuard,
-        LoopRunContext, ProviderToolCall,
-    },
-};
+use ironclaw_turns::LoopResultRef;
 
 use ironclaw_product::projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
 
@@ -932,11 +930,10 @@ mod tests {
         dispatch::CapabilityDisplayOutputPreview,
         ids::{AgentId, InvocationId, ProviderToolName, TenantId, ThreadId},
     };
+    use ironclaw_loop_contracts::{RunProfileResolutionRequest, RunProfileResolver};
     use ironclaw_loop_host::DurablePersistence;
     use ironclaw_runner::planned_driver_factory::default_planned_run_profile_resolver;
-    use ironclaw_turns::{
-        RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
-    };
+    use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
     #[tokio::test]
     async fn capability_io_records_read_file_display_preview() {

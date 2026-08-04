@@ -12,6 +12,7 @@
 ## What This Crate Owns
 
 - Declarative extension manifest, registry, lifecycle, and trust inputs (no execution, network, secrets, or WASM/script/MCP inspection), currently:
+- **Layer `substrates`** (WS2, PROPOSAL §6.8.1). Its dependencies are therefore restricted to `contracts` and `substrates`: `ironclaw_extension_contracts`, `ironclaw_host_api`, `ironclaw_filesystem`. `ExtensionPackage::trust_policy_input` builds an `ironclaw_host_api::trust::TrustPolicyInput` — this crate does **not** depend on `ironclaw_trust` and must not regain that dependency; the policy engine that consumes the input sits above it.
 - Manifest discovery/validation and asset-path containment: `ExtensionError`, `ExtensionAssetPath` (`lib.rs`); the in-memory `ExtensionRegistry` (`registry`).
 - Lifecycle: `ExtensionLifecycleEvent`, `ExtensionLifecycleEventSink`, `ExtensionLifecycleService` (`lifecycle`).
 - The v2 manifest schema (`v2`): `ExtensionManifestV2`, `CapabilityDeclV2`, `ExtensionRuntimeV2`, `ManifestSource`, `CapabilityVisibility`, `ManifestV2Error`, and the schema-version/size constants.

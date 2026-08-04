@@ -20,10 +20,10 @@ use crate::db::{
 };
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
-    BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry, Entry, FileStat,
-    FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexName,
-    IndexSpec, IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo, TxnCapability,
-    VersionedEntry,
+    AtomicSubtreeEntry, BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry,
+    Entry, FileStat, FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind,
+    IndexName, IndexSpec, IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo,
+    TxnCapability, VersionedEntry, root::validate_atomic_subtree_entries,
 };
 /// libSQL-backed [`RootFilesystem`] storing file contents by virtual path.
 #[derive(Debug)]
@@ -295,6 +295,100 @@ impl RootFilesystem for LibSqlRootFilesystem {
             entry: build_entry(path, body, content_type_raw, kind_raw, indexed_raw)?,
             version: record_version_from_i64(path, version_raw)?,
         }))
+    }
+
+    async fn create_subtree_atomic(
+        &self,
+        prefix: &VirtualPath,
+        entries: Vec<AtomicSubtreeEntry>,
+    ) -> Result<Vec<RecordVersion>, FilesystemError> {
+        validate_atomic_subtree_entries(prefix, &entries)?;
+        let conn = self
+            .write_connection(prefix, FilesystemOperation::CreateSubtreeAtomic)
+            .await?;
+        let transaction = conn
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+            .await
+            .map_err(|error| {
+                libsql_db_error(
+                    prefix.clone(),
+                    FilesystemOperation::CreateSubtreeAtomic,
+                    error,
+                )
+            })?;
+
+        let (lower, upper) = descendant_path_range(prefix);
+        let mut existing = transaction
+            .query(
+                "SELECT path, version FROM root_filesystem_entries \
+                 WHERE path = ?1 OR (path >= ?2 AND path < ?3) LIMIT 1",
+                libsql::params![prefix.as_str(), lower, upper],
+            )
+            .await
+            .map_err(|error| {
+                libsql_db_error(
+                    prefix.clone(),
+                    FilesystemOperation::CreateSubtreeAtomic,
+                    error,
+                )
+            })?;
+        if let Some(row) = existing.next().await.map_err(|error| {
+            libsql_db_error(
+                prefix.clone(),
+                FilesystemOperation::CreateSubtreeAtomic,
+                error,
+            )
+        })? {
+            let version_raw: i64 = row.get(1).map_err(|error| {
+                libsql_db_error(
+                    prefix.clone(),
+                    FilesystemOperation::CreateSubtreeAtomic,
+                    error,
+                )
+            })?;
+            return Err(FilesystemError::VersionMismatch {
+                path: prefix.clone(),
+                expected: None,
+                found: Some(record_version_from_i64(prefix, version_raw)?),
+            });
+        }
+        drop(existing);
+
+        let mut versions = Vec::with_capacity(entries.len());
+        for item in entries {
+            let indexed_json = serde_json::to_string(&item.entry.indexed).map_err(|_| {
+                FilesystemError::SerializeIndexed {
+                    path: item.path.clone(),
+                    operation: FilesystemOperation::CreateSubtreeAtomic,
+                }
+            })?;
+            let kind = item
+                .entry
+                .kind
+                .as_ref()
+                .map(|value| value.as_str().to_string());
+            let content_type = item.entry.content_type.as_str().to_string();
+            versions.push(
+                put_libsql_inner(
+                    &transaction,
+                    &item.path,
+                    item.entry.body,
+                    content_type,
+                    kind,
+                    indexed_json,
+                    CasExpectation::Absent,
+                )
+                .await?,
+            );
+        }
+        transaction.commit().await.map_err(|error| {
+            libsql_db_error(
+                prefix.clone(),
+                FilesystemOperation::CreateSubtreeAtomic,
+                error,
+            )
+        })?;
+        Ok(versions)
     }
 
     async fn ensure_index(
@@ -711,14 +805,31 @@ impl RootFilesystem for LibSqlRootFilesystem {
         page: &crate::OrderedPage,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
         let conn = self.read_connection().await?;
+        // Resolve the spec against `path` and every ancestor prefix, most
+        // specific first, so a caller may declare the index once on a higher
+        // prefix and query a child path. `/shared` keeps its existing
+        // precedence over every path-derived candidate. The candidate list is
+        // bounded by path depth, so this stays a keyed lookup, not a scan.
+        let candidate_prefixes = crate::index::ancestor_prefixes(path.as_str());
+        let mut spec_params: Vec<libsql::Value> = candidate_prefixes
+            .iter()
+            .map(|prefix| libsql::Value::Text((*prefix).to_string()))
+            .collect();
+        spec_params.push(libsql::Value::Text("/shared".to_string()));
+        let spec_placeholders: Vec<String> = (1..=spec_params.len())
+            .map(|position| format!("?{position}"))
+            .collect();
+        let name_placeholder = format!("?{}", spec_params.len() + 1);
+        spec_params.push(libsql::Value::Text(page.index.as_str().to_string()));
+        let spec_sql = format!(
+            "SELECT keys, kind FROM root_filesystem_index_specs \
+             WHERE prefix IN ({}) AND name = {name_placeholder} \
+             ORDER BY CASE WHEN prefix = '/shared' THEN 0 ELSE 1 END, LENGTH(prefix) DESC \
+             LIMIT 1",
+            spec_placeholders.join(", ")
+        );
         let mut spec_rows = conn
-            .query(
-                "SELECT keys, kind FROM root_filesystem_index_specs \
-                 WHERE prefix IN (?1, '/shared') AND name = ?2 \
-                 ORDER BY CASE WHEN prefix = '/shared' THEN 0 ELSE 1 END \
-                 LIMIT 1",
-                libsql::params![path.as_str(), page.index.as_str()],
-            )
+            .query(&spec_sql, spec_params)
             .await
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Query, error))?;
         let spec = if let Some(row) = spec_rows
@@ -770,7 +881,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
         };
         let sort_position = prefix_values.len();
         let tie_position = sort_position.saturating_add(1);
-        if tie_position >= 8 {
+        if tie_position >= crate::index::MAX_ORDERED_INDEX_KEYS {
             return Err(FilesystemError::Unsupported {
                 path: path.clone(),
                 operation: FilesystemOperation::Query,
@@ -1487,13 +1598,14 @@ impl StorageTxn for LibSqlStorageTxn {
 
 impl Drop for LibSqlStorageTxn {
     fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
-        if let Some(conn) = self.conn.take() {
-            tokio::spawn(async move {
-                let _ = conn.execute("ROLLBACK", ()).await;
-            });
+        if self.active
+            && let Some(conn) = self.conn.take()
+        {
+            // A destructor cannot await ROLLBACK. Discard the connection so
+            // SQLite rolls back while closing it and the pool can create a
+            // clean replacement without a detached task retaining its only
+            // writer lease.
+            conn.discard();
         }
     }
 }
@@ -2139,19 +2251,34 @@ impl LibSqlRootFilesystem {
         // Scan the spec catalog for FTS specs whose prefix is path or any
         // ancestor (so callers may declare the index on a higher prefix
         // and query a child path).
-        let candidate_prefixes = ancestor_prefixes(path.as_str());
-        let placeholders: Vec<String> = (1..=candidate_prefixes.len())
-            .map(|i| format!("?{i}"))
+        // Ancestors only, deliberately unlike `query_ordered`, which also
+        // considers `/shared`. The two resolve different things: an ordered
+        // index is a projection row keyed by `(index_name, path)` and readable
+        // from anywhere, whereas an FTS declaration owns a table whose triggers
+        // and backfill populate rows for the declaring prefix's subtree alone.
+        // Selecting `/shared` for a path outside it therefore points the
+        // `path IN (SELECT path FROM <fts> MATCH …)` clause at a table with no
+        // rows for that path — a silent empty result rather than a miss the
+        // caller can see.
+        //
+        // Ordered in SQL rather than by hoping the driver returns insertion
+        // order: the caller keeps the first row it sees per key, so "most
+        // specific wins" only holds if the most specific prefix arrives first.
+        // Without ORDER BY, two declarations at different ancestor prefixes
+        // resolve by rowid.
+        let params: Vec<libsql::Value> = crate::index::ancestor_prefixes(path.as_str())
+            .iter()
+            .map(|prefix| libsql::Value::Text((*prefix).to_string()))
+            .collect();
+        let placeholders: Vec<String> = (1..=params.len())
+            .map(|position| format!("?{position}"))
             .collect();
         let sql = format!(
             "SELECT prefix, name, keys FROM root_filesystem_index_specs \
-             WHERE kind = 'fts' AND prefix IN ({})",
+             WHERE kind = 'fts' AND prefix IN ({}) \
+             ORDER BY LENGTH(prefix) DESC",
             placeholders.join(", ")
         );
-        let params: Vec<libsql::Value> = candidate_prefixes
-            .iter()
-            .map(|p| libsql::Value::Text(p.clone()))
-            .collect();
         let mut rows = conn
             .query(&sql, params)
             .await
@@ -2376,87 +2503,157 @@ async fn ensure_libsql_ordered_projection(
     path: &VirtualPath,
     spec: &IndexSpec,
 ) -> Result<(), FilesystemError> {
-    const MAX_ORDERED_INDEX_KEYS: usize = 8;
-    if spec.keys.len() > MAX_ORDERED_INDEX_KEYS {
+    if spec.keys.len() > crate::index::MAX_ORDERED_INDEX_KEYS {
         return Err(FilesystemError::Unsupported {
             path: path.clone(),
             operation: FilesystemOperation::EnsureIndex,
         });
     }
-    let trigger_base = sql_index_name(path.as_str(), spec.name.as_str());
-    let legacy_trigger_base = sql_index_name("/ordered_projection", spec.name.as_str());
-    let index_name = spec.name.as_str();
-    let escaped_prefix = path.as_str().replace('\'', "''");
-    let descendant_pattern = if path.as_str() == "/" {
-        "/%".to_string()
-    } else {
-        format!("{}/%", path.as_str().trim_end_matches('/'))
-    }
-    .replace('\'', "''");
-    let new_path_matches =
-        format!("(new.path = '{escaped_prefix}' OR new.path LIKE '{descendant_pattern}')");
-    let old_path_matches =
-        format!("(old.path = '{escaped_prefix}' OR old.path LIKE '{descendant_pattern}')");
-    let projected_values = spec
-        .keys
-        .iter()
-        .map(|key| format!("json_extract(new.indexed, '$.{}')", key.as_str()))
-        .chain(
-            std::iter::repeat_with(|| "NULL".to_string())
-                .take(MAX_ORDERED_INDEX_KEYS.saturating_sub(spec.keys.len())),
+    ensure_libsql_static_ordered_projection(conn)
+        .await
+        .map_err(|error| match error {
+            // The static ensure reports path-less infrastructure errors; the
+            // declaration seam's contract is a path-carrying backend error.
+            FilesystemError::Backend {
+                operation, reason, ..
+            }
+            | FilesystemError::BackendInfrastructure { operation, reason } => {
+                FilesystemError::Backend {
+                    path: path.clone(),
+                    operation,
+                    reason,
+                }
+            }
+            other => other,
+        })
+}
+
+/// Projection triggers are static: three triggers total, whose bodies project
+/// by joining the spec catalog on prefix containment. The previous design
+/// installed three triggers per (declaration prefix, spec); every entry write
+/// then evaluated every trigger ever declared — O(total declarations) per
+/// statement (measured 3,750 triggers and ~38ms/statement after a 50-user
+/// run). The catalog join is O(catalog rows) with a tiny constant, and
+/// declaration becomes a pure catalog insert.
+///
+/// Semantics are unchanged, including "declaration never backfills": triggers
+/// only fire on writes after the fact, and a spec projects exactly the
+/// subtree of its declared prefix.
+async fn ensure_libsql_static_ordered_projection(
+    conn: &libsql::Connection,
+) -> Result<(), FilesystemError> {
+    // Drop the legacy per-declaration triggers exactly once per database.
+    // SQLite has no dynamic DDL in plain SQL, so the sweep is done here; it
+    // is cheap when nothing matches (single catalog scan).
+    let mut legacy = conn
+        .query(
+            "SELECT name FROM sqlite_master \
+             WHERE type = 'trigger' \
+               AND (name LIKE 'idx_rfs_%' \
+                    OR (name LIKE 'rfs_ordered_projection_%' \
+                        AND name NOT LIKE 'rfs_ordered_projection_v3_%')) \
+               AND sql LIKE '%root_filesystem_ordered_index_rows%'",
+            (),
         )
-        .collect::<Vec<_>>()
-        .join(", ");
-    let predicate = spec
-        .keys
-        .iter()
-        .map(|key| format!("json_type(new.indexed, '$.{}') IS NOT NULL", key.as_str()))
-        .collect::<Vec<_>>()
-        .join(" AND ");
-    let insert = format!(
-        "CREATE TRIGGER IF NOT EXISTS {trigger_base}_ai \
-         AFTER INSERT ON root_filesystem_entries \
-         WHEN {new_path_matches} \
-         BEGIN \
-           INSERT OR REPLACE INTO root_filesystem_ordered_index_rows(\
-             index_name, path, k0, k1, k2, k3, k4, k5, k6, k7\
-           ) \
-           SELECT '{index_name}', new.path, {projected_values} \
-           WHERE {new_path_matches} AND new.is_dir = 0 AND {predicate}; \
-         END;"
+        .await
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::EnsureIndex, error))?;
+    let mut drops = String::new();
+    while let Some(row) = legacy
+        .next()
+        .await
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::EnsureIndex, error))?
+    {
+        let name: String = row.get(0).map_err(|error| {
+            infrastructure_libsql_error(FilesystemOperation::EnsureIndex, error)
+        })?;
+        // The name is interpolated into DDL unquoted, so the ASCII
+        // alphanumeric/underscore check below is the whole safeguard, not a
+        // belt-and-braces extra: relaxing it would admit injection.
+        if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            drops.push_str(&format!("DROP TRIGGER IF EXISTS {name};"));
+        }
+    }
+    drop(legacy);
+    if !drops.is_empty() {
+        conn.execute_batch(&drops).await.map_err(|error| {
+            infrastructure_libsql_error(FilesystemOperation::EnsureIndex, error)
+        })?;
+    }
+
+    // Containment: spec.prefix is the path itself or a proper ancestor. The
+    // half-open band `(prefix || '/', prefix || '0')` is the range form of
+    // `LIKE prefix || '/%'` without wildcard-injection from stored prefixes;
+    // '/' needs its own arm because '//' breaks the band trick.
+    // Ancestors of the written path, walked by string surgery: rtrim with the
+    // path's own non-slash characters strips the trailing segment, leaving
+    // ".../" to trim. Joining the catalog by equality on these turns the
+    // projection into an index seek on the `(prefix, name)` key. Comparing
+    // every catalog row against the path instead — which is what a
+    // containment predicate does — scans every declaration ever made, and an
+    // upgraded database keeps its per-thread declaration rows forever.
+    let ancestors = "WITH RECURSIVE rfs_ancestors(prefix) AS ( \
+           SELECT new.path \
+           UNION ALL \
+           SELECT CASE \
+             WHEN length(rtrim(prefix, replace(prefix, '/', ''))) <= 1 THEN '/' \
+             ELSE substr( \
+               rtrim(prefix, replace(prefix, '/', '')), \
+               1, \
+               length(rtrim(prefix, replace(prefix, '/', ''))) - 1 \
+             ) \
+           END \
+           FROM rfs_ancestors WHERE prefix <> '/' \
+         )";
+    let mut key_values = Vec::new();
+    let mut key_presence = Vec::new();
+    for i in 0..crate::index::MAX_ORDERED_INDEX_KEYS {
+        key_values.push(format!(
+            "CASE WHEN json_array_length(s.keys) > {i} \
+             THEN json_extract(new.indexed, '$.' || json_extract(s.keys, '$[{i}]')) END"
+        ));
+        key_presence.push(format!(
+            "(json_array_length(s.keys) <= {i} \
+             OR json_type(new.indexed, '$.' || json_extract(s.keys, '$[{i}]')) IS NOT NULL)"
+        ));
+    }
+    let key_values = key_values.join(", ");
+    let key_presence = key_presence.join(" AND ");
+    let project = format!(
+        "INSERT OR REPLACE INTO root_filesystem_ordered_index_rows(\
+           index_name, path, k0, k1, k2, k3, k4, k5, k6, k7\
+         ) \
+         {ancestors} \
+         SELECT s.name, new.path, {key_values} \
+         FROM rfs_ancestors a \
+         JOIN root_filesystem_index_specs s ON s.prefix = a.prefix \
+         WHERE s.kind IN ('exact', 'prefix') \
+           AND new.is_dir = 0 \
+           AND new.indexed IS NOT NULL \
+           AND {key_presence} \
+         ORDER BY LENGTH(s.prefix) ASC;"
     );
-    let update = format!(
-        "CREATE TRIGGER IF NOT EXISTS {trigger_base}_au \
-         AFTER UPDATE ON root_filesystem_entries \
-         WHEN {old_path_matches} OR {new_path_matches} \
-         BEGIN \
-           DELETE FROM root_filesystem_ordered_index_rows \
-             WHERE index_name = '{index_name}' AND path = old.path; \
-           INSERT OR REPLACE INTO root_filesystem_ordered_index_rows(\
-             index_name, path, k0, k1, k2, k3, k4, k5, k6, k7\
-           ) \
-           SELECT '{index_name}', new.path, {projected_values} \
-           WHERE {new_path_matches} AND new.is_dir = 0 AND {predicate}; \
-         END;"
+    let statements = format!(
+        "CREATE INDEX IF NOT EXISTS idx_root_filesystem_ordered_rows_path \
+           ON root_filesystem_ordered_index_rows(path);\
+         CREATE TRIGGER IF NOT EXISTS rfs_ordered_projection_v3_ai \
+           AFTER INSERT ON root_filesystem_entries \
+           BEGIN {project} END;\
+         CREATE TRIGGER IF NOT EXISTS rfs_ordered_projection_v3_au \
+           AFTER UPDATE ON root_filesystem_entries \
+           BEGIN \
+             DELETE FROM root_filesystem_ordered_index_rows WHERE path = old.path; \
+             {project} \
+           END;\
+         CREATE TRIGGER IF NOT EXISTS rfs_ordered_projection_v3_ad \
+           AFTER DELETE ON root_filesystem_entries \
+           BEGIN \
+             DELETE FROM root_filesystem_ordered_index_rows WHERE path = old.path; \
+           END;"
     );
-    let delete = format!(
-        "CREATE TRIGGER IF NOT EXISTS {trigger_base}_ad \
-         AFTER DELETE ON root_filesystem_entries \
-         WHEN {old_path_matches} \
-         BEGIN \
-           DELETE FROM root_filesystem_ordered_index_rows \
-             WHERE index_name = '{index_name}' AND path = old.path; \
-         END;"
-    );
-    let remove_legacy = format!(
-        "DROP TRIGGER IF EXISTS {legacy_trigger_base}_ai;\
-         DROP TRIGGER IF EXISTS {legacy_trigger_base}_au;\
-         DROP TRIGGER IF EXISTS {legacy_trigger_base}_ad;"
-    );
-    conn.execute_batch(&format!("{remove_legacy}{insert}{update}{delete}"))
+    conn.execute_batch(&statements)
         .await
         .map(|_| ())
-        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error))
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::EnsureIndex, error))
 }
 async fn ensure_libsql_events_table(conn: &libsql::Connection) -> Result<(), FilesystemError> {
     conn.execute_batch(LIBSQL_EVENTS_SCHEMA)
@@ -2635,22 +2832,6 @@ fn collect_fts_keys(filter: &Filter, out: &mut Vec<String>) {
     }
 }
 
-/// All ancestor paths of `path`, **most specific first**, ending at `/`.
-/// Used to find an FTS index declared on a higher prefix that should still
-/// cover descendant queries.
-fn ancestor_prefixes(path: &str) -> Vec<String> {
-    let mut out = vec![path.trim_end_matches('/').to_string()];
-    let mut cur = path.trim_end_matches('/').to_string();
-    while let Some(idx) = cur.rfind('/') {
-        if idx == 0 {
-            out.push("/".to_string());
-            break;
-        }
-        cur.truncate(idx);
-        out.push(cur.clone());
-    }
-    out
-}
 fn bind_index_value(
     path: &VirtualPath,
     value: &IndexValue,
@@ -3288,6 +3469,63 @@ mod tests {
         ));
     }
 
+    /// The projection trigger set is static: declaring many specs at many
+    /// prefixes must leave exactly three triggers on the entries table, and a
+    /// surviving legacy per-declaration trigger must be swept on the next
+    /// declaration. The per-declaration design accumulated 3 triggers per
+    /// (prefix, spec) — O(total declarations) evaluated on every write.
+    #[tokio::test]
+    async fn ordered_projection_triggers_stay_constant_across_declarations() {
+        let (fs, _dir) = fresh_backend().await;
+        let writer = fs.migration_write_connection().await.unwrap();
+        // A survivor from the per-declaration era, shaped like sql_index_name
+        // output and touching the projection table so the sweep matches it.
+        writer
+            .execute_batch(
+                "CREATE TRIGGER idx_rfs_legacy_by_status_ai \
+                 AFTER INSERT ON root_filesystem_entries BEGIN \
+                   DELETE FROM root_filesystem_ordered_index_rows WHERE path = new.path; \
+                 END;",
+            )
+            .await
+            .unwrap();
+        drop(writer);
+
+        for i in 0..5 {
+            let path = VirtualPath::new(format!("/resources/trigger-count/{i}")).unwrap();
+            let spec = IndexSpec::new(
+                IndexName::new(format!("by_status_{i}")).unwrap(),
+                vec![IndexKey::new("status").unwrap()],
+                IndexKind::Exact,
+            );
+            fs.ensure_index(&path, &spec).await.unwrap();
+        }
+
+        let reader = fs.read_connection().await.unwrap();
+        let mut rows = reader
+            .query(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' \
+                 AND sql LIKE '%root_filesystem_ordered_index_rows%' ORDER BY name",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut names = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            names.push(row.get::<String>(0).unwrap());
+        }
+        assert_eq!(
+            names,
+            vec![
+                "rfs_ordered_projection_v3_ad".to_string(),
+                "rfs_ordered_projection_v3_ai".to_string(),
+                "rfs_ordered_projection_v3_au".to_string(),
+            ],
+            "five declarations leave exactly the static trigger set and the \
+             legacy per-declaration trigger is swept"
+        );
+    }
+
     #[tokio::test]
     async fn ensure_index_rolls_back_the_catalog_when_ddl_fails() {
         let (fs, _dir) = fresh_backend().await;
@@ -3699,5 +3937,74 @@ mod tests {
         .await
         .expect("independent writer must not hang behind a cancelled pooled transaction")
         .expect("independent writer must acquire the SQLite writer lock");
+    }
+
+    /// Break caught: dropping the filesystem transaction must release the
+    /// size-one writer lane before the same task performs its next write.
+    #[tokio::test]
+    async fn dropping_storage_transaction_releases_writer_lane_synchronously() {
+        let (fs, _dir) = fresh_backend().await;
+        let fs = Arc::new(fs);
+        let prefix = VirtualPath::new("/resources").unwrap();
+        let abandoned_path = VirtualPath::new("/resources/abandoned").unwrap();
+        let next_path = VirtualPath::new("/resources/next").unwrap();
+        let task_fs = Arc::clone(&fs);
+        let task_prefix = prefix.clone();
+        let task_abandoned_path = abandoned_path.clone();
+        let task_next_path = next_path.clone();
+        tokio::spawn(async move {
+            let mut transaction = task_fs.begin(&task_prefix).await.unwrap();
+            transaction
+                .put(
+                    &task_abandoned_path,
+                    Entry::bytes(b"uncommitted".to_vec()),
+                    CasExpectation::Absent,
+                )
+                .await
+                .unwrap();
+            drop(transaction);
+
+            let mut writer_checkout = Box::pin(task_fs.runtime.write());
+            let first_poll = std::future::poll_fn(|context| {
+                std::task::Poll::Ready(std::future::Future::poll(writer_checkout.as_mut(), context))
+            })
+            .await;
+            match first_poll {
+                std::task::Poll::Ready(Ok(writer)) => drop(writer),
+                std::task::Poll::Ready(Err(error)) => {
+                    panic!("dropping the transaction must clear writer ownership: {error}")
+                }
+                std::task::Poll::Pending => {
+                    drop(
+                        writer_checkout
+                            .await
+                            .expect("a recycled writer connection must become available"),
+                    );
+                }
+            }
+
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                task_fs.put(
+                    &task_next_path,
+                    Entry::bytes(b"committed".to_vec()),
+                    CasExpectation::Absent,
+                ),
+            )
+            .await
+            .expect("the next write must not wait behind a detached rollback")
+            .expect("the same task must reacquire the writer lane after dropping a transaction");
+        })
+        .await
+        .expect("writer task");
+
+        assert!(
+            fs.get(&abandoned_path).await.unwrap().is_none(),
+            "dropping an active transaction must roll back its staged write"
+        );
+        assert!(
+            fs.get(&next_path).await.unwrap().is_some(),
+            "the writer lane must remain usable after cancellation cleanup"
+        );
     }
 }

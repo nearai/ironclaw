@@ -5,7 +5,11 @@ edition = "2024"
 publish = false
 
 [package.metadata.ironclaw]
-layer = "substrates"
+# PROPOSAL §6.7.4: loop-tier middleware implementing `loop_contracts` ports.
+# `loops` states what it is and legalizes `hooks -> wasm_limiter` (`runtimes`),
+# dissolving the W6 exception. Its consumers are `ironclaw_runner` (`loops`)
+# and `ironclaw_reborn_composition` (`app`); nothing below `loops` depends on it.
+layer = "loops"
 description = "Reborn loop hook framework: trust-tiered points/kinds/decisions, sealed witness types, dispatcher contract."
 
 [features]
@@ -40,7 +44,7 @@ futures = "0.3"
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_prompt_envelope = { path = "../ironclaw_prompt_envelope" }
-ironclaw_turns = { path = "../ironclaw_turns" }
+ironclaw_loop_contracts = { path = "../ironclaw_loop_contracts", version = "0.1.0" }
 ironclaw_wasm_limiter = { path = "../ironclaw_wasm_limiter" }
 lru = "0.18"
 rust_decimal = { version = "1", features = ["serde", "serde-with-str", "db-tokio-postgres"] }

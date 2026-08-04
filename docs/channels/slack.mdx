@@ -109,12 +109,9 @@ URL — one signed endpoint answers both surfaces, so there is no second address
 up.
 </Note>
 
-The redirect URL is used for per-user ("personal") Slack authorization. Tell IronClaw the
-same value so the two agree:
-
-```bash
-export IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI=https://your-host/api/reborn/product-auth/oauth/slack/callback
-```
+The redirect URL is used for per-user ("personal") Slack authorization. IronClaw derives
+it from the instance's own public base URL, so there is nothing to set on this side — just
+register the value above in the Slack app.
 
 <Warning>
 The redirect URL must match **exactly** on both sides, including scheme, host, port, and
@@ -184,6 +181,7 @@ that the steps above describe.
         "im:history",
         "im:write",
         "files:read",
+        "files:write",
         "groups:history",
         "mpim:history",
         "commands"
@@ -217,6 +215,11 @@ want the bot to participate in channels, you can drop the `user` block and the r
 URL with it.
 </Note>
 
+`files:read` lets the bot resolve and download inbound file shares.
+`files:write` lets it return explicitly attached workspace files through
+Slack's external upload flow. IronClaw never uses the retired `files.upload`
+method.
+
 Slack validates the request URL when you save the manifest, so start IronClaw before
 creating the app.
 
@@ -224,29 +227,20 @@ creating the app.
 
 ## Configuration
 
-Slack settings live under `[slack]` in your configuration file. Set them through the web
-interface rather than by hand — the tokens belong in the secret store, and the file only
-names the variables that hold them.
+Slack has no settings in the configuration file. The app id, the bot token, the signing
+secret, and channel routing are all configured in the web interface, on the Slack card
+under **Extensions** — the tokens go straight into the encrypted secret store.
 
-```toml
-[slack]
-enabled = true
-```
+There is no key that turns Slack on. The webhook route is always mounted, and it starts
+accepting events once the Slack extension is installed and its signing secret is
+registered. Until then it answers `503`.
 
-| Key | Purpose |
-| --- | --- |
-| `slack.enabled` | Turn the Slack route on |
-| `slack.api_app_id` | Your Slack app id |
-| `slack.bot_token_env` | Name of the variable holding the bot token |
-| `slack.signing_secret_env` | Name of the variable holding the signing secret |
-| `slack.team_id` | Workspace the app is installed in |
-| `slack.channel_routes` | Which conversations map to which agent scope |
-
-Check what's currently set:
-
-```bash
-ironclaw config list | grep slack
-```
+<Note>
+An older configuration file may still carry a `[slack]` section. Nothing reads it. A
+leftover setup field — `api_app_id`, `team_id`, `bot_token_env`, `signing_secret_env`,
+`channel_routes`, and the rest — now stops startup with a pointer to the web interface
+instead of being quietly ignored, so delete the section.
+</Note>
 
 ---
 
@@ -261,9 +255,9 @@ Confirm the instance answers from outside your network, and that you used the ex
 </Accordion>
 
 <Accordion title="Slack rejects authorization with a redirect-URI mismatch">
-The redirect URL in the Slack app and `IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI`
-must match character for character. Check the scheme, the port, and that the path is the
-full `/api/reborn/product-auth/oauth/slack/callback`.
+The redirect URL registered in the Slack app must match the one IronClaw sends character
+for character. Check the scheme, the host, the port, and that the path is the full
+`/api/reborn/product-auth/oauth/slack/callback`.
 </Accordion>
 
 <Accordion title="The bot doesn't respond in a channel">

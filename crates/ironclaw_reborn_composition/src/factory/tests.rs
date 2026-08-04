@@ -11,7 +11,7 @@ use ironclaw_filesystem::FilesystemError;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    action::{NetworkPolicy, NetworkTargetPattern},
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
     ids::{
         CapabilityGrantId, CapabilityId, ExtensionId, InvocationId, RunId, SecretHandle, TenantId,
@@ -44,9 +44,7 @@ use crate::builtin_capability_policy::{BuiltinApprovalPolicyAction, BuiltinCapab
 use crate::{
     RebornReadinessDiagnostic, RebornReadinessState, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
 };
-use ironclaw_extension_host::ExtensionActivationMode;
-use ironclaw_extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress;
-use ironclaw_host_api::state::InstallationState;
+use ironclaw_extension_contracts::state::InstallationState;
 
 #[test]
 fn libsql_build_resource_governor_guard_requires_singleton_authority() {
@@ -623,13 +621,13 @@ async fn local_dev_extension_host_reserves_runner_bridge_capabilities() {
         .await
         .expect("fixture installs before activation");
     let error = extension_management
-        .activate(package_ref.clone(), ExtensionActivationMode::Static, &owner)
+        .activate(package_ref.clone(), &owner)
         .await
         .expect_err("runner bridge collision must fail activation");
     assert!(
         matches!(
             &error,
-            ironclaw_product::ProductSurfaceFailure::InvalidBindingRequest { reason }
+            ironclaw_product_contracts::error::ProductOperationFailure::InvalidBindingRequest { reason }
                 if reason.contains(BRIDGE_CAPABILITY_ID)
                     && reason.contains("collides with a host built-in")
         ),
@@ -1306,11 +1304,7 @@ async fn standalone_gsuite_installs_activates_and_dispatches_through_host_runtim
         .await
         .expect("install Gmail");
     extension_management
-        .activate_with_prechecked_credentials_for_user_for_test(
-            gmail_ref,
-            ExtensionActivationMode::Static,
-            &caller,
-        )
+        .activate_with_prechecked_credentials_for_user_for_test(gmail_ref, &caller)
         .await
         .expect("activate Gmail");
     extension_management
@@ -1318,11 +1312,7 @@ async fn standalone_gsuite_installs_activates_and_dispatches_through_host_runtim
         .await
         .expect("install Google Calendar");
     extension_management
-        .activate_with_prechecked_credentials_for_user_for_test(
-            calendar_ref,
-            ExtensionActivationMode::Static,
-            &caller,
-        )
+        .activate_with_prechecked_credentials_for_user_for_test(calendar_ref, &caller)
         .await
         .expect("activate Google Calendar");
 
@@ -1337,7 +1327,7 @@ async fn standalone_gsuite_installs_activates_and_dispatches_through_host_runtim
                 BuiltinApprovalPolicyAction::Dispatch {
                     capability: &gmail_capability,
                 },
-                runtime_surfaces.workspace_mounts_for_test(),
+                crate::factory::test_support::workspace_mounts_for_test(runtime_surfaces),
                 runtime_surfaces.skill_mounts_for_test(),
                 runtime_surfaces.memory_mounts_for_test(),
                 runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
@@ -1351,8 +1341,7 @@ async fn standalone_gsuite_installs_activates_and_dispatches_through_host_runtim
         .credential_account_service()
         .create_account(NewCredentialAccount {
             scope: auth_scope,
-            provider: ironclaw_first_party_extensions::google_provider_id()
-                .expect("Google provider id"),
+            provider: ironclaw_extension_support::google_provider_id().expect("Google provider id"),
             label: CredentialAccountLabel::new("work google").expect("valid label"),
             status: CredentialAccountStatus::Configured,
             ownership: CredentialOwnership::UserReusable,
@@ -1406,7 +1395,7 @@ async fn standalone_gsuite_installs_activates_and_dispatches_through_host_runtim
 }
 
 #[tokio::test]
-async fn standalone_notion_mcp_installs_activates_and_reaches_auth_gate() {
+async fn standalone_notion_mcp_stays_pending_without_preparation() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_runtime_substrate(
         crate::deployment::local_filesystem_build_input_with_profile(
@@ -1451,38 +1440,18 @@ async fn standalone_notion_mcp_installs_activates_and_reaches_auth_gate() {
         .await
         .expect("install Notion MCP");
     extension_management
-        .activate_with_prechecked_credentials_for_user_for_test(
-            notion_ref,
-            ExtensionActivationMode::HostedMcpDiscovery {
-                scope: ResourceScope::local_default(caller.clone(), InvocationId::new())
-                    .expect("valid scope"),
-                runtime_http_egress: Arc::new(
-                    HostedMcpDiscoveryEgress::with_tool_name("notion-search").read_only(),
-                ),
-            },
+        .activate_with_prechecked_credentials_for_user_for_test(notion_ref, &caller)
+        .await
+        .expect("pending Notion activation returns a lifecycle response");
+    let projection = extension_management
+        .project(
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion")
+                .expect("valid Notion ref"),
             &caller,
         )
         .await
-        .expect("activate Notion MCP with scripted discovery");
-
-    let context = notion_mcp_context("notion.notion-search");
-    enable_global_auto_approve_for_context(runtime_surfaces, &context).await;
-    let outcome = services
-        .host_runtime
-        .as_ref()
-        .invoke_capability((
-            context,
-            CapabilityId::new("notion.notion-search").unwrap(),
-            ResourceEstimate::default(),
-            serde_json::json!({ "query": "project notes" }),
-        ))
-        .await
-        .expect("runtime invocation completes");
-
-    let RuntimeCapabilityOutcome::AuthRequired(gate) = outcome else {
-        panic!("expected missing Notion token to open auth gate, got {outcome:?}");
-    };
-    assert_eq!(gate.capability_id.as_str(), "notion.notion-search");
+        .expect("project pending Notion installation");
+    assert_eq!(projection.phase, InstallationState::Installed);
 }
 
 #[tokio::test]
@@ -1511,11 +1480,7 @@ async fn standalone_web_access_installs_activates_and_dispatches_through_host_ru
         .await
         .expect("install Web Access");
     extension_management
-        .activate_with_prechecked_credentials_for_user_for_test(
-            web_access_ref,
-            ExtensionActivationMode::Static,
-            &caller,
-        )
+        .activate_with_prechecked_credentials_for_user_for_test(web_access_ref, &caller)
         .await
         .expect("activate Web Access");
 
@@ -1565,7 +1530,7 @@ fn nearai_bootstrap_input_with_base(
 }
 
 fn nearai_bootstrap_input(owner: &str, root: PathBuf, api_key: &str) -> RebornHostBindings {
-    nearai_bootstrap_input_with_base(owner, root, "https://private.near.ai", api_key)
+    nearai_bootstrap_input_with_base(owner, root, "https://private.nearai.example", api_key)
 }
 
 #[test]
@@ -1947,26 +1912,12 @@ async fn standalone_nearai_mcp_auto_bootstraps_from_injected_config() {
         Some(ironclaw_extensions::CapabilityVisibility::HostInternal)
     );
 
-    // Script live tools/list discovery through the hosted-MCP seam so the
-    // discovered web_search tool surfaces with the connection template's
-    // credential wiring (the injected endpoint override patches
-    // [mcp].server only; the audience derives from that server host).
+    // The canonical activation path no longer selects a discovery lane. The
+    // bootstrap-owned preparation state remains the authority for this package.
     extension_management
-        .activate_with_prechecked_credentials_for_test(
-            nearai_ref,
-            ExtensionActivationMode::HostedMcpDiscovery {
-                scope: ResourceScope::local_default(
-                    UserId::new(owner).unwrap(),
-                    InvocationId::new(),
-                )
-                .expect("valid scope"),
-                runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::with_tool_name(
-                    "web_search",
-                )),
-            },
-        )
+        .activate_with_prechecked_credentials_for_test(nearai_ref)
         .await
-        .expect("scripted NEAR AI discovery activation");
+        .expect("pending NEAR AI activation returns a lifecycle response");
 
     let capabilities = extension_management
         .active_model_visible_capabilities()
@@ -2082,7 +2033,7 @@ async fn standalone_nearai_mcp_rebootstrap_reuses_existing_account() {
     let outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         Some(
             ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
-                "https://private.near.ai",
+                "https://private.nearai.example",
                 secrecy::SecretString::from("nearai-second-key"),
             )
             .expect("valid NEAR AI MCP bootstrap config"),
@@ -2155,7 +2106,7 @@ async fn standalone_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential
     let outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         Some(
             ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
-                "https://private.near.ai",
+                "https://private.nearai.example",
                 secrecy::SecretString::from("nearai-test-key"),
             )
             .expect("valid NEAR AI MCP bootstrap config"),
@@ -2214,7 +2165,7 @@ async fn standalone_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential
 async fn standalone_nearai_mcp_invalid_base_url_fails_build() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
-        "http://private.near.ai",
+        "http://private.nearai.example",
         secrecy::SecretString::from("nearai-test-key"),
     )
     .expect("config shape");
@@ -2774,37 +2725,9 @@ async fn enable_global_auto_approve_for_context(
 }
 
 use crate::approval_test_support::disable_global_auto_approve;
-
-fn notion_mcp_context(capability_id: &str) -> ExecutionContext {
-    let extension_id = ExtensionId::new("caller").expect("valid extension id");
-    let mut context = ExecutionContext::local_default(
-        UserId::new("standalone-test-user").expect("valid user id"),
-        extension_id.clone(),
-        RuntimeKind::Mcp,
-        TrustClass::Sandbox,
-        CapabilitySet {
-            grants: vec![CapabilityGrant {
-                id: CapabilityGrantId::new(),
-                capability: CapabilityId::new(capability_id).expect("valid capability id"),
-                grantee: Principal::Extension(extension_id),
-                issued_by: Principal::HostRuntime,
-                constraints: GrantConstraints {
-                    allowed_effects: notion_mcp_allowed_effects(),
-                    mounts: MountView::new(Vec::new()).expect("valid empty mount view"),
-                    network: notion_mcp_network_policy(),
-                    secrets: vec![SecretHandle::new("mcp_notion_access_token").unwrap()],
-                    resource_ceiling: None,
-                    expires_at: None,
-                    max_invocations: None,
-                },
-            }],
-        },
-        MountView::new(Vec::new()).expect("valid empty mount view"),
-    )
-    .expect("valid execution context");
-    context.run_id = Some(RunId::new());
-    context
-}
+use ironclaw_product_contracts::account_setup::{
+    ChannelConnectionNoticePolicy, ExtensionAccountSetupDescriptor,
+};
 
 fn web_access_context(capability_id: &str) -> ExecutionContext {
     let extension_id = ExtensionId::new("caller").expect("valid extension id");
@@ -2932,26 +2855,6 @@ fn network_policy() -> NetworkPolicy {
     }
 }
 
-fn notion_mcp_network_policy() -> NetworkPolicy {
-    NetworkPolicy {
-        allowed_targets: vec![NetworkTargetPattern {
-            scheme: Some(NetworkScheme::Https),
-            host_pattern: "mcp.notion.com".to_string(),
-            port: None,
-        }],
-        deny_private_ip_ranges: true,
-        max_egress_bytes: None,
-    }
-}
-
-fn notion_mcp_allowed_effects() -> Vec<EffectKind> {
-    vec![
-        EffectKind::DispatchCapability,
-        EffectKind::Network,
-        EffectKind::UseSecret,
-    ]
-}
-
 fn local_host_minimal_approval_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy
 {
     let mut policy = crate::standalone_runtime_policy().expect("standalone policy resolves");
@@ -3026,7 +2929,7 @@ fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
     // pin locks that the migration preserved slack's first-party grant and
     // its manifest-digest binding (wrong digest / wrong path → Sandbox).
     let policy = builtin_first_party_trust_policy().expect("trust policy");
-    let slack_bundle = ironclaw_first_party_extensions::packages::bundled_packages()
+    let slack_bundle = ironclaw_extension_support::packages::bundled_packages()
         .into_iter()
         .find(|bundle| bundle.id == "slack")
         .expect("slack is in the bundled inventory");
@@ -3035,7 +2938,7 @@ fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
 
     let matching = ironclaw_trust::TrustPolicy::evaluate(
         &policy,
-        &ironclaw_trust::TrustPolicyInput {
+        &ironclaw_host_api::trust::TrustPolicyInput {
             identity: slack_identity(
                 "/system/extensions/slack/manifest.toml",
                 Some(expected_digest.clone()),
@@ -3054,7 +2957,7 @@ fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
 
     let wrong_digest = ironclaw_trust::TrustPolicy::evaluate(
         &policy,
-        &ironclaw_trust::TrustPolicyInput {
+        &ironclaw_host_api::trust::TrustPolicyInput {
             identity: slack_identity(
                 "/system/extensions/slack/manifest.toml",
                 Some(
@@ -3076,7 +2979,7 @@ fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
 
     let wrong_path = ironclaw_trust::TrustPolicy::evaluate(
         &policy,
-        &ironclaw_trust::TrustPolicyInput {
+        &ironclaw_host_api::trust::TrustPolicyInput {
             identity: slack_identity(
                 "/system/extensions/slack/other-manifest.toml",
                 Some(expected_digest),
@@ -3102,7 +3005,7 @@ fn builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory() {
     // first-party grant AND its manifest-digest binding (a wrong digest must
     // still fall back to Sandbox — the loop didn't drop the digest).
     let policy = builtin_first_party_trust_policy().expect("trust policy");
-    let gmail_bundle = ironclaw_first_party_extensions::packages::bundled_packages()
+    let gmail_bundle = ironclaw_extension_support::packages::bundled_packages()
         .into_iter()
         .find(|bundle| bundle.id == "gmail")
         .expect("gmail is in the bundled inventory");
@@ -3122,7 +3025,7 @@ fn builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory() {
 
     let matching = ironclaw_trust::TrustPolicy::evaluate(
         &policy,
-        &ironclaw_trust::TrustPolicyInput {
+        &ironclaw_host_api::trust::TrustPolicyInput {
             identity: gmail_identity(Some(expected_digest.clone())),
             requested_trust: ironclaw_host_api::trust::RequestedTrustClass::FirstPartyRequested,
             requested_authority: Default::default(),
@@ -3137,7 +3040,7 @@ fn builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory() {
 
     let wrong_digest = ironclaw_trust::TrustPolicy::evaluate(
         &policy,
-        &ironclaw_trust::TrustPolicyInput {
+        &ironclaw_host_api::trust::TrustPolicyInput {
             identity: gmail_identity(Some(
                 "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
                     .to_string(),
@@ -3208,10 +3111,12 @@ async fn completed_lifecycle_activation_continuation_installs_the_extension() {
     let flow = product_auth
         .flow_manager()
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider.clone(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -3377,10 +3282,8 @@ async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_disp
     );
 }
 
-fn pairing_account_setup_descriptor(
-    extension_id: &str,
-) -> ironclaw_product::ExtensionAccountSetupDescriptor {
-    ironclaw_product::ExtensionAccountSetupDescriptor {
+fn pairing_account_setup_descriptor(extension_id: &str) -> ExtensionAccountSetupDescriptor {
+    ExtensionAccountSetupDescriptor {
         extension_id: ExtensionId::new(extension_id).expect("extension id"),
         auth_requirement: ironclaw_host_api::decision::RuntimeCredentialAuthRequirement {
             provider: VendorId::new(extension_id).expect("provider id"),
@@ -3397,9 +3300,7 @@ fn pairing_account_setup_descriptor(
             submit_label: "Pair".to_string(),
             error_message: "Pairing failed.".to_string(),
         },
-        connection_notices: ironclaw_product::ChannelConnectionNoticePolicy::generic(
-            "Pairing Fixture",
-        ),
+        connection_notices: ChannelConnectionNoticePolicy::generic("Pairing Fixture"),
         activation_success_message: "Pairing fixture connected.".to_string(),
         pairing_deep_link_template: None,
         inbound_code_prefixes: Vec::new(),

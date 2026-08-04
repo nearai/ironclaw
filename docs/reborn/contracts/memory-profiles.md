@@ -97,7 +97,7 @@ schemas/memory/document-write.output.v1.json
 
 - no third-party certification flow;
 - no Honcho provider implementation (a third-party `mem0` provider now exists in
-  `crates/ironclaw_memory_mem0`, but it is off by default and feature-gated behind
+  `crates/extensions/packages/mem0`, but it is off by default and feature-gated behind
   `memory-mem0`; it binds to `memory.document_store.v1` and, in production-shaped
   deployments, requires an explicit admin override);
 - no migration of legacy `memory_documents` rows from this crate.

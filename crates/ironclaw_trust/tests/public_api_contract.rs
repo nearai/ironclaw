@@ -1,3 +1,4 @@
+use ironclaw_host_api::trust::TrustPolicyInput;
 use std::collections::BTreeSet;
 
 use ironclaw_host_api::{
@@ -8,7 +9,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, BundledEntry, BundledRegistry, HostTrustAssignment, HostTrustPolicy,
-    TrustPolicy, TrustPolicyInput, TrustProvenance,
+    TrustPolicy, TrustProvenance,
 };
 
 fn pkg(id: &str) -> PackageId {

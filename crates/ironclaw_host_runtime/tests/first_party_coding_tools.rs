@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{
-    DirEntry, DiskFilesystem, Fault, FaultInjecting, FileStat, FileType, FilesystemError,
-    FilesystemOperation, RootFilesystem,
+    DirEntry, DiskFilesystem, Fault, FaultInjecting, FaultKind, FileStat, FileType,
+    FilesystemError, FilesystemOperation, RootFilesystem,
 };
 use ironclaw_host_api::result_meta::FailureKind;
 use ironclaw_host_api::runtime_policy::{
@@ -31,10 +31,10 @@ use ironclaw_host_runtime::{
     TenantSandboxProcessPort, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_package,
 };
+use ironclaw_loop_contracts::LoopSafeSummary;
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_triggers::InMemoryTriggerRepository;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
-use ironclaw_turns::run_profile::LoopSafeSummary;
 use serde_json::{Value, json};
 
 #[tokio::test]
@@ -180,6 +180,48 @@ async fn builtin_coding_list_and_grep_skip_entries_when_stat_fails() {
     .await
     .unwrap();
     assert_eq!(grepped["files"], json!(["ok.rs"]));
+    assert_eq!(grepped["incomplete"], json!(true));
+    assert_eq!(grepped["skipped_file_count"], json!(1));
+    assert_eq!(
+        grepped["skipped_files"],
+        json!([{"file": "skip.rs", "operation": "stat"}])
+    );
+}
+
+#[tokio::test]
+async fn builtin_coding_grep_bounds_skipped_file_diagnostics() {
+    let temp = tempfile::tempdir().unwrap();
+    for index in 0..25 {
+        std::fs::write(temp.path().join(format!("file-{index:02}.rs")), "needle\n").unwrap();
+    }
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(
+        FaultInjecting::new(filesystem).with_fault(
+            Fault::on(FilesystemOperation::Stat)
+                .path("/file-")
+                .backend("injected host path /private/secret and backend details"),
+        ),
+    );
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let grepped = invoke_with_context(
+        &runtime,
+        GREP_CAPABILITY_ID,
+        json!({"path": "/workspace", "pattern": "needle"}),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(grepped["incomplete"], json!(true));
+    assert_eq!(grepped["skipped_file_count"], json!(25));
+    assert_eq!(grepped["skipped_files"].as_array().unwrap().len(), 20);
+    assert!(
+        !grepped.to_string().contains("private")
+            && !grepped.to_string().contains("backend details"),
+        "grep output must not expose injected host paths or backend reasons: {grepped}"
+    );
 }
 
 #[tokio::test]
@@ -208,6 +250,64 @@ async fn builtin_coding_grep_skips_entries_when_read_fails_during_directory_sear
     .unwrap();
 
     assert_eq!(grepped["files"], json!(["ok.rs"]));
+    assert_eq!(grepped["incomplete"], json!(true));
+    assert_eq!(grepped["skipped_file_count"], json!(1));
+    assert_eq!(
+        grepped["skipped_files"],
+        json!([{"file": "skip.rs", "operation": "read_file"}])
+    );
+}
+
+#[tokio::test]
+async fn builtin_coding_grep_failure_reports_missing_root_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        GREP_CAPABILITY_ID,
+        json!({"path": "/workspace/missing.py", "pattern": "needle"}),
+        context,
+    )
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert_eq!(
+        failure.message.as_deref(),
+        Some("grep failed for path workspace missing.py: file not found")
+    );
+}
+
+#[tokio::test]
+async fn builtin_coding_grep_failure_reports_file_disappeared_before_read() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("gone.rs"), "needle\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(
+        FaultInjecting::new(filesystem).with_fault(
+            Fault::on(FilesystemOperation::ReadFile)
+                .path("/gone.rs")
+                .returning(FaultKind::NotFound),
+        ),
+    );
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        GREP_CAPABILITY_ID,
+        json!({"path": "/workspace/gone.rs", "pattern": "needle"}),
+        context,
+    )
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert_eq!(
+        failure.message.as_deref(),
+        Some("grep failed for path workspace gone.rs: file not found")
+    );
 }
 
 #[tokio::test]
@@ -225,16 +325,19 @@ async fn builtin_coding_grep_fails_on_explicit_file_read_error() {
     );
     let context = execution_context_with_mounts(coding_capability_ids(), mounts);
 
-    let error = invoke_with_context(
+    let failure = invoke_failure_with_context(
         &runtime,
         GREP_CAPABILITY_ID,
         json!({"path": "/workspace/fail.rs", "pattern": "needle"}),
         context,
     )
-    .await
-    .unwrap_err();
+    .await;
 
-    assert_eq!(error, FailureKind::Backend);
+    assert_eq!(failure.kind, FailureKind::Backend);
+    assert_eq!(
+        failure.message.as_deref(),
+        Some("grep failed for path workspace fail.rs: filesystem backend error")
+    );
 }
 
 #[tokio::test]

@@ -3,11 +3,13 @@ import { MarkdownRenderer } from "./markdown-renderer";
 import { ToolActivity } from "./tool-activity";
 import { Icon } from "../../../design-system/icons";
 import { toast } from "../../../lib/toast";
-import { ProjectFileChips } from "./project-file-chips";
 import { AttachmentChip } from "./attachment-chip";
-import { AttachmentPreviewModal } from "./attachment-preview";
 import { useT } from "../../../lib/i18n";
-import { fetchRunArtifact } from "../../../lib/api";
+import {
+  fetchRunArtifact,
+  fetchThreadArtifact,
+  projectFileContentUrl,
+} from "../../../lib/api";
 import { saveBlob } from "../../../lib/download";
 import { COMMAND_RESULT_KIND, classifyCommandResponse } from "../lib/chat-commands";
 import {
@@ -24,6 +26,12 @@ import {
 const CommandResult = React.lazy(() =>
   import("./command-result").then(({ CommandResult }) => ({
     default: CommandResult,
+  }))
+);
+
+const AttachmentPreviewModal = React.lazy(() =>
+  import("./attachment-preview").then(({ AttachmentPreviewModal }) => ({
+    default: AttachmentPreviewModal,
   }))
 );
 
@@ -53,6 +61,7 @@ type MessageBubbleProps = {
   onRetry?: (message: ChatMessage) => void;
   threadId?: string | null;
   activeRunId?: string | null;
+  regressionArtifactExportEnabled?: boolean;
   // The server command inventory (`useChatCommands()`, threaded down from
   // chat.tsx through MessageList) — only read for a SYSTEM message carrying a
   // `commandResult` whose rejection is the "available commands" help case;
@@ -117,6 +126,7 @@ function MessageBubbleImpl({
   onRetry,
   threadId,
   activeRunId,
+  regressionArtifactExportEnabled = false,
   commands,
 }: MessageBubbleProps) {
   const t = useT();
@@ -146,10 +156,24 @@ function MessageBubbleImpl({
       ? message.failureStatus
       : undefined;
   const [copied, setCopied] = React.useState(false);
-  const [artifactDownloading, setArtifactDownloading] = React.useState(false);
+  const [artifactDownloading, setArtifactDownloading] = React.useState<
+    "run" | "thread" | null
+  >(null);
   // The attachment currently open in the preview modal (null when closed).
   const [previewAttachment, setPreviewAttachment] =
     React.useState<ChatAttachment | null>(null);
+  const openWorkspaceFile = React.useCallback(
+    (path: string) => {
+      if (!threadId) return;
+      setPreviewAttachment({
+        filename: path.split("/").filter(Boolean).pop() || path,
+        mime_type: "",
+        fetch_url: projectFileContentUrl({ threadId, path }),
+        workspace_path: path,
+      });
+    },
+    [threadId],
+  );
   // All hooks must run before the role-based early returns below.
   // A message can change role in place across renders (e.g. an
   // optimistic bubble upgrading, or a streaming role shift), so
@@ -170,7 +194,7 @@ function MessageBubbleImpl({
     typeof message.turnRunId === "string" ? message.turnRunId : "";
   const downloadArtifact = React.useCallback(async () => {
     if (!threadId || !turnRunId || artifactDownloading) return;
-    setArtifactDownloading(true);
+    setArtifactDownloading("run");
     try {
       const artifact = await fetchRunArtifact({ threadId, runId: turnRunId });
       const filenameRunId = turnRunId.replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -188,9 +212,32 @@ function MessageBubbleImpl({
         { tone: "error" },
       );
     } finally {
-      setArtifactDownloading(false);
+      setArtifactDownloading(null);
     }
   }, [artifactDownloading, t, threadId, turnRunId]);
+  const downloadThreadArtifact = React.useCallback(async () => {
+    if (!threadId || artifactDownloading) return;
+    setArtifactDownloading("thread");
+    try {
+      const artifact = await fetchThreadArtifact({ threadId });
+      const filenameThreadId = threadId.replace(/[^a-zA-Z0-9._-]/g, "_");
+      saveBlob(
+        new Blob([`${JSON.stringify(artifact, null, 2)}\n`], {
+          type: "application/json",
+        }),
+        `ironclaw-thread-${filenameThreadId}.json`,
+      );
+    } catch (error) {
+      toast(
+        error instanceof Error
+          ? error.message
+          : t("chat.fileDownloadFailed"),
+        { tone: "error" },
+      );
+    } finally {
+      setArtifactDownloading(null);
+    }
+  }, [artifactDownloading, t, threadId]);
 
   if (
     role === CHAT_MESSAGE_ROLES.TOOL_ACTIVITY ||
@@ -268,7 +315,15 @@ function MessageBubbleImpl({
     message.isFinalReply === true &&
     !isOptimistic &&
     threadId &&
-    turnRunId,
+    turnRunId &&
+    regressionArtifactExportEnabled,
+  );
+  const showThreadArtifactAction = Boolean(
+    role === CHAT_MESSAGE_ROLES.ASSISTANT &&
+    message.isFinalReply === true &&
+    !isOptimistic &&
+    threadId &&
+    regressionArtifactExportEnabled,
   );
   const isNotice = role === CHAT_MESSAGE_ROLES.SYSTEM;
   const isError = role === CHAT_MESSAGE_ROLES.ERROR;
@@ -282,6 +337,9 @@ function MessageBubbleImpl({
   const contentWidthClass =
     isUser || isError ? "min-w-0 max-w-full" : "w-full min-w-0 max-w-full";
   const showRetryAction = status === "error" && onRetry;
+  // A user message accepted-and-queued behind an active run: render a distinct
+  // "queued" badge (never the error styling / resend action).
+  const showQueuedStatus = isUser && status === "queued";
   const showMetaRow = showActions || showRetryAction || timeLabel;
   const contentOpacityClass = isOptimistic ? "opacity-70" : "";
   const roleStyle =
@@ -307,12 +365,28 @@ function MessageBubbleImpl({
           {role === CHAT_MESSAGE_ROLES.ASSISTANT ||
           role === CHAT_MESSAGE_ROLES.SYSTEM ||
           role === CHAT_MESSAGE_ROLES.ERROR
-            ? (<div className={contentOpacityClass}><MarkdownRenderer content={content} streaming={isStreamingAssistantReply} /></div>)
+            ? (<div className={contentOpacityClass}><MarkdownRenderer
+                content={content}
+                streaming={isStreamingAssistantReply}
+                onWorkspaceFileOpen={
+                  role === CHAT_MESSAGE_ROLES.ASSISTANT && threadId
+                    ? openWorkspaceFile
+                    : undefined
+                }
+              /></div>)
             : (<div className="v2-wrap-anywhere whitespace-pre-wrap break-words"><span className={contentOpacityClass}>{content}</span></div>)}
 
           {status === "error" && (
             <div className={["mt-2 flex flex-wrap items-center gap-2 text-xs text-red-300", contentOpacityClass].join(" ")}>
               <span>{error}</span>
+            </div>
+          )}
+
+          {showQueuedStatus && (
+            <div className="mt-2 flex justify-end">
+              <span className="rounded border border-iron-700 bg-iron-900/70 px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-normal text-iron-300">
+                {t("chat.queued")}
+              </span>
             </div>
           )}
 
@@ -323,7 +397,6 @@ function MessageBubbleImpl({
           )}
 
           {attachments && attachments.length > 0 && (
-            <>
             <div className="mt-2 flex flex-col gap-1.5">
               {attachments.map((att, i) => (<AttachmentChip
                 key={att.id || i}
@@ -331,25 +404,24 @@ function MessageBubbleImpl({
                 onPreview={setPreviewAttachment}
               />))}
             </div>
-            <AttachmentPreviewModal
-              attachment={previewAttachment}
-              onClose={() => setPreviewAttachment(null)}
-            />
-            </>
           )}
 
-          {role === CHAT_MESSAGE_ROLES.ASSISTANT &&
-          (<ProjectFileChips
-            threadId={threadId}
-            content={typeof content === "string" ? content : ""}
-          />)}
+          {previewAttachment && (
+            <React.Suspense fallback={null}>
+              <AttachmentPreviewModal
+                attachment={previewAttachment}
+                onClose={() => setPreviewAttachment(null)}
+                threadId={threadId}
+              />
+            </React.Suspense>
+          )}
         </div>
       </div>
 
       {showMetaRow && (
         <div
           className={[
-            "mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100",
+            "mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-iron-400",
             isUser
               ? "self-end justify-end"
               : isNotice
@@ -375,13 +447,26 @@ function MessageBubbleImpl({
               <button
                 type="button"
                 onClick={downloadArtifact}
-                disabled={artifactDownloading}
-                title={artifactDownloading ? t("common.loading") : t("common.download")}
-                aria-label={artifactDownloading ? t("common.loading") : t("common.download")}
+                disabled={artifactDownloading !== null}
+                title={artifactDownloading === "run" ? t("common.loading") : t("chat.downloadRunArtifact")}
+                aria-label={artifactDownloading === "run" ? t("common.loading") : t("chat.downloadRunArtifact")}
                 data-testid="download-run-artifact"
                 className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100 disabled:opacity-50"
               >
                 <Icon name="download" className="h-3.5 w-3.5" />
+              </button>
+            )}
+            {showThreadArtifactAction && (
+              <button
+                type="button"
+                onClick={downloadThreadArtifact}
+                disabled={artifactDownloading !== null}
+                title={artifactDownloading === "thread" ? t("common.loading") : t("chat.downloadThreadArtifact")}
+                aria-label={artifactDownloading === "thread" ? t("common.loading") : t("chat.downloadThreadArtifact")}
+                data-testid="download-thread-artifact"
+                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100 disabled:opacity-50"
+              >
+                <Icon name="layers" className="h-3.5 w-3.5" />
               </button>
             )}
             {showRetryAction && (

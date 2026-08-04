@@ -1,13 +1,11 @@
 use std::sync::Arc;
 
 use ironclaw_event_projections::{
-    CapabilityActivityProjection, CapabilityActivityStatus, EventStreamManager, ProjectionRequest,
-    ProjectionScope, ReplayAuditProjectionService, ReplayEventProjectionService,
-    RunProjectionStatus, RunStatusProjection, RuntimeStreamResume,
+    CapabilityActivityProjection, CapabilityActivityStatus, EventProjectionService,
+    ProjectionRequest, ProjectionScope, ReplayEventProjectionService, RunProjectionStatus,
+    RunStatusProjection,
 };
-use ironclaw_events::{
-    DurableEventLog, InMemoryDurableAuditLog, InMemoryDurableEventLog, RuntimeEvent,
-};
+use ironclaw_events::{DurableEventLog, InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, ExtensionId, InvocationId, TenantId, ThreadId, UserId},
     resource::ResourceScope,
@@ -26,13 +24,8 @@ fn scope_for_thread(thread_id: ThreadId, invocation_id: InvocationId) -> Resourc
     }
 }
 
-fn projection_manager(log: Arc<InMemoryDurableEventLog>) -> EventStreamManager {
-    EventStreamManager::new(
-        Arc::new(ReplayEventProjectionService::new(log)),
-        Arc::new(ReplayAuditProjectionService::new(Arc::new(
-            InMemoryDurableAuditLog::new(),
-        ))),
-    )
+fn projection_service(log: Arc<InMemoryDurableEventLog>) -> ReplayEventProjectionService {
+    ReplayEventProjectionService::new(log)
 }
 
 async fn append_nested_dispatch_failure(
@@ -86,7 +79,7 @@ fn assert_nested_failure_projection(
 #[tokio::test]
 async fn runtime_snapshot_keeps_nested_dispatch_failure_out_of_run_status() {
     let log = Arc::new(InMemoryDurableEventLog::new());
-    let manager = projection_manager(Arc::clone(&log));
+    let projection = projection_service(Arc::clone(&log));
     let thread_id = ThreadId::new("thread-nested-dispatch-snapshot").unwrap();
     let parent_invocation_id = InvocationId::new();
     let child_invocation_id = InvocationId::new();
@@ -114,8 +107,8 @@ async fn runtime_snapshot_keeps_nested_dispatch_failure_out_of_run_status() {
     .await
     .unwrap();
 
-    let snapshot = manager
-        .runtime_snapshot(ProjectionRequest {
+    let snapshot = projection
+        .snapshot(ProjectionRequest {
             scope: ProjectionScope::from_resource_scope(&parent_scope),
             after: None,
             limit: 16,
@@ -134,7 +127,7 @@ async fn runtime_snapshot_keeps_nested_dispatch_failure_out_of_run_status() {
 #[tokio::test]
 async fn runtime_resume_keeps_late_nested_dispatch_failure_out_of_run_status() {
     let log = Arc::new(InMemoryDurableEventLog::new());
-    let manager = projection_manager(Arc::clone(&log));
+    let projection = projection_service(Arc::clone(&log));
     let thread_id = ThreadId::new("thread-nested-dispatch-resume").unwrap();
     let parent_invocation_id = InvocationId::new();
     let child_invocation_id = InvocationId::new();
@@ -149,8 +142,8 @@ async fn runtime_resume_keeps_late_nested_dispatch_failure_out_of_run_status() {
     ))
     .await
     .unwrap();
-    let initial = manager
-        .runtime_snapshot(ProjectionRequest {
+    let initial = projection
+        .snapshot(ProjectionRequest {
             scope: scope.clone(),
             after: None,
             limit: 16,
@@ -172,17 +165,14 @@ async fn runtime_resume_keeps_late_nested_dispatch_failure_out_of_run_status() {
     .await
     .unwrap();
 
-    let resumed = manager
-        .runtime_resume(ProjectionRequest {
+    let replay = projection
+        .updates(ProjectionRequest {
             scope,
             after: Some(initial.next_cursor),
             limit: 16,
         })
         .await
         .unwrap();
-    let RuntimeStreamResume::Updates(replay) = resumed else {
-        panic!("a valid cursor should resume with projection updates");
-    };
 
     assert_nested_failure_projection(
         &replay.runs,

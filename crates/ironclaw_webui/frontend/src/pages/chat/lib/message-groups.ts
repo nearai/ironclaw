@@ -9,6 +9,7 @@ export function groupMessages(messages) {
   );
   const orderedMessages =
     moveDelayedActivityBeforeAssistantBoundary(renderableMessages);
+  const runStartedAtById = new Map();
   const items = [];
 
   for (let index = 0; index < orderedMessages.length; index += 1) {
@@ -19,7 +20,7 @@ export function groupMessages(messages) {
       const boundary = orderedMessages[index + 1 + activity.length];
       if (activity.length > 0 && (!boundary || boundary.role === "user")) {
         appendActivityRun(items, activity);
-        appendMessage(items, msg);
+        appendMessage(items, msg, runStartedAtById);
         index += activity.length;
         continue;
       }
@@ -32,7 +33,7 @@ export function groupMessages(messages) {
       continue;
     }
 
-    appendMessage(items, msg);
+    appendMessage(items, msg, runStartedAtById);
   }
 
   return items;
@@ -103,8 +104,33 @@ function appendActivityRun(items, activity) {
   });
 }
 
-function appendMessage(items, message) {
+function appendMessage(items, message, runStartedAtById) {
   items.push({ type: "message", id: messageRenderKey(message), message });
+  const runId = turnRunIdForMessage(message);
+  const completedAt = timestampMs(message.timestamp);
+  if (message?.role === "user") {
+    if (runId && completedAt !== null) {
+      runStartedAtById.set(runId, completedAt);
+    }
+    return;
+  }
+  if (!isFinalAssistantReply(message)) return;
+
+  const startedAt = runStartedAtById.get(runId);
+  if (
+    !runId ||
+    startedAt === undefined ||
+    completedAt === null ||
+    completedAt < startedAt
+  ) {
+    return;
+  }
+
+  items.push({
+    type: "run-completion",
+    id: `run-completion-${runId}`,
+    durationSeconds: Math.max(1, Math.round((completedAt - startedAt) / 1000)),
+  });
 }
 
 function messageRenderKey(message) {

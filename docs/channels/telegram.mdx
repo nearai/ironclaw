@@ -84,18 +84,19 @@ default Telegram bots only see messages that mention them.
 
 ## Configuration
 
-```toml
-telegram.enabled = true
-```
-
-Check the current state:
-
-```bash
-ironclaw config get telegram.enabled
-```
+Telegram has no settings in `config.toml` and no CLI enablement key. The
+ingress route is compiled in and mounted unconditionally; it starts serving
+once you install the Telegram extension and finish bot setup in the WebUI
+(see the steps above). Until then it returns `503`.
 
 The bot token lives in the encrypted secret store, not in `config.toml`. See
 [Configuration](/capabilities/configuration).
+
+<Note>
+  A `[telegram]` section left over from an older release still parses, but
+  nothing reads it — `ironclaw serve` logs a deprecation notice on boot.
+  Delete the section to silence it.
+</Note>
 
 ---
 

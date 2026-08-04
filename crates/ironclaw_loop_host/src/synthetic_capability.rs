@@ -14,16 +14,14 @@ use ironclaw_host_api::{
     resolution::{Resolution, ResolutionBatch},
     runtime::RuntimeKind,
 };
-use ironclaw_turns::{
-    CapabilityActivityId,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
-        CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion, ConcurrencyHint,
-        LoopCapabilityPort, LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
-        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
-    },
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityDescriptorView,
+    CapabilityInputRef, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest,
+    LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
+use ironclaw_turns::CapabilityActivityId;
 
 fn resource_scope_for_run(
     run_context: &LoopRunContext,
@@ -71,7 +69,7 @@ pub fn wrap_synthetic_capabilities(
 /// Recover the original `InvocationId` a synthetic approval-gate resume token
 /// encodes, so the replay-payload store can be keyed by it on resume.
 fn invocation_id_from_resume_token(
-    resume_token: &ironclaw_turns::run_profile::CapabilityResumeToken,
+    resume_token: &ironclaw_loop_contracts::CapabilityResumeToken,
 ) -> Result<ironclaw_host_api::ids::InvocationId, AgentLoopHostError> {
     ironclaw_host_api::ids::InvocationId::parse(resume_token.as_str()).map_err(|error| {
         AgentLoopHostError::new(
@@ -163,6 +161,7 @@ impl SyntheticCapabilityDescriptor {
             capability_id: self.capability_id.clone(),
             name: self.provider_tool_name.clone(),
             description: self.description.clone(),
+            description_trust: Default::default(),
             parameters: self.parameters_schema.clone(),
         }
     }
@@ -628,12 +627,12 @@ mod tests {
 
     use crate::{CapabilityResultWrite, CapabilityWriteResult, EmptyLoopCapabilityPort};
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
-    use ironclaw_turns::run_profile::resolution;
-    use ironclaw_turns::{
-        LoopResultRef, RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId,
-        TurnScope,
-        run_profile::{InMemoryRunProfileResolver, VisibleCapabilityRequest},
+    use ironclaw_loop_contracts::resolution;
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver,
+        VisibleCapabilityRequest,
     };
+    use ironclaw_turns::{LoopResultRef, TurnId, TurnRunId, TurnScope};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const TEST_CAPABILITY_ID: &str = "test.synthetic";
@@ -739,7 +738,7 @@ mod tests {
             Ok(resolution::completed(
                 LoopResultRef::new("result:synthetic-handler").expect("valid result ref"),
                 "synthetic handler completed".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 false,
                 0,
                 None,

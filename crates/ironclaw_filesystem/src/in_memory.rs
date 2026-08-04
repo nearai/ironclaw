@@ -30,9 +30,10 @@ use tokio::sync::Mutex;
 use crate::backend::{EventRecord, StorageTxn};
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
-    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FileType, FilesystemError,
-    FilesystemOperation, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page,
-    RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
+    AtomicSubtreeEntry, BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FileType,
+    FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexName, IndexSpec,
+    IndexValue, Page, RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
+    root::validate_atomic_subtree_entries,
 };
 
 mod transaction;
@@ -110,6 +111,43 @@ impl RootFilesystem for InMemoryBackend {
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
         let state = self.state.lock().await;
         Ok(state_get(&state, path))
+    }
+
+    async fn create_subtree_atomic(
+        &self,
+        prefix: &VirtualPath,
+        entries: Vec<AtomicSubtreeEntry>,
+    ) -> Result<Vec<RecordVersion>, FilesystemError> {
+        validate_atomic_subtree_entries(prefix, &entries)?;
+        let mut state = self.state.lock().await;
+        let prefix_with_separator = with_trailing_slash(prefix.as_str());
+        if state.entries.contains_key(prefix)
+            || state
+                .entries
+                .keys()
+                .any(|path| path.as_str().starts_with(&prefix_with_separator))
+        {
+            return Err(FilesystemError::VersionMismatch {
+                path: prefix.clone(),
+                expected: None,
+                found: Some(RecordVersion::from_backend(1)),
+            });
+        }
+        let modified = SystemTime::now();
+        let version = RecordVersion::from_backend(1);
+        let mut versions = Vec::with_capacity(entries.len());
+        for item in entries {
+            state.entries.insert(
+                item.path,
+                StoredEntry {
+                    entry: item.entry,
+                    version,
+                    modified,
+                },
+            );
+            versions.push(version);
+        }
+        Ok(versions)
     }
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
@@ -307,10 +345,18 @@ impl RootFilesystem for InMemoryBackend {
         page: &crate::OrderedPage,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
         let state = self.state.lock().await;
-        let Some(materialized) = state
-            .ordered_indexes
-            .get(path.as_str())
-            .and_then(|indexes| indexes.get(&page.index))
+        // Resolve against `path` and every ancestor prefix, most specific
+        // first, so a caller may declare the index once on a higher prefix and
+        // query a child path. Bounded by path depth, not a scan over declared
+        // prefixes.
+        let Some(materialized) = crate::index::ancestor_prefixes(path.as_str())
+            .into_iter()
+            .find_map(|prefix| {
+                state
+                    .ordered_indexes
+                    .get(prefix)
+                    .and_then(|indexes| indexes.get(&page.index))
+            })
         else {
             return Err(FilesystemError::Unsupported {
                 path: path.clone(),
@@ -350,6 +396,14 @@ impl RootFilesystem for InMemoryBackend {
                     {
                         continue;
                     }
+                    // A spec resolved from an ancestor covers a wider subtree
+                    // than the caller asked for; its rows carry no record of
+                    // the declaring prefix. Without this check a query would
+                    // return sibling subtrees' rows. The SQL backends apply the
+                    // equivalent predicate in their row SELECT.
+                    if !crate::index::path_within_prefix(matched_path.as_str(), path.as_str()) {
+                        continue;
+                    }
                     push_ordered_result(&state, matched_path, &mut results);
                     if results.len() >= page.limit as usize {
                         break;
@@ -375,6 +429,11 @@ impl RootFilesystem for InMemoryBackend {
                         && (values.get(sort_position), values.get(sort_position + 1))
                             >= (Some(&cursor.value), Some(&cursor.tie_breaker))
                     {
+                        continue;
+                    }
+                    // See the ascending branch: ancestor-resolved specs cover a
+                    // wider subtree than the caller asked for.
+                    if !crate::index::path_within_prefix(matched_path.as_str(), path.as_str()) {
                         continue;
                     }
                     push_ordered_result(&state, matched_path, &mut results);
@@ -639,7 +698,9 @@ fn update_materialized_indexes(
     old_entry: Option<&Entry>,
     new_entry: Option<&Entry>,
 ) {
-    for prefix in ancestor_paths(path.as_str()) {
+    // Projects into every matching ancestor declaration, so a root-declared
+    // spec and a narrower one declared under it both stay current.
+    for prefix in crate::index::ancestor_prefixes(path.as_str()) {
         let Some(indexes) = state.ordered_indexes.get_mut(prefix) else {
             continue;
         };
@@ -656,19 +717,6 @@ fn update_materialized_indexes(
             }
         }
     }
-}
-
-fn ancestor_paths(path: &str) -> Vec<&str> {
-    let mut prefixes = vec!["/"];
-    prefixes.extend(
-        path.char_indices()
-            .filter(|(index, character)| *index > 0 && *character == '/')
-            .filter_map(|(index, _)| path.get(..index)),
-    );
-    if path != "/" {
-        prefixes.push(path);
-    }
-    prefixes
 }
 
 fn state_append(state: &mut State, path: &VirtualPath, payload: Vec<u8>) -> SeqNo {
@@ -1314,6 +1362,69 @@ mod tests {
         assert_eq!(
             descending_next[0].entry.indexed[&key("thread_id")],
             IndexValue::Text("a".into())
+        );
+    }
+
+    /// The ascending and descending ordered-query loops carry separate subtree
+    /// guards. Only ascending is exercised by the ancestor-declaration
+    /// contract, so a missing descending guard would leak sibling-subtree rows
+    /// without failing anything.
+    #[tokio::test]
+    async fn descending_query_from_an_ancestor_declared_index_excludes_siblings() {
+        let backend = InMemoryBackend::new();
+        let rank = IndexKey::new("rank").unwrap();
+        let id = IndexKey::new("id").unwrap();
+        backend
+            .ensure_index(
+                &VirtualPath::new("/engine/scoped").unwrap(),
+                &IndexSpec::new(
+                    IndexName::new("scoped_items_v1").unwrap(),
+                    vec![rank.clone(), id.clone()],
+                    IndexKind::Exact,
+                ),
+            )
+            .await
+            .unwrap();
+        for (path, leaf) in [
+            ("/engine/scoped/alpha/a-1", "a-1"),
+            ("/engine/scoped/beta/b-1", "b-1"),
+        ] {
+            backend
+                .put(
+                    &VirtualPath::new(path).unwrap(),
+                    Entry::record(RecordKind::new("scoped").unwrap(), &serde_json::json!({}))
+                        .unwrap()
+                        .with_indexed(rank.clone(), IndexValue::Text(leaf.to_string()))
+                        .with_indexed(id.clone(), IndexValue::Text(leaf.to_string())),
+                    CasExpectation::Absent,
+                )
+                .await
+                .unwrap();
+        }
+
+        let rows = backend
+            .query_ordered(
+                &VirtualPath::new("/engine/scoped/alpha").unwrap(),
+                &Filter::All,
+                &crate::OrderedPage::new(
+                    IndexName::new("scoped_items_v1").unwrap(),
+                    rank.clone(),
+                    id.clone(),
+                    crate::SortDirection::Descending,
+                    16,
+                ),
+            )
+            .await
+            .unwrap();
+        let paths = rows
+            .iter()
+            .map(|row| row.path.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec!["/engine/scoped/alpha/a-1".to_string()],
+            "a descending child query resolved from an ancestor spec must not \
+             return a sibling subtree"
         );
     }
 

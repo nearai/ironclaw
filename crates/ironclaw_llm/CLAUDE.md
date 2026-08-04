@@ -17,7 +17,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `openai_codex_provider.rs` | OpenAI Codex Responses API client (SSE streaming, JWT auth, subscription billing) |
 | `openai_codex_session.rs` | OAuth 2.0 session manager for OpenAI Codex (device code flow, token persistence) |
 | `token_refreshing.rs` | Token-refreshing `LlmProvider` decorator for OpenAI Codex (pre-emptive refresh, zero-cost billing) |
-| `reasoning.rs` | `Reasoning` struct, `ReasoningContext`, `RespondResult`, `ActionPlan`, `ToolSelection`; thinking-tag stripping; `SILENT_REPLY_TOKEN` |
+| `reasoning.rs` | Model-response text cleanup (`clean_response` — thinking-tag stripping) and textual tool-call recovery (`contains_codex_text_tool_call_syntax`, `recover_codex_text_tool_calls_from_tool_names`) |
 | `session.rs` | NEAR AI session token management with disk + DB persistence, OAuth login flow |
 | `circuit_breaker.rs` | Circuit breaker: Closed → Open → HalfOpen state machine |
 | `retry.rs` | Exponential backoff retry wrapper; `is_retryable()` classification |
@@ -32,7 +32,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `gemini_oauth.rs` | Gemini OAuth provider (Cloud OAuth credentials → `generativelanguage.googleapis.com`) |
 | `github_copilot.rs` | GitHub Copilot Chat provider (uses dedicated reqwest client, not `RigAdapter`) |
 | `github_copilot_auth.rs` | Copilot session-token exchange and refresh (`CopilotTokenManager`) |
-| `host.rs` | Host-side trait surface: `SessionDb`, `SessionSecrets`, `SessionRenewer`, `SessionKeyPersistor` (binary supplies adapters in `src/llm_host.rs`) |
+| `host.rs` | Host-side trait surface: `SessionDb`, `SessionSecrets`, `SessionRenewer`, `SessionKeyPersistor` (adapters are the composing binary's to supply; none does today — see "Host Trait Surface") |
 | `runtime.rs` | `SwappableLlmProvider` + `LlmReloadHandle` for hot-reloading the provider chain on settings change |
 | `registry.rs` | Provider registry (`ProviderDefinition`, `ProviderProtocol`); resolves backend strings to clients |
 | `resolution.rs` | Full `LlmConfig` resolution for composition roots that select from `providers.json` and need dedicated providers plus the shared provider chain |
@@ -43,7 +43,57 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `vision_models.rs` | Vision-capable model registry for attachment routing |
 | `reasoning_models.rs` | Reasoning-capable model registry (Codex, R1, o-series, etc.) used for thinking-mode dispatch |
 | `models.rs` | Top-level model-name catalog and helpers |
-| `testing/` | `StubLlm`, `StubErrorKind`, `fault_injection` — gated behind the `testing` cargo feature for downstream test harnesses |
+| `testing/` | `StubLlm`, `StubErrorKind`, `fault_injection` — gated behind the `test-support` cargo feature for downstream test harnesses |
+
+## Sub-owner map
+
+The File Map above says what each file *is*. This map says who **owns** it —
+which of the crate's ten concerns a change belongs to, and what must not drift
+into it. PROPOSAL §6.4.13 asks for this map and names five sub-owners
+(providers / auth-sessions / registry / decorators / recording); measured
+against the tree those five cover 28 of 48 files, so five more are named here
+to reach 100%. See the amendment on §6.4.13 for why each addition is not one
+of the original five.
+
+**This table is enforced.** `tests/module_charter.rs` asserts every `.rs` file
+under `src/` appears in exactly one row and every path in a row exists, so the
+map cannot rot in either direction — a new file fails until it is given an
+owner, and a deleted one fails until its entry goes.
+
+| Sub-owner | Owns | Never contains | Files |
+|---|---|---|---|
+| `core-contract` | The `LlmProvider` trait, the request/response vocabulary, the error taxonomy, the config types, shared HTTP hardening, and the factory that assembles everything | A vendor protocol, or reliability behavior | `lib.rs`, `provider.rs`, `error.rs`, `config.rs`, `url_check.rs` |
+| `providers` | One concrete `LlmProvider` per vendor and the protocol shims used by that vendor alone | Cross-provider normalization (that is `normalization`), or credential lifecycle (that is `auth-sessions`) | `nearai_chat.rs`, `rig_adapter.rs`, `gemini_oauth.rs`, `codex_chatgpt.rs`, `bedrock.rs`, `openai_codex_provider.rs`, `anthropic_oauth.rs`, `github_copilot.rs`, `nearai_tool_message_flattening.rs`, `responses_reasoning.rs`, `anthropic_thinking.rs` |
+| `auth-sessions` | Acquiring, persisting, refreshing and revoking provider credentials, plus the host seam that stores them | Request/response shaping | `auth.rs`, `session.rs`, `openai_codex_session.rs`, `github_copilot_auth.rs`, `codex_auth.rs`, `token_refreshing.rs`, `host.rs` |
+| `registry` | The **provider** catalog: definitions, protocols, base-URL and api-key resolution | Model facts (that is `model-catalog`) | `registry.rs`, `resolution.rs` |
+| `decorators` | Anything that wraps `dyn LlmProvider` and is not credential work: retry, breaker, failover, cache, hot-reload, cost routing | Vendor protocol | `retry.rs`, `circuit_breaker.rs`, `failover.rs`, `response_cache.rs`, `runtime.rs`, `smart_routing.rs` |
+| `normalization` | Cross-provider wire hygiene in all three directions: outbound tool schemas, inbound tool arguments, inbound content text | A fix that only one provider needs — that belongs beside it in `providers` | `tool_schema.rs`, `tool_schema/placeholder_stripping.rs`, `tool_args.rs`, `reasoning.rs` |
+| `model-catalog` | Facts about **models**: what an endpoint lists, and which models see images, generate images, or think natively | Provider identity or routing | `models.rs`, `reasoning_models.rs`, `vision_models.rs`, `image_models.rs` |
+| `recording` | Trace capture and replay, and binding recorded tool arguments to earlier results | Live provider behavior | `recording.rs`, `trace_binding.rs` |
+| `transcription` | The `TranscriptionProvider` trait and its implementations — a **different trait** from `LlmProvider`, sharing only transports | Anything implementing `LlmProvider` | `transcription/mod.rs`, `transcription/chat_completions.rs`, `transcription/openai.rs` |
+| `test-support` | Fixtures and fault injection, including the published `test-support` feature downstream harnesses consume | Production behavior | `testing/mod.rs`, `testing/fault_injection.rs`, `codex_test_helpers.rs`, `rig_adapter/tests/finish_reason_tests.rs` |
+
+Four placement calls worth stating, because each is a file whose *shape*
+suggests one owner and whose *purpose* is another:
+
+- **`token_refreshing.rs` is `auth-sessions`, not `decorators`.** It is a
+  decorator by construction, but its whole body is pre-emptive OAuth refresh
+  and retry-once-on-`AuthFailed`; nothing in it is reliability. (The File Map
+  above calls it a decorator; `AGENTS.md` files it under auth. This is the
+  ruling.)
+- **`runtime.rs` and `smart_routing.rs` are `decorators`** even though neither
+  is a *reliability* wrapper — which is why this table's definition is "wraps
+  `dyn LlmProvider` and is not credential work" rather than the narrower
+  "retry/breaker/failover/cache".
+- **`url_check.rs` is `core-contract`** on the strength of `build_http_client`
+  being shared egress plumbing. Its SSRF policy (`check_models_url`) is
+  security-relevant and has three in-crate consumers; if it ever grows a second
+  concern it should become its own sub-owner rather than be split.
+- **`gemini_oauth.rs` is the one genuinely two-owner file.** Its
+  `CredentialManager`/`OAuthCredential` half is `auth-sessions` and its
+  `GeminiOauthProvider` half is `providers`. A file-granular map has to pick
+  one, so it is charged to `providers` (the larger half). Splitting it is owed
+  work, not a defect in this map.
 
 ## Provider Selection
 
@@ -116,7 +166,7 @@ ID, migrate to it immediately. Advanced users can override headers via
 
 **HTTP request timeout:** Non-streaming NEAR AI requests have a 60-second total timeout (`DEFAULT_REQUEST_TIMEOUT_SECS` in `config.rs`). Streaming requests use the same value for time-to-response-headers and each inter-event idle gap, but have no total wall-clock timeout; active long answers must not be cancelled merely because they exceed 60 seconds. The 10 s connect timeout and 30 s TCP keepalive from the shared hardened client also apply (see "Shared client timeout hygiene" below). Rate limit `Retry-After` headers are parsed (both delay-seconds and HTTP-date formats) and forwarded as `LlmError::RateLimited { retry_after }` for the `RetryProvider` to honor.
 
-**Interrupted streams:** A streamed response is complete only after an SSE `[DONE]` marker or an explicit provider finish reason. EOF, transport failure, or an idle timeout before either terminal signal remains an error even when partial text was received. Never reinterpret a partial response as success or issue a semantic continuation request: the runtime must receive the real failure, and only the original provider stream can preserve exact output and tool-call semantics.
+**Interrupted streams:** A streamed response is complete only after an SSE `[DONE]` marker or an explicit provider finish reason. EOF, transport failure, or an idle timeout before either terminal signal is `LlmError::StreamInterrupted` even when partial text was received. Never reinterpret a partial response as success or issue a semantic continuation request: the runtime must receive the real failure, and only the original provider stream can preserve exact output and tool-call semantics. Completed malformed or empty responses use `InvalidResponse` / `EmptyResponse`; those are invalid model output, not provider availability.
 
 **Shared client timeout hygiene:** Every production reqwest client in this crate starts from the shared hardened builders in `config.rs`, the single source of truth for connect-timeout (`CONNECT_TIMEOUT_SECS` = 10 s), TCP keepalive (`TCP_KEEPALIVE_SECS` = 30 s), and idle-pool bound (`POOL_IDLE_TIMEOUT_SECS` = 90 s). One-shot requests additionally use `hardened_client_builder(request_timeout_secs)` for a total timeout; streaming responses use `hardened_streaming_client_builder()` and apply header/idle bounds while consuming the stream. Callers chain site-specific options (`.redirect`, `.resolve_to_addrs`, `.default_headers`) onto the returned builder. Do not re-apply these settings inline — change them only in `config.rs`. Exception: the few infallible constructors that cannot return an error (`SessionManager::new_async`, the transcription providers in `transcription/openai.rs` and `transcription/chat_completions.rs`) build via the hardened builder but log a `tracing::error!` and degrade to a bare `Client::new()` on the rare `.build()` failure (e.g. TLS-backend init) rather than failing construction; making the hardened client the only constructable path in these sites is tracked as durable enforcement in issue #5214.
 
@@ -131,7 +181,7 @@ Closed (normal)
       → Open (if any probe fails)
 ```
 
-**Transient vs non-transient errors:** Only `RequestFailed`, `RateLimited`, `InvalidResponse`, `SessionExpired`, `SessionRenewalFailed`, `Http`, and `Io` count toward the threshold. `AuthFailed`, `ContextLengthExceeded`, `ModelNotAvailable`, and `Json` errors never trip the breaker — they indicate caller problems, not backend degradation.
+**Transient vs non-transient errors:** `RequestFailed`, `RateLimited`, `BadGateway`, `StreamInterrupted`, `SessionExpired`, and `SessionRenewalFailed` count toward the threshold. `Http` and `Io` count only when their concrete status/error kind carries transient connection evidence. `InvalidResponse`, `EmptyResponse`, `AuthFailed`, `ContextLengthExceeded`, `ModelNotAvailable`, `QuotaExceeded`, and `Json` never trip the breaker.
 
 Configure via `LlmConfig` fields: `circuit_breaker_threshold` (env: `LLM_CIRCUIT_BREAKER_THRESHOLD`, falls back to `CIRCUIT_BREAKER_THRESHOLD`; None = disabled), `circuit_breaker_recovery_secs` (env: `LLM_CIRCUIT_BREAKER_RECOVERY_SECS`; default: 30).
 
@@ -147,7 +197,7 @@ The circuit breaker wraps the entire provider chain. When open, it immediately r
 
 ## Retry
 
-`RetryProvider` in `retry.rs` wraps any `LlmProvider` with exponential backoff. Retries on: `RequestFailed`, `RateLimited`, `InvalidResponse`, `SessionRenewalFailed`, `Http`, `Io`. Does **not** retry: `AuthFailed`, `SessionExpired`, `ContextLengthExceeded`, `ModelNotAvailable`, `Json`.
+`RetryProvider` in `retry.rs` wraps any `LlmProvider` with exponential backoff. Retries on: `RequestFailed`, `RateLimited`, `BadGateway`, `StreamInterrupted`, `SessionRenewalFailed`, plus `Http` / `Io` only with concrete transient evidence. Does **not** retry completed `InvalidResponse` / `EmptyResponse`, `AuthFailed`, `SessionExpired`, `ContextLengthExceeded`, `ModelNotAvailable`, `QuotaExceeded`, or `Json`.
 
 **Backoff schedule:** base 1s doubled per attempt with ±25% jitter, minimum floor 100ms. Attempt 0: ~1s, attempt 1: ~2s, attempt 2: ~4s. For `RateLimited`, uses the `retry_after` duration from the error (provider-supplied) instead of backoff.
 
@@ -186,8 +236,8 @@ To add a new provider:
 1. Create `crates/ironclaw_llm/src/myprovider.rs` implementing `LlmProvider`
 2. Add a `ProviderProtocol` variant in `registry.rs` (or wire a backend-string match in `lib.rs` for non-registry providers like `nearai`/`bedrock`/`openai_codex`)
 3. Wire into the factory dispatch in `lib.rs` (`create_registry_provider` for registry-backed protocols, top-level `create_llm_provider` for backend-string-keyed providers)
-4. Add env vars to `src/config/llm.rs` (main crate) and `.env.example`
-5. If the provider needs persistent state (session tokens, refresh tokens, etc.), use the host traits in `host.rs` — never reach for `crate::db`, `crate::secrets`, or `crate::bootstrap`. The crate must stay independent of the binary; the binary supplies adapter impls in `src/llm_host.rs`.
+4. Add env vars to `.env.example` and to whichever crate reads them (the v1 `src/config/llm.rs` is gone)
+5. If the provider needs persistent state (session tokens, refresh tokens, etc.), use the host traits in `host.rs` — never reach for `crate::db`, `crate::secrets`, or `crate::bootstrap`. The crate must stay independent of the binary; the binary supplies the adapter impls.
 
 ## Host Trait Surface
 
@@ -195,12 +245,19 @@ To add a new provider:
 
 | Trait | Purpose | Binary adapter |
 |-------|---------|----------------|
-| `SessionDb` | JSON settings persistence | `DatabaseSessionDb` in `src/llm_host.rs` |
-| `SessionSecrets` | Encrypted secrets store | `SecretsStoreSessionSecrets` in `src/llm_host.rs` |
-| `SessionRenewer` | Interactive NEAR-AI re-auth flow | CLI/wizard impl wired in `src/setup/` |
-| `SessionKeyPersistor` | Runtime env overlay + `.env` upsert | `BootstrapKeyPersistor` in `src/llm_host.rs` |
+| `SessionDb` | JSON settings persistence | none today |
+| `SessionSecrets` | Encrypted secrets store | none today |
+| `SessionRenewer` | Interactive NEAR-AI re-auth flow | only `NoopSessionRenewer` (`src/host.rs`) |
+| `SessionKeyPersistor` | Runtime env overlay + `.env` upsert | only `NoopKeyPersistor` (`src/host.rs`) |
 
-`NoopSessionRenewer` and `NoopKeyPersistor` are provided for headless / hosted contexts (return errors / no-ops). The binary plugs concrete impls into `SessionManager` at startup.
+The v1 adapter names this table used to cite (`DatabaseSessionDb`,
+`SecretsStoreSessionSecrets`, `BootstrapKeyPersistor`, `src/llm_host.rs`,
+`src/setup/`) went with the monolith and resolve to nothing today — and no
+Reborn binary has supplied replacements yet. Re-derive the real implementor set
+with `rg -n "impl (SessionDb|SessionSecrets|SessionRenewer|SessionKeyPersistor) for" crates/`
+before assuming any of these ports is wired.
+
+`NoopSessionRenewer` and `NoopKeyPersistor` are provided for headless / hosted contexts (return errors / no-ops) and are the only implementations in the tree today. A binary that needs real behavior plugs concrete impls into `SessionManager` at startup; no Reborn binary currently does.
 
 ## Response Cache
 
@@ -232,7 +289,7 @@ Uses the Responses API at `chatgpt.com/backend-api/codex/responses` with ChatGPT
 
 ## Provider Chain Construction
 
-`build_provider_chain()` in `lib.rs` is the entry point for chain construction: it creates the base provider (dispatching to `create_openai_codex_provider()` for codex, `create_llm_provider()` for everything else), then delegates the decorator stack to `pub(crate) async fn apply_decorator_chain(raw, config, session)` — the single source of truth for decorator assembly. Assemble the chain only through `apply_decorator_chain`; never apply these decorators inline or at a higher seam. It is crate-internal; the integration-test harness wraps a scripted raw provider beneath the real chain via the test-only `testing::provider_chain_over` re-export (gated by the `testing` feature), so the production API is not widened. The decorators `apply_decorator_chain` assembles, in order (`RecordingLlm` is appended afterward by `build_provider_chain`, not by `apply_decorator_chain`):
+`build_provider_chain()` in `lib.rs` is the entry point for chain construction: it creates the base provider (dispatching to `create_openai_codex_provider()` for codex, `create_llm_provider()` for everything else), then delegates the decorator stack to `pub(crate) async fn apply_decorator_chain(raw, config, session)` — the single source of truth for decorator assembly. Assemble the chain only through `apply_decorator_chain`; never apply these decorators inline or at a higher seam. It is crate-internal; the integration-test harness wraps a scripted raw provider beneath the real chain via the test-only `testing::provider_chain_over` re-export (gated by the `test-support` feature), so the production API is not widened. The decorators `apply_decorator_chain` assembles, in order (`RecordingLlm` is appended afterward by `build_provider_chain`, not by `apply_decorator_chain`):
 
 ```
 Raw provider
@@ -254,13 +311,16 @@ call before recovery can advance the ordered chain.
 
 ## reasoning.rs Contents
 
-`reasoning.rs` does **not** contain an `IntentClassifier`. It contains:
-- `Reasoning` struct — the main reasoning engine used by the agent worker; calls `complete_with_tools()` and handles tool dispatch
-- `ReasoningContext` — carries messages, available tools, job description, and metadata into a reasoning call
-- `RespondResult`, `ActionPlan`, `ToolSelection` — output types from the reasoning engine
-- `TokenUsage` — input/output token counts
-- `SILENT_REPLY_TOKEN` (`"NO_REPLY"`) and `is_silent_reply()` — used by the dispatcher to suppress empty responses in group chats
-- Thinking-tag stripping — regex-based removal of `<thinking>`, `<reflection>`, `<scratchpad>`, `<|think|>`, `<final>`, etc. from model responses before returning to the user
+`reasoning.rs` does **not** contain an `IntentClassifier`, and it is **not** a
+reasoning *engine* — the v1 `Reasoning` struct and its planner/evaluator types
+were deleted in the WS8 dead-surface sweep. What survives is a provider-quirk
+cleanup module with exactly three public functions, all consumed by
+`ironclaw_runner`'s model gateway on the live model-response path:
+- `clean_response()` — thinking-tag stripping: regex-based, code-region-aware removal of `<thinking>`, `<reflection>`, `<scratchpad>`, `<|think|>`, `<final>`, tool-call tags, and markdown-fenced/bracket tool-call residue from model responses before they reach the user
+- `contains_codex_text_tool_call_syntax()` — detects Codex textual tool-call syntax (`to=tool.name json\n{…}`) outside code regions
+- `recover_codex_text_tool_calls_from_tool_names()` — recovers those textual calls as structured `ToolCall`s when the name matches an advertised tool
+
+Everything else in the file is private support for those three.
 
 ## Cost table (moved to `ironclaw_common::llm_costs`)
 

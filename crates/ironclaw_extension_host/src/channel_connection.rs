@@ -26,18 +26,20 @@ use ironclaw_auth::{
 };
 use ironclaw_host_api::{
     ids::{ExtensionId, InvocationId, TenantId},
-    product_surface::{ProductSurfaceCaller, ProductSurfaceError},
     resource::ResourceScope,
 };
 use ironclaw_product::{ChannelAuthAccountState, ChannelConnectionService};
+use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
 
+use ironclaw_extension_contracts::channel_identity::{
+    ChannelConnectionScope, ChannelConnectionScopeSource,
+};
 use ironclaw_extension_host::{
     FilesystemChannelDmTargetStore, channel_config_connection_scope_source,
     discover_channel_extensions,
 };
-use ironclaw_host_api::{
-    channel_identity::{ChannelConnectionScope, ChannelConnectionScopeSource},
-    user_identity::{RebornUserIdentityBindingDeleteStore, RebornUserIdentityLookup},
+use ironclaw_host_api::user_identity::{
+    RebornUserIdentityBindingDeleteStore, RebornUserIdentityLookup,
 };
 
 /// Narrow disconnect-side port over product-auth lifecycle cleanup, so the
@@ -519,7 +521,7 @@ mod tests {
     use std::sync::Mutex;
 
     use ironclaw_host_api::ids::{AgentId, UserId};
-    use ironclaw_product::AdapterInstallationId;
+    use ironclaw_host_api::product_adapter::AdapterInstallationId;
 
     use super::*;
     use ironclaw_extension_host::product_extension_host_api_contract_registry;

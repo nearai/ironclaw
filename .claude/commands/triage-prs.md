@@ -27,23 +27,21 @@ gh pr list --state merged --search "merged:>=$(date -v-7d +%Y-%m-%d)" --limit 10
 
 ## Step 2: Classify each PR by module
 
-For each open PR, determine the primary module it touches by examining the `files` field. Classify into these categories based on the dominant directory:
+For each open PR, determine the primary module it touches by examining the `files` field. Classify into these categories based on the dominant directory. Each path appears in exactly one row; if a future edit introduces an overlap, the more specific row wins over the **Reborn stack** umbrella:
 
 | Category | Directories |
 |----------|------------|
 | **Reborn stack (most current work)** | `crates/ironclaw_runner/`, `crates/ironclaw_reborn_cli/`, `crates/ironclaw_reborn_composition/`, `crates/ironclaw_reborn_event_store/`, `crates/ironclaw_reborn_identity/`, `crates/ironclaw_reborn_openai_compat*/`, `crates/ironclaw_reborn_traces/`, `crates/ironclaw_webui/`, `crates/ironclaw_product/`, `crates/ironclaw_turns/`, `crates/ironclaw_threads/`, `crates/ironclaw_agent_loop/`, `crates/ironclaw_host_runtime/`, `crates/ironclaw_loop_host/`, `crates/ironclaw_capabilities/` |
-| **Legacy v1 crates** | `crates/ironclaw_engine/`, `crates/ironclaw_gateway/`, `crates/ironclaw_oauth/`, `crates/ironclaw_embeddings/`, `crates/ironclaw_tui/` |
 | **LLM & Inference** | `crates/ironclaw_llm/` |
-| **Agent Core** | `src/agent/`, `src/skills/` |
-| **Tools** | `src/tools/`, `tools-src/` |
-| **Channels** | `src/channels/`, `channels-src/` |
-| **Storage & Memory** | `src/db/`, `src/workspace/`, `migrations/` |
-| **Security** | `src/safety/`, `src/secrets/` |
-| **Config & Setup** | `src/config/`, `src/setup/`, `src/cli/`, `crates/ironclaw_reborn_config/` |
-| **Sandbox & Orchestration** | `src/sandbox/`, `src/orchestrator/`, `src/worker/` |
-| **Hooks & Extensions** | `src/hooks/`, `src/extensions/` |
-| **Context & History** | `src/context/`, `src/history/`, `src/estimation/`, `src/evaluation/` |
-| **Web Gateway** | `src/channels/web/` |
+| **Agent Core** | `crates/ironclaw_skills/` |
+| **Tools & Extensions** | `crates/extensions/ironclaw_extension_support/`, `crates/ironclaw_extension_host/`, `crates/ironclaw_extensions/` |
+| **Channels** | `crates/extensions/packages/slack/`, `crates/extensions/packages/telegram/` |
+| **Storage & Memory** | `crates/ironclaw_filesystem/`, `crates/ironclaw_memory*/`, `crates/ironclaw_libsql_runtime/`, `migrations/` |
+| **Security** | `crates/ironclaw_safety/`, `crates/ironclaw_secrets/`, `crates/ironclaw_trust/`, `crates/ironclaw_authorization/`, `crates/ironclaw_approvals/` |
+| **Config & Setup** | `crates/ironclaw_reborn_config/` |
+| **Sandbox & Processes** | `crates/ironclaw_process_sandbox/`, `crates/ironclaw_processes/`, `crates/ironclaw_scripts/`, `crates/ironclaw_wasm*/` |
+| **Hooks** | `crates/ironclaw_hooks/` |
+| **Events & Projections** | `crates/ironclaw_events/`, `crates/ironclaw_event_projections/`, `crates/ironclaw_event_streams/` |
 | **CI/CD & Docs** | `.github/`, `README.md`, `CLAUDE.md`, `*.md` (no src) |
 | **Other** | Anything else |
 

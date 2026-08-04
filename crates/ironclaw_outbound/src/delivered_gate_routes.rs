@@ -32,7 +32,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use ironclaw_host_api::ids::{TenantId, UserId};
-use ironclaw_turns::{TurnRunId, TurnScope};
+use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
 
 /// How long a delivered-gate route record may live before it is considered

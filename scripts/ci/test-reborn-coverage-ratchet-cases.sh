@@ -312,3 +312,51 @@ capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions
 assert_exit_code "R18: [[crate]] entry missing 'name' exits 1" 1 "${CAP_RC}"
 assert_contains "R18: reports the missing-'name' schema error" "${CAP_ERR}" \
   "missing required 'name'"
+
+# R19 (#7083): a nested crate can carry a floor and the ratchet enforces it.
+# The gate's per-crate lookup is `by_crate.get(name, {covered: 0, count: 0})`,
+# so before the fix a floor on a colocated package crate resolved to 0/0 and
+# reported "absent from the merged lcov" no matter how well covered it was —
+# which is why no `crates/extensions/` crate has ever been floored. Both floor
+# forms are exercised, since `floor_covered_lines` is the one that moves
+# independently of the percentage when code is relocated between crates.
+cat > "${fixtures_dir}/r19_nested.lcov" <<'EOF2'
+SF:/work/ironclaw/crates/extensions/packages/slack/src/channel.rs
+LF:1000
+LH:400
+end_of_record
+EOF2
+cat > "${fixtures_dir}/r19_floor.toml" <<'TOML'
+[global]
+enforce = true
+floor_percent = 0.0
+
+[[crate]]
+name = "slack"
+floor_percent = 40.0
+floor_covered_lines = 400
+tolerance_percent = 0.5
+tolerance_lines = 20
+TOML
+capture "${ratchet_sh}" "${fixtures_dir}/r19_nested.lcov" "${empty_exemptions}" "${fixtures_dir}/r19_floor.toml"
+assert_exit_code "R19: a floored nested package crate is measured, not reported absent" 0 "${CAP_RC}"
+assert_contains "R19: reports RATCHET PASS for the nested crate" "${CAP_OUT}" \
+  "RATCHET PASS: slack"
+assert_not_contains "R19: the nested crate is not treated as missing from the lcov" \
+  "${CAP_OUT}" "absent from the merged lcov"
+
+cat > "${fixtures_dir}/r19b_floor.toml" <<'TOML'
+[global]
+enforce = true
+floor_percent = 0.0
+
+[[crate]]
+name = "slack"
+floor_percent = 40.0
+floor_covered_lines = 500
+tolerance_percent = 0.5
+tolerance_lines = 20
+TOML
+capture "${ratchet_sh}" "${fixtures_dir}/r19_nested.lcov" "${empty_exemptions}" "${fixtures_dir}/r19b_floor.toml"
+assert_exit_code "R19b: a nested crate below its covered-lines floor fails" 1 "${CAP_RC}"
+assert_contains "R19b: names the failing nested crate" "${CAP_OUT}" "RATCHET FAIL: slack"

@@ -32,11 +32,13 @@ pub(crate) const MAX_RETRY_AFTER_SECS: u64 = 3600;
 /// (try the next provider). The question is: "could this exact same request
 /// succeed if we try again?"
 ///
-/// Retryable: `RequestFailed`, `RateLimited`, `BadGateway`, `InvalidResponse`,
-/// `SessionRenewalFailed`, `Http`, `Io`.
+/// Retryable: `RequestFailed`, `RateLimited`, `BadGateway`,
+/// `StreamInterrupted`, `SessionRenewalFailed`, and `Http`/`Io` only when
+/// their concrete error carries transient connection/status evidence.
 ///
 /// Non-retryable: `InvalidRequest`, `AuthFailed`, `SessionExpired`,
-/// `ContextLengthExceeded`, `ModelNotAvailable`, `QuotaExceeded`, `Json`.
+/// `ContextLengthExceeded`, `ModelNotAvailable`, `QuotaExceeded`, `Json`,
+/// `InvalidResponse`, `EmptyResponse`.
 /// - `SessionExpired` — handled by session renewal layer, not by retry
 /// - `ModelNotAvailable` — the model won't appear between attempts
 /// - `QuotaExceeded` — billing or credits require user action
@@ -45,17 +47,24 @@ pub(crate) const MAX_RETRY_AFTER_SECS: u64 = 3600;
 /// See also `circuit_breaker::is_transient()` which answers a different
 /// question: "does this error indicate the backend is degraded?"
 pub fn is_retryable(err: &LlmError) -> bool {
-    matches!(
-        err,
+    match err {
         LlmError::RequestFailed { .. }
-            | LlmError::RateLimited { .. }
-            | LlmError::BadGateway { .. }
-            | LlmError::InvalidResponse { .. }
-            | LlmError::EmptyResponse { .. }
-            | LlmError::SessionRenewalFailed { .. }
-            | LlmError::Http(_)
-            | LlmError::Io(_)
-    )
+        | LlmError::RateLimited { .. }
+        | LlmError::BadGateway { .. }
+        | LlmError::StreamInterrupted { .. }
+        | LlmError::SessionRenewalFailed { .. } => true,
+        LlmError::Http(error) => crate::error::is_transient_http_error(error),
+        LlmError::Io(error) => crate::error::is_transient_io_error(error),
+        LlmError::InvalidRequest { .. }
+        | LlmError::InvalidResponse { .. }
+        | LlmError::EmptyResponse { .. }
+        | LlmError::ContextLengthExceeded { .. }
+        | LlmError::ModelNotAvailable { .. }
+        | LlmError::QuotaExceeded { .. }
+        | LlmError::AuthFailed { .. }
+        | LlmError::SessionExpired { .. }
+        | LlmError::Json(_) => false,
+    }
 }
 
 /// Calculate exponential backoff delay with random jitter.
@@ -725,9 +734,9 @@ mod tests {
             provider: "p".into(),
             retry_after: None,
         }));
-        assert!(is_retryable(&LlmError::InvalidResponse {
+        assert!(is_retryable(&LlmError::StreamInterrupted {
             provider: "p".into(),
-            reason: "bad".into(),
+            reason: "connection closed".into(),
         }));
         assert!(is_retryable(&LlmError::SessionRenewalFailed {
             provider: "p".into(),
@@ -754,6 +763,17 @@ mod tests {
             status: 500,
             retry_after: None,
         }));
+        assert!(!is_retryable(&LlmError::InvalidResponse {
+            provider: "p".into(),
+            reason: "bad".into(),
+        }));
+        assert!(!is_retryable(&LlmError::EmptyResponse {
+            provider: "p".into(),
+        }));
+        assert!(!is_retryable(&LlmError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "session file denied"
+        ))));
     }
 
     /// Regression for PR #2753 review: when `BadGateway` carries

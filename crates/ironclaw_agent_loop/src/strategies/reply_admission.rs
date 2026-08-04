@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use ironclaw_common::provider_transcript::is_only_provider_transcript_artifact_lines;
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     AssistantReply, LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole,
 };
 
@@ -97,7 +97,7 @@ fn reply_admission_control_text(rejection: &ReplyAdmissionRejection) -> &'static
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_turns::run_profile::AssistantReply;
+    use ironclaw_loop_contracts::AssistantReply;
 
     use super::*;
     use crate::test_support::test_run_context;

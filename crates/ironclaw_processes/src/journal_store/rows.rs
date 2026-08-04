@@ -23,10 +23,12 @@ use crate::{
 };
 
 mod keys;
+mod references;
 use keys::{
     index_key, index_name, lineage_scope_key, ordered_index, owner_scope_key, process_kind_key,
     process_status_key, scope_owner_key, scoped_path,
 };
+pub(super) use references::LoadReferences;
 
 const MATERIALIZED_PREFIX: &str = "/processes/materialized";
 const MATERIALIZED_KIND: &str = "process_materialized";
@@ -72,19 +74,6 @@ pub(super) struct LoadedRows {
     rows: HashMap<VirtualPath, MaterializedRow>,
     versions: HashMap<VirtualPath, RecordVersion>,
     pub(super) initialized: bool,
-}
-
-#[derive(Default)]
-pub(super) struct LoadReferences {
-    pub(super) process_ids: Vec<ProcessId>,
-    pub(super) tree_roots: Vec<ProcessId>,
-    pub(super) dependencies: Vec<(ProcessId, ProcessId)>,
-    pub(super) checkpoints: Vec<ProcessCheckpointId>,
-    pub(super) submission_idempotency_key: Option<String>,
-    pub(super) control_idempotency_key: Option<String>,
-    pub(super) active_conflict: Option<(ResourceScope, ProcessKind)>,
-    pub(super) claim: Option<(ClaimProcessesRequest, ProcessConcurrencyLimits)>,
-    pub(super) recover_expired: Option<RecoverExpiredProcessLeasesRequest>,
 }
 
 pub(super) fn retryable_transaction_error(error: &ironclaw_filesystem::FilesystemError) -> bool {
@@ -270,6 +259,16 @@ where
     Ok(())
 }
 
+/// The `count` oldest keys of an idempotency order deque.
+///
+/// A group commit inserting N new keys can evict N old ones once the deque is
+/// at its cap. Loading only the single oldest row left the rest of the evicted
+/// keys untombstoned in storage, where a later retry could still read one and
+/// replay its stale outcome.
+fn oldest_keys(order: &std::collections::VecDeque<String>, count: usize) -> Vec<String> {
+    order.iter().take(count).cloned().collect()
+}
+
 pub(super) async fn load<F>(
     filesystem: &ScopedFilesystem<F>,
     references: &LoadReferences,
@@ -287,7 +286,7 @@ where
         .collect::<Vec<_>>();
     let order_path = scoped_path(&format!("{MATERIALIZED_PREFIX}/idempotency-order"))?;
     push_if_present(filesystem, &mut records, &order_path).await?;
-    let (oldest_control_key, oldest_submission_key) = records
+    let (oldest_control_keys, oldest_submission_keys) = records
         .iter()
         .map(decode)
         .collect::<Result<Vec<_>, _>>()?
@@ -297,8 +296,11 @@ where
                 control_order,
                 submission_order,
             } => Some((
-                control_order.front().cloned(),
-                submission_order.front().cloned(),
+                oldest_keys(&control_order, references.control_idempotency_keys.len()),
+                oldest_keys(
+                    &submission_order,
+                    references.submission_idempotency_keys.len(),
+                ),
             )),
             _ => None,
         })
@@ -312,35 +314,72 @@ where
                         submission_order,
                         ..
                     } => Some((
-                        control_order.front().cloned(),
-                        submission_order.front().cloned(),
+                        oldest_keys(&control_order, references.control_idempotency_keys.len()),
+                        oldest_keys(
+                            &submission_order,
+                            references.submission_idempotency_keys.len(),
+                        ),
                     )),
                     _ => None,
                 })
         })
         .unwrap_or_default();
-    for (collection, key) in [
-        ("control", references.control_idempotency_key.as_ref()),
-        ("control", oldest_control_key.as_ref()),
-        ("submission", references.submission_idempotency_key.as_ref()),
-        ("submission", oldest_submission_key.as_ref()),
-    ] {
-        if let Some(key) = key {
-            let path = hashed_scoped_path(collection, key)?;
-            push_if_present(filesystem, &mut records, &path).await?;
-        }
+    let idempotency_keys = references
+        .control_idempotency_keys
+        .iter()
+        .map(|key| ("control", key))
+        .chain(oldest_control_keys.iter().map(|key| ("control", key)))
+        .chain(
+            references
+                .submission_idempotency_keys
+                .iter()
+                .map(|key| ("submission", key)),
+        )
+        .chain(oldest_submission_keys.iter().map(|key| ("submission", key)))
+        .collect::<Vec<_>>();
+    for (collection, key) in idempotency_keys {
+        let path = hashed_scoped_path(collection, key)?;
+        push_if_present(filesystem, &mut records, &path).await?;
     }
     for process_id in &references.process_ids {
         let path = process_scoped_path(*process_id)?;
         push_if_present(filesystem, &mut records, &path).await?;
     }
-    if let Some((scope, process_kind)) = &references.active_conflict {
+    for (scope, process_kind) in &references.active_conflicts {
         records.extend(query_active_conflict(filesystem, scope, process_kind, 1).await?);
     }
-    if let Some((request, limits)) = &references.claim
-        && request.process_id_filter.is_none()
-    {
-        let candidates = query_claim_candidates(filesystem, request).await?;
+    // Sum the demand of equivalent unfiltered claims before querying any of
+    // them. Two claims are equivalent when they drive the same query, which is
+    // the scope and kind filters; `process_id_filter` claims are skipped
+    // entirely and named rows are loaded elsewhere. Linear scan because a group
+    // commit holds at most `MAX_BATCH_COMMANDS` claims, so this is a handful of
+    // comparisons, not a data structure.
+    let mut batched_demand: Vec<(&ClaimProcessesRequest, usize)> = Vec::new();
+    for (request, _) in &references.claims {
+        if request.process_id_filter.is_some() {
+            continue;
+        }
+        match batched_demand.iter_mut().find(|(equivalent, _)| {
+            equivalent.scope_filter == request.scope_filter
+                && equivalent.process_kind_filter == request.process_kind_filter
+        }) {
+            Some((_, total)) => *total = total.saturating_add(request.max_processes),
+            None => batched_demand.push((request, request.max_processes)),
+        }
+    }
+
+    for (request, limits) in &references.claims {
+        if request.process_id_filter.is_some() {
+            continue;
+        }
+        let demand = batched_demand
+            .iter()
+            .find(|(equivalent, _)| {
+                equivalent.scope_filter == request.scope_filter
+                    && equivalent.process_kind_filter == request.process_kind_filter
+            })
+            .map_or(request.max_processes, |(_, total)| *total);
+        let candidates = query_claim_candidates(filesystem, request, demand).await?;
         records.extend(candidates.clone());
         let snapshots = candidates
             .iter()
@@ -368,7 +407,7 @@ where
             );
         }
     }
-    if let Some(request) = &references.recover_expired {
+    for request in &references.recover_expired {
         records.extend(query_expired_processes(filesystem, request).await?);
     }
     for root_process_id in &references.tree_roots {
@@ -879,9 +918,19 @@ where
 const RECOVERY_BATCH_LIMIT: u32 = Page::MAX_LIMIT;
 const CLAIM_QUOTA_SKIP_ALLOWANCE: usize = 64;
 
+/// Load queued candidates for one claim shape.
+///
+/// `batched_demand` is the summed `max_processes` of every equivalent claim in
+/// the group commit, not just this request's. A batch materializes one shared
+/// state, so a window sized for a single request leaves later claims in the
+/// same batch reading an already-exhausted candidate set and returning empty
+/// while eligible work is still queued. Before group commit each claim ran its
+/// own transaction and re-queried after the previous one advanced state, so the
+/// window was always fresh; batching removed that and this replaces it.
 async fn query_claim_candidates<F>(
     filesystem: &ScopedFilesystem<F>,
     request: &ClaimProcessesRequest,
+    batched_demand: usize,
 ) -> Result<Vec<VersionedEntry>, ProcessJournalStoreError>
 where
     F: RootFilesystem,
@@ -912,8 +961,8 @@ where
         }
         (None, None) => index_name("process_queue_v4")?,
     };
-    let candidate_limit = request
-        .max_processes
+    let candidate_limit = batched_demand
+        .max(request.max_processes)
         .saturating_add(CLAIM_QUOTA_SKIP_ALLOWANCE)
         .min(Page::MAX_LIMIT as usize);
     let candidate_limit = u32::try_from(candidate_limit).unwrap_or(Page::MAX_LIMIT);

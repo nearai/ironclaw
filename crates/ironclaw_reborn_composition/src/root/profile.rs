@@ -58,6 +58,15 @@ impl RebornCompositionProfile {
         self.deployment().uses_hosted_extension_installation_state()
     }
 
+    /// Whether this profile keys workspace mounts per caller.
+    ///
+    /// One decision, read by every workspace write lane in composition and by
+    /// the CLI's WebUI workspace-projection flag, so the browser and the agent
+    /// address the same subtree.
+    pub fn workspace_scoped_per_caller(self) -> bool {
+        self.deployment().workspace_scoped_per_caller()
+    }
+
     pub fn to_event_store_profile(self) -> ironclaw_reborn_event_store::RebornProfile {
         self.deployment().event_store_profile()
     }

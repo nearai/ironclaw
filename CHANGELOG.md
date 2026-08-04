@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0-rc.1] - 2026-08-03
+
+First release candidate since 1.0.0. The headline work is extension reach —
+registering arbitrary hosted MCP servers, installing from IronHub deep links,
+durable file attachments that cross channels, and Slack `/ironclaw` slash
+commands — plus a broad pass on making failures legible: to the model, which
+now gets told what to do next instead of an opaque stop, and to the user, who
+gets localized, actionable errors instead of silent dead ends.
+
+**Upgrading from 1.0.0.** No migration steps. Extension lifecycle state moved
+to a normalized on-disk shape; rows written by 1.0.0 keep deserializing. The
+one behavioral removal is the `/webhooks/slack/events` compatibility alias
+(see Removed).
+
+### Added
+
+- **Custom MCP servers.** Register a hosted MCP server from the WebUI and use
+  its tools like any other extension: discovery accepts bounded
+  OpenAPI-derived tool catalogs within the manifest's declared tool budget,
+  auth is resolved during registration, and the registered tools are exposed
+  to the model.
+- **IronHub install flow.** Install extensions from an IronHub deep link,
+  including private manifest sources, through a register/install gateway.
+- **Attachments.** Durable cross-channel file flows: a file sent on one
+  channel stays retrievable from the others and from the WebUI.
+- **Slack slash commands.** Native `/ironclaw` commands in Slack, backed by a
+  role-filtered command palette in the WebUI and role gating on admin command
+  actions.
+- **Memory as an extension.** The memory provider is modeled as a userland
+  extension with a host-managed lifecycle and a contract built around declared
+  capabilities, so a provider advertises what it can actually do instead of
+  being assumed uniform.
+- **Sandbox lane (opt-in, partly unwired).** A `RuntimeKind::Sandbox` runtime
+  lane with credential reuse, leaf-scoped mount containment, per-user sandbox
+  identity primitives, and a credential placeholder registry. Docker-connect
+  retry, the egress allowlist, and shell limits ship unwired in this release.
+- **Trigger poller on production-shaped runtimes** (opt-in), and the SSO/admin
+  identity resolver wired into those runtimes.
+- **QA run artifacts.** Caller-scoped run and full-thread artifact export,
+  gated off by default, plus a regression promotion loop for the test suite.
+- **`BENCHMARKING_MODE`.** An opt-in system-prompt addendum for unattended
+  evaluation runs.
+
 ### Changed
 
 - **Extension persistence:** normalize filesystem-backed extension lifecycle
@@ -18,6 +61,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   diagnostic health snapshot: it was always `healthy`, never read, and never
   surfaced, while the host's activation record already owns extension failure
   state. Rows written by the previous release keep deserializing.
+- **Model failures now carry a next step.** Every termination path — no
+  progress, iteration limit, disabled capability, denied call, provider error
+  — tells the model what would unlock the call instead of stopping opaquely.
+- **WebUI performance:** route-level code splitting, deferred Markdown and
+  syntax highlighting during chat streaming, optimized embedded static-asset
+  delivery, and pagination for the sidebar thread list, admin users list, and
+  older logs.
+- **Shared WebUI controls:** a common settings `Switch`, a shared
+  `ConfirmDialog` replacing native browser confirmations, and normalized
+  control typography.
 
 ### Fixed
 
@@ -78,6 +131,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Channel removal:** revoke caller-owned OAuth or proof-code pairing state
   through the shared lifecycle before deleting any channel installation, so
   removing Telegram, Slack, or a future channel unpairs it on every surface.
+- **One authorization per vendor account:** authorizing a vendor now covers
+  every installed extension sharing that account, instead of re-prompting per
+  extension. Token response scopes are trusted over the OAuth redirect echo.
+- **Extension package roots** are persisted rather than fabricated on load, so
+  a stale or partial catalog entry no longer takes down startup.
+- **Tool disclosure** is narrowed by the caller's allow-set, closing three
+  paths that leaked tool definitions the caller was not granted.
+- **Provider errors are classified correctly:** rate limits are no longer read
+  as auth failures, a missing model is not retried, adapters report the
+  provider's real finish reason, and the runner stops silently retrying
+  model-stage failures that cannot succeed.
+- **Context overflow and compaction:** secret matches are redacted during
+  compaction and a run recovers from context overflow instead of terminating.
+- **libSQL durability:** writers are serialized, cancelled transactions and
+  interrupted history migrations recover, and transient writer contention no
+  longer surfaces as a failed run.
+- **Panic and cancellation safety** on the run path, plus bounded
+  deterministic gateway failures so a wedged model stage cannot hang a turn.
+- **WebUI streaming and navigation:** smooth streaming with preserved model
+  phases, route state and workspace-tree state preserved across SPA
+  navigation, viewport preserved while loading older messages, message actions
+  kept visible, and active run state preserved when cancellation fails.
+- **WebUI correctness and a11y:** localized chat/extension/OAuth failure
+  messages, surfaced admin user-management failures, recovery from transient
+  session checks, focus trapping in the extension configuration modal, no
+  crash on admin configuration paste, pairing prompts rendered without a text
+  input, tool-permission selection retained while saving, always-allow reset
+  when the approval gate changes, and authenticated previews for workspace
+  file links.
+- **Automations** inherit the implicit source channel target, and the
+  outbound delivery-target registry is caller-scoped structurally rather than
+  by convention.
+- **Skills:** the model is told to review the available skills before
+  answering.
+- **`ironclaw service`:** the generated systemd unit no longer quotes
+  `WorkingDirectory=`.
+- **Projects** show only API-backed data instead of placeholder rows.
+
+### Performance
+
+- **Hosted Postgres API capacity** regressed by the row-native process journal
+  is recovered.
+- **Durable turn-event reads** are served by an indexed scope+cursor query
+  instead of a scan.
 
 ### Removed
 
@@ -86,15 +183,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/webhooks/extensions/slack/events`; generic product-auth OAuth callbacks are
   unchanged.
 
+## [1.0.0] - 2026-07-27
+
+First stable release of a rearchitected IronClaw. This is not an increment on
+the 0.29.x line — it is a ground-up rebuild of the agent runtime, storage,
+extension host, and web UI.
+
+**The `ironclaw` binary is the rearchitected CLI.** The v1 monolith builds as
+the `ironclaw-legacy` binary and is not published; 1.0.0 publishes the new
+`ironclaw` binary only.
+
+### This is not an in-place upgrade from 0.29.x
+
+There is no migration for v1 config, databases, settings, or secrets, and
+installing 1.0.0 does not touch your existing v1 data. Treat it as a fresh
+install: point `IRONCLAW_REBORN_HOME` at a new directory, run
+`ironclaw onboard`, and reconnect your providers and channels. Do not point it
+at a v1 data directory.
+
+### What ships
+
+- **Platforms.** Seven targets — macOS (Apple Silicon, Intel), Linux
+  (`x86_64`/`aarch64`, gnu and static musl), and Windows (`x86_64`), with shell,
+  PowerShell, and MSI installers.
+- **Guided setup.** `ironclaw onboard` provisions the config, the encrypted
+  credential store, an LLM provider (interactive key entry with a live probe),
+  a WebUI login token, and — on macOS and Linux — the background service. The
+  credential store's master key is provisioned in the OS keychain when one is
+  available, falling back to a locally cached key file otherwise.
+- **Model providers.** 26 providers in the built-in catalog, including NEAR AI,
+  OpenAI, Anthropic, Gemini, Bedrock, Ollama, OpenRouter, Groq, DeepSeek, and
+  any OpenAI-compatible endpoint. Manage routes with `ironclaw models`.
+- **Web UI.** `ironclaw serve` starts the WebChat v2 interface with the frontend
+  embedded in the binary — no separate asset deploy. Chat, extensions,
+  automations, settings, and admin surfaces are served from root-level routes.
+- **Extensions.** Twelve first-party extensions ship embedded and install
+  without a network fetch: GitHub, Gmail, Google Calendar, Docs, Drive, Sheets,
+  Slides, Notion, NEAR AI MCP, Slack, Telegram, and web access. Manage them with
+  `ironclaw extension` or the WebUI registry.
+- **Channels.** Slack and Telegram, both configured from the WebUI; Slack
+  connects per user through OAuth, Telegram through a per-user pairing code.
+- **Runtime.** Skills, scheduled and triggered automations, subagents, workspace
+  memory, and trace capture.
+- **Storage.** File-backed libSQL by default, so a stock install needs no
+  external database; PostgreSQL is opt-in via `[storage]`.
+- **Service management.** `ironclaw service install|start|stop|restart|status|uninstall`
+  runs the binary as a launchd user agent (macOS) or systemd user unit (Linux).
+
+### Known limitations
+
+- `ironclaw channels list`, `hooks list`, and `logs` appear in `--help` but
+  return an explicit "not implemented yet" error.
+- `mcp`, `memory`, `pairing`, `import`, and `login` subcommands from v1 have no
+  equivalent in this release; MCP servers and memory are reached through
+  extensions and the WebUI instead.
+- `onboard --import-history` parses but does nothing.
+- `skills` is list-only from the CLI.
+- `extension` and `skills` work out of the box: `ironclaw onboard` defaults to
+  the `local-dev` profile, where both are fully supported (as under
+  `local-dev-yolo`, `hosted-single-tenant`, and `hosted-single-tenant-volume`).
+  Only operators who explicitly choose `production` or `migration-dry-run`
+  hit a clear error instead.
+
+Please report problems at https://github.com/nearai/ironclaw/issues — include
+`ironclaw status --json` output.
+
+The itemized changes since 1.0.0-rc.1 follow; see the 1.0.0-rc.1 entry below for
+everything that landed between 0.29.1 and the release candidate.
+
+### Fixed
+
+- *(webui)* restore SSE streams across navigation, so chat keeps streaming when
+  the user moves between WebUI routes mid-turn ([#6425](https://github.com/nearai/ironclaw/pull/6425)).
+- *(webui)* stop the WebChat "Disconnected" lockout caused by rate-limit budget
+  exhaustion and navigation-race SSE thrash ([#6592](https://github.com/nearai/ironclaw/pull/6592)).
+
+### CI / Release
+
+- *(release)* update the Reborn Dockerfile and make the Reborn Docker image
+  buildable ([#6612](https://github.com/nearai/ironclaw/pull/6612)).
+- *(ci)* run the full Reborn test and E2E gates on `release-fix-*` pull-request
+  branches ([#6537](https://github.com/nearai/ironclaw/pull/6537)).
+
 ## [1.0.0-rc.1] - 2026-07-20
 
-First release candidate of the rearchitected IronClaw, internally called
-**Reborn**. This is not an increment on the 0.29.x line — it is a ground-up
-rebuild of the agent runtime, storage, extension host, and web UI.
+First release candidate of a rearchitected IronClaw. This is not an increment
+on the 0.29.x line — it is a ground-up rebuild of the agent runtime, storage,
+extension host, and web UI.
 
-**The `ironclaw` binary is now the Reborn CLI.** The v1 monolith now builds as
-the `ironclaw-legacy` binary and is no longer published; 1.0.0-rc.1 publishes
-the Reborn `ironclaw` binary only.
+**The `ironclaw` binary is now the rearchitected CLI.** The v1 monolith now
+builds as the `ironclaw-legacy` binary and is no longer published; 1.0.0-rc.1
+publishes the new `ironclaw` binary only.
 
 ### This is not an in-place upgrade from 0.29.x
 
@@ -138,8 +317,8 @@ it at a v1 data directory.
 - `ironclaw channels list`, `hooks list`, and `logs` appear in `--help` but
   return an explicit "not implemented yet" error.
 - `mcp`, `memory`, `pairing`, `import`, and `login` subcommands from v1 have no
-  Reborn equivalent; MCP servers and memory are reached through extensions and
-  the WebUI instead.
+  equivalent in this release; MCP servers and memory are reached through
+  extensions and the WebUI instead.
 - `onboard --import-history` parses but does nothing.
 - `skills` is list-only from the CLI.
 - `extension` and `skills` work out of the box: `ironclaw onboard` defaults to

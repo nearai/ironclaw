@@ -30,7 +30,7 @@ Placement decision, in order:
    format, timezone) → `ironclaw_common`. This is the ONLY thing common
    accepts.
 
-**`ironclaw_common` is not a DTO dumping ground.** It has fan-in ~64 — every
+**`ironclaw_common` is not a DTO dumping ground.** 17 workspace crates depend on it — every
 type added there rebuilds most of the workspace on change and couples
 unrelated domains. A type belongs in common only if it is domain-free (would
 be equally at home in any subsystem). "Several crates use it" is NOT the
@@ -40,11 +40,13 @@ common.
 
 ## Why (measured 2026-07, semantically judged)
 
-The workspace has ~2,900 public types. A field/variant-signature scan
-(`scripts/check-type-duplicates.py`) found 178 cross-crate structural
-candidates; agent review of every pair's definitions and usage judged **18
-TRUE duplicates + 14 borderline identity-lockstep mirrors** — real but rare
-(~1%), and mostly under *different names* (invisible to name matching). The
+The workspace has ~3,400 public structs/enums (`rg -c '^\s*pub (struct|enum) ' crates/*/src`).
+A field/variant-signature scan (`scripts/check-type-duplicates.py`) reports
+**203** cross-crate structural candidates from 2,003 eligible types on this
+tree; the 2026-07 judging pass ran over a **178**-pair snapshot of that scan and
+found **18 TRUE duplicates + 14 borderline identity-lockstep mirrors** — real
+but rare (~1%), and mostly under *different names* (invisible to name matching).
+Re-run the script before quoting either number; the unjudged delta is real. The
 judged backlog lives in `docs/plans/2026-07-02-type-dedup-backlog.md`.
 The dominant failure mode: a downstream crate re-declares an upstream type
 verbatim "for decoupling," plus an identity `From` that never diverges.
@@ -52,7 +54,7 @@ verbatim "for decoupling," plus an identity `From` that never diverges.
 The remaining complexity is contract *surface* (≈500 Request/Response/Config
 types, each defined once), which placement cannot reduce — only interface
 design (domain-port splits) and scaffolding do. Meanwhile compile ripple IS
-controlled by placement: `common` fan-in 64, `host_api` 270, `turns` 110.
+controlled by placement. Measured crate-level fan-in on this tree (`grep -l <crate> crates/*/Cargo.toml`): `host_api` **53**, `turns` **20**, `common` **17** — note this inverts the ordering an earlier version of this rule asserted, and `host_api` (the endorsed vocabulary home) carries the widest fan-in by design.
 Edit ripple is expensive and rare; don't fix it by maximizing compile ripple.
 
 ## Mirror structs and `From` chains — a mapping must earn its keep
@@ -131,8 +133,10 @@ examples: two `projection`s, `lifecycle.rs` that is skill management).
 
 The same discipline applies to traits. A trait is justified by exactly one of:
 
-1. **Polymorphism** — 2+ production implementors (62% of the workspace's 352
-   traits, measured 2026-07).
+1. **Polymorphism** — 2+ production implementors (the 2026-07 pass judged this
+   true of ~62% of traits; the workspace has **372** `pub trait` definitions
+   today, so re-count with
+   `rg -c '^\s*pub trait ' crates/*/src` before quoting a share).
 2. **Dependency inversion** — a port defined in a lower crate, implemented by
    a higher one. Single-impl BY DESIGN; "only one implementor" is the wrong
    metric here — deleting it re-couples the layers the boundary tests protect.
@@ -141,9 +145,10 @@ The same discipline applies to traits. A trait is justified by exactly one of:
    (includes security attenuation surfaces like the hooks gate sinks).
 
 A trait with one same-crate impl, no double, no `dyn` use, and no inversion is
-**ceremony** — call the concrete type; delete the trait. Judged 2026-07: only
-8 of 352 traits (2.3%) failed this test (4 ceremony, 4 dead) — listed in
-`docs/plans/2026-07-02-type-dedup-backlog.md`. New single-impl traits need
+**ceremony** — call the concrete type; delete the trait. The 2026-07 pass found
+only 8 traits failing this test (4 ceremony, 4 dead) — listed in
+`docs/plans/2026-07-02-type-dedup-backlog.md`. That judgement has not been
+re-run against the current trait set. New single-impl traits need
 their §-reason stated in the PR description; reviewers may block on it.
 
 Caution when auditing mechanically: naive `impl X for` grepping misses

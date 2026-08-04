@@ -3,12 +3,20 @@
 ## Start Here
 
 - Read `CLAUDE.md` first; it contains detailed provider and reasoning notes.
+- **`CLAUDE.md`'s `## Sub-owner map` is the authoritative file→owner
+  assignment** and is enforced by `tests/module_charter.rs` (every `src/` file
+  has exactly one owner; the table cannot rot in either direction). The
+  informal buckets below are a reading aid for orientation only — when they
+  disagree with the map, the map wins.
 - Read `Cargo.toml` for provider dependencies and feature shape.
 - Relevant files by area:
   - `provider.rs`, `registry.rs`, `runtime.rs`, `host.rs` — provider contracts and host seams.
   - `retry.rs`, `failover.rs`, `circuit_breaker.rs`, `response_cache.rs` — reliability and caching.
   - `tool_schema.rs`, `rig_adapter.rs`, `openai_codex_provider.rs` — tool-call/schema boundaries.
-  - `reasoning.rs` — legacy reasoning engine and response shaping.
+  - `reasoning.rs` — model-response text hygiene: `clean_response` plus
+    textual tool-call recovery. **Not legacy and not dead** — the v1 engine
+    half was deleted in #6964; what remains has five production call sites in
+    `ironclaw_loop_host/src/model_gateway.rs`.
   - `*_oauth.rs`, `*_auth.rs`, `session.rs`, `token_refreshing.rs` — provider auth/session handling.
 
 ## What This Crate Owns

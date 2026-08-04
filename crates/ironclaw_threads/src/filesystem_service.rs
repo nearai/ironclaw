@@ -33,7 +33,9 @@
 //! request and performs one exact read.
 
 mod message_lookup_index;
+mod message_read;
 mod thread_index;
+mod transcript_migration;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -51,7 +53,7 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{
     error::HostApiError,
-    ids::{InvocationId, ThreadId},
+    ids::{InvocationId, TenantId, ThreadId, UserId},
     path::ScopedPath,
     resource::ResourceScope,
 };
@@ -60,6 +62,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
+use crate::stored_message::serialize_stored_thread_message;
 use crate::summary_artifacts::find_overlapping_summary;
 use crate::title::derive_title_from_message;
 use crate::tool_result_records::{
@@ -70,19 +73,20 @@ use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
     AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
+    BoundedThreadMessageSnapshot, BoundedThreadMessages, BoundedThreadMessagesRequest,
     CapabilityDisplayPreviewEnvelope, ContextMessage, ContextMessages, ContextWindow,
     CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
     LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, ProviderToolCallReferenceEnvelope, PutToolResultRecordRequest,
-    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
-    SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
-    ToolResultRecordChunk, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
-    UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
+    MessageStatus, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
+    ThreadMessageRecord, ThreadScope, ToolResultRecordChunk, ToolResultReferenceEnvelope,
+    UpdateAssistantDraftRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 use message_lookup_index::MessageLookupIndexStore;
+use message_read::{MessageReadBudget, MessageReadResult};
 
 /// Bound on the CAS retry loop. Mirrors the run-state / authorization
 /// store budgets — enough to absorb routine cross-process contention,
@@ -126,29 +130,6 @@ struct StoredThreadRecord {
     next_sequence: u64,
 }
 
-/// On-disk transcript message record.
-///
-/// `ThreadMessageRecord` deliberately skips provider replay metadata when it is
-/// serialized for product-facing transcript surfaces. The filesystem service is
-/// the private backend for model context, so it stores that metadata explicitly
-/// while history reads continue to scrub it before returning records.
-#[derive(Serialize)]
-struct StoredThreadMessageRecord<'a> {
-    #[serde(flatten)]
-    record: &'a ThreadMessageRecord,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_result_provider_call: &'a Option<ProviderToolCallReferenceEnvelope>,
-}
-
-impl<'a> From<&'a ThreadMessageRecord> for StoredThreadMessageRecord<'a> {
-    fn from(record: &'a ThreadMessageRecord) -> Self {
-        Self {
-            record,
-            tool_result_provider_call: &record.tool_result_provider_call,
-        }
-    }
-}
-
 /// On-disk inbound idempotency record. Includes the originating scope so a
 /// replay can validate the hashed lookup and rehydrate the reply.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,8 +161,26 @@ where
     filesystem: Arc<ScopedFilesystem<F>>,
     known_thread_index_rows: Mutex<HashSet<String>>,
     ready_thread_index_scopes: Mutex<HashSet<String>>,
+    /// Mounts whose `/threads`-root index specs are already declared, keyed by
+    /// `tenant:user` — the pair the alias resolves through. Keeps thread create
+    /// off the index-DDL path after a mount's first thread.
+    ready_index_mounts: Mutex<HashSet<(TenantId, UserId)>>,
     thread_index_declaration_lock: tokio::sync::Mutex<()>,
     one_shot_context_windows: Mutex<HashMap<String, ContextWindow>>,
+}
+
+/// Whether a mount that cannot serve ordered indexes is a hard failure.
+///
+/// A named mode rather than a boolean: one caller derives it from `!required`,
+/// and an inverted argument there would silently downgrade a required
+/// declaration to a skipped one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum IndexDeclarationPolicy {
+    /// Propagate `Unsupported` — the caller needs the projection.
+    Required,
+    /// Tolerate `Unsupported` — the caller only wants the projection if the
+    /// mount can serve it.
+    Optional,
 }
 
 impl<F> FilesystemSessionThreadService<F>
@@ -193,6 +192,7 @@ where
             filesystem,
             known_thread_index_rows: Mutex::new(HashSet::new()),
             ready_thread_index_scopes: Mutex::new(HashSet::new()),
+            ready_index_mounts: Mutex::new(HashSet::new()),
             thread_index_declaration_lock: tokio::sync::Mutex::new(()),
             one_shot_context_windows: Mutex::new(HashMap::new()),
         }
@@ -254,7 +254,7 @@ where
     }
 
     fn message_entry(record: &ThreadMessageRecord) -> Result<Entry, SessionThreadError> {
-        let body = serialize_pretty(&StoredThreadMessageRecord::from(record))?;
+        let body = serialize_stored_thread_message(record)?;
         let kind = RecordKind::new(THREAD_MESSAGE_KIND).map_err(|error| {
             SessionThreadError::Backend(format!("invalid thread_message record kind: {error}"))
         })?;
@@ -313,28 +313,73 @@ where
             ))
     }
 
-    async fn ensure_thread_record_indexes(
+    /// Declare every ordered-index spec this crate queries, once per mount.
+    ///
+    /// These are declared at the `/threads` alias root rather than under each
+    /// thread. A declaration is catalog work — a spec row, and on first use the
+    /// static projection trigger set — so declaring per thread paid that cost
+    /// on every thread create and left a catalog row per thread behind
+    /// forever, which the projection then has to consider on each write.
+    /// (Under the per-declaration trigger design this branch replaced, it also
+    /// accumulated three triggers per spec per thread.) Every spec leads with
+    /// its partition key
+    /// (`thread_id`, or `scope_key` for the listing projection), so a single
+    /// declaration above the per-thread paths serves every thread under this
+    /// mount; `query_ordered` resolves it by walking ancestor prefixes.
+    ///
+    /// The alias root resolves to a per-(tenant, user) backend path, so the
+    /// memo is keyed by that pair. Racing callers may each declare once more
+    /// than strictly needed — declarations are idempotent by contract, and the
+    /// backend keeps its own cache on the same resolved path — which is why
+    /// this deliberately takes no lock.
+    ///
+    /// `IndexDeclarationPolicy::Optional` lets a caller that only needs the
+    /// projection for an optional listing tolerate a mount without
+    /// ordered-index support; `Required` propagates. The mount is memoized as
+    /// declared
+    /// only on full success, so a fail-soft skip does not suppress a later
+    /// required declaration.
+    pub(super) async fn declare_root_indexes(
         &self,
         scope: &ThreadScope,
-        thread_id: &ThreadId,
+        policy: IndexDeclarationPolicy,
     ) -> Result<(), SessionThreadError> {
-        let messages = messages_root(scope, thread_id)?;
-        for index in [
-            message_sequence_index_spec()?,
-            message_kind_status_index_spec()?,
-        ] {
-            self.filesystem
-                .ensure_index(&scope.to_resource_scope(), &messages, &index)
-                .await?;
+        let resource_scope = scope.to_resource_scope();
+        // The `/threads` alias resolves through tenant and user, so the mount
+        // identity is that pair. Kept typed rather than flattened into a
+        // delimited string (typed-internals rule).
+        let mount_key = (
+            resource_scope.tenant_id.clone(),
+            resource_scope.user_id.clone(),
+        );
+        if self
+            .ready_index_mounts
+            .lock()
+            .map(|ready| ready.contains(&mount_key))
+            .unwrap_or(false)
+        {
+            return Ok(());
         }
-        let summaries = summaries_root(scope, thread_id)?;
-        self.filesystem
-            .ensure_index(
-                &scope.to_resource_scope(),
-                &summaries,
-                &summary_index_spec()?,
-            )
-            .await?;
+        let root = scoped_path(THREADS_PREFIX)?;
+        for index in root_index_specs()? {
+            match self
+                .filesystem
+                .ensure_index(&resource_scope, &root, &index)
+                .await
+            {
+                Ok(()) => {}
+                Err(FilesystemError::Unsupported { .. })
+                    if policy == IndexDeclarationPolicy::Optional =>
+                {
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if let Ok(mut ready) = self.ready_index_mounts.lock() {
+            ready.insert(mount_key.clone());
+            thread_index::evict_entry_over_limit(&mut ready, 512, &mount_key);
+        }
         Ok(())
     }
 
@@ -829,13 +874,15 @@ where
             .transpose()
     }
 
+    /// Caller must have run `ensure_transcript_indexes_migrated` for the
+    /// scope; hoisted out so a list page pays the marker check once, not once
+    /// per untitled thread.
     async fn first_user_message_for_title(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
         _next_sequence: u64,
     ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
-        self.ensure_transcript_indexes_migrated(scope).await?;
         let Some(message_id) = MessageLookupIndexStore::new(self.filesystem.as_ref())
             .read_first_user(scope, thread_id)
             .await?
@@ -1348,7 +1395,7 @@ where
         .await
         .map_err(map_cas_error)?;
         if created {
-            self.ensure_thread_record_indexes(&record.scope, &record.thread_id)
+            self.declare_root_indexes(&record.scope, IndexDeclarationPolicy::Required)
                 .await?;
         }
         if created || !self.is_thread_index_known(&record.scope, &record.thread_id) {
@@ -1401,6 +1448,9 @@ where
 
         let message_id = ThreadMessageId::new();
         let (content_text, attachments) = content.into_parts();
+        // Derived before `content_text` moves into the message record; seeds
+        // the sidebar label in the post-accept activity touch below.
+        let derived_title_candidate = derive_title_from_message(&content_text);
         crate::contract::validate_attachment_refs(&attachments)?;
         // Sequence assignment happens only after payload validation. On
         // transactional backends the thread counter, message, sequence index,
@@ -1500,11 +1550,34 @@ where
         }
 
         // Inbound user message is thread activity — stamp recency so the
-        // sidebar surfaces this thread first. Best-effort: the message is
+        // sidebar surfaces this thread first, and seed the derived sidebar
+        // label from this message in the same index-row write (the label only
+        // lands when the thread has no title yet). Best-effort: the message is
         // already durable, so a touch failure must not fail (and retry) the
         // accept.
-        self.touch_thread_updated_at_best_effort_at(&scope, &thread_id, now)
-            .await;
+        // Only the first user message may seed the label. A pre-upgrade thread
+        // has messages but no cached label, and seeding from whatever arrives
+        // next would show the newest message where the sidebar contract
+        // promises the first — the probe-and-heal path derives those correctly.
+        let derived_title_candidate = (sequence == 1).then_some(derived_title_candidate).flatten();
+        if let Err(error) = self
+            .touch_thread_index_updated_at_with_derived_title(
+                &scope,
+                &thread_id,
+                now,
+                derived_title_candidate,
+            )
+            .await
+        {
+            // silent-ok: the message is already durable; the recency stamp and
+            // derived label are advisory, and failing the accept here could
+            // make an un-idempotent caller retry and duplicate the message.
+            tracing::debug!(
+                thread_id = %thread_id.as_str(),
+                ?error,
+                "skipping thread recency/title touch after inbound accept"
+            );
+        }
 
         Ok(AcceptedInboundMessage {
             thread_id,
@@ -1582,9 +1655,37 @@ where
             .ok_or_else(|| SessionThreadError::UnknownThread {
                 thread_id: thread_id.clone(),
             })?;
+        let queued_sequence = match self
+            .read_message_versioned(scope, thread_id, message_id)
+            .await?
+            .ok_or(SessionThreadError::UnknownMessage { message_id })?
+            .0
+            .status
+        {
+            MessageStatus::Queued => Some(self.reserve_sequence(scope, thread_id).await?),
+            _ => None,
+        };
         let updated = self
             .apply_message_update(scope, thread_id, message_id, |message| {
+                // Idempotent re-submit: if this exact run already submitted the
+                // message, a redelivered/duplicate ack is a no-op rather than an
+                // `InvalidMessageTransition`. The queued-message consumer
+                // (`InMemoryHostInputQueue::ack_consumed`) drives this transition
+                // on an at-least-once ack path, so the same run can legitimately
+                // ack twice. The terminal-state guard is preserved: a *different*
+                // run, or a `RejectedBusy` row, still fails through
+                // `ensure_user_accepted`.
+                if message.status == MessageStatus::Submitted
+                    && message.turn_run_id.as_deref() == Some(turn_run_id.as_str())
+                {
+                    return Ok(());
+                }
                 ensure_user_accepted(message, "mark_message_submitted")?;
+                if message.status == MessageStatus::Queued
+                    && let Some(sequence) = queued_sequence
+                {
+                    message.sequence = sequence;
+                }
                 message.status = MessageStatus::Submitted;
                 message.turn_id = Some(turn_id.clone());
                 message.turn_run_id = Some(turn_run_id.clone());
@@ -1618,12 +1719,58 @@ where
         .await
     }
 
+    async fn mark_message_queued(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+        active_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.read_thread_versioned(scope, thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            })?;
+        self.apply_message_update(scope, thread_id, message_id, |message| {
+            ensure_user_accepted(message, "mark_message_queued")?;
+            message.status = MessageStatus::Queued;
+            message.turn_id = None;
+            message.turn_run_id = Some(active_run_id.clone());
+            Ok(())
+        })
+        .await
+    }
+
+    async fn read_thread_message(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        if self
+            .read_thread_versioned(scope, thread_id)
+            .await?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        Ok(self
+            .read_message_versioned(scope, thread_id, message_id)
+            .await?
+            .map(|(message, _)| message))
+    }
+
     async fn append_assistant_draft(
         &self,
         request: AppendAssistantDraftRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        // Dedup-by-turn-run-id is an exact projection read. Legacy rows require
-        // explicit index migration; requests never scan the transcript.
+        // Dedup-by-turn-run-id is an exact projection read (legacy rows require
+        // explicit index migration; requests never scan the transcript) — while
+        // preserving multiple finalized assistant replies in a run: retries of
+        // the same draft/final content reuse the existing record; a different
+        // finalized reply starts a sibling draft (a steered run replies more
+        // than once).
+        let requested_content = request.content.as_text().to_owned();
         if let Some(existing) = self
             .find_assistant_message_by_run(
                 &request.scope,
@@ -1632,6 +1779,11 @@ where
                 None,
             )
             .await?
+            && crate::contract::should_reuse_assistant_run_message(
+                &existing,
+                &requested_content,
+                request.content.attachments(),
+            )
         {
             return Ok(existing);
         }
@@ -1654,7 +1806,7 @@ where
             turn_run_id: Some(request.turn_run_id),
             tool_result_ref: None,
             tool_result_provider_call: None,
-            content: Some(request.content.into_text()),
+            content: Some(requested_content),
             attachments: Vec::new(),
             redaction_ref: None,
         };
@@ -1672,6 +1824,8 @@ where
         &self,
         request: AppendFinalizedAssistantMessageRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let (content, attachments) = request.content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
         if let Some(existing) = self
             .find_assistant_message_by_run(
                 &request.scope,
@@ -1682,30 +1836,62 @@ where
             .await?
         {
             if existing.status != MessageStatus::Draft {
-                return Ok(existing);
-            }
-            let content = request.content.clone();
-            let now = Utc::now();
-            let finalized = self
-                .apply_message_update(
+                if crate::contract::should_reuse_assistant_run_message(
+                    &existing,
+                    &content,
+                    &attachments,
+                ) {
+                    // Retry of the same finalized reply (or a redacted/deleted
+                    // row that must not be resurrected): idempotent return.
+                    return Ok(existing);
+                }
+                if existing.status == MessageStatus::Finalized
+                    && existing.content.as_deref() == Some(content.as_str())
+                {
+                    // Same finalized text with a DIFFERENT attachment set is a
+                    // mismatched replay, not a steered second reply: appending
+                    // a sibling would duplicate the visible reply, and
+                    // returning the old row would silently drop the new
+                    // attachments. Fail loud instead (the loop transcript
+                    // port surfaces this as a transcript write failure).
+                    return Err(SessionThreadError::InvalidMessageTransition {
+                        message_id: existing.message_id,
+                        from: MessageStatus::Finalized,
+                        attempted: "append_finalized_assistant_message with mismatched attachments",
+                    });
+                }
+                // A DIFFERENT finalized reply in the same run — a steered run
+                // replying again. Skip the draft-finalize branch and append a
+                // sibling finalized message below (the run index moves to it).
+            } else {
+                let content = content.clone();
+                let attachments = attachments.clone();
+                let now = Utc::now();
+                let finalized = self
+                    .apply_message_update(
+                        &request.scope,
+                        &request.thread_id,
+                        existing.message_id,
+                        |message| {
+                            ensure_draft(message)?;
+                            message.status = MessageStatus::Finalized;
+                            message.content = Some(content.clone());
+                            message.attachments = attachments.clone();
+                            message.updated_at = Some(now);
+                            Ok(())
+                        },
+                    )
+                    .await?;
+                // Finalizing the in-flight draft is thread activity — stamp
+                // recency (best-effort; the draft update above is durable).
+                self.touch_thread_updated_at_best_effort_at(
                     &request.scope,
                     &request.thread_id,
-                    existing.message_id,
-                    |message| {
-                        ensure_draft(message)?;
-                        message.status = MessageStatus::Finalized;
-                        message.content = Some(content.clone().into_text());
-                        message.attachments = Vec::new();
-                        message.updated_at = Some(now);
-                        Ok(())
-                    },
+                    now,
                 )
-                .await?;
-            // Finalizing the in-flight draft is thread activity — stamp recency
-            // (best-effort; the draft update above is already durable).
-            self.touch_thread_updated_at_best_effort_at(&request.scope, &request.thread_id, now)
                 .await;
-            return Ok(finalized);
+                return Ok(finalized);
+            }
         }
         let sequence = self
             .reserve_sequence(&request.scope, &request.thread_id)
@@ -1726,8 +1912,8 @@ where
             turn_run_id: Some(request.turn_run_id),
             tool_result_ref: None,
             tool_result_provider_call: None,
-            content: Some(request.content.into_text()),
-            attachments: Vec::new(),
+            content: Some(content),
+            attachments,
             redaction_ref: None,
         };
         self.write_new_message(
@@ -2183,6 +2369,8 @@ where
         message_id: ThreadMessageId,
         content: MessageContent,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let (content, attachments) = content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
         self.read_thread_versioned(scope, thread_id)
             .await?
             .ok_or_else(|| SessionThreadError::UnknownThread {
@@ -2193,8 +2381,8 @@ where
             .apply_message_update(scope, thread_id, message_id, |message| {
                 ensure_draft(message)?;
                 message.status = MessageStatus::Finalized;
-                message.content = Some(content.clone().into_text());
-                message.attachments = Vec::new();
+                message.content = Some(content.clone());
+                message.attachments = attachments.clone();
                 message.updated_at = Some(now);
                 Ok(())
             })
@@ -2233,6 +2421,11 @@ where
                     Ok(())
                 },
             )
+            .await?;
+        // The cached sidebar label may be a copy of the text just redacted.
+        // Propagating the removal is a redaction obligation, not best-effort:
+        // failing here is correct if the copy cannot be cleared.
+        self.clear_derived_title(&request.scope, &request.thread_id)
             .await?;
         self.touch_thread_updated_at_best_effort_at(&request.scope, &request.thread_id, now)
             .await;
@@ -2322,6 +2515,51 @@ where
             summary_artifacts: history_summary_artifacts(&messages, summaries),
             messages: history_messages(&messages),
         })
+    }
+
+    async fn list_thread_messages_bounded(
+        &self,
+        request: BoundedThreadMessagesRequest,
+    ) -> Result<BoundedThreadMessages, SessionThreadError> {
+        let thread = self
+            .read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?
+            .0;
+        let messages = match self
+            .read_thread_messages(
+                &request.scope,
+                &request.thread_id,
+                Some(MessageReadBudget::new(
+                    request.max_messages,
+                    request.max_bytes,
+                )),
+            )
+            .await?
+        {
+            MessageReadResult::Complete(messages) => messages,
+            MessageReadResult::LimitExceeded => {
+                return Ok(BoundedThreadMessages::LimitExceeded);
+            }
+        };
+        let message_ids = messages
+            .iter()
+            .map(|message| message.message_id)
+            .collect::<Vec<_>>();
+        Ok(BoundedThreadMessages::Complete(Box::new(
+            BoundedThreadMessageSnapshot {
+                history: ThreadMessageRange {
+                    thread: self.thread_record_with_index_overlay(thread).await?,
+                    messages: messages.iter().map(history_message).collect(),
+                },
+                context: ContextMessages {
+                    thread_id: request.thread_id,
+                    messages: context_messages_by_id(&messages, &message_ids),
+                },
+            },
+        )))
     }
 
     async fn list_thread_messages_range(
@@ -2533,9 +2771,16 @@ where
         let mut needs_title: Vec<(usize, ThreadId, u64)> = Vec::new();
         for index in &listed {
             let idx = page.len();
-            let record = index.record.clone();
+            let mut record = index.record.clone();
             if record.title.is_none() {
-                needs_title.push((idx, record.thread_id.clone(), index.next_sequence));
+                match &index.derived_title {
+                    // The write path seeded the label into the index row; the
+                    // sidebar entry costs no extra reads.
+                    Some(derived) => record.title = Some(derived.clone()),
+                    // Row predates write-time derivation: probe for this
+                    // response; the migration backfills the label durably.
+                    None => needs_title.push((idx, record.thread_id.clone(), index.next_sequence)),
+                }
             }
             page.push(record);
         }
@@ -2547,6 +2792,8 @@ where
         // are silent-ok — the sidebar entry simply falls back to its
         // thread-id label, matching the WebUI fallback path.
         if !needs_title.is_empty() {
+            self.ensure_transcript_indexes_migrated(&request.scope)
+                .await?;
             let title_results: Vec<(
                 usize,
                 ThreadId,
@@ -2572,6 +2819,10 @@ where
                             .and_then(|message| message.content.as_deref())
                             .and_then(derive_title_from_message)
                         {
+                            // Read-only: the label serves this response but is
+                            // not persisted here. Backfilling it durably is the
+                            // thread-index migration's job (threads guardrail —
+                            // a list request must not repair the projection).
                             page[idx].title = Some(title);
                         }
                     }
@@ -2813,6 +3064,18 @@ fn fs_index_name(raw: &str) -> Result<IndexName, SessionThreadError> {
         .map_err(|error| SessionThreadError::Backend(format!("invalid index name: {error}")))
 }
 
+/// Every ordered-index spec this crate queries, all declared together at the
+/// `/threads` alias root. Each leads with its partition key, so one
+/// declaration above the per-thread paths serves every thread on the mount.
+fn root_index_specs() -> Result<[IndexSpec; 4], SessionThreadError> {
+    Ok([
+        message_sequence_index_spec()?,
+        message_kind_status_index_spec()?,
+        summary_index_spec()?,
+        thread_index::thread_activity_index_spec()?,
+    ])
+}
+
 fn summary_index_spec() -> Result<IndexSpec, SessionThreadError> {
     Ok(IndexSpec::new(
         fs_index_name("thread_summary_sequence_v2")?,
@@ -2921,7 +3184,7 @@ fn ensure_user_accepted(
     if message.kind == MessageKind::User
         && matches!(
             message.status,
-            MessageStatus::Accepted | MessageStatus::DeferredBusy
+            MessageStatus::Accepted | MessageStatus::DeferredBusy | MessageStatus::Queued
         )
     {
         return Ok(());
@@ -3118,7 +3381,7 @@ fn history_summary_artifacts(
 /// apply — blocking it would silently drop a legitimate compacted range.
 ///
 /// Resurfaceable statuses (must still block the summary):
-///   Draft | Interrupted | Superseded | DeferredBusy
+///   Draft | Interrupted | Superseded | Queued | DeferredBusy
 /// Permanent non-visible (must NOT block):
 ///   RejectedBusy (terminal, user must explicitly resend)
 ///   CapabilityDisplayPreview kind (never model-visible regardless of status)
@@ -3132,6 +3395,7 @@ fn can_resurface_as_model_visible(message: &ThreadMessageRecord) -> bool {
         MessageStatus::Draft
             | MessageStatus::Interrupted
             | MessageStatus::Superseded
+            | MessageStatus::Queued
             | MessageStatus::DeferredBusy
     )
 }

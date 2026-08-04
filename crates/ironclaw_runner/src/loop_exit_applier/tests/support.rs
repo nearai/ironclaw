@@ -1,7 +1,18 @@
+use ironclaw_turns::loop_exit::LoopExitApplier;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_host_api::ids::{ProcessId, TenantId, ThreadId};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef,
+    ReplyTargetBindingRef, RunProfileVersion, SanitizedFailure, SourceBindingRef, TurnActor,
+    TurnCheckpointId, TurnGateRef, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope,
+    TurnStatus,
+};
+use ironclaw_loop_contracts::{
+    CheckpointSchemaId, LoopBlocked, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStateRef,
+    LoopCompleted, LoopCompletionKind, LoopDriverId, LoopExit, RedactedCheckpointPayload,
+};
 use ironclaw_processes::{
     ClaimProcessesRequest, ClaimedProcess, FailProcessRequest, JournaledProcessSnapshot,
     ProcessJournalCursor, ProcessLeaseRequest, ProcessLifecycleStatus,
@@ -13,20 +24,14 @@ use ironclaw_threads::{
     ThreadMessageRecord, ThreadScope, ToolResultSafeSummary,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, EventCursor,
-    GateRef, GetLoopCheckpointRequest, GetRunStateRequest, LoopBlocked, LoopBlockedKind,
-    LoopCheckpointKind, LoopCheckpointRecord, LoopCheckpointStateRef, LoopCheckpointStore,
-    LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef,
-    LoopResultRef, PutLoopCheckpointRequest, RedactedCheckpointPayload, ReplyTargetBindingRef,
-    ResumeTurnRequest, ResumeTurnResponse, RunProfileVersion, SanitizedFailure, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnError, TurnId,
-    TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope, TurnStatus,
-    run_profile::{CheckpointSchemaId, LoopDriverId},
-    runner::ClaimedTurnRun,
+    AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, GetLoopCheckpointRequest,
+    GetRunStateRequest, LoopCheckpointRecord, LoopCheckpointStore, PutLoopCheckpointRequest,
+    ResumeTurnRequest, ResumeTurnResponse, SubmitTurnRequest, SubmitTurnResponse, TurnError,
+    TurnRunState, runner::ClaimedTurnRun,
 };
 
 use crate::loop_exit_applier::{
-    AwaitDependentRunEvidenceStore, InMemoryLoopExitEvidencePort, LoopExitApplier,
+    AwaitDependentRunEvidenceStore, InMemoryLoopExitEvidencePort,
     ThreadCheckpointLoopExitEvidencePort,
 };
 
@@ -57,7 +62,7 @@ pub(super) fn empty_await_dependent_run_evidence() -> Arc<dyn AwaitDependentRunE
 pub(super) struct RecordingAwaitDependentRunEvidence {
     scope: TurnScope,
     run_id: TurnRunId,
-    gate_ref: GateRef,
+    gate_ref: TurnGateRef,
     mode: ironclaw_loop_host::SpawnSubagentMode,
 }
 
@@ -65,7 +70,7 @@ impl RecordingAwaitDependentRunEvidence {
     pub(super) fn new(
         scope: TurnScope,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         mode: ironclaw_loop_host::SpawnSubagentMode,
     ) -> Self {
         Self {
@@ -173,6 +178,7 @@ pub(super) fn running_run_state(
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply").expect("valid"),
         resolved_run_profile_id: ironclaw_turns::RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
+        allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
         received_at: chrono::Utc::now(),
@@ -203,7 +209,7 @@ impl AgentTurnRuntimePort for StaticAgentTurnRuntime {
         &self,
         _request: SubmitTurnRequest,
         _admission_policy: &dyn ironclaw_turns::TurnAdmissionPolicy,
-        _run_profile_resolver: &dyn ironclaw_turns::RunProfileResolver,
+        _run_profile_resolver: &dyn ironclaw_loop_contracts::RunProfileResolver,
     ) -> Result<SubmitTurnResponse, TurnError> {
         panic!("submit_turn should not be called by evidence tests")
     }
@@ -390,7 +396,7 @@ impl Fixture {
 }
 
 pub(super) fn claimed_run() -> ClaimedTurnRun {
-    let descriptor = ironclaw_turns::AgentLoopDriverDescriptor {
+    let descriptor = ironclaw_loop_contracts::AgentLoopDriverDescriptor {
         id: LoopDriverId::new("test_loop").expect("valid"),
         version: RunProfileVersion::new(1),
         checkpoint_schema_id: Some(CheckpointSchemaId::new("test_checkpoint").expect("valid")),
@@ -417,6 +423,7 @@ pub(super) fn claimed_run() -> ClaimedTurnRun {
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply").expect("valid"),
             resolved_run_profile_id: ironclaw_turns::RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
+            allow_steering: true,
             resolved_model_route: None,
             model_usage: None,
             received_at: chrono::Utc::now(),
@@ -438,9 +445,9 @@ pub(super) fn claimed_run() -> ClaimedTurnRun {
 }
 
 fn test_profile(
-    descriptor: ironclaw_turns::AgentLoopDriverDescriptor,
-) -> ironclaw_turns::ResolvedRunProfile {
-    use ironclaw_turns::run_profile::*;
+    descriptor: ironclaw_loop_contracts::AgentLoopDriverDescriptor,
+) -> ironclaw_loop_contracts::ResolvedRunProfile {
+    use ironclaw_loop_contracts::*;
     use ironclaw_turns::*;
 
     ResolvedRunProfile {
@@ -476,7 +483,7 @@ fn test_profile(
             max_model_calls: 32,
             max_capability_invocations: 64,
         },
-        personal_context_policy: ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
+        personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
         runtime_constraints: RuntimeProfileConstraints {
             allow_raw_runtime_backend_selection: false,
             allow_broad_capability_surface: false,

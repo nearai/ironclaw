@@ -11,12 +11,16 @@
 
 use std::sync::Arc;
 
+use chrono::{TimeZone, Utc};
 use ironclaw_conversations::{
-    AdapterInstallationId, AdapterKind, ConditionalUnpairOutcome, ConversationBindingService,
-    ConversationRouteKind, ExpectedExternalActorOwner, ExternalActorBindingEpoch, ExternalActorRef,
-    ExternalConversationRef, ExternalEventId, InboundTurnError,
-    RebornFilesystemConversationServices, ResolveConversationRequest,
+    AcceptConversationMessageRequest, AcceptedConversationMessageLookup,
+    AcceptedConversationMessageReplay, AdapterInstallationId, AdapterKind,
+    ConditionalUnpairOutcome, ConversationBindingService, ConversationMessageRecord,
+    ConversationRouteKind, ExpectedExternalActorOwner, ExternalActorBindingEpoch, ExternalEventId,
+    InboundConversationService, InboundMessageContentRef, InboundTurnError,
+    MessageIdempotencyStatus, RebornFilesystemConversationServices, ResolveConversationRequest,
 };
+use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
 use ironclaw_filesystem::{CasExpectation, InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     ids::{AgentId, ProjectId, TenantId, UserId},
@@ -59,7 +63,7 @@ fn default_installation() -> AdapterInstallationId {
 }
 
 fn external_actor(id: &str) -> ExternalActorRef {
-    ExternalActorRef::new("user", id).unwrap()
+    ExternalActorRef::new("user", id, None::<String>).unwrap()
 }
 
 fn external_conversation(id: &str) -> ExternalConversationRef {
@@ -137,6 +141,138 @@ async fn filesystem_conversation_services_round_trip_persisted_state_on_reopen()
         .unwrap();
     assert_eq!(resolution.tenant_id, tenant_id("tenant-a"));
     assert_eq!(resolution.actor.user_id, user_id("alice"));
+
+    // The durable wrapper forwards the inbound-message half of the contract
+    // too, not just binding resolution. `inbound_contract.rs` only ever drives
+    // these two methods through `InMemoryConversationServices`, so without
+    // this the filesystem-backed `accept_inbound_message` /
+    // `replay_accepted_inbound_message` forwarders are never executed —
+    // and a broken delegation here would look exactly like a passing suite.
+    let accepted = reopened
+        .accept_inbound_message(AcceptConversationMessageRequest {
+            tenant_id: tenant_id("tenant-a"),
+            thread_id: resolution.turn_scope.thread_id,
+            actor: resolution.actor,
+            adapter_kind: telegram(),
+            adapter_installation_id: default_installation(),
+            external_actor_ref: external_actor("telegram-user-1"),
+            source_binding_ref: resolution.source_binding_ref,
+            reply_target_binding_ref: resolution.reply_target_binding_ref,
+            external_conversation_ref: external_conversation("chat-1"),
+            external_event_id: ExternalEventId::new("event-2").unwrap(),
+            route_kind: ConversationRouteKind::Direct,
+            content_ref: InboundMessageContentRef::new("content:event-2").unwrap(),
+            received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 0, 0).unwrap(),
+            requested_run_profile: None,
+        })
+        .await
+        .expect("the durable services accept an inbound message");
+    assert_eq!(accepted.tenant_id, tenant_id("tenant-a"));
+
+    let replay = reopened
+        .replay_accepted_inbound_message(AcceptedConversationMessageLookup {
+            tenant_id: tenant_id("tenant-a"),
+            adapter_kind: telegram(),
+            adapter_installation_id: default_installation(),
+            external_actor_ref: external_actor("telegram-user-1"),
+            external_conversation_ref: external_conversation("chat-1"),
+            external_event_id: ExternalEventId::new("event-2").unwrap(),
+        })
+        .await
+        .expect("the replay lookup succeeds")
+        .expect("the accepted message replays by its external event id");
+    assert_eq!(
+        replay.accepted_message.message_ref, accepted.message_ref,
+        "the replay must return the message the accept produced"
+    );
+    assert_eq!(replay.accepted_message.thread_id, accepted.thread_id);
+    assert_eq!(
+        accepted.idempotency,
+        MessageIdempotencyStatus::Inserted,
+        "the first accept inserts"
+    );
+    assert_eq!(
+        replay.accepted_message.idempotency,
+        MessageIdempotencyStatus::Duplicate,
+        "replaying an already-accepted event reports it as a duplicate, not a fresh insert"
+    );
+
+    // WS5 renamed this DTO family (`AcceptedInboundMessage*` ->
+    // `AcceptedConversationMessage*`, `ThreadMessageRecord` ->
+    // `ConversationMessageRecord`). Serde keys on FIELD names, not type names,
+    // so the rename must be invisible on the wire — these types are persisted
+    // through the conversation state store, and a rename that silently changed
+    // the encoding would strand every durable record written before it. Nothing
+    // else in the suite serializes this family, so without this the derives are
+    // never even instantiated.
+    let record = reopened
+        .inner()
+        .accepted_messages()
+        .await
+        .into_iter()
+        .find(|record| record.accepted.message_ref == accepted.message_ref)
+        .expect("the accepted message is recorded in conversation state");
+
+    let encoded_record = serde_json::to_value(&record).expect("record serializes");
+    for field in [
+        "accepted",
+        "actor",
+        "external_event_id",
+        "content_ref",
+        "received_at",
+    ] {
+        assert!(
+            encoded_record.get(field).is_some(),
+            "ConversationMessageRecord must keep its `{field}` wire field after the type rename"
+        );
+    }
+    for field in [
+        "tenant_id",
+        "thread_id",
+        "actor",
+        "message_ref",
+        "source_binding_ref",
+        "reply_target_binding_ref",
+        "received_at",
+        "idempotency",
+    ] {
+        assert!(
+            encoded_record["accepted"].get(field).is_some(),
+            "AcceptedConversationMessage must keep its `{field}` wire field after the type rename"
+        );
+    }
+
+    assert_eq!(
+        serde_json::from_value::<ConversationMessageRecord>(encoded_record)
+            .expect("record round-trips"),
+        record,
+        "ConversationMessageRecord must survive a durable round trip unchanged"
+    );
+
+    let encoded_replay = serde_json::to_value(&replay).expect("replay serializes");
+    assert_eq!(
+        serde_json::from_value::<AcceptedConversationMessageReplay>(encoded_replay)
+            .expect("replay round-trips"),
+        replay,
+        "AcceptedConversationMessageReplay must survive a durable round trip unchanged"
+    );
+
+    let lookup = AcceptedConversationMessageLookup {
+        tenant_id: tenant_id("tenant-a"),
+        adapter_kind: telegram(),
+        adapter_installation_id: default_installation(),
+        external_actor_ref: external_actor("telegram-user-1"),
+        external_conversation_ref: external_conversation("chat-1"),
+        external_event_id: ExternalEventId::new("event-2").unwrap(),
+    };
+    assert_eq!(
+        serde_json::from_value::<AcceptedConversationMessageLookup>(
+            serde_json::to_value(&lookup).expect("lookup serializes")
+        )
+        .expect("lookup round-trips"),
+        lookup,
+        "AcceptedConversationMessageLookup must survive a durable round trip unchanged"
+    );
 }
 
 #[tokio::test]
@@ -459,5 +595,275 @@ async fn filesystem_conversation_state_store_isolates_two_tenants_with_same_user
     assert_ne!(
         resolution_a.turn_scope.thread_id, resolution_b.turn_scope.thread_id,
         "cross-tenant first-contact bindings must produce distinct thread ids"
+    );
+}
+
+/// A threaded route: a topic inside the conversation plus the per-event reply
+/// target. This is the shape the `thread_id` -> `topic_id` rename touched, so
+/// it is the shape the durable-grammar tests drive.
+fn threaded_conversation(id: &str, topic: &str, reply_target: &str) -> ExternalConversationRef {
+    ExternalConversationRef::new(Some("space-1"), id, Some(topic), Some(reply_target))
+        .expect("threaded conversation")
+}
+
+/// Collect every `(key, value)` pair in a JSON document, at any depth.
+fn json_fields(value: &serde_json::Value, out: &mut Vec<(String, serde_json::Value)>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                out.push((key.clone(), child.clone()));
+                json_fields(child, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                json_fields(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+async fn read_state_document(
+    backend: &InMemoryBackend,
+    tenant: &str,
+    user: &str,
+) -> serde_json::Value {
+    let state_path = VirtualPath::new(format!(
+        "/tenants/{tenant}/users/{user}/conversations/state.json"
+    ))
+    .expect("state path");
+    let versioned = backend
+        .get(&state_path)
+        .await
+        .expect("read state")
+        .expect("stored state");
+    serde_json::from_slice(&versioned.entry.body).expect("state json")
+}
+
+/// Drive a paired actor, a threaded binding and an accepted message through the
+/// durable services, and return the persisted document.
+async fn seed_threaded_state(
+    backend: Arc<InMemoryBackend>,
+    scoped: Arc<ScopedFilesystem<InMemoryBackend>>,
+    conversation: &ExternalConversationRef,
+) -> serde_json::Value {
+    let services = RebornFilesystemConversationServices::new(Arc::clone(&scoped))
+        .await
+        .expect("services");
+    services
+        .pair_external_actor(
+            tenant_id("tenant-a"),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-threaded"),
+            user_id("alice"),
+        )
+        .await
+        .expect("pair actor");
+    let resolution = services
+        .resolve_or_create_binding(resolve_request(
+            tenant_id("tenant-a"),
+            external_actor("telegram-user-threaded"),
+            conversation.clone(),
+            "event-threaded-1",
+        ))
+        .await
+        .expect("resolve threaded binding");
+    services
+        .accept_inbound_message(AcceptConversationMessageRequest {
+            tenant_id: tenant_id("tenant-a"),
+            thread_id: resolution.turn_scope.thread_id,
+            actor: resolution.actor,
+            adapter_kind: telegram(),
+            adapter_installation_id: default_installation(),
+            external_actor_ref: external_actor("telegram-user-threaded"),
+            source_binding_ref: resolution.source_binding_ref,
+            reply_target_binding_ref: resolution.reply_target_binding_ref,
+            external_conversation_ref: conversation.clone(),
+            external_event_id: ExternalEventId::new("event-threaded-2").unwrap(),
+            route_kind: ConversationRouteKind::Direct,
+            content_ref: InboundMessageContentRef::new("content:event-threaded-2").unwrap(),
+            received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 0, 0).unwrap(),
+            requested_run_profile: None,
+        })
+        .await
+        .expect("accept a threaded message");
+    drop(services);
+    read_state_document(&backend, "tenant-a", "alice").await
+}
+
+/// The rollback half of the `thread_id` -> `topic_id` rename, asserted on the
+/// *document* rather than on a surrogate struct.
+///
+/// `stored_refs.rs`'s own tests prove the adapter maps the grammar correctly,
+/// but they declare their own record types — so an adapter that was never
+/// attached, or attached to only some of the fields that carry a ref, leaves
+/// them green. This drives the real `StoredConversationState` through the real
+/// services and then reads every key in the persisted document, so a missing or
+/// misplaced annotation at *any* site fails here.
+///
+/// The assertion is deliberately the absence of the canonical spelling: a
+/// released binary's readers name `thread_id`/`message_id` and carry no
+/// aliases, so a document written in the canonical spelling reads back with
+/// `None` for both, with no error — and because the topic keys `BindingKey`,
+/// two threaded bindings in one conversation would collapse onto one key and
+/// the earlier one would be dropped.
+#[tokio::test]
+async fn filesystem_conversation_services_persist_external_refs_in_the_durable_grammar() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_conversations_fs(Arc::clone(&backend), "tenant-a", "alice");
+    let conversation = threaded_conversation("chat-threaded", "topic-1", "msg-1700.1");
+    let state = seed_threaded_state(Arc::clone(&backend), Arc::clone(&scoped), &conversation).await;
+
+    let mut fields = Vec::new();
+    json_fields(&state, &mut fields);
+    assert!(
+        !fields.is_empty(),
+        "the persisted document scanned empty — the walk is broken"
+    );
+
+    let canonical: Vec<&String> = fields
+        .iter()
+        .map(|(key, _)| key)
+        .filter(|key| key.as_str() == "topic_id" || key.as_str() == "reply_target_message_id")
+        .collect();
+    assert!(
+        canonical.is_empty(),
+        "durable records must keep the released grammar so a rollback can still read them; \
+         found the canonical spelling at {canonical:?} in {state}"
+    );
+
+    // Non-vacuity: the topic and the reply target must actually be in there
+    // under the durable names, or "no canonical spelling" would pass on an
+    // empty document.
+    assert!(
+        fields
+            .iter()
+            .any(|(key, value)| key == "thread_id" && value == "topic-1"),
+        "the external topic must persist as `thread_id`: {state}"
+    );
+    assert!(
+        fields
+            .iter()
+            .any(|(key, value)| key == "message_id" && value == "msg-1700.1"),
+        "the reply target must persist as `message_id`: {state}"
+    );
+
+    // And the route still resolves after a reopen, which is what the grammar
+    // is protecting.
+    let reopened = RebornFilesystemConversationServices::new(scoped)
+        .await
+        .expect("reopen");
+    let resolution = reopened
+        .resolve_or_create_binding(resolve_request(
+            tenant_id("tenant-a"),
+            external_actor("telegram-user-threaded"),
+            conversation,
+            "event-threaded-3",
+        ))
+        .await
+        .expect("the threaded binding survives a reopen");
+    assert_eq!(resolution.actor.user_id, user_id("alice"));
+}
+
+/// The upgrade half, and the reason the aliases are not dead code: a document
+/// written in the canonical spelling — by an intermediate build of this rename
+/// — must still load, with its topic and reply target intact.
+///
+/// Rewriting is scoped to objects that carry a `conversation_id`, so the
+/// canonical `ThreadId` fields elsewhere in the document (`BindingRecord`,
+/// `ReplyTargetRecord`, `ThreadKey` all have a real `thread_id`) are left
+/// alone. If the rewrite ever stopped finding anything, the assertion below it
+/// would still have to hold, so the test cannot pass vacuously.
+#[tokio::test]
+async fn filesystem_conversation_services_reopen_pre_unification_external_refs() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_conversations_fs(Arc::clone(&backend), "tenant-a", "alice");
+    let conversation = threaded_conversation("chat-canonical", "topic-9", "msg-1900.9");
+    let mut state =
+        seed_threaded_state(Arc::clone(&backend), Arc::clone(&scoped), &conversation).await;
+
+    fn rewrite_refs_to_canonical(value: &mut serde_json::Value, rewritten: &mut usize) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.contains_key("conversation_id") {
+                    if let Some(topic) = map.remove("thread_id") {
+                        map.insert("topic_id".to_string(), topic);
+                        *rewritten += 1;
+                    }
+                    if let Some(reply_target) = map.remove("message_id") {
+                        map.insert("reply_target_message_id".to_string(), reply_target);
+                        *rewritten += 1;
+                    }
+                }
+                for child in map.values_mut() {
+                    rewrite_refs_to_canonical(child, rewritten);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    rewrite_refs_to_canonical(item, rewritten);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut rewritten = 0usize;
+    rewrite_refs_to_canonical(&mut state, &mut rewritten);
+    assert!(
+        rewritten > 0,
+        "the rewrite found no external ref to re-spell, so the reopen below would \
+         prove nothing: {state}"
+    );
+
+    let state_path = VirtualPath::new("/tenants/tenant-a/users/alice/conversations/state.json")
+        .expect("state path");
+    let mut versioned = backend
+        .get(&state_path)
+        .await
+        .expect("read state")
+        .expect("stored state");
+    versioned.entry.body = serde_json::to_vec(&state).expect("canonical state json");
+    backend
+        .put(
+            &state_path,
+            versioned.entry,
+            CasExpectation::Version(versioned.version),
+        )
+        .await
+        .expect("write canonically spelled snapshot");
+
+    let reopened = RebornFilesystemConversationServices::new(scoped)
+        .await
+        .expect("a canonically spelled snapshot remains readable");
+    let resolution = reopened
+        .resolve_or_create_binding(resolve_request(
+            tenant_id("tenant-a"),
+            external_actor("telegram-user-threaded"),
+            conversation,
+            "event-canonical-1",
+        ))
+        .await
+        .expect("the threaded route survives the alias path");
+    assert_eq!(resolution.actor.user_id, user_id("alice"));
+
+    // The topic must have survived as a topic, not have been dropped into the
+    // conversation root: a route with a *different* topic in the same
+    // conversation must not resolve to the same binding.
+    let other_topic = reopened
+        .resolve_or_create_binding(resolve_request(
+            tenant_id("tenant-a"),
+            external_actor("telegram-user-threaded"),
+            threaded_conversation("chat-canonical", "topic-other", "msg-1900.9"),
+            "event-canonical-2",
+        ))
+        .await
+        .expect("a second topic resolves");
+    assert_ne!(
+        resolution.turn_scope.thread_id, other_topic.turn_scope.thread_id,
+        "two topics in one conversation must key different bindings — if the topic had \
+         been read as None, both would collapse onto the conversation root"
     );
 }

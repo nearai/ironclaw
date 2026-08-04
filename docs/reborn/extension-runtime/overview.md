@@ -77,7 +77,7 @@ cannot be derived from the manifest. Host code consumes a package as one
 opaque, cleanly built bundle (id, display name, manifest source, assets);
 nothing outside the package enumerates or re-describes its contents, and
 generic crates never name one. There is no hand-maintained catalog: the
-bundled inventory (`ironclaw_first_party_extensions`) holds exactly one
+bundled inventory (`ironclaw_extension_support`) holds exactly one
 small module per package (`src/packages/<id>.rs`) beside its
 `assets/<id>/` directory, and a collector concatenates the per-module
 bundles. Adding an integration is a new assets directory plus its module;
@@ -220,6 +220,11 @@ Notes on the sections:
   `shared_secret_header` (constant-time compare), or `none`. Signing secrets
   never reach the adapter. Two recipe kinds cover Slack and Telegram; new kinds
   are added to the host when a protocol genuinely needs one.
+- **`[[channel.egress]]`** may narrow a host/method grant with exact `paths`,
+  segment-bounded `path_prefixes`, and request/response byte limits. Empty path
+  lists preserve the legacy host+method policy. Path-placeholder credentials
+  remain host-injected; the policy matcher evaluates the placeholder-bearing
+  path, and the runtime substitutes the secret only after approval.
 - **`conversation_model`** (required on `[channel]`) classifies how external
   conversations map to IronClaw conversations:
   - `continuous` — the protocol supplies conversation identity; each external
@@ -303,7 +308,8 @@ Rules that keep the boundary easy to reason about:
 Extensions that use the same `VendorId` each carry the recipe (gmail, drive,
 calendar all embed the `[auth.google]` recipe). During internal publication the
 host unifies them: recipes for one vendor must be **identical except `scopes`
-and `display_name`**, or publication fails with a conflict. Scope ceilings union
+and presentation-only `display_name`, `instructions`, and `setup_url`**, or
+publication fails with a conflict. Scope ceilings union
 across extensions available to the caller exactly as the system does today; a
 new extension needing more scopes triggers incremental re-consent. Accounts and
 grants are stored per user and vendor and shared — connecting Google once serves
@@ -460,6 +466,17 @@ pub trait ChannelAdapter: Send + Sync {
     /// secrets, bounded input.
     fn inbound(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError>;
 
+    /// Fetch one inbound attachment through the manifest-restricted egress
+    /// pinned to the adapter generation that parsed the request. The default
+    /// fails closed with `Unsupported`.
+    async fn fetch_attachment(
+        &self,
+        attachment: &ChannelAttachmentRef,
+        egress: &dyn RestrictedEgress,
+    ) -> Result<InboundAttachment, ChannelError> {
+        Err(ChannelError::Unsupported)
+    }
+
     /// Render and send one normalized outbound envelope through restricted
     /// egress. Owns vendor formatting, splitting, target syntax, DM
     /// provisioning, and safe error mapping. Returns structured outcomes;
@@ -489,6 +506,10 @@ pub enum InboundOutcome {
     /// text, attachments, optional opaque `reply_context` ≤ 4 KiB that the
     /// host stores server-side and hands back at delivery time).
     Messages(Vec<NormalizedInboundMessage>),
+    /// One verified fragment of a provider-level logical message. The host
+    /// durably stages it, acknowledges the fragment, and admits one ordered
+    /// atomic message after a bounded quiet window.
+    BatchFragment(InboundBatchFragment),
     /// Bounded immediate response (e.g. Slack URL-verification challenge).
     Respond(ImmediateResponse),
     /// Authenticated no-op (ignored event types).
@@ -496,12 +517,26 @@ pub enum InboundOutcome {
 }
 ```
 
-Attachments are **references, not bytes**: an `AttachmentRef` carries the
-vendor URL/id and a mime hint, which keeps `inbound` pure. When something
-actually needs the bytes, the *host* fetches them through restricted egress
-with the channel credential — secrets stay host-side. Outbound attachments are
-envelope parts; `deliver` owns the upload. (The ref type is defined now; the
-fetch path is built only when a consumer needs it.)
+Inbound attachments remain **references, not bytes** during parsing:
+`ChannelAttachmentRef` carries a validated descriptor plus an opaque vendor
+reference. The reference is host-only and redacted from `Debug`. Ordinary
+message references remain transient. Provider batches require one narrow
+exception: verified fragments are serialized only into the tenant-scoped,
+host-private inbound-batch snapshot until the batch is admitted or rejected.
+Those opaque references never enter events, projections, transcripts, or
+model-visible state. After duplicate replay misses and before-inbound policy
+allows or rewrites the message, the product workflow fetches through the exact
+generation-pinned adapter and manifest-restricted egress, validates id, MIME,
+size, count, and total-byte budgets, and lands bytes through the project
+filesystem before accepting the message. Retryable transfer failures release
+the idempotency attempt; permanent failures settle it.
+
+For final and triggered outbound replies, the coordinator recognizes confined
+`/workspace/...` file references, preflights and reads them through the
+turn-scoped project filesystem, and appends transient `OutboundPart::File`
+values. Callers cannot inject pre-materialized file parts. The adapter owns the
+vendor upload; raw bytes never enter attempts, events, projections, or
+transcripts.
 
 ### 4.3 Auth — one host engine, recipes, no adapter
 
@@ -640,10 +675,17 @@ sequenceDiagram
     R->>R: match route, enforce method/body/rate/deadline
     R->>R: execute verification recipe (constant-time, replay window)
     R->>A: inbound(verified bounded request)
-    A-->>R: Messages | Respond | Ignore
-    R->>W: durable dedupe + admission commit
-    W-->>R: receipt
-    R-->>V: 2xx (only after durable commit; else retryable 5xx)
+    A-->>R: Messages | BatchFragment | Respond | Ignore
+    alt Ordinary message
+        R->>W: durable dedupe + admission commit
+        W-->>R: receipt
+        R-->>V: 2xx after admission (else retryable 5xx)
+    else Provider-batch fragment
+        R->>R: durable host-private stage
+        R-->>V: 2xx after staging (else retryable 5xx)
+        R->>R: settle, lease, merge, recover after restart
+        R->>W: one ordered atomic admission
+    end
     W->>W: identity/conversation binding, turn submission
 ```
 

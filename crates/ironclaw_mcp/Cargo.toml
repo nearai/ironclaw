@@ -12,6 +12,7 @@ async-trait = "0.1"
 futures-util = "0.3"
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 serde_json = "1"
 thiserror = "2"

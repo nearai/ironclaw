@@ -44,14 +44,14 @@ use ironclaw_turns::{AcceptedMessageRef, IdempotencyKey, SubmitTurnResponse};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
-    AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind, ConditionalUnpairOutcome,
-    ConversationActorPairingService, ConversationBindingResolution, ConversationBindingService,
-    ExpectedExternalActorOwner, ExternalActorBindingEpoch, ExternalActorRef,
-    ExternalConversationIdentity, InMemoryConversationServices, InboundTurnError,
+    AcceptConversationMessageRequest, AcceptedConversationMessage,
+    AcceptedConversationMessageLookup, AcceptedConversationMessageReplay, AdapterInstallationId,
+    AdapterKind, ConditionalUnpairOutcome, ConversationActorPairingService,
+    ConversationBindingResolution, ConversationBindingService, ConversationMessageRecord,
+    ExpectedExternalActorOwner, ExternalActorBindingEpoch, ExternalConversationIdentity,
+    InMemoryConversationServices, InboundConversationService, InboundTurnError,
     LinkConversationRequest, LinkedConversationBinding, ReplyTargetBinding,
-    ResolveConversationRequest, SessionThreadService, ThreadMessageRecord,
-    ValidateReplyTargetRequest,
+    ResolveConversationRequest, ValidateReplyTargetRequest,
     memory::{
         AcceptedMessageReplayKey, ActorKey, BindingKey, BindingRecord, ExternalEventRouteKey,
         InMemoryState, MessageIdempotencyKey, ReplyTargetRecord, StoredAcceptedMessageReplay,
@@ -59,6 +59,7 @@ use crate::{
     },
     state_store::{ConversationStateRepository, PersistedConversationState},
 };
+use ironclaw_extension_contracts::external::ExternalActorRef;
 
 const STATE_PREFIX: &str = "/conversations";
 
@@ -119,11 +120,11 @@ struct StoredConversationState {
     reply_targets: HashMap<String, ReplyTargetRecord>,
     threads: Vec<(ThreadKey, ThreadRecord)>,
     external_event_routes: Vec<(ExternalEventRouteKey, ExternalConversationIdentity)>,
-    message_idempotency: Vec<(MessageIdempotencyKey, AcceptedInboundMessage)>,
+    message_idempotency: Vec<(MessageIdempotencyKey, AcceptedConversationMessage)>,
     message_replays: Vec<(AcceptedMessageReplayKey, StoredAcceptedMessageReplay)>,
     submission_keys: Vec<(AcceptedMessageRef, IdempotencyKey)>,
     submitted_message_responses: Vec<(AcceptedMessageRef, SubmitTurnResponse)>,
-    messages: Vec<ThreadMessageRecord>,
+    messages: Vec<ConversationMessageRecord>,
 }
 
 impl StoredConversationState {
@@ -673,18 +674,18 @@ impl ConversationBindingService for RebornFilesystemConversationServices {
 }
 
 #[async_trait]
-impl SessionThreadService for RebornFilesystemConversationServices {
+impl InboundConversationService for RebornFilesystemConversationServices {
     async fn accept_inbound_message(
         &self,
-        request: AcceptInboundMessageRequest,
-    ) -> Result<AcceptedInboundMessage, InboundTurnError> {
+        request: AcceptConversationMessageRequest,
+    ) -> Result<AcceptedConversationMessage, InboundTurnError> {
         self.inner.accept_inbound_message(request).await
     }
 
     async fn replay_accepted_inbound_message(
         &self,
-        lookup: AcceptedInboundMessageLookup,
-    ) -> Result<Option<AcceptedInboundMessageReplay>, InboundTurnError> {
+        lookup: AcceptedConversationMessageLookup,
+    ) -> Result<Option<AcceptedConversationMessageReplay>, InboundTurnError> {
         self.inner.replay_accepted_inbound_message(lookup).await
     }
 

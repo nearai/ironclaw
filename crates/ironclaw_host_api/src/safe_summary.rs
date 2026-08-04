@@ -95,11 +95,11 @@ impl std::fmt::Display for SafeSummary {
 }
 
 /// The canonical safe-summary redaction rule — the single definition.
-/// `ironclaw_turns::run_profile::host::validate_loop_safe_summary` and
-/// `ironclaw_memory_native`'s memory-snippet validator DELEGATE here (the turns
-/// copy keeps only its `INPUT_ENCODE_HUMAN_SUMMARY` sentinel bypass, a
-/// loop-input-encoding concern; memory_native layers extra snippet-specific
-/// bans on top). Change the rule here, never in a delegate.
+/// `ironclaw_loop_contracts`'s `validate_loop_safe_summary` and
+/// `ironclaw_memory_native`'s memory-snippet validator DELEGATE here (the
+/// loop-contracts copy keeps only its `INPUT_ENCODE_HUMAN_SUMMARY` sentinel
+/// bypass, a loop-input-encoding concern; memory_native layers extra
+/// snippet-specific bans on top). Change the rule here, never in a delegate.
 fn validate_safe_summary(value: &str) -> Result<(), HostApiError> {
     if value.is_empty() {
         return Err(HostApiError::invalid_safe_summary("must not be empty"));

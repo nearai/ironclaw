@@ -26,7 +26,6 @@ allowlist="$(
                 or (.name == "ironclaw_architecture")
                 or (.name == "ironclaw_slack_extension")
                 or (.name == "ironclaw_telegram_extension")
-                or (.name == "ironclaw_telegram_v2_adapter")
                 or (.name | startswith("ironclaw_webui"))
               )
               and (.name != "ironclaw_reborn_integration_tests")
@@ -40,7 +39,7 @@ allowlist="$(
 # Every workspace crate linked by the shipped binary through a normal or build
 # dependency. The union below keeps non-closure allowlist crates covered too.
 closure="$(
-  comm -12 \
+  LC_ALL=C comm -12 \
     <(cargo tree -p ironclaw -e normal,build --prefix none \
       | grep -oE 'ironclaw_[a-z0-9_]+' \
       | LC_ALL=C sort -u) \

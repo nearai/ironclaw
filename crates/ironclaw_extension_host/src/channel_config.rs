@@ -20,14 +20,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::recipe::RecipeSecretField;
 use ironclaw_extensions::{
     ExtensionInstallationStorePort, ExtensionManifestRecord, ResolvedExtensionManifest,
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     ids::{ExtensionId, SecretHandle},
-    product_surface::{ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind},
-    recipe::RecipeSecretField,
     resource::ResourceScope,
 };
 use ironclaw_secrets::{SecretMaterial, SecretStorePort};
@@ -186,6 +185,20 @@ impl ChannelConfigService {
     ) -> Result<Vec<RecipeSecretField>, ChannelConfigError> {
         let record = self.manifest(extension_id).await?;
         Ok(channel_config_fields(record.resolved()))
+    }
+
+    /// Whether the installed manifest declares `[admin_configuration]`.
+    ///
+    /// `pub` for the manager-side product service (§6.8.3): the
+    /// `ChannelConfigProductService` projection suppresses the field list for
+    /// such an extension. Only this yes/no leaves the crate — the manifest
+    /// read itself stays internal.
+    pub async fn declares_admin_configuration(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<bool, ChannelConfigError> {
+        let manifest = self.resolved_manifest(extension_id).await?;
+        Ok(!manifest.admin_configuration.is_empty())
     }
 
     async fn resolved_manifest(
@@ -661,100 +674,6 @@ fn channel_config_admin_idempotency_key(
     })
 }
 
-/// The production [`ironclaw_product::ChannelConfigProductService`] port
-/// over [`ChannelConfigService`] — the surface the WebUI setup service and
-/// the lifecycle configure action route through.
-pub struct RebornChannelConfigProductService {
-    service: Arc<ChannelConfigService>,
-}
-
-impl RebornChannelConfigProductService {
-    pub fn new(service: Arc<ChannelConfigService>) -> Self {
-        Self { service }
-    }
-}
-
-#[async_trait]
-impl ironclaw_product::ChannelConfigProductService for RebornChannelConfigProductService {
-    async fn field_status(
-        &self,
-        extension_id: &ExtensionId,
-    ) -> Result<Vec<ironclaw_product::RebornChannelConfigField>, ProductSurfaceError> {
-        if let Ok(manifest) = self.service.resolved_manifest(extension_id).await
-            && !manifest.admin_configuration.is_empty()
-        {
-            return Ok(Vec::new());
-        }
-        match self.service.status(extension_id).await {
-            Ok(statuses) => Ok(statuses
-                .into_iter()
-                .map(|status| ironclaw_product::RebornChannelConfigField {
-                    name: status.handle,
-                    label: status.label,
-                    secret: status.secret,
-                    provided: status.provided,
-                })
-                .collect()),
-            // A not-yet-installed extension has nothing to configure; the
-            // setup view renders for it, so this projection stays empty
-            // rather than erroring.
-            Err(ChannelConfigError::NotInstalled { .. }) => Ok(Vec::new()),
-            Err(error) => Err(map_channel_config_error(error)),
-        }
-    }
-
-    async fn save_values(
-        &self,
-        extension_id: &ExtensionId,
-        values: Vec<(String, String)>,
-    ) -> Result<(), ProductSurfaceError> {
-        self.service
-            .save(extension_id, values)
-            .await
-            .map_err(map_channel_config_error)
-    }
-}
-
-fn map_channel_config_error(error: ChannelConfigError) -> ProductSurfaceError {
-    match error {
-        ChannelConfigError::NotInstalled { .. } => ProductSurfaceError {
-            code: ProductSurfaceErrorCode::NotFound,
-            kind: ProductSurfaceErrorKind::NotFound,
-            status_code: 404,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        },
-        ChannelConfigError::UnknownField { .. } => ProductSurfaceError {
-            code: ProductSurfaceErrorCode::InvalidRequest,
-            kind: ProductSurfaceErrorKind::Validation,
-            status_code: 400,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        },
-        ChannelConfigError::Storage { .. } => ProductSurfaceError {
-            code: ProductSurfaceErrorCode::Unavailable,
-            kind: ProductSurfaceErrorKind::ServiceUnavailable,
-            status_code: 503,
-            retryable: true,
-            field: None,
-            validation_code: None,
-        },
-        // The save persisted but the §6.5 reactivate cycle failed: the host
-        // record is left per §6.1 with the typed reason; the operator fixes
-        // the value and saves again.
-        ChannelConfigError::Reactivation { .. } => ProductSurfaceError {
-            code: ProductSurfaceErrorCode::Conflict,
-            kind: ProductSurfaceErrorKind::Conflict,
-            status_code: 409,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -850,8 +769,34 @@ visibility = "model"
 input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
 "#;
 
-    const NON_CHANNEL_ADMIN_FIXTURE_MANIFEST: &str =
-        include_str!("../../ironclaw_first_party_extensions/assets/gmail/manifest.toml");
+    /// A no-channel fixture that declares an `[admin_configuration]` group:
+    /// the two properties this test needs, spelled out rather than reached for.
+    ///
+    /// This was an `include_str!` of `packages/gmail/manifest.toml` — a
+    /// cross-package reach-in for a *fixture*, which coupled the test to a
+    /// shipped product manifest it does not own (WS2 §11.2.7). The shipped
+    /// manifest's other 60 lines were never load-bearing here.
+    const NON_CHANNEL_ADMIN_FIXTURE_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "gmail"
+name = "Gmail"
+version = "0.1.0"
+description = "no-channel fixture with deployment admin configuration"
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "gmail"
+
+[admin_configuration]
+group_id = "vendor.google"
+display_name = "Google OAuth client credentials"
+description = "Deployment OAuth client credentials shared by Google extensions."
+fields = [
+  { handle = "google_oauth_client_id", label = "Google OAuth client ID", secret = false, required = true },
+  { handle = "google_oauth_client_secret", label = "Google OAuth client secret", secret = true, required = true },
+]
+"#;
 
     struct RecordingReactivation {
         calls: AtomicUsize,

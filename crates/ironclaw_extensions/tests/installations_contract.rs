@@ -11,8 +11,8 @@ use ironclaw_extensions::{
     ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
     ExtensionInstallationPersistedParts, ExtensionInstallationStore,
     ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef,
-    HostApiContractRegistry, InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestHash,
-    ManifestSource, ManifestV2Error, MembershipDeactivation,
+    HostApiContractRegistry, InstallationIncarnationId, InstallationOwner, MANIFEST_SCHEMA_VERSION,
+    ManifestHash, ManifestSource, ManifestV2Error, MembershipDeactivation,
 };
 use ironclaw_filesystem::{
     CasExpectation, Fault, FaultInjecting, FilesystemOperation, Filter, InMemoryBackend,
@@ -420,6 +420,7 @@ fn persisted_reconstruction_preserves_timestamp_and_bindings() {
             installation_id: installation_id("acme-tools"),
             extension_id: extension_id.clone(),
             manifest_ref: ExtensionManifestRef::new(extension_id, None),
+            incarnation_id: None,
             credential_bindings: vec![binding.clone()],
             updated_at,
             owner: owner.clone(),
@@ -1205,6 +1206,120 @@ async fn assert_normalized_backend_contract(
         .deactivate_membership(expected.installation_id(), &alice)
         .await
         .unwrap();
+
+    let before_refresh = store
+        .get_installation(expected.installation_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        before_refresh.updated_at() > expected.updated_at(),
+        "the public version must include the newer membership-row timestamp",
+    );
+    let expected_ref = before_refresh.manifest_ref().clone();
+    let expected_updated_at = before_refresh.updated_at();
+    let stale_incarnation = InstallationIncarnationId::fresh();
+    let stale_replacement = store
+        .upsert_manifest_only(
+            expected.installation_id(),
+            Some(&stale_incarnation),
+            &expected_ref,
+            expected_updated_at,
+            manifest("sha256:stale-incarnation"),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        stale_replacement,
+        ExtensionInstallationError::PreparationFinalizationRejected { .. }
+    ));
+    store
+        .upsert_manifest_only(
+            expected.installation_id(),
+            before_refresh.incarnation_id(),
+            &expected_ref,
+            expected_updated_at,
+            manifest("sha256:refresh"),
+        )
+        .await
+        .unwrap();
+    let refreshed = store
+        .get_installation(expected.installation_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(refreshed.installation_id(), expected.installation_id());
+    assert_eq!(refreshed.extension_id(), expected.extension_id());
+    assert_eq!(refreshed.incarnation_id(), expected.incarnation_id());
+    assert_eq!(
+        refreshed.credential_bindings(),
+        expected.credential_bindings()
+    );
+    assert_eq!(
+        refreshed.owner().members().unwrap(),
+        &BTreeSet::from([bob.clone()])
+    );
+
+    let mismatched_ref = ExtensionManifestRef::new(extension_id("other-tools"), None);
+    let mismatched = store
+        .upsert_manifest_only(
+            expected.installation_id(),
+            refreshed.incarnation_id(),
+            &mismatched_ref,
+            refreshed.updated_at(),
+            manifest("sha256:stale"),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        mismatched,
+        ExtensionInstallationError::ManifestExtensionMismatch { .. }
+    ));
+
+    let stale = store
+        .upsert_manifest_only(
+            expected.installation_id(),
+            before_refresh.incarnation_id(),
+            &expected_ref,
+            expected_updated_at,
+            manifest("sha256:stale"),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        stale,
+        ExtensionInstallationError::PreparationFinalizationRejected { .. }
+    ));
+
+    let refresh_ref = refreshed.manifest_ref().clone();
+    let refresh_updated_at = refreshed.updated_at();
+    store
+        .activate_membership(expected.installation_id(), &alice)
+        .await
+        .unwrap();
+    store
+        .upsert_manifest_only(
+            expected.installation_id(),
+            refreshed.incarnation_id(),
+            &refresh_ref,
+            refresh_updated_at,
+            manifest("sha256:after-membership"),
+        )
+        .await
+        .unwrap();
+    let after_concurrent_refresh = store
+        .get_installation(expected.installation_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after_concurrent_refresh.owner().members().unwrap(),
+        &BTreeSet::from([alice.clone(), bob.clone()])
+    );
+    assert_eq!(
+        after_concurrent_refresh.manifest_ref().manifest_hash(),
+        Some(&manifest_hash("sha256:after-membership"))
+    );
     drop(store);
 
     let reopened = ExtensionInstallationStore::load_at(
@@ -1222,7 +1337,16 @@ async fn assert_normalized_backend_contract(
         .unwrap();
     assert_eq!(
         installation.owner().members().unwrap(),
-        &BTreeSet::from([bob])
+        &BTreeSet::from([alice, bob])
+    );
+    assert_eq!(
+        reopened
+            .get_manifest(expected.extension_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .manifest_hash(),
+        Some(&manifest_hash("sha256:after-membership"))
     );
 
     reopened

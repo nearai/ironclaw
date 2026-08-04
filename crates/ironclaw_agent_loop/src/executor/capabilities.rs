@@ -2,6 +2,8 @@ use std::collections::HashSet;
 use std::ops::ControlFlow;
 
 use async_trait::async_trait;
+use ironclaw_host_api::turn::CapabilityActivityId;
+use ironclaw_host_api::turn::{LoopGateRef, LoopResultRef};
 use ironclaw_host_api::{
     decision::DenyReason,
     dispatch::INPUT_ENCODE_HUMAN_SUMMARY,
@@ -12,18 +14,15 @@ use ironclaw_host_api::{
         ResultProgress, ResumeToken, SameCallRetryConstraint,
     },
 };
-use ironclaw_turns::{
-    LoopFailureKind, LoopGateRef, LoopResultRef,
-    run_profile::{
-        AuthResumeApprovalIdentity, CapabilityActivityId, CapabilityApprovalResume,
-        CapabilityAuthResume, CapabilityCallCandidate, CapabilityFailure, CapabilityFailureDetail,
-        CapabilityInputIssue, CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken,
-        ContentDigest, LoopDriverNoteKind, LoopProcessRef, LoopProgressEvent, LoopRecoveryClass,
-        LoopRecoveryDisposition, LoopRecoveryStage, LoopRequestBatch,
-        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
-        ObservationTrust, ToolObservationDetail, ToolObservationStatus, ToolRecoveryObservation,
-        VisibleCapabilitySurface,
-    },
+use ironclaw_loop_contracts::{
+    AuthResumeApprovalIdentity, CapabilityApprovalResume, CapabilityAuthResume,
+    CapabilityCallCandidate, CapabilityFailure, CapabilityFailureDetail, CapabilityInputIssue,
+    CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken, ContentDigest,
+    LoopDriverNoteKind, LoopFailureKind, LoopProcessRef, LoopProgressEvent, LoopRecoveryClass,
+    LoopRecoveryDisposition, LoopRecoveryStage, LoopRequestBatch,
+    MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation, ObservationTrust,
+    ToolObservationDetail, ToolObservationStatus, ToolRecoveryObservation,
+    VisibleCapabilitySurface,
 };
 
 use crate::{
@@ -81,7 +80,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             .filter(|pending| {
                 matches!(
                     pending.disposition,
-                    Some(ironclaw_turns::GateResumeDisposition::Denied)
+                    Some(ironclaw_host_api::turn::GateResumeDisposition::Denied)
                 )
             })
             .map(|pending| pending.activity_id_for_resume());
@@ -160,7 +159,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         if let Some(pending) = state.pending_approval_resume.as_ref().filter(|p| {
             matches!(
                 p.disposition.as_ref(),
-                Some(ironclaw_turns::GateResumeDisposition::Denied)
+                Some(ironclaw_host_api::turn::GateResumeDisposition::Denied)
             )
         }) {
             let denied_activity_id = pending.activity_id_for_resume();
@@ -200,7 +199,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         if let Some(pending) = state.pending_external_tool_resume.as_ref().filter(|p| {
             matches!(
                 p.disposition.as_ref(),
-                Some(ironclaw_turns::GateResumeDisposition::Denied)
+                Some(ironclaw_host_api::turn::GateResumeDisposition::Denied)
             )
         }) {
             let denied_activity_id = pending.activity_id_for_resume();
@@ -289,8 +288,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         let batch = match batch_result {
             Ok(batch) => batch,
             Err(ref error)
-                if error.kind
-                    == ironclaw_turns::run_profile::AgentLoopHostErrorKind::StaleSurface =>
+                if error.kind == ironclaw_loop_contracts::AgentLoopHostErrorKind::StaleSurface =>
             {
                 let stale_summary = SanitizedStrategySummary::from_trusted_static(
                     "capability surface changed before execution; re-issue the call",
@@ -533,7 +531,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
 /// that trips the strict validator degrades to a canned fallback instead of
 /// borking the run).
 fn capability_port_error_summary(
-    error: &ironclaw_turns::run_profile::AgentLoopHostError,
+    error: &ironclaw_loop_contracts::AgentLoopHostError,
 ) -> CapabilityErrorSummary {
     let kind = error.kind.failure_kind();
     CapabilityErrorSummary {
@@ -546,10 +544,10 @@ fn capability_port_error_summary(
 /// Carries the port error's secret-scrubbed `detail` (when present) so the
 /// model can retry or explain instead of guessing from the kind alone.
 fn capability_port_error_observation(
-    error: &ironclaw_turns::run_profile::AgentLoopHostError,
+    error: &ironclaw_loop_contracts::AgentLoopHostError,
 ) -> ModelVisibleToolObservation {
     let detail = error.detail.clone().unwrap_or_else(|| {
-        ironclaw_turns::run_profile::sanitize_model_visible_text(error.safe_summary.clone())
+        ironclaw_loop_contracts::sanitize_model_visible_text(error.safe_summary.clone())
     });
     let failure = CapabilityFailure {
         error_kind: error.kind.failure_kind(),
@@ -763,7 +761,7 @@ impl CapabilityStage {
                     ));
                 let observation = ModelVisibleToolObservation {
                     schema_version:
-                        ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+                        ironclaw_loop_contracts::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
                     status: ToolObservationStatus::Error,
                     summary: capability_denied_observation_summary(reason),
                     detail: ToolObservationDetail::GenericFailure {
@@ -903,7 +901,7 @@ impl CapabilityStage {
         mut state: LoopExecutionState,
         call: CapabilityCallCandidate,
         mut summary: CapabilityErrorSummary,
-        mut model_observation: Option<ironclaw_turns::run_profile::ModelVisibleToolObservation>,
+        mut model_observation: Option<ironclaw_loop_contracts::ModelVisibleToolObservation>,
         capability_batch: &mut CapabilityBatchTurnSummary,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
         // Snapshot resume-origin flags for this call BEFORE clearing the pending
@@ -1091,7 +1089,7 @@ impl CapabilityStage {
                         Ok(outcome) => outcome,
                         Err(ref error)
                             if error.kind
-                                == ironclaw_turns::run_profile::AgentLoopHostErrorKind::StaleSurface =>
+                                == ironclaw_loop_contracts::AgentLoopHostErrorKind::StaleSurface =>
                         {
                             summary = CapabilityErrorSummary {
                                 kind: FailureKind::StaleSurface,
@@ -1198,7 +1196,7 @@ impl CapabilityStage {
         ctx: StageContext<'_>,
         mut state: LoopExecutionState,
         call: &CapabilityCallCandidate,
-        _process_ref: &ironclaw_turns::run_profile::LoopProcessRef,
+        _process_ref: &ironclaw_loop_contracts::LoopProcessRef,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
         append_capability_safe_summary_ref(
             ctx.host,
@@ -1305,7 +1303,7 @@ impl CapabilityStage {
                     },
                 )
                 .await;
-            let failure = ironclaw_turns::run_profile::CapabilityFailure {
+            let failure = ironclaw_loop_contracts::CapabilityFailure {
                 error_kind: FailureKind::GateDeclined,
                 safe_summary: "The user declined the capability request.".to_string(),
                 detail: CapabilityFailureDetail::Diagnostic {
@@ -1473,15 +1471,19 @@ fn child_result_from_outcome(
 /// Rebuild the `ResultReference` model observation from a completed [`Outcome`],
 /// carrying the #5838 first-look inline preview content the model reads without a
 /// follow-up `result_read`. Reconstructed from the channel's real
-/// [`ModelResultPreview`] (`refs.preview`) — the delimiter/JSON-bearing content
-/// that the collapse now preserves (it rode the caption `SafeSummary` before,
-/// which dropped it). `None` when no preview is staged, in which case
-/// `append_capability_result_ref` synthesizes a bare success observation.
+/// [`ModelResultPreview`] (`refs.preview`) and its independent continuation
+/// metadata. Metadata-only observations are reconstructed when preview safety
+/// suppresses the text; `None` is reserved for outcomes with neither preview nor
+/// continuation metadata, where `append_capability_result_ref` synthesizes a bare
+/// success observation.
 fn result_reference_observation_from_outcome(
     outcome: &Outcome,
 ) -> Option<ModelVisibleToolObservation> {
-    let preview = outcome.refs.preview.as_ref()?;
+    let preview = outcome.refs.preview.as_ref();
     let meta = &outcome.refs.preview_meta;
+    if preview.is_none() && meta.is_empty() {
+        return None;
+    }
     // The observation references the preview's OWN result: `preview_meta`'s
     // referenced ref when it differs (a `result_read` presenting another result),
     // else the outcome's own preserved origin.
@@ -1508,7 +1510,7 @@ fn result_reference_observation_from_outcome(
         detail: ToolObservationDetail::ResultReference {
             result_ref,
             byte_len: outcome.refs.byte_len,
-            preview: Some(preview.as_str().to_string()),
+            preview: preview.map(|preview| preview.as_str().to_string()),
             // Continuation metadata for a truncated first-look preview; falls back
             // to the full inline size for a complete preview.
             total_bytes: meta.total_bytes.or(Some(outcome.refs.byte_len)),
@@ -1754,7 +1756,7 @@ struct ChildResultAppendInput {
 }
 
 async fn append_spawned_child_result(
-    host: &(dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync),
+    host: &(dyn ironclaw_loop_contracts::AgentLoopDriverHost + Send + Sync),
     state: &mut LoopExecutionState,
     call: &CapabilityCallCandidate,
     input: ChildResultAppendInput,
@@ -1779,11 +1781,11 @@ async fn append_spawned_child_result(
 }
 
 async fn append_blocked_capability_error_result(
-    host: &(dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync),
+    host: &(dyn ironclaw_loop_contracts::AgentLoopDriverHost + Send + Sync),
     state: &mut LoopExecutionState,
     call: &CapabilityCallCandidate,
     summary: &CapabilityErrorSummary,
-    model_observation: Option<ironclaw_turns::run_profile::ModelVisibleToolObservation>,
+    model_observation: Option<ironclaw_loop_contracts::ModelVisibleToolObservation>,
     capability_batch: &mut CapabilityBatchTurnSummary,
 ) -> Result<(), AgentLoopExecutorError> {
     append_capability_error_ref(host, state, call, summary, model_observation).await?;
@@ -1797,7 +1799,7 @@ async fn append_blocked_capability_error_result(
 }
 
 async fn append_completed_capability_result(
-    host: &(dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync),
+    host: &(dyn ironclaw_loop_contracts::AgentLoopDriverHost + Send + Sync),
     state: &mut LoopExecutionState,
     call: &CapabilityCallCandidate,
     result: CapabilityResultMessage,
@@ -1841,8 +1843,11 @@ async fn append_completed_capability_result(
 fn shared_await_dependent_gate(
     calls: &[CapabilityCallCandidate],
     resolutions: &[Resolution],
-) -> Option<(ironclaw_turns::LoopGateRef, CapabilityCallCandidate)> {
-    let mut shared_gate: Option<ironclaw_turns::LoopGateRef> = None;
+) -> Option<(
+    ironclaw_host_api::turn::LoopGateRef,
+    CapabilityCallCandidate,
+)> {
+    let mut shared_gate: Option<ironclaw_host_api::turn::LoopGateRef> = None;
     let mut first_call: Option<CapabilityCallCandidate> = None;
     let mut count = 0_usize;
     for (call, resolution) in calls.iter().zip(resolutions.iter()) {
@@ -1889,15 +1894,13 @@ fn shared_await_dependent_gate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_turns::{
-        LoopGateRef, LoopResultRef,
-        run_profile::{CapabilityInputRef, CapabilitySurfaceVersion, resolution},
-    };
+    use ironclaw_host_api::turn::{LoopGateRef, LoopResultRef};
+    use ironclaw_loop_contracts::{CapabilityInputRef, CapabilitySurfaceVersion, resolution};
 
     fn call(input: &str) -> CapabilityCallCandidate {
         let capability_id = ironclaw_host_api::ids::CapabilityId::new("test.cap").unwrap();
         CapabilityCallCandidate {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("test-v1").unwrap(),
             capability_id: capability_id.clone(),
             effective_capability_ids: vec![capability_id],

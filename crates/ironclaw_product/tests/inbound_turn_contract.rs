@@ -8,15 +8,25 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_loop_contracts::LoopInput;
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
+    LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
+    LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, PromptMode,
+};
+use ironclaw_loop_host::RejectingInputEnqueue;
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
     EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostInputBatch, HostInputQueue, HostInputQueueError,
-    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse, JsonSpawnSubagentInputCodec, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
-    RunCancellationHandle,
+    HostIdentityContextSource, HostInputBatch, HostInputEnqueuePort, HostInputEnvelope,
+    HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelGateway,
+    HostManagedModelRequest, HostManagedModelResponse, InMemoryHostInputQueue,
+    JsonSpawnSubagentInputCodec, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
+};
+use ironclaw_loop_host::{
+    ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
 };
 use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
@@ -30,9 +40,6 @@ use ironclaw_product::{
 };
 use ironclaw_reborn_composition::ProductLiveCapabilityIo;
 use ironclaw_runner::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
-use ironclaw_runner::model_routes::{
-    ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
-};
 use ironclaw_runner::planned_driver_factory::{
     PLANNED_DEFAULT_PROFILE_ID, default_planned_run_profile_resolver,
 };
@@ -49,20 +56,21 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::test_support::in_memory_agent_turn_runtime;
 use ironclaw_turns::{
-    AgentTurnProcessRuntime, AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse,
-    DefaultTurnCoordinator, EventCursor, GetRunStateRequest, IdempotencyKey,
-    ProcessLoopCheckpointStore, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-    RunProfileVersion, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
-    TurnActor, TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState,
-    TurnRunWake, TurnScope, TurnStatus,
-    run_profile::{
-        AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
-        LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
-        LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, PromptMode,
-    },
+    AcceptedMessageRef, AgentTurnProcessRuntime, AgentTurnRuntimePort, CancelRunRequest,
+    CancelRunResponse, DefaultTurnCoordinator, EventCursor, GetRunStateRequest, IdempotencyKey,
+    ProcessLoopCheckpointStore, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
+    RunProfileId, RunProfileVersion, SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, ThreadBusy, TurnActor, TurnCoordinator, TurnError, TurnId, TurnOriginKind,
+    TurnRunId, TurnRunState, TurnRunWake, TurnScope, TurnStatus,
 };
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
+
+/// Canonical run-start cursor (Copilot review: single source of truth instead
+/// of re-hardcoding the origin literal).
+fn origin_cursor() -> LoopInputCursorToken {
+    LoopInputCursorToken::origin()
+}
 
 fn sample_user_message_envelope(event_suffix: &str) -> ProductInboundEnvelope {
     sample_user_message_envelope_with_install_and_text(event_suffix, "install_alpha", "hello world")
@@ -195,8 +203,34 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
         panic!("cancel_run is not used by inbound turn contract tests")
     }
 
-    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        panic!("get_run_state is not used by inbound turn contract tests")
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        // The busy-steering gateway resolves the active run's turn id before
+        // enqueuing. Return a minimal running-state for the requested run so the
+        // no-queue rejection path can exercise the full gateway.
+        Ok(TurnRunState {
+            scope: request.scope,
+            actor: None,
+            turn_id: TurnId::new(),
+            run_id: request.run_id,
+            status: TurnStatus::Running,
+            accepted_message_ref: AcceptedMessageRef::new("msg:scripted").expect("valid"),
+            source_binding_ref: SourceBindingRef::new("src:scripted").expect("valid"),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:scripted").expect("valid"),
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            allow_steering: true,
+            resolved_model_route: None,
+            received_at: Utc::now(),
+            checkpoint_id: None,
+            gate_ref: None,
+            blocked_activity_id: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: EventCursor::default(),
+            product_context: None,
+            resume_disposition: None,
+            model_usage: None,
+        })
     }
 }
 
@@ -265,7 +299,7 @@ impl LoopCapabilityResultWriter for UnusedCapabilityResultWriter {
         _write: CapabilityResultWrite<'_>,
     ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
         Err(AgentLoopHostError::new(
-            ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation,
+            ironclaw_loop_contracts::AgentLoopHostErrorKind::InvalidInvocation,
             "unused capability result writer",
         ))
     }
@@ -553,8 +587,12 @@ async fn user_message_resolves_binding_persists_message_and_submits_turn() {
     let thread_service = InMemorySessionThreadService::default();
     let store = Arc::new(in_memory_agent_turn_runtime());
     let coordinator = DefaultTurnCoordinator::new(store);
-    let service =
-        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator,
+        Arc::new(RejectingInputEnqueue),
+    );
 
     let envelope = sample_user_message_envelope("turn1");
     let outcome: InboundTurnOutcome = service
@@ -595,6 +633,7 @@ async fn shared_user_message_submits_subject_owned_turn_scope() {
         binding_service,
         thread_service.clone(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     );
     let envelope = sample_user_message_envelope_with_install_text_and_trigger(
         "shared-turn-owner",
@@ -653,8 +692,12 @@ async fn user_message_no_profile_submission_uses_planned_reborn_default() {
         Arc::new(default_planned_run_profile_resolver().expect("planned default profile resolver"));
     let coordinator =
         DefaultTurnCoordinator::new(store.clone()).with_run_profile_resolver(resolver);
-    let service =
-        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator,
+        Arc::new(RejectingInputEnqueue),
+    );
 
     let envelope = sample_user_message_envelope("planned-product-default");
     let outcome = service
@@ -724,6 +767,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        reply_attachment_intent_port: None,
         gate_record_store: None,
         process_system,
         thread_service: Arc::new(thread_service.clone()),
@@ -759,6 +803,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         cancellation_factory: Some(cancellation_factory.clone()),
         skill_context_source: None,
         input_queue: Some(Arc::new(EmptyInputQueue)),
+        input_queue_reconcile: None,
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         user_profile_source: Arc::new(EmptyUserProfileSource),
         memory_context_service: None,
@@ -779,6 +824,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         binding_service,
         thread_service.clone(),
         Arc::clone(&composition.coordinator),
+        Arc::new(RejectingInputEnqueue),
     );
 
     let outcome = service
@@ -894,6 +940,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        reply_attachment_intent_port: None,
         gate_record_store: None,
         process_system,
         thread_service: Arc::new(thread_service.clone()),
@@ -928,6 +975,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         cancellation_factory: Some(cancellation_factory.clone()),
         skill_context_source: None,
         input_queue: Some(Arc::new(EmptyInputQueue)),
+        input_queue_reconcile: None,
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         user_profile_source: Arc::new(EmptyUserProfileSource),
         memory_context_service: None,
@@ -948,6 +996,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         binding_service,
         thread_service.clone(),
         Arc::clone(&composition.coordinator),
+        Arc::new(RejectingInputEnqueue),
     );
 
     let outcome = service
@@ -1080,6 +1129,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         );
     let error = match build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        reply_attachment_intent_port: None,
         gate_record_store: None,
         process_system,
         thread_service: Arc::new(thread_service.clone()),
@@ -1112,6 +1162,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         cancellation_factory: Some(Arc::new(UnretainedRunCancellationFactory)),
         skill_context_source: None,
         input_queue: Some(Arc::new(EmptyInputQueue)),
+        input_queue_reconcile: None,
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         user_profile_source: Arc::new(EmptyUserProfileSource),
         memory_context_service: None,
@@ -1138,8 +1189,12 @@ async fn busy_thread_persists_second_message_as_rejected_busy() {
     let thread_service = InMemorySessionThreadService::default();
     let store = Arc::new(in_memory_agent_turn_runtime());
     let coordinator = DefaultTurnCoordinator::new(store);
-    let service =
-        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator,
+        Arc::new(RejectingInputEnqueue),
+    );
 
     let first = sample_user_message_envelope("busy1");
     service.accept_user_message(&first).await.expect("first");
@@ -1173,6 +1228,453 @@ async fn busy_thread_persists_second_message_as_rejected_busy() {
 }
 
 #[tokio::test]
+async fn busy_thread_with_input_queue_defers_second_message_until_queue_ack() {
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let store = Arc::new(in_memory_agent_turn_runtime());
+    let coordinator = DefaultTurnCoordinator::new(store);
+    let input_queue = Arc::new(InMemoryHostInputQueue::new(
+        Arc::new(thread_service.clone()) as Arc<dyn SessionThreadService>,
+    ));
+    let input_enqueue: Arc<dyn HostInputEnqueuePort> = input_queue.clone();
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator,
+        input_enqueue,
+    );
+
+    let first = sample_user_message_envelope("queue-busy1");
+    service.accept_user_message(&first).await.expect("first");
+    let second = sample_user_message_envelope_with_text("queue-busy2", "queued second");
+    let outcome = service
+        .accept_user_message(&second)
+        .await
+        .expect("second queued");
+
+    let (binding, active_run_id) = match outcome {
+        InboundTurnOutcome::DeferredBusy {
+            binding,
+            active_run_id,
+            ..
+        } => (binding, active_run_id),
+        other => panic!("expected DeferredBusy, got {other:?}"),
+    };
+    let scope = ThreadScope {
+        tenant_id: binding.tenant_id.clone(),
+        agent_id: binding.agent_id.clone().expect("agent id"),
+        project_id: binding.project_id.clone(),
+        owner_user_id: binding.subject_user_id.clone(),
+        mission_id: None,
+    };
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages.len(), 2);
+    assert_eq!(
+        history.messages[1].content.as_deref(),
+        Some("queued second")
+    );
+    assert_eq!(history.messages[1].status, MessageStatus::Queued);
+    assert_eq!(
+        history.messages[1].turn_run_id.as_deref(),
+        Some(active_run_id.to_string().as_str())
+    );
+
+    let batch = input_queue
+        .next_after(active_run_id, origin_cursor(), 8)
+        .await
+        .expect("queued input batch");
+    assert_eq!(batch.inputs.len(), 1);
+    assert!(matches!(batch.inputs[0].input, LoopInput::Steering { .. }));
+
+    input_queue
+        .ack_consumed(active_run_id, vec![batch.inputs[0].ack_token.clone()])
+        .await
+        .expect("ack queued input");
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history after ack");
+    assert_eq!(history.messages[1].status, MessageStatus::Submitted);
+    assert_eq!(
+        history.messages[1].turn_run_id.as_deref(),
+        Some(active_run_id.to_string().as_str())
+    );
+}
+
+struct AckingInputEnqueue {
+    inner: InMemoryHostInputQueue,
+}
+
+impl AckingInputEnqueue {
+    fn new(thread_service: Arc<dyn SessionThreadService>) -> Self {
+        Self {
+            inner: InMemoryHostInputQueue::new(thread_service),
+        }
+    }
+}
+
+#[async_trait]
+impl HostInputEnqueuePort for AckingInputEnqueue {
+    async fn enqueue_queued_message(
+        &self,
+        request: ironclaw_loop_host::EnqueueQueuedMessageRequest,
+    ) -> Result<HostInputEnvelope, HostInputQueueError> {
+        let run_id = request.run_id;
+        let envelope = self.inner.enqueue_queued_message(request).await?;
+        self.inner
+            .ack_consumed(run_id, vec![envelope.ack_token.clone()])
+            .await?;
+        Ok(envelope)
+    }
+}
+
+#[tokio::test]
+async fn busy_thread_queue_submit_tolerates_input_ack_before_queued_mark() {
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let store = Arc::new(in_memory_agent_turn_runtime());
+    let coordinator = DefaultTurnCoordinator::new(store);
+    let input_enqueue: Arc<dyn HostInputEnqueuePort> =
+        Arc::new(AckingInputEnqueue::new(Arc::new(thread_service.clone())));
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator,
+        input_enqueue,
+    );
+
+    let first = sample_user_message_envelope("queue-race1");
+    service.accept_user_message(&first).await.expect("first");
+    let second = sample_user_message_envelope_with_text("queue-race2", "queued then acked");
+    let outcome = service
+        .accept_user_message(&second)
+        .await
+        .expect("second should not fail when input is acked before queued mark");
+
+    let (binding, active_run_id) = match outcome {
+        InboundTurnOutcome::DeferredBusy {
+            binding,
+            active_run_id,
+            ..
+        } => (binding, active_run_id),
+        other => panic!("expected DeferredBusy, got {other:?}"),
+    };
+    let scope = ThreadScope {
+        tenant_id: binding.tenant_id.clone(),
+        agent_id: binding.agent_id.clone().expect("agent id"),
+        project_id: binding.project_id.clone(),
+        owner_user_id: binding.subject_user_id.clone(),
+        mission_id: None,
+    };
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: binding.thread_id,
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages.len(), 2);
+    assert_eq!(history.messages[1].status, MessageStatus::Submitted);
+    assert_eq!(
+        history.messages[1].turn_run_id.as_deref(),
+        Some(active_run_id.to_string().as_str())
+    );
+}
+
+#[tokio::test]
+async fn ack_consumed_is_non_fatal_when_queued_status_flip_fails() {
+    // Regression for the "The run could not start the agent runtime."
+    // (driver_unavailable) run-kill: a queued message's status flip
+    // (`Queued` → `Submitted`) failing inside `ack_consumed` used to surface as
+    // `ThreadStatusUpdate` → `AgentLoopHostErrorKind::Unavailable` → a terminal
+    // `HostUnavailable` that killed the whole run — even though the input had
+    // already been drained and delivered to the model. The status write is
+    // best-effort bookkeeping; its failure must be swallowed and the ack must
+    // still advance.
+    let thread_service: Arc<dyn SessionThreadService> =
+        Arc::new(InMemorySessionThreadService::default());
+    let queue = InMemoryHostInputQueue::new(thread_service);
+    let run_id = TurnRunId::new();
+
+    // Enqueue a queued message whose backing thread/message does not exist, so
+    // the in-queue `mark_message_submitted` is guaranteed to fail.
+    let envelope = queue
+        .enqueue_queued_message(ironclaw_loop_host::EnqueueQueuedMessageRequest {
+            run_id,
+            turn_id: TurnId::new(),
+            scope: ThreadScope {
+                tenant_id: TenantId::new("ghost-tenant").unwrap(),
+                agent_id: AgentId::new("ghost-agent").unwrap(),
+                project_id: None,
+                owner_user_id: None,
+                mission_id: None,
+            },
+            thread_id: ThreadId::new("ghost-thread").unwrap(),
+            message_id: ironclaw_threads::ThreadMessageId::new(),
+            input: LoopInput::Steering {
+                message_ref: ironclaw_turns::LoopMessageRef::new("msg:ghost").unwrap(),
+            },
+        })
+        .await
+        .expect("enqueue");
+
+    // The status flip fails internally, but the ack itself must succeed...
+    queue
+        .ack_consumed(run_id, vec![envelope.ack_token.clone()])
+        .await
+        .expect("ack_consumed must not fail when the queued-message status flip fails");
+
+    // ...and the token must be recorded as consumed so the input is not
+    // redelivered (which would loop the model on the same steering input).
+    let batch = queue
+        .next_after(run_id, origin_cursor(), 8)
+        .await
+        .expect("next_after");
+    assert!(
+        batch.inputs.is_empty(),
+        "acked input must not be redelivered after a swallowed status-update failure"
+    );
+}
+
+#[tokio::test]
+async fn ack_rejects_unknown_token_instead_of_poisoning_state() {
+    // An ack token that matches no live entry and is not already acked must fail
+    // loud, not be silently committed into `acked`. Committing it would poison
+    // the queue: a later entry minted for that same sequence would be skipped
+    // forever by `next_after`.
+    let thread_service: Arc<dyn SessionThreadService> =
+        Arc::new(InMemorySessionThreadService::default());
+    let queue = InMemoryHostInputQueue::new(thread_service);
+    let run_id = TurnRunId::new();
+
+    // Create the run's queue with a single live entry.
+    queue
+        .enqueue_queued_message(ironclaw_loop_host::EnqueueQueuedMessageRequest {
+            run_id,
+            turn_id: TurnId::new(),
+            scope: ThreadScope {
+                tenant_id: TenantId::new("ghost-tenant").unwrap(),
+                agent_id: AgentId::new("ghost-agent").unwrap(),
+                project_id: None,
+                owner_user_id: None,
+                mission_id: None,
+            },
+            thread_id: ThreadId::new("ghost-thread").unwrap(),
+            message_id: ironclaw_threads::ThreadMessageId::new(),
+            input: LoopInput::Steering {
+                message_ref: ironclaw_turns::LoopMessageRef::new("msg:live").unwrap(),
+            },
+        })
+        .await
+        .expect("enqueue");
+
+    // Ack a forged token for an input that was never enqueued.
+    let forged = LoopInputAckToken::new("input-ack:999".to_string()).unwrap();
+    let result = queue.ack_consumed(run_id, vec![forged]).await;
+    assert!(
+        matches!(result, Err(HostInputQueueError::InvalidCursor { .. })),
+        "unknown ack token must be rejected, got {result:?}"
+    );
+
+    // The live entry is untouched and still deliverable.
+    let batch = queue
+        .next_after(run_id, origin_cursor(), 8)
+        .await
+        .expect("next_after");
+    assert_eq!(
+        batch.inputs.len(),
+        1,
+        "the live entry remains deliverable after a rejected forged ack"
+    );
+}
+
+/// Records the transcript status of the queued message at the moment its
+/// steering input becomes drainable (i.e. when `enqueue_queued_message` runs).
+struct StatusObservingInputEnqueue {
+    inner: InMemoryHostInputQueue,
+    thread_service: Arc<dyn SessionThreadService>,
+    observed_status: Arc<Mutex<Option<MessageStatus>>>,
+}
+
+impl StatusObservingInputEnqueue {
+    fn new(thread_service: Arc<dyn SessionThreadService>) -> Self {
+        Self {
+            inner: InMemoryHostInputQueue::new(thread_service.clone()),
+            thread_service,
+            observed_status: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+#[async_trait]
+impl HostInputEnqueuePort for StatusObservingInputEnqueue {
+    async fn enqueue_queued_message(
+        &self,
+        request: ironclaw_loop_host::EnqueueQueuedMessageRequest,
+    ) -> Result<HostInputEnvelope, HostInputQueueError> {
+        let history = self
+            .thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: request.scope.clone(),
+                thread_id: request.thread_id.clone(),
+            })
+            .await
+            .expect("history at enqueue time");
+        let status = history
+            .messages
+            .iter()
+            .find(|message| message.message_id == request.message_id)
+            .map(|message| message.status);
+        *self.observed_status.lock().unwrap() = status;
+        self.inner.enqueue_queued_message(request).await
+    }
+}
+
+#[tokio::test]
+async fn busy_submit_marks_message_queued_before_input_is_drainable() {
+    // Layer 2 ordering guard: the busy-submit path must mark the message
+    // `Queued` BEFORE the steering input is enqueued (and thus drainable), so a
+    // fast loop never observes the message in `Accepted` while draining it. With
+    // the previous enqueue-first ordering the observed status here was
+    // `Accepted`.
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let store = Arc::new(in_memory_agent_turn_runtime());
+    let coordinator = DefaultTurnCoordinator::new(store);
+    let enqueue = Arc::new(StatusObservingInputEnqueue::new(
+        Arc::new(thread_service.clone()) as Arc<dyn SessionThreadService>,
+    ));
+    let observed = enqueue.observed_status.clone();
+    let input_enqueue: Arc<dyn HostInputEnqueuePort> = enqueue;
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator,
+        input_enqueue,
+    );
+
+    let first = sample_user_message_envelope("queue-order1");
+    service.accept_user_message(&first).await.expect("first");
+    let second = sample_user_message_envelope_with_text("queue-order2", "ordered second");
+    let outcome = service
+        .accept_user_message(&second)
+        .await
+        .expect("second deferred");
+    assert!(matches!(outcome, InboundTurnOutcome::DeferredBusy { .. }));
+
+    assert_eq!(
+        *observed.lock().unwrap(),
+        Some(MessageStatus::Queued),
+        "message must be Queued before the steering input becomes drainable"
+    );
+}
+
+#[tokio::test]
+async fn busy_submit_rejects_when_active_run_profile_disallows_steering() {
+    // SteeringPolicy enforcement, full chain: the first submit resolves a
+    // profile with `allow_steering: false`, which is persisted into the run's
+    // process metadata; the second message's busy admission reads it back
+    // through `get_run_state` in the enqueue gateway and falls back to the
+    // `RejectedBusy` outcome even though a real input queue is wired.
+    use ironclaw_loop_contracts::{
+        AgentLoopDriverDescriptor, CapabilitySurfaceProfileId, CheckpointSchemaId,
+        InMemoryRunProfileRegistry, InMemoryRunProfileResolver, LoopDriverId, RunProfileDefinition,
+        SteeringPolicy,
+    };
+
+    let checkpoint_schema_id = CheckpointSchemaId::from_trusted_static("interactive_checkpoint_v1");
+    let no_steering = RunProfileDefinition::interactive_like(
+        RunProfileId::new("no_steering").expect("profile id"),
+        AgentLoopDriverDescriptor {
+            id: LoopDriverId::from_trusted_static("lightweight_loop"),
+            version: RunProfileVersion::new(1),
+            checkpoint_schema_id: Some(checkpoint_schema_id.clone()),
+            checkpoint_schema_version: Some(RunProfileVersion::new(1)),
+        },
+        checkpoint_schema_id,
+        RunProfileVersion::new(1),
+        CapabilitySurfaceProfileId::from_trusted_static("interactive_tools"),
+    )
+    .with_steering_policy(SteeringPolicy {
+        allow_steering: false,
+        allow_interrupt: false,
+        allow_driver_specific_nudges: true,
+    });
+    let mut registry = InMemoryRunProfileRegistry::with_builtin_profiles();
+    registry.register(no_steering).expect("register profile");
+    let resolver = Arc::new(InMemoryRunProfileResolver::new_with_implicit_default(
+        registry,
+        RunProfileId::new("no_steering").expect("profile id"),
+    ));
+
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let store = Arc::new(in_memory_agent_turn_runtime());
+    let coordinator = DefaultTurnCoordinator::new(store).with_run_profile_resolver(resolver);
+    let input_queue = Arc::new(InMemoryHostInputQueue::new(
+        Arc::new(thread_service.clone()) as Arc<dyn SessionThreadService>,
+    ));
+    let input_enqueue: Arc<dyn HostInputEnqueuePort> = input_queue.clone();
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator,
+        input_enqueue,
+    );
+
+    let first = sample_user_message_envelope("no-steer1");
+    service.accept_user_message(&first).await.expect("first");
+    let second = sample_user_message_envelope_with_text("no-steer2", "steering forbidden");
+    let outcome = service
+        .accept_user_message(&second)
+        .await
+        .expect("second rejected busy");
+
+    let (binding, active_run_id) = match outcome {
+        InboundTurnOutcome::RejectedBusy {
+            binding,
+            active_run_id,
+            ..
+        } => (binding, active_run_id.expect("active run id")),
+        other => panic!("expected RejectedBusy when steering is disallowed, got {other:?}"),
+    };
+    let scope = ThreadScope {
+        tenant_id: binding.tenant_id.clone(),
+        agent_id: binding.agent_id.clone().expect("agent id"),
+        project_id: binding.project_id.clone(),
+        owner_user_id: binding.subject_user_id.clone(),
+        mission_id: None,
+    };
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages[1].status, MessageStatus::RejectedBusy);
+
+    // Nothing was enqueued for the active run.
+    let batch = input_queue
+        .next_after(active_run_id, origin_cursor(), 8)
+        .await
+        .expect("queue poll");
+    assert!(
+        batch.inputs.is_empty(),
+        "no steering input may be enqueued when the profile disallows it"
+    );
+}
+
+#[tokio::test]
 async fn retry_validates_live_binding_before_accepted_message_replay() {
     let binding_service = FakeConversationBindingService::new();
     let binding_handle = binding_service.clone();
@@ -1182,8 +1684,12 @@ async fn retry_validates_live_binding_before_accepted_message_replay() {
         reason: "transient submit failure".into(),
     }));
     let coordinator_handle = coordinator.clone();
-    let service =
-        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator,
+        Arc::new(RejectingInputEnqueue),
+    );
 
     let envelope = sample_user_message_envelope("binding-churn");
     let first_err = service
@@ -1249,8 +1755,12 @@ async fn replay_lookup_is_namespaced_by_installation() {
     coordinator.push_result(Err(TurnError::Unavailable {
         reason: "transient submit failure".into(),
     }));
-    let service =
-        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator,
+        Arc::new(RejectingInputEnqueue),
+    );
 
     let first = sample_user_message_envelope_with_install_and_text(
         "shared-event",
@@ -1310,6 +1820,7 @@ async fn legacy_deferred_busy_retry_resubmits_existing_message() {
         binding_service,
         thread_service.clone(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     );
 
     // First call: submit successfully so the message row exists in the thread
@@ -1393,7 +1904,12 @@ async fn reply_target_binding_ref_has_single_reply_prefix() {
     let thread_service = InMemorySessionThreadService::default();
     let coordinator = CapturingTurnCoordinator::default();
     let captured_submit = coordinator.last_submit.clone();
-    let service = DefaultInboundTurnService::new(binding_service, thread_service, coordinator);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service,
+        coordinator,
+        Arc::new(RejectingInputEnqueue),
+    );
 
     let envelope = sample_user_message_envelope("reply-prefix");
     service
@@ -1432,7 +1948,12 @@ async fn max_valid_external_ids_do_not_overflow_turn_refs() {
     let thread_service = InMemorySessionThreadService::default();
     let store = Arc::new(in_memory_agent_turn_runtime());
     let coordinator = DefaultTurnCoordinator::new(store);
-    let service = DefaultInboundTurnService::new(binding_service, thread_service, coordinator);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service,
+        coordinator,
+        Arc::new(RejectingInputEnqueue),
+    );
 
     let long_event_id = "e".repeat(250);
     let envelope = sample_user_message_envelope(&long_event_id);
@@ -1452,7 +1973,12 @@ async fn overflowing_turn_ref_inputs_hash_deterministically() {
         let thread_service = InMemorySessionThreadService::default();
         let coordinator = CapturingTurnCoordinator::default();
         let captured_submit = coordinator.last_submit.clone();
-        let service = DefaultInboundTurnService::new(binding_service, thread_service, coordinator);
+        let service = DefaultInboundTurnService::new(
+            binding_service,
+            thread_service,
+            coordinator,
+            Arc::new(RejectingInputEnqueue),
+        );
 
         let envelope = sample_user_message_envelope(&long_event_id);
         service
@@ -1482,7 +2008,12 @@ async fn binding_failure_surfaces_workflow_error() {
     let thread_service = InMemorySessionThreadService::default();
     let store = Arc::new(in_memory_agent_turn_runtime());
     let coordinator = DefaultTurnCoordinator::new(store);
-    let service = DefaultInboundTurnService::new(binding_service, thread_service, coordinator);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service,
+        coordinator,
+        Arc::new(RejectingInputEnqueue),
+    );
 
     let envelope = sample_user_message_envelope("fail1");
     let err = service
@@ -1507,8 +2038,12 @@ async fn rejected_busy_replay_is_re_rejected_not_resubmitted() {
         status: TurnStatus::Running,
         event_cursor: EventCursor::default(),
     })));
-    let service =
-        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator,
+        Arc::new(RejectingInputEnqueue),
+    );
 
     let envelope = sample_user_message_envelope("rejected-busy-replay");
     let first = service
@@ -1555,5 +2090,192 @@ async fn rejected_busy_replay_is_re_rejected_not_resubmitted() {
         history.messages[0].status,
         MessageStatus::RejectedBusy,
         "original message must remain RejectedBusy, not Submitted"
+    );
+}
+
+/// Enqueue port that acknowledges but stores nothing — the observable shape of
+/// a crash between the `Queued` status write and the (durable) enqueue.
+struct VanishingInputEnqueue;
+
+#[async_trait::async_trait]
+impl HostInputEnqueuePort for VanishingInputEnqueue {
+    async fn enqueue_queued_message(
+        &self,
+        request: ironclaw_loop_host::EnqueueQueuedMessageRequest,
+    ) -> Result<ironclaw_loop_host::HostInputEnvelope, ironclaw_loop_host::HostInputQueueError>
+    {
+        Ok(ironclaw_loop_host::HostInputEnvelope {
+            input: request.input,
+            cursor: LoopInputCursorToken::new("input-cursor:1".to_string()).expect("cursor"),
+            ack_token: ironclaw_loop_contracts::LoopInputAckToken::new("input-ack:1".to_string())
+                .expect("ack token"),
+        })
+    }
+}
+
+/// Crash-orphan recovery (queued replay): a `Queued` row whose queue entry was
+/// lost (crash between status write and enqueue) must be idempotently
+/// RE-ENQUEUED on replay — treating `Queued` as proof of enqueue left the
+/// message undeliverable forever.
+#[tokio::test]
+async fn queued_replay_re_enqueues_crash_orphaned_message() {
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let store = Arc::new(in_memory_agent_turn_runtime());
+    let coordinator: Arc<dyn TurnCoordinator> = Arc::new(DefaultTurnCoordinator::new(store));
+    // Phase 1 — the "crashed" process: enqueue vanishes, so the row is Queued
+    // with no backing queue entry.
+    let crashed = DefaultInboundTurnService::new(
+        binding_service.clone(),
+        thread_service.clone(),
+        Arc::clone(&coordinator),
+        Arc::new(VanishingInputEnqueue),
+    );
+
+    let first = sample_user_message_envelope("orphan1");
+    crashed.accept_user_message(&first).await.expect("first");
+    let second = sample_user_message_envelope_with_text("orphan2", "orphaned steering");
+    let outcome = crashed
+        .accept_user_message(&second)
+        .await
+        .expect("second deferred");
+    let InboundTurnOutcome::DeferredBusy { active_run_id, .. } = outcome else {
+        panic!("expected DeferredBusy, got {outcome:?}");
+    };
+
+    // Phase 2 — the restarted process with the REAL queue: the replay of the
+    // same envelope must re-enqueue before replaying DeferredBusy.
+    let real_queue = Arc::new(InMemoryHostInputQueue::new(
+        Arc::new(thread_service.clone()) as Arc<dyn SessionThreadService>,
+    ));
+    assert!(
+        real_queue
+            .next_after(active_run_id, origin_cursor(), 8)
+            .await
+            .expect("empty poll")
+            .inputs
+            .is_empty(),
+        "precondition: the orphaned message has no queue entry"
+    );
+    let restarted = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        Arc::clone(&coordinator),
+        real_queue.clone() as Arc<dyn HostInputEnqueuePort>,
+    );
+    let replayed = restarted
+        .accept_user_message(&second)
+        .await
+        .expect("replay succeeds");
+    assert!(
+        matches!(replayed, InboundTurnOutcome::DeferredBusy { .. }),
+        "replay stays DeferredBusy, got {replayed:?}"
+    );
+    let batch = real_queue
+        .next_after(active_run_id, origin_cursor(), 8)
+        .await
+        .expect("poll after replay");
+    assert_eq!(
+        batch.inputs.len(),
+        1,
+        "the queued replay must re-enqueue the orphaned steering input"
+    );
+    assert!(matches!(batch.inputs[0].input, LoopInput::Steering { .. }));
+}
+
+/// Queued replay against a run that is already terminal settles the orphaned
+/// row as `RejectedBusy` (resend affordance) instead of replaying a
+/// `DeferredBusy` no run will ever honor.
+#[tokio::test]
+async fn queued_replay_settles_rejected_when_active_run_is_terminal() {
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let store = Arc::new(in_memory_agent_turn_runtime());
+    let coordinator: Arc<dyn TurnCoordinator> = Arc::new(DefaultTurnCoordinator::new(store));
+    let crashed = DefaultInboundTurnService::new(
+        binding_service.clone(),
+        thread_service.clone(),
+        Arc::clone(&coordinator),
+        Arc::new(VanishingInputEnqueue),
+    );
+
+    let first = sample_user_message_envelope("orphan-term1");
+    let submitted = crashed.accept_user_message(&first).await.expect("first");
+    let InboundTurnOutcome::Submitted {
+        submitted_run_id,
+        binding,
+        ..
+    } = submitted
+    else {
+        panic!("expected Submitted, got {submitted:?}");
+    };
+    let second = sample_user_message_envelope_with_text("orphan-term2", "steer a dead run");
+    let outcome = crashed
+        .accept_user_message(&second)
+        .await
+        .expect("second deferred");
+    assert!(matches!(outcome, InboundTurnOutcome::DeferredBusy { .. }));
+
+    // Run A reaches a terminal state before the replay.
+    let scope = ironclaw_turns::TurnScope::new_with_owner(
+        binding.tenant_id.clone(),
+        binding.agent_id.clone(),
+        binding.project_id.clone(),
+        binding.thread_id.clone(),
+        binding.subject_user_id.clone(),
+    );
+    coordinator
+        .cancel_run(ironclaw_turns::CancelRunRequest {
+            scope,
+            actor: ironclaw_turns::TurnActor::new(binding.actor_user_id.clone()),
+            run_id: submitted_run_id,
+            reason: ironclaw_turns::SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("orphan-term-cancel").expect("key"),
+        })
+        .await
+        .expect("cancel run A");
+
+    let real_queue = Arc::new(InMemoryHostInputQueue::new(
+        Arc::new(thread_service.clone()) as Arc<dyn SessionThreadService>,
+    ));
+    let restarted = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        Arc::clone(&coordinator),
+        real_queue.clone() as Arc<dyn HostInputEnqueuePort>,
+    );
+    let replayed = restarted
+        .accept_user_message(&second)
+        .await
+        .expect("replay succeeds");
+    let InboundTurnOutcome::RejectedBusy { binding, .. } = replayed else {
+        panic!("expected RejectedBusy for a terminal run, got {replayed:?}");
+    };
+    let scope = ThreadScope {
+        tenant_id: binding.tenant_id.clone(),
+        agent_id: binding.agent_id.clone().expect("agent id"),
+        project_id: binding.project_id.clone(),
+        owner_user_id: binding.subject_user_id.clone(),
+        mission_id: None,
+    };
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(
+        history.messages[1].status,
+        MessageStatus::RejectedBusy,
+        "the orphaned row settles as RejectedBusy"
+    );
+    let batch = real_queue
+        .next_after(submitted_run_id, origin_cursor(), 8)
+        .await
+        .expect("poll");
+    assert!(
+        batch.inputs.is_empty(),
+        "nothing may be enqueued for a terminal run"
     );
 }

@@ -28,7 +28,7 @@ pub struct RefreshingCapabilityPortTestParts {
     /// Host runtime the assembled port dispatches builtin capabilities
     /// through (harness passes a recording double).
     pub runtime: std::sync::Arc<dyn ironclaw_host_runtime::HostRuntime>,
-    pub run_context: ironclaw_turns::run_profile::LoopRunContext,
+    pub run_context: ironclaw_loop_contracts::LoopRunContext,
     pub fallback_user_id: ironclaw_host_api::ids::UserId,
     pub workspace_mounts: ironclaw_host_api::mount::MountView,
     pub skill_mounts: ironclaw_host_api::mount::MountView,
@@ -40,7 +40,7 @@ pub struct RefreshingCapabilityPortTestParts {
     /// correlation by `call_id` works; never source them independently.
     pub input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     pub result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
-    pub milestone_sink: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopHostMilestoneSink>,
+    pub milestone_sink: std::sync::Arc<dyn ironclaw_loop_contracts::LoopHostMilestoneSink>,
     /// Opaque handle built by
     /// `test_support::build_skill_context_source_for_test`. Wraps
     /// the crate-private `ComposedSelectableSkillContextSource` so it never
@@ -126,6 +126,21 @@ pub struct RefreshingCapabilityPortTestParts {
 /// install/activate an extension can also just omit this call and leave the
 /// field `None` for the same no-op surface.
 #[cfg(feature = "test-support")]
+/// The EXACT per-caller workspace mount view production resolves for a
+/// scoped deployment (`runtime_mounts::scoped_workspace_mount_view` — the
+/// resolver behind `WorkspaceMountPolicy::PerCaller`), exported so an
+/// integration harness can grant its capabilities the same
+/// `tenants/{tenant}/users/{user}` subtree a scoped runtime's own factory
+/// would, instead of hand-formatting the layout and drifting from the
+/// production constructor. For tests only — gated behind `test-support`,
+/// ships zero bytes in production builds.
+pub fn scoped_workspace_mount_view_for_test(
+    scope: &ironclaw_host_api::resource::ResourceScope,
+    permissions: ironclaw_host_api::mount::MountPermissions,
+) -> Result<ironclaw_host_api::mount::MountView, ironclaw_host_api::error::HostApiError> {
+    crate::runtime_mounts::scoped_workspace_mount_view(scope, permissions)
+}
+
 pub fn build_extension_management_for_test(
     runtime: &crate::RebornRuntime,
 ) -> Option<ExtensionManagementTestHandle> {
@@ -141,8 +156,8 @@ pub fn build_extension_management_for_test(
 pub async fn create_refreshing_capability_port_for_test(
     parts: RefreshingCapabilityPortTestParts,
 ) -> Result<
-    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    ironclaw_turns::run_profile::AgentLoopHostError,
+    std::sync::Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
+    ironclaw_loop_contracts::AgentLoopHostError,
 > {
     crate::runtime::create_refreshing_capability_port_for_test(parts).await
 }

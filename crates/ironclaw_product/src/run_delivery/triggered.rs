@@ -2,6 +2,8 @@
 //! deliver its outputs to the creator's personal preference target, through
 //! the [`DeliveryCoordinator`].
 
+use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
+
 use std::sync::Arc;
 
 use crate::OutboundPart;
@@ -16,15 +18,15 @@ use ironclaw_outbound::{
     TriggerCommunicationContext, TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord,
     TriggeredRunDeliveryStore, ValidatedReplyTargetBinding,
 };
-use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, ThreadScope};
+use ironclaw_threads::{AttachmentRef, FinalizedAssistantMessageByRunRequest, ThreadScope};
 use ironclaw_turns::{TurnActor, TurnRunId, TurnRunState, TurnScope, TurnStatus};
 use tokio::sync::Semaphore;
 
 use super::observer::AllowNoProjectionAccess;
 use super::prompts;
 use super::{
-    BlockedActionableMarker, BlockedAuthPromptRequest, DeliveredChannelMessage, RunDeliveryError,
-    RunDeliveryServices, RunDeliverySettings, blocked_actionable_marker, cancel_auth_blocked_run,
+    BlockedActionableMarker, DeliveredChannelMessage, RunDeliveryError, RunDeliveryServices,
+    RunDeliverySettings, blocked_actionable_marker, cancel_auth_blocked_run,
     delivered_messages_from_outcome, gate_routes::record_gate_route_if_needed,
     triggered_run_delivery_settings, wait_for_actionable_state,
 };
@@ -33,12 +35,12 @@ use crate::delivery_coordinator::{
     DeliveryIntent,
 };
 use crate::{ProductOutboundTargetResolver, ProductSurfaceFailure};
+use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec;
 
-// The codec contract lives in `ironclaw_product` (the vendor half
-// is implemented by channel extension crates, which never depend on this
-// crate); re-exported here so the triggered-delivery consumers keep one
-// import surface.
-pub use crate::PreferenceTargetCodec;
+// The codec contract lives in `ironclaw_extension_contracts` — the vendor
+// half is implemented by the channel packages, which must never depend on
+// this crate. Consumers import it from there; this module deliberately keeps
+// no second import path for it (PROPOSAL §11.2.4).
 
 /// One trigger-submitted run to watch and deliver, in generic vocabulary.
 /// The composition's post-submit hook translates its trigger-fire type into
@@ -67,6 +69,7 @@ struct TriggeredNotification {
     event_kind: RunNotificationEventKind,
     intent: DeliveryIntent,
     text: String,
+    attachments: Vec<AttachmentRef>,
     gate_ref_for_routing: Option<String>,
     /// AuthPrompt payloads carrying an OAuth URL must only land in a
     /// personal DM; enforced by the resolver at send time.
@@ -77,6 +80,7 @@ struct TriggeredNotification {
 /// triggered run.
 struct TriggeredNotificationContext<'a> {
     scope: &'a TurnScope,
+    thread_scope: &'a ThreadScope,
     actor: &'a TurnActor,
     run_id: TurnRunId,
     trigger_context: &'a TriggerCommunicationContext,
@@ -396,6 +400,7 @@ async fn deliver_triggered_run(
 
         let notification_context = TriggeredNotificationContext {
             scope: &scope,
+            thread_scope: &thread_scope,
             actor: &actor,
             run_id,
             trigger_context: &trigger_context,
@@ -488,6 +493,7 @@ async fn deliver_triggered_run(
                         prompts::AUTH_UNAVAILABLE_MESSAGE,
                         prompts::triggered_update_footer(&trigger_label)
                     ),
+                    attachments: Vec::new(),
                     gate_ref_for_routing: None,
                     require_direct_message_target: false,
                 };
@@ -570,7 +576,7 @@ async fn triggered_notification_for_state(
 ) -> Result<Option<TriggeredNotification>, RunDeliveryError> {
     match state.status {
         TurnStatus::Completed => {
-            let Some(text) = services
+            let Some(message) = services
                 .thread_service
                 .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
                     scope: thread_scope.clone(),
@@ -578,7 +584,6 @@ async fn triggered_notification_for_state(
                     turn_run_id: run_id.to_string(),
                 })
                 .await?
-                .and_then(|message| message.content)
             else {
                 tracing::warn!(
                     target = "ironclaw::reborn::run_delivery",
@@ -587,10 +592,19 @@ async fn triggered_notification_for_state(
                 );
                 return Ok(None);
             };
+            let Some(text) = message.content else {
+                tracing::warn!(
+                    target = "ironclaw::reborn::run_delivery",
+                    %run_id,
+                    "completed triggered run finalized assistant message has no content; skipping delivery"
+                );
+                return Ok(None);
+            };
             Ok(Some(TriggeredNotification {
                 event_kind: RunNotificationEventKind::FinalReplyReady,
                 intent: DeliveryIntent::TriggeredDelivery,
                 text: format!("{text}{}", prompts::triggered_update_footer(trigger_label)),
+                attachments: message.attachments,
                 gate_ref_for_routing: None,
                 require_direct_message_target: false,
             }))
@@ -622,6 +636,7 @@ async fn triggered_notification_for_state(
                 // channels; the DM reply instruction applies to the personal
                 // target this delivery resolves to.
                 text: prompts::gate_prompt_text(&view, true),
+                attachments: Vec::new(),
                 gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
                 require_direct_message_target: false,
             }))
@@ -642,7 +657,7 @@ async fn triggered_notification_for_state(
                             fallback_owner_user_id: &actor.user_id,
                             scope,
                             run_id,
-                            gate_ref: gate_ref.as_str(),
+                            gate_ref,
                             invocation_id: None,
                             body: "Authentication required to continue this automation."
                                 .to_string(),
@@ -667,6 +682,7 @@ async fn triggered_notification_for_state(
                         event_kind: RunNotificationEventKind::AuthRequired,
                         intent: DeliveryIntent::AuthPrompt,
                         text: prompts::auth_prompt_text(&view, true),
+                        attachments: Vec::new(),
                         gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
                         require_direct_message_target: true,
                     }))
@@ -694,6 +710,7 @@ async fn triggered_notification_for_state(
                             unavailable,
                             prompts::triggered_update_footer(trigger_label)
                         ),
+                        attachments: Vec::new(),
                         gate_ref_for_routing: None,
                         require_direct_message_target: false,
                     }))
@@ -751,13 +768,16 @@ async fn deliver_triggered_notification(
             &outbound_policy,
             services.communication_preferences.as_ref(),
             context.authority,
+            services.project_filesystem.as_ref(),
             CoordinatedDeliveryRequest {
                 intent: notification.intent,
                 delivery,
                 parts: vec![OutboundPart::Text(notification.text)],
+                attachments: notification.attachments,
                 thread_anchor: None,
                 require_direct_message_target: notification.require_direct_message_target,
                 extension_id: &services.extension_id,
+                thread_scope: context.thread_scope,
             },
         )
         .await

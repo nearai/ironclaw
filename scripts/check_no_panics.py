@@ -59,9 +59,13 @@ PATH_ATTR_PATTERN = re.compile(
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 REBORN_BASELINE_PATH = REPO_ROOT / "scripts" / "no_panics_reborn_baseline.txt"
-SHIPPING_PACKAGE_MANIFEST = (
-    REPO_ROOT / "crates" / "ironclaw_reborn_cli" / "Cargo.toml"
-)
+# The scope anchor is the shipping package's *name*, not its directory. The
+# package is `ironclaw` whether its manifest sits at crates/ironclaw_reborn_cli/
+# (today) or at crates/app/ironclaw_cli/ (the target layout, which keeps the
+# package name and only renames the directory — PROPOSAL §5.1). Keying on the
+# path meant a move turned the whole gate into a crash or, worse, a shrunken
+# scan. See docs/reborn/target-architecture/CHECKLIST.md WS10.
+SHIPPING_PACKAGE_NAME = "ironclaw"
 
 
 @dataclass
@@ -622,19 +626,33 @@ def shipping_reborn_source_roots(metadata: dict) -> list[pathlib.Path]:
     a newly wired runtime/persistence/transport crate enters the gate
     automatically. External packages and non-production targets (tests,
     examples, benches, build scripts) are excluded.
+
+    Workspace membership plus "lives somewhere under ``crates/``" is the
+    ownership test, at any depth. The previous rule — manifest exactly one
+    level under ``crates/`` — silently dropped every crate the moment the
+    target-architecture restructure nests them in family directories
+    (``crates/<family>/ironclaw_*``): fewer files scanned, panics in the moved
+    crates unreviewed, and the gate still green for any crate that happened to
+    carry no baseline entries. See
+    docs/reborn/target-architecture/CHECKLIST.md WS10.
+
+    Fail-closed: every reachable workspace member must resolve to a crate
+    directory *and* contribute at least one production target root. A member
+    that resolves to neither is reported rather than skipped — "the discovery
+    found nothing here" is never allowed to look like "there was nothing here".
     """
 
     packages = {package["id"]: package for package in metadata["packages"]}
-    shipping_manifest = SHIPPING_PACKAGE_MANIFEST.resolve()
+    workspace_members = set(metadata.get("workspace_members", ()))
     shipping_ids = [
         package_id
         for package_id, package in packages.items()
-        if pathlib.Path(package["manifest_path"]).resolve() == shipping_manifest
+        if package["name"] == SHIPPING_PACKAGE_NAME and package_id in workspace_members
     ]
     if len(shipping_ids) != 1:
         raise RuntimeError(
-            "expected exactly one shipping Reborn package at "
-            f"{shipping_manifest}, found {len(shipping_ids)}"
+            f"expected exactly one workspace package named {SHIPPING_PACKAGE_NAME!r}, "
+            f"found {len(shipping_ids)}"
         )
 
     resolve = metadata.get("resolve")
@@ -657,17 +675,46 @@ def shipping_reborn_source_roots(metadata: dict) -> list[pathlib.Path]:
 
     roots: set[pathlib.Path] = set()
     crates_root = (REPO_ROOT / "crates").resolve()
-    for package_id in reachable:
+    scanned: list[str] = []
+    outside_crates: list[str] = []
+    without_roots: list[str] = []
+    for package_id in sorted(reachable):
         package = packages[package_id]
-        manifest = pathlib.Path(package["manifest_path"]).resolve()
-        if manifest.parent.parent != crates_root:
+        if package_id not in workspace_members:
             continue
-        for target in package["targets"]:
-            if not ({"lib", "bin"} & set(target["kind"])):
-                continue
-            source = pathlib.Path(target["src_path"]).resolve()
-            if source.suffix == ".rs":
-                roots.add(source)
+        manifest = pathlib.Path(package["manifest_path"]).resolve()
+        if crates_root not in manifest.parents:
+            outside_crates.append(f"{package['name']} ({manifest})")
+            continue
+        package_roots = {
+            source
+            for target in package["targets"]
+            if {"lib", "bin"} & set(target["kind"])
+            for source in (pathlib.Path(target["src_path"]).resolve(),)
+            if source.suffix == ".rs"
+        }
+        if not package_roots:
+            without_roots.append(package["name"])
+            continue
+        roots |= package_roots
+        scanned.append(package["name"])
+
+    if outside_crates:
+        raise RuntimeError(
+            "these workspace crates ship in the binary but their manifests are not "
+            f"under {crates_root}: {', '.join(outside_crates)}. The panic gate scans "
+            "the crate tree; a shipping crate outside it would be skipped silently. "
+            "Move it under crates/ or widen this scope deliberately."
+        )
+    if without_roots:
+        raise RuntimeError(
+            "these shipping workspace crates declare no lib/bin target for the panic "
+            f"gate to scan: {', '.join(without_roots)}. A crate that contributes no "
+            "source root contributes no coverage either."
+        )
+    # `scanned` is non-empty by construction: the shipping package is a
+    # workspace member, and it either resolved under crates/ with a source root
+    # or one of the two errors above already fired.
     return sorted(roots)
 
 
@@ -905,7 +952,7 @@ def compare_reborn_baseline(
 
 
 def changed_rust_files(base: str, head: str) -> list[pathlib.Path]:
-    output = run_git("diff", "--name-only", f"{base}...{head}", "--", "src", "crates")
+    output = run_git("diff", "--name-only", "-M", f"{base}...{head}", "--", "src", "crates")
     files = []
     for line in output.splitlines():
         if line.endswith(".rs") and (line.startswith("src/") or line.startswith("crates/")):
@@ -914,39 +961,77 @@ def changed_rust_files(base: str, head: str) -> list[pathlib.Path]:
     return files
 
 
-def added_lines_for_file(base: str, head: str, path: pathlib.Path) -> set[int]:
-    diff = run_git("diff", "--unified=0", f"{base}...{head}", "--", str(path))
-    added: set[int] = set()
+def added_lines_by_file(base: str, head: str) -> dict[str, set[int]]:
+    """Added line numbers per changed file, computed once, RENAME-AWARE.
+
+    `-M` is what makes this correct for a move: without it, a relocated file
+    has no pre-image on its new path, so every one of its lines reads as added
+    and a pure `git mv` of a file carrying justified `unreachable!()` calls
+    fails the delta scan wholesale. With `-M`, a 100%-similar rename yields a
+    rename header and no `+` lines at all (measured on the WS2 package
+    colocation: 1,754 spurious added lines for
+    `memory-native/src/repo/filesystem.rs` before, 0 after), while a
+    rename-with-edits still reports exactly the lines that actually changed.
+    That is the property this scan wants — "did THIS change introduce a panic",
+    not "did this change touch a line near one".
+
+    One `git diff` for the whole range rather than one per file: pairing a
+    rename needs both sides in the same invocation, which a per-file pathspec
+    on the destination cannot provide.
+    """
+
+    diff = run_git(
+        "diff", "--unified=0", "-M", f"{base}...{head}", "--", "src", "crates"
+    )
+    return parse_added_lines(diff)
+
+
+def parse_added_lines(diff: str) -> dict[str, set[int]]:
+    """Parse `git diff --unified=0` output into per-file added line numbers."""
+
+    per_file: dict[str, set[int]] = {}
+    current: set[int] | None = None
     current_line = 0
 
     for line in diff.splitlines():
+        if line.startswith("+++ "):
+            target = line[4:]
+            if target == "/dev/null":
+                current = None
+            else:
+                name = target[2:] if target.startswith("b/") else target
+                current = per_file.setdefault(name, set())
+            continue
+        if line.startswith("--- ") or line.startswith("diff --git "):
+            continue
+        if current is None:
+            continue
         if line.startswith("@@"):
             match = re.search(r"\+(\d+)(?:,(\d+))?", line)
             if not match:
                 continue
             current_line = int(match.group(1))
             continue
-        if line.startswith("+++ ") or line.startswith("--- "):
-            continue
         if line.startswith("+"):
-            added.add(current_line)
+            current.add(current_line)
             current_line += 1
         elif line.startswith("-"):
             continue
         else:
             current_line += 1
 
-    return added
+    return per_file
 
 
 def collect_violations(base: str, head: str) -> list[tuple[str, int, str]]:
     violations: list[tuple[str, int, str]] = []
     scanner = RustScanner()
 
+    added_by_file = added_lines_by_file(base, head)
     for path in changed_rust_files(base, head):
         if not path.exists():
             continue
-        added_lines = added_lines_for_file(base, head, path)
+        added_lines = added_by_file.get(path.as_posix(), set())
         if not added_lines:
             continue
 
@@ -1158,7 +1243,7 @@ class CheckNoPanicsTests(unittest.TestCase):
         # is not the blessed feature-gated module either.
         self.assertFalse(is_test_only_path("crates/foo/src/auth/test_support.rs"))
         self.assertFalse(
-            is_test_only_path("crates/ironclaw_memory_native/src/contract_tests.rs")
+            is_test_only_path("crates/extensions/packages/memory-native/src/contract_tests.rs")
         )
 
     def test_lifetime_annotations_do_not_desync_braces(self) -> None:
@@ -1388,6 +1473,60 @@ class CheckNoPanicsTests(unittest.TestCase):
             self.assertNotIn(shared, tests)
             self.assertNotIn(child, tests)
 
+    def test_pure_rename_contributes_no_added_lines(self) -> None:
+        """A relocated file must not read as wholly new.
+
+        Regression for the WS2 package colocation: without `-M` the diff has no
+        pre-image on the destination path, so every line of a moved file counts
+        as added and a `git mv` of a file carrying justified `unreachable!()`
+        calls fails the delta scan wholesale. `git diff -M` emits a rename
+        header and no `+` lines for a 100%-similar rename, which is what this
+        parser must reflect.
+        """
+
+        rename_only = (
+            "diff --git a/crates/old/src/lib.rs b/crates/new/src/lib.rs\n"
+            "similarity index 100%\n"
+            "rename from crates/old/src/lib.rs\n"
+            "rename to crates/new/src/lib.rs\n"
+        )
+        self.assertEqual(parse_added_lines(rename_only), {})
+
+    def test_rename_with_edits_reports_only_the_edited_lines(self) -> None:
+        rename_with_edit = (
+            "diff --git a/crates/old/src/lib.rs b/crates/new/src/lib.rs\n"
+            "similarity index 98%\n"
+            "rename from crates/old/src/lib.rs\n"
+            "rename to crates/new/src/lib.rs\n"
+            "--- a/crates/old/src/lib.rs\n"
+            "+++ b/crates/new/src/lib.rs\n"
+            "@@ -7,0 +8,2 @@\n"
+            "+    let x = value.unwrap();\n"
+            "+    let y = other.expect(\"boom\");\n"
+        )
+        self.assertEqual(
+            parse_added_lines(rename_with_edit),
+            {"crates/new/src/lib.rs": {8, 9}},
+        )
+
+    def test_created_file_reports_every_line_and_deletion_reports_none(self) -> None:
+        created = (
+            "diff --git a/crates/new/src/added.rs b/crates/new/src/added.rs\n"
+            "--- /dev/null\n"
+            "+++ b/crates/new/src/added.rs\n"
+            "@@ -0,0 +1,2 @@\n"
+            "+fn a() {}\n"
+            "+fn b() {}\n"
+            "diff --git a/crates/old/src/gone.rs b/crates/old/src/gone.rs\n"
+            "--- a/crates/old/src/gone.rs\n"
+            "+++ /dev/null\n"
+            "@@ -1,2 +0,0 @@\n"
+            "-fn a() {}\n"
+            "-fn b() {}\n"
+        )
+        parsed = parse_added_lines(created)
+        self.assertEqual(parsed, {"crates/new/src/added.rs": {1, 2}})
+
     def test_baseline_comparison_rejects_new_and_stale_entries(self) -> None:
         fingerprint = 'fn invariant :: unreachable!("static invariant")'
         approved = collections.Counter(
@@ -1541,7 +1680,12 @@ class CheckNoPanicsTests(unittest.TestCase):
             self.assertEqual(len(source_reads), 1)
             self.assertEqual(len(violations), 1)
 
-    def test_shipping_roots_follow_normal_dependencies_and_lib_bin_targets(self) -> None:
+    @staticmethod
+    def _shipping_metadata(
+        normal_dependency_dir: str = "crates/normal_dependency",
+        members: tuple[str, ...] | None = None,
+        shipping_dir: str = "crates/ironclaw_reborn_cli",
+    ) -> dict:
         shipping_id = "shipping"
         normal_id = "normal"
         dev_id = "dev"
@@ -1549,12 +1693,14 @@ class CheckNoPanicsTests(unittest.TestCase):
 
         def package(
             package_id: str,
-            crate_name: str,
+            crate_dir: str,
             target_kinds: list[str],
+            name: str | None = None,
         ) -> dict:
-            crate_root = REPO_ROOT / "crates" / crate_name
+            crate_root = REPO_ROOT / crate_dir
             return {
                 "id": package_id,
+                "name": name or crate_dir.rsplit("/", 1)[-1],
                 "manifest_path": str(crate_root / "Cargo.toml"),
                 "targets": [
                     {
@@ -1567,17 +1713,22 @@ class CheckNoPanicsTests(unittest.TestCase):
                 ],
             }
 
-        shipping = package(
-            shipping_id,
-            "ironclaw_reborn_cli",
-            ["lib", "bin", "test", "custom-build"],
-        )
-        metadata = {
+        return {
+            "workspace_members": list(
+                members
+                if members is not None
+                else (shipping_id, normal_id, dev_id, build_id)
+            ),
             "packages": [
-                shipping,
-                package(normal_id, "normal_dependency", ["lib", "bin"]),
-                package(dev_id, "dev_dependency", ["lib"]),
-                package(build_id, "build_dependency", ["lib"]),
+                package(
+                    shipping_id,
+                    shipping_dir,
+                    ["lib", "bin", "test", "custom-build"],
+                    name=SHIPPING_PACKAGE_NAME,
+                ),
+                package(normal_id, normal_dependency_dir, ["lib", "bin"]),
+                package(dev_id, "crates/dev_dependency", ["lib"]),
+                package(build_id, "crates/build_dependency", ["lib"]),
             ],
             "resolve": {
                 "nodes": [
@@ -1596,7 +1747,8 @@ class CheckNoPanicsTests(unittest.TestCase):
             },
         }
 
-        roots = shipping_reborn_source_roots(metadata)
+    def test_shipping_roots_follow_normal_dependencies_and_lib_bin_targets(self) -> None:
+        roots = shipping_reborn_source_roots(self._shipping_metadata())
 
         self.assertEqual(
             roots,
@@ -1609,6 +1761,55 @@ class CheckNoPanicsTests(unittest.TestCase):
                 ]
             ),
         )
+
+    def test_shipping_roots_find_crates_nested_in_family_directories(self) -> None:
+        """A crate in `crates/<family>/<crate>/` is in scope, not skipped.
+
+        The flat-tree rule (manifest exactly one level under `crates/`) dropped
+        these silently, which is how the target-architecture family move would
+        have shrunk this gate's scope without failing it.
+        """
+        roots = shipping_reborn_source_roots(
+            self._shipping_metadata(
+                normal_dependency_dir="crates/substrates/ironclaw_events"
+            )
+        )
+
+        self.assertIn(
+            (REPO_ROOT / "crates/substrates/ironclaw_events/src/lib.rs").resolve(),
+            roots,
+        )
+
+    def test_shipping_package_is_found_by_name_after_a_directory_rename(self) -> None:
+        """The scope anchor survives `crates/ironclaw_reborn_cli` -> `crates/app/ironclaw_cli`.
+
+        The package keeps its name (`ironclaw`) across that rename, so resolving
+        by name keeps the whole gate pointed at the right dependency closure.
+        """
+        roots = shipping_reborn_source_roots(
+            self._shipping_metadata(shipping_dir="crates/app/ironclaw_cli")
+        )
+
+        self.assertIn((REPO_ROOT / "crates/app/ironclaw_cli/src/main.rs").resolve(), roots)
+
+    def test_shipping_crate_outside_the_crate_tree_fails_closed(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "not under"):
+            shipping_reborn_source_roots(
+                self._shipping_metadata(normal_dependency_dir="tools/ironclaw_stress")
+            )
+
+    def test_missing_shipping_package_fails_closed(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "exactly one workspace package"):
+            shipping_reborn_source_roots(self._shipping_metadata(members=()))
+
+    def test_shipping_crate_without_a_source_root_fails_closed(self) -> None:
+        metadata = self._shipping_metadata()
+        for package in metadata["packages"]:
+            if package["id"] == "normal":
+                package["targets"] = [{"kind": ["test"], "src_path": "x.rs"}]
+
+        with self.assertRaisesRegex(RuntimeError, "no lib/bin target"):
+            shipping_reborn_source_roots(metadata)
 
     def test_malformed_baseline_records_are_rejected(self) -> None:
         malformed = [

@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_host_api::memory::{MemoryDescriptor, MemoryLifecycleHook};
+use ironclaw_extension_contracts::memory::{MemoryDescriptor, MemoryLifecycleHook};
 use ironclaw_memory::{
     MemoryInvocation, MemoryService, MemoryServiceContextRequest, MemoryServiceContextSnippet,
     MemoryServiceError, MemoryServiceProfileReadResponse, MemoryServiceRecordRequest,

@@ -37,7 +37,6 @@ pub(super) enum ConfigKey {
     GoogleClientId,
     GoogleClientSecret,
     GoogleRedirectUri,
-    SlackEnabled,
     WebuiToken,
 }
 
@@ -62,7 +61,6 @@ impl ConfigKey {
             "google.client_id" => Some(Self::GoogleClientId),
             "google.client_secret" => Some(Self::GoogleClientSecret),
             "google.redirect_uri" => Some(Self::GoogleRedirectUri),
-            "slack.enabled" => Some(Self::SlackEnabled),
             "webui.token" => Some(Self::WebuiToken),
             _ => None,
         }
@@ -71,9 +69,7 @@ impl ConfigKey {
     pub(super) fn destination(&self) -> ConfigDestination {
         match self {
             Self::LlmApiKey { .. } | Self::GoogleClientSecret => ConfigDestination::SecretStorePort,
-            Self::GoogleClientId | Self::GoogleRedirectUri | Self::SlackEnabled => {
-                ConfigDestination::ConfigToml
-            }
+            Self::GoogleClientId | Self::GoogleRedirectUri => ConfigDestination::ConfigToml,
             Self::WebuiToken => ConfigDestination::TokenFile,
         }
     }
@@ -146,13 +142,6 @@ pub(super) fn validate_shape(key: &ConfigKey, value: &str) -> ShapeVerdict {
                 )
             }
         }
-        ConfigKey::SlackEnabled => {
-            if value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false") {
-                ShapeVerdict::Ok
-            } else {
-                ShapeVerdict::Reject(format!("slack.enabled `{value}` must be `true` or `false`"))
-            }
-        }
         ConfigKey::LlmApiKey { .. } | ConfigKey::WebuiToken => ShapeVerdict::Ok,
     }
 }
@@ -165,19 +154,6 @@ pub(super) fn validate_shape(key: &ConfigKey, value: &str) -> ShapeVerdict {
 /// dependency graph. See the module doc for why the text moved.
 pub(super) fn google_remediation_text() -> String {
     ironclaw_reborn_config::google_remediation_text()
-}
-
-/// Slack remediation text: per Correction A in the PR-C plan, Slack has
-/// no CLI-settable bot token/signing secret — the only supported surface
-/// is the WebUI extension setup flow. Describes WHAT to configure only;
-/// the restart apply-step sentence is appended once by the caller (see
-/// `set.rs::print_apply_step`), not embedded here — see the module doc.
-///
-pub(super) fn slack_remediation_text(base_url: &str) -> String {
-    format!(
-        "After restarting, connect your Slack workspace at {base_url}/extensions (workspace \
-         OAuth happens there; config set cannot supply Slack app identity or credentials)"
-    )
 }
 
 #[cfg(test)]
@@ -224,10 +200,6 @@ mod tests {
             Some(ConfigKey::GoogleRedirectUri)
         );
         assert_eq!(
-            ConfigKey::classify("slack.enabled"),
-            Some(ConfigKey::SlackEnabled)
-        );
-        assert_eq!(
             ConfigKey::classify("webui.token"),
             Some(ConfigKey::WebuiToken)
         );
@@ -235,6 +207,10 @@ mod tests {
 
     #[test]
     fn classify_unknown_key_is_none() {
+        // `slack.enabled` was settable until the section was retired; it now
+        // classifies as unknown so `set.rs` can answer with migration
+        // guidance instead of writing a value nothing reads.
+        assert_eq!(ConfigKey::classify("slack.enabled"), None);
         assert_eq!(ConfigKey::classify("slack.bot_token"), None);
         assert_eq!(ConfigKey::classify("slack.signing_secret"), None);
         assert_eq!(ConfigKey::classify("nonsense.key"), None);
@@ -259,10 +235,6 @@ mod tests {
         );
         assert_eq!(
             ConfigKey::GoogleRedirectUri.destination(),
-            ConfigDestination::ConfigToml
-        );
-        assert_eq!(
-            ConfigKey::SlackEnabled.destination(),
             ConfigDestination::ConfigToml
         );
         assert_eq!(
@@ -354,22 +326,6 @@ mod tests {
     }
 
     #[test]
-    fn slack_enabled_validator_requires_bool_shape() {
-        assert_eq!(
-            validate_shape(&ConfigKey::SlackEnabled, "true"),
-            ShapeVerdict::Ok
-        );
-        assert_eq!(
-            validate_shape(&ConfigKey::SlackEnabled, "FALSE"),
-            ShapeVerdict::Ok
-        );
-        assert!(matches!(
-            validate_shape(&ConfigKey::SlackEnabled, "yes"),
-            ShapeVerdict::Reject(_)
-        ));
-    }
-
-    #[test]
     fn llm_api_key_and_webui_token_have_no_shape_rejection() {
         assert_eq!(
             validate_shape(
@@ -403,22 +359,6 @@ mod tests {
             0,
             "google_remediation_text must not embed the restart step itself \
              (callers append it exactly once): {google}"
-        );
-
-        let slack = slack_remediation_text("http://127.0.0.1:3000");
-        assert!(slack.contains("http://127.0.0.1:3000/extensions"));
-        assert!(!slack.contains("config set slack.bot_token"));
-        // The redirect-URI env var the host-beta lane read is gone on the
-        // unified extension model — the guidance must not teach a dead step.
-        assert!(
-            !slack.contains("IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"),
-            "the retired redirect-URI env var must not be advertised: {slack}"
-        );
-        assert_eq!(
-            slack.matches("service restart").count(),
-            0,
-            "slack_remediation_text must not embed the restart step itself \
-             (callers append it exactly once): {slack}"
         );
     }
 }

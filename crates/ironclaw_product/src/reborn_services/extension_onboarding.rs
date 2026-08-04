@@ -1,4 +1,4 @@
-use ironclaw_host_api::state::InstallationState;
+use ironclaw_extension_contracts::state::InstallationState;
 
 use crate::{
     LifecycleExtensionCredentialSetup, LifecycleExtensionRuntimeKind, LifecycleExtensionSummary,
@@ -6,7 +6,9 @@ use crate::{
 };
 
 use super::extension_credentials::ExtensionCredentialReadiness;
-use super::types::{RebornExtensionOnboardingPayload, RebornExtensionOnboardingState};
+use ironclaw_product_contracts::product_wire::{
+    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ExtensionOnboarding {

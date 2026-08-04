@@ -1,5 +1,5 @@
+use ironclaw_loop_contracts::{LoopContextSnippet, MemoryPromptContextRequest};
 use ironclaw_threads::{ContextMessage, MessageKind, SessionThreadService};
-use ironclaw_turns::run_profile::{LoopContextSnippet, MemoryPromptContextRequest};
 
 use crate::ThreadBackedLoopContextPort;
 
@@ -16,7 +16,7 @@ where
     ///
     /// The first prompt build of the run seeds the query from the latest user
     /// message and fetches both lanes through the wired
-    /// [`ironclaw_turns::run_profile::MemoryPromptContextService`]; subsequent
+    /// [`ironclaw_loop_contracts::MemoryPromptContextService`]; subsequent
     /// per-iteration calls reuse the cached snippets (the "fetch once per run"
     /// guarantee). When no service is wired, or there is no actor / user message
     /// to scope a query to, this returns empty. A fetch failure degrades to empty

@@ -31,12 +31,12 @@ behavior, and persistent behavior is proven on libSQL **and** PostgreSQL.
 Already generic on this branch: one manifest per extension parsed through
 `ExtensionManifestV2::parse`; surfaces projected by `capability_surfaces()`
 (`crates/ironclaw_extensions/src/v2.rs`); surface kinds in
-`crates/ironclaw_host_api/src/surface.rs`; channel surfaces on the extensions
+`crates/ironclaw_extension_contracts/src/surface.rs`; channel surfaces on the extensions
 wire with directions and connection affordance
 (`crates/ironclaw_product/src/reborn_services/{types,extensions}.rs`);
 a narrow channel protocol adapter trait
 (`crates/ironclaw_product_adapters/src/adapter.rs`) implemented by
-`crates/ironclaw_slack_extension`; retired-taxonomy architecture gate.
+`crates/extensions/packages/slack`; retired-taxonomy architecture gate.
 
 Not generic yet — the work:
 
@@ -53,9 +53,9 @@ Not generic yet — the work:
 | Lifecycle emits channel connection copy; workflow has cleanup literals | `crates/ironclaw_extension_host/src/product_lifecycle.rs`, `crates/ironclaw_product/src/reborn_services/extensions.rs` |
 | Slack-only frontend components and branches | `crates/ironclaw_webui/frontend/src/pages/extensions/components/{slack-setup-panel,slack-channel-picker,channels-tab,configure-modal}.tsx`, `lib/slack-{setup,channels}-api.ts`, `pages/chat/components/auth-oauth-card.tsx`, `lib/channel-connection-events.ts` |
 | Concrete channel formatting in LLM prompt construction | `crates/ironclaw_llm/src/reasoning.rs` |
-| Concrete channel variants in trace contributions | `crates/ironclaw_reborn_traces/src/contribution.rs` |
+| Concrete channel variants in trace contributions | `crates/ironclaw_reborn_traces/src/contribution/envelope.rs` |
 | Slack CLI command, cargo feature, config types | `crates/ironclaw_reborn_cli/src/commands/serve_slack.rs`, `slack-v2-host-beta` feature, `crates/ironclaw_reborn_config` |
-| Telegram adapter exists but is test-only | `crates/ironclaw_telegram_extension` |
+| Telegram adapter exists but is test-only | `crates/extensions/packages/telegram` |
 
 ## 3. Target crate and module map
 
@@ -78,7 +78,7 @@ Not generic yet — the work:
 | `ironclaw_dispatcher` | Resolve prebound `ToolAdapter` via injected resolver; delete per-invocation package/runtime-kind selection |
 | `ironclaw_product` | Generic delivery coordinator (all outbound intents); delete Slack cleanup literals |
 | `ironclaw_reborn_composition` | Assembly only: construct stores/ports/host/engine, mount routers, inject resolvers. `src/slack/**` deleted by P6; consumes the first-party package inventory as opaque bundles — no catalog, no extension names (P7) |
-| `ironclaw_first_party_extensions` | The package inventory: one module per package (`src/packages/<id>.rs`) owning that package's embeds, asset descriptors, digest, and bespoke copy, beside `assets/<id>/`; exports opaque bundles consumed by composition and the CLI |
+| `ironclaw_extension_support` | The package inventory: one module per package (`src/packages/<id>.rs`) owning that package's embeds, asset descriptors, digest, and bespoke copy, beside `assets/<id>/`; exports opaque bundles consumed by composition and the CLI |
 | `ironclaw_webui_v2` | Generic surface/config/connect UI from wire data; Slack components deleted |
 | `ironclaw` (`crates/ironclaw_reborn_cli`) | Assembles the native factory registry (the only generic-side crate allowed to link concrete extension crates); `serve_slack.rs` and Slack feature deleted |
 | `ironclaw_llm` | `CommunicationPresentationPolicy` input replaces concrete channel formatting |
@@ -197,8 +197,9 @@ already exists.
   - `egress.rs` — `RestrictedEgress` implementation: scheme/host/method
     allowlist from the resolved contract, credential injection by handle
     (adapter-supplied `Authorization` rejected where injection is declared),
-    response size caps, redirect denial across hosts, private-IP/DNS-rebind
-    denial (reuse existing network policy), deadlines.
+    request size caps checked before approval and again after host-side body
+    credential injection, response size caps, redirect denial across hosts,
+    private-IP/DNS-rebind denial (reuse existing network policy), deadlines.
 - Composition/CLI: CLI assembles `Vec<NativeExtensionFactory>` and passes it
   into composition; composition constructs `ExtensionHost` with stores +
   loaders and injects resolver handles into dispatcher/workflow/engine/router.
@@ -275,7 +276,8 @@ branch anywhere in dispatch (`tests/integration/extension_runtime.rs`).
   deployment tick, due at half the declared lifetime, soonest-death-first
   under the per-tick cap). There is no per-vendor refresher code.
 - Shared vendors: unify recipes during internal publication (identical except
-  `scopes`/`display_name`, else conflict); scope union and incremental
+  `scopes` and presentation-only `display_name`/`instructions`/`setup_url`,
+  else conflict); scope union and incremental
   re-consent keep today's behavior; grants are vendor-scoped and survive
   removal of one consumer while another active extension shares the vendor.
 - Recipe reference (fields beyond `overview.md` §3): `scope_param` (default
@@ -333,13 +335,28 @@ oauth-connect integration test rather than adding a parallel one).
     key: `(installation, event_id)`), **then** 2xx; persistence failure →
     retryable 5xx. Then existing workflow: identity and conversation binding,
     turn submission.
+  - `BatchFragment` → validate bounded batch/fragment identities and settle
+    window, durably stage the verified fragment in the tenant-scoped
+    host-private filesystem, **then** 2xx. A leased worker atomically claims
+    the latest revision after the quiet window, merges fragments in provider
+    order, and performs one ordinary admission. Durable revisions prevent a
+    stale timer from admitting a partial batch; leases and startup recovery
+    cover crashes. Conflicts reject and tombstone the whole batch, while
+    completed tombstones absorb provider redelivery.
   - `Respond` → bounded immediate response (post-verification), no enqueue.
   - `Ignore` → 2xx after the same durable no-op commit.
 - `reply_context` from the message is stored host-side with the conversation
   source binding and handed back in `OutboundEnvelope`.
-- Inbound attachments are `AttachmentRef`s (vendor URL/id + mime hint) so
-  `inbound` stays pure; the host-side fetch through restricted channel egress
-  is specified but implemented only when a consumer needs bytes.
+- Inbound attachments are host-private `ChannelAttachmentRef`s (descriptor +
+  opaque vendor reference), so `inbound` stays pure. Ordinary-message
+  references remain transient; provider-batch fragments serialize them only
+  into the bounded tenant-scoped staging snapshot required for safe
+  acknowledge-before-settle behavior. They never enter events, projections,
+  transcripts, or model-visible state. After replay dedupe and before-inbound
+  policy, the product workflow bounds the original metadata; after policy it
+  reconciles rewritten descriptors, fetches through the exact adapter
+  generation and manifest-restricted egress, validates the returned bytes, and
+  lands them through the project filesystem before message acceptance.
 - Conversation binding consumes the channel's declared `conversation_model`:
   `continuous` channels bind one IronClaw conversation per external
   conversation ref (today's Slack/Telegram behavior, now declared instead of
@@ -381,12 +398,17 @@ signed vendor POST → verified → normalized → turn admitted.
   retry/backoff/dedupe/single-flight/shutdown-drain. Crash after possible
   vendor success → `Unknown`, never blind resend. Sole delivery-state writer —
   adapters get no store. Production construction rejects a no-op sink.
+- For final and triggered replies, the coordinator materializes recognized
+  `/workspace/...` references through the turn-scoped project filesystem after
+  target/channel resolution and before `Sending`. It enforces shared
+  count/per-file/total budgets, rejects caller-supplied file parts, and passes
+  only transient `OutboundPart::File` values to the adapter.
 - `CommunicationPresentationPolicy` derived from `[channel.presentation]`
   flows into prompt construction; delete the concrete
   Discord/WhatsApp/Telegram/Slack branches in
   `crates/ironclaw_llm/src/reasoning.rs`. Replace concrete trace contribution
-  variants in `crates/ironclaw_reborn_traces/src/contribution.rs` with
-  extension/surface origin ids.
+  variants in `crates/ironclaw_reborn_traces/src/contribution/envelope.rs`
+  with extension/surface origin ids.
 - **Slack:** `SlackChannelAdapter::deliver` absorbs Block Kit/plain rendering,
   splitting, `chat.postMessage`/update/delete, DM provisioning
   (`conversations.open`, from `slack_dm_open.rs`), target formats

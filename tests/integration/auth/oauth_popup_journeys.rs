@@ -332,6 +332,7 @@ app_id = "/app_id"
                 .services
                 .flow_manager()
                 .create_flow(NewAuthFlow {
+                    requested_scopes: Vec::new(),
                     id: None,
                     scope: scope.clone(),
                     kind: AuthFlowKind::IntegrationCredential,
@@ -348,6 +349,8 @@ app_id = "/app_id"
                     opaque_state_hash: Some(state_hash.clone()),
                     pkce_verifier_hash: Some(PkceVerifierHash::new(hex64(fill)).unwrap()),
                     expires_at,
+                    // User-driven connect flow in this fixture, not extension-owned.
+                    requester_extension: None,
                 })
                 .await
                 .expect("create_flow must succeed");

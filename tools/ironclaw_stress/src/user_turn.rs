@@ -10,6 +10,10 @@ use std::{
 
 use chrono::Utc;
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, BlockedReason, IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef,
+    TurnActor,
+};
 use ironclaw_host_api::{
     error::HostApiError,
     ids::{CapabilityId, InvocationId, ProcessId, ResourceReservationId, ThreadId},
@@ -22,6 +26,7 @@ use ironclaw_llm::{
     ChatMessage, CompletionRequest, LlmError, LlmProvider, SessionManager,
     build_static_provider_chain, resolve_llm_config_from_env,
 };
+use ironclaw_loop_contracts::LoopCheckpointStateRef;
 use ironclaw_processes::{
     ClaimProcessesRequest, ProcessCheckpointRef, ProcessJournalStore, ProcessKind,
     ProcessLeaseRequest, ProcessStateTransitionRequest, ProcessSuspension, ProcessSuspensionKind,
@@ -38,10 +43,9 @@ use ironclaw_threads::{
     UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, BlockedReason, DefaultTurnCoordinator, GateRef, IdempotencyKey,
-    LoopCheckpointStateRef, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnErrorCategory, claimed_turn_run_from_process_claim, runner::ClaimedTurnRun,
+    DefaultTurnCoordinator, ResumeTurnPrecondition, ResumeTurnRequest, SubmitTurnRequest,
+    SubmitTurnResponse, TurnCoordinator, TurnError, TurnErrorCategory,
+    claimed_turn_run_from_process_claim, runner::ClaimedTurnRun,
 };
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
@@ -963,19 +967,44 @@ where
             .user_turn_context_for_user_index(owner_index)
             .map_err(|error| OperationFailure::invalid_request("thread_list_context", error))?;
         let thread_id = thread_list_thread_id(thread_index)?;
+        let title = if args.thread_list_untitled {
+            None
+        } else {
+            Some(format!("Thread list seed {thread_index:06}"))
+        };
         time_stage(
             &mut stages.ensure_thread,
             self.thread_service.ensure_thread(EnsureThreadRequest {
-                scope: context.thread_scope,
-                thread_id: Some(thread_id),
+                scope: context.thread_scope.clone(),
+                thread_id: Some(thread_id.clone()),
                 created_by_actor_id: context.user_id.as_str().to_string(),
-                title: Some(format!("Thread list seed {thread_index:06}")),
+                title,
                 metadata_json: None,
             }),
         )
         .await
         .map(|_| ())
-        .map_err(|error| thread_failure("thread_list_prefill_ensure_thread", error))
+        .map_err(|error| thread_failure("thread_list_prefill_ensure_thread", error))?;
+        if args.thread_list_untitled {
+            // One accepted user message gives the sidebar something to derive
+            // a label from — the untitled-thread listing shape.
+            self.thread_service
+                .accept_inbound_message(ironclaw_threads::AcceptInboundMessageRequest {
+                    scope: context.thread_scope,
+                    thread_id,
+                    actor_id: context.user_id.as_str().to_string(),
+                    source_binding_id: None,
+                    reply_target_binding_id: None,
+                    external_event_id: None,
+                    content: ironclaw_threads::MessageContent::text(format!(
+                        "thread list seed message {thread_index:06}"
+                    )),
+                })
+                .await
+                .map(|_| ())
+                .map_err(|error| thread_failure("thread_list_prefill_seed_message", error))?;
+        }
+        Ok(())
     }
 
     async fn run_operation(
@@ -1674,7 +1703,7 @@ where
     ) -> Result<ClaimedTurnRun, OperationFailure> {
         let run_id = claimed.state.run_id;
         let is_auth = use_auth_gate;
-        let gate_ref = GateRef::new(format!("stress-gate:{run_id}"))
+        let gate_ref = TurnGateRef::new(format!("stress-gate:{run_id}"))
             .map_err(|error| OperationFailure::invalid_request("block_run", error))?;
         let state_ref = LoopCheckpointStateRef::new(format!("checkpoint:stress-block-{run_id}"))
             .map_err(|error| OperationFailure::invalid_request("block_run", error))?;
@@ -2094,6 +2123,7 @@ fn provider_latency_failure(error: LlmError) -> OperationFailure {
         LlmError::QuotaExceeded { .. } => "model_provider_quota_exceeded",
         LlmError::BadGateway { .. }
         | LlmError::RequestFailed { .. }
+        | LlmError::StreamInterrupted { .. }
         | LlmError::InvalidResponse { .. }
         | LlmError::EmptyResponse { .. }
         | LlmError::Http(_)

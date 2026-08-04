@@ -69,7 +69,7 @@ function componentProps(node, component) {
   const props = {};
   const start = node.values.indexOf(component);
   for (let index = start + 1; index < node.values.length; index += 1) {
-    const name = node.strings[index]?.match(/([A-Za-z][A-Za-z0-9]*)=\s*$/)?.[1];
+    const name = node.strings[index]?.match(/([A-Za-z][A-Za-z0-9-]*)=\s*$/)?.[1];
     if (name) props[name] = node.values[index];
   }
   return props;
@@ -89,11 +89,13 @@ function renderToolsModule({
     }
     return value;
   };
+  const Switch = "Switch";
   const context = {
     Badge: "Badge",
     Card: "Card",
     Icon: "Icon",
     SelectMenu: "SelectMenu",
+    Switch,
     html,
     matchesSearch: (query, values) =>
       !query || values.some((value) => String(value || "").includes(query)),
@@ -109,35 +111,37 @@ function renderToolsModule({
   };
   const exports = runVmModuleForTest(
     "./tools-tab.tsx",
-    ["ToolsTab", "AutoApproveCard", "Switch", "ToolRow"],
+    ["ToolsTab", "AutoApproveCard", "ToolRow"],
     context,
     import.meta.url
   );
-  return { exports, saved };
+  return { exports, saved, Switch };
 }
 
 test("Tools tab renders global auto-approve control and saves the operator key", () => {
-  const { exports, saved } = renderToolsModule();
+  const { exports, saved, Switch } = renderToolsModule();
   const rendered = exports.AutoApproveCard({
     settings: { "agent.auto_approve_tools": false },
     savedKeys: {},
     onSave: (key, value) => saved.push({ key, value }),
   });
 
-  assert.match(collectTemplateText(exports.Switch({ checked: false, label: "x", onChange: () => {} })), /role="switch"/);
-  const switchNode = findComponentNode(rendered, exports.Switch);
+  const switchNode = findComponentNode(rendered, Switch);
   assert.ok(switchNode, "expected auto-approve card to render a switch");
 
-  componentProps(switchNode, exports.Switch).onChange(true);
+  const props = componentProps(switchNode, Switch);
+  assert.equal(props["aria-label"], "settings.field.autoApproveEligibleTools");
+  assert.equal(props.disabled, undefined);
+  props.onChange(true);
   assert.deepEqual(saved, [{ key: "agent.auto_approve_tools", value: true }]);
 });
 
 test("Auto-approve toggle defaults ON when unset and reads present values strictly", () => {
-  const { exports } = renderToolsModule();
+  const { exports, Switch } = renderToolsModule();
   const checkedFor = (settings) => {
     const rendered = exports.AutoApproveCard({ settings, savedKeys: {}, onSave: () => {} });
-    const node = findComponentNode(rendered, exports.Switch);
-    return componentProps(node, exports.Switch).checked;
+    const node = findComponentNode(rendered, Switch);
+    return componentProps(node, Switch).checked;
   };
   // Absent → default ON.
   assert.equal(checkedFor({}), true, "unset must default ON");

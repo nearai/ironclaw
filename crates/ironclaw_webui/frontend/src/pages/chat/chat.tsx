@@ -25,7 +25,6 @@ import { matchCommand } from "./lib/chat-commands";
 import { channelConnectionDisplayName } from "../../lib/channel-connection-events";
 import { channelConnectionFromGate } from "./lib/gates";
 import { NEW_DRAFT_KEY } from "./lib/draft-store";
-import { messageBelongsToActiveRun } from "./lib/message-types";
 import { buildRuntimeContext } from "./lib/runtime-context";
 import { buildScopedLogsPath } from "../logs/lib/logs-data";
 import { useInterfacePreferences } from "../../lib/interface-preferences";
@@ -47,16 +46,6 @@ function pendingOnboardingLabel(onboarding) {
   // Single source of channel display names (lib/channel-connection-events.ts) so
   // the composer notice and the pairing-card title can't drift in casing.
   return channelConnectionDisplayName(onboarding?.extensionName);
-}
-
-function hasVisibleStreamingAssistantText(messages, activeRunId) {
-  return (messages || []).some((message) =>
-    message?.role === "assistant" &&
-    message.isFinalReply === false &&
-    typeof message.content === "string" &&
-    message.content.length > 0 &&
-    messageBelongsToActiveRun(message, activeRunId)
-  );
 }
 
 function cancellationFailureDiagnostic(error) {
@@ -81,6 +70,7 @@ export function Chat({
   composerDraft = "",
   composerResetKey = "",
   gatewayStatus,
+  regressionArtifactExportEnabled = false,
   globalAutoApproveEnabled = false,
   onConnectionStatusChange,
 }) {
@@ -154,14 +144,9 @@ export function Chat({
     Boolean(activeThreadId) && Boolean(pendingOnboarding);
   const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
   const activeRunId = activeRun?.runId || null;
-  const streamingAssistantTextVisible = hasVisibleStreamingAssistantText(
-    messages,
-    activeRunId
-  );
   const showTypingIndicator =
     activeThreadIsProcessing &&
-    !activeThreadHasGate &&
-    !streamingAssistantTextVisible;
+    !activeThreadHasGate;
   const hasMessages =
     messages.length > 0 ||
     activeThreadIsProcessing ||
@@ -180,15 +165,34 @@ export function Chat({
             name: pendingOnboardingLabel(pendingOnboarding),
           })
         : "";
+  // Queued-message UX: a running thread no longer disables the composer — a
+  // follow-up sent while a run is active is accepted and queued. Only a
+  // pending gate / onboarding step (which needs the user's input first) or an
+  // active cooldown blocks a send.
   const composerSendDisabled =
     activeThreadHasGate ||
     activeThreadHasOnboarding ||
-    (activeThreadIsProcessing &&
-      !activeThreadHasGate &&
-      !activeThreadHasOnboarding) ||
     cooldownSeconds > 0;
   const composerSendBlockedRef = React.useRef(composerSendDisabled);
   composerSendBlockedRef.current = composerSendDisabled;
+  // Identifies which "empty-thread cycle" may navigate away from the
+  // landing view. It's bumped on every truthy->falsy transition of
+  // activeThreadId (a genuine new cycle, e.g. "+ New") and by whichever
+  // send wins the navigation for the current cycle -- so a captured id
+  // only matches while its cycle is still current and unclaimed. That one
+  // comparison is enough to stop every stale closure from a batch of
+  // concurrent landing-composer sends from re-navigating, whether its
+  // cycle was already claimed by an earlier winner or superseded by a
+  // "+ New" before it settled. Each redundant navigation tears down and
+  // reopens the app's single SSE stream, and those reconnects are
+  // genuinely accepted, so they burn the caller's server-side rate-limit
+  // budget and strand WebChat on the "Disconnected" badge.
+  const previousActiveThreadIdRef = React.useRef(activeThreadId);
+  const emptyThreadCycleIdRef = React.useRef(0);
+  if (previousActiveThreadIdRef.current && !activeThreadId) {
+    emptyThreadCycleIdRef.current += 1;
+  }
+  previousActiveThreadIdRef.current = activeThreadId;
   const composerStatusText =
     approvalSubmitWarning ||
     (cooldownSeconds > 0 ? t("chat.retryIn", { seconds: cooldownSeconds }) : undefined);
@@ -213,13 +217,22 @@ export function Chat({
         throw new Error(approvalSubmitWarning);
       }
       if (composerSendBlockedRef.current) return null;
+      const sendCycleId = emptyThreadCycleIdRef.current;
       // A newly created thread (from either path below) is not yet the
       // selected/active one — route the browser to it, exactly as the send
       // path already did, so the result (a system notice for a command, the
-      // first reply for a message) renders somewhere visible.
+      // first reply for a message) renders somewhere visible. Only the send
+      // that still owns the current empty-thread cycle may navigate; see
+      // `emptyThreadCycleIdRef`.
       const selectResponseThread = (response) => {
         const responseThreadId = response?.thread_id || activeThreadId;
-        if (!activeThreadId && responseThreadId && onSelectThread) {
+        if (
+          !activeThreadId &&
+          responseThreadId &&
+          onSelectThread &&
+          emptyThreadCycleIdRef.current === sendCycleId
+        ) {
+          emptyThreadCycleIdRef.current += 1;
           onSelectThread(responseThreadId, { replace: true });
         }
       };
@@ -395,6 +408,9 @@ export function Chat({
             onRetryMessage={retryMessage}
             threadId={activeThreadId}
             activeRunId={activeRunId}
+            regressionArtifactExportEnabled={
+              regressionArtifactExportEnabled
+            }
             logsPath={logsPath}
             pending={activeThreadIsProcessing}
             commands={chatCommands}

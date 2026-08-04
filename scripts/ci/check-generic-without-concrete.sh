@@ -47,7 +47,7 @@ EXCLUDED = {
     "ironclaw_slack_extension",
     "ironclaw_telegram_extension",
     # The package inventory crate owns the concrete packages.
-    "ironclaw_first_party_extensions",
+    "ironclaw_extension_support",
     # Sanctioned assemblers.
     "ironclaw_reborn_cli",
     "ironclaw_architecture",

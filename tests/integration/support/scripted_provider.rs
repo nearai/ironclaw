@@ -455,6 +455,9 @@ pub enum RecoverableModelFailure {
     ContentFiltered,
     InvalidOutput,
     OutputTruncated,
+    ProviderJson,
+    ProviderInvalidResponse,
+    ProviderEmptyResponse,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -481,8 +484,20 @@ impl RecoverableModelFailureScript {
 
 #[derive(Default)]
 struct ModelProviderCallRecords {
-    interactive_requests: Vec<Vec<String>>,
-    text_requests: Vec<Vec<String>>,
+    requests: Vec<ModelProviderCallRecord>,
+}
+
+enum ModelProviderCallRecord {
+    Interactive(Vec<String>),
+    Text(Vec<String>),
+}
+
+impl ModelProviderCallRecord {
+    fn messages(&self) -> &[String] {
+        match self {
+            Self::Interactive(messages) | Self::Text(messages) => messages,
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -496,27 +511,60 @@ impl ModelProviderCallProbe {
             .collect();
         let mut records = lock(&self.0);
         if interactive {
-            records.interactive_requests.push(contents);
+            records
+                .requests
+                .push(ModelProviderCallRecord::Interactive(contents));
         } else {
-            records.text_requests.push(contents);
+            records
+                .requests
+                .push(ModelProviderCallRecord::Text(contents));
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn record_text_contents_for_test(&self, messages: &[&str]) {
+        lock(&self.0).requests.push(ModelProviderCallRecord::Text(
+            messages
+                .iter()
+                .map(|message| (*message).to_string())
+                .collect(),
+        ));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_interactive_contents_for_test(&self, messages: &[&str]) {
+        lock(&self.0)
+            .requests
+            .push(ModelProviderCallRecord::Interactive(
+                messages
+                    .iter()
+                    .map(|message| (*message).to_string())
+                    .collect(),
+            ));
+    }
+
     pub fn interactive_calls(&self) -> usize {
-        lock(&self.0).interactive_requests.len()
+        lock(&self.0)
+            .requests
+            .iter()
+            .filter(|request| matches!(request, ModelProviderCallRecord::Interactive(_)))
+            .count()
     }
 
     pub fn text_calls(&self) -> usize {
-        lock(&self.0).text_requests.len()
+        lock(&self.0)
+            .requests
+            .iter()
+            .filter(|request| matches!(request, ModelProviderCallRecord::Text(_)))
+            .count()
     }
 
     pub fn message_content_occurrences(&self, needle: &str) -> usize {
         let records = lock(&self.0);
         records
-            .interactive_requests
+            .requests
             .iter()
-            .chain(&records.text_requests)
-            .flatten()
+            .flat_map(ModelProviderCallRecord::messages)
             .map(|content| content.matches(needle).count())
             .sum()
     }
@@ -524,11 +572,48 @@ impl ModelProviderCallProbe {
     pub fn message_content_contains(&self, needle: &str) -> bool {
         let records = lock(&self.0);
         records
-            .interactive_requests
+            .requests
             .iter()
-            .chain(&records.text_requests)
-            .flatten()
+            .flat_map(ModelProviderCallRecord::messages)
             .any(|content| content.contains(needle))
+    }
+
+    pub fn text_message_content_contains(&self, needle: &str) -> Option<bool> {
+        let records = lock(&self.0);
+        let mut text_requests = records.requests.iter().filter_map(|request| match request {
+            ModelProviderCallRecord::Text(messages) => Some(messages),
+            ModelProviderCallRecord::Interactive(_) => None,
+        });
+        let first = text_requests.next()?;
+        Some(
+            first
+                .iter()
+                .chain(text_requests.flatten())
+                .any(|content| content.contains(needle)),
+        )
+    }
+
+    pub fn post_text_interactive_message_content_contains(&self, needle: &str) -> Option<bool> {
+        let records = lock(&self.0);
+        let last_text = records
+            .requests
+            .iter()
+            .rposition(|request| matches!(request, ModelProviderCallRecord::Text(_)))?;
+        let mut interactive_requests = records
+            .requests
+            .iter()
+            .skip(last_text.saturating_add(1))
+            .filter_map(|request| match request {
+                ModelProviderCallRecord::Interactive(messages) => Some(messages),
+                ModelProviderCallRecord::Text(_) => None,
+            });
+        let first = interactive_requests.next()?;
+        Some(
+            first
+                .iter()
+                .chain(interactive_requests.flatten())
+                .any(|content| content.contains(needle)),
+        )
     }
 }
 
@@ -738,6 +823,18 @@ impl RecoverableFailureLlm {
                 cache_creation_input_tokens: 0,
                 reasoning: None,
                 reasoning_details: None,
+            }),
+            RecoverableModelFailure::ProviderJson => {
+                let error = serde_json::from_str::<serde_json::Value>("{")
+                    .expect_err("provider fixture JSON must be malformed");
+                Err(LlmError::Json(error))
+            }
+            RecoverableModelFailure::ProviderInvalidResponse => Err(LlmError::InvalidResponse {
+                provider: "scripted".to_string(),
+                reason: "malformed response envelope".to_string(),
+            }),
+            RecoverableModelFailure::ProviderEmptyResponse => Err(LlmError::EmptyResponse {
+                provider: "scripted".to_string(),
             }),
         })
     }

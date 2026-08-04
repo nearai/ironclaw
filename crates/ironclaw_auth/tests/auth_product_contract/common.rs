@@ -134,10 +134,12 @@ pub async fn oauth_flow(
 ) -> ironclaw_auth::AuthFlowRecord {
     services
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: owner,
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: authorization_url("https://provider.example/oauth"),
                 expires_at: Utc::now() + Duration::minutes(5),
@@ -171,10 +173,12 @@ pub async fn try_oauth_update_flow(
 ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
     services
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: owner,
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: authorization_url("https://provider.example/oauth"),
                 expires_at: Utc::now() + Duration::minutes(5),

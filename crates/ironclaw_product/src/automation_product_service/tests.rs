@@ -21,7 +21,9 @@ use async_trait::async_trait;
 use ironclaw_host_api::{
     Timestamp,
     ids::{AgentId, ApprovalRequestId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
-    product_surface::{ProductSurfaceCaller, ProductSurfaceErrorCode, ProductSurfaceErrorKind},
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceCaller, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 use ironclaw_threads::{
     EnsureThreadRequest, InMemorySessionThreadService, SessionThreadService, ThreadScope,

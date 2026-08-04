@@ -72,9 +72,9 @@ async fn standalone_runtime_injects_default_system_prompt_into_model_request() {
         }),
         "standalone runtime should send the editable default system prompt to the model gateway"
     );
-    // Disclosure is default-on: the system prompt must teach the model the
-    // tool_search/tool_describe/tool_call protocol, or a weak model never reaches
-    // the deferred long tail.
+    // Disclosure is explicitly enabled by `runtime_input`: the system prompt
+    // must teach the model the tool_search/tool_describe/tool_call protocol, or
+    // a weak model never reaches the deferred long tail.
     assert!(
         recorded_requests[0].messages.iter().any(|message| {
             message.role == HostManagedModelMessageRole::System
@@ -82,8 +82,14 @@ async fn standalone_runtime_injects_default_system_prompt_into_model_request() {
                 && message.content.contains("tool_search")
                 && message.content.contains("tool_describe")
                 && message.content.contains("tool_call")
+                && message
+                    .content
+                    .contains("When `extension_search` and `extension_install` are present")
+                && message
+                    .content
+                    .contains("`extension_register_hosted_mcp` is also visible")
         }),
-        "default-on disclosure should inject the tool-discovery protocol into the system prompt"
+        "bridged disclosure should inject a visibility-conditional discovery protocol"
     );
     assert!(
         recorded_requests[0].messages.iter().any(|message| {
@@ -139,7 +145,7 @@ async fn standalone_runtime_uses_existing_edited_default_system_prompt() {
         }),
         "standalone runtime should preserve and inject the existing edited prompt"
     );
-    // Disclosure is default-on, so the tool-search protocol is appended to the
+    // Disclosure is explicitly enabled, so the tool-search protocol is appended to the
     // (edited) system prompt and reaches the gateway — without overwriting the
     // user's edited base content.
     assert!(
@@ -148,7 +154,7 @@ async fn standalone_runtime_uses_existing_edited_default_system_prompt() {
                 && message.content.starts_with("custom edited runtime prompt")
                 && message.content.contains("tool_search")
         }),
-        "default-on disclosure should append the tool-search protocol to the edited prompt"
+        "bridged disclosure should append the tool-search protocol to the edited prompt"
     );
     // Docs grounding is ground knowledge about the runtime (#6734), not a seed
     // default: an install whose SYSTEM.md never contained it must still be told
@@ -217,9 +223,9 @@ fn runtime_input(
         max_total: Duration::from_secs(3),
     })
     .with_model_gateway_override(gateway)
-    // Pin bridged explicitly so the disclosure-protocol assertions don't depend on
-    // the temporary default-on behavior (and won't break on the default-off revert).
-    .with_tool_disclosure(ironclaw_runner::runtime::ToolDisclosureMode::Bridged)
+    // Pin bridged explicitly so the disclosure-protocol assertions do not depend
+    // on the production default.
+    .with_tool_disclosure(ironclaw_loop_host::ToolDisclosureMode::Bridged)
 }
 
 fn recorded_requests(

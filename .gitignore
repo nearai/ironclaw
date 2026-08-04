@@ -47,7 +47,7 @@ artifacts/
 
 # WASM build artifacts (loaded from disk, not bundled)
 *.wasm
-!crates/ironclaw_first_party_extensions/assets/*/wasm/*.wasm
+!crates/extensions/packages/*/wasm/*.wasm
 
 # Traces
 trace_*.json
@@ -99,6 +99,10 @@ test-tools/*/wasm-src/target/
 # (webui_v2, e2e, tooling, …) and stops the recurring accidental adds
 # (#6298/#6305).
 node_modules/
+
+# Built frontend bundles. Scoped per-crate .gitignore files only cover the
+# crate they live in, which let a sibling crate ship 3.5 MB of build output.
+crates/*/frontend/dist/
 
 # cargo-mutants writes its report tree (caught/missed/timeout lists, per-mutant
 # logs, and a copy of each mutated diff) next to the manifest it is run from.

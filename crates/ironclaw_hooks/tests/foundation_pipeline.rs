@@ -154,8 +154,8 @@ async fn self_authored_deny_flows_through_dispatcher() {
         hook_id,
         spec.clone(),
         SelfAuthorshipProvenance {
-            authored_by_run: ironclaw_turns::TurnRunId::new(),
-            authored_by_turn: ironclaw_turns::TurnId::new(),
+            authored_by_run: ironclaw_host_api::turn::TurnRunId::new(),
+            authored_by_turn: ironclaw_host_api::turn::TurnId::new(),
             authored_at: Utc::now(),
             spec_digest: spec.digest(),
             user_ratification: None,

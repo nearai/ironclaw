@@ -26,8 +26,8 @@ pub fn normalize_mime_type(mime: &str) -> String {
 /// Kind of attachment carried on an incoming message.
 ///
 /// Serializes as a wire-stable snake_case string (`"audio"`, `"image"`,
-/// `"document"`) so it can be persisted in transcript attachment references
-/// and other durable contracts.
+/// `"video"`, `"document"`, `"other"`) so it can be persisted in transcript
+/// attachment references and other durable contracts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttachmentKind {
@@ -35,8 +35,12 @@ pub enum AttachmentKind {
     Audio,
     /// Image content (photos, screenshots).
     Image,
+    /// Video content.
+    Video,
     /// Document content (PDFs, files).
     Document,
+    /// Content outside the known media and document MIME families.
+    Other,
 }
 
 impl AttachmentKind {
@@ -47,8 +51,12 @@ impl AttachmentKind {
             Self::Audio
         } else if base.starts_with("image/") {
             Self::Image
-        } else {
+        } else if base.starts_with("video/") {
+            Self::Video
+        } else if base.starts_with("application/") || base.starts_with("text/") {
             Self::Document
+        } else {
+            Self::Other
         }
     }
 }
@@ -100,7 +108,7 @@ pub struct AttachmentRef {
     /// message, which `validate_attachment_refs` enforces), so it stays a
     /// boundary `String` rather than a validated newtype.
     pub id: String,
-    /// Image / Audio / Document.
+    /// Image / Audio / Video / Document / Other.
     pub kind: AttachmentKind,
     /// MIME type as received at the ingress boundary, stored verbatim. `kind`
     /// and the fallback extension are derived from it through the attachment
@@ -166,6 +174,26 @@ mod tests {
         assert_eq!(
             AttachmentKind::from_mime_type("APPLICATION/PDF"),
             AttachmentKind::Document
+        );
+    }
+
+    #[test]
+    fn attachment_kind_inference_covers_multimodal_mime_families() {
+        assert_eq!(
+            AttachmentKind::from_mime_type("image/gif"),
+            AttachmentKind::Image
+        );
+        assert_eq!(
+            AttachmentKind::from_mime_type("video/mp4"),
+            AttachmentKind::Video
+        );
+        assert_eq!(
+            AttachmentKind::from_mime_type("application/pdf"),
+            AttachmentKind::Document
+        );
+        assert_eq!(
+            AttachmentKind::from_mime_type("model/gltf-binary"),
+            AttachmentKind::Other
         );
     }
 }

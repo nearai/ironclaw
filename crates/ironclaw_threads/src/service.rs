@@ -6,16 +6,17 @@ use ironclaw_host_api::ids::ThreadId;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-    AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest, ContextMessages,
-    ContextWindow, CreateSummaryArtifactRequest, DeleteToolResultRecordRequest,
-    EnsureThreadRequest, FinalizedAssistantMessageByRunRequest, LatestThreadMessageRequest,
-    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, PutToolResultRecordRequest,
-    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadError, SessionThreadRecord, SummaryArtifact, ThreadGoal, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
-    ThreadMessageRecord, ThreadScope, ToolResultRecordChunk, UpdateAssistantDraftRequest,
-    UpdateThreadGoalRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
+    AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
+    BoundedThreadMessages, BoundedThreadMessagesRequest, ContextMessages, ContextWindow,
+    CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
+    FinalizedAssistantMessageByRunRequest, LatestThreadMessageRequest, ListThreadsForScopeRequest,
+    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
+    ThreadGoal, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange,
+    ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, ToolResultRecordChunk,
+    UpdateAssistantDraftRequest, UpdateThreadGoalRequest, UpdateToolResultRecordRequest,
+    UpdateToolResultReferenceRequest,
 };
 
 /// Canonical Reborn session thread and transcript boundary.
@@ -52,6 +53,35 @@ pub trait SessionThreadService: Send + Sync {
         message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError>;
 
+    async fn mark_message_queued(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+        active_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let _ = (scope, thread_id, message_id, active_run_id);
+        Err(SessionThreadError::Backend(
+            "mark_message_queued is not implemented by this thread service".to_string(),
+        ))
+    }
+
+    /// Read one message row by id, or `None` when the thread or message does
+    /// not exist. A point read for race reconciliation (e.g. the busy-steering
+    /// admission checking what a failed status transition actually raced
+    /// with); listing the whole history to inspect one row is the wrong tool.
+    async fn read_thread_message(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        let _ = (scope, thread_id, message_id);
+        Err(SessionThreadError::Backend(
+            "read_thread_message is not implemented by this thread service".to_string(),
+        ))
+    }
+
     async fn append_assistant_draft(
         &self,
         request: AppendAssistantDraftRequest,
@@ -69,7 +99,7 @@ pub trait SessionThreadService: Send + Sync {
                 scope: scope.clone(),
                 thread_id: thread_id.clone(),
                 turn_run_id: request.turn_run_id,
-                content: content.clone(),
+                content: crate::MessageContent::text(content.as_text()),
             })
             .await?;
         if message.status != crate::MessageStatus::Draft {
@@ -166,6 +196,20 @@ pub trait SessionThreadService: Send + Sync {
         &self,
         request: ThreadHistoryRequest,
     ) -> Result<ThreadHistory, SessionThreadError>;
+
+    /// Load a complete history only when it fits the supplied export budget.
+    ///
+    /// Implementations must enforce the budget while reading, rather than
+    /// materializing an unbounded transcript and checking afterward.
+    async fn list_thread_messages_bounded(
+        &self,
+        _request: BoundedThreadMessagesRequest,
+    ) -> Result<BoundedThreadMessages, SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "bounded thread messages are not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
 
     async fn list_thread_messages_range(
         &self,
@@ -378,6 +422,29 @@ where
             .await
     }
 
+    async fn mark_message_queued(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+        active_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.as_ref()
+            .mark_message_queued(scope, thread_id, message_id, active_run_id)
+            .await
+    }
+
+    async fn read_thread_message(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        self.as_ref()
+            .read_thread_message(scope, thread_id, message_id)
+            .await
+    }
+
     async fn append_assistant_draft(
         &self,
         request: AppendAssistantDraftRequest,
@@ -490,6 +557,13 @@ where
         request: ThreadHistoryRequest,
     ) -> Result<ThreadHistory, SessionThreadError> {
         self.as_ref().list_thread_history(request).await
+    }
+
+    async fn list_thread_messages_bounded(
+        &self,
+        request: BoundedThreadMessagesRequest,
+    ) -> Result<BoundedThreadMessages, SessionThreadError> {
+        self.as_ref().list_thread_messages_bounded(request).await
     }
 
     async fn list_thread_messages_range(

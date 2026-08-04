@@ -3,9 +3,10 @@
 This guide is for the standalone `ironclaw serve` Slack host path,
 not the legacy v1 Slack WASM channel.
 
-Slack support ships in the binary. It has one gate: runtime config must set
-`[slack].enabled = true`, or the deployment env must set
-`IRONCLAW_REBORN_SLACK_ENABLED=true`.
+Slack support ships in the binary, and there is no configuration key or
+environment variable that turns it on. The Slack webhook route is always
+mounted; Slack goes live once the Slack extension is installed and its setup is
+completed in the WebUI at `/extensions`.
 
 Slack bot token and signing secret are configured in WebUI Slack setup and
 stored in the Reborn secret store. Do not put OAuth client secrets or LLM keys
@@ -30,7 +31,8 @@ cargo build \
   --bin ironclaw
 ```
 
-Slack is disabled unless the mounted or seeded Reborn config enables it.
+Neither command needs a Slack-specific build flag or feature: the route is
+compiled in and mounted unconditionally.
 
 ## Public Endpoint
 
@@ -85,35 +87,38 @@ IRONCLAW_REBORN_HOME=/data/ironclaw-reborn
 IRONCLAW_REBORN_PROFILE=local-dev
 IRONCLAW_REBORN_WEBUI_TOKEN=<random-hex-32-bytes-or-longer>
 IRONCLAW_REBORN_WEBUI_USER_ID=reborn-cli
-IRONCLAW_REBORN_SLACK_ENABLED=true
 OPENAI_API_KEY=sk-...
 ```
 
 ## Reborn Config
 
-Edit `$IRONCLAW_REBORN_HOME/config.toml`. If the file does not exist yet, run
-`ironclaw config init` or start the Docker image once to seed it.
+The Reborn config file lives at `$IRONCLAW_REBORN_HOME/config.toml`; run
+`ironclaw config init` or start the Docker image once to seed it if it does not
+exist yet.
 
-Minimal Slack config:
+It carries no Slack settings. There is no `[slack]` section to add and no Slack
+key to set: `slack.enabled` is retired, so `ironclaw config set slack.enabled`
+answers with migration guidance instead of writing anything.
 
-```toml
-[slack]
-enabled = true
-```
-
-`enabled` is the only Slack boot setting. You can also set
-`IRONCLAW_REBORN_SLACK_ENABLED=true` instead of editing config. The env var
-overrides only the route enablement gate: `true`/`1` mounts Slack, while
-`false`/`0` acts as a deployment kill switch.
-
-Slack enablement mounts `POST /webhooks/extensions/slack/events`, exposes the
+`POST /webhooks/extensions/slack/events` is mounted unconditionally, and it
+answers `503 temporarily_unavailable` until the Slack extension's ingress
+signing secret is registered. Installing the Slack extension from `/extensions`
+and completing its setup is what registers that secret, exposes the
 manifest-declared Slack deployment fields in Admin Configuration, and makes a
 personal Slack connection available through the Slack extension's user OAuth
 flow.
+
 Slack installation ids, team/app ids, the bot token, the signing secret,
 OAuth client credentials, and channel mappings are configured after startup
 from Admin Configuration. These deployment values are never shown in a user's
 extension setup flow.
+
+> **"Admin Configuration" and the "Slack card" are the same place.** This guide
+> uses the operator-facing name; [Slack](/channels/slack) uses the UI path.
+> Concretely: web interface -> **Extensions** -> **Channels** tab -> scroll to the
+> bottom of the Built-in section -> **Configure** on the Slack card. (Extensions
+> opens on the **Registry** tab, which is *not* where channels are connected.)
+> Every "Admin Configuration" reference below means that dialog.
 
 As an operator, open Admin, Configuration, then Slack deployment configuration.
 Save:
@@ -137,6 +142,17 @@ membership and credential state does not mutate the operator configuration.
 
 Unrouted shared Slack channels fail closed instead of silently inheriting a
 personal/default user scope.
+
+### Migrating an existing config.toml
+
+An existing file that still carries a `[slack]` or `[telegram]` section keeps
+parsing, so an older deployment does not break on upgrade. A leftover Slack
+*setup* field (`installation_id`, `team_id`, `api_app_id`, `slack_user_id`,
+`user_id`, `shared_subject_user_id`, `channel_routes`, `signing_secret_env`,
+`bot_token_env`) fails `serve` closed with a migration pointer rather than
+being silently ignored. A section left with only inert keys still boots, and
+logs a deprecation notice. Either way the fix is the same: delete the section,
+because nothing reads it.
 
 ## Slack App Configuration
 
@@ -165,6 +181,8 @@ https://<public-host>/api/reborn/product-auth/oauth/slack/callback
   - `groups:history` if the bot should receive private-channel message events.
   - `mpim:history` if the bot should receive group-DM message events.
   - `files:read` if Slack file attachments should be downloaded and processed.
+  - `files:write` if explicitly attached workspace files should be delivered
+    back to Slack.
   - `commands` to register the `/ironclaw` slash command (see Slash Command
     below).
 - Add user token scopes:
@@ -245,6 +263,7 @@ oauth_config:
       - groups:history
       - mpim:history
       - files:read
+      - files:write
       - commands
     user:
       - users:read
@@ -263,8 +282,10 @@ settings:
 ```
 
 Use least privilege for production. For example, omit `groups:history` if the
-bot does not need private-channel events, and omit `files:read` if attachment
-processing is not needed.
+bot does not need private-channel events. Omit `files:read` if inbound
+attachment processing is not needed, and omit `files:write` if outbound file
+delivery is not needed. Outbound files use Slack's supported external upload
+flow; the retired `files.upload` method is never called.
 
 ## Start and Verify
 
@@ -301,9 +322,17 @@ Verification checklist:
 
 ## Troubleshooting
 
-### Slack routes are not mounted
+### Slack events are rejected with 503 or 401
 
-Confirm the Reborn config sets [slack].enabled = true, or that the deployment env sets IRONCLAW_REBORN_SLACK_ENABLED=true, then restart `ironclaw`.
+There is no config or env enablement gate to check; the route is always mounted.
+
+A 503 `temporarily_unavailable` means the Slack extension's ingress signing secret is not
+registered yet. Register it in Admin Configuration for Slack (the Slack card — see the
+note under "Reborn Config" for the exact UI path; landing on the wrong Extensions tab is
+the usual reason this step is missed).
+
+A 401 means a signing secret is registered but does not match the app. Compare the value
+there against **Basic Information -> Signing Secret** in the Slack app.
 
 ### Slack route never receives events
 
@@ -323,7 +352,9 @@ Confirm the Admin Configuration Slack signing secret matches the app signing sec
 
 ### Slack replies fail with missing_scope
 
-Add or confirm chat:write, reinstall the Slack app, and update the bot token in Admin Configuration if Slack issued a new token.
+Add or confirm `chat:write` for text, `files:read` for inbound attachments, and
+`files:write` for outbound attachments. Reinstall the Slack app, and update the
+bot token in Admin Configuration if Slack issued a new token.
 
 ### Slack OAuth callback fails
 

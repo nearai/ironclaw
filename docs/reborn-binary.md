@@ -310,6 +310,8 @@ cargo run -q -p ironclaw --bin ironclaw -- ironhub search github
 cargo run -q -p ironclaw --bin ironclaw -- ironhub list --kind skill
 cargo run -q -p ironclaw --bin ironclaw -- ironhub info github-tool --kind tool
 cargo run -q -p ironclaw --bin ironclaw -- ironhub install github-tool --kind tool
+cargo run -q -p ironclaw --bin ironclaw -- ironhub install private-tool \
+  --private-manifest-url-file /secure/path/ironhub-manifest-url
 ```
 
 Catalog and artifact downloads use host-mediated HTTPS egress, bounded response
@@ -319,12 +321,26 @@ artifacts must match both the signed byte count and SHA-256 digest. Install
 automation can pin the inspected catalog state with `--expected-version` and
 `--expected-artifact-digest`.
 
+Private org-scoped manifests use the same pinned Ed25519 verification key and
+must come from the exact HTTPS origin configured by `IRONHUB_MANIFEST_URL`;
+their artifact URLs are pinned to that origin as well. The tokenized private
+manifest URL is read from a file so it does not appear in argv. Durable replay
+state is keyed by the configured host and the signed repository identity, not
+by the rotating access token in that URL.
+
 Unverified community content is rejected unless a CLI operator supplies
 `--acknowledge-unverified`; the model-facing install capability intentionally
 has no equivalent acknowledgement field. `--force` replaces an existing
 registry install through the normal lifecycle manager and restores the previous
 package or skill if the replacement fails. The command alias `iron-hub` is also
 accepted.
+
+`ironclaw serve` exposes the public `POST /api/ironhub/register` handshake only
+when `IRONHUB_AGENT_SHARED_KEY` is explicitly set to a non-empty value of at
+least 32 bytes. The bearer-authenticated install-delivery route stays
+fail-closed as unavailable unless that same optional service is attached. The
+gateway is disabled by default. Signed install deliveries accept timestamps
+within a 300-second drift window and consume their nonces durably.
 
 ### `completion`
 

@@ -248,6 +248,154 @@ fn bottleneck_finder_suite_includes_core_pressure_cases() {
     assert!(labels.contains("memory-churn"));
 }
 
+/// The suite regression fix depends on every non-API libSQL case getting its
+/// own database path: sharing the parent's path is what let earlier cases'
+/// still-running pollers contend on the file and invalidate the benchmark.
+/// Existing suite tests only assert case labels, so a regression here would be
+/// silent.
+#[test]
+fn libsql_cases_use_distinct_generated_database_paths() {
+    let mut base = test_args();
+    base.backend = crate::Backend::Libsql;
+    base.libsql_path = None;
+    let cases = suite::build_cases(StressSuite::BottleneckFinder);
+    let mut seen = std::collections::BTreeSet::new();
+    for case in &cases {
+        let mut case_args = base.clone();
+        suite::apply_case(&base, case, &mut case_args, "run-id");
+        if case_args.scenario.is_api_capacity() {
+            continue;
+        }
+        let path = case_args
+            .libsql_path
+            .clone()
+            .expect("every non-API libSQL case gets a generated database path");
+        assert!(
+            seen.insert(path.clone()),
+            "case {} reused database path {}",
+            case.label,
+            path.display()
+        );
+    }
+    assert!(
+        seen.len() > 1,
+        "the suite must exercise more than one isolated libSQL case"
+    );
+}
+
+/// An explicit `--libsql-path` is honoured and still isolates every case.
+///
+/// Two properties at once, because they trade off against each other: the
+/// operator's directory and extension survive (the path is not silently
+/// replaced with a temporary file), and no two cases land on the same file.
+/// Keying the suffix on the scenario satisfies only the first — `tool-heavy`,
+/// `tool-wait`, and `tool-failure` are all `ToolSession` and would share one
+/// database, which is the cross-runtime lock contention the split exists to
+/// prevent.
+#[test]
+fn explicit_libsql_path_is_preserved_and_still_isolates_each_case() {
+    let mut base = test_args();
+    base.backend = crate::Backend::Libsql;
+    base.libsql_path = Some(std::path::PathBuf::from(
+        "/tmp/operator-choice/bench.sqlite",
+    ));
+    let cases = suite::build_cases(StressSuite::BottleneckFinder);
+    let mut seen = std::collections::BTreeSet::new();
+    let mut checked = 0;
+    for case in &cases {
+        let mut case_args = base.clone();
+        suite::apply_case(&base, case, &mut case_args, "run-id");
+        if case_args.scenario.is_api_capacity() {
+            continue;
+        }
+        let path = case_args
+            .libsql_path
+            .clone()
+            .expect("every non-API libSQL case gets a database path");
+        assert_eq!(
+            path.parent(),
+            Some(std::path::Path::new("/tmp/operator-choice")),
+            "case {} moved off the operator's directory to {}",
+            case.label,
+            path.display()
+        );
+        assert_eq!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some("sqlite"),
+            "case {} dropped the operator's extension: {}",
+            case.label,
+            path.display()
+        );
+        assert!(
+            seen.insert(path.clone()),
+            "case {} reused database path {}",
+            case.label,
+            path.display()
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 1,
+        "the suite must exercise more than one explicit-path libSQL case"
+    );
+}
+
+/// Teardown removes the database and both SQLite sidecars it created.
+///
+/// Drives the real side effect against real files rather than asserting on a
+/// derived string: the previous derivation used `Path::with_extension`, which
+/// only lined up for `.db`, and a string-shaped assertion would have agreed
+/// with it. The path here carries a non-`.db` extension for that reason, which
+/// is also the shape an explicit `--libsql-path` now produces.
+#[tokio::test]
+async fn cleanup_removes_the_database_and_its_sqlite_sidecars() {
+    let dir = std::env::temp_dir().join(format!("ironclaw-stress-cleanup-{}", std::process::id()));
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .expect("create temp dir");
+    // A non-UTF-8 byte in the name is what pins the `OsString` derivation: an
+    // ASCII name survives a `to_string_lossy` round trip unchanged, so on the
+    // ASCII path this case still only covers the extension half of the defect.
+    //
+    // Linux only. macOS rejects a non-UTF-8 filename at creation with EILSEQ
+    // ("Illegal byte sequence"), so seeding the file is impossible there —
+    // gating keeps the byte-preservation pin on the CI runners while leaving
+    // the case runnable for developers on macOS.
+    #[cfg(target_os = "linux")]
+    let database = {
+        use std::os::unix::ffi::OsStringExt;
+        let mut name = b"bench-tool-heavy-".to_vec();
+        name.push(0xff);
+        name.extend_from_slice(b".sqlite");
+        dir.join(std::ffi::OsString::from_vec(name))
+    };
+    #[cfg(not(target_os = "linux"))]
+    let database = dir.join("bench-tool-heavy.sqlite");
+    let mut created = vec![database.clone()];
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = database.clone().into_os_string();
+        sidecar.push(suffix);
+        created.push(std::path::PathBuf::from(sidecar));
+    }
+    for path in &created {
+        tokio::fs::write(path, b"x").await.expect("seed file");
+    }
+
+    crate::cleanup_generated_libsql_path(&database).await;
+
+    for path in &created {
+        assert!(
+            !path.exists(),
+            "{} survived cleanup; SQLite appends -wal/-shm to the whole file \
+             name, so deriving them by extension misses any non-.db path",
+            path.display()
+        );
+    }
+    tokio::fs::remove_dir_all(&dir)
+        .await
+        .expect("remove temp dir");
+}
+
 #[test]
 fn postgres_pool_pressure_suite_includes_remote_pool_cases() {
     let cases = suite::build_cases(StressSuite::PostgresPoolPressure);
@@ -1222,6 +1370,8 @@ fn test_args() -> Args {
         api_poll_interval_ms: 250,
         api_request_timeout_ms: 10_000,
         api_setup_concurrency: 16,
+        api_threads_per_user: 1,
+        thread_list_untitled: false,
         api_background_users: 0,
         api_background_concurrency: 0,
         api_background_operations: 1,

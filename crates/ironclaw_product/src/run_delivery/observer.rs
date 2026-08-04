@@ -2,6 +2,9 @@
 //! channel message submitted and deliver its outputs back to the
 //! originating conversation, entirely through the [`DeliveryCoordinator`].
 
+use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
@@ -26,7 +29,9 @@ use ironclaw_outbound::{
     RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext,
     ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest,
 };
-use ironclaw_threads::FinalizedAssistantMessageByRunRequest;
+use ironclaw_threads::{
+    AttachmentRef, FinalizedAssistantMessageByRunRequest, ThreadMessageRecord, ThreadScope,
+};
 use ironclaw_turns::{
     GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnErrorCategory, TurnRunId,
     TurnRunState, TurnScope, TurnStatus,
@@ -35,18 +40,15 @@ use tokio::sync::Semaphore;
 
 use super::prompts;
 use super::{
-    BlockedActionableMarker, BlockedAuthPromptRequest, DeliveredChannelMessage, HINT_SEEN_CAP,
-    HintSeenSet, RunDeliveryError, RunDeliveryServices, RunDeliverySettings,
-    blocked_actionable_marker, cancel_auth_blocked_run, delivered_messages_from_outcome,
-    gate_routes::record_gate_route_if_needed, thread_scope_from_binding,
-    turn_scope_from_thread_scope,
+    BlockedActionableMarker, DeliveredChannelMessage, HINT_SEEN_CAP, HintSeenSet, RunDeliveryError,
+    RunDeliveryServices, RunDeliverySettings, blocked_actionable_marker, cancel_auth_blocked_run,
+    delivered_messages_from_outcome, gate_routes::record_gate_route_if_needed,
+    thread_scope_from_binding, turn_scope_from_thread_scope,
 };
 use crate::delivery_coordinator::{
     CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest, DeliveryIntent,
 };
-use crate::{
-    ChannelConnectionNoticePolicy, ProductSurfaceFailure, ResolveBindingRequest, ResolvedBinding,
-};
+use crate::{ProductSurfaceFailure, ResolveBindingRequest, ResolvedBinding};
 
 const CONNECT_NOTICE_THROTTLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -56,10 +58,18 @@ struct ActionableNotification {
     event_kind: RunNotificationEventKind,
     intent: DeliveryIntent,
     text: String,
+    attachments: Vec<AttachmentRef>,
     /// Gate ref recorded into the delivered-gate route store for approval
     /// and auth prompts, so a bare reply next to the prompt resolves the
     /// gate. `None` for other kinds.
     gate_ref_for_routing: Option<String>,
+}
+
+struct RunNotificationDeliveryContext<'a> {
+    envelope: &'a ProductInboundEnvelope,
+    scope: &'a TurnScope,
+    thread_scope: &'a ThreadScope,
+    actor: &'a TurnActor,
 }
 
 /// Bound on the delivered-run memory. Evicted oldest-first; an evicted entry
@@ -490,9 +500,12 @@ impl RunDeliveryObserver {
             let gate_ref_for_routing = notification.gate_ref_for_routing.clone();
             let delivered_messages = self
                 .deliver_run_notification(
-                    &envelope,
-                    &scope,
-                    &actor,
+                    RunNotificationDeliveryContext {
+                        envelope: &envelope,
+                        scope: &scope,
+                        thread_scope: &thread_scope,
+                        actor: &actor,
+                    },
                     run_id,
                     &actionable_state,
                     notification,
@@ -609,8 +622,8 @@ impl RunDeliveryObserver {
         let direct_message = envelope_is_direct_chat(envelope);
         let notification = match state.status {
             TurnStatus::Completed => {
-                let Some(text) = self
-                    .read_latest_assistant_text(thread_scope, binding, run_id)
+                let Some(message) = self
+                    .read_latest_assistant_message(thread_scope, binding, run_id)
                     .await?
                 else {
                     tracing::warn!(
@@ -619,10 +632,18 @@ impl RunDeliveryObserver {
                     );
                     return Ok(None);
                 };
+                let Some(text) = message.content else {
+                    tracing::warn!(
+                        %run_id,
+                        "completed run finalized assistant message has no content; skipping final reply delivery"
+                    );
+                    return Ok(None);
+                };
                 ActionableNotification {
                     event_kind: RunNotificationEventKind::FinalReplyReady,
                     intent: DeliveryIntent::FinalReply,
                     text,
+                    attachments: message.attachments,
                     gate_ref_for_routing: None,
                 }
             }
@@ -648,6 +669,7 @@ impl RunDeliveryObserver {
                     event_kind: RunNotificationEventKind::ApprovalNeeded,
                     intent: DeliveryIntent::GatePrompt,
                     text: prompts::gate_prompt_text(&view, direct_message),
+                    attachments: Vec::new(),
                     gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
                 }
             }
@@ -666,7 +688,7 @@ impl RunDeliveryObserver {
                                 fallback_owner_user_id: &binding.actor_user_id,
                                 scope,
                                 run_id,
-                                gate_ref: gate_ref.as_str(),
+                                gate_ref,
                                 invocation_id: None,
                                 body: "Authenticate to continue this run.".to_string(),
                                 credential_requirements: &state.credential_requirements,
@@ -719,6 +741,7 @@ impl RunDeliveryObserver {
                             event_kind: RunNotificationEventKind::AuthRequired,
                             intent: DeliveryIntent::AuthPrompt,
                             text: prompts::auth_prompt_text(&view, direct_message),
+                            attachments: Vec::new(),
                             gate_ref_for_routing: Some(gate_ref.as_str().to_string()),
                         }
                     }
@@ -753,13 +776,17 @@ impl RunDeliveryObserver {
 
     async fn deliver_run_notification(
         &self,
-        envelope: &ProductInboundEnvelope,
-        scope: &TurnScope,
-        actor: &TurnActor,
+        context: RunNotificationDeliveryContext<'_>,
         run_id: TurnRunId,
         state: &TurnRunState,
         notification: ActionableNotification,
     ) -> Result<Vec<DeliveredChannelMessage>, RunDeliveryError> {
+        let RunNotificationDeliveryContext {
+            envelope,
+            scope,
+            thread_scope,
+            actor,
+        } = context;
         let reply_target = state.reply_target_binding_ref.clone();
         let target_authority = ObservedReplyTargetAuthority {
             scope: scope.clone(),
@@ -803,10 +830,12 @@ impl RunDeliveryObserver {
                 &outbound_policy,
                 self.services.communication_preferences.as_ref(),
                 &target_authority,
+                self.services.project_filesystem.as_ref(),
                 CoordinatedDeliveryRequest {
                     intent: notification.intent,
                     delivery,
                     parts: vec![OutboundPart::Text(notification.text)],
+                    attachments: notification.attachments,
                     thread_anchor: None,
                     // MUST stay false on this path. `ObservedReplyTargetAuthority`
                     // (below) has no DM classification for the raw source
@@ -818,6 +847,7 @@ impl RunDeliveryObserver {
                     // (`triggered.rs` passes true for auth prompts).
                     require_direct_message_target: false,
                     extension_id: &self.services.extension_id,
+                    thread_scope,
                 },
             )
             .await?;
@@ -829,13 +859,13 @@ impl RunDeliveryObserver {
         }
     }
 
-    async fn read_latest_assistant_text(
+    async fn read_latest_assistant_message(
         &self,
         thread_scope: &ironclaw_threads::ThreadScope,
         binding: &ResolvedBinding,
         run_id: TurnRunId,
-    ) -> Result<Option<String>, RunDeliveryError> {
-        Ok(self
+    ) -> Result<Option<ThreadMessageRecord>, RunDeliveryError> {
+        let message = self
             .services
             .thread_service
             .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
@@ -843,8 +873,8 @@ impl RunDeliveryObserver {
                 thread_id: binding.thread_id.clone(),
                 turn_run_id: run_id.to_string(),
             })
-            .await?
-            .and_then(|message| message.content))
+            .await?;
+        Ok(message)
     }
 
     /// Scope for notices raised outside a resolved delivery loop: the
@@ -1446,4 +1476,22 @@ pub(crate) fn envelope_is_direct_chat(envelope: &ProductInboundEnvelope) -> bool
 /// OAuth setup links are only safe in a private DM.
 fn auth_setup_link_is_private(envelope: &ProductInboundEnvelope) -> bool {
     envelope_is_direct_chat(envelope)
+}
+
+#[cfg(test)]
+mod delivery_claim_tests {
+    use super::{DeliveryClaim, DeliveryRunLedger};
+    use ironclaw_turns::TurnRunId;
+
+    #[test]
+    fn delivery_run_ledger_distinguishes_active_and_delivered_claims() {
+        let mut ledger = DeliveryRunLedger::default();
+        let run_id = TurnRunId::new();
+
+        assert_eq!(ledger.try_claim(run_id), DeliveryClaim::Claimed);
+        assert_eq!(ledger.try_claim(run_id), DeliveryClaim::AlreadyActive);
+
+        ledger.record_delivered(run_id);
+        assert_eq!(ledger.try_claim(run_id), DeliveryClaim::AlreadyDelivered);
+    }
 }
