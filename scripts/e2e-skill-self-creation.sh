@@ -274,7 +274,10 @@ if await_answer "$TA2"; then
 else
   fail "A6 the fresh conversation never answered"
 fi
-SKIPS=$(grep -ac "skipping skill bundle" "$LOG_DIR/server-2.log" 2>/dev/null || echo 0)
+# `grep -c` exits 1 when the count is zero, so `|| echo 0` appended a SECOND zero and the compare
+# against "0" failed -- reporting a failure for the healthy case. Count without the fallback.
+SKIPS=$(grep -ac "skipping skill bundle" "$LOG_DIR/server-2.log" 2>/dev/null)
+SKIPS=${SKIPS:-0}
 if [ "${SKIPS:-0}" = "0" ]; then
   pass "A6 no bundle was skipped as unvalidatable"
 else
@@ -336,6 +339,11 @@ for m in d.get("messages") or []:
         print("    $ " + (p.get("subtitle") or "")[:160].replace("\n", " "))
 PY
   # Did it RUN the bundled script, or re-type the algorithm inline?
+  #
+  # Best-effort: display-preview subtitles REDACT paths, so `python3 <path>` cannot be attributed to
+  # the bundle from the preview alone. The inline `python3 -c "<algorithm>"` is the reliable tell, so
+  # a false "no" is possible and a false "yes" is not. Worth replacing with a check against the shell
+  # capability's recorded input once that is readable from the timeline.
   RAN_FILE=$(python3 - "$WORK/tb2.json" "$SCRIPT_SKILL" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1])); skill = sys.argv[2]
