@@ -153,9 +153,10 @@ h1,h2,h3,p{margin:0}
 .connect .ch .t{font-size:13px;font-weight:600;color:var(--v2-text-strong)}
 .connect .ch .s{font-size:12px;color:var(--v2-text-muted)}
 .connect .apps{display:flex;flex-wrap:wrap;gap:9px;align-items:center}
-.connectall{margin-left:auto;display:inline-flex;align-items:center;padding:3px 4px;border:0;background:transparent;color:var(--v2-accent-text);font:inherit;font-size:12.5px;font-weight:560;cursor:pointer;border-radius:6px}
-.connectall:hover{color:var(--v2-accent-strong);text-decoration:underline;text-underline-offset:2px}
-.connectall:focus-visible{outline:2px solid color-mix(in srgb,var(--v2-accent) 45%,transparent);outline-offset:2px}
+.connectfoot{display:flex;justify-content:flex-end;margin-top:13px}
+.connectbtn{display:inline-flex;align-items:center;gap:7px;height:34px;padding:0 15px;border-radius:10px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;color:#fff;border:1px solid rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
+.connectbtn:hover{background:radial-gradient(ellipse 200% 220% at 50% 110%,#5BBAF5 0%,#2882c8 60%)}
+.connectbtn:focus-visible{outline:2px solid color-mix(in srgb,var(--v2-accent) 45%,transparent);outline-offset:2px}
 .cpill{display:inline-flex;align-items:center;gap:9px;border:1px solid var(--v2-panel-border);background:var(--v2-surface);border-radius:12px;padding:7px 11px 7px 8px;cursor:pointer;font:inherit;transition:border-color .15s,background .15s}
 .cpill:hover{border-color:color-mix(in srgb,var(--v2-accent) 42%,var(--v2-panel-border))}
 .cpill .appchip{width:24px;height:24px;border-radius:7px;display:grid;place-items:center;border:1px solid;flex:none}
@@ -165,7 +166,7 @@ h1,h2,h3,p{margin:0}
 .cpill .cstate svg{width:12px;height:12px}
 .cpill.on{border-color:color-mix(in srgb,var(--v2-positive-text) 45%,var(--v2-panel-border));background:color-mix(in srgb,var(--v2-positive-soft) 55%,var(--v2-surface))}
 .cpill.on .cstate{background:var(--v2-positive-text);border-color:var(--v2-positive-text);color:#fff}
-.connclose{display:inline-grid;place-items:center;width:26px;height:26px;flex:none;border-radius:8px;border:0;background:transparent;color:var(--v2-text-faint);cursor:pointer;margin-left:8px}
+.connclose{display:inline-grid;place-items:center;width:26px;height:26px;flex:none;border-radius:8px;border:0;background:transparent;color:var(--v2-text-faint);cursor:pointer;margin-left:auto}
 .connclose:hover{background:var(--v2-surface-muted);color:var(--v2-text-strong)}
 .connclose svg{width:14px;height:14px}
 /* composer pill shown when the connect panel is dismissed */
@@ -459,8 +460,9 @@ h1,h2,h3,p{margin:0}
           <div class="rev flagwrap" id="connectBlock">
             <span class="flag"><span class="tag ship">Shipped</span></span>
             <div class="connect">
-              <div class="ch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg><span class="t">Connect your tools</span><span class="s" id="connectSub">one tap each · add more anytime</span><button class="connectall" id="connectAllBtn" type="button">Connect all</button><button class="connclose" id="connCloseBtn" type="button" aria-label="Dismiss connect panel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+              <div class="ch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg><span class="t">Connect your tools</span><span class="s" id="connectSub">one tap each · add more anytime</span><button class="connclose" id="connCloseBtn" type="button" aria-label="Dismiss connect panel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
               <div class="apps" id="appRow"></div>
+              <div class="connectfoot"><button class="connectbtn" id="connectAllBtn" type="button">Connect all</button></div>
             </div>
           </div>
 
@@ -601,7 +603,10 @@ h1,h2,h3,p{margin:0}
     list:'<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
     arrow:'<path d="M9 6l6 6-6 6"/>',
     plus:'<path d="M12 5v14M5 12h14"/>',
-    arrowLeft:'<path d="M15 6l-6 6 6 6"/>'
+    arrowLeft:'<path d="M15 6l-6 6 6 6"/>',
+    book:'<path d="M6 4h11a1 1 0 0 1 1 1v15H7a1 1 0 0 1-1-1z"/><path d="M9 4v16"/>',
+    triangle:'<path d="M12 5l8 14H4z"/>',
+    code:'<path d="M8 9l-3 3 3 3M16 9l3 3-3 3M13 7l-2 10"/>'
   };
   function svg(name,sw){return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="'+(sw||1.8)+'" stroke-linecap="round" stroke-linejoin="round">'+ICON[name]+'</svg>';}
   function chipStyle(accent){return 'color:'+accent+';background:color-mix(in srgb,'+accent+' 16%,transparent);border-color:color-mix(in srgb,'+accent+' 38%,transparent)';}
@@ -611,7 +616,10 @@ h1,h2,h3,p{margin:0}
   var APPS=[
     {key:'gmail',label:'Gmail',icon:'mail',accent:'#ea4335'},
     {key:'calendar',label:'Calendar',icon:'calendar',accent:'#4285f4'},
-    {key:'slack',label:'Slack',icon:'chat',accent:'#e01e5a'}
+    {key:'slack',label:'Slack',icon:'chat',accent:'#e01e5a'},
+    {key:'notion',label:'Notion',icon:'book',accent:'#6b7280'},
+    {key:'drive',label:'Drive',icon:'triangle',accent:'#0f9d58'},
+    {key:'github',label:'GitHub',icon:'code',accent:'#7d5bed'}
   ];
   var appRow=document.getElementById('appRow'),connectAllBtn=document.getElementById('connectAllBtn'),connectSub=document.getElementById('connectSub');
   var connSet=[], connectState='open'; // 'open' | 'pill' | 'gone'
@@ -621,6 +629,7 @@ h1,h2,h3,p{margin:0}
   function renderConnect(){
     var all=APPS.length,n=connSet.length;
     connectAllBtn.style.display=(n>=all)?'none':'';
+    connectAllBtn.textContent=(n>=1)?'Connect':'Connect all';
     connectSub.textContent='one tap each · add more anytime';
     appRow.innerHTML=APPS.map(function(a){
       var on=isConn(a.key);
