@@ -53,6 +53,14 @@ TOKEN="${E2E_TOKEN:-e2eskillstokene2eskillstokene2eskills}"
 BIN="${E2E_BIN:-$REPO_ROOT/target/debug/ironclaw}"
 API="http://127.0.0.1:${PORT}/api/webchat/v2"
 WORK="$(mktemp -d)"
+# Local-dev resolves `workspace_root` from the server's CURRENT DIRECTORY
+# (`build_standalone_local_runtime_services_input`), so whatever directory `serve` starts in becomes
+# the agent's workspace. Launching from a source checkout therefore makes the checkout the workspace,
+# and every agent write lands among tracked files -- which is how two agent-written scripts ended up
+# swept into commits by `git add -A`. Production runs the service in its own directory, so the test
+# does too: a scratch workspace, and an assertion at the end that the repository was untouched.
+WORKSPACE_DIR="${E2E_WORKSPACE:-$WORK/workspace}"
+mkdir -p "$WORKSPACE_DIR"
 LOG_DIR="${E2E_LOG_DIR:-$WORK}"
 # Must exist before the first redirect: `nohup … > "$LOG_DIR/server-1.log"` fails silently on a
 # missing directory, so the server never launches and the log that would say why is never created.
@@ -130,11 +138,16 @@ PY
 
 start_server() {
   rm -f "$LOG_DIR/server-$1.log"
-  IRONCLAW_REBORN_HOME="$HOME_DIR" \
-  IRONCLAW_REBORN_WEBUI_TOKEN="$TOKEN" \
-  IRONCLAW_REBORN_WEBUI_USER_ID=reborn-cli \
-  RUST_MIN_STACK=8388608 \
-    nohup "$BIN" serve --port "$PORT" > "$LOG_DIR/server-$1.log" 2>&1 &
+  # `cd` into the scratch workspace: the server's cwd becomes the agent's workspace root. `$BIN` is
+  # absolute so this still resolves.
+  (
+    cd "$WORKSPACE_DIR" || exit 1
+    IRONCLAW_REBORN_HOME="$HOME_DIR" \
+    IRONCLAW_REBORN_WEBUI_TOKEN="$TOKEN" \
+    IRONCLAW_REBORN_WEBUI_USER_ID=reborn-cli \
+    RUST_MIN_STACK=8388608 \
+      nohup "$BIN" serve --port "$PORT" > "$LOG_DIR/server-$1.log" 2>&1 &
+  )
   # A debug build seeds bundled skills and runs migrations before it binds; be generous.
   for _ in $(seq 1 60); do
     sleep 10
@@ -210,6 +223,9 @@ echo "  port   : $PORT"
 echo "  model  : $MODEL"
 echo "  home   : $HOME_DIR (recreated)"
 echo "  logs   : $LOG_DIR"
+
+REPO_BEFORE="$WORK/repo-before.txt"
+git -C "$REPO_ROOT" status --porcelain > "$REPO_BEFORE" 2>/dev/null || : > "$REPO_BEFORE"
 
 pkill -f "ironclaw serve --port ${PORT}" 2>/dev/null
 sleep 2
@@ -375,10 +391,27 @@ else
   fail "B4 the scripted conversation never answered"
 fi
 
+step "the repository was not written to"
+git -C "$REPO_ROOT" status --porcelain > "$WORK/repo-after.txt" 2>/dev/null || : > "$WORK/repo-after.txt"
+if diff -q "$REPO_BEFORE" "$WORK/repo-after.txt" >/dev/null 2>&1; then
+  pass "no agent writes landed in the checkout"
+else
+  fail "the checkout changed during the run:"
+  diff "$REPO_BEFORE" "$WORK/repo-after.txt" | head -10 | sed 's/^/      /'
+fi
+
+step "what the agent wrote into its workspace"
+if [ -n "$(find "$WORKSPACE_DIR" -type f 2>/dev/null | head -1)" ]; then
+  find "$WORKSPACE_DIR" -type f 2>/dev/null | sed "s|$WORKSPACE_DIR|<workspace>|" | head -8 | sed 's/^/    /'
+else
+  echo "    (nothing -- the agent worked entirely through the skill store)"
+fi
+
 echo
 echo "================ results ================"
 echo "  passed      : $PASS"
 echo "  failed      : $FAIL"
 echo "  known gaps  : $GAP"
 echo "  logs        : $LOG_DIR"
+echo "  workspace   : $WORKSPACE_DIR"
 [ "$FAIL" -eq 0 ] || exit 1
