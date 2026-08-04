@@ -8322,6 +8322,48 @@ async fn builtin_apply_patch_accepts_file_content_written_by_same_scope() {
 }
 
 #[tokio::test]
+async fn builtin_write_file_rejects_docx_after_extracted_read_without_changing_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let original = skill_bundle_zip(&[(
+        "word/document.xml",
+        br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Original text</w:t></w:r></w:p></w:body></w:document>"#,
+    )]);
+    let document_path = temp.path().join("review.docx");
+    std::fs::write(&document_path, &original).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/review.docx"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(read["content"].as_str().unwrap().contains("Original text"));
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/review.docx", "content": "Replacement text"}),
+        context,
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("binary documents cannot be edited with text tools")
+    );
+    assert_eq!(std::fs::read(document_path).unwrap(), original);
+}
+
+#[tokio::test]
 async fn builtin_apply_patch_rejects_when_old_string_is_no_longer_present() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("code.rs"), "old\n").unwrap();
