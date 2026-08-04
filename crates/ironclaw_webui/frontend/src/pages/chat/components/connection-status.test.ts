@@ -73,6 +73,11 @@ test("ConnectionStatus keeps an empty live region mounted for routine states", (
     CONNECTION_STATUS.IDLE,
     CONNECTION_STATUS.CONNECTING,
     CONNECTION_STATUS.CONNECTED,
+    // RECONNECTING is an internal state only: a proxy that closes the SSE
+    // body between streamed frames makes the transport retry on every chunk,
+    // so rendering it would only blink. It stays surfaced for run-failure
+    // attribution via `isConnectionLostStatus` but is not rendered.
+    CONNECTION_STATUS.RECONNECTING,
   ]) {
     const rendered = ConnectionStatus({ status });
     assert.notEqual(rendered, null, status);
@@ -99,7 +104,6 @@ test("ConnectionStatus renders static desktop status and mobile disclosure", () 
   const ConnectionStatus = loadConnectionStatusForTest();
 
   for (const [status, style] of [
-    [CONNECTION_STATUS.RECONNECTING, "--v2-warning-soft"],
     [CONNECTION_STATUS.DISCONNECTED, "--v2-danger-soft"],
     [CONNECTION_STATUS.PAUSED, "--v2-surface-soft"],
   ]) {
@@ -143,7 +147,7 @@ test("ConnectionStatus renders static desktop status and mobile disclosure", () 
 
 test("ConnectionStatus exposes the expanded mobile label state", () => {
   const ConnectionStatus = loadConnectionStatusForTest({ expanded: true });
-  const rendered = ConnectionStatus({ status: CONNECTION_STATUS.RECONNECTING });
+  const rendered = ConnectionStatus({ status: CONNECTION_STATUS.DISCONNECTED });
   const toggle = nodeByTestId(rendered, "connection-status-toggle");
   const floatingLabel = nodeByTestId(rendered, "connection-status-label");
 

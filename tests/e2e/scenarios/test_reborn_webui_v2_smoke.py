@@ -1663,30 +1663,18 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
         connection_status = page.locator(SEL_V2["connection_status"])
 
         await context.set_offline(True)
-        await expect(connection_status).to_have_text("Reconnecting...", timeout=5000)
-        await expect(connection_status).to_have_css("position", "static")
-        assert await connection_status.evaluate("node => Boolean(node.closest('header'))")
-        await expect(connection_status).to_be_in_viewport()
-
+        # RECONNECTING is no longer rendered (internal state only): a proxy
+        # that closes the SSE body between streamed frames would otherwise
+        # blink the badge on every chunk. The badge stays absent during a
+        # transient/retryable reconnect and only reappears on a terminal
+        # DISCONNECTED state.
+        await expect(connection_status).to_have_count(0, timeout=5000)
         await page.set_viewport_size({"width": 390, "height": 844})
         connection_status_toggle = page.locator(SEL_V2["connection_status_toggle"])
         connection_status_label = page.locator(SEL_V2["connection_status_label"])
-        disclosure_id = await connection_status_label.get_attribute("id")
-        assert disclosure_id
-        await expect(connection_status_label).to_be_hidden()
-        await expect(connection_status_label).to_have_attribute("aria-hidden", "true")
-        await expect(connection_status_toggle).to_have_attribute("aria-expanded", "false")
-        await expect(connection_status_toggle).to_have_attribute("aria-controls", disclosure_id)
-        await expect(connection_status_toggle).to_be_in_viewport()
-
-        await connection_status_toggle.click()
-        await expect(connection_status_toggle).to_have_attribute("aria-expanded", "true")
-        await expect(connection_status_label).to_have_attribute("aria-hidden", "false")
-        await expect(connection_status_label).to_be_visible()
-        await expect(connection_status_label).to_have_text("Reconnecting...")
-        await expect(connection_status_label).to_have_css("position", "absolute")
-        await expect(connection_status_toggle).to_be_in_viewport()
-        await expect(connection_status_label).to_be_in_viewport()
+        # No visible status affordance while RECONNECTING is hidden.
+        await expect(connection_status_toggle).to_have_count(0, timeout=5000)
+        await expect(connection_status_label).to_have_count(0, timeout=5000)
         await expect(page.locator(SEL_V2["header_logs_link"])).to_be_visible()
         await expect(page.locator(SEL_V2["header_docs_link"])).to_be_visible()
 
@@ -1698,9 +1686,13 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
         await composer.press("Enter")
         await expect(page.locator(SEL_V2["typing_indicator"])).to_be_visible(timeout=5000)
 
+        # A retryable stream interruption (readyState 0) stays RECONNECTING
+        # internally and is not rendered; the badge remains absent.
         await page.evaluate("() => window.__failLatestV2Sse(0)")
-        await expect(connection_status).to_have_text("Reconnecting...", timeout=5000)
+        await expect(connection_status).to_have_count(0, timeout=5000)
 
+        # A terminal (non-retryable) failure escalates to DISCONNECTED, which
+        # is still rendered.
         await page.evaluate("() => window.__failLatestV2Sse(2)")
         await expect(connection_status).to_have_text("Disconnected", timeout=5000)
 
