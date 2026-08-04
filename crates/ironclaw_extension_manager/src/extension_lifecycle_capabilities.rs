@@ -1429,6 +1429,23 @@ mod tests {
         .await;
         let context = execution_context([EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID]);
 
+        let omitted_auth_type = invoke_json_with_standalone_approval(
+            &services,
+            EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
+            context.clone(),
+            serde_json::json!({
+                "desired_id": "calendar-omitted-auth",
+                "desired_name": "Calendar MCP",
+                "endpoint": "https://mcp.example.test/rpc"
+            }),
+        )
+        .await;
+        assert_eq!(omitted_auth_type, Err(FailureKind::InputEncode));
+        assert!(
+            network.authorized_methods().is_empty(),
+            "missing auth type must be rejected before registration egress"
+        );
+
         let auto = invoke_json_with_standalone_approval(
             &services,
             EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
