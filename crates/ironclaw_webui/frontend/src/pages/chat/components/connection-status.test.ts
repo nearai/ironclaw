@@ -165,3 +165,43 @@ test("ConnectionStatus falls back safely for an unknown interruption", () => {
   assert.ok(floatingLabel.props.className.includes("--v2-surface-soft"));
   assert.equal(floatingLabel.children[0], "blocked");
 });
+
+test("ConnectionStatus does not render a Reconnecting badge during streaming (#7071)", () => {
+  // Regression for #7071: a proxy that closes the SSE body between streamed
+  // frames makes the transport retry on every chunk, flipping the status to
+  // RECONNECTING for each retry. The badge must not surface that routine
+  // in-flight reconnect — only a sustained loss that escalates to
+  // DISCONNECTED is user-visible.
+  const ConnectionStatus = loadConnectionStatusForTest();
+
+  const reconnecting = ConnectionStatus({ status: CONNECTION_STATUS.RECONNECTING });
+  assert(
+    nodeByTestId(reconnecting, "connection-status") === null,
+    "RECONNECTING must not render the desktop status badge",
+  );
+  assert(
+    nodeByTestId(reconnecting, "connection-status-toggle") === null,
+    "RECONNECTING must not render the mobile status toggle",
+  );
+  assert(
+    nodeByTestId(reconnecting, "connection-status-label") === null,
+    "RECONNECTING must not render the mobile status label",
+  );
+
+  const liveStatus = findNode(
+    reconnecting,
+    (node) => node.props?.role === "status",
+  );
+  assert(liveStatus !== null, "the live region stays mounted for RECONNECTING");
+  assert.equal(liveStatus.children[0], "", "RECONNECTING keeps the live region empty");
+
+  const disconnected = ConnectionStatus({ status: CONNECTION_STATUS.DISCONNECTED });
+  assert(
+    nodeByTestId(disconnected, "connection-status") !== null,
+    "DISCONNECTED still renders the desktop status badge",
+  );
+  assert(
+    nodeByTestId(disconnected, "connection-status-label").children[0] === "disconnected",
+    "DISCONNECTED still labels the badge",
+  );
+});
