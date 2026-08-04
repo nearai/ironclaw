@@ -545,6 +545,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         owner = planner.INTEGRATION_SNAPSHOT_PREFIX_OWNERS[
             "tests/snapshots/golden_payload__"
         ]
+        self.assertEqual(owner, "tests/integration/golden_payload.rs")
         expected_lane = planner._integration_test_lanes()[owner]
 
         plan = self.plan(

@@ -324,7 +324,7 @@ mod tests {
 
     use ironclaw_filesystem::{CasExpectation, Entry, InMemoryBackend, RootFilesystem};
     use ironclaw_host_api::{
-        dispatch::{DispatchFailureDetail, RuntimeDispatchErrorKind},
+        dispatch::{DispatchFailureDetail, DispatchInputIssueCode, RuntimeDispatchErrorKind},
         ids::CapabilityId,
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
@@ -420,6 +420,66 @@ mod tests {
             error.kind(),
             Some(RuntimeDispatchErrorKind::FilesystemDenied)
         );
+    }
+
+    #[tokio::test]
+    async fn file_query_rejects_ambiguous_and_missing_input() {
+        for input in [
+            json!({
+                "operation": "query",
+                "data": {},
+                "file_path": "/workspace/source.json",
+                "path": "value"
+            }),
+            json!({"operation": "query", "path": "value"}),
+        ] {
+            let error = dispatch(&request(input))
+                .await
+                .expect_err("exactly one of data or file_path is required");
+            assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::InputEncode));
+
+            let crate::FirstPartyCapabilityError::Dispatch {
+                detail: Some(detail),
+                ..
+            } = error
+            else {
+                panic!("expected structured invalid-input error");
+            };
+            let DispatchFailureDetail::InvalidInput { issues } = *detail else {
+                panic!("expected invalid-input details");
+            };
+            assert_eq!(issues.len(), 2);
+            assert_eq!(issues[0].path, "data");
+            assert_eq!(issues[1].path, "file_path");
+        }
+    }
+
+    #[tokio::test]
+    async fn file_query_rejects_paths_outside_workspace_before_filesystem_access() {
+        for file_path in ["/etc/passwd", "/workspace", "/workspace/"] {
+            let error = dispatch(&request(json!({
+                "operation": "query",
+                "file_path": file_path,
+                "path": "value"
+            })))
+            .await
+            .expect_err("only files below /workspace are readable");
+            assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::InputEncode));
+
+            let crate::FirstPartyCapabilityError::Dispatch {
+                detail: Some(detail),
+                ..
+            } = error
+            else {
+                panic!("expected structured invalid-input error");
+            };
+            let DispatchFailureDetail::InvalidInput { issues } = *detail else {
+                panic!("expected invalid-input details");
+            };
+            assert_eq!(issues.len(), 1);
+            assert_eq!(issues[0].path, "file_path");
+            assert_eq!(issues[0].code, DispatchInputIssueCode::InvalidValue);
+        }
     }
 
     #[tokio::test]
