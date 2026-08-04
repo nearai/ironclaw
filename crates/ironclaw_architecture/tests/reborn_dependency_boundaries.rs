@@ -4167,16 +4167,23 @@ struct LayerMatrixException {
 /// live tree it is turn *admission* (a `TurnCoordinator` handle and
 /// `submit_turn` call), not vocabulary, so `loop_contracts` cannot dissolve it
 /// — its entry now records that and points at WS5.
-const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 10;
+///
+/// **10 → 6 (WS2, `ironclaw_extensions` re-layered `loops` → `substrates`).**
+/// Four entries — `host_runtime`, `capabilities`, `mcp` and `scripts` reaching
+/// `ironclaw_extensions` — were all the same edge under four names: a
+/// kernel/runtimes-tier crate consuming the registry's manifest DTOs. None was
+/// waived and none of those edges was deleted; the *registry* moved down to
+/// `substrates`, where every layer above may legally reach it (PROPOSAL §6.8.1:
+/// "Layer substrates legalizes `capabilities → extensions` and
+/// `host_runtime → extensions`" — it legalizes `mcp` and `scripts` too, which
+/// that entry undercounts). The one edge that blocked the move,
+/// `extensions → trust` (kernel), is also gone rather than waived:
+/// `TrustPolicyInput` is requested-trust *vocabulary* and now lives beside
+/// `PackageIdentity` in `ironclaw_host_api::trust`, which is §6.8.1's own
+/// prescription ("`trust`-vocabulary via `host_api`").
+const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 6;
 
 const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
-    LayerMatrixException {
-        crate_name: "ironclaw_host_runtime",
-        dependency_name: "ironclaw_extensions",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "host_runtime still owns extension-hosting wiring until kernel consolidation moves only the execution perimeter into kernel",
-    },
     LayerMatrixException {
         crate_name: "ironclaw_host_runtime",
         dependency_name: "ironclaw_extension_support",
@@ -4190,13 +4197,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "W7",
         reason: "host_runtime still owns first-party skill management tools and skill URL install limits; remove when kernel consolidation or a dedicated skill-host extraction moves that execution surface out of host_runtime",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_capabilities",
-        dependency_name: "ironclaw_extensions",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "capability hosting still reaches the extension surface until the kernel perimeter is consolidated",
     },
     LayerMatrixException {
         crate_name: "ironclaw_processes",
@@ -4214,24 +4214,10 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
     },
     LayerMatrixException {
         crate_name: "ironclaw_mcp",
-        dependency_name: "ironclaw_extensions",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "MCP runtime still consumes ExtensionPackage and ExtensionRuntime manifest DTOs; remove when extension runtime descriptors move to a neutral contract or runtime lanes are folded behind the extension-host boundary",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_mcp",
         dependency_name: "ironclaw_resources",
         introduced: "2026-07-09",
         removes_in: "W7",
         reason: "MCP runtime support still depends on resource contracts currently classed with kernel behavior",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_scripts",
-        dependency_name: "ironclaw_extensions",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "script runtime still consumes ExtensionPackage and ExtensionRuntime manifest DTOs; remove when extension runtime descriptors move to a neutral contract or runtime lanes are folded behind the extension-host boundary",
     },
     LayerMatrixException {
         crate_name: "ironclaw_scripts",

@@ -139,7 +139,7 @@ impl ActiveExtensionPublisher {
 
 pub fn extension_trust_policy_input(
     package: &ExtensionPackage,
-) -> Result<ironclaw_trust::TrustPolicyInput, ProductOperationFailure> {
+) -> Result<ironclaw_host_api::trust::TrustPolicyInput, ProductOperationFailure> {
     package
         .trust_policy_input(
             package.trust_policy_source().map_err(map_extension_error)?,
