@@ -136,7 +136,7 @@ impl ServeCommand {
             ironclaw_reborn_config::RebornConfigFile::load(&boot_config.home().config_file_path())
                 .map_err(anyhow::Error::from)?;
         if let Some(file) = config_file.as_ref() {
-            reject_legacy_slack_config(file, &boot_config.home().config_file_path())?;
+            reject_retired_config_sections(file, &boot_config.home().config_file_path())?;
         }
 
         // Tenant id is host-trusted (operator-owned config), never
@@ -896,42 +896,22 @@ fn trigger_fire_access_policy(
         .with_tenant_membership(default_agent_id.clone(), default_project_id.cloned())
 }
 
-/// The legacy `[slack]` setup fields are a retired configuration surface:
-/// Slack is configured by installing the Slack extension and completing
-/// workspace OAuth in the WebUI (`/extensions`). A populated setup field
-/// means the operator is following retired instructions — fail closed with
-/// the migration pointer instead of silently ignoring it. `[slack].enabled`
-/// is not rejected: the flag is unused, but existing installs may still
-/// carry it and must keep booting.
-fn reject_legacy_slack_config(
+/// Refuse to serve against a config file that still carries a retired
+/// *setup* key, and announce the retired sections that are merely inert.
+///
+/// Both halves are data-driven by `ironclaw_reborn_config`'s retired-section
+/// table rather than by per-vendor code here: which sections are retired is a
+/// fact about the config schema, so the CLI asks rather than re-deriving. The
+/// inert half is reported instead of ignored because the failure it catches
+/// is an operator setting a flag that documentation once advertised and
+/// nothing reads.
+fn reject_retired_config_sections(
     config_file: &ironclaw_reborn_config::RebornConfigFile,
     config_path: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let Some(slack) = config_file.slack.as_ref() else {
-        return Ok(());
-    };
-    let offending = [
-        ("installation_id", slack.installation_id.is_some()),
-        ("team_id", slack.team_id.is_some()),
-        ("api_app_id", slack.api_app_id.is_some()),
-        ("slack_user_id", slack.slack_user_id.is_some()),
-        ("user_id", slack.user_id.is_some()),
-        (
-            "shared_subject_user_id",
-            slack.shared_subject_user_id.is_some(),
-        ),
-        ("channel_routes", !slack.channel_routes.is_empty()),
-        ("signing_secret_env", slack.signing_secret_env.is_some()),
-        ("bot_token_env", slack.bot_token_env.is_some()),
-    ];
-    if let Some((field, _)) = offending.iter().find(|(_, set)| *set) {
-        anyhow::bail!(
-            "`[slack].{field}` in {path} is a retired configuration surface: Slack is \
-             configured by installing the Slack extension and completing workspace OAuth \
-             in the WebUI (/extensions). Remove the `[slack]` section to continue.",
-            field = field,
-            path = config_path.display(),
-        );
+    config_file.retired_section_migration(config_path)?;
+    for notice in config_file.retired_section_notices(config_path) {
+        tracing::warn!("{notice}");
     }
     Ok(())
 }
@@ -1394,7 +1374,7 @@ mod tests {
     }
 
     #[test]
-    fn serve_startup_rejects_loaded_config_with_legacy_slack_fields() {
+    fn serve_startup_rejects_loaded_config_with_retired_setup_fields() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("config.toml");
         std::fs::write(
@@ -1412,8 +1392,8 @@ slack_user_id = "U123"
             .expect("config file loads")
             .expect("config exists");
 
-        let error = reject_legacy_slack_config(&config_file, &config_path)
-            .expect_err("serve startup must reject legacy Slack config fields");
+        let error = reject_retired_config_sections(&config_file, &config_path)
+            .expect_err("serve startup must reject retired setup fields");
         let message = error.to_string();
 
         assert!(
@@ -1437,8 +1417,27 @@ slack_user_id = "U123"
         let config_file = ironclaw_reborn_config::RebornConfigFile::load(&config_path)
             .expect("config file loads")
             .expect("config exists");
-        reject_legacy_slack_config(&config_file, &config_path)
+        reject_retired_config_sections(&config_file, &config_path)
             .expect("an inert [slack].enabled must not block startup");
+
+        // The check is table-driven, so a section retired later must get the
+        // same treatment without new code here. `[telegram]` never had a
+        // setup field, so it is the inert-only case end to end.
+        std::fs::write(
+            &config_path,
+            "api_version = \"ironclaw.runtime/v1\"\n\n[telegram]\nenabled = true\n",
+        )
+        .expect("write config");
+        let config_file = ironclaw_reborn_config::RebornConfigFile::load(&config_path)
+            .expect("config file loads")
+            .expect("config exists");
+        reject_retired_config_sections(&config_file, &config_path)
+            .expect("an inert [telegram] section must not block startup");
+        assert_eq!(
+            config_file.retired_section_notices(&config_path).len(),
+            1,
+            "an inert retired section must still announce itself"
+        );
     }
 
     #[test]

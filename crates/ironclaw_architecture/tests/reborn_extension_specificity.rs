@@ -1411,14 +1411,17 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     ("crates/ironclaw_reborn_config/src/config_file.rs", "gmail"),
     ("crates/ironclaw_reborn_config/src/config_file.rs", "google"),
-    ("crates/ironclaw_reborn_config/src/config_file.rs", "slack"),
+    // The retired-section gravestones: the only place this crate still
+    // names a vendor, and only as the TOML table name an operator typed.
     (
-        "crates/ironclaw_reborn_config/src/config_file.rs",
+        "crates/ironclaw_reborn_config/src/retired_sections.rs",
+        "slack",
+    ),
+    (
+        "crates/ironclaw_reborn_config/src/retired_sections.rs",
         "telegram",
     ),
     ("crates/ironclaw_reborn_config/src/lib.rs", "google"),
-    ("crates/ironclaw_reborn_config/src/lib.rs", "slack"),
-    ("crates/ironclaw_reborn_config/src/lib.rs", "telegram"),
     // lane-4: dev-deps — sanctioned DEL-7 linkage of concrete channel crates
     // for the production-shaped channel-host E2E suite; the scanner sees the
     // crate names in Cargo.toml even though Rust test sources are excluded.
@@ -1503,7 +1506,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// the gate above (an entry that no longer matches fails); this ceiling is the
 /// other half — the list cannot *grow* untracked either. Lower it in the same
 /// PR that deletes entries so the new floor is locked in.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 129;
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 125;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 #[test]

@@ -477,6 +477,37 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertEqual(plan["root_partitions"], [])
                 self.assertEqual(plan["integration_lanes"], [])
 
+    def test_repo_root_example_env_is_classified_and_selects_no_rust_lane(self) -> None:
+        """`.env.example` is documentation, like a repo-root `*.md`.
+
+        Regression for the gap PR #7117 hit: root `*.md` was classified but
+        its non-`.md` sibling was not, so correcting an env-var comment failed
+        the whole `Tests (Reborn)` roll-up. Nothing reads the file — no crate,
+        test, or workflow — only doc comments name it.
+
+        Paired assertions, same reason as the `.claude/` test above: the path
+        must be *accepted* AND select no Rust lane, so a future
+        "classification" that turns a comment fix into a full matrix fails
+        here too.
+        """
+        plan = self.plan("pull_request", [".env.example"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["crate_buckets"], [])
+        self.assertEqual(plan["root_partitions"], [])
+        self.assertEqual(plan["integration_lanes"], [])
+
+        # The ignore is per-path, not per-PR: a real change riding along still
+        # selects its lane.
+        paired = self.plan(
+            "pull_request", [".env.example", "crates/alpha/src/lib.rs"]
+        )
+        self.assertEqual(paired["mode"], "selected")
+        self.assertNotEqual(paired["crate_buckets"], [])
+
+        # And the fail-closed arm still catches a genuinely unknown root file.
+        with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
+            self.plan("pull_request", [".env.local"])
+
     def test_decided_repo_root_script_paths_are_owned_by_other_workflows(self) -> None:
         """Repo-root `scripts/` files that another workflow owns.
 
