@@ -1492,7 +1492,28 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// the gate above (an entry that no longer matches fails); this ceiling is the
 /// other half — the list cannot *grow* untracked either. Lower it in the same
 /// PR that deletes entries so the new floor is locked in.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 129;
+///
+/// ✎ **129 → 125 (2026-08-04, #7143).** Two separate things, both owed by the
+/// sentence directly above and neither done until now:
+///
+/// - **This PR deleted an entry** — `("…/lifecycle_restore.rs", "slack")`, made
+///   stale by the retired-identity branch deletion — and lowering the ceiling
+///   in the same PR is exactly what that sentence requires. Shipping without it
+///   would have banked the deletion as slack rather than as a floor.
+/// - **The ceiling was already carrying 3 entries of slack before this PR.**
+///   Recounted on `origin/main`: the list holds **126** pairs against a
+///   constant of 129, so three earlier deletions lowered the list without
+///   lowering the ceiling. That slack is silent — the ratchet only refuses
+///   *growth*, so three new vendor carve-outs could have been added without
+///   any gate objecting. Setting the constant to the live count (**125** on
+///   this branch) closes the pre-existing gap as well as this PR's.
+///
+/// Counted with a script over the entries between `const ALLOWLIST` and its
+/// closing `];`, ignoring comment lines, on the **pushed ref** — not by eye and
+/// not with `grep`, which also matches prose. Tracked as #7147; whichever of
+/// the concurrent branches touching this list merges last must recount the
+/// union rather than trusting any single branch's number.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 125;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 #[test]
