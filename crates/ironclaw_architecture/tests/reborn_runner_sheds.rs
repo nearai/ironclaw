@@ -709,24 +709,27 @@ fn reborn_runner_sheds_every_scanned_input_is_non_empty() {
 #[test]
 #[should_panic(expected = "cannot read")]
 fn reborn_runner_sheds_unreadable_input_fails_the_scan_rather_than_disappearing_from_it() {
-    let temporary = std::env::temp_dir().join(format!(
-        "ironclaw-runner-sheds-io-fatality-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&temporary).expect("fixture directory");
-    // A dangling symlink is deterministic in a root container, where `chmod`
-    // is not: root can read a 0000 file.
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(temporary.join("nowhere"), temporary.join("dangling.rs"))
-        .expect("dangling symlink fixture");
     #[cfg(not(unix))]
     panic!("cannot read: fixture unsupported on this platform");
 
-    let files = production_rust_files(&temporary);
-    for path in files {
-        let _ = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+    #[cfg(unix)]
+    {
+        let temporary = std::env::temp_dir().join(format!(
+            "ironclaw-runner-sheds-io-fatality-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&temporary).expect("fixture directory");
+        // A dangling symlink is deterministic in a root container, where
+        // `chmod` is not: root can read a 0000 file.
+        std::os::unix::fs::symlink(temporary.join("nowhere"), temporary.join("dangling.rs"))
+            .expect("dangling symlink fixture");
+
+        let files = production_rust_files(&temporary);
+        for path in files {
+            let _ = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        }
+        let _ = std::fs::remove_dir_all(&temporary);
+        panic!("cannot read: the fixture produced no unreadable file, so this test proved nothing");
     }
-    let _ = std::fs::remove_dir_all(&temporary);
-    panic!("cannot read: the fixture produced no unreadable file, so this test proved nothing");
 }
