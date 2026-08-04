@@ -285,74 +285,27 @@ where
     Ok(services)
 }
 
+/// Write-side skill mounts for the production path.
+///
+/// Delegates to [`crate::runtime_mounts::db_backed_skill_management_mount_view`] so this view and
+/// every reader are built from one decision about where skills live. They were three separate
+/// definitions over two trees, which is nearai/ironclaw#7168 — see that function for the table.
 pub(crate) fn production_skill_management_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, HostApiError> {
-    MountView::new(vec![
-        MountGrant::new(
-            MountAlias::new("/skills")?,
-            VirtualPath::new(format!(
-                "/tenants/{}/users/{}/skills",
-                scope.tenant_id.as_str(),
-                scope.user_id.as_str()
-            ))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-        MountGrant::new(
-            MountAlias::new("/system/skills")?,
-            VirtualPath::new("/system/skills")?,
-            MountPermissions::read_only(),
-        ),
-    ])
+    crate::runtime_mounts::db_backed_skill_management_mount_view(scope)
 }
 
-/// Read-side skill mounts for the production path, targeting the DATABASE-backed tree.
+/// Read-side skill mounts for the hosted multi-tenant Postgres path.
 ///
-/// Must mirror [`production_skill_management_mount_view`]'s targets exactly, because a reader and a
-/// writer pointed at different trees is not a degraded feature — it is a silent, permanent one.
-///
-/// That was the bug. The writer resolves `/skills` to `/tenants/{t}/users/{u}/skills`, and the
-/// composite routes `/tenants` to the database. The reader used `scoped_skill_context_mount_view`,
-/// which resolves `/skills` to `/projects/tenants/{t}/users/{u}/skills`, and `/projects` routes to
-/// the host disk. So `skill_install` wrote to the database, discovery listed the disk, and an
-/// agent-installed skill was never visible again: `installed: true`, present in `skill_list` within
-/// the session, absent from Settings → Skills and unactivatable in every later one. Reproduced by
-/// hand on the WebUI (nearai/ironclaw#7168).
-///
-/// Skills belong entirely in the virtual filesystem, database-backed. A host-disk path for tenant
-/// skill data is also wrong on its own terms under hosted multi-tenancy, where there is no
-/// meaningful host disk for a tenant.
-///
-/// `/system/skills` stays where the writer leaves it, so bundled skills keep resolving; moving that
-/// tree into the database as well is the remaining step toward skills being wholly DB-backed, and
-/// it needs bundled seeding to write into the database at boot rather than ship on disk.
+/// Delegates to the same source as the writer, so `/skills` cannot resolve to a different tree than
+/// `skill_install` wrote to. Kept as a named function because this is the branch selected when a
+/// build supplies no `workspace_filesystems` of its own, and the name is what makes that branch
+/// searchable from the bug.
 pub(crate) fn production_skill_context_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, HostApiError> {
-    MountView::new(vec![
-        MountGrant::new(
-            MountAlias::new("/skills")?,
-            VirtualPath::new(format!(
-                "/tenants/{}/users/{}/skills",
-                scope.tenant_id.as_str(),
-                scope.user_id.as_str()
-            ))?,
-            MountPermissions::read_only(),
-        ),
-        MountGrant::new(
-            MountAlias::new("/tenant-shared/skills")?,
-            VirtualPath::new(format!(
-                "/tenants/{}/tenant-shared/skills",
-                scope.tenant_id.as_str()
-            ))?,
-            MountPermissions::read_only(),
-        ),
-        MountGrant::new(
-            MountAlias::new("/system/skills")?,
-            VirtualPath::new("/system/skills")?,
-            MountPermissions::read_only(),
-        ),
-    ])
+    crate::runtime_mounts::db_backed_skill_context_mount_view(scope)
 }
 
 pub(crate) fn production_system_extensions_lifecycle_mount_view() -> Result<MountView, HostApiError>

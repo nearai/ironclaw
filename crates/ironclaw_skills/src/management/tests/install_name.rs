@@ -24,7 +24,10 @@ async fn install_normalizes_plain_markdown_requested_display_name() {
         "/projects/skills/daily-digest-email-docs/SKILL.md",
     )
     .await;
-    assert!(written.starts_with("---\nname: daily-digest-email-docs\n---\n\n"));
+    // A description is required, and is derived from the document's own first line of prose --
+    // `name:` alone is the shape discovery silently skips (nearai/ironclaw#7168).
+    assert!(written.starts_with("---\nname: daily-digest-email-docs\ndescription: "));
+    assert!(written.contains("Summarize updates for an email."));
 
     let listed = list_skills(&context).await.unwrap();
     assert_eq!(listed.len(), 1);

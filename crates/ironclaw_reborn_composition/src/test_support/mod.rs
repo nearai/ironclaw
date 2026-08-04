@@ -189,3 +189,15 @@ pub fn production_skill_context_mount_view_for_test(
 ) -> Result<ironclaw_host_api::mount::MountView, ironclaw_host_api::error::HostApiError> {
     crate::factory::production_backend_assembly::production_skill_context_mount_view(scope)
 }
+
+/// Read-side skill mounts for the local-dev / local-storage / hosted-single-tenant shapes.
+///
+/// A separate seam because those shapes take a different branch: they supply their own
+/// `workspace_filesystems`, so they never reach the view above. That is how #7168 survived its first
+/// fix — the fix landed on the branch only hosted multi-tenant Postgres takes, while local-dev kept
+/// reading the host disk. Both readers need a parity guard against the same writer.
+pub fn db_backed_skill_context_mount_view_for_test(
+    scope: &ironclaw_host_api::resource::ResourceScope,
+) -> Result<ironclaw_host_api::mount::MountView, ironclaw_host_api::error::HostApiError> {
+    crate::runtime_mounts::db_backed_skill_context_mount_view(scope)
+}

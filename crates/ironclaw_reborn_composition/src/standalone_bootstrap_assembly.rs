@@ -32,6 +32,107 @@ pub(crate) fn backfill_legacy_user_skills(
     Ok(())
 }
 
+/// Move host-disk user skills into the database-backed tree, which is the only tree skills are read
+/// from now.
+///
+/// Two populations need this, and both are silent without it:
+///
+/// * The legacy backfill above writes to `storage_root/tenants/<t>/users/<u>/skills` on the HOST DISK.
+///   Nothing reads that path any more, so a user upgrading with legacy skills would find them gone.
+/// * Every skill an agent installed before this change also went to that disk path, because the
+///   agent's in-run skill port wrote there while Settings → Skills listed the database — the mount
+///   split that is nearai/ironclaw#7168. Those skills are real, the user created them, and an upgrade
+///   must not silently drop them.
+///
+/// Copies, never moves: the disk copy is left in place so a downgrade is not destructive, and a
+/// database entry already present always wins, so this is idempotent across restarts and cannot
+/// clobber a newer edit made through the database.
+pub(crate) async fn import_host_disk_skills_into_database(
+    storage_root: &Path,
+    filesystem: &std::sync::Arc<ironclaw_filesystem::CompositeRootFilesystem>,
+) -> Result<(), RebornBuildError> {
+    use ironclaw_filesystem::RootFilesystem;
+    use ironclaw_host_api::path::VirtualPath;
+
+    let tenants_root = storage_root.join("tenants");
+    let mut imported = 0usize;
+    for (host_path, virtual_path) in disk_skill_files(&tenants_root) {
+        let target = VirtualPath::new(&virtual_path)?;
+        // A database entry wins: it is either newer or the product of a previous import.
+        if RootFilesystem::stat(filesystem.as_ref(), &target)
+            .await
+            .is_ok()
+        {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&host_path) else {
+            continue;
+        };
+        if RootFilesystem::write_file(filesystem.as_ref(), &target, &bytes)
+            .await
+            .is_ok()
+        {
+            imported += 1;
+        }
+    }
+    if imported > 0 {
+        tracing::info!(
+            imported,
+            "imported host-disk skills into the database-backed skill tree"
+        );
+    }
+    Ok(())
+}
+
+/// Every file under `tenants/<tenant>/users/<user>/skills/**`, paired with its database path.
+///
+/// Walks only that shape, so nothing else under `tenants/` is copied into the skill tree.
+fn disk_skill_files(tenants_root: &Path) -> Vec<(PathBuf, String)> {
+    let mut found = Vec::new();
+    let Ok(tenants) = std::fs::read_dir(tenants_root) else {
+        return found;
+    };
+    for tenant in tenants.flatten() {
+        let tenant_id = tenant.file_name().to_string_lossy().to_string();
+        let Ok(users) = std::fs::read_dir(tenant.path().join("users")) else {
+            continue;
+        };
+        for user in users.flatten() {
+            let user_id = user.file_name().to_string_lossy().to_string();
+            let skills_root = user.path().join("skills");
+            collect_files_under(&skills_root, &skills_root, &mut |relative, host_path| {
+                found.push((
+                    host_path.to_path_buf(),
+                    format!("/tenants/{tenant_id}/users/{user_id}/skills/{relative}"),
+                ));
+            });
+        }
+    }
+    found
+}
+
+fn collect_files_under(base: &Path, dir: &Path, visit: &mut impl FnMut(String, &Path)) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files_under(base, &path, visit);
+        } else if path.is_file()
+            && let Ok(relative) = path.strip_prefix(base)
+        {
+            // Forward slashes: this becomes a VirtualPath, not a host path.
+            let relative = relative
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+                .join("/");
+            visit(relative, &path);
+        }
+    }
+}
+
 /// Initializes standalone host content after storage roots are prepared.
 pub(crate) async fn bootstrap_standalone_host(
     storage_root: &Path,

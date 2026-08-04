@@ -287,6 +287,10 @@ async fn build_local_storage_production_shaped(
         }
     };
     let filesystem = filesystem_bundle.filesystem;
+    // Skills are read only from the database now, so anything the legacy backfill (or a pre-upgrade
+    // agent install) left on the host disk has to be brought across or it is silently lost.
+    crate::standalone_bootstrap_assembly::import_host_disk_skills_into_database(root, &filesystem)
+        .await?;
     context.workspace_filesystems = Some(host_access.build_workspace_filesystems(
         Arc::clone(&filesystem),
         context.workspace_scoped_per_caller,

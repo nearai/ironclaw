@@ -1289,7 +1289,10 @@ fn skill_listing_candidate(entries: &[SkillListingEntry]) -> Option<HostSkillCon
     // catalog grows, and only drop entries if even the minimum will not fit.
     let (allowance, listed) = match listing_description_allowance(entries.len()) {
         Some(allowance) => (allowance, entries.len()),
-        None => (MIN_LISTING_DESCRIPTION_CHARS, max_entries_at_min_description()),
+        None => (
+            MIN_LISTING_DESCRIPTION_CHARS,
+            max_entries_at_min_description(),
+        ),
     };
     let mut listing = String::from(SKILL_LISTING_HEADER.trim_end());
     listing.push('\n');

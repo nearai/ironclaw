@@ -53,10 +53,7 @@ fn agent_authored() -> Vec<(String, String)> {
                 continue;
             }
             if let Ok(raw) = std::fs::read_to_string(&md) {
-                out.push((
-                    entry.file_name().to_string_lossy().to_string(),
-                    raw,
-                ));
+                out.push((entry.file_name().to_string_lossy().to_string(), raw));
             }
         }
     }

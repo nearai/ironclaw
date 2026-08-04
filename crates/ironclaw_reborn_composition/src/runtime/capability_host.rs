@@ -49,7 +49,7 @@ use crate::capability_authorization::{StoreApprovalSettingsProvider, effects_req
 use crate::factory::RebornRuntimeStores;
 use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::runtime::ComposedSelectableSkillContextSource;
-use crate::runtime_mounts::{WorkspaceMountPolicy, scoped_skill_management_mount_view};
+use crate::runtime_mounts::{WorkspaceMountPolicy, db_backed_skill_management_mount_view};
 use ironclaw_product::projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
 
 mod outbound_delivery;
@@ -251,7 +251,10 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let resource_scope = resource_scope_for_run(run_context, &self.fallback_user_id);
-        let skill_mounts = scoped_skill_management_mount_view(&resource_scope)
+        // Database-backed, same tree the reader and Settings use. This port is where an agent's
+        // own `skill_install` lands, and it used to write to the host disk while everything else
+        // read the database (nearai/ironclaw#7168).
+        let skill_mounts = db_backed_skill_management_mount_view(&resource_scope)
             .map_err(host_api_agent_loop_error)?;
         // Same scope the skill mounts key off, so a run's workspace grants and
         // its skill mounts can never resolve to different callers.

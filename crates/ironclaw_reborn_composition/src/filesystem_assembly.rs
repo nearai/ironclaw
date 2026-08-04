@@ -21,6 +21,52 @@ pub fn standalone_db_path(root: &Path) -> PathBuf {
     root.join(STANDALONE_DB_FILENAME)
 }
 
+/// Read a file back out of the standalone database, for tests that assert WHERE a skill landed.
+///
+/// Skill writes go to the DB-backed virtual filesystem, so `storage_root.join("tenants/...").exists()`
+/// is no longer the right question — it was the question while writers and readers disagreed about
+/// which tree skills live in (nearai/ironclaw#7168).
+#[cfg(test)]
+pub(crate) async fn database_file_bytes(
+    storage_root: &Path,
+    virtual_path: &str,
+) -> Option<Vec<u8>> {
+    let db = Arc::new(
+        libsql::Builder::new_local(standalone_db_path(storage_root))
+            .build()
+            .await
+            .expect("open standalone libsql database"),
+    );
+    let vfs = LibSqlRootFilesystem::new(db).expect("libsql root filesystem");
+    vfs.run_migrations().await.expect("libsql migrations");
+    let path = VirtualPath::new(virtual_path).expect("virtual path");
+    ironclaw_filesystem::RootFilesystem::read_file(&vfs, &path)
+        .await
+        .ok()
+}
+
+/// Seed a file into the standalone database, for tests that need a skill the runtime can find.
+#[cfg(test)]
+pub(crate) async fn write_database_file_for_test(
+    storage_root: &Path,
+    virtual_path: &str,
+    contents: &[u8],
+) {
+    std::fs::create_dir_all(storage_root).expect("storage root");
+    let db = Arc::new(
+        libsql::Builder::new_local(standalone_db_path(storage_root))
+            .build()
+            .await
+            .expect("open standalone libsql database"),
+    );
+    let vfs = LibSqlRootFilesystem::new(db).expect("libsql root filesystem");
+    vfs.run_migrations().await.expect("libsql migrations");
+    let path = VirtualPath::new(virtual_path).expect("virtual path");
+    ironclaw_filesystem::RootFilesystem::write_file(&vfs, &path, contents)
+        .await
+        .expect("write seeded file into the database");
+}
+
 pub(crate) struct FilesystemAssembly {
     pub(crate) filesystem: Arc<CompositeRootFilesystem>,
     pub(crate) durable_backend: DurableBackend,

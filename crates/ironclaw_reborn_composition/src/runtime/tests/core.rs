@@ -1846,19 +1846,82 @@ fn skill_md(name: &str, description: &str, prompt: &str) -> String {
     )
 }
 
-fn user_skill_dir(
+/// Seed a skill where the runtime actually reads one: the DB-backed virtual filesystem.
+///
+/// These tests used to write user skills to `storage_root/tenants/.../skills` on the HOST DISK,
+/// because that is where the runtime's skill reader used to look. It was also where an agent's own
+/// `skill_install` wrote, while Settings → Skills listed the database — three mount views over two
+/// trees, which is nearai/ironclaw#7168. Now every skill mount is built from
+/// `db_backed_skill_grants`, so a disk-seeded skill is correctly invisible and a test that seeds to
+/// disk is testing nothing.
+///
+/// Migrations are idempotent, so this can run before the runtime is built and each test keeps its
+/// original seed-then-build shape.
+async fn seed_db_skill(
+    storage_root: &std::path::Path,
+    virtual_dir: &str,
+    files: &[(&str, String)],
+) {
+    std::fs::create_dir_all(storage_root).expect("storage root");
+    let db_path = crate::filesystem_assembly::standalone_db_path(storage_root);
+    let db = std::sync::Arc::new(
+        libsql::Builder::new_local(&db_path)
+            .build()
+            .await
+            .expect("open libsql database"),
+    );
+    let vfs = ironclaw_filesystem::LibSqlRootFilesystem::new(db).expect("libsql root filesystem");
+    vfs.run_migrations().await.expect("libsql migrations");
+    for (relative_path, contents) in files {
+        let path =
+            ironclaw_host_api::path::VirtualPath::new(format!("{virtual_dir}/{relative_path}"))
+                .expect("virtual path");
+        ironclaw_filesystem::RootFilesystem::write_file(&vfs, &path, contents.as_bytes())
+            .await
+            .expect("write seeded skill file");
+    }
+}
+
+async fn seed_user_skill(
     storage_root: &std::path::Path,
     tenant_id: &str,
     user_id: &str,
     name: &str,
-) -> std::path::PathBuf {
-    storage_root
-        .join("tenants")
-        .join(tenant_id)
-        .join("users")
-        .join(user_id)
-        .join("skills")
-        .join(name)
+    skill_md: String,
+) {
+    seed_user_skill_with_files(storage_root, tenant_id, user_id, name, skill_md, &[]).await
+}
+
+async fn seed_user_skill_with_files(
+    storage_root: &std::path::Path,
+    tenant_id: &str,
+    user_id: &str,
+    name: &str,
+    skill_md: String,
+    extra_files: &[(&str, String)],
+) {
+    let mut files = vec![("SKILL.md", skill_md)];
+    files.extend(extra_files.iter().map(|(p, c)| (*p, c.clone())));
+    seed_db_skill(
+        storage_root,
+        &format!("/tenants/{tenant_id}/users/{user_id}/skills/{name}"),
+        &files,
+    )
+    .await
+}
+
+async fn seed_tenant_shared_skill(
+    storage_root: &std::path::Path,
+    tenant_id: &str,
+    name: &str,
+    skill_md: String,
+) {
+    seed_db_skill(
+        storage_root,
+        &format!("/tenants/{tenant_id}/tenant-shared/skills/{name}"),
+        &[("SKILL.md", skill_md)],
+    )
+    .await
 }
 
 fn skill_md_with_setup_marker(name: &str, description: &str, marker: &str, prompt: &str) -> String {
@@ -4437,33 +4500,29 @@ async fn standalone_runtime_wires_filesystem_skills_by_default_to_model_calls() 
         ),
     )
     .expect("write system skill");
-    let local_helper_dir = user_skill_dir(
+    seed_user_skill(
         &storage_root,
         "runtime-filesystem-skill-tenant",
         "runtime-filesystem-skill-owner",
         "local-helper",
-    );
-    std::fs::create_dir_all(&local_helper_dir).expect("user skill dir");
-    std::fs::write(
-        local_helper_dir.join("SKILL.md"),
         skill_md(
             "local-helper",
             "local helper description",
             "USER_HELPER_PROMPT_SENTINEL",
         ),
     )
-    .expect("write user skill");
-    std::fs::create_dir_all(storage_root.join("tenant-shared/skills/shared-helper"))
-        .expect("tenant shared skill dir");
-    std::fs::write(
-        storage_root.join("tenant-shared/skills/shared-helper/SKILL.md"),
+    .await;
+    seed_tenant_shared_skill(
+        &storage_root,
+        "runtime-filesystem-skill-tenant",
+        "shared-helper",
         skill_md(
             "shared-helper",
             "tenant shared helper description",
             "TENANT_SHARED_PROMPT_SENTINEL",
         ),
     )
-    .expect("write tenant shared skill");
+    .await;
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let gateway = Arc::new(RecordingGateway {
         reply: "filesystem skill context ok".to_string(),
@@ -4568,12 +4627,26 @@ async fn standalone_runtime_backfills_legacy_owner_skill_root() {
 
     assert_eq!(result.plan.activations().len(), 1);
     assert_eq!(result.plan.activations()[0].name, "legacy-helper");
+    // The legacy tree is migrated onto the host disk and then imported into the DATABASE, which is
+    // the only tree skills are read from. Both are asserted: the disk copy is deliberately left in
+    // place so a downgrade is not destructive, and the database copy is what makes the skill usable.
     assert!(
         storage_root
             .join(
                 "tenants/reborn-cli/users/runtime-legacy-skill-owner/skills/legacy-helper/SKILL.md"
             )
-            .exists()
+            .exists(),
+        "the on-disk legacy migration must still run, so a downgrade keeps the skill"
+    );
+    assert!(
+        crate::filesystem_assembly::database_file_bytes(
+            &storage_root,
+            "/tenants/reborn-cli/users/runtime-legacy-skill-owner/skills/legacy-helper/SKILL.md",
+        )
+        .await
+        .is_some(),
+        "a legacy skill must be imported into the database-backed tree, or upgrading silently loses \
+         every skill the user already had (nearai/ironclaw#7168)"
     );
 
     runtime.shutdown().await.expect("runtime shutdown");
@@ -4583,28 +4656,19 @@ async fn standalone_runtime_backfills_legacy_owner_skill_root() {
 async fn execute_skill_message_returns_plan_and_reads_active_bundle_assets() {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
-    let asset_helper_dir = user_skill_dir(
+    seed_user_skill_with_files(
         &storage_root,
         "runtime-skill-exec-tenant",
         "runtime-skill-exec-owner",
         "asset-helper",
-    );
-    std::fs::create_dir_all(asset_helper_dir.join("references"))
-        .expect("asset skill references dir");
-    std::fs::write(
-        asset_helper_dir.join("SKILL.md"),
         skill_md(
             "asset-helper",
             "asset helper description",
             "ASSET_HELPER_PROMPT_SENTINEL",
         ),
+        &[("references/policy.md", "asset helper policy".to_string())],
     )
-    .expect("write asset helper skill");
-    std::fs::write(
-        asset_helper_dir.join("references/policy.md"),
-        "asset helper policy",
-    )
-    .expect("write asset helper policy");
+    .await;
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let gateway = Arc::new(RecordingGateway {
         reply: "asset helper ok".to_string(),
@@ -4703,22 +4767,18 @@ async fn standalone_runtime_fails_closed_for_ambiguous_explicit_skill_before_mod
         ),
     )
     .expect("write system skill");
-    let user_code_review_dir = user_skill_dir(
+    seed_user_skill(
         &storage_root,
         "runtime-ambiguous-skill-tenant",
         "runtime-ambiguous-skill-owner",
         "code-review",
-    );
-    std::fs::create_dir_all(&user_code_review_dir).expect("user skill dir");
-    std::fs::write(
-        user_code_review_dir.join("SKILL.md"),
         skill_md(
             "code-review",
             "user review description",
             "USER_REVIEW_PROMPT_SENTINEL",
         ),
     )
-    .expect("write user skill");
+    .await;
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let gateway = Arc::new(RecordingGateway {
         reply: "should not reach model".to_string(),
@@ -4769,16 +4829,12 @@ async fn standalone_runtime_fails_closed_for_ambiguous_explicit_skill_before_mod
 async fn standalone_runtime_suppresses_explicit_setup_skill_when_workspace_marker_exists() {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
-    let marker_helper_dir = user_skill_dir(
+    std::fs::create_dir_all(storage_root.join("workspace/markers")).expect("marker dir");
+    seed_user_skill(
         &storage_root,
         "runtime-setup-marker-tenant",
         "runtime-setup-marker-owner",
         "marker-helper",
-    );
-    std::fs::create_dir_all(&marker_helper_dir).expect("user skill dir");
-    std::fs::create_dir_all(storage_root.join("workspace/markers")).expect("marker dir");
-    std::fs::write(
-        marker_helper_dir.join("SKILL.md"),
         skill_md_with_setup_marker(
             "marker-helper",
             "marker helper description",
@@ -4786,7 +4842,7 @@ async fn standalone_runtime_suppresses_explicit_setup_skill_when_workspace_marke
             "MARKER_HELPER_PROMPT_SENTINEL",
         ),
     )
-    .expect("write marker helper skill");
+    .await;
     std::fs::write(
         storage_root.join("workspace/markers/marker-helper.done"),
         "done",
@@ -4860,15 +4916,11 @@ async fn standalone_runtime_suppresses_explicit_setup_skill_when_workspace_marke
 async fn standalone_runtime_activates_setup_skill_when_workspace_marker_is_absent() {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
-    let marker_helper_dir = user_skill_dir(
+    seed_user_skill(
         &storage_root,
         "runtime-setup-marker-absent-tenant",
         "runtime-setup-marker-absent-owner",
         "marker-helper",
-    );
-    std::fs::create_dir_all(&marker_helper_dir).expect("user skill dir");
-    std::fs::write(
-        marker_helper_dir.join("SKILL.md"),
         skill_md_with_setup_marker(
             "marker-helper",
             "marker helper description",
@@ -4876,7 +4928,7 @@ async fn standalone_runtime_activates_setup_skill_when_workspace_marker_is_absen
             "MARKER_HELPER_PROMPT_SENTINEL",
         ),
     )
-    .expect("write marker helper skill");
+    .await;
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let gateway = Arc::new(RecordingGateway {
         reply: "setup marker absent ok".to_string(),
@@ -4981,22 +5033,18 @@ async fn standalone_runtime_rejects_workspace_overlapping_default_skill_roots() 
 async fn standalone_runtime_skips_invalid_filesystem_skill_before_model_call() {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
-    let bad_helper_dir = user_skill_dir(
+    seed_user_skill(
         &storage_root,
         "runtime-bad-skill-tenant",
         "runtime-bad-skill-owner",
         "bad-helper",
-    );
-    std::fs::create_dir_all(&bad_helper_dir).expect("bad skill dir");
-    std::fs::write(
-        bad_helper_dir.join("SKILL.md"),
         skill_md(
             "different-name",
             "bad helper description",
             "BAD_HELPER_PROMPT_SENTINEL",
         ),
     )
-    .expect("write bad skill");
+    .await;
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let gateway = Arc::new(RecordingGateway {
         reply: "invalid skill skipped".to_string(),
@@ -6285,22 +6333,18 @@ async fn standalone_webui_bundle_routes_auth_gates_into_interaction_service() {
 async fn standalone_webui_bundle_records_selectable_filesystem_skill_context() {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
-    let webui_helper_dir = user_skill_dir(
+    seed_user_skill(
         &storage_root,
         "runtime-webui-skill-tenant",
         "runtime-webui-skill-user",
         "webui-helper",
-    );
-    std::fs::create_dir_all(&webui_helper_dir).expect("user skill dir");
-    std::fs::write(
-        webui_helper_dir.join("SKILL.md"),
         skill_md(
             "webui-helper",
             "webui helper description",
             "WEBUI_HELPER_PROMPT_SENTINEL",
         ),
     )
-    .expect("write user skill");
+    .await;
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let gateway = Arc::new(RecordingGateway {
         reply: "webui skill context ok".to_string(),

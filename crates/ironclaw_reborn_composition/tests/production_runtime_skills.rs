@@ -11,25 +11,24 @@
 //! hosted multi-tenant runtime policy — scoped-virtual filesystem, brokered secrets, network deny,
 //! ask-always approvals. No mounts, no env switches.
 //!
-//! **What this test establishes, and the gap it exposes.**
+//! **What these tests establish.**
 //!
-//! The production composition builds, opens a conversation, and runs a skill-execution turn — so
-//! skills are wired on the production path. But a skill written to
-//! the DB-backed `/tenants/<t>/users/<u>/skills/` tree is what it reads: production resolves the skill
-//! store through the scoped-virtual filesystem (libSQL), not the host filesystem. Measured here:
-//! explicit `$name` activation returned an empty activation set for a disk-seeded skill.
+//! Production resolves the skill store through the scoped-virtual filesystem (libSQL), not the host
+//! filesystem, so these seed the DB-backed `/tenants/<t>/users/<u>/skills/` tree — the tree the
+//! product actually reads — and assert a skill there is activatable by name, and still activatable
+//! after a restart. Seeding disk instead activates nothing, which is what an earlier version of this
+//! file measured and recorded as a gap.
 //!
-//! That is not a product bug — it is the storage contract. It means something else, though, and it
-//! is the honest answer to "would this work in production": **every other validation of this work
-//! seeds skills on disk, so none of it exercises production's storage path.** The benchmark mounts
-//! `system/skills`, the local-dev tests write files, and both are real paths for their profiles and
-//! neither is production's.
+//! The mount-parity tests below are the guard for nearai/ironclaw#7168. Skill mounts were three
+//! separate views over two trees: the agent's in-run port and discovery both resolved `/skills` to
+//! `/projects/...` on the host disk, while Settings → Skills resolved it to `/tenants/...` in the
+//! database. Every view now derives from `db_backed_skill_grants`, and both readers are pinned
+//! against the writer here — separately, because the first fix corrected only the branch hosted
+//! multi-tenant Postgres takes and left local-dev reading the disk.
 //!
-//! Closing that needs a seam this crate does not expose: installing a skill into the production
-//! scoped-virtual store from a test, i.e. driving `builtin.skill_install` through the production
-//! capability port rather than writing bytes to a directory. That is ironclaw infrastructure work
-//! with an owner other than this PR, so it is recorded here rather than approximated — a test that
-//! seeds disk and asserts success would report production coverage it does not have.
+//! End to end on a live local-dev server with a real model, after the fix: the agent authored a skill
+//! mid-turn, it appeared in Settings → Skills, survived a server restart, and a fresh conversation
+//! activated it with zero `skipping skill bundle` warnings.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -157,7 +156,6 @@ async fn a_skill_in_the_production_virtual_filesystem_is_activatable_by_name() {
     .await
     .expect("write SKILL.md into the production virtual filesystem");
 
-
     let result = tokio::time::timeout(
         Duration::from_secs(20),
         runtime.execute_skill_message(&conversation, "$tenant-policy-helper"),
@@ -199,8 +197,10 @@ async fn a_skill_in_the_production_virtual_filesystem_is_activatable_by_name() {
 async fn build_production(
     db: Arc<libsql::Database>,
     db_path: &std::path::Path,
-) -> Result<ironclaw_reborn_composition::RebornRuntime, ironclaw_reborn_composition::RebornRuntimeError>
-{
+) -> Result<
+    ironclaw_reborn_composition::RebornRuntime,
+    ironclaw_reborn_composition::RebornRuntimeError,
+> {
     let bindings = ironclaw_reborn_composition::test_support::libsql_host_bindings_for_test(
         RebornCompositionProfile::Production,
         "prod-restart-owner",
@@ -280,7 +280,9 @@ async fn a_skill_in_the_production_store_is_activatable_after_restart() {
     .expect("write SKILL.md into the production virtual filesystem");
 
     // Second build sees a store that already contains the skill.
-    let second = build_production(Arc::clone(&db), &db_path).await.expect("second production build");
+    let second = build_production(Arc::clone(&db), &db_path)
+        .await
+        .expect("second production build");
     let conversation = second
         .new_conversation()
         .await
@@ -354,8 +356,16 @@ async fn production_skill_read_and_write_mounts_resolve_to_the_same_tree() {
     let probe = write
         .scoped_path("/skills/example/SKILL.md")
         .expect("scoped path");
-    let write_target = write.resolve(&probe).expect("write resolves").as_str().to_string();
-    let read_target = read.resolve(&probe).expect("read resolves").as_str().to_string();
+    let write_target = write
+        .resolve(&probe)
+        .expect("write resolves")
+        .as_str()
+        .to_string();
+    let read_target = read
+        .resolve(&probe)
+        .expect("read resolves")
+        .as_str()
+        .to_string();
 
     assert_eq!(
         read_target, write_target,
@@ -367,5 +377,112 @@ async fn production_skill_read_and_write_mounts_resolve_to_the_same_tree() {
     assert!(
         write_target.starts_with("/tenants/"),
         "skills must live in the DB-backed tree, not on host disk; got {write_target}"
+    );
+}
+
+/// The same parity requirement for the OTHER read branch: local-dev, local-storage production, and
+/// hosted single-tenant.
+///
+/// Those shapes supply their own `workspace_filesystems`, so they never construct
+/// `production_skill_context_mount_view` — they build the skill reader in
+/// `HostAccessAssembly::build_workspace_filesystems`. The writer is the same
+/// `production_skill_management_mount_view` in every production-shaped build.
+///
+/// This is why #7168 survived its first fix. That fix corrected the branch only hosted multi-tenant
+/// Postgres takes, and the multi-tenant E2E test then passed while local-dev stayed broken in
+/// exactly the reported way: the WebUI reported the skill installed, `skill_list` showed it for the
+/// rest of the session, Settings → Skills never listed it, and a second conversation could not
+/// activate it. One root cause, two readers, and a green test that only covered one of them.
+///
+/// `/system/skills` is asserted separately: it must stay on the host disk, because that is where
+/// `ensure_bundled_reborn_skills_installed` writes. Sending it to the database would resolve bundled
+/// skills to an empty tree and silently drop all 32.
+#[tokio::test]
+async fn local_dev_skill_read_and_write_mounts_resolve_to_the_same_tree() {
+    use ironclaw_host_api::{
+        ids::{InvocationId, UserId},
+        resource::ResourceScope,
+    };
+
+    let scope = ResourceScope::local_default(
+        UserId::new("mount-parity-user").expect("user id"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+
+    let write =
+        ironclaw_reborn_composition::test_support::production_skill_management_mount_view_for_test(
+            &scope,
+        )
+        .expect("write mount view");
+    let read =
+        ironclaw_reborn_composition::test_support::db_backed_skill_context_mount_view_for_test(
+            &scope,
+        )
+        .expect("read mount view");
+
+    let probe = write
+        .scoped_path("/skills/example/SKILL.md")
+        .expect("scoped path");
+    let write_target = write
+        .resolve(&probe)
+        .expect("write resolves")
+        .as_str()
+        .to_string();
+    let read_target = read
+        .resolve(&probe)
+        .expect("read resolves")
+        .as_str()
+        .to_string();
+
+    assert_eq!(
+        read_target, write_target,
+        "local-dev skill discovery resolves to {read_target} while skill_install resolves to \
+         {write_target}. `/tenants` routes to the database and `/projects` routes to the host disk, \
+         so a mismatch means an agent-installed skill is invisible after the session that created \
+         it (nearai/ironclaw#7168)."
+    );
+    assert!(
+        write_target.starts_with("/tenants/"),
+        "skills must live in the DB-backed virtual filesystem, not on host disk; got {write_target}"
+    );
+
+    // Bundled skills are seeded to the host disk by `ensure_bundled_reborn_skills_installed`, so the
+    // reader must keep looking there. Asserted explicitly because pointing this alias at the
+    // database would resolve all 32 to an empty tree and drop them with no error anywhere.
+    //
+    // `/system/skills` as both alias and target is not a no-op: the composite mounts that virtual
+    // root onto the same host directory the seeder reaches through `/projects/system/skills`.
+    // Verified against a live local-dev server, which lists all 32 bundled skills through it.
+    let bundled_probe = read
+        .scoped_path("/system/skills/example/SKILL.md")
+        .expect("scoped path");
+    let bundled_target = read
+        .resolve(&bundled_probe)
+        .expect("bundled resolves")
+        .as_str()
+        .to_string();
+    assert!(
+        !bundled_target.starts_with("/tenants/"),
+        "bundled skills are seeded to the host disk, not the database; a reader pointed at the DB \
+         resolves them to an empty tree and drops all of them, silently. got {bundled_target}"
+    );
+
+    // The agent's in-run skill port resolves through this same writer, so an agent's `skill_install`
+    // lands where discovery reads. That port was the third view over the second tree: it wrote to
+    // `/projects/tenants/...` on the host disk while Settings → Skills listed the database.
+    let write_bundled_target = write
+        .resolve(
+            &write
+                .scoped_path("/system/skills/example/SKILL.md")
+                .expect("scoped path"),
+        )
+        .expect("bundled resolves")
+        .as_str()
+        .to_string();
+    assert_eq!(
+        write_bundled_target, bundled_target,
+        "reader and writer must agree on the bundled root too, or a skill_update can shadow a \
+         bundled skill in a tree discovery never reads"
     );
 }

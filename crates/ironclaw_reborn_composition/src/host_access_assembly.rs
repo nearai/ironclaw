@@ -10,7 +10,7 @@ use ironclaw_host_runtime::HostProcessPort;
 
 use crate::RebornBuildError;
 use crate::runtime_mounts::{
-    WorkspaceMountPolicy, scoped_skill_context_mount_view, workspace_mount_view,
+    WorkspaceMountPolicy, db_backed_skill_context_mount_view, workspace_mount_view,
 };
 
 pub(crate) type WorkspaceFilesystems = (
@@ -81,9 +81,12 @@ impl HostAccessAssembly {
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         })?;
+        // Database-backed, matching the writer. A disk-backed view here is nearai/ironclaw#7168:
+        // every production-shaped build writes skills to the database, so a reader on
+        // `/projects/...` never sees an installed skill again.
         let skill_filesystem = Arc::new(ScopedFilesystem::new(
             Arc::clone(&filesystem),
-            scoped_skill_context_mount_view,
+            db_backed_skill_context_mount_view,
         ));
         let workspace_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
             filesystem,

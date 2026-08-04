@@ -2384,19 +2384,20 @@ mod tests {
         )
         .await
         .expect("standalone services build");
-        let skill_path = storage_root.join(
-            "tenants/tenant-skill-activate-tool/users/skill-activate-user/skills/unit-activate-helper/SKILL.md",
-        );
-        std::fs::create_dir_all(skill_path.parent().expect("skill parent")).expect("skill dir");
-        std::fs::write(
-            &skill_path,
+        // Seeded into the DATABASE, which is where the runtime reads skills. A disk-seeded skill is
+        // correctly invisible now, so seeding to disk would make this test pass on nothing
+        // (nearai/ironclaw#7168).
+        crate::filesystem_assembly::write_database_file_for_test(
+            &storage_root,
+            "/tenants/tenant-skill-activate-tool/users/skill-activate-user/skills/unit-activate-helper/SKILL.md",
             skill_md(
                 "unit-activate-helper",
                 "Unit activation helper",
                 "UNIT_ACTIVATE_SENTINEL",
-            ),
+            )
+            .as_bytes(),
         )
-        .expect("skill file");
+        .await;
         let runtime = services.host_runtime.clone();
         let runtime_surfaces = services
             .local_runtime_for_test()
@@ -2515,9 +2516,7 @@ mod tests {
         // submitted list. Several skills stay reachable by calling again, so this bounds
         // commitment per call, not the total.
         assert!(
-            descriptor
-                .safe_description
-                .contains("one skill per call"),
+            descriptor.safe_description.contains("one skill per call"),
             "skill_activate must ask for one skill per call, as claude-code's Skill tool does"
         );
         assert_eq!(
@@ -5211,12 +5210,26 @@ mod tests {
             .expect("result output lookup") // safety: test-only assertion in #[cfg(test)] module.
             .expect("result output"); // safety: test-only assertion in #[cfg(test)] module.
         assert_eq!(output["installed"], serde_json::json!(true));
+        // The agent's own in-run skill port must write into the DATABASE, the tree discovery and
+        // Settings read. It used to write to the host disk while everything else read the database,
+        // so an agent-installed skill was invisible after the turn that created it
+        // (nearai/ironclaw#7168).
         assert!(
-            storage_root
+            crate::filesystem_assembly::database_file_bytes(
+                &storage_root,
+                "/tenants/tenant-skill-install-write/users/standalone-skill-port-user/skills/qa-smoke-skill/SKILL.md",
+            )
+            .await
+            .is_some(),
+            "the agent's skill_install must write into the database-backed skill tree"
+        );
+        assert!(
+            !storage_root
                 .join(
                     "tenants/tenant-skill-install-write/users/standalone-skill-port-user/skills/qa-smoke-skill/SKILL.md"
                 )
-                .exists()
+                .exists(),
+            "nothing may be left on the host disk: a skill written there is invisible to discovery"
         );
     }
 

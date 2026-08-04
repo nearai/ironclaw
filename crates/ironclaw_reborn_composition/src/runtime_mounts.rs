@@ -63,30 +63,83 @@ pub(crate) fn ambient_workspace_mount_view(
     MountView::new(mounts)
 }
 
-pub(crate) fn scoped_skill_context_mount_view(
+/// The single decision about where skills live. Every skill mount view is built from this.
+///
+/// There were three views over two different trees, which is the whole of nearai/ironclaw#7168:
+///
+/// | view | used by | `/skills` resolved to |
+/// |---|---|---|
+/// | `scoped_skill_management_mount_view` | the agent's in-run skill port | `/projects/...` = host disk |
+/// | `production_skill_management_mount_view` | Settings → Skills, product capabilities | `/tenants/...` = database |
+/// | `scoped_skill_context_mount_view` | discovery and activation | `/projects/...` = host disk |
+///
+/// So `skill_install` inside a turn wrote to the host disk, Settings → Skills listed the database
+/// and never showed the skill, and a later session's discovery scanned a root that the agent's own
+/// writes had populated under a different scope. The reported symptom was the union of all of it:
+/// `installed: true`, present in `skill_list` for the rest of that turn, absent from Settings, and
+/// unactivatable in every later conversation. Reproduced by hand on the WebUI in local-dev.
+///
+/// Skills belong wholly in the database-backed virtual filesystem. Anything derived from this
+/// function agrees by construction, and no reader can drift from a writer again.
+///
+/// `/system/skills` is the exception, and stays on the host disk: that is where
+/// `ensure_bundled_reborn_skills_installed` writes, and pointing it at the database would resolve
+/// bundled skills to an empty tree and lose all 32 with no error anywhere. Note the alias and the
+/// target are both `/system/skills` — the composite mounts that virtual root straight onto the same
+/// host directory the seeder reaches through `/projects/system/skills`, verified by a local-dev
+/// server listing all 32 through this exact target. Moving bundled seeding into the database is the
+/// remaining step toward skills being wholly DB-backed, and it also closes the hosted multi-tenant
+/// gap where no bundled skill is seeded at all (no tenant host disk exists to seed).
+fn db_backed_skill_grants(
     scope: &ResourceScope,
-) -> Result<MountView, HostApiError> {
-    MountView::new(vec![
+    user_skill_permissions: MountPermissions,
+) -> Result<Vec<MountGrant>, HostApiError> {
+    Ok(vec![
         grant(
             "/skills",
             &format!(
-                "/projects/tenants/{}/users/{}/skills",
+                "/tenants/{}/users/{}/skills",
                 scope.tenant_id.as_str(),
                 scope.user_id.as_str()
             ),
-            MountPermissions::read_only(),
-        )?,
-        grant(
-            "/tenant-shared/skills",
-            "/projects/tenant-shared/skills",
-            MountPermissions::read_only(),
+            user_skill_permissions,
         )?,
         grant(
             "/system/skills",
-            "/projects/system/skills",
+            "/system/skills",
             MountPermissions::read_only(),
         )?,
     ])
+}
+
+/// Read-side skill mounts: discovery, listing, and activation.
+///
+/// Adds the tenant-shared root, which has no writer — a user cannot install into it.
+pub(crate) fn db_backed_skill_context_mount_view(
+    scope: &ResourceScope,
+) -> Result<MountView, HostApiError> {
+    let mut grants = db_backed_skill_grants(scope, MountPermissions::read_only())?;
+    grants.push(grant(
+        "/tenant-shared/skills",
+        &format!("/tenants/{}/tenant-shared/skills", scope.tenant_id.as_str()),
+        MountPermissions::read_only(),
+    )?);
+    MountView::new(grants)
+}
+
+/// Write-side skill mounts: `skill_install`, `skill_update`, `skill_remove`, from either the agent's
+/// in-run port or a product capability.
+///
+/// Resolves `/skills` to the same target as [`db_backed_skill_context_mount_view`]. A test pins
+/// that, because a divergence here is not a degraded feature — it is a skill that exists and can
+/// never be found again.
+pub(crate) fn db_backed_skill_management_mount_view(
+    scope: &ResourceScope,
+) -> Result<MountView, HostApiError> {
+    MountView::new(db_backed_skill_grants(
+        scope,
+        MountPermissions::read_write_list_delete(),
+    )?)
 }
 
 pub(crate) fn skill_management_mount_view() -> Result<MountView, HostApiError> {
@@ -94,27 +147,6 @@ pub(crate) fn skill_management_mount_view() -> Result<MountView, HostApiError> {
         grant(
             "/skills",
             "/projects/skills",
-            MountPermissions::read_write_list_delete(),
-        )?,
-        grant(
-            "/system/skills",
-            "/projects/system/skills",
-            MountPermissions::read_only(),
-        )?,
-    ])
-}
-
-pub(crate) fn scoped_skill_management_mount_view(
-    scope: &ResourceScope,
-) -> Result<MountView, HostApiError> {
-    MountView::new(vec![
-        grant(
-            "/skills",
-            &format!(
-                "/projects/tenants/{}/users/{}/skills",
-                scope.tenant_id.as_str(),
-                scope.user_id.as_str()
-            ),
             MountPermissions::read_write_list_delete(),
         )?,
         grant(
