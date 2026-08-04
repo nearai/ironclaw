@@ -81,6 +81,14 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     // `runtime::tests::outbound_delivery::
     // production_reply_attachment_capability_registers_durable_run_intent`.
     ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
+    // #6898 item 3. Both are driven end-to-end by
+    // `reborn_integration_document_edit`: the redline journey reads a .docx
+    // structurally and resolves its tracked changes into a new document, the
+    // spreadsheet journey sets a formula under a named column, the deck journey
+    // clones a slide with its layout, and the PDF journey authors HTML and
+    // renders it.
+    ironclaw_host_runtime::DOCUMENT_EDIT_CAPABILITY_ID,
+    ironclaw_host_runtime::HTML_TO_PDF_CAPABILITY_ID,
 ];
 
 const SKILL_NAME: &str = "reborn-skill-e2e";
