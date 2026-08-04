@@ -236,6 +236,18 @@ STEP_HEADING = re.compile(r"^[ \t]*- name: (?P<name>.+)$", re.MULTILINE)
 CLIPPY_MATRIX_ASSIGNMENT = "clippy_matrix"
 MATRIX_FLAGS = re.compile(r'"flags"[ \t]*:[ \t]*"(?P<flags>[^"]*)"')
 
+# Ways to keep the command intact while throwing away its verdict. These are
+# not the disguised-command case the block above rules out of scope: each is a
+# plausible edit someone makes on purpose and for a stated reason ("unblock the
+# queue", "this lane is flaky"), and each leaves a lane that runs clippy and
+# ignores it — the silent-green failure this contract exists to prevent.
+EXIT_STATUS_MASKS = (
+    ("|| true", "swallows a failing lint"),
+    ("|| :", "swallows a failing lint"),
+    ("set +e", "stops the shell failing on a failing lint"),
+    ("continue-on-error", "lets the job report success with the lane red"),
+)
+
 # Matched on word boundaries so `--bins` is not also reported as `--bin`, and
 # so value-bearing forms (`--bin ironclaw`, `--bench=throughput`) are caught.
 FORBIDDEN_PRODUCTION_LINT_FLAGS = tuple(
@@ -288,6 +300,12 @@ def validate_production_lint_targets(text: str) -> list[str]:
         for flag, why, pattern in FORBIDDEN_PRODUCTION_LINT_FLAGS
         if pattern.search(command)
     ]
+    errors.extend(
+        f"{CODE_STYLE_WORKFLOW}: {PRODUCTION_LINT_STEP!r} must not mask the lint's "
+        f"exit status with `{mask}` — it {why}"
+        for mask, why in EXIT_STATUS_MASKS
+        if mask in command
+    )
     errors.extend(
         f"{CODE_STYLE_WORKFLOW}: clippy_matrix flags {match.group('flags')!r} must not "
         f"contain {flag} — it {why}, and the matrix expands into "

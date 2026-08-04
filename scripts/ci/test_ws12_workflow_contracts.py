@@ -247,6 +247,47 @@ class WorkflowContractSabotageTests(unittest.TestCase):
             )
         )
 
+    def test_masking_the_production_lint_exit_status_fails_loudly(self) -> None:
+        """A lane that runs clippy and ignores it is the silent-green case.
+
+        Distinct from a disguised command, which this contract deliberately
+        does not chase: each of these is a plausible edit made on purpose and
+        for a stated reason — unblock the queue, quiet a flaky lane — and each
+        leaves the lint running and its verdict discarded.
+        """
+        for mask, injected in (
+            ("|| true", '${{ matrix.flags }} -- -D warnings || true'),
+            ("|| :", '${{ matrix.flags }} -- -D warnings || :'),
+            ("set +e", 'set +e\n          ${{ matrix.flags }} -- -D warnings'),
+        ):
+            with self.subTest(mask=mask):
+                sabotaged = self.workflows[CODE_STYLE_WORKFLOW].replace(
+                    "${{ matrix.flags }} -- -D warnings", injected
+                )
+                self.assertNotEqual(sabotaged, self.workflows[CODE_STYLE_WORKFLOW])
+
+                errors = validate_production_lint_targets(sabotaged)
+                self.assertTrue(
+                    any(f"must not mask the lint's exit status with `{mask}`" in e
+                        for e in errors),
+                    errors,
+                )
+
+        # The YAML-level equivalent: the command runs, fails, and the job
+        # reports success anyway.
+        tolerated = self.workflows[CODE_STYLE_WORKFLOW].replace(
+            "      - name: Check production-target lints\n",
+            "      - name: Check production-target lints\n        continue-on-error: true\n",
+        )
+        self.assertNotEqual(tolerated, self.workflows[CODE_STYLE_WORKFLOW])
+        self.assertTrue(
+            any(
+                "continue-on-error" in e
+                for e in validate_production_lint_targets(tolerated)
+            ),
+            validate_production_lint_targets(tolerated),
+        )
+
     def test_production_lint_failures_reach_the_top_level_contract(self) -> None:
         """The validator must stay wired into `validate_workflow_texts`.
 
