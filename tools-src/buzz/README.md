@@ -160,6 +160,51 @@ Both actions accept an optional `relay_url` field. Defaults to `wss://nearbuilde
 }
 ```
 
+## Security
+
+### Tool Approval
+
+IronClaw has a per-tool approval system. Each tool declares an `ApprovalRequirement`:
+
+| Requirement | Behavior |
+|---|---|
+| `Never` | Runs without prompting (sandboxed tools) |
+| `UnlessAutoApproved` | Prompts once, then auto-approved for the session |
+| `Always` | Prompts every time (e.g. high-risk shell commands) |
+
+Buzz is a **WASM tool** — it defaults to `Never` because it runs in a sandboxed WASM runtime. It has no direct network or filesystem access; all Nostr operations are proxied through the IronClaw host. **Buzz does not need `--auto-approve`.**
+
+### `--auto-approve` Warning
+
+The `--auto-approve` flag disables approval checks for **all** tools, not just Buzz:
+
+```bash
+# ❌ This skips approval for EVERYTHING — shell, HTTP, file writes
+ironclaw acp serve --dev-tools --auto-approve
+```
+
+If `--dev-tools` is enabled alongside `--auto-approve`, the agent gets unrestricted shell and filesystem access with no approval prompts. This is only safe in isolated environments.
+
+**Safe defaults for Buzz:**
+
+```bash
+# ✅ Buzz only — no --dev-tools, no --auto-approve needed
+ironclaw acp serve
+
+# ✅ Buzz + shell access — agent will prompt before running shell commands
+ironclaw acp serve --dev-tools
+```
+
+### WASM Sandbox Isolation
+
+Buzz runs inside the Wasmtime sandbox with:
+- **No network** — all relay connections go through host functions
+- **No filesystem** — tool cannot read/write host files
+- **Fuel limits** — execution time bounded by compute fuel
+- **Memory limits** — WASM linear memory capped
+
+The private key is resolved by the host from the secrets store and passed as a parameter to `nostr_sign_event()`. The WASM module only ever sees signed events, never the raw key.
+
 ## Architecture
 
 Buzz is a pure WASM tool — all Nostr operations go through the IronClaw host:
