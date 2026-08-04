@@ -988,7 +988,7 @@ fn coordinator_over_port(
             adapter: Arc::clone(adapter),
             unavailable: false,
         }),
-        Arc::new(FixedReplyContext(b"vendor-reply-ctx".to_vec())),
+        Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec())),
         DeliveryRetryPolicy {
             max_attempts: 3,
             backoff: std::time::Duration::ZERO,
@@ -1019,7 +1019,7 @@ fn coordinator_with_existing_preflight_settlement(
             adapter: Arc::clone(adapter),
             unavailable: channel_unavailable,
         }),
-        Arc::new(FixedReplyContext(b"vendor-reply-ctx".to_vec())),
+        Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec())),
         DeliveryRetryPolicy {
             max_attempts: 1,
             backoff: std::time::Duration::ZERO,
@@ -1050,7 +1050,7 @@ fn coordinator_with_settlement_failure(
             adapter: Arc::clone(adapter),
             unavailable: channel_unavailable,
         }),
-        Arc::new(FixedReplyContext(b"vendor-reply-ctx".to_vec())),
+        Arc::new(FixedReplyContext::new(b"vendor-reply-ctx".to_vec())),
         DeliveryRetryPolicy {
             max_attempts: 1,
             backoff: std::time::Duration::ZERO,
@@ -3067,7 +3067,7 @@ async fn coordinator_recovery_continues_after_a_per_attempt_store_failure() {
             adapter,
             unavailable: false,
         }),
-        Arc::new(FixedReplyContext(Vec::new())),
+        Arc::new(FixedReplyContext::new(Vec::new())),
         DeliveryRetryPolicy::default(),
     );
 
@@ -3140,7 +3140,7 @@ async fn assert_coordinator_recovery_preserves_concurrent_terminal_status(
             adapter,
             unavailable: false,
         }),
-        Arc::new(FixedReplyContext(Vec::new())),
+        Arc::new(FixedReplyContext::new(Vec::new())),
         DeliveryRetryPolicy::default(),
     );
 
