@@ -1624,3 +1624,55 @@ owner = "@nearai/runtime"
 reason = "include_bytes! inside a macro_rules! body; the template line can never carry a DA record, and the only change is the WS2 asset-path repoint."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-11-30"
+
+# ---------------------------------------------------------------------------
+# #7069 / #7078 shared-vendor OAuth scopes (PR #7077). Three files whose only
+# changed lines carry no executable code the integration tier can reach.
+#
+# `flow.rs` gains one struct field on `AuthFlowRecord` and one on `NewAuthFlow`
+# (the scopes moved off the client-visible `state` blob onto the durable
+# record). A field declaration and its `#[serde]` attribute have no LLVM
+# coverage region at all — the gate's `mechanically_uninstrumentable_lines`
+# already classifies `use`/`const`/`mod`/attributes this way but not field
+# declarations, so these read as an empty denominator rather than as missing
+# tests.
+#
+# `fakes.rs` is the in-memory `AuthFlowManager` double: the added line is one
+# field initializer that executes under crate-tier tests, which this
+# integration-tier lcov does not observe.
+#
+# `auth_engine_assembly.rs` is composition wiring for
+# `CompositionAuthRecipeResolver`; its requester arm runs only in a fully
+# composed runtime resolving an installed extension's recipe, which the
+# integration lane does not build.
+#
+# The behavior these lines carry IS covered — through the seams the tier can
+# reach: `one_google_authorization_satisfies_every_installed_google_extension`,
+# `one_users_consent_never_carries_another_users_installed_scopes`,
+# `google_consent_is_bounded_by_installed_extensions`, and
+# `sibling_uninstall_during_consent_does_not_fail_the_requesters_callback`
+# in `tests/integration/auth/oauth_connect.rs`.
+
+[[exemption]]
+path = "crates/ironclaw_auth/src/flow.rs"
+lines = [144, 208]
+owner = "@nearai/runtime"
+reason = "Struct field declarations carry no LLVM coverage region; the field's behavior is covered through the OAuth connect integration tests."
+issue = "https://github.com/nearai/ironclaw/issues/7069"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/ironclaw_auth/src/fakes.rs"
+lines = [262]
+owner = "@nearai/runtime"
+reason = "Field initializer in the in-memory AuthFlowManager double; executes under crate-tier tests, which the integration-tier lcov does not observe."
+issue = "https://github.com/nearai/ironclaw/issues/7069"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/factory/auth_engine_assembly.rs"
+lines = [189, 195, 198]
+owner = "@nearai/runtime"
+reason = "Composition wiring for the requester-scoped recipe resolver; runs only in a fully composed runtime, which the integration lane does not build."
+issue = "https://github.com/nearai/ironclaw/issues/7069"
+review_after = "2026-11-30"

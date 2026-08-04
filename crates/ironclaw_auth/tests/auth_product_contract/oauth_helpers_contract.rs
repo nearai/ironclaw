@@ -7,8 +7,8 @@
 use super::common::*;
 use ironclaw_auth::{
     AuthFlowId, OAuthAuthorizationCode, OAuthCallbackState, OAuthCallbackStateKind, OAuthClientId,
-    OAuthRedirectUri, OAuthState, OAuthTokenResponse, PkceVerifierSecret, ProviderScope,
-    opaque_state_hash, pkce_s256_challenge, pkce_verifier_hash, scope_text,
+    OAuthRedirectUri, OAuthState, OAuthTokenResponse, PkceVerifierSecret, opaque_state_hash,
+    pkce_s256_challenge, pkce_verifier_hash, scope_text,
 };
 use secrecy::ExposeSecret;
 
@@ -158,11 +158,4 @@ fn auth_scope() -> ironclaw_auth::AuthProductScope {
 
 fn account_label(value: &str) -> ironclaw_auth::CredentialAccountLabel {
     ironclaw_auth::CredentialAccountLabel::new(value).unwrap()
-}
-
-fn provider_scopes(values: &[&str]) -> Vec<ProviderScope> {
-    values
-        .iter()
-        .map(|value| ProviderScope::new(value.to_string()).unwrap())
-        .collect()
 }
