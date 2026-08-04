@@ -235,7 +235,11 @@ jobs:
       # test binary.
       - name: Test local filesystem backend behavior on Windows
         if: matrix.name == 'default'
-        run: cargo test -p ironclaw_filesystem --lib local::
+        # Quoted because the `local::` module filter ends in a colon, which an
+        # unquoted YAML scalar reads as a mapping-key separator — that typo
+        # made the whole workflow file unparseable and took every job in it
+        # down, not just this step.
+        run: "cargo test -p ironclaw_filesystem --lib local::"
 
   wasm-wit-compat:
     name: WASM WIT Compatibility
