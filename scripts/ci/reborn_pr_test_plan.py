@@ -32,6 +32,7 @@ IGNORED_GUIDANCE_PATHS = {
     "tests/integration/CLAUDE.md",
 }
 DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
+DEDICATED_E2E_PREFIX = "tests/e2e/"
 QA_HARNESS_PREFIXES = (
     "scripts/live-canary/",
     "scripts/reborn_webui_v2_live_qa/",
@@ -365,7 +366,10 @@ def build_plan(
             reasons.append(f"static CI or workspace-policy checks own: {path}")
             continue
         if path.startswith(DEDICATED_WORKFLOW_PREFIXES):
-            reasons.append(f"dedicated stress workflow owns: {path}")
+            reasons.append(f"dedicated workflow owns: {path}")
+            continue
+        if path.startswith(DEDICATED_E2E_PREFIX):
+            reasons.append(f"dedicated Reborn E2E workflow owns: {path}")
             continue
         if path.startswith(QA_HARNESS_PREFIXES):
             qa_evidence_changed = True

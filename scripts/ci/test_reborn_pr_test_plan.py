@@ -210,9 +210,10 @@ class RebornPrTestPlanTests(unittest.TestCase):
             plan["reasons"],
         )
 
-    def test_shared_e2e_harness_remains_an_explicit_mapping_error(self) -> None:
-        with self.assertRaisesRegex(ValueError, "unmapped Reborn test path"):
-            self.plan("pull_request", ["tests/e2e/reborn_webui_harness.py"])
+    def test_shared_e2e_harness_is_owned_by_e2e_workflow(self) -> None:
+        plan = self.plan("pull_request", ["tests/e2e/reborn_webui_harness.py"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["integration_lanes"], [])
 
     def test_reborn_e2e_and_crate_changes_keep_both_owners(self) -> None:
         plan = self.plan(
@@ -381,16 +382,26 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["integration_lanes"], [])
 
-    def test_e2e_scenario_is_owned_by_dedicated_e2e_workflow(self) -> None:
-        plan = self.plan(
-            "pull_request", ["tests/e2e/scenarios/test_reborn_webui_v2_smoke.py"]
-        )
-        self.assertEqual(plan["mode"], "none")
-        self.assertEqual(plan["integration_lanes"], [])
-
-    def test_shared_e2e_harness_remains_an_explicit_mapping_error(self) -> None:
-        with self.assertRaisesRegex(ValueError, "unmapped Reborn test path"):
-            self.plan("pull_request", ["tests/e2e/reborn_webui_harness.py"])
+    def test_e2e_paths_are_owned_by_dedicated_workflows(self) -> None:
+        for path in (
+            "tests/e2e/helpers.py",
+            "tests/e2e/reborn_webui_harness.py",
+            "tests/e2e/reborn_coverage_tests.txt",
+            "tests/e2e/scenarios/test_reborn_webui_v2_projects_api.py",
+            "tests/e2e/scenarios/test_reborn_webui_v2_smoke.py",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none")
+                self.assertTrue(plan["run_qa_replay"])
+                self.assertEqual(plan["integration_lanes"], [])
+                self.assertEqual(plan["coverage_mode"], "none")
+                self.assertTrue(
+                    any(
+                        reason.startswith("dedicated Reborn E2E workflow owns")
+                        for reason in plan["reasons"]
+                    )
+                )
 
     def test_changed_coverage_manifest_does_not_launch_integration_lanes(self) -> None:
         plan = self.plan(
