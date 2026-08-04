@@ -88,7 +88,7 @@ class GitHubTags:
             raise ReleaseTagError(f"failed to read {tag}: {result.stderr.strip()}")
         target = json.loads(result.stdout)["object"]
 
-        for _ in range(MAX_ANNOTATED_TAG_DEPTH):
+        for depth in range(MAX_ANNOTATED_TAG_DEPTH + 1):
             object_type = str(target["type"])
             object_sha = str(target["sha"])
             if object_type == "commit":
@@ -97,6 +97,8 @@ class GitHubTags:
                 raise ReleaseTagError(
                     f"{tag} resolves to unsupported Git object type {object_type!r}"
                 )
+            if depth == MAX_ANNOTATED_TAG_DEPTH:
+                break
 
             result = subprocess.run(
                 [

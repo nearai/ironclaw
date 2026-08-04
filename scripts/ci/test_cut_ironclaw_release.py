@@ -152,6 +152,46 @@ class ReleaseTagTests(unittest.TestCase):
         self.assertEqual(target, SHA)
         self.assertIn(f"git/tags/{tag_object_sha}", run.call_args_list[1].args[0][2])
 
+    def test_accepts_exact_annotated_tag_resolution_limit(self) -> None:
+        responses = [
+            mock.Mock(
+                returncode=0,
+                stdout=f'{{"object":{{"type":"tag","sha":"{index:x}{"0" * 39}"}}}}',
+                stderr="",
+            )
+            for index in range(1, release.MAX_ANNOTATED_TAG_DEPTH + 1)
+        ]
+        responses.append(
+            mock.Mock(
+                returncode=0,
+                stdout=f'{{"object":{{"type":"commit","sha":"{SHA}"}}}}',
+                stderr="",
+            )
+        )
+
+        with mock.patch.object(release.subprocess, "run", side_effect=responses):
+            target = release.GitHubTags("nearai/ironclaw").get_target("ironclaw-v1.0.0")
+
+        self.assertEqual(target, SHA)
+
+    def test_rejects_annotated_tag_beyond_resolution_limit(self) -> None:
+        responses = [
+            mock.Mock(
+                returncode=0,
+                stdout=f'{{"object":{{"type":"tag","sha":"{index:x}{"0" * 39}"}}}}',
+                stderr="",
+            )
+            for index in range(1, release.MAX_ANNOTATED_TAG_DEPTH + 2)
+        ]
+
+        with (
+            mock.patch.object(release.subprocess, "run", side_effect=responses) as run,
+            self.assertRaisesRegex(release.ReleaseTagError, "resolution depth"),
+        ):
+            release.GitHubTags("nearai/ironclaw").get_target("ironclaw-v1.0.0")
+
+        self.assertEqual(run.call_count, release.MAX_ANNOTATED_TAG_DEPTH + 1)
+
     def test_release_tooling_is_pinned_to_default_branch_dispatch(self) -> None:
         workflow = (ROOT / ".github/workflows/cut-ironclaw-release.yml").read_text(
             encoding="utf-8"
