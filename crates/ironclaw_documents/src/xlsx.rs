@@ -278,7 +278,10 @@ fn parse_cells(xml: &str, shared: &[String]) -> Result<Vec<Cell>, DocumentError>
             })?;
         match &event {
             Event::Eof => break,
-            Event::Start(tag) | Event::Empty(tag) => match local_name(tag.name().as_ref()) {
+            // `Start` opens a scope that a later `End` closes; `Empty` is
+            // self-closing and has no `End`, so latching a flag on it would
+            // leave it set and misattribute every later text event.
+            Event::Start(tag) => match local_name(tag.name().as_ref()) {
                 b"c" => {
                     reference = attribute(tag, b"r").unwrap_or_default();
                     is_shared = attribute(tag, b"t").as_deref() == Some("s");
@@ -290,6 +293,13 @@ fn parse_cells(xml: &str, shared: &[String]) -> Result<Vec<Cell>, DocumentError>
                 b"f" => in_formula = true,
                 _ => {}
             },
+            Event::Empty(tag) => {
+                // A self-closing `<c r=".."/>` is an empty cell: it carries no
+                // value or formula, so it contributes nothing to the read.
+                if local_name(tag.name().as_ref()) == b"c" {
+                    open = false;
+                }
+            }
             Event::End(tag) => match local_name(tag.name().as_ref()) {
                 b"c" if open => {
                     open = false;
@@ -369,6 +379,18 @@ fn set_cell_formula(xml: &str, target: &str, formula: &str) -> Result<String, Do
             Event::Start(tag) | Event::Empty(tag) => {
                 let qname = tag.name();
                 match local_name(qname.as_ref()) {
+                    b"row" if matches!(event, Event::Empty(_)) => {
+                        // `<row r="N"/>` is an existing but empty row. Emitting
+                        // a fresh row for the same index would give Excel two
+                        // rows with the same `r`, which it repairs by dropping
+                        // content.
+                        let row_number = attribute(tag, b"r").and_then(|r| r.parse::<u32>().ok());
+                        if !wrote && row_number == Some(target_row) {
+                            wrote = true;
+                            return Ok(EventAction::Replace(new_row(target_row, target, formula)));
+                        }
+                        Ok(EventAction::Keep)
+                    }
                     b"row" => {
                         let row_number = attribute(tag, b"r").and_then(|r| r.parse::<u32>().ok());
                         in_target_row = row_number == Some(target_row);
@@ -913,5 +935,63 @@ mod review_regressions {
             ("xl/worksheets/sheet1.xml", empty.as_bytes().to_vec()),
             ("xl/worksheets/sheet2.xml", empty.as_bytes().to_vec()),
         ])
+    }
+}
+
+#[cfg(test)]
+mod empty_element_regressions {
+    use super::*;
+
+    fn sheet_with(body: &str) -> Vec<u8> {
+        let ct = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"#;
+        let wb = r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets><sheet name="S" sheetId="1"/></sheets></workbook>"#;
+        let sheet = format!(
+            r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{body}</sheetData></worksheet>"#
+        );
+        crate::test_fixtures::package(&[
+            ("[Content_Types].xml", ct.as_bytes().to_vec()),
+            ("xl/workbook.xml", wb.as_bytes().to_vec()),
+            ("xl/worksheets/sheet1.xml", sheet.into_bytes()),
+        ])
+    }
+
+    #[test]
+    fn a_self_closing_target_row_is_replaced_not_duplicated() {
+        // Excel repairs a sheet with two rows sharing an `r`, dropping content.
+        let edited = edit_xlsx(
+            &sheet_with(r#"<row r="1"><c r="A1"><v>1</v></c></row><row r="2"/>"#),
+            &[XlsxEdit::SetCellFormula {
+                sheet: "S".to_string(),
+                cell: "A2".to_string(),
+                formula: "A1*2".to_string(),
+            }],
+        )
+        .unwrap();
+        let xml = OoxmlPackage::read(&edited)
+            .unwrap()
+            .part_str("xl/worksheets/sheet1.xml")
+            .unwrap();
+        assert_eq!(
+            xml.matches(r#"r="2""#).count(),
+            1,
+            "row 2 must appear exactly once: {xml}"
+        );
+        assert!(xml.contains("A1*2"), "the formula must be written: {xml}");
+    }
+
+    #[test]
+    fn a_self_closing_value_element_does_not_latch_the_reader() {
+        // `<v/>` has no End; latching `in_value` would misattribute the NEXT
+        // cell's text and corrupt every subsequent value in the row.
+        let sheets = read_xlsx(&sheet_with(
+            r#"<row r="1"><c r="A1"><v/></c><c r="B1"><v>7</v></c></row>"#,
+        ))
+        .unwrap();
+        let b1 = sheets[0]
+            .cells
+            .iter()
+            .find(|cell| cell.reference == "B1")
+            .expect("B1 present");
+        assert_eq!(b1.value.as_deref(), Some("7"));
     }
 }

@@ -79,6 +79,15 @@ impl OoxmlPackage {
                     detail: format!("archive exceeds {MAX_TOTAL_BYTES} decompressed bytes"),
                 });
             }
+            // A duplicate name would keep both entries in `names` but only the
+            // last bytes in `entries`, so `write()` would emit the same content
+            // twice and silently rewrite a package we were asked to preserve.
+            if entries.contains_key(&name) {
+                return Err(DocumentError::MalformedPart {
+                    part: name,
+                    detail: "duplicate zip entry name".to_string(),
+                });
+            }
             names.push(name.clone());
             entries.insert(name, bytes);
         }
