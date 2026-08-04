@@ -182,6 +182,14 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["changed_packages"], ["alpha"])
         self.assertNotEqual(plan["mode"], "none")
 
+    def test_document_fixture_change_runs_a_representative_integration_lane(
+        self,
+    ) -> None:
+        # A binary fixture is consumed by integration tests via `include_bytes!`;
+        # it must schedule a lane rather than hard-error as an unmapped path.
+        plan = self.plan("pull_request", ["tests/fixtures/redlined-contract.docx"])
+        self.assertEqual(plan["integration_lanes"], [0])
+
     def test_recorded_fixture_change_runs_only_qa_replay(self) -> None:
         plan = self.plan(
             "pull_request",
