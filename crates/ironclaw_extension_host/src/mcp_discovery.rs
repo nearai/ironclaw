@@ -9,6 +9,11 @@ use ironclaw_mcp::{McpClient, McpClientRequest, McpHostHttpClient, McpRuntimeHtt
 
 use crate::mcp::{MCP_RESPONSE_BODY_LIMIT, RegistryMcpEgressPlanner};
 
+type HostedMcpClientAndRequest = (
+    McpHostHttpClient<McpRuntimeHttpAdapter<Arc<dyn RuntimeHttpEgress>>, RegistryMcpEgressPlanner>,
+    McpClientRequest,
+);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostedMcpDiscoveryError {
     Transient(String),
@@ -18,23 +23,30 @@ pub enum HostedMcpDiscoveryError {
     CredentialsRejected(ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge),
 }
 
-pub async fn discover_hosted_mcp_package(
+/// Probe only the credential-free MCP initialization handshake.
+///
+/// This deliberately does not list or admit tools. Registration owns auth
+/// selection; catalog discovery remains an installation preparation step.
+pub async fn probe_hosted_mcp_auth(
     package: &ExtensionPackage,
-    max_tools: u32,
     scope: ResourceScope,
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
-) -> Result<ExtensionPackage, HostedMcpDiscoveryError> {
-    discover_hosted_mcp_package_with_policy(package, max_tools, scope, runtime_http_egress, None)
+) -> Result<(), HostedMcpDiscoveryError> {
+    let (client, request) =
+        hosted_mcp_client_and_request(package, scope, runtime_http_egress, "auth probe")?;
+    client
+        .probe_auth(request)
         .await
+        .map(|_| ())
+        .map_err(classify_mcp_client_error)
 }
 
-pub async fn discover_hosted_mcp_package_with_policy(
+fn hosted_mcp_client_and_request(
     package: &ExtensionPackage,
-    max_tools: u32,
     scope: ResourceScope,
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
-    safety: Option<&crate::McpCatalogAdmissionPolicy>,
-) -> Result<ExtensionPackage, HostedMcpDiscoveryError> {
+    purpose: &str,
+) -> Result<HostedMcpClientAndRequest, HostedMcpDiscoveryError> {
     let (transport, command, args, url) = match &package.manifest.runtime {
         ExtensionRuntime::Mcp {
             transport,
@@ -57,7 +69,7 @@ pub async fn discover_hosted_mcp_package_with_policy(
     let registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
     registry.upsert(package.clone()).map_err(|error| {
         HostedMcpDiscoveryError::Permanent(format!(
-            "failed to prepare hosted MCP discovery: {error}"
+            "failed to prepare hosted MCP {purpose}: {error}"
         ))
     })?;
     let planning_capability_id = package
@@ -71,25 +83,46 @@ pub async fn discover_hosted_mcp_package_with_policy(
                 package.id
             ))
         })?;
-    let client = McpHostHttpClient::new(
-        McpRuntimeHttpAdapter::new(runtime_http_egress),
-        RegistryMcpEgressPlanner::new(registry),
-    );
+    Ok((
+        McpHostHttpClient::new(
+            McpRuntimeHttpAdapter::new(runtime_http_egress),
+            RegistryMcpEgressPlanner::new(registry),
+        ),
+        McpClientRequest {
+            provider: package.id.clone(),
+            capability_id: planning_capability_id,
+            scope,
+            transport,
+            command,
+            args,
+            url,
+            input: serde_json::Value::Null,
+            max_output_bytes: MCP_RESPONSE_BODY_LIMIT,
+        },
+    ))
+}
+
+pub async fn discover_hosted_mcp_package(
+    package: &ExtensionPackage,
+    max_tools: u32,
+    scope: ResourceScope,
+    runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+) -> Result<ExtensionPackage, HostedMcpDiscoveryError> {
+    discover_hosted_mcp_package_with_policy(package, max_tools, scope, runtime_http_egress, None)
+        .await
+}
+
+pub async fn discover_hosted_mcp_package_with_policy(
+    package: &ExtensionPackage,
+    max_tools: u32,
+    scope: ResourceScope,
+    runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+    safety: Option<&crate::McpCatalogAdmissionPolicy>,
+) -> Result<ExtensionPackage, HostedMcpDiscoveryError> {
+    let (client, request) =
+        hosted_mcp_client_and_request(package, scope, runtime_http_egress, "discovery")?;
     let output = client
-        .discover_tools(
-            McpClientRequest {
-                provider: package.id.clone(),
-                capability_id: planning_capability_id,
-                scope,
-                transport,
-                command,
-                args,
-                url,
-                input: serde_json::Value::Null,
-                max_output_bytes: MCP_RESPONSE_BODY_LIMIT,
-            },
-            max_tools,
-        )
+        .discover_tools(request, max_tools)
         .await
         .map_err(classify_mcp_client_error)?;
     if output.tools.is_empty() {
@@ -400,5 +433,17 @@ effects = ["network"]
             matches!(&classified, HostedMcpDiscoveryError::Transient(got) if got == "mcp_denied_credential_source"),
             "non-structural client reasons must stay retryable, got {classified:?}"
         );
+    }
+
+    #[test]
+    fn bare_auth_required_classifies_as_credentials_rejected() {
+        let classified = classify_mcp_client_error(ironclaw_mcp::McpClientError::AuthRequired);
+        assert!(matches!(
+            classified,
+            HostedMcpDiscoveryError::CredentialsRejected(challenge)
+                if challenge.status == 401
+                    && challenge.www_authenticate_metadata.is_empty()
+                    && challenge.protected_resource_metadata.is_empty()
+        ));
     }
 }

@@ -20,6 +20,13 @@
   a package, add its directory under `packages/` and its module here, and put it
   in the `PACKAGES` table — the catalog is derived from that table, not from a
   directory scan.
+- **One package module is deliberately not in `PACKAGES`: `nearai`.** Its
+  shipped `[mcp].server` is a placeholder the host rewrites from the operator's
+  LLM-admin bootstrap configuration, and a `fn() -> PackageBundle` cannot
+  produce that value. Its embeds still live here, with every other package's;
+  the patch lives with the endpoint authority in `ironclaw_extension_host`,
+  which calls `packages::nearai::nearai_bundle()`. Read that module's header
+  before assuming the omission is an oversight — it is the documented shape.
 - Rebuilding a WASM guest: `./scripts/build-wasm-extensions.sh --first-party`,
   then `python3 scripts/ci/check-wasm-artifact-freshness.py --update`. The
   freshness gate fails if you edit `wasm-src/` and do not do both.

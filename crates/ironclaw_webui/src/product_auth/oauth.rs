@@ -45,6 +45,7 @@ pub(super) async fn oauth_start_handler(
                 scope: scope.clone(),
                 provider: provider.clone(),
                 requester_extension: None,
+                requested_scopes: Vec::new(),
                 authorization_url: OAuthAuthorizationUrl::new(authorization_endpoint.to_string())
                     .map_err(ProductAuthRouteFailure::from)?,
                 opaque_state_hash,
@@ -185,7 +186,7 @@ pub(super) async fn extension_oauth_start_handler(
             scope: scope.clone(),
             flow_id,
             account_label,
-            requested_scopes,
+            requested_scopes: requested_scopes.clone(),
         },
     ))
     .await?;
@@ -198,6 +199,7 @@ pub(super) async fn extension_oauth_start_handler(
                 scope: scope.clone(),
                 provider: provider.clone(),
                 requester_extension: Some(requester_extension.clone()),
+                requested_scopes: prepared.requested_scopes.clone(),
                 authorization_url: prepared.authorization_url.clone(),
                 opaque_state_hash: prepared.opaque_state_hash.clone(),
                 pkce_verifier_hash: prepared.pkce_verifier_hash.clone(),
@@ -421,6 +423,7 @@ async fn vendor_oauth_callback_attempt(
         .recipes()
         .resolve(
             flow_identity.requester_extension.as_ref(),
+            Some(&callback_scope.resource.user_id),
             provider.as_str(),
         )
         .await
@@ -468,7 +471,7 @@ async fn vendor_oauth_callback_attempt(
     // omit, normalize, or return a cumulative grant there. The token response
     // is the authoritative granted-scope source; the auth engine clamps it to
     // the unified recipe ceiling before storing it.
-    let requested_scopes = callback_state.requested_scopes().to_vec();
+    let requested_scopes = flow_identity.requested_scopes.clone();
     let authorization_code_hash = authorization_code_hash(code.expose_secret())?;
     let pkce_verifier_hash = pkce_verifier_hash(pkce_verifier.expose_secret())?;
 

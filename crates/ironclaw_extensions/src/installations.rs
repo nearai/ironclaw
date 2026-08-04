@@ -857,6 +857,31 @@ pub trait ExtensionInstallationStorePort: Send + Sync {
         installation: ExtensionInstallation,
     ) -> Result<(), ExtensionInstallationError>;
 
+    /// Conditionally refresh only the manifest embedded in a live installation.
+    /// The current installation row is read and retained by the CAS transform,
+    /// so concurrent membership and credential state cannot be overwritten by
+    /// a manifest refresh. A changed incarnation or manifest reference rejects
+    /// the refresh.
+    async fn upsert_manifest_only(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        expected_incarnation_id: Option<&InstallationIncarnationId>,
+        expected_manifest_ref: &ExtensionManifestRef,
+        expected_updated_at: DateTime<Utc>,
+        manifest: ExtensionManifestRecord,
+    ) -> Result<(), ExtensionInstallationError> {
+        let _ = (
+            installation_id,
+            expected_incarnation_id,
+            expected_manifest_ref,
+            expected_updated_at,
+            manifest,
+        );
+        Err(store_unavailable_error(
+            "extension installation store does not implement manifest-only updates",
+        ))
+    }
+
     /// Conditionally commit a prepared manifest. Implementations must reject
     /// a stale incarnation or pending-manifest reference without publication.
     async fn finalize_preparation(
@@ -1001,6 +1026,25 @@ where
         installation: ExtensionInstallation,
     ) -> Result<(), ExtensionInstallationError> {
         (**self).upsert_installation(installation).await
+    }
+
+    async fn upsert_manifest_only(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        expected_incarnation_id: Option<&InstallationIncarnationId>,
+        expected_manifest_ref: &ExtensionManifestRef,
+        expected_updated_at: DateTime<Utc>,
+        manifest: ExtensionManifestRecord,
+    ) -> Result<(), ExtensionInstallationError> {
+        (**self)
+            .upsert_manifest_only(
+                installation_id,
+                expected_incarnation_id,
+                expected_manifest_ref,
+                expected_updated_at,
+                manifest,
+            )
+            .await
     }
 
     async fn finalize_preparation(
@@ -3112,6 +3156,58 @@ impl ExtensionInstallationStore {
         .map_err(|error| map_extension_state_cas_error(error, "installation"))
     }
 
+    async fn clear_v2_preparation_lease(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        incarnation_id: &InstallationIncarnationId,
+        expected_manifest_ref: &ExtensionManifestRef,
+    ) -> Result<(), ExtensionInstallationError> {
+        let path = self.v2_scoped_path(&self.v2_installation_path(installation_id)?)?;
+        let installation_id = installation_id.clone();
+        let incarnation_id = incarnation_id.clone();
+        let expected_manifest_ref = expected_manifest_ref.clone();
+        cas_update(
+            self.scoped_filesystem.as_ref(),
+            &ResourceScope::system(),
+            &path,
+            decode_v2_installation_body,
+            entry_for_v2_installation,
+            move |current: Option<V2InstallationRecord>| {
+                let installation_id = installation_id.clone();
+                let incarnation_id = incarnation_id.clone();
+                let expected_manifest_ref = expected_manifest_ref.clone();
+                async move {
+                    let Some(mut record) = current else {
+                        return Err(ExtensionInstallationError::InstallationNotFound {
+                            installation_id,
+                        });
+                    };
+                    if record.installation_id != installation_id {
+                        return Err(invalid_installation_error(
+                            "v2 installation body identity did not match its key",
+                        ));
+                    }
+                    let lease_matches = record
+                        .lease
+                        .as_ref()
+                        .and_then(|lease| lease.preparation.as_ref())
+                        .is_some_and(|preparation| {
+                            preparation.incarnation_id == incarnation_id
+                                && preparation.expected_manifest_ref == expected_manifest_ref
+                        });
+                    if !lease_matches {
+                        return Ok(CasApply::no_op(record, ()));
+                    }
+                    record.lease = None;
+                    record.updated_at = Utc::now();
+                    Ok(CasApply::new(record, ()))
+                }
+            },
+        )
+        .await
+        .map_err(|error| map_extension_state_cas_error(error, "installation"))
+    }
+
     async fn repair_compatibility_views(&self) -> Result<(), ExtensionInstallationError> {
         let installation_rows = query_all(
             &self.filesystem,
@@ -3462,6 +3558,95 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
         Ok(())
     }
 
+    async fn upsert_manifest_only(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        expected_incarnation_id: Option<&InstallationIncarnationId>,
+        expected_manifest_ref: &ExtensionManifestRef,
+        expected_updated_at: DateTime<Utc>,
+        manifest: ExtensionManifestRecord,
+    ) -> Result<(), ExtensionInstallationError> {
+        if manifest.extension_id() != expected_manifest_ref.extension_id() {
+            return Err(ExtensionInstallationError::ManifestExtensionMismatch {
+                extension_id: expected_manifest_ref.extension_id().clone(),
+                manifest_extension_id: manifest.extension_id().clone(),
+            });
+        }
+        let path = self.v2_scoped_path(&self.v2_installation_path(installation_id)?)?;
+        let installation_id = installation_id.clone();
+        let expected_incarnation_id = expected_incarnation_id.cloned();
+        let expected_manifest_ref = expected_manifest_ref.clone();
+        let manifest_wire = WireManifestRecord::from(&manifest);
+        cas_update(
+            self.scoped_filesystem.as_ref(),
+            &ResourceScope::system(),
+            &path,
+            decode_v2_installation_body,
+            entry_for_v2_installation,
+            move |current: Option<V2InstallationRecord>| {
+                let installation_id = installation_id.clone();
+                let expected_incarnation_id = expected_incarnation_id.clone();
+                let expected_manifest_ref = expected_manifest_ref.clone();
+                let manifest_wire = manifest_wire.clone();
+                async move {
+                    let Some(mut record) = current else {
+                        return Err(ExtensionInstallationError::InstallationNotFound {
+                            installation_id,
+                        });
+                    };
+                    if record.installation_id != installation_id {
+                        return Err(invalid_installation_error(
+                            "v2 installation body identity did not match its key",
+                        ));
+                    }
+                    if record.is_removed() {
+                        return Err(ExtensionInstallationError::InstallationNotFound {
+                            installation_id,
+                        });
+                    }
+                    // The expected timestamp is the aggregate maximum across
+                    // this core and its child rows. Child-only changes can make
+                    // it newer than the core and must not block this update;
+                    // only a core newer than the observed aggregate is stale.
+                    if record.lease.is_some()
+                        || record.incarnation_id != expected_incarnation_id
+                        || record.manifest_ref() != expected_manifest_ref
+                        || record.updated_at > expected_updated_at
+                    {
+                        return Err(
+                            ExtensionInstallationError::PreparationFinalizationRejected {
+                                installation_id,
+                            },
+                        );
+                    }
+                    let manifest_extension_id = manifest_wire
+                        .resolved
+                        .as_ref()
+                        .ok_or_else(|| {
+                            invalid_installation_error("manifest-only refresh was not resolved")
+                        })?
+                        .id
+                        .clone();
+                    if record.extension_id != manifest_extension_id {
+                        return Err(ExtensionInstallationError::ManifestExtensionMismatch {
+                            extension_id: record.extension_id,
+                            manifest_extension_id,
+                        });
+                    }
+                    record.manifest = manifest_wire;
+                    record.updated_at = Utc::now();
+                    Ok(CasApply::new(record, ()))
+                }
+            },
+        )
+        .await
+        .map_err(|error| map_extension_state_cas_error(error, "installation"))?;
+        // The v2 row is authoritative. Keep the legacy projection best effort;
+        // startup repair converges it if this compatibility write races.
+        let _ = self.put_manifest(&manifest, CasExpectation::Any).await;
+        Ok(())
+    }
+
     async fn finalize_preparation(
         &self,
         installation_id: &ExtensionInstallationId,
@@ -3493,10 +3678,16 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
                 // until the next store-construction repair pass. Release it
                 // here so the aggregate stays visible immediately.
                 // silent-ok: best-effort release racing a concurrent repair
-                // (repair_interrupted_v2_leases) or another mutator; either
-                // outcome still clears the lease, and the original rejection
-                // below is the error the caller must see.
-                let _ = self.clear_v2_lease(installation_id).await;
+                // or retry; the matching lease is cleared, while a newer lease
+                // is preserved, and the original rejection remains the error
+                // the caller must see.
+                let _ = self
+                    .clear_v2_preparation_lease(
+                        installation_id,
+                        incarnation_id,
+                        expected_pending_manifest_ref,
+                    )
+                    .await;
                 return Err(rejection);
             }
         };
@@ -3556,14 +3747,29 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
             expected_pending_manifest_ref,
         )
         .await?;
-        let core = self
+        let core = match self
             .finish_v2_preparation_checkpoint(
                 installation_id,
                 incarnation_id,
                 expected_pending_manifest_ref,
                 &next_pending_manifest,
             )
-            .await?;
+            .await
+        {
+            Ok(core) => core,
+            Err(rejection) => {
+                // The lease was committed above. Keep the pending aggregate
+                // immediately visible if the checkpoint CAS fails.
+                let _ = self
+                    .clear_v2_preparation_lease(
+                        installation_id,
+                        incarnation_id,
+                        expected_pending_manifest_ref,
+                    )
+                    .await;
+                return Err(rejection);
+            }
+        };
         let installation = self.reconstruct_v2_installation(&core).await?;
         let _ = self
             .put_manifest(&next_pending_manifest, CasExpectation::Any)
@@ -4315,7 +4521,7 @@ fn map_extension_state_cas_error(
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
     use ironclaw_host_api::{host_port::HostPortCatalog, ids::ExtensionId, path::VirtualPath};
 
     use super::*;
@@ -5016,6 +5222,123 @@ mod tests {
                 .manifest_hash()
                 .map(ManifestHash::as_str),
             Some("hash-two")
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_checkpoint_releases_its_preparation_lease() {
+        let backend = Arc::new(
+            FaultInjecting::new(InMemoryBackend::new()).with_fault(
+                Fault::on(FilesystemOperation::WriteFile)
+                    .path("/v2/installations/")
+                    .nth(3)
+                    .backend("interrupt checkpoint commit"),
+            ),
+        );
+        let store = ExtensionInstallationStore::load_at(
+            backend,
+            VirtualPath::new("/system/extensions/.installations/checkpoint-failure")
+                .expect("valid root"),
+            HostPortCatalog::empty(),
+            capability_provider_contracts(),
+        )
+        .await
+        .expect("filesystem store");
+        let pending = pending_installation("fixture", Some("hash-one"));
+        let installation_id = pending.installation_id().clone();
+        let incarnation = pending.incarnation_id().cloned().expect("incarnation");
+        let expected_ref = pending.manifest_ref().clone();
+        store
+            .upsert_manifest_and_installation(
+                pending_manifest_record("fixture", Some("hash-one")),
+                pending.clone(),
+            )
+            .await
+            .expect("seed pending");
+
+        store
+            .checkpoint_preparation(
+                &installation_id,
+                &incarnation,
+                &expected_ref,
+                pending_manifest_record("fixture", Some("hash-two")),
+            )
+            .await
+            .expect_err("the injected checkpoint commit failure surfaces");
+        let visible = store
+            .get_installation(&installation_id)
+            .await
+            .expect("load after failed checkpoint")
+            .expect("a failed checkpoint must release its durable lease immediately");
+        assert_eq!(visible.manifest_ref(), pending.manifest_ref());
+        assert_eq!(visible.incarnation_id(), pending.incarnation_id());
+        assert_eq!(visible.owner(), pending.owner());
+
+        let retry = store
+            .checkpoint_preparation(
+                &installation_id,
+                &incarnation,
+                &expected_ref,
+                pending_manifest_record("fixture", Some("hash-two")),
+            )
+            .await
+            .expect("the checkpoint remains retryable without reopening the store");
+        assert_eq!(
+            retry
+                .manifest_ref()
+                .manifest_hash()
+                .map(ManifestHash::as_str),
+            Some("hash-two")
+        );
+    }
+
+    #[tokio::test]
+    async fn preparation_lease_cleanup_clears_only_the_matching_lease() {
+        let store = installation_store().await;
+        let pending = pending_installation("fixture", Some("hash-one"));
+        let installation_id = pending.installation_id().clone();
+        let incarnation = pending.incarnation_id().cloned().expect("incarnation");
+        let expected_ref = pending.manifest_ref().clone();
+        store
+            .upsert_manifest_and_installation(
+                pending_manifest_record("fixture", Some("hash-one")),
+                pending,
+            )
+            .await
+            .expect("seed pending");
+        store
+            .take_v2_preparation_lease(&installation_id, &incarnation, &expected_ref)
+            .await
+            .expect("take preparation lease");
+
+        let different_ref = ExtensionManifestRef::new(
+            ExtensionId::new("fixture").expect("extension id"),
+            Some(ManifestHash::new("hash-other").expect("hash")),
+        );
+        store
+            .clear_v2_preparation_lease(&installation_id, &incarnation, &different_ref)
+            .await
+            .expect("mismatched cleanup is a no-op");
+        assert!(
+            store
+                .get_installation(&installation_id)
+                .await
+                .expect("load leased installation")
+                .is_none(),
+            "a mismatched cleanup must retain the newer preparation lease"
+        );
+
+        store
+            .clear_v2_preparation_lease(&installation_id, &incarnation, &expected_ref)
+            .await
+            .expect("matching cleanup succeeds");
+        assert!(
+            store
+                .get_installation(&installation_id)
+                .await
+                .expect("load released installation")
+                .is_some(),
+            "the matching cleanup restores visibility"
         );
     }
 

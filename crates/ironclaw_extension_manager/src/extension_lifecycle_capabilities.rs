@@ -2,7 +2,11 @@
 use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
-use ironclaw_extension_contracts::state::InstallationState;
+use ironclaw_extension_contracts::{
+    hosted_mcp::{HostedMcpAuthSelection, HostedMcpEndpoint, RegisterHostedMcpRequest},
+    lifecycle_id::LifecyclePackageId,
+    state::InstallationState,
+};
 use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
 };
@@ -34,18 +38,22 @@ use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagement
 use ironclaw_product_contracts::package_lifecycle::public_lifecycle_response_json;
 
 pub const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
+pub const EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID: &str =
+    "builtin.extension_register_hosted_mcp";
 pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
 pub const EXTENSION_ACTIVATE_CAPABILITY_ID: &str = "builtin.extension_activate";
 pub const EXTENSION_REMOVE_CAPABILITY_ID: &str = "builtin.extension_remove";
 
-pub const EXTENSION_LIFECYCLE_CAPABILITY_IDS: [&str; 3] = [
+pub const EXTENSION_LIFECYCLE_CAPABILITY_IDS: [&str; 4] = [
     EXTENSION_SEARCH_CAPABILITY_ID,
+    EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
     EXTENSION_INSTALL_CAPABILITY_ID,
     EXTENSION_REMOVE_CAPABILITY_ID,
 ];
 
-const EXTENSION_LIFECYCLE_HANDLER_IDS: [&str; 4] = [
+const EXTENSION_LIFECYCLE_HANDLER_IDS: [&str; 5] = [
     EXTENSION_SEARCH_CAPABILITY_ID,
+    EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
     EXTENSION_INSTALL_CAPABILITY_ID,
     EXTENSION_ACTIVATE_CAPABILITY_ID,
     EXTENSION_REMOVE_CAPABILITY_ID,
@@ -83,13 +91,23 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     let manifests = vec![
         lifecycle_manifest(
             EXTENSION_SEARCH_CAPABILITY_ID,
-            "Search the local Reborn extension catalog by extension, product, provider, or service name. The catalog includes host-bundled extensions that are not installed yet and installed extensions that are inactive. For connect, enable, install, pair, authenticate, or integrate requests, use this for discovery only, then continue with builtin.extension_install for the matching extension instead of asking the user to configure credentials from search results. For routine, trigger, or notification delivery, prefer configured outbound delivery targets before installing an external channel.",
+            "Search the local Reborn extension catalog by extension, product, provider, or service name. The catalog includes host-bundled extensions that are not installed yet and installed extensions that are inactive. For connect, enable, install, pair, authenticate, or integrate requests, use this for discovery only, then continue with builtin.extension_install for the matching extension instead of asking the user to configure credentials from search results. If no result matches and the user supplied a custom hosted MCP endpoint, continue with builtin.extension_register_hosted_mcp before installation. For routine, trigger, or notification delivery, prefer configured outbound delivery targets before installing an external channel.",
             vec![EffectKind::ReadFilesystem],
             PermissionMode::Allow,
         )?,
         lifecycle_manifest(
+            EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
+            "Register a custom hosted MCP endpoint in the Reborn extension catalog before installing it. First call builtin.extension_search; use this only when the requested MCP server is not already registered. Choose auth_type from provider documentation or explicit user context: no_auth only for a documented public endpoint, bearer for a static API token or PAT sent as a Bearer credential, and oauth for a browser authorization-code flow. If the auth type is unclear, ask the user instead of guessing. On success, pass the returned package_ref.id to builtin.extension_install. Registration never installs or activates the extension.",
+            vec![
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::Network,
+            ],
+            PermissionMode::Ask,
+        )?,
+        lifecycle_manifest(
             EXTENSION_INSTALL_CAPABILITY_ID,
-            "Install a searched Reborn extension into durable standalone lifecycle state. Installation also attempts activation: when an extension does not require credentials or credentials are already available it publishes tools immediately, and when credentials are missing it raises the auth gate. If install reports the extension is already installed, report the installed state or credential gate it returns instead of calling a separate activation tool.",
+            "Install a searched or registered Reborn extension into durable standalone lifecycle state. Pass an extension_id returned by builtin.extension_search, or first use builtin.extension_register_hosted_mcp for a custom MCP endpoint and pass its returned package_ref.id; never pass a raw endpoint URL here. Installation also attempts activation: when an extension does not require credentials or credentials are already available it publishes tools immediately, and when credentials are missing it raises the auth gate. If install reports the extension is already installed, report the installed state or credential gate it returns instead of calling a separate activation tool.",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Ask,
         )?,
@@ -178,7 +196,8 @@ fn lifecycle_origin_gate_matrix(id: &str) -> OriginGateMatrix {
     let mut matrix = OriginGateMatrix::builtin_loop_run_seed(id);
     if matches!(
         id,
-        EXTENSION_INSTALL_CAPABILITY_ID
+        EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID
+            | EXTENSION_INSTALL_CAPABILITY_ID
             | EXTENSION_ACTIVATE_CAPABILITY_ID
             | EXTENSION_REMOVE_CAPABILITY_ID
     ) {
@@ -201,6 +220,35 @@ struct SearchInput {
 #[derive(Debug, Deserialize)]
 struct ExtensionIdInput {
     extension_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegisterHostedMcpInput {
+    desired_id: LifecyclePackageId,
+    desired_name: String,
+    endpoint: HostedMcpEndpoint,
+    auth_type: ModelHostedMcpAuthType,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ModelHostedMcpAuthType {
+    NoAuth,
+    Bearer,
+    #[serde(rename = "oauth")]
+    OAuth,
+}
+
+impl From<ModelHostedMcpAuthType> for HostedMcpAuthSelection {
+    fn from(value: ModelHostedMcpAuthType) -> Self {
+        match value {
+            ModelHostedMcpAuthType::NoAuth => Self::NoAuth,
+            ModelHostedMcpAuthType::Bearer => Self::Bearer,
+            ModelHostedMcpAuthType::OAuth => Self::OAuth {
+                client_profile_id: None,
+            },
+        }
+    }
 }
 
 /// Sanitizes a lifecycle-projection serialization failure into the capability
@@ -243,6 +291,21 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                                 as &dyn ironclaw_extension_host::ExtensionActivationCredentialGate,
                         ),
                         &request.scope.user_id,
+                    )
+                    .await
+                    .map_err(lifecycle_error)
+            }
+            EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID => {
+                let input: RegisterHostedMcpInput = parse_input(request.input)?;
+                self.extension_management
+                    .register_hosted_mcp(
+                        RegisterHostedMcpRequest {
+                            desired_id: input.desired_id,
+                            desired_name: input.desired_name,
+                            endpoint: input.endpoint,
+                            auth_selection: Some(input.auth_type.into()),
+                        },
+                        request.scope.clone(),
                     )
                     .await
                     .map_err(lifecycle_error)
@@ -849,13 +912,19 @@ mod tests {
     use crate::lifecycle_test_support::{
         ExtensionLifecycleTestServices, build_lifecycle_test_services,
         invoke_json_with_standalone_approval, invoke_with_standalone_approval,
+        lifecycle_product_context,
     };
     use ironclaw_extension_contracts::state::InstallationState;
+    use ironclaw_extension_contracts::{
+        hosted_mcp::{HostedMcpAuthSelection, HostedMcpEndpoint, RegisterHostedMcpRequest},
+        lifecycle_id::LifecyclePackageId,
+    };
     use ironclaw_product::RebornChannelConnectStrategy;
+    use ironclaw_product_contracts::lifecycle_service::LifecycleProductService;
     use ironclaw_product_contracts::package_lifecycle::{
         ChannelConnectionRequirement, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
         LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
-        LifecycleSearchExtensionSummary,
+        LifecycleProductAction, LifecycleSearchExtensionSummary,
     };
 
     const TEST_OWNER_ID: &str = "extension-tool-test-user";
@@ -908,7 +977,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("{} must declare an origin_gate_matrix", manifest.id));
             let expected_product = if matches!(
                 manifest.id.as_str(),
-                EXTENSION_INSTALL_CAPABILITY_ID
+                EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID
+                    | EXTENSION_INSTALL_CAPABILITY_ID
                     | EXTENSION_ACTIVATE_CAPABILITY_ID
                     | EXTENSION_REMOVE_CAPABILITY_ID
             ) {
@@ -935,6 +1005,7 @@ mod tests {
             "extension_search must be in the Ungated allowlist"
         );
         for gated in [
+            EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
             EXTENSION_INSTALL_CAPABILITY_ID,
             EXTENSION_ACTIVATE_CAPABILITY_ID,
             EXTENSION_REMOVE_CAPABILITY_ID,
@@ -1028,12 +1099,18 @@ mod tests {
         let runtime = services.host_runtime.as_ref();
 
         let surface = runtime
-            .visible_capabilities(visible_request(EXTENSION_LIFECYCLE_CAPABILITY_IDS))
+            .visible_capabilities(visible_request([
+                EXTENSION_SEARCH_CAPABILITY_ID,
+                EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
+                EXTENSION_INSTALL_CAPABILITY_ID,
+                EXTENSION_REMOVE_CAPABILITY_ID,
+            ]))
             .await
             .expect("visible capabilities");
         let ids = surface_capability_ids(&surface);
 
         assert!(ids.contains(&EXTENSION_SEARCH_CAPABILITY_ID));
+        assert!(ids.contains(&EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID));
         assert!(ids.contains(&EXTENSION_INSTALL_CAPABILITY_ID));
         assert!(ids.contains(&EXTENSION_REMOVE_CAPABILITY_ID));
         assert!(!ids.contains(&EXTENSION_ACTIVATE_CAPABILITY_ID));
@@ -1061,13 +1138,39 @@ mod tests {
             "extension_search query should be optional so models can list all extensions"
         );
 
+        let register = descriptor_for(&surface, EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID);
+        assert_eq!(register.default_permission, PermissionMode::Ask);
+        assert!(
+            register
+                .description
+                .contains(EXTENSION_SEARCH_CAPABILITY_ID)
+                && register
+                    .description
+                    .contains(EXTENSION_INSTALL_CAPABILITY_ID)
+                && register.description.contains("custom hosted MCP")
+                && register.description.contains("provider documentation")
+                && register.description.contains("ask the user"),
+            "hosted MCP registration should teach search -> explicit auth -> install: {}",
+            register.description
+        );
+        assert_eq!(
+            register.parameters_schema["required"],
+            serde_json::json!(["desired_id", "desired_name", "endpoint", "auth_type"])
+        );
+        assert_eq!(
+            register.parameters_schema["properties"]["auth_type"]["enum"],
+            serde_json::json!(["no_auth", "bearer", "oauth"])
+        );
         let install = descriptor_for(&surface, EXTENSION_INSTALL_CAPABILITY_ID);
         assert_eq!(install.default_permission, PermissionMode::Ask);
         assert!(
             install.description.contains("already installed")
                 && install.description.contains("does not require credentials")
                 && install.description.contains("attempts activation")
-                && install.description.contains("auth gate"),
+                && install.description.contains("auth gate")
+                && install
+                    .description
+                    .contains(EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID),
             "extension_install description should route installs through install-driven activation: {}",
             install.description
         );
@@ -1309,6 +1412,153 @@ mod tests {
 
         let after_remove = active_extension_capability_ids(&extension_management).await;
         assert!(!after_remove.iter().any(|id| id == "web-access.search"));
+    }
+
+    #[tokio::test]
+    async fn model_registration_reuses_product_lifecycle_pipeline_before_install() {
+        let network = Arc::new(
+            ironclaw_extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name(
+                "calendar-search",
+            ),
+        );
+        let services = test_services(
+            "extension-tools-register-hosted-mcp-owner",
+            Some(network.clone()),
+            false,
+        )
+        .await;
+        let context = execution_context([EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID]);
+
+        let omitted_auth_type = invoke_json_with_standalone_approval(
+            &services,
+            EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
+            context.clone(),
+            serde_json::json!({
+                "desired_id": "calendar-omitted-auth",
+                "desired_name": "Calendar MCP",
+                "endpoint": "https://mcp.example.test/rpc"
+            }),
+        )
+        .await;
+        assert_eq!(omitted_auth_type, Err(FailureKind::InputEncode));
+        assert!(
+            network.authorized_methods().is_empty(),
+            "missing auth type must be rejected before registration egress"
+        );
+
+        let auto = invoke_json_with_standalone_approval(
+            &services,
+            EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
+            context.clone(),
+            serde_json::json!({
+                "desired_id": "calendar-auto",
+                "desired_name": "Calendar MCP",
+                "endpoint": "https://mcp.example.test/rpc",
+                "auth_type": "auto"
+            }),
+        )
+        .await;
+        assert_eq!(auto, Err(FailureKind::InputEncode));
+        assert!(
+            network.authorized_methods().is_empty(),
+            "model-only auth auto-selection must be rejected before registration egress"
+        );
+
+        let oauth_without_metadata = invoke_json_with_standalone_approval(
+            &services,
+            EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
+            context.clone(),
+            serde_json::json!({
+                "desired_id": "calendar-oauth",
+                "desired_name": "Calendar MCP OAuth",
+                "endpoint": "https://mcp.example.test/rpc",
+                "auth_type": "oauth"
+            }),
+        )
+        .await;
+        assert_eq!(oauth_without_metadata, Err(FailureKind::InputEncode));
+        assert!(
+            !network.authorized_methods().is_empty(),
+            "valid model OAuth input must reach the shared registration preflight before its lifecycle failure is mapped"
+        );
+
+        let registered = invoke_json_with_standalone_approval(
+            &services,
+            EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
+            context.clone(),
+            serde_json::json!({
+                "desired_id": "calendar",
+                "desired_name": "Calendar MCP",
+                "endpoint": "https://mcp.example.test/rpc",
+                "auth_type": "no_auth"
+            }),
+        )
+        .await
+        .expect("model registration succeeds through the runtime capability");
+        assert_eq!(registered["package_ref"]["id"], "mcp-calendar");
+        let registration_calls = network.authorized_methods().len();
+
+        let retry = services
+            .lifecycle_service
+            .execute(
+                lifecycle_product_context(context.resource_scope.clone()),
+                LifecycleProductAction::ExtensionRegisterHostedMcp {
+                    request: RegisterHostedMcpRequest {
+                        desired_id: LifecyclePackageId::new("calendar").expect("package id"),
+                        desired_name: "Calendar MCP".to_string(),
+                        endpoint: HostedMcpEndpoint::new("https://mcp.example.test/rpc")
+                            .expect("endpoint"),
+                        auth_selection: Some(HostedMcpAuthSelection::NoAuth),
+                    },
+                },
+            )
+            .await
+            .expect("ordinary product lifecycle exact retry succeeds");
+        assert_eq!(
+            retry
+                .package_ref
+                .as_ref()
+                .map(|package_ref| package_ref.id.as_str()),
+            Some("mcp-calendar")
+        );
+        assert_eq!(
+            network.authorized_methods().len(),
+            registration_calls,
+            "the product retry must hit the same durable registration pipeline without another probe"
+        );
+
+        let installed = invoke_json(
+            &services,
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "mcp-calendar"}),
+        )
+        .await
+        .expect("the registered package id installs through the ordinary lifecycle tool");
+        assert_eq!(installed["phase"], "active");
+        assert_eq!(installed["payload"]["installed"], true);
+    }
+
+    #[test]
+    fn model_registration_auth_strings_map_to_explicit_host_selections() {
+        for (auth_type, expected) in [
+            ("no_auth", HostedMcpAuthSelection::NoAuth),
+            ("bearer", HostedMcpAuthSelection::Bearer),
+            (
+                "oauth",
+                HostedMcpAuthSelection::OAuth {
+                    client_profile_id: None,
+                },
+            ),
+        ] {
+            let input: RegisterHostedMcpInput = serde_json::from_value(serde_json::json!({
+                "desired_id": "calendar",
+                "desired_name": "Calendar MCP",
+                "endpoint": "https://mcp.example.test/rpc",
+                "auth_type": auth_type
+            }))
+            .expect("explicit model auth type should deserialize");
+            assert_eq!(HostedMcpAuthSelection::from(input.auth_type), expected);
+        }
     }
 
     #[tokio::test]

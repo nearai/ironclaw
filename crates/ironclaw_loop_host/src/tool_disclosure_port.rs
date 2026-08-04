@@ -3,6 +3,9 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
+use crate::{
+    CapabilityAllowSet, CapabilityResultWrite, DurablePersistence, LoopCapabilityResultWriter,
+};
 use async_trait::async_trait;
 use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId},
@@ -14,9 +17,6 @@ use ironclaw_loop_contracts::{
     LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
     ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
     VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
-};
-use ironclaw_loop_host::{
-    CapabilityAllowSet, CapabilityResultWrite, DurablePersistence, LoopCapabilityResultWriter,
 };
 use ironclaw_turns::{CapabilityActivityId, TurnId};
 use serde_json::{Value, json};
@@ -41,20 +41,20 @@ const DISCLOSURE_INPUT_PREFIX: &str = "input:tool-disclosure:";
 const DESCRIBE_FIRST_BRIDGE_NAME: &str = "tool_disclosure:auto_schema";
 
 /// Provider tool name of the loop's `capability_info` inspector (mirrors
-/// `ironclaw_loop_host::capability_info::TOOL_NAME`). Inspecting a deferred
+/// `crate::capability_info::TOOL_NAME`). Inspecting a deferred
 /// tool via `capability_info` is treated as intent to use it: the target is
 /// disclosed + promoted so it becomes directly callable — the `tool_search` →
 /// `capability_info` → direct-call discovery path.
 const CAPABILITY_INFO_NAME: &str = "capability_info";
 
-pub(crate) struct ToolDisclosureCapabilityDecorator {
+pub struct ToolDisclosureCapabilityDecorator {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     caps: DisclosureCaps,
 }
 
 impl ToolDisclosureCapabilityDecorator {
-    pub(crate) fn new(result_writer: Arc<dyn LoopCapabilityResultWriter>) -> Self {
+    pub fn new(result_writer: Arc<dyn LoopCapabilityResultWriter>) -> Self {
         Self {
             result_writer,
             promoted_by_scope: Arc::new(Mutex::new(HashMap::new())),
@@ -64,7 +64,7 @@ impl ToolDisclosureCapabilityDecorator {
 
     /// Wrap one run's capability port with disclosure using the exact
     /// allow-set already resolved by the runner-private profiled factory.
-    pub(crate) fn decorate_with_allow_set(
+    pub fn decorate_with_allow_set(
         &self,
         run_context: &LoopRunContext,
         inner: Arc<dyn LoopCapabilityPort>,
@@ -1372,6 +1372,7 @@ mod tests {
         ));
     }
 
+    use crate::CapabilityWriteResult;
     use ironclaw_host_api::{
         ids::{AgentId, ProjectId, TenantId, ThreadId},
         resolution::ToolVerdict,
@@ -1381,7 +1382,6 @@ mod tests {
         CapabilityDescriptorView, ConcurrencyHint, InMemoryRunProfileResolver, ResolvedRunProfile,
         RunProfileResolutionRequest, RunProfileResolver,
     };
-    use ironclaw_loop_host::CapabilityWriteResult;
     use ironclaw_turns::{LoopResultRef, TurnRunId, TurnScope};
 
     struct SpyPort {

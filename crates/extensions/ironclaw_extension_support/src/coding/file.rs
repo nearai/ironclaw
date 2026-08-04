@@ -26,8 +26,8 @@ use super::{
         stat_optional, virtual_to_relative,
     },
     state::{
-        CodingReadScopeKey, SharedCodingEditLocks, SharedCodingReadStates, content_fingerprint,
-        read_scope_key,
+        CodingReadScopeKey, ReadRepresentation, SharedCodingEditLocks, SharedCodingReadStates,
+        content_fingerprint, read_scope_key,
     },
     text::{
         TextEdit, decode_text, decode_text_lossy, encode_text, previous_char_boundary,
@@ -74,22 +74,26 @@ pub(super) async fn read_file(
             filesystem_error_with_summary("read_file", resolved.scoped_path.as_str(), error)
         })?;
 
-    let content = if should_extract_document_before_text(&bytes, resolved.scoped_path.as_str()) {
-        match extract_document_text_for_read_file(&bytes, resolved.scoped_path.as_str())? {
-            Some(content) => content,
-            None => decode_read_file_text(&bytes)?,
-        }
-    } else {
-        match decode_read_file_text(&bytes) {
-            Ok(content) => content,
-            Err(text_error) => {
-                match extract_document_text_for_read_file(&bytes, resolved.scoped_path.as_str())? {
-                    Some(content) => content,
-                    None => return Err(text_error),
+    let (content, representation) =
+        if should_extract_document_before_text(&bytes, resolved.scoped_path.as_str()) {
+            match extract_document_text_for_read_file(&bytes, resolved.scoped_path.as_str())? {
+                Some(content) => (content, ReadRepresentation::ExtractedText),
+                None => (decode_read_file_text(&bytes)?, ReadRepresentation::RawText),
+            }
+        } else {
+            match decode_read_file_text(&bytes) {
+                Ok(content) => (content, ReadRepresentation::RawText),
+                Err(text_error) => {
+                    match extract_document_text_for_read_file(
+                        &bytes,
+                        resolved.scoped_path.as_str(),
+                    )? {
+                        Some(content) => (content, ReadRepresentation::ExtractedText),
+                        None => return Err(text_error),
+                    }
                 }
             }
-        }
-    };
+        };
 
     let output = read_file_text_output(
         &content,
@@ -108,6 +112,7 @@ pub(super) async fn read_file(
             &read_scope_key(request),
             resolved.virtual_path.as_str(),
             content_fingerprint(&bytes),
+            representation,
         );
     }
 
@@ -353,6 +358,12 @@ pub(super) async fn write_file(
         return Err(input_error());
     }
     let resolved = resolve_required_path(request, "path", FilesystemOperation::WriteFile)?;
+    if is_opaque_binary_document_path(resolved.scoped_path.as_str()) {
+        return Err(binary_document_write_error(
+            "write_file",
+            resolved.scoped_path.as_str(),
+        ));
+    }
     let content = required_str(request.input, "content")?;
     if content.len() > MAX_WRITE_SIZE {
         return Err(input_error());
@@ -367,6 +378,20 @@ pub(super) async fn write_file(
     {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
+        ));
+    }
+    // PDF is a text-authorable format (new-file creation is legitimate), but
+    // an existing PDF cannot be safely overwritten via text tools once it has
+    // been read as extracted text — the fingerprint bypass in issue #6898
+    // applies to overwrites only. Block existing-PDF overwrites explicitly;
+    // new PDF creation falls through to the normal write path.
+    if let Some(stat) = &existing_stat
+        && stat.file_type == FileType::File
+        && is_pdf_document_path(resolved.scoped_path.as_str())
+    {
+        return Err(binary_document_write_error(
+            "write_file",
+            resolved.scoped_path.as_str(),
         ));
     }
     let can_read = operation_allowed(&resolved.grant.permissions, FilesystemOperation::ReadFile);
@@ -405,6 +430,7 @@ pub(super) async fn write_file(
         &scope,
         resolved.virtual_path.as_str(),
         content_fingerprint(content.as_bytes()),
+        ReadRepresentation::RawText,
     );
     let output = json!({
         "path": resolved.scoped_path.as_str(),
@@ -436,6 +462,12 @@ async fn verify_read_before_edit(
             resolved.scoped_path.as_str(),
         ));
     };
+    if recorded.representation != ReadRepresentation::RawText {
+        return Err(binary_document_write_error(
+            operation,
+            resolved.scoped_path.as_str(),
+        ));
+    }
     // A file grown past what read_file can return cannot match any recorded
     // read; report it as changed instead of fingerprinting unbounded bytes.
     if stat.len > MAX_READ_SIZE {
@@ -448,10 +480,34 @@ async fn verify_read_before_edit(
         .map_err(|error| {
             filesystem_error_with_summary(operation, resolved.scoped_path.as_str(), error)
         })?;
-    if content_fingerprint(&bytes) != recorded {
+    if content_fingerprint(&bytes) != recorded.fingerprint {
         return Err(stale_read_error(operation, resolved.scoped_path.as_str()));
     }
+    reject_binary_probe(&bytes)
+        .map_err(|_| binary_document_write_error(operation, resolved.scoped_path.as_str()))?;
     Ok(bytes)
+}
+
+fn lower_path_extension(scoped_path: &str) -> Option<String> {
+    scoped_path.rsplit('.').next().map(str::to_ascii_lowercase)
+}
+
+fn is_opaque_binary_document_path(scoped_path: &str) -> bool {
+    matches!(
+        lower_path_extension(scoped_path).as_deref(),
+        Some("doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx")
+    )
+}
+
+fn is_pdf_document_path(scoped_path: &str) -> bool {
+    matches!(lower_path_extension(scoped_path).as_deref(), Some("pdf"))
+}
+
+fn binary_document_write_error(operation: &str, scoped_path: &str) -> CodingCapabilityError {
+    operation_error_with_summary(format!(
+        "{operation} failed for {}: binary documents cannot be edited with text tools; use a document editing capability that preserves the original format",
+        safe_summary_path(scoped_path)
+    ))
 }
 
 fn read_before_edit_error(operation: &str, scoped_path: &str) -> CodingCapabilityError {
@@ -672,6 +728,7 @@ pub(super) async fn apply_patch(
         &scope,
         resolved.virtual_path.as_str(),
         content_fingerprint(&output),
+        ReadRepresentation::RawText,
     );
     let mut result = json!({
         "path": resolved.scoped_path.as_str(),

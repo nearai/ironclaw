@@ -6563,24 +6563,24 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
-/// Regression guard: a message that arrives while the thread is busy is stored with
-/// `RejectedBusy` status and must NOT be auto-resubmitted when the blocking run
-/// reaches a terminal state.
+/// Regression guard: a message that arrives while the thread is busy is queued
+/// as steering input for the active run (`Queued` status, `DeferredBusy`
+/// response) and must NOT be auto-resubmitted as a separate run when the
+/// blocking run reaches a terminal state.
 ///
 /// Scenario:
 ///  A – submitted via `turn_coordinator.submit_turn`; worker is stopped so it stays
 ///      Queued and holds the active-lock.
-///  B – submitted via `bundle.submit_turn` (WebUI path); thread is busy → stored
-///      as `RejectedBusy`; response carries a non-empty `notice`.
-///  Cancel A → B stays `RejectedBusy` (no auto-resubmission).
+///  B – submitted via the WebUI path; thread is busy → stored as `Queued`,
+///      bound to run A; response is `DeferredBusy` with a non-empty `notice`.
+///  Cancel A → B flips `Queued` → `RejectedBusy` (the cancel-time steering
+///      reconciler claims the undrained input; resend affordance, never an
+///      auto-resubmission as a separate run).
 ///  C – submitted after A is cancelled; thread is free → `Submitted`.
 ///
-/// arch-note: lives in runtime.rs (adds ~200 lines to an already >3000-line file) because
-/// it requires `build_reborn_runtime` + full turn-runner control that only the runtime test
-/// harness provides; moving it would require duplicating that harness. Decomposition of
-/// runtime.rs is tracked in plan #4471.
+// arch-exempt: large_file, requires `build_reborn_runtime` + full turn-runner control that only this runtime test harness provides — moving it would duplicate the harness, plan #4471
 #[tokio::test]
-async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
+async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
         reply: "busy-drain ok".to_string(),
@@ -6672,25 +6672,30 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
     .await
     .expect("message B submit should not error");
 
-    let RebornSubmitTurnResponse::RejectedBusy {
+    let RebornSubmitTurnResponse::DeferredBusy {
         notice: notice_b,
         active_run_id: busy_run_id,
+        status: status_b,
         ..
     } = response_b
     else {
-        panic!("expected RejectedBusy for message B, got {response_b:?}");
+        panic!("expected DeferredBusy for message B, got {response_b:?}");
     };
     assert_eq!(
-        busy_run_id,
-        Some(run_id_a),
-        "RejectedBusy should report run A as the active run"
+        busy_run_id, run_id_a,
+        "DeferredBusy should report run A as the active run"
+    );
+    assert_eq!(
+        status_b,
+        TurnStatus::Queued,
+        "run A holds the lock in Queued state"
     );
     assert!(
         !notice_b.is_empty(),
-        "RejectedBusy response must carry a non-empty notice"
+        "DeferredBusy response must carry a non-empty notice"
     );
 
-    // Verify message B is stored with RejectedBusy status.
+    // Verify message B is stored with Queued status, bound to run A.
     let history = runtime
         .thread_service
         .list_thread_history(ThreadHistoryRequest {
@@ -6699,20 +6704,25 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
         })
         .await
         .expect("thread history after B");
-    let rejected_messages: Vec<_> = history
+    let queued_messages: Vec<_> = history
         .messages
         .iter()
-        .filter(|m| matches!(m.status, MessageStatus::RejectedBusy))
+        .filter(|m| matches!(m.status, MessageStatus::Queued))
         .collect();
     assert_eq!(
-        rejected_messages.len(),
+        queued_messages.len(),
         1,
-        "exactly one message should be stored as RejectedBusy after thread-busy submit"
+        "exactly one message should be stored as Queued after thread-busy submit"
     );
     assert_eq!(
-        rejected_messages[0].kind,
+        queued_messages[0].kind,
         MessageKind::User,
-        "the RejectedBusy message must be of kind User"
+        "the Queued message must be of kind User"
+    );
+    assert_eq!(
+        queued_messages[0].turn_run_id.as_deref(),
+        Some(run_id_a.to_string().as_str()),
+        "the Queued message must be bound to run A"
     );
 
     // Cancel run A — this is the terminal event that (must NOT) auto-resubmit B.
@@ -6736,10 +6746,10 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
         .await
         .expect("thread history after cancel");
     // Identify message B by the message_id we captured from the pre-cancel history.
-    // Using the stable message_id (rather than a simple RejectedBusy count) ensures
-    // a regression that leaves the RejectedBusy row AND adds a Submitted row for the
-    // same message cannot slip past as "still one RejectedBusy".
-    let msg_b_id = rejected_messages[0].message_id;
+    // Using the stable message_id (rather than a simple Queued count) ensures
+    // a regression that leaves the Queued row AND adds a Submitted row for the
+    // same message cannot slip past as "still one Queued".
+    let msg_b_id = queued_messages[0].message_id;
 
     let msg_b_after_cancel: Vec<_> = history_after_cancel
         .messages
@@ -6754,7 +6764,7 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
     assert_eq!(
         msg_b_after_cancel[0].status,
         MessageStatus::RejectedBusy,
-        "message B must still be RejectedBusy after run A is cancelled — no auto-resubmission"
+        "message B must flip to RejectedBusy after run A is cancelled — resend affordance, no auto-resubmission"
     );
     // Guard: no additional Submitted row must have been created for message B's message_id.
     let submitted_for_b: Vec<_> = history_after_cancel

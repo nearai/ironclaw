@@ -56,6 +56,7 @@ use ironclaw_host_api::{
     scope::Principal,
 };
 use ironclaw_loop_contracts::{LoopHostMilestoneSink, LoopRunContext, RunProfileResolutionRequest};
+use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
     AwaitEdgeSettler, AwaitEdgeWriter, CapabilityAllowSet, CapabilityResolveError,
     CapabilitySurfaceProfileResolver, EmptyUserProfileSource, FilesystemSkillBundleSource,
@@ -87,7 +88,7 @@ use ironclaw_runner::milestone_events::{
 };
 use ironclaw_runner::runtime::{
     DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
-    ProcessRuntimeSystem, ToolDisclosureMode, build_default_planned_runtime,
+    ProcessRuntimeSystem, build_default_planned_runtime,
 };
 use ironclaw_runner::subagent::await_edge::{
     boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
@@ -624,6 +625,7 @@ pub struct RebornRuntime {
     pub(crate) _process_gate_query_source: Arc<dyn ProcessGateQuerySource<Error = TurnError>>,
     turn_tree_store: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
     thread_service: Arc<dyn SessionThreadService>,
+    input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
     thread_scope: ThreadScope,
     turn_scheduler: RuntimeTurnScheduler,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
@@ -1111,6 +1113,7 @@ impl RebornRuntime {
             crate::extension_host_assembly::ChannelHostAssemblyWiring {
                 thread_service,
                 turn_coordinator,
+                input_enqueue: self.webui_input_enqueue(),
                 approval_interaction: None,
                 auth_interaction: None,
                 identity,
@@ -1232,17 +1235,17 @@ impl RebornRuntime {
         Some(service.connection_notices().clone())
     }
 
-    /// The production protected pairing route mount (`pairing/{mint,status,
-    /// unpair}`) over the composed pairing registry. Tests only.
+    /// The composed pairing registry, for building the protected pairing
+    /// route mount (`pairing/{mint,status,unpair}`). Tests only.
+    ///
+    /// Composition hands out the *registry*, not the mount: the routes live in
+    /// `ironclaw_webui` (PROPOSAL §6.9.4) and this crate does not depend on
+    /// the transport — `ironclaw_webui` is a dev-dependency here, not a
+    /// normal one, and building the mount from production code would make it
+    /// a normal one.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn channel_pairing_route_mount_for_test(
-        &self,
-    ) -> Option<ironclaw_host_ingress::ProtectedRouteMount> {
-        self.channel_pairing.as_ref().map(|registry| {
-            ironclaw_extension_host::channel_pairing_serve::channel_pairing_route_mount(Arc::clone(
-                registry,
-            ))
-        })
+    pub fn channel_pairing_registry_for_test(&self) -> Option<Arc<ChannelPairingRegistry>> {
+        self.channel_pairing.as_ref().map(Arc::clone)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1620,6 +1623,10 @@ impl RebornRuntime {
         self.product_turn_coordinator()
     }
 
+    pub(crate) fn webui_input_enqueue(&self) -> Arc<dyn ironclaw_loop_host::HostInputEnqueuePort> {
+        Arc::clone(&self.input_enqueue)
+    }
+
     /// The generic post-OAuth channel-identity binding config for this
     /// deployment (extension-runtime §5.5): channel extensions bind through
     /// generic discovery over the durable installation store; bindings
@@ -1627,16 +1634,14 @@ impl RebornRuntime {
     /// provisioning opens the caller's direct conversation through the
     /// extension's own adapter. `None` when the composed runtime carries no
     /// durable channel-identity storage.
-    /// The bearer-authed generic pairing route mount (`WebGeneratedCode`
-    /// channels), when the composed runtime built any pairing service.
-    pub fn channel_pairing_route_mount(
-        &self,
-    ) -> Option<ironclaw_host_ingress::ProtectedRouteMount> {
-        self.channel_pairing.as_ref().map(|registry| {
-            ironclaw_extension_host::channel_pairing_serve::channel_pairing_route_mount(
-                std::sync::Arc::clone(registry),
-            )
-        })
+    /// The composed pairing registry for the bearer-authed generic pairing
+    /// routes (`WebGeneratedCode` channels), when the composed runtime built
+    /// any pairing service. The binary turns it into a route mount through
+    /// `ironclaw_webui::channel_pairing_route_mount` — see
+    /// `channel_pairing_registry_for_test` for why the mount is not built
+    /// here.
+    pub fn channel_pairing_registry(&self) -> Option<Arc<ChannelPairingRegistry>> {
+        self.channel_pairing.as_ref().map(Arc::clone)
     }
 
     pub fn channel_identity_binding_config(
@@ -3552,6 +3557,37 @@ pub(crate) async fn build_runtime_with_resource_governor(
         .map_err(|error| RebornRuntimeError::MalformedConfig {
             reason: format!("await-edge resolver result writer bind failed: {error}"),
         })?;
+    // Steering/followup input queue: a message queued while a run is busy is
+    // persisted per-run through the composed scoped filesystem
+    // (`FilesystemHostInputQueue`), so it survives a daemon restart — the
+    // scheduler re-claims the run from its checkpoint and drains the persisted
+    // input. The same instance serves as the loop's drain reader
+    // (`parts.input_queue`) and every inbound surface's enqueue port.
+    let host_input_queue = {
+        let owner_scope = ResourceScope {
+            tenant_id: thread_scope.tenant_id.clone(),
+            user_id: actor_user_id.clone(),
+            agent_id: Some(thread_scope.agent_id.clone()),
+            project_id: thread_scope.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        Arc::new(ironclaw_loop_host::FilesystemHostInputQueue::new(
+            Arc::clone(&services.scoped_filesystem),
+            owner_scope,
+            Arc::clone(&thread_service),
+        ))
+    };
+    let host_input_queue_reader: Arc<dyn ironclaw_loop_host::HostInputQueue> =
+        host_input_queue.clone();
+    let host_input_queue_for_cancel_reconcile: Arc<
+        dyn ironclaw_loop_host::HostInputQueueReconcile,
+    > = host_input_queue.clone();
+    let host_input_queue_for_terminal_reconcile: Arc<
+        dyn ironclaw_loop_host::HostInputQueueReconcile,
+    > = host_input_queue.clone();
+    let host_input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort> = host_input_queue;
 
     #[cfg(feature = "test-support")]
     let runtime_skill_context_source = skill_context_source.clone();
@@ -3627,7 +3663,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
         model_route_resolver: None,
         cancellation_factory: None,
         skill_context_source,
-        input_queue: None,
+        input_queue: Some(host_input_queue_reader),
+        input_queue_reconcile: Some(host_input_queue_for_terminal_reconcile),
         identity_context_source: match (
             services.standalone_storage_root.clone(),
             services.default_system_prompt_path.clone(),
@@ -3747,7 +3784,16 @@ pub(crate) async fn build_runtime_with_resource_governor(
             ),
         )) as Arc<dyn ironclaw_loop_contracts::SystemInferencePort>
     });
-    let planned_turn_coordinator: Arc<dyn TurnCoordinator> = composition.coordinator.clone();
+    // Terminal reconciliation of stranded steering inputs: every cancel caller
+    // goes through this ONE decorated coordinator, so a run cancelled before
+    // its next drain flips its queued messages to `RejectedBusy` (resend
+    // affordance) instead of leaving them `Queued` forever.
+    let planned_turn_coordinator: Arc<dyn TurnCoordinator> = Arc::new(
+        ironclaw_runner::steering_reconcile::CancelReconcilingTurnCoordinator::new(
+            composition.coordinator.clone(),
+            host_input_queue_for_cancel_reconcile,
+        ),
+    );
     let approval_interaction_service: Arc<dyn ApprovalInteractionService> =
         if let (Some(local_runtime), Some(builtin_capability_policy)) =
             (local_runtime, builtin_capability_policy.as_ref())
@@ -3800,6 +3846,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         crate::extension_host_assembly::RuntimeExtensionHostAssemblyWiring {
             thread_service: Arc::clone(&thread_service),
             turn_coordinator: Arc::clone(&planned_turn_coordinator),
+            input_enqueue: Arc::clone(&host_input_enqueue),
             approval_interaction: Arc::clone(&approval_interaction_service),
             auth_interaction: Arc::clone(&auth_interaction_service),
             thread_scope: &thread_scope,
@@ -4152,6 +4199,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         _process_gate_query_source: process_gate_query_source,
         turn_tree_store: turn_projection,
         thread_service,
+        input_enqueue: host_input_enqueue,
         thread_scope,
         turn_scheduler: RuntimeTurnScheduler::new(composition.scheduler_handle, scheduler_notifier),
         trigger_poller_handle,

@@ -216,10 +216,6 @@ struct PendingInputAck {
 }
 
 impl PendingInputAck {
-    fn is_empty(&self) -> bool {
-        self.tokens.is_empty()
-    }
-
     fn replace(&mut self, tokens: Vec<LoopInputAckToken>) -> Result<(), AgentLoopExecutorError> {
         if !tokens.is_empty() && !self.tokens.is_empty() {
             return Err(AgentLoopExecutorError::PlannerContract {

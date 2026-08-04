@@ -92,6 +92,7 @@ fn auth_error_mapping_run_state(request: &GetRunStateRequest) -> TurnRunState {
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-auth-error").unwrap(), // safety: fixed test binding literal is valid.
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
+        allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
         received_at: Utc::now(),
@@ -223,6 +224,7 @@ async fn standalone_oauth_turn_gate_callback_resumes_default_turn_coordinator() 
     let flow = product_auth
         .flow_manager()
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: auth_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
@@ -1020,6 +1022,7 @@ async fn create_provider_flow(
     product_auth
         .flow_manager()
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope,
             kind: AuthFlowKind::IntegrationCredential,
@@ -1048,6 +1051,7 @@ async fn create_vendor_flow(
     match product_auth
         .flow_manager()
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope,
             kind: AuthFlowKind::IntegrationCredential,

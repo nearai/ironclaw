@@ -12,13 +12,14 @@ use ironclaw_loop_contracts::{
 use ironclaw_loop_host::{
     AgentTurnRunCancellationFactory, AwaitEdgeSettler, AwaitEdgeWriter,
     CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier, HostIdentityContextSource,
-    HostInputQueue, HostManagedModelGateway, HostSkillContextSource, HostUserProfileSource,
-    LoopAttachmentReadPort, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter, PerSurfaceCapabilityDenyDecorator,
-    ProductLiveCancellationReadiness, RunCancellationFactory, SpawnSubagentFlavorDescriptor,
-    SpawnSubagentInputCodec, SubagentDefinitionResolver, SubagentPromptComposer,
-    SubagentPromptMaterialSource, SubagentSpawnCapabilityPort, SubagentSpawnDeps,
-    SubagentSpawnLimits, verify_product_live_cancellation_probe,
+    HostInputQueue, HostInputQueueReconcile, HostManagedModelGateway, HostSkillContextSource,
+    HostUserProfileSource, LoopAttachmentReadPort, LoopCapabilityPortDecorator,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, ModelRouteResolver,
+    PerSurfaceCapabilityDenyDecorator, ProductLiveCancellationReadiness, RunCancellationFactory,
+    SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec, SubagentDefinitionResolver,
+    SubagentPromptComposer, SubagentPromptMaterialSource, SubagentSpawnCapabilityPort,
+    SubagentSpawnDeps, SubagentSpawnLimits, ToolDisclosureCapabilityDecorator, ToolDisclosureMode,
+    verify_product_live_cancellation_probe,
 };
 use ironclaw_memory::MemoryService;
 use ironclaw_outbound::ReplyAttachmentIntentPort;
@@ -39,7 +40,6 @@ use crate::{
         apply_capability_surface_profile, capability_resolve_error_to_agent_host_error,
     },
     loop_exit_applier::{AwaitDependentRunEvidenceStore, ThreadCheckpointLoopExitEvidencePort},
-    model_routes::ModelRouteResolver,
     planned_driver_factory::{
         DefaultPlannedDriverRegistrationError, default_planned_run_profile_resolver,
         register_default_planned_driver, register_default_text_only_driver,
@@ -50,7 +50,6 @@ use crate::{
         prompt_material::GateBackedSubagentPromptMaterialSource,
     },
     text_loop_driver::TextOnlyModelReplyDriverConfig,
-    tool_disclosure_port::ToolDisclosureCapabilityDecorator,
     turn_run_executor::RebornTurnRunExecutor,
     turn_scheduler::{
         SchedulerTurnRunWakeNotifier, TurnRunScheduler, TurnRunSchedulerConfig,
@@ -94,60 +93,6 @@ pub const DEFAULT_MAX_CONCURRENT_RUNS_PER_USER: std::num::NonZeroU32 =
         // 3 is a non-zero compile-time constant so this arm is never reached.
         None => std::num::NonZeroU32::MIN,
     };
-
-pub const REBORN_TOOL_DISCLOSURE_ENV: &str = "REBORN_TOOL_DISCLOSURE";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ToolDisclosureMode {
-    #[default]
-    Off,
-    Bridged,
-}
-
-impl ToolDisclosureMode {
-    pub fn from_env() -> Self {
-        match std::env::var(REBORN_TOOL_DISCLOSURE_ENV) {
-            Ok(value) => Self::from_raw(Some(&value)),
-            Err(std::env::VarError::NotPresent) => Self::from_raw(None),
-            // Don't silently `.ok()`-drop a NotUnicode read: the var is set but
-            // unreadable (a misconfiguration). Record it at the REPL-safe debug
-            // level and fail closed even if the unset default changes later.
-            Err(std::env::VarError::NotUnicode(_)) => {
-                tracing::debug!(
-                    target: "ironclaw::reborn::runtime",
-                    env = REBORN_TOOL_DISCLOSURE_ENV,
-                    "REBORN_TOOL_DISCLOSURE is set but not valid UTF-8; falling back to Off"
-                );
-                Self::Off
-            }
-        }
-    }
-
-    /// Progressive tool disclosure defaults **off** — an unset, empty, or
-    /// unrecognized `REBORN_TOOL_DISCLOSURE` leaves the request path
-    /// byte-identical to the pre-disclosure behavior. Only an explicit
-    /// `REBORN_TOOL_DISCLOSURE=bridged` opts into the bridged path.
-    fn from_raw(raw: Option<&str>) -> Self {
-        match raw {
-            Some(value) if value.eq_ignore_ascii_case("off") => Self::Off,
-            Some(value) if value.eq_ignore_ascii_case("bridged") => Self::Bridged,
-            Some(value) if !value.is_empty() => {
-                tracing::debug!(
-                    target: "ironclaw::reborn::runtime",
-                    env = REBORN_TOOL_DISCLOSURE_ENV,
-                    "unrecognized REBORN_TOOL_DISCLOSURE value; falling back to default Off"
-                );
-                Self::Off
-            }
-            // unset / empty -> default off (byte-identical request path).
-            _ => Self::Off,
-        }
-    }
-
-    pub fn is_bridged(self) -> bool {
-        matches!(self, Self::Bridged)
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct DefaultPlannedRuntimeConfig {
@@ -311,6 +256,14 @@ where
     /// a bug — the same "genuinely optional" shape as `attachment_read_port`.
     pub gate_record_store: Option<Arc<dyn ironclaw_approvals::GateRecordStorePort>>,
     pub input_queue: Option<Arc<dyn HostInputQueue>>,
+    /// Terminal-reconciliation surface of the SAME queue as `input_queue`.
+    /// When present, the composed [`ProcessTransitionPort`] is decorated with
+    /// [`crate::steering_reconcile::SteeringReconcilingProcessTransitions`],
+    /// so every terminal run transition (complete/fail/cancel) closes the
+    /// run's steering queue, settles stranded `Queued` rows, and reclaims the
+    /// per-run queue record. `None` only for compositions without a steering
+    /// queue (then there is nothing to reconcile).
+    pub input_queue_reconcile: Option<Arc<dyn HostInputQueueReconcile>>,
     /// Required by live planned-runtime composition. Helper-level tests may use
     /// a no-op implementation, but the type signature always requires a valid
     /// identity context source.
@@ -381,6 +334,7 @@ pub enum DefaultPlannedRuntimeBuildError {
     PlannedDriver(DefaultPlannedDriverRegistrationError),
     RunProfile(String),
     SubagentCompletion(String),
+    SteeringReconcileObserver(String),
 }
 
 impl fmt::Display for DefaultPlannedRuntimeBuildError {
@@ -391,6 +345,12 @@ impl fmt::Display for DefaultPlannedRuntimeBuildError {
             Self::RunProfile(error) => write!(formatter, "run profile resolver failed: {error}"),
             Self::SubagentCompletion(error) => {
                 write!(formatter, "subagent completion wiring failed: {error}")
+            }
+            Self::SteeringReconcileObserver(error) => {
+                write!(
+                    formatter,
+                    "steering reconcile observer wiring failed: {error}"
+                )
             }
         }
     }
@@ -646,6 +606,19 @@ where
             parts.turn_event_sink.clone(),
         )))
         .map_err(DefaultPlannedRuntimeBuildError::SubagentCompletion)?;
+    if let Some(reconcile) = parts.input_queue_reconcile.clone() {
+        // Completeness net over the transition-port decoration below: the
+        // scheduler/supervisor terminalizes crash-reclaimed and panicked runs
+        // through the raw runtime handle, but every terminal transition lands
+        // in the journal, and observer delivery is durable (cursor-tracked,
+        // retried, replayed across restarts). Reconciliation is idempotent,
+        // so double delivery with the decorator is a no-op.
+        process_system
+            .subscribe_process_observer(Arc::new(
+                crate::steering_reconcile::SteeringReconcileCommitObserver::new(reconcile),
+            ))
+            .map_err(DefaultPlannedRuntimeBuildError::SteeringReconcileObserver)?;
+    }
     let base_coordinator = DefaultTurnCoordinator::new(Arc::clone(&agent_turn_runtime))
         .with_run_profile_resolver(Arc::clone(&run_profile_resolver))
         .with_wake_notifier(Arc::clone(&wake_notifier))
@@ -809,8 +782,21 @@ where
     }
     let host_factory = Arc::new(host_factory);
 
-    let process_transition_port: Arc<dyn ProcessTransitionPort<Error = ironclaw_turns::TurnError>> =
-        process_system.transitions();
+    let mut process_transition_port: Arc<
+        dyn ProcessTransitionPort<Error = ironclaw_turns::TurnError>,
+    > = process_system.transitions();
+    if let Some(reconcile) = parts.input_queue_reconcile {
+        // Decorate the ONE transition port every terminal path flows through
+        // (loop-exit apply, executor/scheduler failure fallbacks), so a run
+        // that ends without a cancel still closes and reclaims its steering
+        // queue.
+        process_transition_port = Arc::new(
+            crate::steering_reconcile::SteeringReconcilingProcessTransitions::new(
+                process_transition_port,
+                reconcile,
+            ),
+        );
+    }
     let loop_exit_applier = Arc::new(LoopExitApplier::new(
         Arc::clone(&process_transition_port),
         parts.loop_exit_evidence,
@@ -986,69 +972,6 @@ mod tests {
         DecoratingLoopCapabilityPortFactory, LoopCapabilityPortDecorator,
         LoopCapabilityPortFactory, PerSurfaceCapabilityDenyDecorator,
     };
-
-    #[test]
-    fn tool_disclosure_mode_defaults_off_with_bridged_opt_in() {
-        use super::ToolDisclosureMode;
-        assert_eq!(ToolDisclosureMode::default(), ToolDisclosureMode::Off);
-        // Default off: unset / empty / unrecognized resolve to Off so the
-        // request path stays byte-identical. Only explicit `bridged` opts in.
-        // `is_bridged()` is what gates whether the gateway attaches the decorator.
-        assert!(
-            !ToolDisclosureMode::from_raw(None).is_bridged(),
-            "unset must default OFF (byte-identical request path)"
-        );
-        assert!(!ToolDisclosureMode::from_raw(Some("")).is_bridged());
-        assert!(
-            !ToolDisclosureMode::from_raw(Some("garbage")).is_bridged(),
-            "unrecognized values must fall back to the default Off"
-        );
-        assert!(ToolDisclosureMode::from_raw(Some("bridged")).is_bridged());
-        assert!(ToolDisclosureMode::from_raw(Some("BRIDGED")).is_bridged());
-        assert!(
-            !ToolDisclosureMode::from_raw(Some("off")).is_bridged(),
-            "explicit REBORN_TOOL_DISCLOSURE=off disables disclosure"
-        );
-        // Per-variant gating is unchanged.
-        assert!(!ToolDisclosureMode::Off.is_bridged());
-        assert!(ToolDisclosureMode::Bridged.is_bridged());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn tool_disclosure_mode_non_unicode_env_fails_closed() {
-        use std::ffi::OsString;
-        use std::os::unix::ffi::OsStringExt;
-        use std::process::Command;
-
-        use super::{REBORN_TOOL_DISCLOSURE_ENV, ToolDisclosureMode};
-
-        const CHILD_MARKER: &str = "IRONCLAW_NON_UNICODE_DISCLOSURE_TEST_CHILD";
-        if std::env::var_os(CHILD_MARKER).is_some() {
-            assert_eq!(
-                ToolDisclosureMode::from_env(),
-                ToolDisclosureMode::Off,
-                "non-Unicode configuration must fail closed"
-            );
-            return;
-        }
-
-        let output = Command::new(std::env::current_exe().expect("current test executable"))
-            .args([
-                "--exact",
-                "runtime::tests::tool_disclosure_mode_non_unicode_env_fails_closed",
-                "--test-threads=1",
-            ])
-            .env(CHILD_MARKER, "1")
-            .env(REBORN_TOOL_DISCLOSURE_ENV, OsString::from_vec(vec![0xff]))
-            .output()
-            .expect("spawn isolated non-Unicode environment test");
-        assert!(
-            output.status.success(),
-            "isolated non-Unicode environment test failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
 
     #[test]
     fn scheduler_permit_count_unlimited_uses_max_permits() {

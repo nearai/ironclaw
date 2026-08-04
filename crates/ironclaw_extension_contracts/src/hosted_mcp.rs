@@ -196,8 +196,9 @@ impl<'de> Deserialize<'de> for HostedMcpEndpoint {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostedMcpAuthSelection {
-    /// Probe without credentials and derive no-auth, bearer, or OAuth setup
-    /// from the server's protocol response.
+    /// Probe without credentials during registration. Resolve no-auth or OAuth
+    /// only when the protocol proves it; an otherwise unexplained 401 requires
+    /// the caller to retry registration with an explicit OAuth or bearer choice.
     Auto,
     #[default]
     NoAuth,
@@ -253,6 +254,21 @@ mod tests {
         assert!(
             hosted_mcp_extension_id(&LifecyclePackageId::new("mcp-linear").expect("id")).is_err()
         );
+    }
+
+    #[test]
+    fn hosted_mcp_endpoint_deserialization_rejects_malformed_values() {
+        for value in [
+            serde_json::json!(""),
+            serde_json::json!("https://mcp.example.test/\npath"),
+            serde_json::json!("x".repeat(HOSTED_MCP_ENDPOINT_MAX_BYTES + 1)),
+            serde_json::json!(42),
+        ] {
+            assert!(
+                serde_json::from_value::<HostedMcpEndpoint>(value).is_err(),
+                "malformed hosted MCP endpoint must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -351,6 +367,18 @@ mod tests {
         assert_eq!(
             locations[0].as_str(),
             "https://mcp.notion.com/.well-known/oauth-protected-resource/mcp"
+        );
+    }
+
+    #[test]
+    fn stripe_style_unquoted_auth_challenge_extracts_metadata_location() {
+        let locations = extract_mcp_auth_metadata_locations(
+            "Bearer resource_metadata=https://mcp.stripe.com/.well-known/oauth-protected-resource",
+        );
+        assert_eq!(locations.len(), 1);
+        assert_eq!(
+            locations[0].as_str(),
+            "https://mcp.stripe.com/.well-known/oauth-protected-resource"
         );
     }
 }

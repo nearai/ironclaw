@@ -23,6 +23,7 @@ use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_host_api::turn::{
     EventCursor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope, TurnStatus,
 };
+use ironclaw_loop_host::RejectingInputEnqueue;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
@@ -281,7 +282,7 @@ async fn replay_submit_carries_direct_surface_type_and_adapter_id() {
     let thread_service = StubSessionThreadService;
 
     handoff
-        .submit_or_replay(&thread_service, &coordinator)
+        .submit_or_replay(&thread_service, &coordinator, &RejectingInputEnqueue)
         .await
         .expect("submit_or_replay succeeds");
 
@@ -547,7 +548,7 @@ async fn shared_user_message_records_channel_surface_type() {
     let thread_service = StubSessionThreadService;
 
     handoff
-        .submit_or_replay(&thread_service, &coordinator)
+        .submit_or_replay(&thread_service, &coordinator, &RejectingInputEnqueue)
         .await
         .expect("submit_or_replay succeeds");
 

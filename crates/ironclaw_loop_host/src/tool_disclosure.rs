@@ -6,12 +6,12 @@ use std::{
     sync::LazyLock,
 };
 
+use crate::CapabilityAllowSet;
 use ironclaw_host_api::{
     ids::{CapabilityId, ProviderToolName},
     runtime::RuntimeKind,
 };
 use ironclaw_loop_contracts::{CapabilityDescriptorView, ConcurrencyHint, ProviderToolDefinition};
-use ironclaw_loop_host::CapabilityAllowSet;
 use serde_json::{Map, Value, json};
 
 /// Canonical core tool names from the progressive-disclosure policy.
@@ -43,9 +43,10 @@ pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     "http",
     "web_search",
     // onboarding entry points — the full extension lifecycle is core so a weak
-    // model can run search -> install -> remove directly, without
+    // model can run search -> register custom MCP -> install -> remove directly, without
     // routing the install/remove steps through tool_search.
     "extension_search",
+    "extension_register_hosted_mcp",
     "extension_install",
     "extension_remove",
     // routine / scheduled-trigger lifecycle — core so the model can list and
@@ -582,7 +583,7 @@ pub(crate) fn is_bridge_capability_id(capability_id: &CapabilityId) -> bool {
 
 /// The synthetic `ironclaw.*` bridge ids, exempted from profile allow-set
 /// narrowing at the composition root (#5647).
-pub(crate) fn bridge_capability_ids() -> impl Iterator<Item = CapabilityId> {
+pub fn bridge_capability_ids() -> impl Iterator<Item = CapabilityId> {
     bridge_tool_definitions_with_tokens().map(|(definition, _)| definition.capability_id.clone())
 }
 
@@ -1012,6 +1013,10 @@ mod tests {
             ("shell", ironclaw_host_runtime::SHELL_CAPABILITY_ID),
             ("http", ironclaw_host_runtime::HTTP_CAPABILITY_ID),
             ("extension_search", "builtin.extension_search"),
+            (
+                "extension_register_hosted_mcp",
+                "builtin.extension_register_hosted_mcp",
+            ),
             ("extension_install", "builtin.extension_install"),
             ("extension_remove", "builtin.extension_remove"),
             ("trigger_list", "builtin.trigger_list"),
@@ -2288,5 +2293,24 @@ mod tests {
             "required": ["request"],
             "additionalProperties": false
         })
+    }
+
+    /// Moved verbatim from the deleted `ironclaw_runner::tool_disclosure_bridge`
+    /// delegate module (WS3 runner sheds): `bridge_capability_ids` is `pub` on
+    /// this crate now, so the one-function forwarding module it needed is gone.
+    #[test]
+    fn bridge_capability_ids_exposes_exact_synthetic_bridge_set() {
+        let capability_ids: Vec<String> = bridge_capability_ids()
+            .map(|capability_id| capability_id.into_string())
+            .collect();
+
+        assert_eq!(
+            capability_ids,
+            vec![
+                "ironclaw.tool_search".to_string(),
+                "ironclaw.tool_describe".to_string(),
+                "ironclaw.tool_call".to_string(),
+            ]
+        );
     }
 }

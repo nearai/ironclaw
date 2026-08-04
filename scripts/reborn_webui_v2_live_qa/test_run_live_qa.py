@@ -3896,7 +3896,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(result.details["delivery_target_present"], True)
         self.assertIn("preflight", result.details)
 
-    def test_start_reborn_server_does_not_seed_retired_slack_redirect_env(self):
+    def test_start_reborn_server_forwards_slack_oauth_env(self):
         captured: dict[str, object] = {}
 
         class FakeProcess:
@@ -3937,9 +3937,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(captured["health_url"], "http://127.0.0.1:38555/api/health")
         env = captured["env"]
         self.assertIsInstance(env, dict)
-        self.assertNotIn(
-            "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI",
-            env,
+        self.assertEqual(
+            env["REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_ID"],
+            "slack-client",
         )
 
     def test_completed_capability_counts_ignore_stale_completed_runs(self):
@@ -5572,13 +5572,40 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 )
 
             slack = prepared.preflight["slack"]
-            self.assertTrue(slack["enabled_in_config"])
             self.assertTrue(slack["requires_slack"])
             self.assertFalse(slack["env_present"])
             self.assertEqual(slack["auth_test"]["error"], "Slack env unavailable")
             self.assertIsNone(slack["setup"]["installation_id"])
             self.assertIsNone(slack["setup"]["team_id"])
             self.assertIsNone(slack["setup"]["api_app_id"])
+
+    def test_prepare_reborn_home_skips_slack_auth_for_non_slack_cases(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            args = argparse.Namespace(
+                output_dir=root / "out",
+                reborn_home=root / "missing-source-home",
+                require_slack_live=False,
+            )
+            env = {
+                "LIVE_OPENAI_COMPATIBLE_API_KEY": "fake-live-llm-key",
+                "REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV": "LIVE_OPENAI_COMPATIBLE_API_KEY",
+                "IRONCLAW_REBORN_SLACK_SIGNING_SECRET": "signing-secret",
+                "IRONCLAW_REBORN_SLACK_BOT_TOKEN": "xoxb-bot-token",
+            }
+
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch.object(run_live_qa, "_slack_auth_test") as slack_auth_test,
+            ):
+                prepared = run_live_qa.prepare_reborn_home(
+                    args,
+                    ["qa_3b_endpoint_status_live_chat"],
+                )
+
+            slack_auth_test.assert_not_called()
+            self.assertFalse(prepared.preflight["slack"]["requires_slack"])
+            self.assertFalse(prepared.preflight["slack"]["auth_test"]["checked"])
 
     def test_slack_setup_payload_uses_persisted_oauth_client_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -5784,7 +5811,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             reborn_home = Path(tmpdir) / "reborn-home"
             reborn_home.mkdir()
             (reborn_home / "config.toml").write_text(
-                "[slack]\nenabled = true\n",
+                "",
                 encoding="utf-8",
             )
             prepared = run_live_qa.PreparedRebornHome(
@@ -6231,7 +6258,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             config = (prepared.path / "config.toml").read_text(encoding="utf-8")
             self.assertIn('profile = "local-dev"', config)
             self.assertIn("[llm.default]", config)
-            self.assertIn("[slack]", config)
+            self.assertNotIn("[slack]", config)
             self.assertIn('api_key_env = "LIVE_OPENAI_COMPATIBLE_API_KEY"', config)
             for rejected in (
                 "installation_id",
@@ -6262,8 +6289,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 run_live_qa.create_generated_reborn_home(home, include_slack=True)
 
             config = (home / "config.toml").read_text(encoding="utf-8")
-            self.assertIn("[slack]", config)
-            self.assertIn("enabled = true", config)
+            self.assertNotIn("[slack]", config)
+            self.assertNotIn("enabled = true", config)
             for rejected in (
                 "installation_id",
                 "team_id",
@@ -9405,7 +9432,28 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         ):
             captured_envs[reborn_home.name] = env
             Path(env["IRONCLAW_TRACE_OUTPUT"]).write_text(
-                json.dumps({"model_name": "test", "steps": [{"type": "user_input"}]}),
+                json.dumps(
+                    {
+                        "model_name": "test",
+                        "usage": {
+                            "input_tokens": 10,
+                            "output_tokens": 2,
+                            "cache_read_input_tokens": 4,
+                            "cache_creation_input_tokens": 0,
+                            "total_cost_usd": "0.0001",
+                        },
+                        "steps": [
+                            {
+                                "response": {
+                                    "type": "text",
+                                    "content": "done",
+                                    "input_tokens": 10,
+                                    "output_tokens": 2,
+                                }
+                            }
+                        ],
+                    }
+                ),
                 encoding="utf-8",
             )
             return object(), f"http://127.0.0.1/{reborn_home.name}"
@@ -9472,6 +9520,117 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
             # The per-case trace directory is created eagerly by the helper.
             self.assertTrue((output_dir / "llm-traces").is_dir())
+            payload = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            for result in payload["results"]:
+                self.assertEqual(
+                    result["details"]["metrics"],
+                    {
+                        "model_call_count": 1,
+                        "tool_call_count": 0,
+                        "input_tokens": 10,
+                        "output_tokens": 2,
+                        "cache_read_tokens": 4,
+                        "uncached_input_tokens": 6,
+                        "cost_usd": "0.0001",
+                    },
+                )
+
+    def test_case_llm_trace_metrics_count_calls_and_aggregate_usage(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trace_path = Path(tmpdir) / "case.json"
+            trace_path.write_text(
+                json.dumps(
+                    {
+                        "model_name": "test-model",
+                        "usage": {
+                            "input_tokens": 180,
+                            "output_tokens": 35,
+                            "cache_read_input_tokens": 70,
+                            "cache_creation_input_tokens": 20,
+                            "total_cost_usd": "0.00123",
+                        },
+                        "steps": [
+                            {
+                                "response": {
+                                    "type": "user_input",
+                                    "content": "private prompt must not escape",
+                                }
+                            },
+                            {
+                                "response": {
+                                    "type": "tool_calls",
+                                    "tool_calls": [
+                                        {"name": "one", "arguments": {"secret": "x"}},
+                                        {"name": "two", "arguments": {"secret": "y"}},
+                                    ],
+                                    "input_tokens": 80,
+                                    "output_tokens": 20,
+                                }
+                            },
+                            {
+                                "response": {
+                                    "type": "text",
+                                    "content": "private answer must not escape",
+                                    "input_tokens": 100,
+                                    "output_tokens": 15,
+                                }
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            metrics = run_live_qa.parse_case_llm_trace_metrics(trace_path)
+
+        self.assertEqual(
+            metrics,
+            {
+                "model_call_count": 2,
+                "tool_call_count": 2,
+                "input_tokens": 180,
+                "output_tokens": 35,
+                "cache_read_tokens": 70,
+                "uncached_input_tokens": 110,
+                "cost_usd": "0.00123",
+            },
+        )
+        self.assertNotIn("private", json.dumps(metrics))
+        self.assertNotIn("one", json.dumps(metrics))
+
+    def test_case_llm_trace_metrics_keep_missing_provider_usage_unknown(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trace_path = Path(tmpdir) / "legacy-case.json"
+            trace_path.write_text(
+                json.dumps(
+                    {
+                        "model_name": "legacy",
+                        "steps": [
+                            {
+                                "response": {
+                                    "type": "text",
+                                    "content": "answer",
+                                    "input_tokens": 12,
+                                    "output_tokens": 3,
+                                }
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            metrics = run_live_qa.parse_case_llm_trace_metrics(trace_path)
+
+        self.assertEqual(metrics["model_call_count"], 1)
+        self.assertEqual(metrics["tool_call_count"], 0)
+        self.assertEqual(metrics["input_tokens"], 12)
+        self.assertEqual(metrics["output_tokens"], 3)
+        self.assertIsNone(metrics["cache_read_tokens"])
+        self.assertIsNone(metrics["uncached_input_tokens"])
+        self.assertIsNone(metrics["cost_usd"])
 
     def test_run_cases_fails_successful_model_case_when_trace_is_missing(self):
         async def fake_case(_ctx: run_live_qa.LiveQaContext) -> run_live_qa.ProbeResult:
@@ -9532,6 +9691,18 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertTrue(result["details"]["blocking"])
         self.assertEqual(result["details"]["failure_category"], "trace_harvest")
         self.assertIn("missing or invalid", result["details"]["error"])
+        self.assertEqual(
+            result["details"]["metrics"],
+            {
+                "model_call_count": None,
+                "tool_call_count": None,
+                "input_tokens": None,
+                "output_tokens": None,
+                "cache_read_tokens": None,
+                "uncached_input_tokens": None,
+                "cost_usd": None,
+            },
+        )
 
     def test_run_cases_blocks_slack_connect_without_personal_product_auth(self):
         async def fake_case(_ctx: run_live_qa.LiveQaContext) -> run_live_qa.ProbeResult:

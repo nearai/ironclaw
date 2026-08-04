@@ -39,7 +39,6 @@ pub mod channel_identity_store;
 pub mod channel_lifecycle;
 pub mod channel_outbound_targets;
 pub mod channel_pairing;
-pub mod channel_pairing_serve;
 pub mod channel_subject_routes;
 pub mod channel_triggered_delivery;
 pub mod deployment_channels;
@@ -234,8 +233,7 @@ pub use provider_instance_readiness::{
     ProviderInstanceReadinessInput, provider_instance_readiness_map,
 };
 pub use recipes::{
-    InstalledManifestAuthRecipeResolver, SnapshotAuthRecipeResolver, VendorRecipeConflict,
-    unified_vendor_recipes,
+    InstalledManifestAuthRecipeResolver, VendorRecipeConflict, unified_vendor_recipes,
 };
 pub use removal_cleanup::{
     ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapter, ExtensionRemovalCleanupAdapterId,

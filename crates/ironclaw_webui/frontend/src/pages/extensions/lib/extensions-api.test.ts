@@ -11,10 +11,10 @@ function extensionsApiSourceForTest() {
     if (line.startsWith("import ")) continue;
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { installExtension, registerCustomMcp, removeExtension, submitExtensionSetup, startExtensionOauth };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { installExtension, registerCustomMcp, removeExtension, submitExtensionSetup, selectHostedMcpAuth, startExtensionOauth };`;
 }
 
-test("registerCustomMcp sends only the admission wire shape", async () => {
+test("registerCustomMcp sends only the complete admission wire shape", async () => {
   const apiCalls = [];
   const context = {
     apiFetch: async (url, options) => { apiCalls.push({ url, options }); return { success: true }; },
@@ -31,6 +31,52 @@ test("registerCustomMcp sends only the admission wire shape", async () => {
     desired_id: "linear", desired_name: "Linear MCP", endpoint: "https://mcp.linear.app/mcp",
     auth_selection: { kind: "oauth", client_profile_id: "linear-default" },
   });
+});
+
+test("registerCustomMcp preserves automatic initial auth detection", async () => {
+  const apiCalls = [];
+  const context = {
+    apiFetch: async (url, options) => { apiCalls.push({ url, options }); return { success: true }; },
+    clientActionId: () => "unused", encodeURIComponent, globalThis: {}, setupExtension: () => {},
+  };
+  vm.runInNewContext(extensionsApiSourceForTest(), context);
+  await context.globalThis.__testExports.registerCustomMcp({
+    desiredId: "linear", desiredName: "Linear MCP", endpoint: "https://mcp.linear.app/mcp",
+    authSelection: { kind: "auto" },
+  });
+  assert.deepEqual(JSON.parse(apiCalls[0].options.body).auth_selection, { kind: "auto" });
+});
+
+test("selectHostedMcpAuth sends only the recovery selection through setup", async () => {
+  const setupCalls = [];
+  const context = {
+    apiFetch: () => {},
+    clientActionId: () => "unused",
+    encodeURIComponent,
+    globalThis: {},
+    setupExtension: async (extensionName, options) => {
+      setupCalls.push({ extensionName, options });
+      return { success: true };
+    },
+  };
+  vm.runInNewContext(extensionsApiSourceForTest(), context);
+
+  await context.globalThis.__testExports.selectHostedMcpAuth(
+    { kind: "extension", id: "linear" },
+    { kind: "oauth" },
+    { clientActionId: "select-auth-action" },
+  );
+
+  assert.deepEqual(JSON.parse(JSON.stringify(setupCalls)), [
+    {
+      extensionName: "linear",
+      options: {
+        action: "select_auth",
+        payload: { auth_selection: { kind: "oauth" } },
+        clientActionId: "select-auth-action",
+      },
+    },
+  ]);
 });
 
 test("installExtension assigns a fresh client idempotency key to each gesture", async () => {

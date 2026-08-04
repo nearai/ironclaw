@@ -657,7 +657,7 @@ async fn triggered_notification_for_state(
                             fallback_owner_user_id: &actor.user_id,
                             scope,
                             run_id,
-                            gate_ref: gate_ref.as_str(),
+                            gate_ref,
                             invocation_id: None,
                             body: "Authentication required to continue this automation."
                                 .to_string(),

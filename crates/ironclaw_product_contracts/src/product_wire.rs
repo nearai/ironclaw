@@ -389,6 +389,14 @@ pub enum RebornSubmitTurnResponse {
         event_cursor: Option<EventCursor>,
         notice: String,
     },
+    DeferredBusy {
+        thread_id: ThreadId,
+        accepted_message_ref: AcceptedMessageRef,
+        active_run_id: TurnRunId,
+        status: TurnStatus,
+        event_cursor: EventCursor,
+        notice: String,
+    },
     AlreadySubmitted {
         thread_id: ThreadId,
         accepted_message_ref: AcceptedMessageRef,
@@ -1364,6 +1372,8 @@ pub struct RebornSetupExtensionResponse {
     pub phase: LifecyclePublicState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blockers: Vec<LifecycleReadinessBlocker>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<LifecycleProductPayload>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

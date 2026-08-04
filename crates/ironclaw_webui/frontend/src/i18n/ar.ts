@@ -118,6 +118,7 @@ registerPack("ar", {
   "chat.identityUser": "أنت",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "انتقل إلى الأحدث",
+  "chat.queued": "في قائمة الانتظار",
   "shortcuts.title": "اختصارات لوحة المفاتيح",
   "shortcuts.send": "أرسل رسالة",
   "shortcuts.newline": "سطر جديد",

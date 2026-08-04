@@ -10,7 +10,7 @@
 //! (`trigger_list` stays visible).
 //!
 //! Traced, not assumed: denial happens at the model-gateway seam
-//! (`ironclaw_runner::model_gateway`'s `validate_provider_tool_call`, via
+//! (`ironclaw_loop_host::model_gateway`'s `validate_provider_tool_call`, via
 //! `CapabilitySurfaceDenyFilter`), BEFORE a `CapabilityCallCandidate` is ever
 //! constructed — so `CapabilityStage` never runs and nothing is appended via
 //! `append_tool_result_reference` (confirmed empirically: persisted history is

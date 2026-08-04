@@ -533,6 +533,136 @@ mod tests {
         );
     }
 
+    fn assert_binary_document_rejection(err: &super::CodingCapabilityError, file_hint: &str) {
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::OperationFailed);
+        let summary = err
+            .safe_summary()
+            .expect("binary-document rejection must carry a model-visible reason");
+        assert!(
+            summary.contains(file_hint),
+            "summary should name the file, got: {summary}"
+        );
+        assert!(
+            summary.contains("binary documents cannot be edited with text tools"),
+            "summary should explain why text editing is unsafe, got: {summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_file_rejects_opaque_document_target_without_touching_bytes() {
+        let fixture = CodingFixture::new("opaque-document-user");
+        let file = fixture.workspace_dir.join("review.docx");
+        let original = b"opaque document bytes";
+        std::fs::write(&file, original).expect("seed document");
+
+        let err = fixture
+            .dispatch(
+                super::CodingCapabilityKind::WriteFile,
+                json!({"path": "/workspace/review.docx", "content": "replacement"}),
+            )
+            .await
+            .expect_err("text write to DOCX must be rejected");
+
+        assert_binary_document_rejection(&err, "review.docx");
+        assert_eq!(
+            std::fs::read(file).expect("document after rejected write"),
+            original
+        );
+    }
+
+    #[tokio::test]
+    async fn extracted_rtf_read_does_not_authorize_raw_overwrite() {
+        let fixture = CodingFixture::new("extracted-rtf-user");
+        let file = fixture.workspace_dir.join("review.rtf");
+        let original = br"{\rtf1\ansi Original RTF text}";
+        std::fs::write(&file, original).expect("seed RTF document");
+
+        let read = fixture
+            .dispatch(
+                super::CodingCapabilityKind::ReadFile,
+                json!({"path": "/workspace/review.rtf"}),
+            )
+            .await
+            .expect("read extracted RTF text");
+        assert!(
+            read.output["content"]
+                .as_str()
+                .expect("read content")
+                .contains("Original RTF text")
+        );
+
+        let err = fixture
+            .dispatch(
+                super::CodingCapabilityKind::WriteFile,
+                json!({"path": "/workspace/review.rtf", "content": "replacement"}),
+            )
+            .await
+            .expect_err("extracted text must not authorize a raw overwrite");
+
+        assert_binary_document_rejection(&err, "review.rtf");
+        assert_eq!(
+            std::fs::read(file).expect("RTF after rejected write"),
+            original
+        );
+    }
+
+    #[tokio::test]
+    async fn write_file_rejects_existing_pdf_but_allows_new_pdf() {
+        let fixture = CodingFixture::new("pdf-write-user");
+        let existing = fixture.workspace_dir.join("existing.pdf");
+        let original = b"%PDF-1.4 existing\n";
+        std::fs::write(&existing, original).expect("seed PDF");
+
+        let err = fixture
+            .dispatch(
+                super::CodingCapabilityKind::WriteFile,
+                json!({"path": "/workspace/existing.pdf", "content": "replacement"}),
+            )
+            .await
+            .expect_err("existing PDF overwrite must be rejected");
+        assert_binary_document_rejection(&err, "existing.pdf");
+        assert_eq!(
+            std::fs::read(existing).expect("PDF after rejected write"),
+            original
+        );
+
+        fixture
+            .dispatch(
+                super::CodingCapabilityKind::WriteFile,
+                json!({"path": "/workspace/new.pdf", "content": "%PDF-1.4 new\n"}),
+            )
+            .await
+            .expect("new PDF creation must remain supported");
+        assert_eq!(
+            std::fs::read(fixture.workspace_dir.join("new.pdf")).expect("new PDF"),
+            b"%PDF-1.4 new\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_file_falls_back_to_legacy_document_extraction() {
+        let fixture = CodingFixture::new("legacy-document-user");
+        let file = fixture.workspace_dir.join("legacy.doc");
+        let mut original = b"Legacy document text".to_vec();
+        original.extend_from_slice(&[0; 32]);
+        std::fs::write(file, original).expect("seed legacy document");
+
+        let read = fixture
+            .dispatch(
+                super::CodingCapabilityKind::ReadFile,
+                json!({"path": "/workspace/legacy.doc"}),
+            )
+            .await
+            .expect("legacy document extraction fallback succeeds");
+
+        assert!(
+            read.output["content"]
+                .as_str()
+                .expect("read content")
+                .contains("Legacy document text")
+        );
+    }
+
     #[tokio::test]
     async fn write_file_requires_reading_existing_files_first() {
         let fixture = CodingFixture::new("read-before-write-user");

@@ -342,6 +342,7 @@ pub(crate) async fn build_backend_channel_pairing(
 pub(crate) struct ChannelHostAssemblyWiring {
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) turn_coordinator: Arc<dyn TurnCoordinator>,
+    pub(crate) input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
     pub(crate) approval_interaction: Option<Arc<dyn ApprovalInteractionService>>,
     pub(crate) auth_interaction: Option<Arc<dyn AuthInteractionService>>,
     pub(crate) identity: ironclaw_extension_host::channel_host::ChannelHostIdentity,
@@ -355,6 +356,7 @@ pub(crate) struct ChannelHostAssemblyWiring {
 pub(crate) struct RuntimeExtensionHostAssemblyWiring<'a> {
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) turn_coordinator: Arc<dyn TurnCoordinator>,
+    pub(crate) input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
     pub(crate) approval_interaction: Arc<dyn ApprovalInteractionService>,
     pub(crate) auth_interaction: Arc<dyn AuthInteractionService>,
     pub(crate) thread_scope: &'a ThreadScope,
@@ -450,6 +452,7 @@ pub(crate) fn start_channel_host(
     let ChannelHostAssemblyWiring {
         thread_service,
         turn_coordinator,
+        input_enqueue,
         approval_interaction,
         auth_interaction,
         identity,
@@ -501,6 +504,7 @@ pub(crate) fn start_channel_host(
         thread_service,
         turn_coordinator,
         inbound_attachments: Arc::clone(inbound_attachments),
+        input_enqueue,
         approval_interaction,
         auth_interaction,
         identity,
@@ -520,6 +524,7 @@ pub(crate) async fn build_runtime_channel_host(
         turn_coordinator,
         approval_interaction,
         auth_interaction,
+        input_enqueue,
         thread_scope,
         actor_user_id,
         auth_challenges,
@@ -551,6 +556,7 @@ pub(crate) async fn build_runtime_channel_host(
         ChannelHostAssemblyWiring {
             thread_service,
             turn_coordinator,
+            input_enqueue,
             approval_interaction: Some(approval_interaction),
             auth_interaction: Some(auth_interaction),
             identity,

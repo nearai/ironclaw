@@ -19,9 +19,29 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
-IGNORED_PREFIXES = ("docs/", ".github/ISSUE_TEMPLATE/")
+# Path classes with no Rust or E2E surface any Reborn lane can exercise.
+# `.claude/` is agent guidance (skills, commands, rules) — prose in the same
+# class as `docs/`. It was unclassified until 2026-08-03, which meant the
+# planner's fail-closed arm rejected every PR that touched agent guidance:
+# the only satisfiable behaviour for that class was "never edit it", which is
+# not a policy anyone chose. Classifying it is the fix; loosening the
+# fail-closed arm is not.
+IGNORED_PREFIXES = ("docs/", ".claude/", ".github/ISSUE_TEMPLATE/")
+IGNORED_GUIDANCE_PATHS = {
+    "tests/CLAUDE.md",
+    "tests/integration/CLAUDE.md",
+}
 DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
+QA_HARNESS_PREFIXES = (
+    "scripts/live-canary/",
+    "scripts/reborn_webui_v2_live_qa/",
+)
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
+INTEGRATION_SUPPORT_OWNERS = {
+    "tests/support/hosted_mcp_registration_server.rs": (
+        "tests/integration/hosted_mcp_registration.rs"
+    ),
+}
 PR_STATIC_CONTROL_PATHS = {
     "Cargo.toml",
     "rust-toolchain",
@@ -30,6 +50,18 @@ PR_STATIC_CONTROL_PATHS = {
     ".cargo/config.toml",
     "tests/integration/coverage-exemptions.toml",
     "tests/integration/coverage-floor.toml",
+    # Repo-root `scripts/` is deliberately NOT prefix-classified — the
+    # `unmapped test or CI path` arm below exists to force a per-file decision.
+    # These two are decided:
+    #   * the panic baseline is enforced by Code Style
+    #     (`check_no_panics.py --reborn-baseline`), which runs on every PR and
+    #     owns the whole check; no Reborn lane reads it.
+    #   * `reborn-e2e-rust.sh` is driven by the `Reborn E2E` workflow, which has
+    #     its own scope detector (`Detect Reborn E2E scope`). This planner
+    #     selects lanes for `Tests (Reborn)` only, and that workflow does not
+    #     invoke the script.
+    "scripts/no_panics_reborn_baseline.txt",
+    "scripts/reborn-e2e-rust.sh",
 }
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/")
 BUCKET_WEIGHTS = {
@@ -335,11 +367,17 @@ def build_plan(
         if path.startswith(DEDICATED_WORKFLOW_PREFIXES):
             reasons.append(f"dedicated stress workflow owns: {path}")
             continue
+        if path.startswith(QA_HARNESS_PREFIXES):
+            qa_evidence_changed = True
+            reasons.append(f"live QA harness changed: {path}")
+            continue
         if path == CHANGED_COVERAGE_MANIFEST:
             reasons.append("changed-coverage policy is statically validated")
             continue
-        if path.startswith(IGNORED_PREFIXES) or (
-            path.endswith(".md") and "/" not in path
+        if (
+            path in IGNORED_GUIDANCE_PATHS
+            or path.startswith(IGNORED_PREFIXES)
+            or (path.endswith(".md") and "/" not in path)
         ):
             continue
         if path.startswith("crates/ironclaw_webui/frontend/"):
@@ -362,6 +400,11 @@ def build_plan(
             integration_lanes.add(integration_inventory[path])
             reasons.append(f"integration test changed: {path}")
             continue
+        if path in INTEGRATION_SUPPORT_OWNERS:
+            owner = INTEGRATION_SUPPORT_OWNERS[path]
+            integration_lanes.add(integration_inventory[owner])
+            reasons.append(f"integration test support changed: {path}")
+            continue
         if path.startswith("tests/integration/"):
             integration_lanes.add(0)
             reasons.append(
@@ -375,6 +418,17 @@ def build_plan(
         }:
             qa_evidence_changed = True
             reasons.append("recorded QA evidence changed")
+            continue
+        if path.startswith(("tests/reborn_", "tests/e2e/reborn_", "scripts/ci/reborn-")):
+            raise ValueError(f"unmapped Reborn test path: {path}")
+        if path.startswith("tests/e2e/"):
+            # E2E scenarios and support live in the dedicated
+            # `reborn-e2e.yml` workflow, which runs its own changed-path
+            # filter and provider/shard matrix. They are not part of the
+            # crate-bucket / root-partition / integration-lane plan emitted
+            # here, so skip them instead of failing closed on an unmapped
+            # path.
+            reasons.append(f"Reborn E2E workflow owns: {path}")
             continue
         if path.startswith("crates/"):
             package = next(
@@ -414,6 +468,14 @@ def build_plan(
             continue
         if path.startswith(("tests/reborn_", "tests/e2e/reborn_", "scripts/ci/reborn-")):
             raise ValueError(f"unmapped Reborn test path: {path}")
+        if path.startswith("tests/e2e/"):
+            # The browser/E2E suite has its own workflow (`reborn-e2e.yml`,
+            # `paths: tests/e2e/**`) with its own scope detection, so this
+            # planner must not also schedule Rust lanes for it. The
+            # `tests/e2e/reborn_*` harnesses above stay a deliberate hard
+            # error — they are shared fixtures, not one scenario.
+            reasons.append(f"dedicated Reborn E2E workflow owns: {path}")
+            continue
         if path.startswith(("scripts/", "tests/", ".github/actions/")):
             raise ValueError(f"unmapped test or CI path: {path}")
         raise ValueError(f"unclassified pull-request path: {path}")

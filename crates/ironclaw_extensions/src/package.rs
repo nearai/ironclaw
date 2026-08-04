@@ -3,9 +3,8 @@ use ironclaw_host_api::{
     capability::CapabilityDescriptor,
     ids::{ExtensionId, PackageId},
     path::VirtualPath,
-    trust::{PackageIdentity, PackageSource},
+    trust::{PackageIdentity, PackageSource, TrustPolicyInput},
 };
-use ironclaw_trust::TrustPolicyInput;
 use std::collections::{BTreeSet, HashSet};
 
 use crate::{

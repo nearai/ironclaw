@@ -23,7 +23,14 @@ on:
         type: string
   pull_request:
     branches:
+      # Release branches get the same gate as main: a release-blocker fix
+      # opened against a frozen candidate must clear the deterministic Reborn
+      # suite before it can produce a new rc. `release-fix-*` is the 1.0.0-era
+      # name; `release/*` is the weekly cut named in
+      # docs/internal/weekly-release-strategy.md.
       - main
+      - "release-fix-*"
+      - "release/*"
   merge_group:
     branches:
       - main

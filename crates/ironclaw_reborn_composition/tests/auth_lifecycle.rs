@@ -209,6 +209,7 @@ impl TurnCoordinator for LifecycleTurnCoordinator {
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply:lifecycle").unwrap(),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
+            allow_steering: true,
             resolved_model_route: None,
             model_usage: None,
             received_at: Utc::now(),
@@ -252,6 +253,7 @@ async fn assert_lifecycle_uninstall_denies_blocked_auth_gate(fail_flow_before_un
     let state_hash = opaque_state_hash("lifecycle-state").unwrap();
     let flow = auth
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: flow_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
@@ -654,6 +656,7 @@ async fn lifecycle_cleanup_dispatches_each_canceled_turn_gate_continuation_once(
         let flow_scope = flow_scope.clone();
         async move {
             auth.create_flow(NewAuthFlow {
+                requested_scopes: Vec::new(),
                 id: None,
                 scope: flow_scope,
                 kind: AuthFlowKind::IntegrationCredential,

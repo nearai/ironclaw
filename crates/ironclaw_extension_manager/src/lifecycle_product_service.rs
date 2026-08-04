@@ -82,7 +82,9 @@ impl ExtensionHostLifecycleProductService {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(None);
                 };
-                extension_management.register_hosted_mcp(request).await
+                extension_management
+                    .register_hosted_mcp(request, lifecycle_resource_scope(&context)?)
+                    .await
             }
             LifecycleProductAction::SkillSearch { query } => {
                 let scope = self
@@ -203,6 +205,25 @@ impl ExtensionHostLifecycleProductService {
                     return unsupported_projection(Some(package_ref));
                 };
                 let caller = lifecycle_caller(&context)?;
+                self.execute_extension_activation(
+                    &context,
+                    extension_management,
+                    package_ref,
+                    &caller,
+                )
+                .await
+            }
+            LifecycleProductAction::ExtensionSelectHostedMcpAuth {
+                package_ref,
+                auth_selection,
+            } => {
+                let Some(extension_management) = &self.extension_management else {
+                    return unsupported_projection(Some(package_ref));
+                };
+                let caller = lifecycle_caller(&context)?;
+                extension_management
+                    .select_hosted_mcp_auth(&package_ref, auth_selection, &caller)
+                    .await?;
                 self.execute_extension_activation(
                     &context,
                     extension_management,
@@ -505,7 +526,7 @@ impl LifecycleProductService for ExtensionHostLifecycleProductService {
     async fn installed_activation_errors(
         &self,
         _context: LifecycleProductContext,
-    ) -> Result<std::collections::HashMap<String, String>, ProductSurfaceError> {
+    ) -> Result<std::collections::HashMap<ExtensionId, String>, ProductSurfaceError> {
         let result = match &self.extension_management {
             Some(extension_management) => {
                 extension_management.installation_activation_errors().await

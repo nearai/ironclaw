@@ -400,7 +400,7 @@ impl ProductCapabilityHandler {
             Self::ExtensionRegisterHostedMcp => {
                 let request: ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest =
                     product_command_input(input)?;
-                services
+                let response = services
                     .lifecycle_service
                     .execute(
                         LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
@@ -412,6 +412,18 @@ impl ProductCapabilityHandler {
                         LifecycleProductAction::ExtensionRegisterHostedMcp { request },
                     )
                     .await?;
+                if response.blockers.iter().any(|blocker| matches!(
+                    blocker,
+                    ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
+                        ref_id: Some(ref_id),
+                    } if ref_id.as_str()
+                        == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
+                )) {
+                    return Err(ProductSurfaceError::validation(
+                        "auth_selection",
+                        ProductSurfaceValidationCode::AuthSelectionRequired,
+                    ));
+                }
                 Ok(())
             }
             Self::ExtensionImport => {

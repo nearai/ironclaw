@@ -285,8 +285,9 @@ impl ExtensionLifecycleManager {
     pub async fn register_hosted_mcp(
         &self,
         request: RegisterHostedMcpRequest,
+        scope: ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
-        self.hosted_mcp_preparation.register(request).await
+        self.hosted_mcp_preparation.register(request, scope).await
     }
 
     /// Run the composed preparation strategy, if this installation's generic
@@ -300,6 +301,23 @@ impl ExtensionLifecycleManager {
     ) -> Result<Option<LifecycleProductResponse>, ProductOperationFailure> {
         self.hosted_mcp_preparation
             .prepare_if_pending(package_ref, scope, credential_gate, caller)
+            .await
+    }
+
+    /// Validates the caller and persists an explicit hosted-MCP authentication selection.
+    pub async fn select_hosted_mcp_auth(
+        &self,
+        package_ref: &LifecyclePackageRef,
+        auth_selection: ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection,
+        caller: &UserId,
+    ) -> Result<(), ProductOperationFailure> {
+        self.hosted_mcp_preparation
+            .select_auth(
+                package_ref,
+                auth_selection,
+                caller,
+                &self.tenant_operator_user_id,
+            )
             .await
     }
     pub fn new(dependencies: ExtensionLifecycleManagerDependencies) -> Self {
@@ -703,7 +721,7 @@ impl ExtensionLifecycleManager {
                 installation_state_for_installation(
                     installation,
                     has_activatable_surface,
-                    activation_errors.contains_key(installation.extension_id().as_str()),
+                    activation_errors.contains_key(installation.extension_id()),
                 )
             })
             .unwrap_or(InstallationState::Installed);
@@ -711,7 +729,17 @@ impl ExtensionLifecycleManager {
             .as_ref()
             .map(|installation| install_scope_for_owner(installation.owner()));
         let summary = available.summary();
-        Ok(response_with_payload(
+        let auth_selection_required = available.source
+            == ironclaw_extensions::ManifestSource::UserRegistered
+            && available.resolved_manifest.mcp.as_ref().is_some_and(|mcp| {
+                matches!(
+                    mcp.registration_auth,
+                    ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::Auto
+                )
+            })
+            && !has_activatable_surface
+            && package_runtime_credential_auth_requirements(&available.package).is_empty();
+        let mut response = response_with_payload(
             Some(package_ref),
             phase,
             LifecycleProductPayload::ExtensionList {
@@ -722,7 +750,15 @@ impl ExtensionLifecycleManager {
                 }],
                 count: 1,
             },
-        ))
+        );
+        if auth_selection_required {
+            response.blockers = vec![LifecycleReadinessBlocker::Setup {
+                ref_id: Some(LifecycleBlockerRef::new(
+                    ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF,
+                )?),
+            }];
+        }
+        Ok(response)
     }
 
     pub async fn active_model_visible_capabilities(
@@ -826,13 +862,15 @@ impl ExtensionLifecycleManager {
     /// `activation_error` are driven from this one source.
     pub async fn installation_activation_errors(
         &self,
-    ) -> Result<std::collections::HashMap<String, String>, ProductOperationFailure> {
+    ) -> Result<std::collections::HashMap<ExtensionId, String>, ProductOperationFailure> {
         match self.generic_host.get() {
-            Some(host) => host.installation_errors().await.map_err(|error| {
-                ProductOperationFailure::Transient {
+            Some(host) => host
+                .installation_errors()
+                .await
+                .map(typed_activation_errors)
+                .map_err(|error| ProductOperationFailure::Transient {
                     reason: format!("extension activation errors could not be read: {error}"),
-                }
-            }),
+                }),
             None => Ok(std::collections::HashMap::new()),
         }
     }
@@ -873,7 +911,7 @@ impl ExtensionLifecycleManager {
                 phase: installation_state_for_installation(
                     &installation,
                     package_has_activatable_surface(&available.package),
-                    activation_errors.contains_key(installation.extension_id().as_str()),
+                    activation_errors.contains_key(installation.extension_id()),
                 ),
                 install_scope: Some(install_scope_for_owner(installation.owner())),
             });
@@ -886,7 +924,7 @@ impl ExtensionLifecycleManager {
         extension: &AvailableExtensionPackage,
         credential_gate: Option<&dyn ExtensionActivationCredentialGate>,
         caller: &UserId,
-        activation_errors: &std::collections::HashMap<String, String>,
+        activation_errors: &std::collections::HashMap<ExtensionId, String>,
     ) -> Result<LifecycleSearchExtensionSummary, ProductOperationFailure> {
         let mut summary = extension.summary();
         suppress_search_credential_onboarding(&mut summary);
@@ -902,7 +940,7 @@ impl ExtensionLifecycleManager {
                 installation_phase: None,
             });
         };
-        let has_last_error = activation_errors.contains_key(installation.extension_id().as_str());
+        let has_last_error = activation_errors.contains_key(installation.extension_id());
         let phase =
             search_installation_phase(extension, &installation, credential_gate, has_last_error)
                 .await?;
@@ -2894,6 +2932,24 @@ fn map_channel_config_error(error: crate::ChannelConfigError) -> ProductOperatio
     }
 }
 
+/// Project the durable installation records' bare-string keys onto the
+/// `ExtensionId` every consumer of this map already holds, so the lookup is
+/// typed instead of stringified at each call site.
+///
+/// A key the boundary vocabulary rejects is **dropped**. That changes no
+/// answer — such a key could never have matched an installation's own
+/// `ExtensionId` — it only stops an unmatchable row from being carried around
+/// as though it could match.
+fn typed_activation_errors(
+    raw: std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<ExtensionId, String> {
+    raw.into_iter()
+        .filter_map(|(extension_id, reason)| {
+            ExtensionId::new(extension_id).ok().map(|id| (id, reason))
+        })
+        .collect()
+}
+
 pub(crate) fn extension_ids_from_package_ref(
     package_ref: &LifecyclePackageRef,
 ) -> Result<(ExtensionId, ExtensionInstallationId), ProductOperationFailure> {
@@ -3178,7 +3234,7 @@ where
     Ok(owners)
 }
 
-fn ensure_caller_may_mutate_tenant_installation(
+pub(crate) fn ensure_caller_may_mutate_tenant_installation(
     installation: &ExtensionInstallation,
     caller: &UserId,
     tenant_operator: &UserId,
@@ -3210,6 +3266,37 @@ fn compensation_failure(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    /// The activation-error map is keyed by `ExtensionId` so the three
+    /// installation-state call sites can look it up with the id they already
+    /// hold instead of stringifying. This pins both halves of that projection:
+    /// a well-formed durable key survives verbatim, and a key that is not
+    /// extension vocabulary is dropped rather than carried as an entry nothing
+    /// could ever match.
+    #[test]
+    fn typed_activation_errors_keeps_valid_keys_and_drops_unmatchable_ones() {
+        let typed = super::typed_activation_errors(std::collections::HashMap::from([
+            (
+                "slack".to_string(),
+                "activation failed: bad token".to_string(),
+            ),
+            // Not a name segment: uppercase and a space.
+            ("Slack Channel".to_string(), "corrupted row".to_string()),
+            (String::new(), "empty key".to_string()),
+        ]));
+
+        assert_eq!(
+            typed.len(),
+            1,
+            "only the well-formed key survives: {typed:?}"
+        );
+        assert_eq!(
+            typed
+                .get(&super::ExtensionId::new("slack").expect("valid extension id"))
+                .map(String::as_str),
+            Some("activation failed: bad token"),
+        );
+    }
 
     use ironclaw_extensions::{
         ExtensionInstallationStore, ExtensionInstallationStorePort as _, ExtensionLifecycleService,
@@ -4077,14 +4164,20 @@ output_schema_ref = "schemas/run.output.json"
             )
             .expect("public fixture endpoint"),
             auth_selection: Some(
-                ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::Auto,
+                ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::NoAuth,
             ),
         };
+        let register_scope = ResourceScope::local_default(
+            UserId::new("lock-order-owner").expect("valid owner"),
+            ironclaw_host_api::ids::InvocationId::new(),
+        )
+        .expect("local registration scope");
         let register_manager = Arc::clone(&manager);
-        let register_task =
-            tokio::spawn(
-                async move { register_manager.register_hosted_mcp(register_request).await },
-            );
+        let register_task = tokio::spawn(async move {
+            register_manager
+                .register_hosted_mcp(register_request, register_scope)
+                .await
+        });
 
         holding.notified().await;
 
