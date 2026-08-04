@@ -185,6 +185,12 @@ h1,h2,h3,p{margin:0}
 .carousel .chd .chmeta{font-family:var(--font-mono);font-size:11px;color:var(--v2-text-faint);font-variant-numeric:tabular-nums;white-space:nowrap;flex:none}
 .carousel .chd .chmeta:not(:empty)::before{content:"·";margin:0 6px 0 4px;color:var(--v2-text-faint)}
 :root:not(.flags-off) .carousel .chd{padding-right:160px}
+/* relocated agent status line (branded indicator + activity string) — sits above the drawer */
+.drawertop{display:flex;align-items:center;gap:8px;padding:0 2px 8px}
+.drawertop.hide{display:none}
+.drawertop .dt-ttl{font-size:13px;font-weight:600;color:var(--v2-text-strong);white-space:nowrap;flex:none}
+.drawertop .chmeta{font-family:var(--font-mono);font-size:11px;color:var(--v2-text-faint);font-variant-numeric:tabular-nums;white-space:nowrap;flex:none}
+.drawertop .chmeta:not(:empty)::before{content:"·";margin:0 6px 0 4px;color:var(--v2-text-faint)}
 .nearmark{display:inline-flex;flex:none;color:var(--near-blue)}
 .nearmark .near{width:16px;height:16px;overflow:visible;transform-box:fill-box;transform-origin:center}
 .nearmark.busy .near{animation:near-beat 2s ease-in-out infinite}
@@ -522,10 +528,11 @@ h1,h2,h3,p{margin:0}
             <div class="ghostveil"><span class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg>Connect to turn these on</span></div>
           </div>
 
+          <div class="drawertop hide" id="drawerTop"><span class="nearmark" id="carNear"><svg class="near" viewBox="0 0 24 24" aria-hidden="true"><defs><clipPath id="carNearClip"><path d="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z"/></clipPath></defs><path class="near-base" d="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z"/><g clip-path="url(#carNearClip)"><path class="near-comet" d="M2.6 22.2 L2.6 2.4 L21.4 21.6 L21.4 1.8"/></g></svg></span><span class="dt-ttl" id="carTtl">Suggested for you</span><span class="chmeta" id="carMeta"></span></div>
           <div class="rev flagwrap" id="carouselBlock">
             <span class="flag"><span class="tag native">New UX</span><span class="tag newevt">New Feature</span></span>
             <div class="carousel">
-              <div class="chd"><span class="nearmark" id="carNear"><svg class="near" viewBox="0 0 24 24" aria-hidden="true"><defs><clipPath id="carNearClip"><path d="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z"/></clipPath></defs><path class="near-base" d="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z"/><g clip-path="url(#carNearClip)"><path class="near-comet" d="M2.6 22.2 L2.6 2.4 L21.4 21.6 L21.4 1.8"/></g></svg></span><span class="ttl" id="carTtl">Done for you</span><span class="chmeta" id="carMeta"></span><span class="sub" id="carSub">Completed automatically — review or undo anytime</span><button class="dctl toggle" id="drawerToggle" type="button" title="Collapse" aria-label="Collapse suggestions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button><button class="dctl" id="drawerClose" type="button" title="Dismiss suggestions" aria-label="Dismiss suggestions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+              <div class="chd"><span class="sub" id="carSub">Approve to run, or tweak first</span><button class="dctl toggle" id="drawerToggle" type="button" title="Collapse" aria-label="Collapse suggestions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button><button class="dctl" id="drawerClose" type="button" title="Dismiss suggestions" aria-label="Dismiss suggestions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
               <div class="strip" id="realStrip"></div>
             </div>
             <div class="taskdrawer" id="taskDrawer" aria-label="Suggested tasks"></div>
@@ -776,13 +783,14 @@ h1,h2,h3,p{margin:0}
   function applyDrawer(){
     if(!carouselBlock||!taskDrawer) return;
     var isVision=(version==='vision');
-    var active=(scene==='first' && step>=2);
+    var active=(scene==='first') && (isVision ? step>=2 : true);
     var typing=!!(field&&field.value.trim())&&taskDrawer.children.length>0;
     var dismissed=isVision && active && drawerState==='dismissed';
     var collapsed=active && !dismissed && ((isVision&&drawerState==='collapsed') || (typing && (!isVision || drawerState==='open')));
     carouselBlock.classList.toggle('dismissed',dismissed);
     carouselBlock.classList.toggle('collapsed',collapsed);
     root.classList.toggle('drawer-on', isVision && active && !dismissed);
+    if(drawerTop) show(drawerTop, active && !dismissed);
     if(drawerRestore) drawerRestore.hidden=!dismissed;
     if(drawerToggle){ drawerToggle.title=collapsed?'Expand':'Collapse'; drawerToggle.setAttribute('aria-label',collapsed?'Expand suggestions':'Collapse suggestions'); }
   }
@@ -790,7 +798,7 @@ h1,h2,h3,p{margin:0}
 
   var connectBlock=document.getElementById('connectBlock'),ghostBlock=document.getElementById('ghostBlock'),
       carouselBlock=document.getElementById('carouselBlock'),realStrip=document.getElementById('realStrip'),taskDrawer=document.getElementById('taskDrawer'),
-      carNear=document.getElementById('carNear'),carMeta=document.getElementById('carMeta'),
+      carNear=document.getElementById('carNear'),carMeta=document.getElementById('carMeta'),drawerTop=document.getElementById('drawerTop'),
       heroTitle=document.getElementById('heroTitle'),heroSub=document.getElementById('heroSub'),
       carTtl=document.getElementById('carTtl'),carSub=document.getElementById('carSub'),
       capN=document.getElementById('capN'),capC=document.getElementById('capC'),
@@ -831,7 +839,7 @@ h1,h2,h3,p{margin:0}
   // Agent modes per version (Foundational is scoped to Suggest / Plan / Auto Approve)
   var MODES={
     vision:[['Suggest','Always ask before taking any action.'],['Plan','Draft a plan of tasks and wait for approval.'],['Auto','Auto-run approved task types without asking.'],['Bypass','Full automation — act without approvals. Use with care.']],
-    foundational:[['Suggest','Always ask for approval before performing a task or automation.'],['Plan','Describe the activity and the steps needed, then wait for approval.'],['Auto Approve','Automatically approve the predefined task types.']]
+    foundational:[['Suggest','Always ask for approval before performing a task or automation.'],['Plan','Describe the activity and the steps needed, then wait for approval.'],['Auto Approve','Auto-approve task types you\'ve already approved, plus any task you request.']]
   };
   var nearStart=0,elTimer=null;
   function fmt(ms){var s=Math.floor(ms/1000);return Math.floor(s/60)+':'+String(s%60).padStart(2,'0');}
@@ -842,15 +850,37 @@ h1,h2,h3,p{margin:0}
     step=Math.max(0,Math.min(step,MAX));
     var prop=modeProposed();
     var isVision=(version==='vision');
-    var h=(step>=3&&prop&&HERO_PROP[step])?HERO_PROP[step]:((!isVision&&step<=2)?HERO_FOUND[step]:HERO[step]);
+    if(!isVision){
+      // ===== Foundational: enterprise single-state first run — suggested cards from the first step =====
+      heroTitle.textContent='Welcome to IronClaw.';
+      heroSub.textContent = prop
+        ? "Your tools are connected — here's what I'd take off your plate. Approve, tweak, or dismiss any, or just tell me what else."
+        : "Your tools are connected — here's what I've already handled. Review or undo anything, or tell me what else to take on.";
+      capN.textContent='First run';
+      capC.innerHTML='<b>Foundational</b> — enterprise. Tools are admin-preconnected, so the first screen already surfaces suggested tasks. Approve, tweak, dismiss, or type your own. Modes: Suggest / Plan / Auto Approve.';
+      show(connectBlock,false); show(ghostBlock,false); show(carouselBlock,true);
+      connPill.style.display='none';
+      carTtl.textContent = prop ? 'Suggested for you' : 'Done for you';
+      carSub.textContent = prop ? 'Approve to run, or tweak first' : 'Review or undo anytime';
+      var fh='',fd='';
+      for(var fi=0;fi<CARDS.length;fi++){ fh+=cardHTML(CARDS[fi], fi, cardStates[fi], {}); fd+=pillHTML(CARDS[fi], fi, cardStates[fi]); }
+      realStrip.innerHTML=fh; taskDrawer.innerHTML=fd;
+      bindCarouselCards(); bindDrawer();
+      carNear.classList.remove('busy');carNear.classList.add('done');
+      if(elTimer){clearInterval(elTimer);elTimer=null;} carMeta.textContent='';
+      trackFill.style.width='100%'; beatLbl.textContent='—';
+      applyDrawer();
+      return;
+    }
+    var h=(step>=3&&prop&&HERO_PROP[step])?HERO_PROP[step]:HERO[step];
     heroTitle.textContent=h[0];heroSub.textContent=h[1];
-    capN.textContent='Beat '+step+' / '+MAX; capC.innerHTML=(!isVision&&CAP_FOUND[step])?CAP_FOUND[step]:CAP[step];
+    capN.textContent='Beat '+step+' / '+MAX; capC.innerHTML=CAP[step];
     var coach=(dir==='coach'),empty=(step<=1),working=(step===2);
-    show(connectBlock, empty && connectState==='open' && isVision);
-    show(ghostBlock, empty && coach && isVision);
+    show(connectBlock, empty && connectState==='open');
+    show(ghostBlock, empty && coach);
     show(carouselBlock, step>=2);
-    connPill.style.display = (empty && connectState==='pill' && isVision) ? '' : 'none';
-    if(isVision){ if(step===0){ connSet=[]; renderConnect(); } else if(step===1){ connSet=APPS.map(function(a){return a.key;}); renderConnect(); } }
+    connPill.style.display = (empty && connectState==='pill') ? '' : 'none';
+    if(step===0){ connSet=[]; renderConnect(); } else if(step===1){ connSet=APPS.map(function(a){return a.key;}); renderConnect(); }
     if(step>=2){
       if(working){
         carTtl.textContent = prop ? 'Looking for things to suggest' : 'Working on your first automations';
@@ -1034,7 +1064,7 @@ h1,h2,h3,p{margin:0}
   function setScene(s){
     scene=s;
     sFirst.setAttribute('aria-pressed',s==='first');sThread.setAttribute('aria-pressed',s==='thread');sPlan.setAttribute('aria-pressed',s==='plan');
-    frControls.classList.toggle('hide', s!=='first');
+    frControls.classList.toggle('hide', s!=='first' || version==='foundational');
     document.getElementById('sceneFirstRun').classList.toggle('on', s==='first');
     document.getElementById('sceneThread').classList.toggle('on', s==='thread');
     document.getElementById('scenePlan').classList.toggle('on', s==='plan');
@@ -1058,6 +1088,7 @@ h1,h2,h3,p{margin:0}
     agentMode='Suggest';modeLabel.textContent='Suggest';renderModeMenu();
     if(whoName) whoName.textContent=(v==='vision')?'Ada':'';
     drawerState='open';
+    frControls.classList.toggle('hide', scene!=='first' || v==='foundational');
     if(scene==='first') resetFirst(); else render();
   }
   vVision.onclick=function(){setVersion('vision');};
