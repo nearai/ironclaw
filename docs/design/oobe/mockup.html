@@ -158,8 +158,8 @@ h1,h2,h3,p{margin:0}
 .connectbtn:focus-visible{outline:2px solid color-mix(in srgb,var(--v2-accent) 45%,transparent);outline-offset:2px}
 .cpill{display:inline-flex;align-items:center;gap:9px;border:1px solid var(--v2-panel-border);background:var(--v2-surface);border-radius:12px;padding:7px 11px 7px 8px;cursor:pointer;font:inherit;transition:border-color .15s,background .15s}
 .cpill:hover{border-color:color-mix(in srgb,var(--v2-accent) 42%,var(--v2-panel-border))}
-.cpill .appchip{width:24px;height:24px;border-radius:7px;display:grid;place-items:center;border:1px solid;flex:none}
-.cpill .appchip svg{width:14px;height:14px}
+.cpill .appchip{width:22px;height:22px;display:grid;place-items:center;flex:none;color:var(--v2-text-strong)}
+.cpill .appchip svg{width:100%;height:100%;display:block}
 .cpill .an{font-size:13px;font-weight:560;color:var(--v2-text-strong)}
 .cpill .cstate{width:18px;height:18px;border-radius:6px;border:1.5px solid var(--v2-text-faint);display:grid;place-items:center;flex:none;color:transparent;transition:background .15s,border-color .15s}
 .cpill .cstate svg{width:12px;height:12px}
@@ -195,11 +195,11 @@ h1,h2,h3,p{margin:0}
 .strip::-webkit-scrollbar{display:none}
 
 /* automation task card (faithful to automation-task-card.tsx) */
-.tcard{flex:none;width:260px;display:flex;flex-direction:column;border:1px solid var(--v2-panel-border);border-radius:16px;background:var(--v2-card-bg);padding:14px;text-align:left;box-shadow:0 1px 2px rgba(15,18,25,.04),0 12px 26px -12px rgba(15,18,25,.12)}
+.tcard{flex:none;width:258px;display:flex;flex-direction:column;border:1px solid var(--v2-panel-border);border-radius:16px;background:var(--v2-card-bg);padding:12px;text-align:left;box-shadow:0 1px 2px rgba(15,18,25,.04),0 12px 26px -12px rgba(15,18,25,.12)}
 .tcard:hover{border-color:color-mix(in srgb,var(--v2-accent) 32%,var(--v2-panel-border))}
-.tcard .thd{display:flex;align-items:center;gap:9px;margin-bottom:9px}
-.tcard .appchip{width:26px;height:26px;border-radius:8px;display:grid;place-items:center;border:1px solid;flex:none}
-.tcard .appchip svg{width:14px;height:14px}
+.tcard .thd{display:flex;align-items:center;gap:9px;margin-bottom:7px}
+.tcard .appchip{width:24px;height:24px;display:grid;place-items:center;flex:none;color:var(--v2-text-strong)}
+.tcard .appchip svg{width:100%;height:100%;display:block}
 .tcard .ttl{flex:1;min-width:0;font-size:14px;font-weight:650;line-height:1.25;color:var(--v2-text-strong);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .badge{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:999px;white-space:nowrap}
 .badge.success{color:var(--v2-positive-text);background:var(--v2-positive-soft)}
@@ -209,12 +209,12 @@ h1,h2,h3,p{margin:0}
 .tcard .metrics{display:flex;flex-wrap:wrap;align-items:center;gap:2px 8px;font-size:12.5px;color:var(--v2-text-muted)}
 .tcard .metrics b{font-weight:660;color:var(--v2-text-strong)}
 .tcard .metrics span+span::before{content:"·";margin-right:8px;color:var(--v2-text-faint)}
-.tcard .tprov{margin-top:9px;font-size:11px;color:var(--v2-text-faint)}
-.tcard .acts{margin-top:auto;padding-top:13px;display:flex;align-items:center;gap:4px}
-.tcard .acts button{display:inline-flex;align-items:center;justify-content:center;gap:5px;font:inherit;font-size:12px;font-weight:560;height:32px;padding:0 11px;border-radius:9px;cursor:pointer;border:1px solid transparent;background:transparent;color:var(--v2-text-muted)}
+.tcard .tprov{margin-top:7px;font-size:11px;color:var(--v2-text-faint)}
+.tcard .acts{margin-top:auto;padding-top:11px;display:flex;align-items:center;gap:3px}
+.tcard .acts button{display:inline-flex;align-items:center;justify-content:center;gap:5px;font:inherit;font-size:11.5px;font-weight:560;height:28px;padding:0 9px;border-radius:8px;cursor:pointer;border:1px solid transparent;background:transparent;color:var(--v2-text-muted)}
 .tcard .acts button svg{width:13px;height:13px}
 .tcard .acts .txt:hover{background:var(--v2-surface);color:var(--v2-text-strong)}
-.tcard .acts .approve{padding:0 16px;color:#fff;font-weight:600;border-color:rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
+.tcard .acts .approve{padding:0 13px;color:#fff;font-weight:600;border-color:rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
 .tcard .acts .approve:hover{background:radial-gradient(ellipse 200% 220% at 50% 110%,#5BBAF5 0%,#2882c8 60%)}
 .tcard .acts .revert{color:var(--v2-danger-text)}
 .tcard .acts .revert:hover{background:color-mix(in srgb,var(--v2-danger-text) 12%,transparent);color:var(--v2-danger-text)}
@@ -340,8 +340,8 @@ h1,h2,h3,p{margin:0}
 /* calendar reschedule + plan cards */
 .calcard,.plancard{width:100%;max-width:560px;border:1px solid var(--v2-panel-border);border-radius:18px;background:var(--v2-card-bg);box-shadow:var(--v2-card-shadow);overflow:hidden}
 .calcard .chd,.plancard .chd{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--v2-panel-border)}
-.calcard .chd .appchip{width:32px;height:32px;border-radius:10px;display:grid;place-items:center;border:1px solid;flex:none}
-.calcard .chd .appchip svg{width:16px;height:16px}
+.calcard .chd .appchip{width:30px;height:30px;display:grid;place-items:center;flex:none;color:var(--v2-text-strong)}
+.calcard .chd .appchip svg{width:100%;height:100%;display:block}
 .calcard .chd .tt,.plancard .chd .tt{min-width:0}
 .calcard .chd .tt b,.plancard .chd .tt b{display:block;font-size:14px;font-weight:600;color:var(--v2-text-strong);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .calcard .chd .tt small,.plancard .chd .tt small{font-size:12px;color:var(--v2-text-muted)}
@@ -378,8 +378,8 @@ h1,h2,h3,p{margin:0}
 .plist{list-style:none;margin:0;padding:0}
 .plist li{display:flex;align-items:center;gap:12px;padding:12px 16px;border-top:1px solid var(--v2-panel-border)}
 .plist li:first-child{border-top:0}
-.plist .appchip{width:28px;height:28px;border-radius:9px;display:grid;place-items:center;border:1px solid;flex:none}
-.plist .appchip svg{width:14px;height:14px}
+.plist .appchip{width:26px;height:26px;display:grid;place-items:center;flex:none;color:var(--v2-text-strong)}
+.plist .appchip svg{width:100%;height:100%;display:block}
 .plist .pinfo{min-width:0;flex:1}
 .plist .pinfo .pt{display:flex;align-items:center;gap:8px}
 .plist .pinfo .pt b{font-size:13px;font-weight:560;color:var(--v2-text-strong);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -621,6 +621,17 @@ h1,h2,h3,p{margin:0}
   };
   function svg(name,sw){return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="'+(sw||1.8)+'" stroke-linecap="round" stroke-linejoin="round">'+ICON[name]+'</svg>';}
   function chipStyle(accent){return 'color:'+accent+';background:color-mix(in srgb,'+accent+' 16%,transparent);border-color:color-mix(in srgb,'+accent+' 38%,transparent)';}
+  // real brand product logos (full colour; github/notion are monochrome → currentColor, theme-adaptive)
+  var BRAND={
+    gmail:'<svg viewBox="0 0 48 48" fill="none"><rect x="4" y="9" width="40" height="30" rx="4" fill="#fff"/><path fill="#4caf50" d="M45 16.2l-5 2.75-5 4.75L35 40h7c1.657 0 3-1.343 3-3V16.2z"/><path fill="#1e88e5" d="M3 16.2l3.614 1.71L13 23.7V40H6c-1.657 0-3-1.343-3-3V16.2z"/><polygon fill="#e53935" points="35,11.2 24,19.45 13,11.2 12,17 13,23.7 24,31.95 35,23.7 36,17"/><path fill="#c62828" d="M3 12.298V16.2l10 7.5V11.2L9.876 8.859C9.132 8.301 8.228 8 7.298 8 4.924 8 3 9.924 3 12.298z"/><path fill="#fbc02d" d="M45 12.298V16.2l-10 7.5V11.2l3.124-2.341C38.868 8.301 39.772 8 40.702 8 43.076 8 45 9.924 45 12.298z"/></svg>',
+    calendar:'<svg viewBox="0 0 48 48" fill="none"><rect x="6" y="6" width="36" height="36" rx="3" fill="#fff"/><polygon fill="#1e88e5" points="25.68,20.92 26.688,22.36 28.272,21.208 28.272,29.56 30,29.56 30,18.616 28.56,18.616"/><path fill="#1e88e5" d="M22.943 23.745c.625-.574 1.013-1.37 1.013-2.249 0-1.747-1.533-3.168-3.417-3.168-1.602 0-2.972 1.009-3.33 2.45l1.657.421c.165-.664.868-1.146 1.673-1.146.942 0 1.709.646 1.709 1.443 0 .797-.767 1.443-1.709 1.443h-.997v1.708h.997c1.081 0 1.972.751 1.972 1.677 0 .947-.923 1.677-2.104 1.677-1.081 0-2.007-.61-2.174-1.446l-1.657.421c.359 1.441 1.729 2.5 3.331 2.5 1.884 0 3.417-1.421 3.417-3.168 0-.879-.388-1.675-2.013-2.249z"/><polygon fill="#fbc02d" points="34,42 14,42 13,38 14,34 34,34 35,38"/><polygon fill="#4caf50" points="38,34 38,14 42,13 46,14 46,34 42,35"/><path fill="#1e88e5" d="M34 14l1-4-1-4H9C7.343 6 6 7.343 6 9v25l4 1 4-1V14h20z"/><polygon fill="#e53935" points="34,6 34,14 42,14 42,10 38,6"/><path fill="#1565c0" d="M42 14h-8V6h5c1.657 0 3 1.343 3 3v5z"/><path fill="#2e7d32" d="M9 42h5v-8H6v5c0 1.657 1.343 3 3 3z"/></svg>',
+    docs:'<svg viewBox="0 0 48 48" fill="none"><path fill="#2196f3" d="M37 45H11c-1.657 0-3-1.343-3-3V6c0-1.657 1.343-3 3-3h19l10 10v29c0 1.657-1.343 3-3 3z"/><path fill="#bbdefb" d="M40 13H30V3z"/><path fill="#1565c0" d="M30 13l10 10V13z"/><path fill="#e3f2fd" d="M15 23h18v2H15zm0 4h18v2H15zm0 4h18v2H15zm0 4h10v2H15z"/></svg>',
+    drive:'<svg viewBox="0 0 48 48" fill="none"><path fill="#FFC107" d="M17 6h14l14 24H31z"/><path fill="#1976D2" d="M9.875 42L16.938 30H45l-7 12z"/><path fill="#4CAF50" d="M3 30.125L9.875 42 24 18 17 6z"/></svg>',
+    slack:'<svg viewBox="0 0 48 48" fill="none"><path fill="#33d375" d="M33 8c0-2.209-1.791-4-4-4s-4 1.791-4 4v11c0 2.209 1.791 4 4 4s4-1.791 4-4z"/><path fill="#33d375" d="M43 19c0 2.209-1.791 4-4 4h-4v-4c0-2.209 1.791-4 4-4s4 1.791 4 4z"/><path fill="#40c4ff" d="M8 14c-2.209 0-4 1.791-4 4s1.791 4 4 4h11c2.209 0 4-1.791 4-4s-1.791-4-4-4z"/><path fill="#40c4ff" d="M19 4c2.209 0 4 1.791 4 4v4h-4c-2.209 0-4-1.791-4-4s1.791-4 4-4z"/><path fill="#e91e63" d="M14 40c0 2.209 1.791 4 4 4s4-1.791 4-4V29c0-2.209-1.791-4-4-4s-4 1.791-4 4z"/><path fill="#e91e63" d="M4 29c0-2.209 1.791-4 4-4h4v4c0 2.209-1.791 4-4 4s-4-1.791-4-4z"/><path fill="#ffc107" d="M40 34c2.209 0 4-1.791 4-4s-1.791-4-4-4H29c-2.209 0-4 1.791-4 4s1.791 4 4 4z"/><path fill="#ffc107" d="M29 44c-2.209 0-4-1.791-4-4v-4h4c2.209 0 4 1.791 4 4s-1.791 4-4 4z"/></svg>',
+    notion:'<svg viewBox="0 0 32 32" fill="currentColor"><path d="M8 26V6h4.2l11.6 14.2V6H28v20h-4.2L12.2 11.8V26z"/></svg>',
+    github:'<svg viewBox="0 0 98 96" fill="none"><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M41.4395 69.3848C28.8066 67.8535 19.9062 58.7617 19.9062 46.9902C19.9062 42.2051 21.6289 37.0371 24.5 33.5918C23.2559 30.4336 23.4473 23.7344 24.8828 20.959C28.7109 20.4805 33.8789 22.4902 36.9414 25.2656C40.5781 24.1172 44.4062 23.543 49.0957 23.543C53.7852 23.543 57.6133 24.1172 61.0586 25.1699C64.0254 22.4902 69.2891 20.4805 73.1172 20.959C74.457 23.543 74.6484 30.2422 73.4043 33.4961C76.4668 37.1328 78.0937 42.0137 78.0937 46.9902C78.0937 58.7617 69.1934 67.6621 56.3691 69.2891C59.623 71.3945 61.8242 75.9883 61.8242 81.252V91.2051C61.8242 94.0762 64.2168 95.7031 67.0879 94.5547C84.4102 87.9512 98 70.6289 98 49.1914C98 22.1074 75.9883 0 48.9043 0C21.8203 0 0 22.1074 0 49.1914C0 70.4375 13.4941 88.0469 31.6777 94.6504C34.2617 95.6074 36.75 93.8848 36.75 91.3008V83.6445C35.4102 84.2188 33.6875 84.6016 32.1562 84.6016C25.8398 84.6016 22.1074 81.1563 19.4277 74.7441C18.375 72.1602 17.2266 70.6289 15.0254 70.3418C13.877 70.2461 13.4941 69.7676 13.4941 69.1934C13.4941 68.0449 15.4082 67.1836 17.3223 67.1836C20.0977 67.1836 22.4902 68.9063 24.9785 72.4473C26.8926 75.2227 28.9023 76.4668 31.2949 76.4668C33.6875 76.4668 35.2187 75.6055 37.4199 73.4043C39.0469 71.7773 40.291 70.3418 41.4395 69.3848Z"/></svg>'
+  };
+  function brandLogo(k){return BRAND[k]||'';}
   function nearBusy(label){return '<div class="livestat busy" style="padding:2px"><svg class="near" viewBox="0 0 24 24" aria-hidden="true"><path class="near-base" d="'+NEAR_D+'"/></svg><span class="verb">'+label+'</span></div>';}
 
   // ================= FIRST RUN scene =================
@@ -635,7 +646,7 @@ h1,h2,h3,p{margin:0}
   var appRow=document.getElementById('appRow'),connectSub=document.getElementById('connectSub');
   var connSet=[], connectState='open'; // 'open' | 'pill' | 'gone'
   function isConn(k){return connSet.indexOf(k)>=0;}
-  function appChip(a){return '<span class="appchip" style="'+chipStyle(a.accent)+'">'+svg(a.icon)+'</span>';}
+  function appChip(a){return '<span class="appchip">'+brandLogo(a.key)+'</span>';}
   function advanceFromConnect(){ if(step<1){ step=1; render(); if(playing){clearTimeout(timer);timer=setTimeout(advance,1100);} } }
   function connectAll(){ connSet=APPS.map(function(a){return a.key;}); renderConnect(); advanceFromConnect(); }
   function renderConnect(){
@@ -667,9 +678,9 @@ h1,h2,h3,p{margin:0}
   connPill.onclick=function(){ setConnectState('open'); };
   connPillX.onclick=function(e){ e.stopPropagation(); setConnectState('gone'); };
   var CARDS=[
-    {app:'gmail',label:'Gmail',icon:'mail',accent:'#ea4335',title:'Triaged your inbox',when:'2m ago',metrics:[['12','replied'],['40','archived']]},
-    {app:'calendar',label:'Calendar',icon:'calendar',accent:'#4285f4',title:'Accepted 3 invites',when:'just now',metrics:[['3','accepted'],['1','conflicts']]},
-    {app:'file',label:'Google Docs',icon:'file',accent:'#3b82f6',title:'Doc insights ready',when:'just now',metrics:[['5','insights'],['2','docs']]}
+    {app:'gmail',brand:'gmail',label:'Gmail',accent:'#ea4335',title:'Triaged your inbox',when:'2m ago',metrics:[['12','replied'],['40','archived']]},
+    {app:'calendar',brand:'calendar',label:'Calendar',accent:'#4285f4',title:'Accepted 3 invites',when:'just now',metrics:[['3','accepted'],['1','conflicts']]},
+    {app:'file',brand:'docs',label:'Google Docs',accent:'#3b82f6',title:'Doc insights ready',when:'just now',metrics:[['5','insights'],['2','docs']]}
   ];
   function badgeFor(state){
     if(state==='suggested') return '<span class="badge accent">Suggested</span>';
@@ -680,8 +691,8 @@ h1,h2,h3,p{margin:0}
     opts=opts||{};
     var term=(state==='dismissed'||state==='reverted');
     var m=c.metrics.map(function(x){return '<span><b>'+x[0]+'</b> '+x[1]+'</span>';}).join('');
-    var head='<div class="thd"><span class="appchip" style="'+chipStyle(c.accent)+'">'+svg(c.icon)+'</span>'
-      +'<b class="ttl">'+c.title+'</b>'+badgeFor(state)+'</div>';
+    var head='<div class="thd"><span class="appchip">'+brandLogo(c.brand)+'</span>'
+      +'<b class="ttl">'+c.title+'</b></div>';
     var body=term?'':'<div class="metrics">'+m+'</div><div class="tprov">From '+c.label+' · '+c.when+'</div>';
     var acts;
     if(term){
@@ -821,7 +832,7 @@ h1,h2,h3,p{margin:0}
     var automated = o.state==='automated';
     if(o.state==='dismissed' || o.state==='reverted'){
       var note = o.state==='dismissed' ? 'Dismissed — nothing was done.' : 'Reverted — the change was undone.';
-      return '<div class="calcard"><div class="chd"><span class="appchip" style="'+chipStyle(CAL_ACCENT)+'">'+svg('calendar')+'</span>'
+      return '<div class="calcard"><div class="chd"><span class="appchip">'+brandLogo('calendar')+'</span>'
         +'<div class="tt"><b>Move your 3:00 sync</b><small>Google Calendar</small></div>'
         +'<span class="badge muted">'+(o.state==='dismissed'?'Dismissed':'Reverted')+'</span></div>'
         +'<div class="cfoot"><span class="termnote">'+svg('undo')+note+'</span></div></div>';
@@ -844,7 +855,7 @@ h1,h2,h3,p{margin:0}
         +'<button class="actbtn ghost" data-act="cancel">Skip</button>'
         +'<button class="actbtn ghost launch">'+svg('external')+'Open</button></div>';
     }
-    return '<div class="calcard"><div class="chd"><span class="appchip" style="'+chipStyle(CAL_ACCENT)+'">'+svg('calendar')+'</span>'
+    return '<div class="calcard"><div class="chd"><span class="appchip">'+brandLogo('calendar')+'</span>'
       +'<div class="tt"><b>Move your 3:00 sync</b><small>Google Calendar</small></div>'+badge+'</div>'
       +'<div class="cbody"><p class="pline">'+pline+'</p>'
       +'<div class="slots">'
@@ -877,10 +888,10 @@ h1,h2,h3,p{margin:0}
 
   // ================= PLAN scene =================
   var PLAN_ITEMS=[
-    {app:'gmail',icon:'mail',accent:'#ea4335',title:'Triage 40 unread',sum:'Reply to 12, archive the rest'},
-    {app:'calendar',icon:'calendar',accent:'#4285f4',title:'Accept 3 invites',sum:'No conflicts found'},
-    {app:'file',icon:'file',accent:'#3b82f6',title:'Summarize 2 docs',sum:'Product spec + retro notes'},
-    {app:'slack',icon:'chat',accent:'#e01e5a',title:'Post standup update',sum:"From yesterday's activity"}
+    {app:'gmail',brand:'gmail',accent:'#ea4335',title:'Triage 40 unread',sum:'Reply to 12, archive the rest'},
+    {app:'calendar',brand:'calendar',accent:'#4285f4',title:'Accept 3 invites',sum:'No conflicts found'},
+    {app:'file',brand:'docs',accent:'#3b82f6',title:'Summarize 2 docs',sum:'Product spec + retro notes'},
+    {app:'slack',brand:'slack',accent:'#e01e5a',title:'Post standup update',sum:"From yesterday's activity"}
   ];
   var plan={state:'open',items:null};
   function planCardHTML(){
@@ -891,7 +902,7 @@ h1,h2,h3,p{margin:0}
       : allDone ? '<span class="badge success"><span class="bdot"></span>All done</span>'
       : '<span class="badge accent">'+remaining+' to approve</span>';
     var rows=items.map(function(it,idx){
-      var chip='<span class="appchip" style="'+chipStyle(it.accent)+'">'+svg(it.icon)+'</span>';
+      var chip='<span class="appchip">'+brandLogo(it.brand)+'</span>';
       var info='<div class="pinfo"><div class="pt"><b>'+it.title+'</b></div><div class="ps">'+it.sum+'</div></div>';
       var right;
       if(it.status==='done'){ right='<svg class="donecheck" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">'+ICON.check+'</svg>'; }
