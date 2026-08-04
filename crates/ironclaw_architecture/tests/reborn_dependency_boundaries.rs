@@ -3137,8 +3137,16 @@ struct BoundaryRule {
 fn boundary_rules() -> Vec<BoundaryRule> {
     vec![
         BoundaryRule {
+            // `ironclaw_extensions` was on this crate's *guidance* forbidden
+            // list (`CLAUDE.md`) but never on the enforced one, and the crate
+            // held the dependency the whole time — the guidance-vs-code
+            // contradiction PROPOSAL §6.9.1 names. Resolved by CHECKLIST WS5's
+            // `product` narrows row: `adapter_registry` (product's only
+            // consumer of the registry) moved to its chartered owners, the
+            // manifest entry is gone, and the rule is enforced from here on.
             crate_name: "ironclaw_product",
             forbidden: vec![
+                "ironclaw_extensions",
                 "ironclaw_host_runtime",
                 "ironclaw_mcp",
                 "ironclaw_wasm",

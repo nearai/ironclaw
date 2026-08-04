@@ -25,7 +25,6 @@
 #![forbid(unsafe_code)]
 
 mod action;
-pub mod adapter_registry;
 mod approval_interaction;
 mod approval_prompt;
 mod auth_continuation;

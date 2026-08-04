@@ -829,12 +829,17 @@ const DOWNGRADE_PINS: &[DowngradePin] = &[
         from_layer: "loops",
         to_layer: "substrates",
         demoted_in: "#7094 (WS2 — Extensions family)",
+        // `ironclaw_product` dropped off with CHECKLIST WS5's `product` narrows
+        // row: `adapter_registry` was its only consumer of the registry, and it
+        // moved to `ironclaw_extensions::host_api::product_adapter` (projection)
+        // and `ironclaw_extension_contracts::product_adapter_section` (schema).
+        // The edge is now forbidden outright by the crate's `BoundaryRule` in
+        // `reborn_dependency_boundaries.rs`, so it cannot come back here.
         permitted_consumers: &[
             "ironclaw_capabilities",
             "ironclaw_extension_host",
             "ironclaw_extension_manager",
             "ironclaw_host_runtime",
-            "ironclaw_product",
             "ironclaw_reborn_composition",
         ],
     },

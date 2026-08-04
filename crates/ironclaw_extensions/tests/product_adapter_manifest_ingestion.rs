@@ -1,12 +1,16 @@
+use ironclaw_extension_contracts::product_adapter_section::ProductAdapterSectionError;
 use ironclaw_extension_contracts::surface::CapabilitySurfaceKind;
+use ironclaw_extensions::host_api::product_adapter::{
+    RegistryError, parse_product_adapter_manifest_record, product_adapter_sections,
+};
 use ironclaw_extensions::{
-    CapabilitySurfaceDeclV2, ExtensionManifestRecord, MANIFEST_SCHEMA_VERSION, ManifestSource,
+    CapabilitySurfaceDeclV2, ExtensionManifestRecord, MANIFEST_SCHEMA_VERSION, ManifestHash,
+    ManifestSource,
 };
 use ironclaw_host_api::host_port::HostPortCatalog;
-use ironclaw_product::adapter_registry::{
-    ManifestHash, RegistryError, parse_product_adapter_manifest_record, product_adapter_sections,
+use ironclaw_host_api::product_adapter::{
+    AuthRequirement, ProductCapabilityFlag, ProductSurfaceKind,
 };
-use ironclaw_product::{AuthRequirement, ProductCapabilityFlag, ProductSurfaceKind};
 
 fn manifest(extra: &str) -> String {
     format!(
@@ -65,7 +69,8 @@ fn parses_product_adapter_host_api_section_from_extension_manifest_v2() {
     assert_eq!(record.extension_id().as_str(), "telegram-v2");
     let adapters = product_adapter_sections(&record).unwrap();
     assert_eq!(adapters.len(), 1);
-    let adapter = &adapters[0];
+    assert_eq!(adapters[0].section().as_str(), "product_adapter.inbound");
+    let adapter = adapters[0].resolved();
     assert_eq!(adapter.adapter_id().as_str(), "telegram-v2/inbound");
     assert_eq!(adapter.surface_kind(), ProductSurfaceKind::ExternalChannel);
     assert!(matches!(
@@ -131,7 +136,8 @@ credential_handle = "undeclared_token"
     let err = parse(&raw).unwrap_err();
     assert!(matches!(
         err,
-        RegistryError::UndeclaredEgressCredentialHandle { .. } | RegistryError::Manifest(_)
+        RegistryError::Section(ProductAdapterSectionError::UndeclaredEgressCredentialHandle { .. })
+            | RegistryError::Manifest(_)
     ));
 }
 
@@ -145,10 +151,10 @@ fn rejects_auth_header_injection_shape() {
     let err = parse(&raw).unwrap_err();
     assert!(matches!(
         err,
-        RegistryError::InvalidValue {
+        RegistryError::Section(ProductAdapterSectionError::InvalidValue {
             field: "auth.header_name",
             ..
-        } | RegistryError::Manifest(_)
+        }) | RegistryError::Manifest(_)
     ));
 }
 
@@ -173,7 +179,7 @@ fn parses_host_ingress_route_from_manifest() {
     )))
     .unwrap();
     let adapters = product_adapter_sections(&record).unwrap();
-    let routes = adapters[0].host_ingress();
+    let routes = adapters[0].resolved().host_ingress();
     assert_eq!(routes.len(), 1);
     assert_eq!(
         routes[0].descriptor().route_id().as_str(),
@@ -223,7 +229,9 @@ fn rejects_host_ingress_credential_handle_not_declared_as_required() {
     assert!(
         matches!(
             err,
-            RegistryError::UndeclaredIngressCredentialHandle { .. } | RegistryError::Manifest(_)
+            RegistryError::Section(
+                ProductAdapterSectionError::UndeclaredIngressCredentialHandle { .. }
+            ) | RegistryError::Manifest(_)
         ),
         "got {err:?}"
     );

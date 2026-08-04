@@ -160,11 +160,14 @@ const PRODUCT_DEFINED_TRAITS_EXTENSION_MANAGER_STILL_IMPLEMENTS: &[(&str, &str)]
 ///
 /// Why this exists when the trait residue above already does: the trait list is
 /// **trait-shaped** — it sees `impl <product trait> for …` headers and nothing
-/// else. A dependency can also be a constant (`adapter_registry::
-/// PRODUCT_ADAPTER_HOST_API_ID`), a free function (`auth_prompt_view_for_
-/// blocked_auth`), or an inline construction of a concrete product type
-/// (`ProductConversationBindingService::new`), and none of those register
-/// there. The manifest biconditional below catches the *sum* loudly, but as a
+/// else. A dependency can also be a constant, a free function
+/// (`auth_prompt_view_for_blocked_auth`), or an inline construction of a
+/// concrete product type (`ProductConversationBindingService::new`), and none
+/// of those register there — the constant example this paragraph used to give,
+/// `adapter_registry::PRODUCT_ADAPTER_HOST_API_ID`, is gone because the WS5
+/// `adapter_registry` move retired it, which is exactly the point: only a
+/// file-level scan saw it at all.
+/// The manifest biconditional below catches the *sum* loudly, but as a
 /// boolean: it cannot say what remains. The `products → loops` re-layer was
 /// sized five times from proxies of this set and was wrong five times
 /// (PROPOSAL §12.11 D-A and its 2026-08-03 amendment; #7092; #7143; #7145) —
@@ -176,16 +179,12 @@ const PRODUCT_DEFINED_TRAITS_EXTENSION_MANAGER_STILL_IMPLEMENTS: &[(&str, &str)]
 /// fails the gate and is not to be allowlisted here — implement against
 /// `ironclaw_product_contracts` instead (§6.1.3). The row's reason names the
 /// blocker class so the flip's remaining work stays enumerable: `port` (the
-/// trait residue above), `adapter-registry` (manifest projection, owned by
-/// CHECKLIST WS5's `product` narrows row), `product-fn` (a free function that
-/// moves with its vocabulary), or `assembly` (the D-A factory-port scope).
+/// trait residue above), `product-fn` (a free function that moves with its
+/// vocabulary), or `assembly` (the D-A factory-port scope). The fourth class,
+/// `adapter-registry` (manifest projection), is **discharged** — CHECKLIST
+/// WS5's `product` narrows row moved it to `extension_contracts`/
+/// `ironclaw_extensions`, and no row carries it any more.
 const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
-    (
-        "available_extensions.rs",
-        "adapter-registry: product_adapter_sections manifest projection \
-         (owned by CHECKLIST WS5's product-narrows row; the strategy-alias \
-         half of this row fell to #7143's import repoint)",
-    ),
     (
         "channel_connection.rs",
         "port: implements ChannelConnectionService and returns \
@@ -198,21 +197,10 @@ const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
          concrete stack — the §12.11 D-A factory-port scope",
     ),
     (
-        "channel_lifecycle.rs",
-        "adapter-registry: PRODUCT_ADAPTER_HOST_API_ID section filter (the \
-         strategy-alias half fell to #7143's import repoint)",
-    ),
-    (
         "channel_triggered_delivery.rs",
         "assembly: drives product's TriggeredRunDeliveryDriver/Request and \
          triggered_run_delivery_settings — covered by the §12.11 D-A ruling \
          alongside channel_host.rs",
-    ),
-    (
-        "host_api_contracts.rs",
-        "adapter-registry: registers product's \
-         register_product_adapter_host_api_contract into the manifest contract \
-         registry (owned by CHECKLIST WS5's product-narrows row)",
     ),
     (
         "product_lifecycle.rs",
@@ -237,7 +225,15 @@ const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
 /// Ceiling on the reference ledger. Only ever moves down — growing the frozen
 /// list past it needs this constant raised in the same PR, which is the
 /// deliberate two-edit speed bump against re-widening the edge.
-const EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE: usize = 9;
+///
+/// 9 → 6 when CHECKLIST WS5's `product` narrows row moved `adapter_registry`
+/// to its chartered owners: the `[product_adapter.*]` section schema to
+/// `ironclaw_extension_contracts::product_adapter_section` (§6.1.2) and the
+/// resolved projection + host-API manifest contract to
+/// `ironclaw_extensions::host_api::product_adapter` (§6.8.1). That retired the
+/// whole `adapter-registry` blocker class — `available_extensions.rs`,
+/// `channel_lifecycle.rs`, and `host_api_contracts.rs`.
+const EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE: usize = 6;
 
 /// Workspace package metadata, resolved once per test binary.
 ///

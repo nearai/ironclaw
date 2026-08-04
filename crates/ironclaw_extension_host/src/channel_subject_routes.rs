@@ -351,7 +351,7 @@ supports_threads = false
     -> Result<ironclaw_extensions::HostApiContractRegistry, ironclaw_extensions::ManifestV2Error>
     {
         let mut registry = ironclaw_extensions::default_host_api_contract_registry()?;
-        ironclaw_product::adapter_registry::register_product_adapter_host_api_contract(
+        ironclaw_extensions::host_api::product_adapter::register_product_adapter_host_api_contract(
             &mut registry,
         )
         .map_err(|error| ironclaw_extensions::ManifestV2Error::Invalid {

@@ -1161,10 +1161,23 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_webui/frontend/src/pages/chat/components/auth-oauth-card.tsx",
         "github",
     ),
-    ("crates/ironclaw_product/src/adapter_registry.rs", "github"),
-    ("crates/ironclaw_product/src/adapter_registry.rs", "slack"),
+    // The inline-secret guard's vendor token prefixes. Repointed (not added)
+    // when CHECKLIST WS5's `product` narrows row moved `adapter_registry` to
+    // `ironclaw_extensions::host_api::product_adapter`; the guard stayed with
+    // the raw-TOML parse stage, so the entries moved file and nothing else.
+    // The schema half that went to `ironclaw_extension_contracts` carries no
+    // vendor name — its fixtures were rewritten generically rather than carved,
+    // the same disposition PROPOSAL §6.1.3 records for `ProductConversationRouteKey`.
     (
-        "crates/ironclaw_product/src/adapter_registry.rs",
+        "crates/ironclaw_extensions/src/host_api/product_adapter.rs",
+        "github",
+    ),
+    (
+        "crates/ironclaw_extensions/src/host_api/product_adapter.rs",
+        "slack",
+    ),
+    (
+        "crates/ironclaw_extensions/src/host_api/product_adapter.rs",
         "telegram",
     ),
     (
