@@ -139,9 +139,8 @@ use crate::outbound::{
     outbound_delivery_synthetic_provider,
 };
 use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
-pub use ironclaw_auth::product_prompt::{
-    blocked_auth_flow_canceller, product_auth_challenge_provider,
-};
+pub(crate) use ironclaw_auth::product_prompt::blocked_auth_flow_canceller;
+pub use ironclaw_auth::product_prompt::product_auth_challenge_provider;
 use ironclaw_extension_host::AdminConfigurationCatalogUse;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_extension_host::channel_pairing::ChannelPairingConsumeOutcome;
