@@ -1566,7 +1566,6 @@ mod tests {
             fallback_user_id: fallback_user_id.clone(),
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
             workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
-            extension_filesystem: Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -1878,7 +1877,6 @@ mod tests {
             fallback_user_id: fallback_user_id.clone(),
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
             workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
-            extension_filesystem: Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -2395,7 +2393,6 @@ mod tests {
             fallback_user_id: UserId::new("skill-activate-user").expect("user id"),
             policy,
             workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
-            extension_filesystem: Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -2647,7 +2644,6 @@ mod tests {
             fallback_user_id: UserId::new("external-tool-provider-name-user").expect("user id"),
             policy,
             workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
-            extension_filesystem: Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -2733,7 +2729,6 @@ mod tests {
             fallback_user_id: UserId::new("project-create-fallback-user").expect("user id"),
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
             workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
-            extension_filesystem: Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -2937,7 +2932,6 @@ mod tests {
             fallback_user_id,
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
             workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
-            extension_filesystem: Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -3276,7 +3270,6 @@ mod tests {
             fallback_user_id,
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
             workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
-            extension_filesystem: Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -3708,7 +3701,6 @@ mod tests {
             fallback_user_id,
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
             workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
-            extension_filesystem: Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -3867,7 +3859,6 @@ mod tests {
             fallback_user_id: fallback_user_id.clone(),
             policy,
             workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
-            extension_filesystem: Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -4729,7 +4720,6 @@ mod tests {
             fallback_user_id: UserId::new("outbound-delivery-fallback-user").expect("user id"),
             policy,
             workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
-            extension_filesystem: Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -4847,7 +4837,6 @@ mod tests {
             fallback_user_id: UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
             policy,
             workspace_mounts,
-            extension_filesystem: Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -5098,7 +5087,6 @@ mod tests {
             fallback_user_id: UserId::new("standalone-skill-port-user").expect("user id"), // safety: literal test id is valid.
             policy,
             workspace_mounts,
-            extension_filesystem: Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -5221,7 +5209,6 @@ mod tests {
             fallback_user_id: UserId::new("standalone-no-host-user").expect("user id"), // safety: literal test id is valid.
             policy,
             workspace_mounts,
-            extension_filesystem: Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()

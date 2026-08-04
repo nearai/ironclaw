@@ -787,12 +787,31 @@ pub async fn browse_fs_dir(
     let (served_path, scoped_prefix) =
         workspace_served_path(&query.mount, &requested_path, projection)?;
     let surface = state.bind_services(caller);
+    let mount = query.mount;
     let request = RebornFsListRequest {
         mount: query.mount,
         path: served_path,
         project_id: query.project_id,
     };
-    let mut response = FS_LIST_VIEW.query_on(&surface, request, None).await?;
+    let mut response = match FS_LIST_VIEW.query_on(&surface, request, None).await {
+        // A caller's own projection ROOT exists by authorization: it is the
+        // subtree their identity keys, not a path they chose. It has no
+        // backing directory until their first write, so a fresh user opening
+        // the Workspace tab must see an empty workspace, not an error. Deeper
+        // paths under it keep reporting NotFound.
+        Err(error)
+            if error.code == ProductSurfaceErrorCode::NotFound
+                && scoped_prefix.is_some()
+                && requested_path.is_empty() =>
+        {
+            RebornFsListResponse {
+                mount,
+                path: String::new(),
+                entries: Vec::new(),
+            }
+        }
+        other => other?,
+    };
     response.path = requested_path;
     if let Some(prefix) = scoped_prefix {
         for entry in response.entries.iter_mut() {

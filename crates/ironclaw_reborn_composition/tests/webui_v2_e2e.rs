@@ -2242,7 +2242,9 @@ async fn agent_workspace_writes_are_visible_to_their_owner_and_hidden_from_other
     );
 
     // User B's listing resolves inside B's own subtree, which no agent has
-    // written to: either an empty listing or not-found, never A's files.
+    // written to. An authorized-but-never-written workspace root reads as
+    // EMPTY, never as an error and never as A's files: a fresh user opening
+    // the Workspace tab before their first run must see an empty workspace.
     let other_listing = router
         .clone()
         .oneshot(bearer_get_with_token(
@@ -2253,9 +2255,17 @@ async fn agent_workspace_writes_are_visible_to_their_owner_and_hidden_from_other
         .expect("user B workspace list oneshot");
     let other_status = other_listing.status();
     let other_body = String::from_utf8_lossy(&read_body_bytes(other_listing).await).to_string();
-    assert!(
-        other_status == StatusCode::OK || other_status == StatusCode::NOT_FOUND,
-        "user B workspace listing should be empty or absent, got {other_status}: {other_body}"
+    assert_eq!(
+        other_status,
+        StatusCode::OK,
+        "a fresh caller's workspace listing must succeed, got {other_status}: {other_body}"
+    );
+    let other_json: serde_json::Value =
+        serde_json::from_str(&other_body).expect("user B workspace listing is JSON");
+    assert_eq!(
+        other_json["entries"].as_array().map(Vec::len),
+        Some(0),
+        "a fresh caller's workspace lists as empty, got: {other_body}"
     );
     assert!(
         !other_body.contains("report.csv"),

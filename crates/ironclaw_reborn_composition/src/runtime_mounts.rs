@@ -2,7 +2,7 @@
 
 use std::{collections::HashSet, path::Path, sync::Arc};
 
-use ironclaw_filesystem::{CompositeRootFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{CompositeRootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     error::HostApiError,
     mount::{MountGrant, MountPermissions, MountView},
@@ -230,51 +230,6 @@ impl WorkspaceMountPolicy {
             Self::Shared(view) => Ok(view.clone()),
             Self::PerCaller => scoped_workspace_mount_view(scope, MountPermissions::read_write()),
         }
-    }
-}
-
-/// Ensure the caller's own workspace root exists before their first operation.
-///
-/// A shared deployment's `/projects/workspace` is created once at composition
-/// (`build_host_access`). A per-caller deployment has no equivalent: the
-/// caller's `tenants/{tenant}/users/{user}` directory does not exist until
-/// something writes into it, and until then every read tool
-/// (`list_dir`, `glob`, `grep`) failed `operation_failed` instead of reporting
-/// an empty workspace --- the agent was unusable for a brand-new hosted user.
-///
-/// Creating is preferred over softening `NotFound`: it fixes reads and writes
-/// together, leaves error mapping untouched everywhere else, and mirrors the
-/// sandbox lane, which already `create_dir_all`s its per-scope workspace in
-/// `prepare_workspace`. Only the CALLER'S OWN resolved root is created --- the
-/// path comes from their scoped mount view, never from tool input --- so this
-/// cannot conjure a directory anywhere else.
-///
-/// A no-op for shared deployments, whose root composition already created.
-/// Failure is logged and swallowed: a run must not die because a directory
-/// that the first write would create anyway could not be pre-created.
-pub(crate) async fn ensure_caller_workspace_root(
-    extension_filesystem: &Arc<CompositeRootFilesystem>,
-    policy: &WorkspaceMountPolicy,
-    scope: &ResourceScope,
-) {
-    if !matches!(policy, WorkspaceMountPolicy::PerCaller) {
-        return;
-    }
-    let target =
-        match scoped_workspace_mount_view(scope, MountPermissions::read_write_list_delete()) {
-            Ok(view) => view.mounts.first().map(|mount| mount.target.clone()),
-            Err(error) => {
-                tracing::warn!(%error, "caller workspace root could not be resolved");
-                return;
-            }
-        };
-    let Some(target) = target else {
-        return;
-    };
-    if let Err(error) = extension_filesystem.create_dir_all(&target).await {
-        // silent-ok: best-effort pre-creation; the first write creates the same
-        // directory, and reads of a still-missing root surface their own error.
-        tracing::warn!(%error, path = %target, "caller workspace root could not be created");
     }
 }
 
