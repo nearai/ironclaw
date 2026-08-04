@@ -42,6 +42,32 @@ async fn write_workspace_file_as(
     file_name: &str,
     body: &str,
 ) {
+    let outcome = invoke_workspace_tool_as(
+        services,
+        user_id,
+        "builtin_write_file",
+        WRITE_FILE_CAPABILITY_ID,
+        serde_json::json!({
+            "path": format!("/workspace/{file_name}"),
+            "content": body,
+        }),
+    )
+    .await;
+    assert_tool_succeeded(&outcome, "write_file");
+}
+
+/// Drive one first-party workspace tool through the production capability port
+/// as `user_id`, returning the tool's own JSON output.
+///
+/// The port is the seam that mints the caller's workspace grant, so every
+/// assertion made on the result reflects the mount view a real run would get.
+async fn invoke_workspace_tool_as(
+    services: &RebornRuntimeStores,
+    user_id: &str,
+    provider_tool_name: &str,
+    capability_id: &str,
+    arguments: serde_json::Value,
+) -> ToolOutcome {
     let runtime_surfaces = services
         .local_runtime_for_test()
         .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
@@ -59,6 +85,7 @@ async fn write_workspace_file_as(
             crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"), // safety: test-only assertion in #[cfg(test)] module.
         ),
         workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
+        extension_filesystem: Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
         memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
         system_extensions_lifecycle_mounts: runtime_surfaces
             .system_extensions_lifecycle_mounts_for_test()
@@ -98,30 +125,51 @@ async fn write_workspace_file_as(
     let input_ref = capability_io
         .register_provider_tool_call_input(
             &run_context,
-            &write_file_call(serde_json::json!({
-                "path": format!("/workspace/{file_name}"),
-                "content": body,
-            })),
+            &provider_tool_call(provider_tool_name, arguments),
         )
         .await
         .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
 
-    let outcome = port
+    let resolution = port
         .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
-            capability_id: CapabilityId::new(WRITE_FILE_CAPABILITY_ID)
-                .expect("write_file capability id"), // safety: test-only literal id.
+            capability_id: CapabilityId::new(capability_id).expect("capability id"), // safety: test-only literal id.
             input_ref,
             approval_resume: None,
             auth_resume: None,
         })
         .await
-        .expect("write_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
+        .expect("capability invocation"); // safety: test-only assertion in #[cfg(test)] module.
 
+    let output = match &resolution {
+        Resolution::Done(outcome) => outcome.refs.origin.as_ref().and_then(|result_ref| {
+            capability_io
+                .result_output(result_ref.as_str())
+                .ok()
+                .flatten()
+        }),
+        _ => None,
+    };
+    ToolOutcome { resolution, output }
+}
+
+struct ToolOutcome {
+    resolution: Resolution,
+    output: Option<serde_json::Value>,
+}
+
+fn assert_tool_succeeded(outcome: &ToolOutcome, label: &str) {
+    let Resolution::Done(done) = &outcome.resolution else {
+        panic!("{label} should complete, got {:?}", outcome.resolution);
+    };
     assert!(
-        matches!(outcome, Resolution::Done(_)),
-        "write_file should complete, got {outcome:?}"
+        matches!(
+            done.verdict,
+            ironclaw_host_api::resolution::ToolVerdict::Success
+        ),
+        "{label} should succeed, got {:?}",
+        done.verdict
     );
 }
 
@@ -266,16 +314,125 @@ async fn enable_global_auto_approve(
     .expect("enabling global auto-approve should succeed"); // safety: test-only assertion in #[cfg(test)] module.
 }
 
-fn write_file_call(arguments: serde_json::Value) -> ProviderToolCall {
+fn provider_tool_call(name: &str, arguments: serde_json::Value) -> ProviderToolCall {
     ProviderToolCall {
         provider_id: "test-provider".to_string(),
         provider_model_id: "test-model".to_string(),
         turn_id: Some("provider-turn-1".to_string()),
         id: "call-1".to_string(),
-        name: ProviderToolName::new("builtin_write_file").expect("provider tool name"), // safety: test-only literal.
+        name: ProviderToolName::new(name).expect("provider tool name"), // safety: test-only literal.
         arguments,
         response_reasoning: None,
         reasoning: None,
         signature: None,
     }
+}
+
+/// A brand-new caller has no workspace subtree on disk yet. Read tools must
+/// treat that as an EMPTY workspace, not an error --- production shipped with
+/// `builtin.list_dir` and `builtin.glob` failing `operation_failed` for every
+/// fresh hosted user, which left the agent unable to do anything until some
+/// other path happened to create the directory.
+#[tokio::test]
+async fn fresh_caller_reads_an_empty_workspace_then_writes_into_it() {
+    let storage = tempfile::tempdir().expect("temp storage root"); // safety: test-only assertion in #[cfg(test)] module.
+    let services = crate::factory::build_runtime_substrate(
+        crate::deployment::local_filesystem_build_input_with_profile(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            "hosted-owner",
+            storage.path().to_path_buf(),
+        )
+        .with_runtime_policy(
+            crate::standalone_runtime_policy().expect("local-host policy resolves"),
+        ),
+    )
+    .await
+    .expect("hosted services build"); // safety: test-only assertion in #[cfg(test)] module.
+
+    // Nothing has ever written for `newcomer`, so their
+    // `tenants/{tenant}/users/newcomer` directory does not exist.
+    let listed = invoke_workspace_tool_as(
+        &services,
+        "newcomer",
+        "builtin_list_dir",
+        ironclaw_host_runtime::LIST_DIR_CAPABILITY_ID,
+        serde_json::json!({ "path": "/workspace" }),
+    )
+    .await;
+    assert_tool_succeeded(&listed, "list_dir on a fresh caller's workspace");
+    let listed_output = listed.output.expect("list_dir returns output");
+    assert_eq!(
+        listed_output["entries"].as_array().map(Vec::len),
+        Some(0),
+        "a fresh caller's workspace lists as empty, got {listed_output}"
+    );
+
+    let globbed = invoke_workspace_tool_as(
+        &services,
+        "newcomer",
+        "builtin_glob",
+        ironclaw_host_runtime::GLOB_CAPABILITY_ID,
+        serde_json::json!({ "pattern": "**/*" }),
+    )
+    .await;
+    assert_tool_succeeded(&globbed, "glob on a fresh caller's workspace");
+
+    let grepped = invoke_workspace_tool_as(
+        &services,
+        "newcomer",
+        "builtin_grep",
+        ironclaw_host_runtime::GREP_CAPABILITY_ID,
+        serde_json::json!({ "pattern": "anything" }),
+    )
+    .await;
+    assert_tool_succeeded(&grepped, "grep on a fresh caller's workspace");
+
+    // The first write from that same fresh caller must succeed and become
+    // visible to the very next read, including into a nested path whose parent
+    // directories do not exist yet.
+    write_workspace_file_as(&services, "newcomer", "first.txt", "newcomer-body").await;
+    write_workspace_file_as(
+        &services,
+        "newcomer",
+        "notes/deep/second.txt",
+        "nested-body",
+    )
+    .await;
+
+    assert_eq!(
+        read_composed_path(
+            &services,
+            &format!("/projects/workspace/tenants/{TENANT}/users/newcomer/notes/deep/second.txt"),
+        )
+        .await
+        .as_deref(),
+        Some("nested-body"),
+        "a fresh caller's first write must create missing parent directories"
+    );
+
+    let relisted = invoke_workspace_tool_as(
+        &services,
+        "newcomer",
+        "builtin_list_dir",
+        ironclaw_host_runtime::LIST_DIR_CAPABILITY_ID,
+        serde_json::json!({ "path": "/workspace" }),
+    )
+    .await;
+    assert_tool_succeeded(&relisted, "list_dir after the first write");
+    let relisted_output = relisted.output.expect("list_dir returns output");
+    assert!(
+        relisted_output.to_string().contains("first.txt"),
+        "the freshly written file must be listable, got {relisted_output}"
+    );
+
+    assert_eq!(
+        read_composed_path(
+            &services,
+            &format!("/projects/workspace/tenants/{TENANT}/users/newcomer/first.txt"),
+        )
+        .await
+        .as_deref(),
+        Some("newcomer-body"),
+        "the write still lands in the caller's own subtree"
+    );
 }

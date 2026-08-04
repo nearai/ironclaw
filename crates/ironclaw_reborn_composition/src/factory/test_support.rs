@@ -171,15 +171,6 @@ impl RebornRuntimeStores {
         &self.workspace_mounts
     }
 
-    /// The ambient shared workspace view. Only deployments whose policy is
-    /// `Shared` have one; a per-caller deployment resolves its view from the
-    /// run/gate scope and must be driven through the production seam instead.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn workspace_mounts_for_test(&self) -> &MountView {
-        shared_workspace_view(&self.workspace_mounts)
-            .expect("test runtime uses a shared workspace mount policy")
-    }
-
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn standalone_storage_root_for_direct_test(&self) -> &PathBuf {
         self.standalone_storage_root
@@ -1132,6 +1123,24 @@ mod attachment_seam_tests {
 /// production resolves its view from the run/gate scope instead. Lives here
 /// rather than on `WorkspaceMountPolicy` so the production type carries no
 /// test-only member.
+/// The ambient shared workspace view a test runtime carries.
+///
+/// A free function rather than a `RebornRuntimeStores` method: the
+/// struct-member ratchet
+/// (`ironclaw_architecture::reborn_struct_test_support_ratchet`) counts
+/// `#[cfg(test-support)]` *members* on production structs, while
+/// `check_no_panics.py` requires the item-level `#[cfg]` for the `.expect()`
+/// below. A gated free function satisfies both.
+///
+/// Panics under a per-caller policy, which has no shared view --- such a
+/// deployment must be driven through the production seam instead.
+#[cfg(test)]
+pub(crate) fn workspace_mounts_for_test(stores: &RebornRuntimeStores) -> &MountView {
+    shared_workspace_view(&stores.workspace_mounts)
+        .expect("test runtime uses a shared workspace mount policy")
+}
+
+#[cfg(test)]
 pub(crate) fn shared_workspace_view(
     policy: &crate::runtime_mounts::WorkspaceMountPolicy,
 ) -> Option<&MountView> {

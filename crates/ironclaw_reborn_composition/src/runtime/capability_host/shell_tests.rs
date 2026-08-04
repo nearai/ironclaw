@@ -93,6 +93,7 @@ async fn standalone_yolo_shell_translates_workspace_workdir_without_scoped_mount
         fallback_user_id: UserId::new("standalone-shell-user").expect("user id"),
         policy,
         workspace_mounts,
+        extension_filesystem: Arc::clone(runtime_surfaces.extension_filesystem_for_test()),
         memory_mounts,
         system_extensions_lifecycle_mounts: runtime_surfaces
             .system_extensions_lifecycle_mounts_for_test()

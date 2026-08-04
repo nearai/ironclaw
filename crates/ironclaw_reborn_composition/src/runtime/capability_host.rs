@@ -181,6 +181,7 @@ pub(super) fn capability_wiring(
             fallback_user_id,
             policy,
             workspace_mounts,
+            extension_filesystem: Arc::clone(&services.extension_filesystem),
             memory_mounts,
             system_extensions_lifecycle_mounts,
             extension_surface_source,
@@ -217,6 +218,10 @@ struct RefreshingLoopCapabilityPortFactory {
     /// Resolved per run, not once per runtime: under a per-caller policy the
     /// `mounts = "workspace"` grants must point at the caller's own subtree.
     workspace_mounts: WorkspaceMountPolicy,
+    /// Composite root backing the workspace mounts, used once per run to
+    /// guarantee the caller's own workspace root exists before their first
+    /// tool call (see `runtime_mounts::ensure_caller_workspace_root`).
+    extension_filesystem: Arc<ironclaw_filesystem::CompositeRootFilesystem>,
     memory_mounts: MountView,
     system_extensions_lifecycle_mounts: MountView,
     extension_surface_source: ExtensionCapabilitySurfaceSource,
@@ -259,6 +264,16 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
             .workspace_mounts
             .capability_grant_view(&resource_scope)
             .map_err(host_api_agent_loop_error)?;
+        // A brand-new caller has no workspace directory yet; without this the
+        // run's first `list_dir`/`glob` fails instead of reporting an empty
+        // workspace. Same scope as the grant above, so only this caller's own
+        // root is ever created.
+        crate::runtime_mounts::ensure_caller_workspace_root(
+            &self.extension_filesystem,
+            &self.workspace_mounts,
+            &resource_scope,
+        )
+        .await;
         create_refreshing_capability_port(RefreshingCapabilityPortConfig {
             runtime: Arc::clone(&self.runtime),
             run_context: run_context.clone(),
