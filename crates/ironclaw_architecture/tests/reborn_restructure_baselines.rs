@@ -8,9 +8,15 @@
 //!
 //! | baseline | recorded in |
 //! |---|---|
-//! | `LAYER_MATRIX_EXCEPTIONS` count (WS0 20, now 15) | `reborn_dependency_boundaries.rs` |
-//! | extension-specificity allowlist size (130) | `reborn_extension_specificity.rs` |
-//! | production-struct dead-code inventory (82 paths / 283 members) | `reborn_struct_test_support_ratchet.rs` |
+//! | `LAYER_MATRIX_EXCEPTIONS` count (WS0 20) | `reborn_dependency_boundaries.rs` |
+//! | extension-specificity allowlist size (WS0 130) | `reborn_extension_specificity.rs` |
+//! | production-struct dead-code inventory (WS0 82 paths / 283 members) | `reborn_struct_test_support_ratchet.rs` |
+//!
+//! Only the WS0 records are quoted above. The live values are the owning
+//! files' constants and ratchet down as waves land; a "now N" quoted in this
+//! header rotted unnoticed (it read "now 15" while the live register was 6),
+//! so this file no longer carries one — one definition per metric, owned by
+//! the gate that enforces it, applies to the prose too.
 //!
 //! The remaining two — composition mass and the integration-coverage floor —
 //! are enforced by shell gates over committed manifests, wired into CI
