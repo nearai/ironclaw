@@ -14,14 +14,15 @@ pub(crate) fn package(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
     let mut cursor = Cursor::new(Vec::new());
     {
         let mut zip = zip::ZipWriter::new(&mut cursor);
+        let epoch = zip::DateTime::from_date_and_time(1980, 1, 1, 0, 0, 0).unwrap(); // safety: `mod test_fixtures` is `#[cfg(test)]`-only and the literal date is valid by construction.
         let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
-            .last_modified_time(zip::DateTime::from_date_and_time(1980, 1, 1, 0, 0, 0).unwrap());
+            .last_modified_time(epoch);
         for (name, bytes) in entries {
-            zip.start_file(*name, options).unwrap();
-            zip.write_all(bytes).unwrap();
+            zip.start_file(*name, options).unwrap(); // safety: test-only fixture builder; a fixture that cannot be built must fail the test loudly.
+            zip.write_all(bytes).unwrap(); // safety: test-only fixture builder; writing to an in-memory cursor.
         }
-        zip.finish().unwrap();
+        zip.finish().unwrap(); // safety: test-only fixture builder; see above.
     }
     cursor.into_inner()
 }
