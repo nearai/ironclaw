@@ -1,8 +1,29 @@
 use std::time::Instant;
 
 use ironclaw_host_api::{ids::CapabilityId, resource::ResourceScope};
-pub(crate) use ironclaw_observability::json_value_bytes as json_bytes;
 use serde_json::Value;
+
+/// Serializes `value` purely to count the bytes it would occupy.
+///
+/// Cheap per byte but *not* free: it walks the whole value, and a `read_file`
+/// output can be large. Every caller must therefore establish that latency
+/// tracing is live before calling — the counter below is how tests prove they
+/// do, since "no work happened" has no other observable signature.
+#[inline]
+pub(crate) fn json_bytes(value: &Value) -> u64 {
+    #[cfg(test)]
+    JSON_BYTES_CALLS.with(|calls| calls.set(calls.get() + 1));
+    ironclaw_observability::json_value_bytes(value)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Thread-local on purpose: `#[tokio::test]` runs on a current-thread
+    /// runtime, so a task's measurements stay on its own thread and a sibling
+    /// test running in parallel cannot pollute the count.
+    pub(crate) static JSON_BYTES_CALLS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
 
 pub(crate) struct FirstPartyToolLatencyFields<'a> {
     capability_id: &'a CapabilityId,
