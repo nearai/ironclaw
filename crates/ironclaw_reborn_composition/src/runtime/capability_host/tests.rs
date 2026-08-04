@@ -2090,6 +2090,7 @@ mod tests {
                 EffectKind::ExecuteCode,
                 EffectKind::Network,
                 EffectKind::UseSecret,
+                EffectKind::ModifyExtension,
                 EffectKind::ModifyApproval,
                 EffectKind::ExternalWrite
             ]

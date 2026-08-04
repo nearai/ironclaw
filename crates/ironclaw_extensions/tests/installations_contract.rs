@@ -22,6 +22,7 @@ use ironclaw_host_api::{
     host_port::HostPortCatalog,
     ids::{ExtensionId, SecretHandle, UserId},
     path::VirtualPath,
+    registry_package::{RegistryPackageProvenance, RegistryPackageProvenanceParts},
 };
 
 fn extension_id(value: &str) -> ExtensionId {
@@ -537,6 +538,67 @@ async fn installation_store_persists_manifest_and_installation_as_rows() {
             .unwrap()
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn malformed_persisted_registry_provenance_fails_closed_on_restart() {
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+    let root = VirtualPath::new("/system/extensions/.installations/tampered-provenance").unwrap();
+    let store = ExtensionInstallationStore::load_at(
+        Arc::clone(&filesystem),
+        root.clone(),
+        HostPortCatalog::empty(),
+        contracts(),
+    )
+    .await
+    .unwrap();
+    let provenance = RegistryPackageProvenance::new(RegistryPackageProvenanceParts {
+        registry: "ironhub".to_string(),
+        repository: "nearai/ironhub".to_string(),
+        package_version: "1.0.0".to_string(),
+        release_tag: "v1.0.0".to_string(),
+        catalog_origin: "https://hub.ironclaw.com".to_string(),
+        artifact_digest: format!("sha256:{}", "a".repeat(64)),
+        manifest_digest: None,
+        installed_at: Utc::now(),
+    })
+    .unwrap();
+    store
+        .upsert_manifest_and_installation(
+            manifest("sha256:abc").with_registry_provenance(Some(provenance)),
+            installation("sha256:abc"),
+        )
+        .await
+        .unwrap();
+
+    let rows = filesystem
+        .query(
+            &VirtualPath::new(format!("{}/manifests", root.as_str())).unwrap(),
+            &Filter::All,
+            Page::first(10),
+        )
+        .await
+        .unwrap();
+    let row = rows.first().expect("manifest row");
+    let mut body: serde_json::Value = row.entry.parse_json().unwrap();
+    body["registry_provenance"]["artifact_digest"] = serde_json::json!("sha256:tampered");
+    let mut tampered = row.entry.clone();
+    tampered.body = serde_json::to_vec(&body).unwrap();
+    filesystem
+        .put(&row.path, tampered, CasExpectation::Version(row.version))
+        .await
+        .unwrap();
+    drop(store);
+
+    let error = ExtensionInstallationStore::load_at(
+        filesystem,
+        root,
+        HostPortCatalog::empty(),
+        contracts(),
+    )
+    .await
+    .expect_err("tampered provenance must prevent the store from reopening");
+    assert!(error.to_string().contains("artifact_digest"));
 }
 
 #[tokio::test]

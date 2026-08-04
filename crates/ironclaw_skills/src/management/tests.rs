@@ -8,6 +8,7 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, ScopedPath, VirtualPath},
+    registry_package::RegistryPackageProvenance,
     resource::ResourceScope,
 };
 
@@ -184,6 +185,61 @@ async fn install_rejects_existing_skill_with_different_content() {
     .await
     .unwrap_err();
 
+    assert_eq!(error.kind(), SkillManagementErrorKind::Conflict);
+}
+
+#[tokio::test]
+async fn registry_metadata_fallback_never_applies_to_companion_json_files() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem, skill_mounts());
+    let content = skill_md("json-companion", "description", "PROMPT");
+    let first_companion = br#"{
+        "source":"installed_url",
+        "source_url":"https://hub.ironclaw.com/json-companion/SKILL.md",
+        "registry_provenance":{
+            "registry":"ironhub",
+            "repository":"nearai/ironhub",
+            "package_version":"1.0.0",
+            "release_tag":"v1.0.0",
+            "catalog_origin":"https://hub.ironclaw.com",
+            "artifact_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "installed_at":"2026-08-03T00:00:00Z"
+        }
+    }"#;
+    let second_companion = String::from_utf8(first_companion.to_vec())
+        .unwrap()
+        .replace("2026-08-03T00:00:00Z", "2026-08-04T00:00:00Z");
+    install_skill(
+        &context,
+        SkillInstallRequest {
+            name: None,
+            content: &content,
+            files: &[SkillInstallFile {
+                relative_path: "references/data.json",
+                contents: first_companion,
+            }],
+            source: SkillInstallSource::InstalledUrl,
+            source_url: Some("https://hub.ironclaw.com/json-companion/SKILL.md"),
+        },
+    )
+    .await
+    .expect("initial bundle install");
+
+    let error = install_skill(
+        &context,
+        SkillInstallRequest {
+            name: None,
+            content: &content,
+            files: &[SkillInstallFile {
+                relative_path: "references/data.json",
+                contents: second_companion.as_bytes(),
+            }],
+            source: SkillInstallSource::InstalledUrl,
+            source_url: Some("https://hub.ironclaw.com/json-companion/SKILL.md"),
+        },
+    )
+    .await
+    .expect_err("changed companion JSON must conflict");
     assert_eq!(error.kind(), SkillManagementErrorKind::Conflict);
 }
 
@@ -656,6 +712,115 @@ async fn list_treats_oversized_install_metadata_as_installed() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].name, "metadata-helper");
     assert_eq!(listed[0].source, SkillSource::Installed);
+}
+
+#[tokio::test]
+async fn install_metadata_reader_reports_parse_and_size_causes() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    write_file(
+        filesystem.as_ref(),
+        "/projects/skills/metadata-diagnostics/SKILL.md",
+        skill_md("metadata-diagnostics", "description", "PROMPT"),
+    )
+    .await;
+    let metadata_path =
+        VirtualPath::new("/projects/skills/metadata-diagnostics/.ironclaw-install.json").unwrap();
+    filesystem
+        .write_file(&metadata_path, b"not json")
+        .await
+        .unwrap();
+    let context = skill_management_context(filesystem.clone(), skill_mounts());
+
+    let parse_error = read_skill_install_metadata(&context, "metadata-diagnostics")
+        .await
+        .expect_err("malformed metadata is rejected");
+    assert_eq!(parse_error.kind(), SkillManagementErrorKind::InvalidSkill);
+    assert!(
+        parse_error
+            .reason()
+            .is_some_and(|reason| reason.contains("expected ident"))
+    );
+
+    filesystem
+        .write_file(
+            &metadata_path,
+            &vec![b'x'; crate::MAX_INSTALL_METADATA_BYTES + 1],
+        )
+        .await
+        .unwrap();
+    let size_error = read_skill_install_metadata(&context, "metadata-diagnostics")
+        .await
+        .expect_err("oversized metadata is rejected with its size cause");
+    assert_eq!(size_error.kind(), SkillManagementErrorKind::Resource);
+    assert!(
+        size_error
+            .reason()
+            .is_some_and(|reason| reason.contains("exceeds"))
+    );
+}
+
+#[tokio::test]
+async fn registry_replacement_readback_failure_restores_exact_previous_bundle() {
+    let inner = Arc::new(InMemoryBackend::default());
+    let initial_context = skill_management_context_with_root(inner.clone(), skill_mounts());
+    let old_content = skill_md("rollback-skill", "old description", "OLD_PROMPT");
+    let old_provenance = registry_provenance("0.1.0", 'a');
+    install_registry_skill(
+        &initial_context,
+        SkillRegistryInstallRequest {
+            name: "rollback-skill",
+            content: &old_content,
+            source_url: "https://hub.ironclaw.com/rollback-skill/SKILL.md",
+            provenance: &old_provenance,
+            expected_current_artifact_digest: None,
+        },
+    )
+    .await
+    .expect("initial registry skill install");
+    drop(initial_context);
+    let Ok(inner) = Arc::try_unwrap(inner) else {
+        panic!("initial context releases backend");
+    };
+    let backend = Arc::new(
+        FaultInjecting::new(inner).with_fault(
+            Fault::on(FilesystemOperation::ReadFile)
+                .path("rollback-skill/SKILL.md")
+                .nth(2)
+                .backend("injected replacement read-back failure"),
+        ),
+    );
+    let context = skill_management_context_with_root(backend.clone(), skill_mounts());
+    let new_content = skill_md("rollback-skill", "new description", "NEW_PROMPT");
+    let new_provenance = registry_provenance("0.2.0", 'b');
+
+    let error = replace_registry_skill(
+        &context,
+        SkillRegistryInstallRequest {
+            name: "rollback-skill",
+            content: &new_content,
+            source_url: "https://hub.ironclaw.com/rollback-skill/SKILL.md",
+            provenance: &new_provenance,
+            expected_current_artifact_digest: None,
+        },
+    )
+    .await
+    .expect_err("read-back failure must roll back the replacement");
+    assert_eq!(error.kind(), SkillManagementErrorKind::InvalidSkill);
+
+    let restored = read_skill_content(
+        &context,
+        SkillContentRequest {
+            name: "rollback-skill",
+        },
+    )
+    .await
+    .expect("restored skill is readable");
+    assert_eq!(restored.content, old_content);
+    let restored_metadata = read_skill_install_metadata(&context, "rollback-skill")
+        .await
+        .expect("restored metadata read")
+        .expect("restored metadata exists");
+    assert_eq!(restored_metadata.registry_provenance, Some(old_provenance));
 }
 
 #[tokio::test]
@@ -1486,6 +1651,19 @@ fn skill_management_context_with_root(
     mounts: MountView,
 ) -> SkillManagementContext {
     SkillManagementContext::new(filesystem, mounts, ResourceScope::system())
+}
+
+fn registry_provenance(version: &str, digest_byte: char) -> RegistryPackageProvenance {
+    serde_json::from_value(serde_json::json!({
+        "registry": "ironhub",
+        "repository": "nearai/ironhub",
+        "package_version": version,
+        "release_tag": format!("v{version}"),
+        "catalog_origin": "https://hub.ironclaw.com",
+        "artifact_digest": format!("sha256:{}", digest_byte.to_string().repeat(64)),
+        "installed_at": "2026-08-03T00:00:00Z",
+    }))
+    .expect("test registry provenance")
 }
 
 fn skill_md(name: &str, description: &str, prompt: &str) -> String {

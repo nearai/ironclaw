@@ -18,6 +18,7 @@ use ironclaw_host_api::{
     error::HostApiError,
     mount::MountView,
     path::{ScopedPath, VirtualPath},
+    registry_package::RegistryPackageProvenance,
     resource::ResourceScope,
 };
 
@@ -32,8 +33,10 @@ pub use install_bundle::{
 pub(crate) use install_bundle::{SkillBundleSnapshot, capture_skill_bundle, restore_skill_bundle};
 
 use install_bundle::{
+    ExistingRegistryInstallMatch, adopt_registry_receipt, capture_skill_bundle_locked,
     existing_skill_install_matches, install_metadata_source, installed_skill_source,
-    publish_skill_install, read_install_metadata_bytes, validate_install_bundle_files,
+    publish_skill_install, read_install_metadata_bytes, read_install_metadata_bytes_strict,
+    restore_skill_bundle_locked, validate_install_bundle_files,
 };
 
 pub(super) const USER_SKILLS_ROOT: &str = "/skills";
@@ -222,6 +225,15 @@ pub struct SkillInstallRequest<'a> {
     pub source_url: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SkillRegistryInstallRequest<'a> {
+    pub name: &'a str,
+    pub content: &'a str,
+    pub source_url: &'a str,
+    pub provenance: &'a RegistryPackageProvenance,
+    pub expected_current_artifact_digest: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillInstallResult {
     pub name: String,
@@ -345,6 +357,131 @@ pub async fn install_skill(
     context: &SkillManagementContext,
     request: SkillInstallRequest<'_>,
 ) -> Result<SkillInstallResult, SkillManagementError> {
+    install_skill_with_registry_provenance(context, request, None).await
+}
+
+pub(crate) async fn install_registry_skill(
+    context: &SkillManagementContext,
+    request: SkillRegistryInstallRequest<'_>,
+) -> Result<SkillInstallResult, SkillManagementError> {
+    let install = SkillInstallRequest {
+        name: Some(request.name),
+        content: request.content,
+        files: &[],
+        source: SkillInstallSource::InstalledUrl,
+        source_url: Some(request.source_url),
+    };
+    install_skill_with_registry_provenance(context, install, Some(request.provenance)).await
+}
+
+pub(crate) async fn replace_registry_skill(
+    context: &SkillManagementContext,
+    request: SkillRegistryInstallRequest<'_>,
+) -> Result<SkillInstallResult, SkillManagementError> {
+    if request.content.len() as u64 > MAX_PROMPT_FILE_SIZE {
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::Resource,
+        ));
+    }
+    let prepared = prepare_install_content(request.content, Some(request.name))?;
+    if prepared.content.len() as u64 > MAX_PROMPT_FILE_SIZE {
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::Resource,
+        ));
+    }
+    let skill_name = prepared.parsed.manifest.name;
+    let mutation_lock = skill_mutation_lock(&skill_name);
+    let _mutation_guard = mutation_lock.lock().await;
+    if let Some(expected_digest) = request.expected_current_artifact_digest {
+        let current_metadata = read_skill_install_metadata(context, &skill_name)
+            .await?
+            .ok_or_else(|| SkillManagementError::new(SkillManagementErrorKind::Conflict))?;
+        let current_provenance = current_metadata
+            .registry_provenance
+            .as_ref()
+            .ok_or_else(|| SkillManagementError::new(SkillManagementErrorKind::Conflict))?;
+        if !current_provenance
+            .artifact_digest()
+            .eq_ignore_ascii_case(expected_digest)
+        {
+            return Err(SkillManagementError::with_reason(
+                SkillManagementErrorKind::Conflict,
+                "skill changed since update status was checked",
+            ));
+        }
+    }
+    let previous = capture_skill_bundle_locked(context, &skill_name).await?;
+    let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, &skill_name)?;
+    context
+        .filesystem
+        .delete(&context.scope, &skill_dir)
+        .await
+        .map_err(filesystem_error)?;
+    let replacement = async {
+        publish_skill_install(
+            context,
+            &skill_name,
+            &prepared.content,
+            &[],
+            SkillInstallSource::InstalledUrl,
+            Some(request.source_url),
+            Some(request.provenance),
+        )
+        .await?;
+        let skill_path = skill_scoped_path(USER_SKILLS_ROOT, &skill_name, SKILL_FILE_NAME)?;
+        let persisted_content = read_skill_file(context, &skill_path)
+            .await?
+            .ok_or_else(|| SkillManagementError::new(SkillManagementErrorKind::InvalidSkill))?;
+        let persisted_metadata = read_skill_install_metadata(context, &skill_name)
+            .await?
+            .ok_or_else(|| SkillManagementError::new(SkillManagementErrorKind::InvalidSkill))?;
+        if persisted_content != prepared.content
+            || persisted_metadata.registry_provenance.as_ref() != Some(request.provenance)
+        {
+            return Err(SkillManagementError::with_reason(
+                SkillManagementErrorKind::InvalidSkill,
+                "skill replacement did not pass durable read-back verification",
+            ));
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(original_error) = replacement {
+        match context.filesystem.delete(&context.scope, &skill_dir).await {
+            Ok(()) | Err(FilesystemError::NotFound { .. }) => {}
+            Err(cleanup_error) => {
+                return Err(SkillManagementError::with_reason(
+                    original_error.kind(),
+                    format!(
+                        "skill replacement failed with {original_error:?}; target cleanup also failed with {cleanup_error:?}"
+                    ),
+                ));
+            }
+        }
+        if let Err(restore_error) =
+            restore_skill_bundle_locked(context, &skill_name, previous).await
+        {
+            return Err(SkillManagementError::with_reason(
+                original_error.kind(),
+                format!(
+                    "skill replacement failed with {original_error:?}; previous skill restoration also failed with {restore_error:?}"
+                ),
+            ));
+        }
+        return Err(original_error);
+    }
+    Ok(SkillInstallResult {
+        name: skill_name.clone(),
+        scoped_path: format!("{USER_SKILLS_ROOT}/{skill_name}/{SKILL_FILE_NAME}"),
+        source: SkillSource::Installed,
+    })
+}
+
+async fn install_skill_with_registry_provenance(
+    context: &SkillManagementContext,
+    request: SkillInstallRequest<'_>,
+    registry_provenance: Option<&RegistryPackageProvenance>,
+) -> Result<SkillInstallResult, SkillManagementError> {
     tracing::debug!("skill install started");
     if request.content.len() as u64 > MAX_PROMPT_FILE_SIZE {
         tracing::debug!(
@@ -376,26 +513,41 @@ pub async fn install_skill(
 
     log_skill_filesystem_phase("stat_existing_dir", &skill_name, &skill_dir);
     if stat_optional(context, &skill_dir).await?.is_some() {
-        if existing_skill_install_matches(
+        match existing_skill_install_matches(
             context,
             &skill_name,
             &prepared.content,
             request.files,
             request.source,
             request.source_url,
+            registry_provenance,
         )
         .await?
         {
-            tracing::debug!(
-                skill_name = %skill_name,
-                scoped_path = %skill_dir,
-                "skill install matched existing skill directory"
-            );
-            return Ok(SkillInstallResult {
-                name: skill_name.clone(),
-                scoped_path: format!("{USER_SKILLS_ROOT}/{skill_name}/{SKILL_FILE_NAME}"),
-                source: installed_skill_source(request.source),
-            });
+            ExistingRegistryInstallMatch::Match => {
+                tracing::debug!(
+                    skill_name = %skill_name,
+                    scoped_path = %skill_dir,
+                    "skill install matched existing skill directory"
+                );
+                return Ok(SkillInstallResult {
+                    name: skill_name.clone(),
+                    scoped_path: format!("{USER_SKILLS_ROOT}/{skill_name}/{SKILL_FILE_NAME}"),
+                    source: installed_skill_source(request.source),
+                });
+            }
+            ExistingRegistryInstallMatch::AdoptReceipt => {
+                let provenance = registry_provenance
+                    .ok_or_else(|| SkillManagementError::new(SkillManagementErrorKind::Conflict))?;
+                adopt_registry_receipt(context, &skill_name, request.source_url, provenance)
+                    .await?;
+                return Ok(SkillInstallResult {
+                    name: skill_name.clone(),
+                    scoped_path: format!("{USER_SKILLS_ROOT}/{skill_name}/{SKILL_FILE_NAME}"),
+                    source: installed_skill_source(request.source),
+                });
+            }
+            ExistingRegistryInstallMatch::Conflict => {}
         }
         tracing::debug!(
             skill_name = %skill_name,
@@ -426,6 +578,7 @@ pub async fn install_skill(
         request.files,
         request.source,
         request.source_url,
+        registry_provenance,
     )
     .await?;
     tracing::debug!(
@@ -592,6 +745,27 @@ pub async fn read_skill_content(
         // Persisted origins are host-maintenance metadata. Keep them out of
         // the caller/model-visible read result.
         source_url: None,
+    })
+}
+
+pub async fn read_skill_install_metadata(
+    context: &SkillManagementContext,
+    name: &str,
+) -> Result<Option<crate::InstalledSkillMetadata>, SkillManagementError> {
+    if !validate_skill_name(name) {
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::InvalidInput,
+        ));
+    }
+    let skill_path = skill_scoped_path(USER_SKILLS_ROOT, name, SKILL_FILE_NAME)?;
+    let Some(bytes) = read_install_metadata_bytes_strict(context, &skill_path).await? else {
+        return Ok(None);
+    };
+    serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+        SkillManagementError::with_reason(
+            SkillManagementErrorKind::InvalidSkill,
+            format!("invalid skill install metadata: {error}"),
+        )
     })
 }
 

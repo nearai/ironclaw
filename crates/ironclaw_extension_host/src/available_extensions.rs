@@ -13,6 +13,7 @@ use ironclaw_host_api::{
     host_port::HostPortCatalog,
     ids::{CapabilityId, ExtensionId, VendorId},
     path::VirtualPath,
+    registry_package::RegistryPackageProvenance,
 };
 use ironclaw_product::RebornChannelConnectStrategy;
 use ironclaw_product_contracts::error::ProductOperationFailure;
@@ -93,12 +94,15 @@ pub struct AvailableExtensionPackage {
     pub resolved_manifest: Arc<ironclaw_extensions::ResolvedExtensionManifest>,
     /// The loader-supplied [`ManifestSource`] this package was validated
     /// under. Carried so install/migration re-parses (`prepare_install`,
-    /// `prepare_manifest_migration`) validate with the SAME source the
+    /// lifecycle restore/update preparation) validate with the SAME source the
     /// package entered the catalog with: an uploaded bundle validated as
     /// `InstalledLocal` must never be re-validated (and persisted) as
     /// `HostBundled`, which is the only source eligible for
     /// first-party/system trust and runtime claims.
     pub source: ManifestSource,
+    /// Immutable registry identity and digests persisted with registry
+    /// installs. Host-bundled and local-upload packages leave this unset.
+    pub registry_provenance: Option<RegistryPackageProvenance>,
     pub package: ExtensionPackage,
     /// Trusted host-catalog declarations for mandatory external cleanup before
     /// local removal. Never inferred from manifest presentation metadata.
@@ -817,6 +821,7 @@ fn bundled_extension_package(
         manifest_toml: record.raw_toml().to_string(),
         resolved_manifest: Arc::new(record.resolved().clone()),
         source: ManifestSource::HostBundled,
+        registry_provenance: None,
         package,
         cleanup_requirements: Vec::new(),
         surface_kinds,
@@ -1147,9 +1152,12 @@ where
         // Production discovery defaults to `InstalledLocal`, but a durable
         // installation manifest may preserve the narrower
         // `RegistryInstalled` source. `HostBundled` remains reserved for
-        // compiled inventory whose ids are skipped above. This prevents both
-        // upload -> restart trust laundering and registry provenance loss.
+        // compiled inventory whose ids are skipped above. This prevents
+        // upload -> restart trust laundering. Registry provenance remains
+        // authoritative in the installation store and must be joined by the
+        // lifecycle caller rather than inferred by discovery.
         source: stamp,
+        registry_provenance: None,
         package,
         cleanup_requirements: Vec::new(),
         surface_kinds,
@@ -2807,6 +2815,7 @@ output_schema_ref = "schemas/write.output.json"
             manifest_toml: MANIFEST.to_string(),
             resolved_manifest,
             source: ManifestSource::HostBundled,
+            registry_provenance: None,
             package,
             cleanup_requirements: Vec::new(),
             surface_kinds: Vec::new(),

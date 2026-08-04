@@ -2,9 +2,9 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionInstallation, ExtensionInstallationError,
-    ExtensionInstallationId, ExtensionInstallationStorePort, ExtensionLifecycleService,
-    ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage, InstallationOwner,
-    ManifestHash, ManifestSource, canonicalize_installation_rows,
+    ExtensionInstallationId, ExtensionInstallationPersistedParts, ExtensionInstallationStorePort,
+    ExtensionLifecycleService, ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage,
+    InstallationOwner, ManifestHash, ManifestSource, canonicalize_installation_rows,
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{approval::sha256_digest_token, ids::UserId};
@@ -248,30 +248,7 @@ pub fn prepare_install(
     owner: InstallationOwner,
     retained_definition: Option<ExtensionManifestRecord>,
 ) -> Result<ExtensionInstallPlan, ProductOperationFailure> {
-    let manifest_hash = available_manifest_hash(available)?;
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        ProductOperationFailure::InvalidBindingRequest {
-            reason: format!("host port catalog rejected extension install: {error}"),
-        }
-    })?;
-    let contracts = product_extension_host_api_contract_registry().map_err(|error| {
-        ProductOperationFailure::InvalidBindingRequest {
-            reason: format!("host API contract registry rejected extension install: {error}"),
-        }
-    })?;
-    let catalog_record = manifest_record_for_available(
-        available,
-        &host_ports,
-        &contracts,
-        Some(manifest_hash.clone()),
-    )?
-    // Install records no readiness verdict. "Nothing model-visible yet" is
-    // read from the package itself
-    // (`ResolvedExtensionManifest::has_model_visible_capabilities`), so a
-    // package whose capabilities arrive from a later runtime step needs no
-    // stored flag — and, more importantly, a package that never has such a
-    // step is never asked the question.
-    .with_removal_cleanup_requirements(available.cleanup_requirements.clone());
+    let (catalog_record, manifest_hash) = prepare_manifest_record(available)?;
     let manifest_record = match retained_definition {
         Some(retained)
             if retained.raw_toml() == catalog_record.raw_toml()
@@ -325,33 +302,21 @@ fn manifest_record_for_available(
     .map_err(map_extension_installation_error)
 }
 
-fn prepare_manifest_migration(
+pub fn prepare_registry_update(
     available: &AvailableExtensionPackage,
     existing: &ExtensionInstallation,
 ) -> Result<ExtensionInstallPlan, ProductOperationFailure> {
-    let manifest_hash = available_manifest_hash(available)?;
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        ProductOperationFailure::InvalidBindingRequest {
-            reason: format!("host port catalog rejected manifest migration: {error}"),
-        }
-    })?;
-    let contracts = product_extension_host_api_contract_registry().map_err(|error| {
-        ProductOperationFailure::InvalidBindingRequest {
-            reason: format!("host API contract registry rejected manifest migration: {error}"),
-        }
-    })?;
-    let manifest_record = manifest_record_for_available(
-        available,
-        &host_ports,
-        &contracts,
-        Some(manifest_hash.clone()),
-    )?
-    .with_removal_cleanup_requirements(available.cleanup_requirements.clone());
+    let (manifest_record, manifest_hash) = prepare_manifest_record(available)?;
+    // A registry update is a new package incarnation: it intentionally mints
+    // a fresh incarnation id and update timestamp. Receipt adoption and
+    // bundled-manifest migration use `prepare_persisted_installation` below
+    // because those operations only repair metadata and preserve lifecycle
+    // identity and timestamps.
     let installation = ExtensionInstallation::new(
         existing.installation_id().clone(),
         existing.extension_id().clone(),
         ExtensionManifestRef::new(existing.extension_id().clone(), Some(manifest_hash)),
-        existing.credential_bindings().to_vec(),
+        compatible_registry_credential_bindings(available, existing),
         chrono::Utc::now(),
         existing.owner().clone(),
     )
@@ -360,6 +325,150 @@ fn prepare_manifest_migration(
         manifest_record,
         installation,
     })
+}
+
+fn prepare_manifest_record(
+    available: &AvailableExtensionPackage,
+) -> Result<(ExtensionManifestRecord, ManifestHash), ProductOperationFailure> {
+    let manifest_hash = available_manifest_hash(available)?;
+    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+        ProductOperationFailure::InvalidBindingRequest {
+            reason: format!("host port catalog rejected extension manifest: {error}"),
+        }
+    })?;
+    let contracts = product_extension_host_api_contract_registry().map_err(|error| {
+        ProductOperationFailure::InvalidBindingRequest {
+            reason: format!("host API contract registry rejected extension manifest: {error}"),
+        }
+    })?;
+    let manifest_record = manifest_record_for_available(
+        available,
+        &host_ports,
+        &contracts,
+        Some(manifest_hash.clone()),
+    )?
+    .with_registry_provenance(available.registry_provenance.clone())
+    .with_removal_cleanup_requirements(available.cleanup_requirements.clone());
+    Ok((manifest_record, manifest_hash))
+}
+
+fn compatible_registry_credential_bindings(
+    available: &AvailableExtensionPackage,
+    existing: &ExtensionInstallation,
+) -> Vec<ironclaw_extensions::ExtensionCredentialBinding> {
+    let declared = declared_registry_credential_handles(&available.resolved_manifest);
+    existing
+        .credential_bindings()
+        .iter()
+        .filter(|binding| declared.contains(binding.credential_handle().as_str()))
+        .cloned()
+        .collect()
+}
+
+fn declared_registry_credential_handles(
+    manifest: &ironclaw_extensions::ResolvedExtensionManifest,
+) -> BTreeSet<&str> {
+    let mut declared = BTreeSet::new();
+    for tool in &manifest.tools {
+        declared.extend(
+            tool.runtime_credentials
+                .iter()
+                .map(|requirement| requirement.handle.as_str()),
+        );
+    }
+    if let Some(mcp) = &manifest.mcp {
+        declared.extend(mcp.credential_handles.iter().map(|handle| handle.as_str()));
+    }
+    if let Some(channel) = &manifest.channel {
+        if let Some(ingress) = &channel.ingress
+            && let Some(handle) = ingress.verification.secret_handle()
+        {
+            declared.insert(handle.as_str());
+        }
+        for egress in &channel.egress {
+            declared.extend(
+                egress
+                    .credential_handle
+                    .iter()
+                    .map(|handle| handle.as_str()),
+            );
+            declared.extend(
+                egress
+                    .body_credentials
+                    .iter()
+                    .map(|credential| credential.handle.as_str()),
+            );
+        }
+    }
+    for descriptor in &manifest.admin_configuration {
+        declared.extend(descriptor.fields.iter().map(|field| field.handle.as_str()));
+    }
+    for auth in &manifest.auth {
+        match auth.recipe.as_ref() {
+            Some(ironclaw_extension_contracts::recipe::VendorAuthRecipe::Oauth2Code(recipe)) => {
+                if let Some(credentials) = &recipe.client_credentials {
+                    declared.insert(credentials.client_id_handle.as_str());
+                    declared.extend(
+                        credentials
+                            .client_secret_handle
+                            .iter()
+                            .map(|handle| handle.as_str()),
+                    );
+                }
+            }
+            Some(ironclaw_extension_contracts::recipe::VendorAuthRecipe::ApiKey(recipe)) => {
+                declared.extend(recipe.fields.iter().map(|field| field.handle.as_str()));
+                if let Some(validation) = &recipe.validation {
+                    declared.insert(validation.inject.handle.as_str());
+                }
+            }
+            None => {}
+        }
+    }
+    declared
+}
+
+pub fn prepare_registry_receipt_adoption(
+    available: &AvailableExtensionPackage,
+    existing: &ExtensionInstallation,
+) -> Result<ExtensionInstallPlan, ProductOperationFailure> {
+    let (manifest_record, manifest_hash) = prepare_manifest_record(available)?;
+    let installation = prepare_persisted_installation(existing, manifest_hash)?;
+    Ok(ExtensionInstallPlan {
+        manifest_record,
+        installation,
+    })
+}
+
+fn prepare_bundled_manifest_migration(
+    available: &AvailableExtensionPackage,
+    existing: &ExtensionInstallation,
+) -> Result<ExtensionInstallPlan, ProductOperationFailure> {
+    let (manifest_record, manifest_hash) = prepare_manifest_record(available)?;
+    let installation = prepare_persisted_installation(existing, manifest_hash)?;
+    Ok(ExtensionInstallPlan {
+        manifest_record,
+        installation,
+    })
+}
+
+fn prepare_persisted_installation(
+    existing: &ExtensionInstallation,
+    manifest_hash: ManifestHash,
+) -> Result<ExtensionInstallation, ProductOperationFailure> {
+    ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
+        installation_id: existing.installation_id().clone(),
+        extension_id: existing.extension_id().clone(),
+        manifest_ref: ExtensionManifestRef::new(
+            existing.extension_id().clone(),
+            Some(manifest_hash),
+        ),
+        incarnation_id: existing.incarnation_id().cloned(),
+        credential_bindings: existing.credential_bindings().to_vec(),
+        updated_at: existing.updated_at(),
+        owner: existing.owner().clone(),
+    })
+    .map_err(map_extension_installation_error)
 }
 
 async fn migrate_host_bundled_manifest_hash(
@@ -384,7 +493,7 @@ async fn migrate_host_bundled_manifest_hash(
         extension_id = %installation.extension_id(),
         "bundled extension manifest hash changed; migrating stored installation to new manifest hash"
     );
-    let migration_plan = prepare_manifest_migration(available, installation)?;
+    let migration_plan = prepare_bundled_manifest_migration(available, installation)?;
     installation_store
         .upsert_manifest_and_installation(
             migration_plan.manifest_record,
@@ -578,7 +687,7 @@ effects = ["network", "use_secret"]
 
         // Migration reuses the existing row's identity and owner while taking
         // the catalog's manifest hash — the boot-time upgrade path.
-        let migrated = super::prepare_manifest_migration(&available, &plan.installation)
+        let migrated = super::prepare_bundled_manifest_migration(&available, &plan.installation)
             .expect("migration plans against the existing installation");
         assert_eq!(
             migrated.installation.installation_id(),

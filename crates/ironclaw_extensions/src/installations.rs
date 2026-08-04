@@ -18,6 +18,7 @@ use ironclaw_host_api::{
     ids::{ExtensionId, SecretHandle, UserId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, ScopedPath, VirtualPath},
+    registry_package::RegistryPackageProvenance,
     resource::ResourceScope,
 };
 use serde::{Deserialize, Deserializer, Serialize};
@@ -168,6 +169,7 @@ pub struct ExtensionManifestRecord {
     manifest: ExtensionManifestV2,
     resolved: ResolvedExtensionManifest,
     manifest_hash: Option<ManifestHash>,
+    registry_provenance: Option<RegistryPackageProvenance>,
     removal_cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
     definition_retention: PackageDefinitionRetention,
 }
@@ -243,6 +245,7 @@ impl ExtensionManifestRecord {
             manifest,
             resolved,
             manifest_hash,
+            registry_provenance: None,
             removal_cleanup_requirements: Vec::new(),
             definition_retention: PackageDefinitionRetention::RemoveWithLastInstallation,
         })
@@ -263,6 +266,7 @@ impl ExtensionManifestRecord {
             manifest,
             resolved,
             manifest_hash,
+            registry_provenance: None,
             removal_cleanup_requirements: Vec::new(),
             definition_retention: PackageDefinitionRetention::RemoveWithLastInstallation,
         })
@@ -281,6 +285,14 @@ impl ExtensionManifestRecord {
 
     pub fn with_definition_retention(mut self, retention: PackageDefinitionRetention) -> Self {
         self.definition_retention = retention;
+        self
+    }
+
+    pub fn with_registry_provenance(
+        mut self,
+        provenance: Option<RegistryPackageProvenance>,
+    ) -> Self {
+        self.registry_provenance = provenance;
         self
     }
 
@@ -303,6 +315,10 @@ impl ExtensionManifestRecord {
 
     pub fn manifest_hash(&self) -> Option<&ManifestHash> {
         self.manifest_hash.as_ref()
+    }
+
+    pub fn registry_provenance(&self) -> Option<&RegistryPackageProvenance> {
+        self.registry_provenance.as_ref()
     }
 
     pub fn removal_cleanup_requirements(&self) -> &[ExtensionRemovalCleanupRequirement] {
@@ -4013,6 +4029,7 @@ struct WireManifestRecord {
     source: WireManifestSource,
     resolved: Option<ResolvedExtensionManifest>,
     manifest_hash: Option<ManifestHash>,
+    registry_provenance: Option<RegistryPackageProvenance>,
     removal_cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
     definition_retention: PackageDefinitionRetention,
 }
@@ -4025,6 +4042,8 @@ struct WireManifestRecordRef<'a> {
     resolved: &'a Option<ResolvedExtensionManifest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     manifest_hash: &'a Option<ManifestHash>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registry_provenance: &'a Option<RegistryPackageProvenance>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     removal_cleanup_requirements: &'a Vec<ExtensionRemovalCleanupRequirement>,
     #[serde(skip_serializing_if = "is_default_definition_retention")]
@@ -4041,6 +4060,7 @@ impl Serialize for WireManifestRecord {
             source: self.source,
             resolved: &self.resolved,
             manifest_hash: &self.manifest_hash,
+            registry_provenance: &self.registry_provenance,
             removal_cleanup_requirements: &self.removal_cleanup_requirements,
             definition_retention: self.definition_retention,
         }
@@ -4056,6 +4076,8 @@ struct WireManifestRecordValue {
     resolved: Option<serde_json::Value>,
     #[serde(default)]
     manifest_hash: Option<ManifestHash>,
+    #[serde(default)]
+    registry_provenance: Option<RegistryPackageProvenance>,
     #[serde(default)]
     removal_cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
     #[serde(default)]
@@ -4078,6 +4100,7 @@ impl<'de> Deserialize<'de> for WireManifestRecord {
             source: wire.source,
             resolved,
             manifest_hash: wire.manifest_hash,
+            registry_provenance: wire.registry_provenance,
             removal_cleanup_requirements: wire.removal_cleanup_requirements,
             definition_retention: wire.definition_retention,
         })
@@ -4129,6 +4152,7 @@ impl WireManifestRecord {
         )
         .map(|record| {
             record
+                .with_registry_provenance(self.registry_provenance)
                 .with_removal_cleanup_requirements(self.removal_cleanup_requirements)
                 .with_definition_retention(self.definition_retention)
         })
@@ -4142,6 +4166,7 @@ impl From<&ExtensionManifestRecord> for WireManifestRecord {
             source: WireManifestSource::from_manifest_source(record.manifest().source),
             resolved: Some(record.resolved().clone()),
             manifest_hash: record.manifest_hash().cloned(),
+            registry_provenance: record.registry_provenance().cloned(),
             removal_cleanup_requirements: record.removal_cleanup_requirements().to_vec(),
             definition_retention: record.definition_retention(),
         }
@@ -4522,7 +4547,12 @@ fn map_extension_state_cas_error(
 #[cfg(test)]
 mod tests {
     use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
-    use ironclaw_host_api::{host_port::HostPortCatalog, ids::ExtensionId, path::VirtualPath};
+    use ironclaw_host_api::{
+        host_port::HostPortCatalog,
+        ids::ExtensionId,
+        path::VirtualPath,
+        registry_package::{RegistryPackageProvenance, RegistryPackageProvenanceParts},
+    };
 
     use super::*;
     use crate::ManifestSource;
@@ -4776,6 +4806,7 @@ mod tests {
             source: WireManifestSource::from_manifest_source(record.manifest().source),
             resolved: None,
             manifest_hash: record.manifest_hash().cloned(),
+            registry_provenance: None,
             removal_cleanup_requirements: Vec::new(),
             definition_retention: PackageDefinitionRetention::RemoveWithLastInstallation,
         };
@@ -4823,6 +4854,57 @@ mod tests {
             .expect("load migrated row")
             .expect("migrated row exists");
         assert_eq!(loaded.resolved(), record.resolved());
+    }
+
+    #[tokio::test]
+    async fn registry_receipt_survives_store_reconstruction() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let root =
+            VirtualPath::new("/system/extensions/.installations/receipt-test").expect("valid root");
+        let store = ExtensionInstallationStore::load_at(
+            backend.clone(),
+            root.clone(),
+            HostPortCatalog::empty(),
+            capability_provider_contracts(),
+        )
+        .await
+        .expect("initial store");
+        let provenance = RegistryPackageProvenance::new(RegistryPackageProvenanceParts {
+            registry: "ironhub".to_string(),
+            repository: "nearai/ironhub".to_string(),
+            package_version: "0.2.0".to_string(),
+            release_tag: "v0.2.0".to_string(),
+            catalog_origin: "https://hub.ironclaw.com".to_string(),
+            artifact_digest: format!("sha256:{}", "a".repeat(64)),
+            manifest_digest: Some(format!("sha256:{}", "b".repeat(64))),
+            installed_at: chrono::Utc::now(),
+        })
+        .expect("valid provenance");
+        let record = manifest_record("registry-receipt", Some("hash-receipt"))
+            .with_registry_provenance(Some(provenance.clone()));
+        store
+            .upsert_manifest_and_installation(
+                record,
+                installation("registry-receipt", Some("hash-receipt")),
+            )
+            .await
+            .expect("receipt persisted with install");
+        drop(store);
+
+        let reopened = ExtensionInstallationStore::load_at(
+            backend,
+            root,
+            HostPortCatalog::empty(),
+            capability_provider_contracts(),
+        )
+        .await
+        .expect("reopen store");
+        let loaded = reopened
+            .get_manifest(&ExtensionId::new("registry-receipt").expect("extension id"))
+            .await
+            .expect("manifest read")
+            .expect("manifest exists");
+        assert_eq!(loaded.registry_provenance(), Some(&provenance));
     }
 
     #[tokio::test]

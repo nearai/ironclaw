@@ -23,17 +23,24 @@ use serde::Deserialize;
 use ironclaw_extension_host::ExtensionLifecycleManager;
 
 use super::link_service::IronhubLinkStateStore;
-use super::model::{IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubInstallOptions};
+use super::model::{
+    IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubInstallOptions,
+    IronHubUpdateOptions,
+};
 use super::service::{IronhubManifestUrl, execute_reborn_ironhub_service_command};
 
 pub const IRONHUB_SEARCH_CAPABILITY_ID: &str = "builtin.ironhub_search";
 pub const IRONHUB_INFO_CAPABILITY_ID: &str = "builtin.ironhub_info";
+pub const IRONHUB_STATUS_CAPABILITY_ID: &str = "builtin.ironhub_status";
 pub const IRONHUB_INSTALL_CAPABILITY_ID: &str = "builtin.ironhub_install";
+pub const IRONHUB_UPDATE_CAPABILITY_ID: &str = "builtin.ironhub_update";
 
-const IRONHUB_CAPABILITY_IDS: [&str; 3] = [
+const IRONHUB_CAPABILITY_IDS: [&str; 5] = [
     IRONHUB_SEARCH_CAPABILITY_ID,
     IRONHUB_INFO_CAPABILITY_ID,
+    IRONHUB_STATUS_CAPABILITY_ID,
     IRONHUB_INSTALL_CAPABILITY_ID,
+    IRONHUB_UPDATE_CAPABILITY_ID,
 ];
 
 pub fn extend_builtin_first_party_package(
@@ -89,6 +96,25 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
                 EffectKind::Network,
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
+                EffectKind::ModifyExtension,
+            ],
+            PermissionMode::Ask,
+        )?,
+        capability_manifest(
+            IRONHUB_STATUS_CAPABILITY_ID,
+            "List caller-visible IronHub installations, their signed installed receipts, activation state, update availability, and security-authority changes.",
+            vec![EffectKind::Network, EffectKind::ReadFilesystem],
+            PermissionMode::Allow,
+        )?,
+        capability_manifest(
+            IRONHUB_UPDATE_CAPABILITY_ID,
+            "Update one installed IronHub tool or skill to an exact signed version and digest returned by ironhub_status. Authority changes require explicit acknowledgement and this capability always requires user approval.",
+            vec![
+                EffectKind::Network,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::DeleteFilesystem,
+                EffectKind::ModifyExtension,
             ],
             PermissionMode::Ask,
         )?,
@@ -103,8 +129,17 @@ fn capability_manifest(
 ) -> Result<CapabilityManifest, ExtensionError> {
     let schema_name = id.strip_prefix("builtin.").unwrap_or(id).replace('.', "-");
     let mut origin_gate_matrix = OriginGateMatrix::builtin_loop_run_seed(id);
-    if id == IRONHUB_INSTALL_CAPABILITY_ID {
+    if matches!(
+        id,
+        IRONHUB_INSTALL_CAPABILITY_ID | IRONHUB_UPDATE_CAPABILITY_ID
+    ) {
         origin_gate_matrix.product = OriginGatePolicy::ConsentSufficient;
+    }
+    if id == IRONHUB_UPDATE_CAPABILITY_ID {
+        // Updating executable code or model instructions always needs a fresh
+        // decision. AskAlways also prevents persistent approvals from being
+        // replayed for a later target.
+        origin_gate_matrix.loop_run = OriginGatePolicy::AskAlways;
     }
     Ok(CapabilityManifest {
         id: CapabilityId::new(id)?,
@@ -166,6 +201,26 @@ struct InstallInput {
     expected_artifact_digest: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct StatusInput {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    kind: Option<IronHubEntryKind>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateInput {
+    name: String,
+    #[serde(default)]
+    kind: Option<IronHubEntryKind>,
+    expected_installed_artifact_digest: String,
+    expected_version: String,
+    expected_artifact_digest: String,
+    #[serde(default)]
+    acknowledge_authority_change: bool,
+}
+
 #[async_trait]
 impl FirstPartyCapabilityHandler for IronHubCapabilityHandler {
     async fn dispatch(
@@ -200,6 +255,28 @@ impl FirstPartyCapabilityHandler for IronHubCapabilityHandler {
                         acknowledge_unverified: false,
                         expected_version: input.expected_version,
                         expected_artifact_digest: input.expected_artifact_digest,
+                        private_manifest_url: None,
+                    },
+                }
+            }
+            IRONHUB_STATUS_CAPABILITY_ID => {
+                let input: StatusInput = parse_input(request.input)?;
+                IronHubCommand::Status {
+                    name: input.name,
+                    kind: input.kind,
+                }
+            }
+            IRONHUB_UPDATE_CAPABILITY_ID => {
+                let input: UpdateInput = parse_input(request.input)?;
+                IronHubCommand::Update {
+                    name: input.name,
+                    options: IronHubUpdateOptions {
+                        kind: input.kind,
+                        expected_installed_artifact_digest: input
+                            .expected_installed_artifact_digest,
+                        expected_version: input.expected_version,
+                        expected_artifact_digest: input.expected_artifact_digest,
+                        acknowledge_authority_change: input.acknowledge_authority_change,
                         private_manifest_url: None,
                     },
                 }

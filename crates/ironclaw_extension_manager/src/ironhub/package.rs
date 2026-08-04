@@ -1,13 +1,95 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ironclaw_extensions::{ExtensionAssetPath, ExtensionRuntimeV2, ManifestSource};
+use ironclaw_host_api::registry_package::RegistryPackageProvenance;
 
 use ironclaw_extension_host::{
-    AvailableExtensionPackage, parse_imported_manifest, registry_extension_package,
+    AvailableExtensionPackage, parse_imported_manifest, registry_extension_package_with_provenance,
 };
 
 use crate::ironhub::catalog::validate_hub_name;
 use crate::ironhub::model::{IronHubCommandError, IronHubToolEntry};
+
+pub(crate) fn authority_changes(
+    installed: &ironclaw_extensions::ResolvedExtensionManifest,
+    candidate: &ironclaw_extensions::ResolvedExtensionManifest,
+) -> Vec<String> {
+    let mut changes = Vec::new();
+    if installed.requested_trust != candidate.requested_trust {
+        changes.push("requested trust changed".to_string());
+    }
+    if installed.runtime != candidate.runtime {
+        changes.push("runtime configuration changed".to_string());
+    }
+    let installed_ids = installed
+        .tools
+        .iter()
+        .map(|tool| &tool.id)
+        .collect::<BTreeSet<_>>();
+    let candidate_ids = candidate
+        .tools
+        .iter()
+        .map(|tool| &tool.id)
+        .collect::<BTreeSet<_>>();
+    if installed_ids != candidate_ids {
+        changes.push("capability set changed".to_string());
+    }
+    for installed_tool in &installed.tools {
+        let Some(candidate_tool) = candidate
+            .tools
+            .iter()
+            .find(|candidate_tool| candidate_tool.id == installed_tool.id)
+        else {
+            continue;
+        };
+        if installed_tool.effects != candidate_tool.effects {
+            changes.push(format!("effects changed for {}", installed_tool.id));
+        }
+        if installed_tool.default_permission != candidate_tool.default_permission
+            || installed_tool.visibility != candidate_tool.visibility
+            || installed_tool.origin_gate_matrix != candidate_tool.origin_gate_matrix
+        {
+            changes.push(format!(
+                "permission policy changed for {}",
+                installed_tool.id
+            ));
+        }
+        if installed_tool.network_targets != candidate_tool.network_targets
+            || installed_tool.max_egress_bytes != candidate_tool.max_egress_bytes
+        {
+            changes.push(format!(
+                "network authority changed for {}",
+                installed_tool.id
+            ));
+        }
+        if installed_tool.runtime_credentials != candidate_tool.runtime_credentials {
+            changes.push(format!(
+                "credential requirements changed for {}",
+                installed_tool.id
+            ));
+        }
+        if installed_tool.required_host_ports != candidate_tool.required_host_ports {
+            changes.push(format!("host ports changed for {}", installed_tool.id));
+        }
+        if installed_tool.resource_profile != candidate_tool.resource_profile {
+            changes.push(format!("resource limits changed for {}", installed_tool.id));
+        }
+    }
+    if installed.auth != candidate.auth {
+        changes.push("credential setup or scopes changed".to_string());
+    }
+    if installed.mcp != candidate.mcp
+        || installed.channel != candidate.channel
+        || installed.memory != candidate.memory
+        || installed.admin_configuration != candidate.admin_configuration
+        || installed.host_apis != candidate.host_apis
+        || installed.section_surfaces != candidate.section_surfaces
+        || installed.hooks != candidate.hooks
+    {
+        changes.push("host surface authority changed".to_string());
+    }
+    changes
+}
 
 /// Assemble a registry tool package around the manifest the registry published.
 ///
@@ -30,6 +112,7 @@ pub(crate) fn ironhub_tool_package(
     capabilities: Vec<u8>,
     schemas: Vec<(String, Vec<u8>)>,
     reserved_bundled_ids: &[String],
+    provenance: RegistryPackageProvenance,
 ) -> Result<AvailableExtensionPackage, IronHubCommandError> {
     validate_hub_name(&entry.name)?;
     let manifest_toml =
@@ -91,8 +174,9 @@ pub(crate) fn ironhub_tool_package(
     }
     files.extend(schema_assets);
 
-    let package = registry_extension_package(files, reserved_bundled_ids)
-        .map_err(IronHubCommandError::Product)?;
+    let package =
+        registry_extension_package_with_provenance(files, reserved_bundled_ids, provenance)
+            .map_err(IronHubCommandError::Product)?;
 
     // The catalog entry names the tool the user asked for; the manifest declares
     // the id it installs as. They are covered by the same signature, so a
@@ -124,6 +208,16 @@ fn validate_manifest_asset_path(path: &str) -> Result<(), IronHubCommandError> {
 mod tests {
     use super::super::model::{IronHubArtifact, IronHubProvenance};
     use super::*;
+    use chrono::Utc;
+    use ironclaw_extension_host::{available_manifest_hash, prepare_registry_update};
+    use ironclaw_extensions::{
+        ExtensionCredentialBinding, ExtensionCredentialHandle, ExtensionInstallation,
+        ExtensionInstallationId, ExtensionManifestRef, InstallationOwner,
+    };
+    use ironclaw_host_api::ids::{SecretHandle, UserId};
+    use ironclaw_host_api::registry_package::{
+        RegistryPackageProvenance, RegistryPackageProvenanceParts,
+    };
 
     /// A real WASI component; `registry_extension_package` rejects core modules.
     fn component() -> Vec<u8> {
@@ -236,6 +330,23 @@ access_token = "/access_token""#
         )
     }
 
+    fn provenance(entry: &IronHubToolEntry) -> RegistryPackageProvenance {
+        RegistryPackageProvenance::new(RegistryPackageProvenanceParts {
+            registry: "ironhub".to_string(),
+            repository: "nearai/ironhub".to_string(),
+            package_version: entry.version.clone(),
+            release_tag: "test".to_string(),
+            catalog_origin: "https://hub.ironclaw.com/".to_string(),
+            artifact_digest: format!("sha256:{}", "a".repeat(64)),
+            manifest_digest: entry
+                .manifest
+                .as_ref()
+                .map(|artifact| format!("sha256:{}", artifact.sha256)),
+            installed_at: Utc::now(),
+        })
+        .expect("provenance")
+    }
+
     fn build(entry: &IronHubToolEntry, manifest: Vec<u8>) -> AvailableExtensionPackage {
         ironhub_tool_package(
             entry,
@@ -244,6 +355,7 @@ access_token = "/access_token""#
             b"{}".to_vec(),
             published_schemas(&entry.name),
             &[],
+            provenance(entry),
         )
         .expect("package builds")
     }
@@ -258,6 +370,98 @@ access_token = "/access_token""#
         assert_eq!(
             package.manifest_toml,
             String::from_utf8(manifest).expect("utf8")
+        );
+    }
+
+    #[test]
+    fn authority_diff_reports_security_relevant_manifest_changes() {
+        let installed = build(
+            &entry_named("attio"),
+            published_manifest("attio", &api_key_auth("attio", "")),
+        );
+        let candidate_manifest =
+            String::from_utf8(published_manifest("attio", &api_key_auth("attio", "")))
+                .expect("manifest UTF-8")
+                .replace(
+                    r#"effects = ["network", "use_secret"]"#,
+                    r#"effects = ["network", "use_secret", "external_write"]"#,
+                );
+        let candidate = build(&entry_named("attio"), candidate_manifest.into_bytes());
+
+        assert_eq!(
+            authority_changes(&installed.resolved_manifest, &candidate.resolved_manifest),
+            vec!["effects changed for attio.invoke"]
+        );
+    }
+
+    #[test]
+    fn authority_diff_reports_same_kind_runtime_configuration_changes() {
+        let installed = build(
+            &entry_named("attio"),
+            published_manifest("attio", &api_key_auth("attio", "")),
+        );
+        let candidate_manifest =
+            String::from_utf8(published_manifest("attio", &api_key_auth("attio", "")))
+                .expect("manifest UTF-8")
+                .replace(
+                    "module = \"wasm/attio-tool.wasm\"",
+                    "module = \"wasm/attio-updated.wasm\"",
+                );
+        let candidate = build(&entry_named("attio"), candidate_manifest.into_bytes());
+
+        assert_eq!(
+            authority_changes(&installed.resolved_manifest, &candidate.resolved_manifest),
+            vec!["runtime configuration changed"]
+        );
+    }
+
+    #[test]
+    fn tool_target_digest_binds_the_published_manifest() {
+        let mut entry = entry_named("attio");
+        let original = super::super::catalog::tool_artifact_digest(&entry);
+        entry.manifest.as_mut().expect("manifest artifact").sha256 = "b".repeat(64);
+
+        assert_ne!(
+            original,
+            super::super::catalog::tool_artifact_digest(&entry)
+        );
+    }
+
+    #[test]
+    fn registry_update_preserves_only_credential_bindings_declared_by_the_target() {
+        let installed = build(
+            &entry_named("attio"),
+            published_manifest("attio", &api_key_auth("attio", "")),
+        );
+        let binding = ExtensionCredentialBinding::new(
+            ExtensionCredentialHandle::new("attio_api_key").expect("credential handle"),
+            SecretHandle::new("saved-attio-api-key").expect("secret handle"),
+        );
+        let existing = ExtensionInstallation::new(
+            ExtensionInstallationId::new("attio").expect("installation id"),
+            installed.package.id.clone(),
+            ExtensionManifestRef::new(
+                installed.package.id.clone(),
+                Some(available_manifest_hash(&installed).expect("manifest hash")),
+            ),
+            vec![binding.clone()],
+            Utc::now(),
+            InstallationOwner::user(UserId::new("alice").expect("user id")),
+        )
+        .expect("existing installation");
+
+        let compatible = prepare_registry_update(&installed, &existing).expect("compatible update");
+        assert_eq!(compatible.installation.credential_bindings(), &[binding]);
+
+        let renamed = String::from_utf8(published_manifest("attio", &api_key_auth("attio", "")))
+            .expect("manifest UTF-8")
+            .replace("attio_api_key", "attio_new_api_key");
+        let incompatible = build(&entry_named("attio"), renamed.into_bytes());
+        let plan =
+            prepare_registry_update(&incompatible, &existing).expect("authority-changing update");
+        assert!(
+            plan.installation.credential_bindings().is_empty(),
+            "a binding must not be carried into a target that no longer declares its handle"
         );
     }
 
@@ -321,6 +525,7 @@ access_token = "/access_token""#
             b"{}".to_vec(),
             schemas,
             &[],
+            provenance(&entry_named("attio")),
         )
         .expect_err("every manifest schema must be present in the signed catalog");
 
@@ -341,6 +546,7 @@ access_token = "/access_token""#
             b"{}".to_vec(),
             published_schemas("attio"),
             &[],
+            provenance(&entry),
         )
         .expect_err("manifest must be UTF-8");
         assert!(invalid_utf8.to_string().contains("not UTF-8"));
@@ -354,6 +560,7 @@ access_token = "/access_token""#
             b"{}".to_vec(),
             duplicate,
             &[],
+            provenance(&entry),
         )
         .expect_err("duplicate schema paths must be rejected");
         assert!(duplicate_error.to_string().contains("more than once"));
@@ -367,6 +574,7 @@ access_token = "/access_token""#
             b"{}".to_vec(),
             unreferenced,
             &[],
+            provenance(&entry),
         )
         .expect_err("unreferenced schema paths must be rejected");
         assert!(unreferenced_error.to_string().contains("unreferenced"));
@@ -422,6 +630,7 @@ access_token = "/access_token""#
                 b"{}".to_vec(),
                 published_schemas("attio"),
                 &[],
+                provenance(&entry_named("attio")),
             )
             .expect_err(label);
             assert!(
@@ -520,6 +729,7 @@ setup_url = "https://app.attio.com/settings/developers""#,
             b"{}".to_vec(),
             published_schemas("other-tool"),
             &[],
+            provenance(&entry_named("attio")),
         )
         .expect_err("mismatched id must not install");
 
@@ -541,6 +751,7 @@ setup_url = "https://app.attio.com/settings/developers""#,
             b"{}".to_vec(),
             published_schemas("attio"),
             &[],
+            provenance(&entry_named("attio")),
         )
         .expect_err("malformed manifest must not install");
 

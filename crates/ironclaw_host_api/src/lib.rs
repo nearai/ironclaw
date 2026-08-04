@@ -56,6 +56,7 @@ pub mod lane;
 pub mod mount;
 pub mod outbound;
 pub mod path;
+pub mod registry_package;
 pub mod resolution;
 pub mod resource;
 pub mod result_meta;

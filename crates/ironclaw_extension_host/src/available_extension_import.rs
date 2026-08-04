@@ -6,7 +6,10 @@ use ironclaw_extensions::{
     ManifestSource,
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
-use ironclaw_host_api::{ids::ExtensionId, path::VirtualPath, runtime::RuntimeKind};
+use ironclaw_host_api::{
+    ids::ExtensionId, path::VirtualPath, registry_package::RegistryPackageProvenance,
+    runtime::RuntimeKind,
+};
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::package_lifecycle::{
     LifecycleExtensionOnboarding, LifecyclePackageKind, LifecyclePackageRef,
@@ -177,6 +180,18 @@ pub fn registry_extension_package(
     )
 }
 
+/// Build a registry package and attach the host-validated immutable receipt
+/// that must be committed with its installation record.
+pub fn registry_extension_package_with_provenance(
+    files: Vec<(String, Vec<u8>)>,
+    reserved_bundled_ids: &[String],
+    provenance: RegistryPackageProvenance,
+) -> Result<AvailableExtensionPackage, ProductOperationFailure> {
+    let mut package = registry_extension_package(files, reserved_bundled_ids)?;
+    package.registry_provenance = Some(provenance);
+    Ok(package)
+}
+
 /// Parse an extension manifest at the import boundary.
 ///
 /// Exposed so a caller that downloads a manifest and its assets as separate
@@ -301,6 +316,7 @@ fn extension_package_from_files(
         manifest_toml: record.raw_toml().to_string(),
         resolved_manifest: Arc::new(record.resolved().clone()),
         source,
+        registry_provenance: None,
         package,
         cleanup_requirements: Vec::new(),
         surface_kinds,

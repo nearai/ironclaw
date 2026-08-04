@@ -88,6 +88,42 @@ erasing rows. Package bytes and assets remain under
 `/system/extensions/<extension_id>/` and are never embedded in lifecycle
 records.
 
+### Registry installation receipts and updates
+
+A registry-installed extension persists a validated
+`RegistryPackageProvenance` with its manifest definition. The receipt contains
+only registry/repository identity, package version, release tag, a redacted
+HTTPS catalog origin, artifact and manifest digests, and installation time. It
+must never contain a private manifest URL, access token, signed download URL,
+or credential. Installed skills persist the same receipt in their
+`.ironclaw-install.json` sidecar.
+
+Registry discovery and status are read-only. Installation, update, activation,
+deactivation, and removal remain explicit transitions:
+
+- install verifies the signed catalog and every artifact before publishing a
+  package and its receipt;
+- update requires the exact currently installed artifact digest and the exact
+  target version and digest returned by status;
+- a tool update compares security-relevant manifest authority (trust, runtime,
+  capabilities, effects, permissions, network/credential/host-port/resource
+  authority, auth, and host surfaces) and requires fresh consent when it
+  changes;
+- a skill update always requires fresh consent because its model instructions
+  change;
+- update preserves compatible credential bindings and caller ownership, does
+  not run uninstall credential cleanup, and restores the exact prior package,
+  receipt, ownership, bindings, and activation state if replacement fails;
+- shared or legacy tenant-wide extension installations fail closed rather than
+  allowing one caller to update every member's package;
+- ordinary removal deletes the receipt with the manifest or skill sidecar.
+
+An identical signed reinstall may attach a missing receipt to a package
+installed by an earlier release, without replacing its bytes or changing its
+installation timestamp. `force=true` installation is not an update contract.
+There is no polling or background auto-update; updates are manual and pinned
+to the status result.
+
 All authoritative read-modify-write transitions use the shared bounded
 filesystem CAS helper. A fresh installation writes child rows before
 committing the installation record (definition included) in one CAS, so an

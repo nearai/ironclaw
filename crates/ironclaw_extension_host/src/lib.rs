@@ -126,6 +126,7 @@ pub use admin_configuration_store::{
 pub use available_extension_import::{
     extension_asset_path, imported_extension_package, inline_extension_dir_assets,
     materialize_available_extension, parse_imported_manifest, registry_extension_package,
+    registry_extension_package_with_provenance,
 };
 pub use available_extensions::{
     AdminConfigurationCatalogUse, AvailableExtensionAsset, AvailableExtensionAssetContent,
@@ -208,7 +209,7 @@ pub use lifecycle::{
 };
 pub use lifecycle_restore::{
     ExtensionInstallPlan, available_manifest_hash, package_visible_capability_ids, prepare_install,
-    restore_extension_lifecycle_state,
+    prepare_registry_receipt_adoption, prepare_registry_update, restore_extension_lifecycle_state,
 };
 pub use lifecycle_vocabulary::ActiveExtensionCapability;
 pub use loaders::{ExtensionLoader, LoadContext, LoadedExtension, NativeExtensionFactory};
@@ -228,6 +229,7 @@ pub use nearai_mcp::{
 };
 pub use product_lifecycle::{
     ExtensionCredentialCleanup, ExtensionLifecycleManager, ExtensionLifecycleManagerDependencies,
+    RegistryExtensionInstallationStatus,
 };
 pub use provider_instance_readiness::{
     ProviderInstanceReadinessInput, provider_instance_readiness_map,

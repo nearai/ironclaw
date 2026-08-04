@@ -10,6 +10,7 @@ authority_effects = [
     "execute_code",
     "network",
     "use_secret",
+    "modify_extension",
     "modify_approval",
     "external_write",
 ]
@@ -255,9 +256,21 @@ mounts = "ambient"
 network = "ironhub_artifacts"
 
 [[grants]]
+capability = "builtin.ironhub_status"
+effects = ["dispatch_capability", "network", "read_filesystem"]
+mounts = "ironhub_status"
+network = "ironhub_artifacts"
+
+[[grants]]
 capability = "builtin.ironhub_install"
-effects = ["dispatch_capability", "network", "read_filesystem", "write_filesystem"]
-mounts = "system_extensions_lifecycle"
+effects = ["dispatch_capability", "network", "read_filesystem", "write_filesystem", "modify_extension"]
+mounts = "ironhub_lifecycle"
+network = "ironhub_artifacts"
+
+[[grants]]
+capability = "builtin.ironhub_update"
+effects = ["dispatch_capability", "network", "read_filesystem", "write_filesystem", "delete_filesystem", "modify_extension"]
+mounts = "ironhub_lifecycle"
 network = "ironhub_artifacts"
 
 [[grants]]

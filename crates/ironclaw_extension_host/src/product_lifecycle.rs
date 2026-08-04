@@ -21,6 +21,7 @@ use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
     ids::{ExtensionId, UserId, VendorId},
+    registry_package::RegistryPackageProvenance,
     resource::ResourceScope,
 };
 use ironclaw_product::{
@@ -67,7 +68,8 @@ pub trait ExtensionCredentialCleanup: Send + Sync {
 use crate::{
     ActiveExtensionCapability, AvailableExtensionCatalog, AvailableExtensionPackage,
     ExtensionInstallPlan, imported_extension_package, materialize_available_extension,
-    package_visible_capability_ids, prepare_install, visible_capability_ids,
+    package_visible_capability_ids, prepare_install, prepare_registry_receipt_adoption,
+    prepare_registry_update, visible_capability_ids,
 };
 use crate::{
     ExtensionActivationCredentialGate, ExtensionActivationCredentialReadiness,
@@ -133,6 +135,15 @@ where
 // standalone writers that should mirror lifecycle-managed packages into or out
 // of active_registry. Production and multi-tenant reuse require scoped storage
 // and registry ownership first; tracked in #4091.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryExtensionInstallationStatus {
+    pub extension_id: ExtensionId,
+    pub registry_provenance: Option<RegistryPackageProvenance>,
+    pub active: bool,
+    pub update_allowed: bool,
+    pub resolved_manifest: Arc<ironclaw_extensions::ResolvedExtensionManifest>,
+}
+
 pub struct ExtensionLifecycleManager {
     filesystem: Arc<dyn RootFilesystem>,
     catalog: Arc<RwLock<AvailableExtensionCatalog>>,
@@ -369,6 +380,91 @@ impl ExtensionLifecycleManager {
         &self,
     ) -> Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort> {
         Arc::clone(&self.installation_store)
+    }
+
+    pub async fn registry_installation_statuses(
+        &self,
+        caller: &UserId,
+    ) -> Result<Vec<RegistryExtensionInstallationStatus>, ProductOperationFailure> {
+        let installations = self
+            .installation_store
+            .list_installations()
+            .await
+            .map_err(map_extension_installation_error)?;
+        let mut manifests = self
+            .installation_store
+            .list_manifests()
+            .await
+            .map_err(map_extension_installation_error)?
+            .into_iter()
+            .map(|manifest| (manifest.extension_id().clone(), manifest))
+            .collect::<BTreeMap<_, _>>();
+        let active = self.active_extensions.snapshot();
+        let mut statuses = Vec::new();
+        for installation in installations {
+            if !installation.owner().visible_to(caller) {
+                continue;
+            }
+            let Some(manifest) = manifests.remove(installation.extension_id()) else {
+                continue;
+            };
+            if manifest.manifest().source != ironclaw_extensions::ManifestSource::RegistryInstalled
+            {
+                continue;
+            }
+            statuses.push(RegistryExtensionInstallationStatus {
+                extension_id: installation.extension_id().clone(),
+                registry_provenance: manifest.registry_provenance().cloned(),
+                active: active.get_extension(installation.extension_id()).is_some(),
+                update_allowed: matches!(
+                    installation.owner(),
+                    InstallationOwner::Users { user_ids }
+                        if user_ids.len() == 1 && user_ids.contains(caller)
+                ),
+                resolved_manifest: Arc::new(manifest.resolved().clone()),
+            });
+        }
+        statuses.sort_by(|left, right| left.extension_id.cmp(&right.extension_id));
+        Ok(statuses)
+    }
+
+    pub async fn registry_installation_status(
+        &self,
+        extension_id: &ExtensionId,
+        caller: &UserId,
+    ) -> Result<Option<RegistryExtensionInstallationStatus>, ProductOperationFailure> {
+        let Some(installation) = self.search_installation(extension_id).await? else {
+            return Ok(None);
+        };
+        if !installation.owner().visible_to(caller) {
+            return Ok(None);
+        }
+        let Some(manifest) = self
+            .installation_store
+            .get_manifest(extension_id)
+            .await
+            .map_err(map_extension_installation_error)?
+        else {
+            return Ok(None);
+        };
+        if manifest.manifest().source != ironclaw_extensions::ManifestSource::RegistryInstalled {
+            return Ok(None);
+        }
+        Ok(Some(RegistryExtensionInstallationStatus {
+            extension_id: extension_id.clone(),
+            registry_provenance: manifest.registry_provenance().cloned(),
+            active: self
+                .active_extensions
+                .snapshot()
+                .get_extension(extension_id)
+                .is_some(),
+            update_allowed: matches!(
+                installation.owner(),
+                InstallationOwner::Users { user_ids }
+                    if user_ids.len() == 1 && user_ids.contains(caller)
+            ),
+            resolved_manifest: Arc::new(manifest.resolved().clone()),
+        }))
     }
 
     pub async fn reserved_bundled_extension_ids(&self) -> Vec<String> {
@@ -1087,6 +1183,10 @@ impl ExtensionLifecycleManager {
             let matches = previous.manifest_toml == package.manifest_toml
                 && previous.assets == package.assets;
             if matches {
+                {
+                    let mut catalog = self.catalog.write().await;
+                    catalog.extend(AvailableExtensionCatalog::from_packages(vec![package]));
+                }
                 return self
                     .install_and_activate_registry_package(package_ref, caller)
                     .await;
@@ -1208,7 +1308,293 @@ impl ExtensionLifecycleManager {
         caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         self.install(package_ref.clone(), caller).await?;
+        self.adopt_registry_receipt_if_needed(&package_ref).await?;
         self.activate(package_ref, caller).await
+    }
+
+    /// Replace one caller-exclusive registry extension without running
+    /// uninstall cleanup. Registry updates preserve compatible credential
+    /// bindings and compensate back to the exact prior manifest/install row if
+    /// any target install or activation step fails.
+    pub async fn update_registry_package(
+        &self,
+        package: AvailableExtensionPackage,
+        expected_current_artifact_digest: &str,
+        caller: &UserId,
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
+        if package.source != ironclaw_extensions::ManifestSource::RegistryInstalled {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
+                reason: "registry update requires a registry-validated package".to_string(),
+            });
+        }
+        let target_provenance = package.registry_provenance.as_ref().ok_or_else(|| {
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "registry update requires immutable package provenance".to_string(),
+            }
+        })?;
+        let package_ref = package.package_ref.clone();
+        let extension_id = package.package.id.clone();
+        let _registry_permit = acquire_registry_install_permit(
+            Arc::clone(&self.registry_install_operations),
+            extension_id.as_str().to_string(),
+        )
+        .await;
+        let previous = {
+            let catalog = self.catalog.read().await;
+            catalog.resolve(&package_ref)?
+        };
+        if previous.source != ironclaw_extensions::ManifestSource::RegistryInstalled {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} was not installed from a registry",
+                    extension_id.as_str()
+                ),
+            });
+        }
+        let previous_installation =
+            self.search_installation(&extension_id)
+                .await?
+                .ok_or_else(|| ProductOperationFailure::InvalidBindingRequest {
+                    reason: format!("extension {} is not installed", extension_id.as_str()),
+                })?;
+        ensure_caller_may_operate(&previous_installation, caller)?;
+        match previous_installation.owner() {
+            InstallationOwner::Users { user_ids }
+                if user_ids.len() == 1 && user_ids.contains(caller) => {}
+            InstallationOwner::Users { .. } => {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
+                    reason: format!(
+                        "extension {} is shared by multiple users; registry update requires an exclusive installation",
+                        extension_id.as_str()
+                    ),
+                });
+            }
+            InstallationOwner::Tenant => {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
+                    reason: format!(
+                        "extension {} uses a legacy tenant-wide installation; registry update requires a user-owned exclusive installation",
+                        extension_id.as_str()
+                    ),
+                });
+            }
+        }
+        let previous_manifest = self
+            .installation_store
+            .get_manifest(&extension_id)
+            .await
+            .map_err(map_extension_installation_error)?
+            .ok_or_else(|| ProductOperationFailure::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} manifest is not installed",
+                    extension_id.as_str()
+                ),
+            })?;
+        let previous_provenance = previous_manifest.registry_provenance().ok_or_else(|| {
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} has no durable registry receipt; reinstall it before updating",
+                    extension_id.as_str()
+                ),
+            }
+        })?;
+        if !previous_provenance
+            .artifact_digest()
+            .eq_ignore_ascii_case(expected_current_artifact_digest)
+        {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} changed since update was checked; refresh status and retry",
+                    extension_id.as_str()
+                ),
+            });
+        }
+        if target_provenance
+            .artifact_digest()
+            .eq_ignore_ascii_case(previous_provenance.artifact_digest())
+            && previous.manifest_toml == package.manifest_toml
+            && previous.assets == package.assets
+        {
+            return self
+                .install_and_activate_registry_package(package_ref, caller)
+                .await;
+        }
+        let was_active = self
+            .active_extensions
+            .snapshot()
+            .get_extension(&extension_id)
+            .is_some();
+        let target_plan = prepare_registry_update(&package, &previous_installation)?;
+
+        if let Err(original_error) = self.remove_registry_replacement(&package_ref, caller).await {
+            let restore_result = async {
+                if self.search_installation(&extension_id).await?.is_none() {
+                    self.install(package_ref.clone(), caller).await?;
+                }
+                self.persist_install_plan(ExtensionInstallPlan {
+                    manifest_record: previous_manifest.clone(),
+                    installation: previous_installation.clone(),
+                })
+                .await?;
+                if was_active
+                    && self
+                        .active_extensions
+                        .snapshot()
+                        .get_extension(&extension_id)
+                        .is_none()
+                {
+                    self.activate(package_ref.clone(), caller).await?;
+                }
+                Ok::<(), ProductOperationFailure>(())
+            }
+            .await;
+            if let Err(restore_error) = restore_result {
+                return Err(compensation_failure(
+                    "registry replacement removal failed and the previous package could not be restored",
+                    original_error,
+                    restore_error,
+                ));
+            }
+            return Err(original_error);
+        }
+        {
+            let mut catalog = self.catalog.write().await;
+            catalog.extend(AvailableExtensionCatalog::from_packages(vec![package]));
+        }
+        let target_result = async {
+            let installed = self.install(package_ref.clone(), caller).await?;
+            self.persist_install_plan(target_plan).await?;
+            if was_active {
+                self.activate(package_ref.clone(), caller).await
+            } else {
+                Ok(installed)
+            }
+        }
+        .await;
+        match target_result {
+            Ok(response) => Ok(response),
+            Err(original_error) => {
+                if let Err(cleanup_error) =
+                    self.remove_registry_replacement(&package_ref, caller).await
+                {
+                    return Err(compensation_failure(
+                        "registry update failed and target cleanup also failed",
+                        original_error,
+                        cleanup_error,
+                    ));
+                }
+                {
+                    let mut catalog = self.catalog.write().await;
+                    catalog.remove(&package_ref);
+                    catalog.restore(Arc::clone(&previous));
+                }
+                if let Err(restore_error) = self.install(package_ref.clone(), caller).await {
+                    return Err(compensation_failure(
+                        "registry update failed and the previous package could not be restored",
+                        original_error,
+                        restore_error,
+                    ));
+                }
+                if let Err(restore_error) = self
+                    .persist_install_plan(ExtensionInstallPlan {
+                        manifest_record: previous_manifest,
+                        installation: previous_installation,
+                    })
+                    .await
+                {
+                    return Err(compensation_failure(
+                        "registry update failed and the previous install receipt could not be restored",
+                        original_error,
+                        restore_error,
+                    ));
+                }
+                if was_active && let Err(restore_error) = self.activate(package_ref, caller).await {
+                    return Err(compensation_failure(
+                        "registry update failed and the previous activation could not be restored",
+                        original_error,
+                        restore_error,
+                    ));
+                }
+                Err(original_error)
+            }
+        }
+    }
+
+    async fn remove_registry_replacement(
+        &self,
+        package_ref: &LifecyclePackageRef,
+        caller: &UserId,
+    ) -> Result<(), ProductOperationFailure> {
+        let (extension_id, _) = extension_ids_from_package_ref(package_ref)?;
+        let _operation_guard = self.operation_lock.lock().await;
+        if self.search_installation(&extension_id).await?.is_some() {
+            let response = self.remove_locked(package_ref.clone(), caller).await?;
+            if matches!(
+                response.payload,
+                Some(LifecycleProductPayload::ExtensionRemove { removed: false })
+            ) {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
+                    reason: format!(
+                        "extension {} is shared and cannot be replaced",
+                        extension_id.as_str()
+                    ),
+                });
+            }
+        } else {
+            self.remove_orphaned_runtime_state(&extension_id).await?;
+        }
+        match self.installation_store.delete_manifest(&extension_id).await {
+            Ok(()) | Err(ExtensionInstallationError::ManifestNotFound { .. }) => Ok(()),
+            Err(error) => Err(map_extension_installation_error(error)),
+        }
+    }
+
+    async fn adopt_registry_receipt_if_needed(
+        &self,
+        package_ref: &LifecyclePackageRef,
+    ) -> Result<(), ProductOperationFailure> {
+        let available = {
+            let catalog = self.catalog.read().await;
+            catalog.resolve(package_ref)?
+        };
+        let Some(target_provenance) = available.registry_provenance.as_ref() else {
+            return Ok(());
+        };
+        let installation_id =
+            ExtensionInstallationId::new(available.package.id.as_str().to_string())
+                .map_err(map_extension_installation_error)?;
+        let installation = self
+            .installation_store
+            .get_installation(&installation_id)
+            .await
+            .map_err(map_extension_installation_error)?
+            .ok_or_else(|| ProductOperationFailure::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} has no installation row after install",
+                    available.package.id.as_str()
+                ),
+            })?;
+        let manifest = self
+            .installation_store
+            .get_manifest(&available.package.id)
+            .await
+            .map_err(map_extension_installation_error)?
+            .ok_or_else(|| ProductOperationFailure::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} has no manifest row after install",
+                    available.package.id.as_str()
+                ),
+            })?;
+        if manifest
+            .registry_provenance()
+            .is_some_and(|current| current.same_package_identity(target_provenance))
+        {
+            return Ok(());
+        }
+        self.persist_install_plan(prepare_registry_receipt_adoption(
+            &available,
+            &installation,
+        )?)
+        .await
     }
 
     pub async fn install(
@@ -4568,6 +4954,7 @@ output_schema_ref = "schemas/search.output.json"
             manifest_toml: manifest_toml.to_string(),
             resolved_manifest,
             source: ManifestSource::HostBundled,
+            registry_provenance: None,
             package,
             cleanup_requirements: Vec::new(),
             surface_kinds: Vec::new(),
@@ -4658,6 +5045,7 @@ input_schema_ref = "schemas/fixture_host_internal/dynamic/mcp_server.input.v1.js
             manifest_toml: manifest_toml.to_string(),
             resolved_manifest,
             source: ManifestSource::HostBundled,
+            registry_provenance: None,
             package,
             cleanup_requirements: Vec::new(),
             surface_kinds: Vec::new(),

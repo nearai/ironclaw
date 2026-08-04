@@ -145,6 +145,39 @@ pub struct IronHubInstallOptions {
     pub private_manifest_url: Option<String>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct IronHubUpdateOptions {
+    pub kind: Option<IronHubEntryKind>,
+    pub expected_installed_artifact_digest: String,
+    pub expected_version: String,
+    pub expected_artifact_digest: String,
+    pub acknowledge_authority_change: bool,
+    pub private_manifest_url: Option<String>,
+}
+
+impl std::fmt::Debug for IronHubUpdateOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IronHubUpdateOptions")
+            .field("kind", &self.kind)
+            .field(
+                "expected_installed_artifact_digest",
+                &self.expected_installed_artifact_digest,
+            )
+            .field("expected_version", &self.expected_version)
+            .field("expected_artifact_digest", &self.expected_artifact_digest)
+            .field(
+                "acknowledge_authority_change",
+                &self.acknowledge_authority_change,
+            )
+            .field(
+                "private_manifest_url",
+                &self.private_manifest_url.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for IronHubInstallOptions {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -174,10 +207,31 @@ pub enum IronHubCommand {
         name: String,
         kind: Option<IronHubEntryKind>,
     },
+    Status {
+        name: Option<String>,
+        kind: Option<IronHubEntryKind>,
+    },
     Install {
         name: String,
         options: IronHubInstallOptions,
     },
+    Update {
+        name: String,
+        options: IronHubUpdateOptions,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IronHubInstallationSummary {
+    pub version: String,
+    pub artifact_digest: String,
+    pub release_tag: String,
+    pub catalog_origin: String,
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_available: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authority_changes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,13 +243,17 @@ pub struct IronHubEntrySummary {
     pub provenance: IronHubProvenance,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation: Option<IronHubInstallationSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IronHubPhase {
     Discovered,
+    Status,
     Installed,
+    Updated,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -166,6 +166,7 @@ pub(crate) fn tool_summary(entry: &IronHubToolEntry) -> IronHubEntrySummary {
         description: entry.description.clone(),
         provenance: entry.provenance,
         artifact_digest: Some(tool_artifact_digest(entry)),
+        installation: None,
     }
 }
 
@@ -177,6 +178,7 @@ pub(crate) fn skill_summary(entry: &IronHubSkillEntry) -> IronHubEntrySummary {
         description: entry.description.clone(),
         provenance: entry.provenance,
         artifact_digest: Some(skill_artifact_digest(entry)),
+        installation: None,
     }
 }
 
@@ -188,6 +190,7 @@ pub(crate) fn compact_tool_summary(entry: &IronHubToolEntry) -> IronHubEntrySumm
         description: compact_description(&entry.description),
         provenance: entry.provenance,
         artifact_digest: None,
+        installation: None,
     }
 }
 
@@ -199,6 +202,7 @@ pub(crate) fn compact_skill_summary(entry: &IronHubSkillEntry) -> IronHubEntrySu
         description: compact_description(&entry.description),
         provenance: entry.provenance,
         artifact_digest: None,
+        installation: None,
     }
 }
 
@@ -222,7 +226,7 @@ pub(crate) fn tool_artifact_digest(entry: &IronHubToolEntry) -> String {
     sha256_digest_token(digest_material.as_bytes())
 }
 
-fn skill_artifact_digest(entry: &IronHubSkillEntry) -> String {
+pub(crate) fn skill_artifact_digest(entry: &IronHubSkillEntry) -> String {
     sha256_digest_token(entry.skill_md.sha256.as_bytes())
 }
 
@@ -439,6 +443,12 @@ pub(crate) fn validate_private_manifest_origin(
         ));
     }
     Ok(configured)
+}
+
+pub(crate) fn catalog_origin_for_url(
+    configured_catalog_url: &str,
+) -> Result<CatalogOrigin, IronHubCommandError> {
+    CatalogOrigin::from_url(configured_catalog_url, "configured catalog URL")
 }
 
 pub(crate) fn host_is_disallowed_target(host: &str) -> bool {

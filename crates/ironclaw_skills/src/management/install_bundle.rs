@@ -4,7 +4,7 @@ use std::{
 };
 
 use ironclaw_filesystem::{FileType, FilesystemError, FilesystemOperation};
-use ironclaw_host_api::path::ScopedPath;
+use ironclaw_host_api::{path::ScopedPath, registry_package::RegistryPackageProvenance};
 
 use crate::{
     INSTALL_METADATA_FILE_NAME, InstalledSkillMetadata, MAX_INSTALL_METADATA_BYTES,
@@ -23,6 +23,13 @@ pub const MAX_INSTALL_BUNDLE_FILE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_INSTALL_BUNDLE_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SKILL_SNAPSHOT_FILES: usize = MAX_INSTALL_BUNDLE_FILES + 2;
 const MAX_SKILL_SNAPSHOT_ENTRIES: usize = MAX_SKILL_SNAPSHOT_FILES * 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExistingRegistryInstallMatch {
+    Match,
+    AdoptReceipt,
+    Conflict,
+}
 const MAX_SKILL_SNAPSHOT_TOTAL_BYTES: usize =
     MAX_INSTALL_BUNDLE_TOTAL_BYTES + MAX_PROMPT_FILE_SIZE as usize + MAX_INSTALL_METADATA_BYTES;
 
@@ -53,6 +60,13 @@ pub(crate) async fn capture_skill_bundle(
     }
     let mutation_lock = skill_mutation_lock(skill_name);
     let _mutation_guard = mutation_lock.lock().await;
+    capture_skill_bundle_locked(context, skill_name).await
+}
+
+pub(super) async fn capture_skill_bundle_locked(
+    context: &SkillManagementContext,
+    skill_name: &str,
+) -> Result<SkillBundleSnapshot, SkillManagementError> {
     let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, skill_name)?;
     let mut files = Vec::new();
     let mut stack = vec![(skill_dir, String::new())];
@@ -165,6 +179,14 @@ pub(crate) async fn restore_skill_bundle(
     }
     let mutation_lock = skill_mutation_lock(skill_name);
     let _mutation_guard = mutation_lock.lock().await;
+    restore_skill_bundle_locked(context, skill_name, snapshot).await
+}
+
+pub(super) async fn restore_skill_bundle_locked(
+    context: &SkillManagementContext,
+    skill_name: &str,
+    snapshot: SkillBundleSnapshot,
+) -> Result<SkillSource, SkillManagementError> {
     let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, skill_name)?;
     if stat_optional(context, &skill_dir).await?.is_some() {
         return Err(SkillManagementError::new(
@@ -213,6 +235,7 @@ pub(super) async fn publish_skill_install(
     files: &[SkillInstallFile<'_>],
     source: SkillInstallSource,
     source_url: Option<&str>,
+    registry_provenance: Option<&RegistryPackageProvenance>,
 ) -> Result<(), SkillManagementError> {
     let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, skill_name)?;
     let skill_path = skill_scoped_path(USER_SKILLS_ROOT, skill_name, SKILL_FILE_NAME)?;
@@ -238,7 +261,7 @@ pub(super) async fn publish_skill_install(
         if source == SkillInstallSource::InstalledUrl {
             let metadata_path =
                 skill_bundle_file_scoped_path(skill_name, INSTALL_METADATA_FILE_NAME)?;
-            let metadata = install_metadata_bytes(source_url)?;
+            let metadata = install_metadata_bytes(source_url, registry_provenance)?;
             log_skill_filesystem_phase("write_install_metadata", skill_name, &metadata_path);
             context
                 .filesystem
@@ -280,9 +303,16 @@ pub(super) async fn existing_skill_install_matches(
     files: &[SkillInstallFile<'_>],
     source: SkillInstallSource,
     source_url: Option<&str>,
-) -> Result<bool, SkillManagementError> {
+    registry_provenance: Option<&RegistryPackageProvenance>,
+) -> Result<ExistingRegistryInstallMatch, SkillManagementError> {
     let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, skill_name)?;
-    let expected_files = expected_install_files(normalized_content, files, source, source_url)?;
+    let expected_files = expected_install_files(
+        normalized_content,
+        files,
+        source,
+        source_url,
+        registry_provenance,
+    )?;
     existing_files_match_expected(context, &skill_dir, expected_files).await
 }
 
@@ -291,6 +321,7 @@ fn expected_install_files<'a>(
     files: &'a [SkillInstallFile<'a>],
     source: SkillInstallSource,
     source_url: Option<&str>,
+    registry_provenance: Option<&RegistryPackageProvenance>,
 ) -> Result<BTreeMap<String, Cow<'a, [u8]>>, SkillManagementError> {
     let mut expected = BTreeMap::from([(
         SKILL_FILE_NAME.to_string(),
@@ -299,7 +330,7 @@ fn expected_install_files<'a>(
     if source == SkillInstallSource::InstalledUrl {
         expected.insert(
             INSTALL_METADATA_FILE_NAME.to_string(),
-            Cow::Owned(install_metadata_bytes(source_url)?),
+            Cow::Owned(install_metadata_bytes(source_url, registry_provenance)?),
         );
     }
     for file in files {
@@ -313,7 +344,8 @@ async fn existing_files_match_expected(
     context: &SkillManagementContext,
     skill_dir: &ScopedPath,
     mut expected_files: BTreeMap<String, Cow<'_, [u8]>>,
-) -> Result<bool, SkillManagementError> {
+) -> Result<ExistingRegistryInstallMatch, SkillManagementError> {
+    let mut adopt_receipt = false;
     let expected_dirs = expected_directory_prefixes(expected_files.keys());
     let expected_entry_count = expected_files.len().saturating_add(expected_dirs.len());
     let mut stack = vec![(skill_dir.clone(), String::new())];
@@ -328,7 +360,7 @@ async fn existing_files_match_expected(
             .await
             .map_err(filesystem_error)?;
         if entries.len() > expected_entry_count {
-            return Ok(false);
+            return Ok(ExistingRegistryInstallMatch::Conflict);
         }
         for entry in entries {
             let relative_path = if relative_prefix.is_empty() {
@@ -339,33 +371,102 @@ async fn existing_files_match_expected(
             match entry.file_type {
                 FileType::File => {
                     let Some(expected_contents) = expected_files.remove(&relative_path) else {
-                        return Ok(false);
+                        return Ok(ExistingRegistryInstallMatch::Conflict);
                     };
                     let file_path = scoped_child(&dir_path, &entry.name)?;
-                    let Some(existing_contents) =
+                    let existing_contents = if relative_path == INSTALL_METADATA_FILE_NAME {
+                        context
+                            .filesystem
+                            .read_bytes_bounded(
+                                &context.scope,
+                                &file_path,
+                                MAX_INSTALL_METADATA_BYTES,
+                            )
+                            .await
+                            .map_err(filesystem_error)?
+                    } else {
                         read_existing_file_bytes(context, &file_path, expected_contents.len())
                             .await?
-                    else {
-                        return Ok(false);
                     };
-                    if existing_contents != expected_contents.as_ref() {
-                        return Ok(false);
+                    let Some(existing_contents) = existing_contents else {
+                        return Ok(ExistingRegistryInstallMatch::Conflict);
+                    };
+                    if existing_contents != expected_contents.as_ref()
+                        && relative_path == INSTALL_METADATA_FILE_NAME
+                    {
+                        match install_metadata_match(&existing_contents, expected_contents.as_ref())
+                        {
+                            ExistingRegistryInstallMatch::Match => {}
+                            ExistingRegistryInstallMatch::AdoptReceipt => adopt_receipt = true,
+                            ExistingRegistryInstallMatch::Conflict => {
+                                return Ok(ExistingRegistryInstallMatch::Conflict);
+                            }
+                        }
+                    } else if existing_contents != expected_contents.as_ref() {
+                        return Ok(ExistingRegistryInstallMatch::Conflict);
                     }
                 }
                 FileType::Directory => {
                     if !expected_dirs.contains(&relative_path) {
-                        return Ok(false);
+                        return Ok(ExistingRegistryInstallMatch::Conflict);
                     }
                     stack.push((
                         scoped_child(&dir_path, &entry.name)?,
                         format!("{relative_path}/"),
                     ));
                 }
-                FileType::Symlink | FileType::Other => return Ok(false),
+                FileType::Symlink | FileType::Other => {
+                    return Ok(ExistingRegistryInstallMatch::Conflict);
+                }
             }
         }
     }
-    Ok(expected_files.is_empty())
+    if !expected_files.is_empty() {
+        return Ok(ExistingRegistryInstallMatch::Conflict);
+    }
+    Ok(if adopt_receipt {
+        ExistingRegistryInstallMatch::AdoptReceipt
+    } else {
+        ExistingRegistryInstallMatch::Match
+    })
+}
+
+fn install_metadata_match(existing: &[u8], expected: &[u8]) -> ExistingRegistryInstallMatch {
+    let (Ok(existing), Ok(expected)) = (
+        serde_json::from_slice::<InstalledSkillMetadata>(existing),
+        serde_json::from_slice::<InstalledSkillMetadata>(expected),
+    ) else {
+        return ExistingRegistryInstallMatch::Conflict;
+    };
+    if existing.source != expected.source
+        || existing.source_url != expected.source_url
+        || existing.source_subdir != expected.source_subdir
+    {
+        return ExistingRegistryInstallMatch::Conflict;
+    }
+    match (&existing.registry_provenance, &expected.registry_provenance) {
+        (Some(existing), Some(expected)) if existing.same_package_identity(expected) => {
+            ExistingRegistryInstallMatch::Match
+        }
+        (None, Some(_)) => ExistingRegistryInstallMatch::AdoptReceipt,
+        (None, None) => ExistingRegistryInstallMatch::Match,
+        _ => ExistingRegistryInstallMatch::Conflict,
+    }
+}
+
+pub(super) async fn adopt_registry_receipt(
+    context: &SkillManagementContext,
+    skill_name: &str,
+    source_url: Option<&str>,
+    provenance: &RegistryPackageProvenance,
+) -> Result<(), SkillManagementError> {
+    let metadata_path = skill_bundle_file_scoped_path(skill_name, INSTALL_METADATA_FILE_NAME)?;
+    let metadata = install_metadata_bytes(source_url, Some(provenance))?;
+    context
+        .filesystem
+        .write_file(&context.scope, &metadata_path, &metadata)
+        .await
+        .map_err(filesystem_error)
 }
 
 fn expected_directory_prefixes<'a>(
@@ -453,10 +554,44 @@ pub(super) async fn read_install_metadata_bytes(
     }
 }
 
-fn install_metadata_bytes(source_url: Option<&str>) -> Result<Vec<u8>, SkillManagementError> {
-    let bytes = InstalledSkillMetadata::installed_url(source_url)
-        .to_pretty_json()
-        .map_err(|_| SkillManagementError::new(SkillManagementErrorKind::InvalidInput))?;
+pub(super) async fn read_install_metadata_bytes_strict(
+    context: &SkillManagementContext,
+    skill_path: &ScopedPath,
+) -> Result<Option<Vec<u8>>, SkillManagementError> {
+    let Some(metadata_path) = scoped_sibling(skill_path, INSTALL_METADATA_FILE_NAME)? else {
+        return Ok(None);
+    };
+    match context
+        .filesystem
+        .read_bytes_bounded(&context.scope, &metadata_path, MAX_INSTALL_METADATA_BYTES)
+        .await
+    {
+        Ok(Some(bytes)) => Ok(Some(bytes)),
+        Ok(None) => Err(SkillManagementError::with_reason(
+            SkillManagementErrorKind::Resource,
+            format!(
+                "skill install metadata at {metadata_path} exceeds the {MAX_INSTALL_METADATA_BYTES}-byte limit"
+            ),
+        )),
+        Err(FilesystemError::NotFound { .. }) => Ok(None),
+        Err(error) => Err(filesystem_error(error)),
+    }
+}
+
+fn install_metadata_bytes(
+    source_url: Option<&str>,
+    registry_provenance: Option<&RegistryPackageProvenance>,
+) -> Result<Vec<u8>, SkillManagementError> {
+    let metadata = registry_provenance
+        .cloned()
+        .map(|provenance| InstalledSkillMetadata::installed_registry(source_url, provenance))
+        .unwrap_or_else(|| InstalledSkillMetadata::installed_url(source_url));
+    let bytes = metadata.to_pretty_json().map_err(|error| {
+        SkillManagementError::with_reason(
+            SkillManagementErrorKind::InvalidInput,
+            format!("failed to serialize skill install metadata: {error}"),
+        )
+    })?;
     if bytes.len() > MAX_INSTALL_METADATA_BYTES {
         return Err(SkillManagementError::new(
             SkillManagementErrorKind::Resource,

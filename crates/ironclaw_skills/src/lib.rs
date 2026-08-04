@@ -40,8 +40,11 @@ pub use management::{
     SkillInstallResult, SkillInstallSource, SkillManagementContext, SkillManagementError,
     SkillManagementErrorKind, SkillRemoveRequest, SkillRemoveResult, SkillSearchRequest,
     SkillSearchResult, SkillSource as ManagedSkillSource, SkillSummary, SkillUpdateRequest,
-    SkillUpdateResult, install_skill, list_skills, read_skill_content, remove_skill, search_skills,
-    skill_summary_json, update_skill,
+    SkillUpdateResult, install_skill, list_skills, read_skill_content, read_skill_install_metadata,
+    remove_skill, search_skills, skill_summary_json, update_skill,
+};
+pub(crate) use management::{
+    SkillRegistryInstallRequest, install_registry_skill, replace_registry_skill,
 };
 pub use parser::{ParsedSkill, SkillParseError, parse_skill_md, set_skill_auto_activate};
 pub use scoped_management::{

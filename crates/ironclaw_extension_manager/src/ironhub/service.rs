@@ -11,7 +11,8 @@ use ironclaw_host_api::{
         RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
         RuntimeHttpEgressResponse,
     },
-    ids::{CapabilityId, InvocationId},
+    ids::{CapabilityId, ExtensionId, InvocationId},
+    registry_package::{RegistryPackageProvenance, RegistryPackageProvenanceParts},
     resource::ResourceScope,
     runtime::RuntimeKind,
 };
@@ -20,26 +21,29 @@ use ironclaw_product_contracts::package_lifecycle::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
 };
 use ironclaw_skills::{
-    ScopedSkillManagementError, ScopedSkillManagementPort, SkillManagementErrorKind,
+    ScopedSkillManagementError, ScopedSkillManagementPort, set_skill_auto_activate,
 };
 
-use ironclaw_extension_host::ExtensionLifecycleManager;
+use ironclaw_extension_host::{ExtensionLifecycleManager, parse_imported_manifest};
+use ironclaw_extensions::ManifestSource;
 
 use super::catalog::{
-    CatalogOrigin, IronHubManifestSource, catalog, classify, classify_gate_and_digest,
-    compact_skill_summary, compact_tool_summary, entry_matches, invalid,
-    network_policy_for_url_from_origin, sha256_hex, skill_summary, tool_summary,
-    validate_artifact_for_origin, validate_artifact_url, validate_hub_name, validate_manifest,
-    validate_private_manifest, validate_private_manifest_origin, verify_signed_manifest,
+    CatalogOrigin, IronHubManifestSource, catalog, catalog_origin_for_url, classify,
+    classify_gate_and_digest, compact_skill_summary, compact_tool_summary, entry_matches, invalid,
+    network_policy_for_url_from_origin, sha256_hex, skill_artifact_digest, skill_summary,
+    tool_artifact_digest, tool_summary, validate_artifact_for_origin, validate_artifact_url,
+    validate_hub_name, validate_manifest, validate_private_manifest,
+    validate_private_manifest_origin, verify_signed_manifest,
 };
 use super::link_service::{IronhubLinkStateError, IronhubLinkStateStore};
 use super::model::{
     DEFAULT_IRONHUB_MANIFEST_URL, IronHubArtifact, IronHubCommand, IronHubCommandError,
-    IronHubEntryKind, IronHubInstallOptions, IronHubManifest, IronHubPhase, IronHubProvenance,
-    IronHubResponse, MANIFEST_CACHE_MAX_ENTRIES, MANIFEST_CACHE_TTL, MAX_MANIFEST_BYTES,
-    MAX_METADATA_BYTES, MAX_SIGNED_MANIFEST_BYTES, MAX_WASM_BYTES,
+    IronHubEntryKind, IronHubInstallOptions, IronHubInstallationSummary, IronHubManifest,
+    IronHubPhase, IronHubProvenance, IronHubResponse, IronHubUpdateOptions,
+    MANIFEST_CACHE_MAX_ENTRIES, MANIFEST_CACHE_TTL, MAX_MANIFEST_BYTES, MAX_METADATA_BYTES,
+    MAX_SIGNED_MANIFEST_BYTES, MAX_WASM_BYTES,
 };
-use super::package::ironhub_tool_package;
+use super::package::{authority_changes, ironhub_tool_package};
 
 struct CachedManifest {
     manifest: Arc<IronHubManifest>,
@@ -48,6 +52,7 @@ struct CachedManifest {
 
 static MANIFEST_CACHE: LazyLock<std::sync::Mutex<HashMap<String, CachedManifest>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+const MAX_STATUS_ENTRIES: usize = 50;
 
 pub trait RebornIronHubRuntime {
     fn ironhub_skill_management(&self) -> Arc<ScopedSkillManagementPort>;
@@ -198,7 +203,9 @@ impl IronHubService {
             IronHubCommand::Search { query } => self.search(&query).await,
             IronHubCommand::List { kind } => self.list(kind).await,
             IronHubCommand::Info { name, kind } => self.info(&name, kind).await,
+            IronHubCommand::Status { name, kind } => self.status(name.as_deref(), kind).await,
             IronHubCommand::Install { name, options } => self.install(&name, options).await,
+            IronHubCommand::Update { name, options } => self.update(&name, options).await,
         }
     }
 
@@ -260,37 +267,256 @@ impl IronHubService {
         Ok(IronHubResponse::discovered(vec![entry]))
     }
 
+    async fn status(
+        &self,
+        name: Option<&str>,
+        kind: Option<IronHubEntryKind>,
+    ) -> Result<IronHubResponse, IronHubCommandError> {
+        if let Some(name) = name {
+            validate_hub_name(name)?;
+        }
+        let manifest = self.fetch_manifest_cached().await?;
+        let public_origin = catalog_origin_for_url(&self.manifest_url)?.redacted_source_url();
+        let mut entries = Vec::new();
+        let mut total_entries = 0usize;
+
+        if kind != Some(IronHubEntryKind::Skill) {
+            let installed_tools = if let Some(name) = name {
+                let extension_id = ExtensionId::new(name.to_string())
+                    .map_err(|error| invalid(error.to_string()))?;
+                self.extension_management
+                    .registry_installation_status(&extension_id, &self.scope.user_id)
+                    .await?
+                    .into_iter()
+                    .collect()
+            } else {
+                self.extension_management
+                    .registry_installation_statuses(&self.scope.user_id)
+                    .await?
+            };
+            for installed in installed_tools {
+                if name.is_some_and(|name| name != installed.extension_id.as_str()) {
+                    continue;
+                }
+                let Some(provenance) = installed.registry_provenance.as_ref() else {
+                    continue;
+                };
+                if provenance.registry() != "ironhub" {
+                    continue;
+                }
+                total_entries += 1;
+                if entries.len() >= MAX_STATUS_ENTRIES {
+                    continue;
+                }
+                let catalog_entry = manifest.find_tool(installed.extension_id.as_str());
+                let update_available = if provenance.catalog_origin() == public_origin {
+                    catalog_entry.map(|entry| {
+                        !tool_artifact_digest(entry)
+                            .eq_ignore_ascii_case(provenance.artifact_digest())
+                            || entry.version != provenance.package_version()
+                    })
+                } else {
+                    None
+                };
+                let authority_changes = if name.is_some() && update_available == Some(true) {
+                    if let Some(entry) = catalog_entry {
+                        match self
+                            .tool_authority_changes(entry, &installed.resolved_manifest, None)
+                            .await
+                        {
+                            Ok(changes) => changes,
+                            Err(error) => {
+                                tracing::warn!(
+                                    package = %installed.extension_id,
+                                    %error,
+                                    "IronHub status could not compute extension authority changes"
+                                );
+                                Vec::new()
+                            }
+                        }
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
+                let mut summary = catalog_entry.map(tool_summary).unwrap_or_else(|| {
+                    installed_tool_summary(
+                        installed.extension_id.as_str(),
+                        provenance.package_version(),
+                    )
+                });
+                summary.installation = Some(IronHubInstallationSummary {
+                    version: provenance.package_version().to_string(),
+                    artifact_digest: provenance.artifact_digest().to_string(),
+                    release_tag: provenance.release_tag().to_string(),
+                    catalog_origin: provenance.catalog_origin().to_string(),
+                    active: installed.active,
+                    update_available,
+                    authority_changes,
+                });
+                entries.push(summary);
+            }
+        }
+
+        if kind != Some(IronHubEntryKind::Tool) {
+            for skill in self
+                .skill_management
+                .list_for_scope(self.scope.clone())
+                .await
+                .map_err(skill_install_error)?
+            {
+                if name.is_some_and(|name| name != skill.name) {
+                    continue;
+                }
+                let Some(metadata) = self
+                    .skill_management
+                    .install_metadata_for_scope(self.scope.clone(), &skill.name)
+                    .await
+                    .map_err(skill_install_error)?
+                else {
+                    continue;
+                };
+                let Some(provenance) = metadata.registry_provenance.as_ref() else {
+                    continue;
+                };
+                if provenance.registry() != "ironhub" {
+                    continue;
+                }
+                total_entries += 1;
+                if entries.len() >= MAX_STATUS_ENTRIES {
+                    continue;
+                }
+                let catalog_entry = manifest.find_skill(&skill.name);
+                let update_available = if provenance.catalog_origin() == public_origin {
+                    catalog_entry.map(|entry| {
+                        !skill_artifact_digest(entry)
+                            .eq_ignore_ascii_case(provenance.artifact_digest())
+                            || entry.version != provenance.package_version()
+                    })
+                } else {
+                    None
+                };
+                let mut summary = catalog_entry.map(skill_summary).unwrap_or_else(|| {
+                    installed_skill_summary(&skill.name, provenance.package_version())
+                });
+                summary.installation = Some(IronHubInstallationSummary {
+                    version: provenance.package_version().to_string(),
+                    artifact_digest: provenance.artifact_digest().to_string(),
+                    release_tag: provenance.release_tag().to_string(),
+                    catalog_origin: provenance.catalog_origin().to_string(),
+                    active: skill.auto_activate,
+                    update_available,
+                    authority_changes: if update_available == Some(true) {
+                        vec!["skill instructions changed".to_string()]
+                    } else {
+                        Vec::new()
+                    },
+                });
+                entries.push(summary);
+            }
+        }
+
+        entries.sort_by(|left, right| {
+            left.kind
+                .as_str()
+                .cmp(right.kind.as_str())
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        let returned_entries = entries.len();
+        let truncated = returned_entries < total_entries;
+        Ok(IronHubResponse {
+            phase: IronHubPhase::Status,
+            total_entries,
+            returned_entries,
+            truncated,
+            catalog_total: Some(manifest.tools.len() + manifest.skills.len()),
+            message: truncated.then(|| {
+                format!(
+                    "INCOMPLETE IRONHUB STATUS: returned {returned_entries} of {total_entries} installed entries; query an exact package name for complete update details."
+                )
+            }),
+            entries,
+            lifecycle: None,
+        })
+    }
+
+    async fn tool_authority_changes(
+        &self,
+        entry: &super::model::IronHubToolEntry,
+        installed: &ironclaw_extensions::ResolvedExtensionManifest,
+        private_origin: Option<&CatalogOrigin>,
+    ) -> Result<Vec<String>, IronHubCommandError> {
+        let manifest_artifact = entry.manifest.as_ref().ok_or_else(|| {
+            catalog(format!(
+                "'{}' publishes no extension manifest; update comparison is unavailable",
+                entry.name
+            ))
+        })?;
+        let bytes = self
+            .download_verified(manifest_artifact, MAX_METADATA_BYTES, private_origin)
+            .await?;
+        let manifest_toml =
+            String::from_utf8(bytes).map_err(|error| IronHubCommandError::Install {
+                reason: format!("published extension manifest is not UTF-8: {error}"),
+            })?;
+        let candidate = parse_imported_manifest(&manifest_toml, ManifestSource::RegistryInstalled)?;
+        Ok(authority_changes(installed, candidate.resolved()))
+    }
+
+    async fn resolve_manifest_source(
+        &self,
+        private_manifest_url: Option<&str>,
+    ) -> Result<
+        (
+            Arc<IronHubManifest>,
+            IronHubManifestSource,
+            Option<CatalogOrigin>,
+        ),
+        IronHubCommandError,
+    > {
+        let private_origin = private_manifest_url
+            .map(|private_url| validate_private_manifest_origin(&self.manifest_url, private_url))
+            .transpose()?;
+        match (private_manifest_url, private_origin) {
+            (Some(private_url), Some(origin)) => Ok((
+                Arc::new(self.fetch_private_manifest(private_url, &origin).await?),
+                IronHubManifestSource::Private,
+                Some(origin),
+            )),
+            (None, None) => Ok((
+                self.fetch_manifest_cached().await?,
+                IronHubManifestSource::Public,
+                None,
+            )),
+            _ => Err(catalog(
+                "private manifest source could not be validated against the catalog origin",
+            )),
+        }
+    }
+
     async fn install(
         &self,
         name: &str,
         options: IronHubInstallOptions,
     ) -> Result<IronHubResponse, IronHubCommandError> {
         validate_hub_name(name)?;
-        let private_origin = options
-            .private_manifest_url
-            .as_deref()
-            .map(|private_url| validate_private_manifest_origin(&self.manifest_url, private_url))
-            .transpose()?;
-        let (manifest, source) = match (
-            options.private_manifest_url.as_deref(),
-            private_origin.as_ref(),
-        ) {
-            (Some(private_url), Some(origin)) => (
-                Arc::new(self.fetch_private_manifest(private_url, origin).await?),
-                IronHubManifestSource::Private,
-            ),
-            (None, None) => (
-                self.fetch_manifest_cached().await?,
-                IronHubManifestSource::Public,
-            ),
-            _ => {
-                return Err(catalog(
-                    "private manifest source could not be validated against the catalog origin",
-                ));
-            }
-        };
+        if options.force {
+            return Err(invalid(
+                "force replacement is not an update; call ironhub_status and ironhub_update",
+            ));
+        }
+        let (manifest, source, private_origin) = self
+            .resolve_manifest_source(options.private_manifest_url.as_deref())
+            .await?;
         let (kind, provenance, artifact_digest) =
             classify_gate_and_digest(&manifest, name, options.kind, &options, source)?;
+        let catalog_origin = private_origin
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| catalog_origin_for_url(&self.manifest_url))?;
+        let registry_provenance =
+            registry_provenance(&manifest, kind, name, &artifact_digest, &catalog_origin)?;
         let lifecycle = match kind {
             IronHubEntryKind::Skill => {
                 let entry = manifest
@@ -308,8 +534,16 @@ impl IronHubService {
                     .map(CatalogOrigin::redacted_source_url)
                     .unwrap_or_else(|| entry.skill_md.url.clone());
                 let installed = self
-                    .install_skill(entry.name.as_str(), &content, &source_url, options.force)
-                    .await?;
+                    .skill_management
+                    .install_from_registry_for_scope(
+                        self.scope.clone(),
+                        entry.name.as_str(),
+                        &content,
+                        &source_url,
+                        &registry_provenance,
+                    )
+                    .await
+                    .map_err(skill_install_error)?;
                 LifecycleProductResponse {
                     package_ref: Some(
                         LifecyclePackageRef::new(
@@ -376,6 +610,7 @@ impl IronHubService {
                     capabilities,
                     schemas,
                     &reserved,
+                    registry_provenance.clone(),
                 )?;
                 self.extension_management
                     .install_registry_package(
@@ -418,53 +653,272 @@ impl IronHubService {
         })
     }
 
-    async fn install_skill(
+    async fn update(
         &self,
         name: &str,
-        content: &str,
-        source_url: &str,
-        force: bool,
-    ) -> Result<ironclaw_skills::SkillInstallResult, IronHubCommandError> {
-        let first = self
-            .skill_management
-            .install_from_url_for_scope(self.scope.clone(), Some(name), content, source_url)
-            .await;
-        let Err(error) = first else {
-            return first.map_err(skill_install_error);
-        };
-        if !force || !is_skill_conflict(&error) {
-            return Err(skill_install_error(error));
-        }
-        let previous = self
-            .skill_management
-            .capture_replacement_snapshot_for_scope(self.scope.clone(), name)
-            .await
-            .map_err(skill_install_error)?;
-        self.skill_management
-            .remove_for_scope(self.scope.clone(), name)
-            .await
-            .map_err(skill_install_error)?;
-        match self
-            .skill_management
-            .install_from_url_for_scope(self.scope.clone(), Some(name), content, source_url)
-            .await
+        options: IronHubUpdateOptions,
+    ) -> Result<IronHubResponse, IronHubCommandError> {
+        validate_hub_name(name)?;
+        if options.expected_installed_artifact_digest.trim().is_empty()
+            || options.expected_version.trim().is_empty()
+            || options.expected_artifact_digest.trim().is_empty()
         {
-            Ok(result) => Ok(result),
-            Err(original_error) => {
-                let restore = self
-                    .skill_management
-                    .restore_replacement_snapshot(previous)
-                    .await;
-                if let Err(restore_error) = restore {
-                    return Err(IronHubCommandError::Install {
-                        reason: format!(
-                            "forced skill replacement failed ({original_error}); previous skill restoration also failed ({restore_error})"
-                        ),
-                    });
-                }
-                Err(skill_install_error(original_error))
-            }
+            return Err(invalid(
+                "update requires installed digest, target version, and target digest from ironhub_status",
+            ));
         }
+
+        let (manifest, source, private_origin) = self
+            .resolve_manifest_source(options.private_manifest_url.as_deref())
+            .await?;
+        let install_options = IronHubInstallOptions {
+            kind: options.kind,
+            force: false,
+            acknowledge_unverified: options.acknowledge_authority_change,
+            expected_version: Some(options.expected_version.clone()),
+            expected_artifact_digest: Some(options.expected_artifact_digest.clone()),
+            private_manifest_url: options.private_manifest_url.clone(),
+        };
+        let (kind, provenance, artifact_digest) =
+            classify_gate_and_digest(&manifest, name, options.kind, &install_options, source)?;
+        let catalog_origin = private_origin
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| catalog_origin_for_url(&self.manifest_url))?;
+        let target_provenance =
+            registry_provenance(&manifest, kind, name, &artifact_digest, &catalog_origin)?;
+
+        let (lifecycle, active) = match kind {
+            IronHubEntryKind::Tool => {
+                self.update_tool(
+                    name,
+                    &manifest,
+                    private_origin.as_ref(),
+                    &target_provenance,
+                    &options,
+                )
+                .await?
+            }
+            IronHubEntryKind::Skill => {
+                self.update_skill(
+                    name,
+                    &manifest,
+                    private_origin.as_ref(),
+                    &target_provenance,
+                    &options,
+                )
+                .await?
+            }
+        };
+        let mut entry = match kind {
+            IronHubEntryKind::Tool => tool_summary(
+                manifest
+                    .find_tool(name)
+                    .ok_or_else(|| catalog("tool not found"))?,
+            ),
+            IronHubEntryKind::Skill => skill_summary(
+                manifest
+                    .find_skill(name)
+                    .ok_or_else(|| catalog("skill not found"))?,
+            ),
+        };
+        entry.provenance = provenance;
+        entry.installation = Some(IronHubInstallationSummary {
+            version: target_provenance.package_version().to_string(),
+            artifact_digest: target_provenance.artifact_digest().to_string(),
+            release_tag: target_provenance.release_tag().to_string(),
+            catalog_origin: target_provenance.catalog_origin().to_string(),
+            active,
+            update_available: Some(false),
+            authority_changes: Vec::new(),
+        });
+        Ok(IronHubResponse {
+            phase: IronHubPhase::Updated,
+            total_entries: 1,
+            returned_entries: 1,
+            truncated: false,
+            catalog_total: None,
+            message: Some(format!(
+                "updated {} '{}' to {} from IronHub; artifact_digest={}",
+                kind.as_str(),
+                name,
+                target_provenance.package_version(),
+                target_provenance.artifact_digest()
+            )),
+            entries: vec![entry],
+            lifecycle: Some(lifecycle),
+        })
+    }
+
+    async fn update_tool(
+        &self,
+        name: &str,
+        manifest: &IronHubManifest,
+        private_origin: Option<&CatalogOrigin>,
+        target_provenance: &RegistryPackageProvenance,
+        options: &IronHubUpdateOptions,
+    ) -> Result<(LifecycleProductResponse, bool), IronHubCommandError> {
+        let extension_id =
+            ExtensionId::new(name.to_string()).map_err(|error| invalid(error.to_string()))?;
+        let installed = self
+            .extension_management
+            .registry_installation_status(&extension_id, &self.scope.user_id)
+            .await?
+            .ok_or_else(|| invalid(format!("tool '{name}' is not installed")))?;
+        let installed_provenance = installed.registry_provenance.as_ref().ok_or_else(|| {
+            invalid(format!(
+                "tool '{name}' has no durable IronHub receipt; reinstall it before updating"
+            ))
+        })?;
+        validate_update_source(
+            name,
+            installed_provenance,
+            target_provenance,
+            &options.expected_installed_artifact_digest,
+        )?;
+        if !installed.update_allowed {
+            return Err(invalid(format!(
+                "tool '{name}' is shared by multiple users; update requires an exclusive installation"
+            )));
+        }
+        let entry = manifest
+            .find_tool(name)
+            .ok_or_else(|| catalog("tool not found"))?;
+        let manifest_artifact = entry.manifest.as_ref().ok_or_else(|| {
+            catalog(format!(
+                "'{}' publishes no extension manifest; update is unavailable",
+                entry.name
+            ))
+        })?;
+        let tool_manifest = self
+            .download_verified(manifest_artifact, MAX_METADATA_BYTES, private_origin)
+            .await?;
+        let wasm = self
+            .download_verified(&entry.wasm, MAX_WASM_BYTES, private_origin)
+            .await?;
+        let capabilities = self
+            .download_verified(&entry.capabilities, MAX_METADATA_BYTES, private_origin)
+            .await?;
+        let mut schemas = Vec::with_capacity(entry.schemas.len());
+        for (path, artifact) in &entry.schemas {
+            let content = self
+                .download_verified(artifact, MAX_METADATA_BYTES, private_origin)
+                .await?;
+            schemas.push((path.clone(), content));
+        }
+        let reserved = self
+            .extension_management
+            .reserved_bundled_extension_ids()
+            .await;
+        let package = ironhub_tool_package(
+            entry,
+            tool_manifest,
+            wasm,
+            capabilities,
+            schemas,
+            &reserved,
+            target_provenance.clone(),
+        )?;
+        let changes = authority_changes(&installed.resolved_manifest, &package.resolved_manifest);
+        if !changes.is_empty() && !options.acknowledge_authority_change {
+            return Err(invalid(format!(
+                "tool '{name}' changes extension authority: {}; retry only after reviewing the signed target and acknowledging the change",
+                changes.join(", ")
+            )));
+        }
+        let lifecycle = self
+            .extension_management
+            .update_registry_package(
+                package,
+                &options.expected_installed_artifact_digest,
+                &self.scope.user_id,
+            )
+            .await?;
+        let active = lifecycle.phase == InstallationState::Active;
+        Ok((lifecycle, active))
+    }
+
+    async fn update_skill(
+        &self,
+        name: &str,
+        manifest: &IronHubManifest,
+        private_origin: Option<&CatalogOrigin>,
+        target_provenance: &RegistryPackageProvenance,
+        options: &IronHubUpdateOptions,
+    ) -> Result<(LifecycleProductResponse, bool), IronHubCommandError> {
+        let current = self
+            .skill_management
+            .list_for_scope(self.scope.clone())
+            .await
+            .map_err(skill_install_error)?
+            .into_iter()
+            .find(|skill| skill.name == name)
+            .ok_or_else(|| invalid(format!("skill '{name}' is not installed")))?;
+        let metadata = self
+            .skill_management
+            .install_metadata_for_scope(self.scope.clone(), name)
+            .await
+            .map_err(skill_install_error)?
+            .ok_or_else(|| invalid(format!("skill '{name}' has no durable install metadata")))?;
+        let installed_provenance = metadata.registry_provenance.as_ref().ok_or_else(|| {
+            invalid(format!(
+                "skill '{name}' has no durable IronHub receipt; reinstall it before updating"
+            ))
+        })?;
+        validate_update_source(
+            name,
+            installed_provenance,
+            target_provenance,
+            &options.expected_installed_artifact_digest,
+        )?;
+        if !options.acknowledge_authority_change {
+            return Err(invalid(format!(
+                "skill '{name}' changes model instructions; retry only after reviewing the signed target and acknowledging the change"
+            )));
+        }
+        let entry = manifest
+            .find_skill(name)
+            .ok_or_else(|| catalog("skill not found"))?;
+        let content = self
+            .download_verified(&entry.skill_md, MAX_METADATA_BYTES, private_origin)
+            .await?;
+        let content = String::from_utf8(content).map_err(|error| IronHubCommandError::Install {
+            reason: format!("skill markdown is not UTF-8: {error}"),
+        })?;
+        let content = set_skill_auto_activate(&content, current.auto_activate);
+        let source_url = private_origin
+            .map(CatalogOrigin::redacted_source_url)
+            .unwrap_or_else(|| entry.skill_md.url.clone());
+        let installed = self
+            .skill_management
+            .replace_from_registry_for_scope(
+                self.scope.clone(),
+                name,
+                &content,
+                &source_url,
+                target_provenance,
+                &options.expected_installed_artifact_digest,
+            )
+            .await
+            .map_err(skill_install_error)?;
+        let active = current.auto_activate;
+        Ok((
+            LifecycleProductResponse {
+                package_ref: Some(
+                    LifecyclePackageRef::new(LifecyclePackageKind::Skill, installed.name.as_str())
+                        .map_err(|error| invalid(error.to_string()))?,
+                ),
+                phase: InstallationState::Installed,
+                blockers: Vec::new(),
+                message: None,
+                payload: Some(LifecycleProductPayload::SkillInstall {
+                    installed: true,
+                    name: LifecyclePackageId::new(installed.name)
+                        .map_err(|error| invalid(error.to_string()))?,
+                }),
+            },
+            active,
+        ))
     }
 
     async fn fetch_manifest_cached(&self) -> Result<Arc<IronHubManifest>, IronHubCommandError> {
@@ -649,7 +1103,9 @@ fn ironhub_command_capability_id(
             super::IRONHUB_SEARCH_CAPABILITY_ID
         }
         IronHubCommand::Info { .. } => super::IRONHUB_INFO_CAPABILITY_ID,
+        IronHubCommand::Status { .. } => super::IRONHUB_STATUS_CAPABILITY_ID,
         IronHubCommand::Install { .. } => super::IRONHUB_INSTALL_CAPABILITY_ID,
+        IronHubCommand::Update { .. } => super::IRONHUB_UPDATE_CAPABILITY_ID,
     };
     CapabilityId::new(value).map_err(|error| invalid(error.to_string()))
 }
@@ -671,12 +1127,94 @@ fn entry_version(
     }
 }
 
-fn is_skill_conflict(error: &ScopedSkillManagementError) -> bool {
-    matches!(
-        error,
-        ScopedSkillManagementError::Skill(error)
-            if error.kind() == SkillManagementErrorKind::Conflict
-    )
+fn installed_tool_summary(name: &str, version: &str) -> super::model::IronHubEntrySummary {
+    super::model::IronHubEntrySummary {
+        kind: IronHubEntryKind::Tool,
+        name: name.to_string(),
+        version: version.to_string(),
+        description: String::new(),
+        provenance: IronHubProvenance::New,
+        artifact_digest: None,
+        installation: None,
+    }
+}
+
+fn installed_skill_summary(name: &str, version: &str) -> super::model::IronHubEntrySummary {
+    super::model::IronHubEntrySummary {
+        kind: IronHubEntryKind::Skill,
+        name: name.to_string(),
+        version: version.to_string(),
+        description: String::new(),
+        provenance: IronHubProvenance::New,
+        artifact_digest: None,
+        installation: None,
+    }
+}
+
+fn registry_provenance(
+    manifest: &IronHubManifest,
+    kind: IronHubEntryKind,
+    name: &str,
+    artifact_digest: &str,
+    catalog_origin: &CatalogOrigin,
+) -> Result<RegistryPackageProvenance, IronHubCommandError> {
+    let (package_version, manifest_digest) = match kind {
+        IronHubEntryKind::Tool => {
+            let entry = manifest
+                .find_tool(name)
+                .ok_or_else(|| catalog("tool not found"))?;
+            (
+                entry.version.clone(),
+                entry
+                    .manifest
+                    .as_ref()
+                    .map(|artifact| format!("sha256:{}", artifact.sha256.to_ascii_lowercase())),
+            )
+        }
+        IronHubEntryKind::Skill => {
+            let entry = manifest
+                .find_skill(name)
+                .ok_or_else(|| catalog("skill not found"))?;
+            (entry.version.clone(), None)
+        }
+    };
+    RegistryPackageProvenance::new(RegistryPackageProvenanceParts {
+        registry: "ironhub".to_string(),
+        repository: manifest.repo.clone(),
+        package_version,
+        release_tag: manifest.release_tag.clone(),
+        catalog_origin: catalog_origin.redacted_source_url(),
+        artifact_digest: artifact_digest.to_ascii_lowercase(),
+        manifest_digest,
+        installed_at: Utc::now(),
+    })
+    .map_err(|error| invalid(format!("invalid registry package provenance: {error}")))
+}
+
+fn validate_update_source(
+    name: &str,
+    installed: &RegistryPackageProvenance,
+    target: &RegistryPackageProvenance,
+    expected_installed_artifact_digest: &str,
+) -> Result<(), IronHubCommandError> {
+    if installed.registry() != "ironhub"
+        || target.registry() != installed.registry()
+        || target.repository() != installed.repository()
+        || target.catalog_origin() != installed.catalog_origin()
+    {
+        return Err(invalid(format!(
+            "package '{name}' update source does not match its installed registry receipt"
+        )));
+    }
+    if !installed
+        .artifact_digest()
+        .eq_ignore_ascii_case(expected_installed_artifact_digest)
+    {
+        return Err(invalid(format!(
+            "package '{name}' changed since update was checked; refresh ironhub_status and retry"
+        )));
+    }
+    Ok(())
 }
 
 fn skill_install_error(error: ScopedSkillManagementError) -> IronHubCommandError {

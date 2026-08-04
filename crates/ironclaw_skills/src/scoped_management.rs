@@ -10,16 +10,19 @@ use ironclaw_host_api::{
 };
 
 use crate::{
-    SkillContentRequest, SkillContentResult, SkillInstallRequest, SkillInstallResult,
-    SkillInstallSource, SkillManagementContext, SkillManagementError, SkillRemoveRequest,
-    SkillRemoveResult, SkillSearchRequest, SkillSearchResult, SkillSummary, SkillUpdateRequest,
-    SkillUpdateResult, install_skill, list_skills,
+    InstalledSkillMetadata, SkillContentRequest, SkillContentResult, SkillInstallRequest,
+    SkillInstallResult, SkillInstallSource, SkillManagementContext, SkillManagementError,
+    SkillRegistryInstallRequest, SkillRemoveRequest, SkillRemoveResult, SkillSearchRequest,
+    SkillSearchResult, SkillSummary, SkillUpdateRequest, SkillUpdateResult, install_registry_skill,
+    install_skill, list_skills,
     management::{
         SKILL_FILE_NAME, SkillBundleSnapshot, USER_SKILLS_ROOT, capture_skill_bundle,
         restore_skill_bundle,
     },
-    read_skill_content, remove_skill, search_skills, update_skill,
+    read_skill_content, read_skill_install_metadata, remove_skill, replace_registry_skill,
+    search_skills, update_skill,
 };
+use ironclaw_host_api::registry_package::RegistryPackageProvenance;
 
 pub type ScopedSkillManagementMountResolver =
     dyn Fn(&ResourceScope) -> Result<MountView, HostApiError> + Send + Sync;
@@ -210,6 +213,60 @@ impl ScopedSkillManagementPort {
             },
         )
         .await?)
+    }
+
+    pub async fn install_from_registry_for_scope(
+        &self,
+        scope: ResourceScope,
+        name: &str,
+        content: &str,
+        source_url: &str,
+        provenance: &RegistryPackageProvenance,
+    ) -> Result<SkillInstallResult, ScopedSkillManagementError> {
+        let context = self.context_for_scope(scope)?;
+        Ok(install_registry_skill(
+            &context,
+            SkillRegistryInstallRequest {
+                name,
+                content,
+                source_url,
+                provenance,
+                expected_current_artifact_digest: None,
+            },
+        )
+        .await?)
+    }
+
+    pub async fn replace_from_registry_for_scope(
+        &self,
+        scope: ResourceScope,
+        name: &str,
+        content: &str,
+        source_url: &str,
+        provenance: &RegistryPackageProvenance,
+        expected_current_artifact_digest: &str,
+    ) -> Result<SkillInstallResult, ScopedSkillManagementError> {
+        let context = self.context_for_scope(scope)?;
+        Ok(replace_registry_skill(
+            &context,
+            SkillRegistryInstallRequest {
+                name,
+                content,
+                source_url,
+                provenance,
+                expected_current_artifact_digest: Some(expected_current_artifact_digest),
+            },
+        )
+        .await?)
+    }
+
+    pub async fn install_metadata_for_scope(
+        &self,
+        scope: ResourceScope,
+        name: &str,
+    ) -> Result<Option<InstalledSkillMetadata>, ScopedSkillManagementError> {
+        let context = self.context_for_scope(scope)?;
+        Ok(read_skill_install_metadata(&context, name).await?)
     }
 
     pub async fn remove_for_scope(

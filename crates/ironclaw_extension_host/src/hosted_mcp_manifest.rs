@@ -384,6 +384,7 @@ pub(crate) fn available_package(
         manifest_toml: record.raw_toml().to_string(),
         resolved_manifest: Arc::new(record.resolved().clone()),
         source: ManifestSource::UserRegistered,
+        registry_provenance: None,
         package,
         cleanup_requirements: Vec::new(),
         surface_kinds: surface_kinds_from_manifest_record(record, id)?,

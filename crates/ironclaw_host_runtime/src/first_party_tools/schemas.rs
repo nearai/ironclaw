@@ -462,19 +462,59 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "properties": {
                 "name": { "type": "string", "description": "IronHub tool or skill name." },
                 "kind": { "type": "string", "enum": ["tool", "skill"] },
-                "force": { "type": "boolean", "default": false },
                 "expected_version": { "type": "string" },
                 "expected_artifact_digest": { "type": "string" }
             },
             "required": ["name"],
             "additionalProperties": false
         }),
-        "schemas/builtin/ironhub_search.output.v1.json"
-        | "schemas/builtin/ironhub_info.output.v1.json"
-        | "schemas/builtin/ironhub_install.output.v1.json" => json!({
+        "schemas/builtin/ironhub_status.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "phase": { "type": "string", "enum": ["discovered", "installed"] },
+                "name": { "type": "string", "description": "Optional exact installed IronHub package name." },
+                "kind": { "type": "string", "enum": ["tool", "skill"] }
+            },
+            "additionalProperties": false
+        }),
+        "schemas/builtin/ironhub_update.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Installed IronHub tool or skill name." },
+                "kind": { "type": "string", "enum": ["tool", "skill"] },
+                "expected_installed_artifact_digest": {
+                    "type": "string",
+                    "description": "Installed artifact digest returned by ironhub_status."
+                },
+                "expected_version": {
+                    "type": "string",
+                    "description": "Exact signed target version returned by ironhub_status."
+                },
+                "expected_artifact_digest": {
+                    "type": "string",
+                    "description": "Exact signed target artifact digest returned by ironhub_status."
+                },
+                "acknowledge_authority_change": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Set only after presenting and reviewing every authority_change returned by ironhub_status."
+                }
+            },
+            "required": [
+                "name",
+                "expected_installed_artifact_digest",
+                "expected_version",
+                "expected_artifact_digest"
+            ],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/ironhub_search.output.v1.json"
+        | "schemas/builtin/ironhub_info.output.v1.json"
+        | "schemas/builtin/ironhub_install.output.v1.json"
+        | "schemas/builtin/ironhub_status.output.v1.json"
+        | "schemas/builtin/ironhub_update.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "phase": { "type": "string", "enum": ["discovered", "status", "installed", "updated"] },
                 "total_entries": {
                     "type": "integer",
                     "minimum": 0,
@@ -503,7 +543,31 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                                 "type": "string",
                                 "enum": ["official", "trusted", "verified", "new"]
                             },
-                            "artifact_digest": { "type": "string" }
+                            "artifact_digest": { "type": "string" },
+                            "installation": {
+                                "type": "object",
+                                "properties": {
+                                    "version": { "type": "string" },
+                                    "artifact_digest": { "type": "string" },
+                                    "release_tag": { "type": "string" },
+                                    "catalog_origin": { "type": "string" },
+                                    "active": { "type": "boolean" },
+                                    "update_available": { "type": "boolean" },
+                                    "authority_changes": {
+                                        "type": "array",
+                                        "items": { "type": "string" }
+                                    }
+                                },
+                                "required": [
+                                    "version",
+                                    "artifact_digest",
+                                    "release_tag",
+                                    "catalog_origin",
+                                    "active",
+                                    "authority_changes"
+                                ],
+                                "additionalProperties": false
+                            }
                         },
                         "required": ["kind", "name", "version", "description", "provenance"],
                         "additionalProperties": false
@@ -1037,7 +1101,7 @@ mod tests {
         assert_eq!(input["additionalProperties"], false);
         assert_eq!(
             install_output["properties"]["phase"]["enum"],
-            serde_json::json!(["discovered", "installed"])
+            serde_json::json!(["discovered", "status", "installed", "updated"])
         );
         assert_eq!(
             search_output["required"],
