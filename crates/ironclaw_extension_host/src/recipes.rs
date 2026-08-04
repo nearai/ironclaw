@@ -141,8 +141,9 @@ impl AuthRecipeResolver for InstalledManifestAuthRecipeResolver {
         // is tenant-wide ("this extension is registered here, and this is its
         // recipe"), while membership rows record who actually installed it.
         // Unioning over registrations pooled other users' extensions into this
-        // caller's consent screen, so a user who installed only Gmail was asked
-        // to grant Drive because somebody else had installed Drive (#7078).
+        // caller's consent screen, so a user who installed one extension of a
+        // vendor was asked to grant the scopes of a sibling extension that a
+        // DIFFERENT user had installed (#7078).
         //
         // `list_installations` is the membership-aware read: it already drops
         // removed and lease-held rows, and carries the `InstallationOwner` that
