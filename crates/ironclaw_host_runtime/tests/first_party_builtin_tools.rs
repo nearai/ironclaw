@@ -135,6 +135,15 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
     {
         assert_coding_manifest_contract(descriptor);
     }
+    let json = package
+        .capabilities
+        .iter()
+        .find(|descriptor| descriptor.id.as_str() == JSON_CAPABILITY_ID)
+        .expect("JSON manifest");
+    assert_eq!(
+        json.effects,
+        vec![EffectKind::DispatchCapability, EffectKind::ReadFilesystem]
+    );
     let skill_install = package
         .capabilities
         .iter()
@@ -4197,6 +4206,53 @@ async fn builtin_json_parse_query_stringify_and_validate_work() {
     .await
     .unwrap();
     assert!(stringified.as_str().unwrap().contains("\"ok\": true"));
+}
+
+#[tokio::test]
+async fn builtin_json_queries_authorized_workspace_file_with_adjacent_indices() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("source.json"),
+        serde_json::to_vec(&json!({
+            "nodes": [null, null, {"data": vec![vec!["value"]; 16]}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let (filesystem, mounts) = mounted_filesystem(root.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+
+    let queried = invoke_with_context(
+        &runtime,
+        JSON_CAPABILITY_ID,
+        json!({
+            "operation": "query",
+            "file_path": "/workspace/source.json",
+            "path": "nodes[2].data[15][0]"
+        }),
+        execution_context_with_mounts([JSON_CAPABILITY_ID], mounts),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(queried, json!("value"));
+}
+
+#[tokio::test]
+async fn builtin_json_file_query_denies_unmounted_workspace_path() {
+    let failure = invoke_failure_with_context(
+        &runtime(),
+        JSON_CAPABILITY_ID,
+        json!({
+            "operation": "query",
+            "file_path": "/workspace/source.json",
+            "path": "value"
+        }),
+        execution_context([JSON_CAPABILITY_ID]),
+    )
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::FilesystemDenied);
 }
 
 #[tokio::test]

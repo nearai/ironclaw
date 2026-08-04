@@ -79,12 +79,59 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["parse", "stringify", "query", "validate"]
+                    "enum": ["parse", "stringify", "query", "validate"],
+                    "description": "JSON operation to perform"
                 },
                 "data": { "description": "JSON string or JSON value to process" },
-                "path": { "type": "string", "description": "Dot/bracket path for query operation" }
+                "file_path": {
+                    "type": "string",
+                    "maxLength": 4096,
+                    "description": "Scoped JSON file below /workspace to read for a query; mutually exclusive with data and bounded to 1048576 bytes"
+                },
+                "path": {
+                    "type": "string",
+                    "maxLength": 4096,
+                    "description": "Dot/bracket query path, including root arrays and repeated indices such as [1][0] or nodes[2].data[15][0]"
+                }
             },
-            "required": ["operation", "data"],
+            "oneOf": [
+                {
+                    "title": "parse inline JSON text",
+                    "properties": {
+                        "operation": { "const": "parse" },
+                        "data": { "type": "string" }
+                    },
+                    "required": ["operation", "data"],
+                    "not": { "anyOf": [{ "required": ["file_path"] }, { "required": ["path"] }] }
+                },
+                {
+                    "title": "stringify inline JSON",
+                    "properties": { "operation": { "const": "stringify" } },
+                    "required": ["operation", "data"],
+                    "not": { "anyOf": [{ "required": ["file_path"] }, { "required": ["path"] }] }
+                },
+                {
+                    "title": "query inline JSON",
+                    "properties": { "operation": { "const": "query" } },
+                    "required": ["operation", "data", "path"],
+                    "not": { "required": ["file_path"] }
+                },
+                {
+                    "title": "query a scoped workspace JSON file",
+                    "properties": { "operation": { "const": "query" } },
+                    "required": ["operation", "file_path", "path"],
+                    "not": { "required": ["data"] }
+                },
+                {
+                    "title": "validate inline JSON text",
+                    "properties": {
+                        "operation": { "const": "validate" },
+                        "data": { "type": "string" }
+                    },
+                    "required": ["operation", "data"],
+                    "not": { "anyOf": [{ "required": ["file_path"] }, { "required": ["path"] }] }
+                }
+            ],
             "additionalProperties": false
         }),
         "schemas/builtin/http.input.v1.json" => http_schema(false),
@@ -960,6 +1007,26 @@ fn response_body_limit_schema(require_save_to: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::resolve_builtin_input_schema_ref;
+
+    #[test]
+    fn json_schema_discloses_exact_operation_inputs() {
+        let schema = resolve_builtin_input_schema_ref("schemas/builtin/json.input.v1.json")
+            .expect("JSON schema is registered");
+        let branches = schema["oneOf"].as_array().expect("operation alternatives");
+        assert_eq!(branches.len(), 5);
+        assert!(branches.iter().any(|branch| {
+            branch["properties"]["operation"]["const"] == "query"
+                && branch["required"] == serde_json::json!(["operation", "data", "path"])
+                && branch["not"]["required"] == serde_json::json!(["file_path"])
+        }));
+        assert!(branches.iter().any(|branch| {
+            branch["properties"]["operation"]["const"] == "query"
+                && branch["required"] == serde_json::json!(["operation", "file_path", "path"])
+                && branch["not"]["required"] == serde_json::json!(["data"])
+        }));
+        assert_eq!(schema["properties"]["file_path"]["maxLength"], 4096);
+        assert_eq!(schema["properties"]["path"]["maxLength"], 4096);
+    }
 
     #[test]
     fn trigger_create_prompt_description_warns_against_self_referential_creation_prompts() {
