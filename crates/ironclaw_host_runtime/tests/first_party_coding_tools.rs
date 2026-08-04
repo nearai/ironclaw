@@ -8,6 +8,9 @@ use ironclaw_filesystem::{
     DirEntry, DiskFilesystem, Fault, FaultInjecting, FaultKind, FileStat, FileType,
     FilesystemError, FilesystemOperation, RootFilesystem,
 };
+use ironclaw_host_api::process::{
+    CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
+};
 use ironclaw_host_api::result_meta::FailureKind;
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
@@ -24,10 +27,9 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    APPLY_PATCH_CAPABILITY_ID, CapabilitySurfaceVersion, CommandExecutionOutput,
-    CommandExecutionRequest, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HostRuntime,
-    HostRuntimeServices, LIST_DIR_CAPABILITY_ID, PostEditCheckConfig, READ_FILE_CAPABILITY_ID,
-    RuntimeCapabilityOutcome, RuntimeProcessError, RuntimeProcessPort, SandboxCommandTransport,
+    APPLY_PATCH_CAPABILITY_ID, CapabilitySurfaceVersion, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID,
+    HostRuntime, HostRuntimeServices, LIST_DIR_CAPABILITY_ID, PostEditCheckConfig,
+    READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome, RuntimeProcessPort,
     TenantSandboxProcessPort, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_package,
 };

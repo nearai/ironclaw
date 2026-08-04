@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import json
 import os
 import re
 import sqlite3
+import sys
 import tomllib
 import uuid
 from contextlib import closing
@@ -31,6 +33,17 @@ from scripts.reborn_webui_v2_live_qa.root_filesystem import (
     _write_new_secret_file_0600,
 )
 
+# The Slack package manifest path is resolved by hopping from the
+# ironclaw_extension_support crate (found by NAME through the shared inventory,
+# scripts/ci/lib/crate_tree.py) to its sibling `packages/` directory — the same
+# anchor scripts/build-wasm-extensions.sh and scripts/live-canary/scrub-artifacts.sh
+# use — rather than a literal `crates/extensions/packages/slack` path. See
+# docs/reborn/target-architecture/CHECKLIST.md WS10.
+sys.path.insert(
+    0, str(Path(__file__).resolve().parents[2] / "scripts" / "ci" / "lib")
+)
+from crate_tree import CrateTreeError, crate_directory  # noqa: E402
+
 
 SLACK_INSTALLATION_SETUP_PATH = "/tenants/reborn-cli/shared/slack-setup/installation.json"
 SLACK_SIGNING_SECRET_ENV = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
@@ -44,10 +57,21 @@ SLACK_PERSONAL_ACCESS_TOKEN_ENV_NAMES = [
     "REBORN_WEBUI_V2_LIVE_QA_SLACK_USER_TOKEN",
 ]
 SLACK_EXTENSION_INSTALLATION_ID = "slack"
-SLACK_EXTENSION_MANIFEST = (
-    Path(__file__).resolve().parents[2]
-    / "crates/extensions/packages/slack/manifest.toml"
-)
+ANCHOR_CRATE_FOR_SLACK_MANIFEST = "ironclaw_extension_support"
+
+
+@functools.lru_cache(maxsize=None)
+def _slack_extension_manifest_path() -> Path:
+    """Repo-relative `packages/slack/manifest.toml`, resolved once per process."""
+    repo_root = Path(__file__).resolve().parents[2]
+    try:
+        anchor = crate_directory(ANCHOR_CRATE_FOR_SLACK_MANIFEST, repo_root)
+    except CrateTreeError as error:
+        raise LiveQaError(
+            f"cannot resolve the {ANCHOR_CRATE_FOR_SLACK_MANIFEST} crate, so the "
+            f"Slack extension manifest path is unknown: {error}"
+        ) from error
+    return repo_root / Path(anchor).parent / "packages" / "slack" / "manifest.toml"
 # Optional SECOND human identity (a dedicated canary user, distinct from the
 # connected personal account AND from the bot). Arms that strictly need a
 # second HUMAN actor must assert this env and fail loudly when it is absent —
@@ -87,7 +111,7 @@ LEGACY_SLACK_SETUP_KEYS = {
 def _slack_auth_provider() -> str:
     """Return the credential vendor declared by the unified Slack manifest."""
     try:
-        with SLACK_EXTENSION_MANIFEST.open("rb") as manifest_file:
+        with _slack_extension_manifest_path().open("rb") as manifest_file:
             manifest = tomllib.load(manifest_file)
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise LiveQaError(

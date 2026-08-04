@@ -61,6 +61,30 @@ const WS0_COMPOSITION_SRC_LOC: usize = 43_936;
 const WS0_COMPOSITION_DENOMINATOR_LOC: usize = 667_978;
 const WS0_COMPOSITION_SHARE_BP: usize = 658;
 
+/// Composition's **absolute** production LOC on `origin/main` @ `676d86ce02`
+/// (2026-08-04), from the same `--print` run: "composition absolute: 44021 LOC
+/// (production src)".
+///
+/// ✎ **Added 2026-08-04 (#7151).** The share metric above is *share-based*, and
+/// that denominator is poisoned: it is every other crate's production code, so
+/// feature inflow anywhere else improves composition's score while composition
+/// grows. Measured across the two days before this record, composition took
+/// **+619 lines** of feature inflow against **−23** from an entire eviction
+/// wave — and its share still *fell*, 658 bp → 634 bp, because the workspace
+/// grew faster. The share ceiling could not object either: WS0's own note
+/// records ~17.4pp of slack (2398 bp ceiling against 634 bp observed), i.e.
+/// composition could roughly quadruple untouched. `[gate].loc_ceiling` is the
+/// bound that actually constrains, and the assertion below keeps it armed and
+/// consistent the same way the share ceiling is kept.
+///
+/// ✎ Re-recorded 44_021 → 44_392 on 2026-08-04 with the manifest's matching
+/// re-seed: #7062 landed +371 production LOC of composition wiring between
+/// this record's seeding and this branch's merge of `main` @ `be33ae138f`,
+/// and the nudge-window assertion below correctly refused a ceiling that
+/// moved without its record (371 > 200). Measured on the merged tree with
+/// `bash scripts/ci/check-composition-budget.sh --print`.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 45127;
+
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".
 const WS0_COMPOSITION_ARC_DYN_SITES: usize = 827;
@@ -125,6 +149,13 @@ fn reborn_restructure_baseline_ratchets_stay_armed() {
     let tolerance_bp = integer(gate, COMPOSITION_BUDGET_MANIFEST, "tolerance_bp");
     let arc_dyn_ceiling = integer(gate, COMPOSITION_BUDGET_MANIFEST, "arc_dyn_ceiling");
     let arc_dyn_tolerance = integer(gate, COMPOSITION_BUDGET_MANIFEST, "arc_dyn_tolerance");
+    // `integer` panics on a missing key, which is the point: deleting the
+    // absolute-mass keys must be a loud Rust-side failure as well as a shell
+    // schema error, so the binding metric cannot be disarmed by three
+    // deletions in a TOML file (#7151).
+    let loc_ceiling = integer(gate, COMPOSITION_BUDGET_MANIFEST, "loc_ceiling");
+    let loc_tolerance = integer(gate, COMPOSITION_BUDGET_MANIFEST, "loc_tolerance");
+    let loc_nudge_slack = integer(gate, COMPOSITION_BUDGET_MANIFEST, "loc_nudge_slack");
 
     assert!(
         enforcing(gate, COMPOSITION_BUDGET_MANIFEST),
@@ -149,6 +180,39 @@ fn reborn_restructure_baseline_ratchets_stay_armed() {
         "the WS0 composition-dispatch record ({WS0_COMPOSITION_ARC_DYN_SITES} Arc<dyn>) now \
          exceeds the gate's effective ceiling ({}). Re-measure and update the WS0 record.",
         arc_dyn_ceiling + arc_dyn_tolerance
+    );
+
+    // The absolute-mass bound (#7151). Two properties, both of which the share
+    // ceiling above visibly lacks.
+    assert!(
+        loc_ceiling > 0,
+        "{COMPOSITION_BUDGET_MANIFEST} [gate].loc_ceiling is {loc_ceiling} — a zero or negative \
+         absolute ceiling is a disarmed gate, not a bound. It is the only composition metric \
+         that feature inflow elsewhere in the workspace cannot loosen (#7151)."
+    );
+    let effective_loc_ceiling = loc_ceiling + loc_tolerance;
+    assert!(
+        i64::try_from(COMPOSITION_ABSOLUTE_SRC_LOC).is_ok_and(|loc| loc <= effective_loc_ceiling),
+        "the composition absolute-mass record ({COMPOSITION_ABSOLUTE_SRC_LOC} LOC) now exceeds \
+         the gate's effective ceiling ({effective_loc_ceiling} LOC). Re-measure with `bash \
+         scripts/ci/check-composition-budget.sh --print` and update this record, or the ceiling \
+         is wrong."
+    );
+    // The ceiling has to BIND, which is the specific failure the share metric
+    // suffered: 2398 bp recorded against 634 bp observed is ~17.4pp of slack,
+    // enough for composition to roughly quadruple with the gate green. A
+    // recorded value more than one nudge-window below the ceiling means a wave
+    // closed without re-ratcheting.
+    assert!(
+        i64::try_from(COMPOSITION_ABSOLUTE_SRC_LOC)
+            .is_ok_and(|loc| loc_ceiling - loc <= loc_nudge_slack),
+        "{COMPOSITION_BUDGET_MANIFEST} [gate].loc_ceiling is {loc_ceiling} against a recorded \
+         {COMPOSITION_ABSOLUTE_SRC_LOC} LOC — {} LOC of unclaimed headroom, more than the \
+         {loc_nudge_slack}-LOC nudge window. Composition may grow that far with every gate \
+         green, which is exactly how the share ceiling became inert. Lower loc_ceiling to the \
+         observed count (re-ratchet at every wave close) or raise loc_nudge_slack with a \
+         rationale.",
+        loc_ceiling - COMPOSITION_ABSOLUTE_SRC_LOC as i64
     );
 
     let coverage = parse_manifest(COVERAGE_FLOOR_MANIFEST);
@@ -177,6 +241,11 @@ fn reborn_restructure_baseline_ratchets_stay_armed() {
     eprintln!(
         "  composition mass     : {WS0_COMPOSITION_SRC_LOC} / {WS0_COMPOSITION_DENOMINATOR_LOC} \
          LOC = {WS0_COMPOSITION_SHARE_BP} bp  [gate ceiling {ceiling_bp} bp + {tolerance_bp} tol, armed]"
+    );
+    eprintln!(
+        "  composition absolute : {COMPOSITION_ABSOLUTE_SRC_LOC} LOC  [gate ceiling \
+         {loc_ceiling} + {loc_tolerance} tol, nudge at {loc_nudge_slack}, armed]  <- the \
+         binding mass bound"
     );
     eprintln!(
         "  composition dispatch : {WS0_COMPOSITION_ARC_DYN_SITES} Arc<dyn>  [gate ceiling \

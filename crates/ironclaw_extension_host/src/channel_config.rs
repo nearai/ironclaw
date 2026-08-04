@@ -843,8 +843,9 @@ fields = [
                 Arc::new(InMemoryBackend::new()),
                 ironclaw_host_api::path::VirtualPath::new("/system/extensions/.installations/test")
                     .expect("valid test path"),
-                ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
-                ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+                ironclaw_host_api::host_port::default_host_port_catalog()
+                    .expect("host port catalog"),
+                ironclaw_extensions::default_host_api_contract_registry().expect("contracts"),
             )
             .await
             .expect("filesystem extension installation store"),
@@ -852,9 +853,9 @@ fields = [
         let record = ExtensionManifestRecord::from_toml(
             manifest_toml,
             ManifestSource::HostBundled,
-            &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
+            &ironclaw_host_api::host_port::default_host_port_catalog().expect("catalog"),
             None,
-            &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            &ironclaw_extensions::default_host_api_contract_registry().expect("contracts"),
             None,
         )
         .expect("fixture manifest parses");

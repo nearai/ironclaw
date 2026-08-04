@@ -1,4 +1,4 @@
-use ironclaw_turns::TurnError;
+use crate::turn_submission::TurnSubmissionError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum InboundTurnError {
@@ -21,8 +21,14 @@ pub enum InboundTurnError {
     StatePoisoned,
     #[error("failed to construct canonical reference: {reason}")]
     InvalidCanonicalRef { reason: String },
+    /// A turn submission the [`ConversationTurnSubmitter`] port rejected. The
+    /// typed port error is preserved, never flattened to a string: callers
+    /// branch on its `retry()`/`category()` and surface its
+    /// `adapter_status_code()`.
+    ///
+    /// [`ConversationTurnSubmitter`]: crate::ConversationTurnSubmitter
     #[error("turn submission failed: {error}")]
-    TurnSubmissionFailed { error: TurnError },
+    TurnSubmissionFailed { error: TurnSubmissionError },
     #[error("durable conversation state failed: {reason}")]
     DurableState { reason: String },
 }

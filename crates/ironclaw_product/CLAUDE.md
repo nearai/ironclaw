@@ -127,7 +127,7 @@ idempotency replay, and the inbound-attachment and policy failures. Two rules:
 ## Boundary rules
 
 Must NOT depend on: `ironclaw_extensions`,
-`ironclaw_host_runtime`, `ironclaw_mcp`, `ironclaw_wasm`, `ironclaw_scripts`,
+`ironclaw_host_runtime`, `ironclaw_mcp`, `ironclaw_wasm`, `ironclaw_sandbox`,
 `ironclaw_network`.
 
 Agent-loop note: product-facing turns enter through workflow services and

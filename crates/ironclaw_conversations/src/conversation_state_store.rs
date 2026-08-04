@@ -39,8 +39,8 @@ use ironclaw_filesystem::{
     RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::ids::UserId;
+use ironclaw_host_api::turn::{AcceptedMessageRef, IdempotencyKey, SubmitTurnResponse};
 use ironclaw_host_api::{error::HostApiError, path::ScopedPath, resource::ResourceScope};
-use ironclaw_turns::{AcceptedMessageRef, IdempotencyKey, SubmitTurnResponse};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -691,8 +691,8 @@ impl InboundConversationService for RebornFilesystemConversationServices {
 
     async fn inbound_message_turn_submission(
         &self,
-        message_ref: &ironclaw_turns::AcceptedMessageRef,
-    ) -> Result<Option<ironclaw_turns::SubmitTurnResponse>, InboundTurnError> {
+        message_ref: &AcceptedMessageRef,
+    ) -> Result<Option<SubmitTurnResponse>, InboundTurnError> {
         self.inner
             .inbound_message_turn_submission(message_ref)
             .await
@@ -700,8 +700,8 @@ impl InboundConversationService for RebornFilesystemConversationServices {
 
     async fn inbound_message_turn_submission_key(
         &self,
-        message_ref: &ironclaw_turns::AcceptedMessageRef,
-    ) -> Result<ironclaw_turns::IdempotencyKey, InboundTurnError> {
+        message_ref: &AcceptedMessageRef,
+    ) -> Result<IdempotencyKey, InboundTurnError> {
         self.inner
             .inbound_message_turn_submission_key(message_ref)
             .await
@@ -709,7 +709,7 @@ impl InboundConversationService for RebornFilesystemConversationServices {
 
     async fn rotate_inbound_message_turn_submission_key(
         &self,
-        message_ref: &ironclaw_turns::AcceptedMessageRef,
+        message_ref: &AcceptedMessageRef,
     ) -> Result<(), InboundTurnError> {
         self.inner
             .rotate_inbound_message_turn_submission_key(message_ref)
@@ -718,8 +718,8 @@ impl InboundConversationService for RebornFilesystemConversationServices {
 
     async fn mark_inbound_message_turn_submitted(
         &self,
-        message_ref: &ironclaw_turns::AcceptedMessageRef,
-        response: ironclaw_turns::SubmitTurnResponse,
+        message_ref: &AcceptedMessageRef,
+        response: SubmitTurnResponse,
     ) -> Result<(), InboundTurnError> {
         self.inner
             .mark_inbound_message_turn_submitted(message_ref, response)

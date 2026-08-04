@@ -188,8 +188,8 @@ mod tests {
         let installation_store = ExtensionInstallationStore::load_at(
             Arc::clone(&backend) as Arc<dyn RootFilesystem>,
             VirtualPath::new("/system/extensions/.installations/test").expect("valid test path"),
-            ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
-            ironclaw_host_runtime::default_host_api_contract_registry().expect("host contracts"),
+            ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
+            ironclaw_extensions::default_host_api_contract_registry().expect("host contracts"),
         )
         .await
         .expect("filesystem extension installation store");
@@ -453,9 +453,9 @@ mod tests {
                 Arc::new(InMemoryBackend::new()),
                 VirtualPath::new("/system/extensions/.installations/test")
                     .expect("valid test path"),
-                ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
-                ironclaw_host_runtime::default_host_api_contract_registry()
-                    .expect("host contracts"),
+                ironclaw_host_api::host_port::default_host_port_catalog()
+                    .expect("host port catalog"),
+                ironclaw_extensions::default_host_api_contract_registry().expect("host contracts"),
             )
             .await
             .expect("filesystem extension installation store"),
@@ -464,9 +464,9 @@ mod tests {
             let record = ExtensionManifestRecord::from_toml(
                 *manifest_toml,
                 ironclaw_extensions::ManifestSource::HostBundled,
-                &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
+                &ironclaw_host_api::host_port::default_host_port_catalog().expect("catalog"),
                 None,
-                &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+                &ironclaw_extensions::default_host_api_contract_registry().expect("contracts"),
                 None,
             )
             .expect("fixture manifest parses");

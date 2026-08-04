@@ -48,7 +48,15 @@ from the root workspace, also never built here), so one rule covers both; the
 silk-decoder half is a latent-bug fix that arrives with it.
 
 Usage:
-    python3 scripts/ci/lib/crate_tree.py [repo_root]   # one crate dir per line
+    python3 scripts/ci/lib/crate_tree.py [repo_root]
+        Print every crate directory, one per line (unchanged, load-bearing
+        contract: scripts/build-wasm-extensions.sh and others parse this).
+
+    python3 scripts/ci/lib/crate_tree.py --directory <name> [repo_root]
+        Print the single crate directory whose basename is <name>. Exits 1
+        with the CrateTreeError message on stderr when the name is absent or
+        ambiguous — never falls back to a guessed literal path. The
+        `scripts/ci/crate-dir.sh` wrapper shells to this for bash callers.
 """
 
 from __future__ import annotations
@@ -310,10 +318,32 @@ def reset_inventory_cache() -> None:
 
 
 def main() -> int:
-    root = sys.argv[1] if len(sys.argv) > 1 else "."
+    args = sys.argv[1:]
+
+    # Manual parsing (not argparse) so the pre-existing positional-root
+    # contract above is untouched byte-for-byte: every current caller passes
+    # at most one bare positional argument, and that must keep working
+    # exactly as before regardless of how `--directory` is implemented.
+    directory_name: str | None = None
+    if "--directory" in args:
+        flag_index = args.index("--directory")
+        try:
+            directory_name = args[flag_index + 1]
+        except IndexError:
+            print(
+                "crate discovery failed: --directory requires a crate name",
+                file=sys.stderr,
+            )
+            return 1
+        del args[flag_index : flag_index + 2]
+
+    root = args[0] if args else "."
     try:
-        for directory in crate_directories(root):
-            print(directory)
+        if directory_name is not None:
+            print(crate_directory(directory_name, root))
+        else:
+            for directory in crate_directories(root):
+                print(directory)
     except CrateTreeError as error:
         print(f"crate discovery failed: {error}", file=sys.stderr)
         return 1

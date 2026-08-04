@@ -26,11 +26,9 @@
 use ironclaw_extension_contracts::memory::MemoryDescriptor;
 use ironclaw_extensions::{
     ExtensionError, ExtensionInstallationError, ExtensionManifestRecord, ExtensionManifestV2,
-    ExtensionPackage, ManifestSource,
+    ExtensionPackage, ManifestSource, default_host_api_contract_registry,
 };
-use ironclaw_host_api::path::VirtualPath;
-
-use crate::extension_contracts::{default_host_api_contract_registry, default_host_port_catalog};
+use ironclaw_host_api::{host_port::default_host_port_catalog, path::VirtualPath};
 
 /// Reserved host-bundled extension id for the native memory provider.
 pub const NATIVE_MEMORY_EXTENSION_ID: &str = "ironclaw.memory";

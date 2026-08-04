@@ -58,6 +58,298 @@ pub fn workspace_root() -> PathBuf {
         .expect("architecture crate must sit inside the workspace")
 }
 
+// ---------------------------------------------------------------------------
+// Crate inventory: the Rust half of the WS10 path-keying rule
+//
+// Every gate in this directory that names a crate spells it the flat way —
+// `crates/ironclaw_llm/src/lib.rs`. The family move (`crates/<family>/…`,
+// PROPOSAL §5) makes that spelling false for ~60 crates at once, and a gate
+// that resolves it with a bare `root.join(…)` then either scans a directory
+// that is not there or asserts against an allowlist nothing can match.
+//
+// The rule these helpers implement is the one `scripts/ci/lib/crate_tree.py`
+// states for the Python-side gates, so the two inventories agree by
+// construction and `reborn_crate_inventory.rs` pins them equal:
+//
+//   * a crate directory is the OUTERMOST directory under `crates/` owning a
+//     `Cargo.toml`;
+//   * a manifest declaring its own `[workspace]` table is the root of a
+//     DIFFERENT workspace (`crates/ironclaw_silk_decoder`, the six `wasm-src`
+//     guests) and is not a crate of this one;
+//   * `target/` and dotted directories are skipped;
+//   * fewer than `MIN_CRATE_DIRECTORIES` results is a broken checkout, not an
+//     answer — refuse rather than let a gate report success on an empty scan.
+//
+// A gate keeps its literal, readable `crates/<crate>/…` spelling and resolves
+// it through `crate_path`; the literal becomes a crate NAME plus an in-crate
+// remainder rather than a directory path. On today's flat tree resolution is
+// the identity, which is what makes adopting it a behavior-free change.
+// ---------------------------------------------------------------------------
+
+/// Fail-closed floor, mirroring `crate_tree.py`'s. Far below the real count
+/// (65 at the WS0 baseline); a handful of results always means the walk lost
+/// the tree rather than that the tree shrank.
+pub const MIN_CRATE_DIRECTORIES: usize = 20;
+
+const CRATES_ROOT: &str = "crates";
+const WORKSPACE_TABLE_HEADER: &str = "[workspace]";
+
+/// Every crate directory under `crates/`, repo-relative, POSIX-separated,
+/// sorted. Errors carry the reason so the caller can panic with it.
+#[allow(dead_code)]
+pub fn try_crate_directories(root: &Path) -> Result<Vec<String>, String> {
+    let crates_root = root.join(CRATES_ROOT);
+    if !crates_root.is_dir() {
+        return Err(format!(
+            "no {CRATES_ROOT}/ directory under {} — crate discovery cannot run. Every \
+             path-keyed gate resolves its scope through this inventory; refusing rather \
+             than scanning nothing is deliberate \
+             (docs/reborn/target-architecture/CHECKLIST.md WS10).",
+            root.display()
+        ));
+    }
+
+    let mut manifests = Vec::new();
+    collect_crate_manifest_dirs(root, &crates_root, &mut manifests)?;
+    // Shallowest first so the outermost owner of a path is always seen before
+    // any manifest nested inside it.
+    manifests.sort_by(|left, right| {
+        (left.matches('/').count(), left.as_str())
+            .cmp(&(right.matches('/').count(), right.as_str()))
+    });
+
+    let mut directories: Vec<String> = Vec::new();
+    for candidate in manifests {
+        if directories
+            .iter()
+            .any(|kept| candidate == *kept || candidate.starts_with(&format!("{kept}/")))
+        {
+            continue;
+        }
+        directories.push(candidate);
+    }
+
+    if directories.len() < MIN_CRATE_DIRECTORIES {
+        return Err(format!(
+            "crate discovery found only {} crate director(ies) under {} (floor is {}). \
+             Either the crate tree moved out from under this gate or the workspace root is \
+             wrong. Failing closed: a gate that scans nothing must never report success \
+             (docs/reborn/target-architecture/CHECKLIST.md WS10).",
+            directories.len(),
+            crates_root.display(),
+            MIN_CRATE_DIRECTORIES
+        ));
+    }
+
+    directories.sort();
+    Ok(directories)
+}
+
+/// `try_crate_directories`, panicking on refusal.
+#[allow(dead_code)]
+pub fn crate_directories(root: &Path) -> Vec<String> {
+    try_crate_directories(root).unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// Directories under `crates/` that are roots of a *separate* workspace, and so
+/// are excluded from the inventory by construction rather than by omission.
+#[allow(dead_code)]
+pub fn nested_workspace_roots(root: &Path) -> Vec<String> {
+    let mut roots = Vec::new();
+    let crates_root = root.join(CRATES_ROOT);
+    if crates_root.is_dir() {
+        let _ = walk_manifest_dirs(root, &crates_root, &mut |relative, declares_workspace| {
+            if declares_workspace {
+                roots.push(relative.to_string());
+            }
+        });
+    }
+    roots.sort();
+    roots
+}
+
+fn collect_crate_manifest_dirs(
+    root: &Path,
+    directory: &Path,
+    out: &mut Vec<String>,
+) -> Result<(), String> {
+    walk_manifest_dirs(root, directory, &mut |relative, declares_workspace| {
+        if !declares_workspace {
+            out.push(relative.to_string());
+        }
+    })
+}
+
+fn walk_manifest_dirs(
+    root: &Path,
+    directory: &Path,
+    visit: &mut dyn FnMut(&str, bool),
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(directory)
+        .map_err(|error| format!("cannot read {}: {error}", directory.display()))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("cannot read {}: {error}", directory.display()))?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if path.is_dir() {
+            if name == "target" || name.starts_with('.') {
+                continue;
+            }
+            walk_manifest_dirs(root, &path, visit)?;
+            continue;
+        }
+        if name != "Cargo.toml" {
+            continue;
+        }
+        // Read fail-closed, like `crate_tree.py`: an unreadable manifest counts
+        // as a normal crate so a permissions problem surfaces as a build error
+        // rather than as a directory quietly leaving every path-keyed gate.
+        let declares_workspace = std::fs::read_to_string(&path)
+            .map(|text| {
+                text.lines()
+                    .any(|line| line.trim() == WORKSPACE_TABLE_HEADER)
+            })
+            .unwrap_or(false);
+        let relative = relative_posix(root, directory);
+        visit(&relative, declares_workspace);
+    }
+    Ok(())
+}
+
+fn relative_posix(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// The crate directory whose basename is `name`, repo-relative.
+///
+/// Absent or ambiguous is an error, never a silent empty scope: a gate that
+/// names a crate must fail at the name it can no longer resolve.
+#[allow(dead_code)]
+pub fn try_crate_directory(root: &Path, name: &str) -> Result<String, String> {
+    let inventory = try_crate_directories(root)?;
+    let matches: Vec<&String> = inventory
+        .iter()
+        .filter(|directory| directory.rsplit('/').next() == Some(name))
+        .collect();
+    match matches.as_slice() {
+        [only] => Ok((*only).clone()),
+        found => Err(format!(
+            "expected exactly one crate directory named {name:?} under {CRATES_ROOT}/, found \
+             {}: {found:?}. If the crate was renamed or removed, repoint the gate that names \
+             it rather than letting it measure an empty tree.",
+            found.len()
+        )),
+    }
+}
+
+/// `try_crate_directory`, panicking on refusal.
+#[allow(dead_code)]
+pub fn crate_directory(root: &Path, name: &str) -> String {
+    try_crate_directory(root, name).unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// Absolute path of the crate directory named `name`.
+#[allow(dead_code)]
+pub fn crate_dir(root: &Path, name: &str) -> PathBuf {
+    root.join(crate_directory(root, name))
+}
+
+/// Rewrite a *logical* `crates/<crate>/<remainder>` spelling into the path the
+/// crate actually occupies, resolving `<crate>` through the inventory.
+///
+/// Order matters, and it is what makes adoption behavior-free:
+///
+///   1. the spec already names a real crate directory → identity (this is the
+///      only branch taken on today's flat tree, and the branch that keeps an
+///      already-nested crate such as `crates/extensions/ironclaw_extension_support`
+///      spelled the way it really sits);
+///   2. the spec resolves to something that exists but is owned by no crate
+///      (`crates/AGENTS.md`, a data-only package directory) → identity;
+///   3. the crate moved → resolve the first segment as a crate directory
+///      basename and rejoin the remainder;
+///   4. nothing resolves → refuse. A spec naming a crate that no longer exists
+///      is a stale entry, and answering it with a path that matches nothing is
+///      the silent failure this row exists to kill.
+///
+/// A trailing `/` is preserved, so allowlist entries used as `contains`
+/// fragments (`crates/ironclaw_llm/src/`) resolve to fragments.
+#[allow(dead_code)]
+pub fn try_resolve_crate_relative(root: &Path, logical: &str) -> Result<String, String> {
+    let prefix = format!("{CRATES_ROOT}/");
+    if !logical.starts_with(&prefix) {
+        return Ok(logical.to_string());
+    }
+    let inventory = try_crate_directories(root)?;
+    for directory in &inventory {
+        if logical == directory || logical.starts_with(&format!("{directory}/")) {
+            return Ok(logical.to_string());
+        }
+    }
+    if root.join(logical.trim_end_matches('/')).exists() {
+        return Ok(logical.to_string());
+    }
+    let rest = &logical[prefix.len()..];
+    let (name, remainder) = match rest.split_once('/') {
+        Some((name, remainder)) => (name, Some(remainder)),
+        None => (rest, None),
+    };
+    let directory = try_crate_directory(root, name).map_err(|error| {
+        format!(
+            "path {logical:?} names crate {name:?}, which does not resolve against the crate \
+             inventory and does not exist on disk — repoint the gate that names it rather \
+             than leaving a term that matches nothing ({error})"
+        )
+    })?;
+    Ok(match remainder {
+        Some(remainder) => format!("{directory}/{remainder}"),
+        None => directory,
+    })
+}
+
+/// `try_resolve_crate_relative`, panicking on refusal.
+#[allow(dead_code)]
+pub fn resolve_crate_relative(root: &Path, logical: &str) -> String {
+    try_resolve_crate_relative(root, logical).unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// Absolute path for a logical `crates/<crate>/<remainder>` spelling —
+/// the drop-in replacement for `root.join("crates/ironclaw_x/…")`.
+#[allow(dead_code)]
+pub fn crate_path(root: &Path, logical: &str) -> PathBuf {
+    root.join(resolve_crate_relative(root, logical))
+}
+
+/// The directory basename of the crate owning `path`, or `""` when no crate
+/// under `crates/` owns it.
+///
+/// The drop-in replacement for "take the first path component under
+/// `crates/`". That idiom answers `substrates` once a crate moves into a
+/// family directory, and already answers `extensions` for the two crates that
+/// sit one level down today — so a gate keyed on it compares an ownership
+/// question against a directory name and silently attributes code to the wrong
+/// owner. Outermost-wins, exactly like the inventory.
+#[allow(dead_code)]
+pub fn owning_crate_name(root: &Path, path: &Path) -> String {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return String::new();
+    };
+    let relative = relative.to_string_lossy().replace('\\', "/");
+    for directory in crate_directories(root) {
+        if relative.starts_with(&format!("{directory}/")) || relative == directory {
+            return directory
+                .rsplit('/')
+                .next()
+                .unwrap_or(&directory)
+                .to_string();
+        }
+    }
+    String::new()
+}
+
 /// Names with more than one defining occurrence — a second same-named
 /// definition elsewhere is new debt hiding behind an allowlist entry (§10) —
 /// EXCEPT when every occurrence is `#[cfg(...)]`-gated (mutually exclusive
@@ -83,6 +375,7 @@ pub fn duplicate_definitions(
 /// `tests/`, `examples/`, and `benches/` trees plus any file named in
 /// `skip_files` (the ratchet files themselves, as defense in depth — their
 /// fixtures are already excluded by string stripping).
+#[allow(dead_code)]
 pub fn collect_type_defs(
     dir: &Path,
     keywords: &[&str],
@@ -133,6 +426,7 @@ pub fn collect_type_defs(
 /// (single-line) `#[cfg(...)]` attribute in its immediately preceding attribute
 /// block — used to exempt mutually exclusive compile branches from the
 /// duplicate check.
+#[allow(dead_code)]
 pub fn scan_type_defs(
     source: &str,
     keywords: &[&str],

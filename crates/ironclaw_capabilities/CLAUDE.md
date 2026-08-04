@@ -1,6 +1,9 @@
 # ironclaw_capabilities guardrails
 
-- Own caller-facing `CapabilityHost` invoke/resume/spawn workflow.
+- Own caller-facing `CapabilityHost` invoke/resume/spawn workflow. It lives in
+  `src/host/`, one private module per workflow; the charter table in
+  `src/host/mod.rs` decides which file an item belongs to, and `AGENTS.md`
+  summarises it. `authorize` decides; a workflow module only maps the verdict.
 - Use the neutral `CapabilityDispatcher` port; do not add a normal dependency on concrete runtime crates.
 - `CapabilityHost` is the single caller-facing authority path for invoke/resume/spawn: host-runtime adapters, built-ins, custom packages, and external runtimes must enter through this workflow rather than adding parallel authorization/approval dispatch paths.
 - Host authorization must use the trust-aware contract (`TrustAwareCapabilityDispatchAuthorizer`) with a policy-derived `TrustDecision`; do not wire production `CapabilityHost` with grant-only authorization that bypasses trust ceilings.

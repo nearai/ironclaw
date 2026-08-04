@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
+use ironclaw_extension_contracts::runtime::ExtensionAssetPath;
 use ironclaw_extensions::{
-    ExtensionAssetPath, ExtensionManifestRecord, ExtensionPackage, ExtensionRuntimeV2,
-    ManifestSource,
+    ExtensionManifestRecord, ExtensionPackage, ExtensionRuntimeV2, ManifestSource,
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{ids::ExtensionId, path::VirtualPath, runtime::RuntimeKind};
@@ -77,10 +77,8 @@ pub fn extension_asset_path(
 ) -> Result<VirtualPath, ProductOperationFailure> {
     let root = VirtualPath::new(format!("/system/extensions/{}", extension_id.as_str()))
         .map_err(map_binding_error)?;
-    ExtensionAssetPath::new(asset_path.to_string())
-        .map_err(map_binding_error)?
-        .resolve_under(&root)
-        .map_err(map_binding_error)
+    let asset = ExtensionAssetPath::new(asset_path.to_string()).map_err(map_binding_error)?;
+    ironclaw_extensions::resolve_asset_under(&asset, &root).map_err(map_binding_error)
 }
 
 /// Read every file under `root` into inline bytes (paths relative to `root`),
@@ -188,11 +186,12 @@ pub fn parse_imported_manifest(
     manifest_toml: &str,
     source: ManifestSource,
 ) -> Result<ExtensionManifestRecord, ProductOperationFailure> {
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        ProductOperationFailure::InvalidBindingRequest {
-            reason: format!("host port catalog rejected imported extension: {error}"),
-        }
-    })?;
+    let host_ports =
+        ironclaw_host_api::host_port::default_host_port_catalog().map_err(|error| {
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: format!("host port catalog rejected imported extension: {error}"),
+            }
+        })?;
     let contracts = product_extension_host_api_contract_registry().map_err(|error| {
         ProductOperationFailure::InvalidBindingRequest {
             reason: format!("host API contract registry rejected imported extension: {error}"),
@@ -793,8 +792,8 @@ setup_url = "{expected_url}"
                 include_str!("../../../test-tools/ascii-renderer/manifest.toml"),
             ),
         ] {
-            let host_ports =
-                ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
+            let host_ports = ironclaw_host_api::host_port::default_host_port_catalog()
+                .expect("host port catalog");
             let contracts =
                 product_extension_host_api_contract_registry().expect("host API contracts");
             let record = ExtensionManifestRecord::from_toml(

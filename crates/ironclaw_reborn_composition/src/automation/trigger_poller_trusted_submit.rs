@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use ironclaw_conversations::{
     AcceptedConversationMessage, AdapterInstallationId, AdapterKind, ConversationBindingResolution,
     ConversationBindingService, ConversationRouteKind, ExternalEventId, InboundTurnError,
-    ResolveConversationRequest,
+    ResolveConversationRequest, TurnSubmissionRetry,
 };
 use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
 use ironclaw_host_api::{
@@ -24,7 +24,7 @@ use ironclaw_triggers::{
     TriggerError, TriggerFire, TriggerId, TriggerMaterializedPrompt, TriggerPromptMaterializer,
     TriggerTrustedInboundBinding,
 };
-use ironclaw_turns::{AdmissionRejectionReason, TurnError, TurnScope};
+use ironclaw_turns::TurnScope;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TriggerFireAuthRequest {
@@ -355,37 +355,19 @@ fn trigger_authorization_error(error: TriggerFireAuthError) -> TriggerError {
 
 fn classify_materializer_inbound_error(error: InboundTurnError) -> TriggerError {
     match error {
-        InboundTurnError::TurnSubmissionFailed {
-            error: TurnError::ThreadBusy(_),
-        } => retryable_trigger_materializer_backend_error(),
-        InboundTurnError::TurnSubmissionFailed {
-            error: TurnError::AdmissionRejected(ref rejection),
-        } => match rejection.reason {
-            AdmissionRejectionReason::TenantLimit | AdmissionRejectionReason::Unavailable => {
+        // A submission failure classifies by the port error's retry class:
+        // both retryable classes are a re-polled fire, permanent is a submit
+        // rejection. Which `TurnError` lands in which class is
+        // `conversation_turn_submitter`'s total mapping, pinned there.
+        InboundTurnError::TurnSubmissionFailed { ref error } => match error.retry() {
+            TurnSubmissionRetry::RetryableAfterKeyRotation
+            | TurnSubmissionRetry::RetryableWithSameKey => {
                 retryable_trigger_materializer_backend_error()
             }
-            AdmissionRejectionReason::ProfileRejected
-            | AdmissionRejectionReason::Policy
-            | AdmissionRejectionReason::Unauthorized => {
+            TurnSubmissionRetry::Permanent => {
                 rejected_trigger_materialization("trusted trigger submit rejected")
             }
         },
-        InboundTurnError::TurnSubmissionFailed {
-            error:
-                TurnError::Unavailable { .. }
-                | TurnError::CapacityExceeded { .. }
-                | TurnError::Conflict { .. },
-        } => retryable_trigger_materializer_backend_error(),
-        InboundTurnError::TurnSubmissionFailed {
-            error:
-                TurnError::ScopeNotFound
-                | TurnError::Unauthorized
-                | TurnError::InvalidRequest { .. }
-                | TurnError::RunNotRetryable { .. }
-                | TurnError::InvalidTransition { .. }
-                | TurnError::LeaseMismatch
-                | TurnError::InvalidRunOriginAdapter,
-        } => rejected_trigger_materialization("trusted trigger submit rejected"),
         InboundTurnError::BindingRequired { .. } | InboundTurnError::AccessDenied { .. } => {
             blocked_trigger_materialization("trusted trigger inbound request blocked")
         }
@@ -488,6 +470,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The real port adapter and the real `TurnError` → port-error mapping, so
+    // these tests drive the production seam rather than a stand-in.
+    use crate::automation::conversation_turn_submitter::{
+        CoordinatorTurnSubmitter, turn_submission_error,
+    };
     use crate::runtime_input::{
         TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
         TriggerFireAccessError,
@@ -1247,11 +1234,11 @@ mod tests {
     #[test]
     fn thread_busy_inbound_errors_are_retryable_backend_failures() {
         let error = classify_materializer_inbound_error(InboundTurnError::TurnSubmissionFailed {
-            error: TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            error: turn_submission_error(TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
                 active_run_id: TurnRunId::new(),
                 status: TurnStatus::Queued,
                 event_cursor: EventCursor(1),
-            }),
+            })),
         });
 
         assert!(
@@ -1275,7 +1262,7 @@ mod tests {
         ] {
             let classified =
                 classify_materializer_inbound_error(InboundTurnError::TurnSubmissionFailed {
-                    error,
+                    error: turn_submission_error(error),
                 });
 
             assert!(
@@ -1287,9 +1274,9 @@ mod tests {
     #[test]
     fn transient_admission_rejections_are_retryable_backend_failures() {
         let error = classify_materializer_inbound_error(InboundTurnError::TurnSubmissionFailed {
-            error: TurnError::AdmissionRejected(AdmissionRejection::new(
+            error: turn_submission_error(TurnError::AdmissionRejected(AdmissionRejection::new(
                 AdmissionRejectionReason::TenantLimit,
-            )),
+            ))),
         });
 
         assert!(
@@ -1300,9 +1287,9 @@ mod tests {
     #[test]
     fn permanent_admission_rejections_are_terminal_materialization_failures() {
         let error = classify_materializer_inbound_error(InboundTurnError::TurnSubmissionFailed {
-            error: TurnError::AdmissionRejected(AdmissionRejection::new(
+            error: turn_submission_error(TurnError::AdmissionRejected(AdmissionRejection::new(
                 AdmissionRejectionReason::Policy,
-            )),
+            ))),
         });
 
         assert!(
@@ -1345,9 +1332,9 @@ mod tests {
     #[test]
     fn run_not_retryable_is_terminal_materialization_failure() {
         let error = classify_materializer_inbound_error(InboundTurnError::TurnSubmissionFailed {
-            error: TurnError::RunNotRetryable {
+            error: turn_submission_error(TurnError::RunNotRetryable {
                 run_id: TurnRunId::new(),
-            },
+            }),
         });
 
         assert!(
@@ -1423,10 +1410,12 @@ mod tests {
         let trusted_submitter = trusted_trigger_fire_submitter(
             conversations.clone(),
             conversations,
-            Arc::new(CountingTurnCoordinator {
-                run_id,
-                submit_turn_count: submit_turn_count.clone(),
-            }),
+            Arc::new(CoordinatorTurnSubmitter::new(Arc::new(
+                CountingTurnCoordinator {
+                    run_id,
+                    submit_turn_count: submit_turn_count.clone(),
+                },
+            ))),
         );
         let worker = TriggerPollerWorker::new(
             TriggerPollerWorkerConfig::default().set_fires_per_tick(1),
@@ -1484,10 +1473,12 @@ mod tests {
         let trusted_submitter = trusted_trigger_fire_submitter(
             conversations.clone(),
             conversations,
-            Arc::new(CountingTurnCoordinator {
-                run_id,
-                submit_turn_count: submit_turn_count.clone(),
-            }),
+            Arc::new(CoordinatorTurnSubmitter::new(Arc::new(
+                CountingTurnCoordinator {
+                    run_id,
+                    submit_turn_count: submit_turn_count.clone(),
+                },
+            ))),
         );
         let worker = TriggerPollerWorker::new(
             TriggerPollerWorkerConfig::default().set_fires_per_tick(1),
@@ -1558,10 +1549,12 @@ mod tests {
         let trusted_submitter = trusted_trigger_fire_submitter(
             conversations.clone(),
             conversations,
-            Arc::new(CountingTurnCoordinator {
-                run_id,
-                submit_turn_count: submit_turn_count.clone(),
-            }),
+            Arc::new(CoordinatorTurnSubmitter::new(Arc::new(
+                CountingTurnCoordinator {
+                    run_id,
+                    submit_turn_count: submit_turn_count.clone(),
+                },
+            ))),
         );
         let worker = TriggerPollerWorker::new(
             TriggerPollerWorkerConfig::default().set_fires_per_tick(1),
@@ -1730,7 +1723,9 @@ mod tests {
         let trusted_submitter = trusted_trigger_fire_submitter(
             conversations.clone(),
             conversations,
-            Arc::new(RecordingTurnCoordinator { run_id }),
+            Arc::new(CoordinatorTurnSubmitter::new(Arc::new(
+                RecordingTurnCoordinator { run_id },
+            ))),
         );
         let worker = TriggerPollerWorker::new(
             TriggerPollerWorkerConfig::default().set_fires_per_tick(1),
@@ -2010,7 +2005,9 @@ mod tests {
         let inner_submitter = trusted_trigger_fire_submitter(
             conversations.clone(),
             conversations,
-            Arc::new(RecordingTurnCoordinator { run_id }),
+            Arc::new(CoordinatorTurnSubmitter::new(Arc::new(
+                RecordingTurnCoordinator { run_id },
+            ))),
         );
         let capturing_submitter = Arc::new(CapturingTrustedTriggerFireSubmitter {
             inner: inner_submitter,

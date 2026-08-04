@@ -72,7 +72,7 @@ ironclaw_memory_native = { path = "../extensions/packages/memory-native", versio
 ironclaw_processes = { path = "../ironclaw_processes", version = "0.1.0", features = ["test-support"] }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store", version = "0.1.0" }
 ironclaw_resources = { path = "../ironclaw_resources", version = "0.1.0" }
-ironclaw_scripts = { path = "../ironclaw_scripts", version = "0.1.0" }
+ironclaw_sandbox = { path = "../ironclaw_sandbox", version = "0.1.0" }
 ironclaw_skills = { path = "../ironclaw_skills", version = "0.3.0", default-features = false }
 ironclaw_trust = { path = "../ironclaw_trust", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0", features = ["test-support"] }

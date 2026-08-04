@@ -5,6 +5,7 @@ use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::TurnCoordinator;
 
+use crate::automation::conversation_turn_submitter::CoordinatorTurnSubmitter;
 #[cfg(any(test, feature = "test-support"))]
 use crate::automation::trigger_poller::TenantScopedTrustedTriggerFireAuthorizer;
 use crate::automation::trigger_poller::{
@@ -51,10 +52,13 @@ where
         default_agent_id,
         authorizer,
     ));
+    // `ironclaw_conversations` does not hold the coordinator; it declares the
+    // one submission call it makes as a port, which this adapter implements
+    // over the handle composition already owns.
     let trusted_submitter = ironclaw_conversations::trusted_trigger_fire_submitter(
         conversation_services.clone(),
         conversation_services,
-        turn_coordinator,
+        Arc::new(CoordinatorTurnSubmitter::new(turn_coordinator)),
     );
     let services = TriggerPollerServices {
         materializer,

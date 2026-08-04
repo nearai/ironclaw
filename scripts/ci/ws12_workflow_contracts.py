@@ -381,20 +381,39 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
     CrateScopeFilter(
         workflow=PLATFORM_WORKFLOW,
         name="has_direct_wasm_abi_risk",
-        anchor="wit/",
+        # Anchored on the build script rather than on a path prefix: the WIT
+        # directory moved inside `ironclaw_wasm` (CHECKLIST WS4), so the bare
+        # `wit/` alternative that used to anchor this filter is gone.
+        anchor="build-wasm-extensions",
         kind="regex",
         crates=(
             ("ironclaw_common", "src/lib.rs"),
             ("ironclaw_wasm", "src/lib.rs"),
         ),
-        # Probe derived from reality rather than from a guessed layout: the
-        # shipped package manifests are found on disk and every one of them
-        # must be in scope. Anchored on the support crate and hopping to its
-        # sibling `packages/` directory, which is where WS2 put them — if that
-        # moves again this stops discovering files or stops matching them,
-        # either way loudly.
-        crate_globs=(("ironclaw_extension_support", "../packages/*/manifest.toml"),),
-        in_scope=("wit/host.wit", "registry/tools/x.json", "scripts/build-wasm-extensions.sh"),
+        # Probes derived from reality rather than from a guessed layout: the
+        # files are found on disk and every one of them must be in scope.
+        #
+        #  * the shipped package manifests, anchored on the support crate and
+        #    hopping to its sibling `packages/` directory, which is where WS2
+        #    put them — if that moves again this stops discovering files or
+        #    stops matching them, either way loudly.
+        #  * the canonical WASM ABI contracts themselves. Naming them by glob
+        #    rather than by literal is the point: the filter's whole job is to
+        #    put a `tool.wit`/`channel.wit` edit in scope, and a literal probe
+        #    can only assert the path someone typed. `wit/*.wit` discovers
+        #    whatever the crate actually ships, so adding a third contract or
+        #    moving the directory out of the crate fails here instead of
+        #    passing on a stale name. (It replaces two `.../wit/host.wit`
+        #    probes: no `host.wit` exists in this repository, so they asserted
+        #    the crate-name alternative twice and nothing about the ABI files.)
+        crate_globs=(
+            ("ironclaw_extension_support", "../packages/*/manifest.toml"),
+            ("ironclaw_wasm", "wit/*.wit"),
+        ),
+        in_scope=(
+            "registry/tools/x.json",
+            "scripts/build-wasm-extensions.sh",
+        ),
         out_of_scope=(
             "crates/ironclaw_llm/src/lib.rs",
             f"crates/{NESTED_FAMILY}/ironclaw_llm/src/lib.rs",
@@ -614,6 +633,194 @@ def validate_crate_scope_filters(
     return errors
 
 
+# ---------------------------------------------------------------------------
+# WebUI frontend directory sites + crate-name residue (#7155 WS10: "loud
+# path-pattern inventory")
+#
+# 28 sites across seven workflows spelled `crates/ironclaw_webui/frontend`
+# directly: a `cache-dependency-path:` value (12), a `cd` inside a `run:`
+# block (12), and a `working-directory:` key (4). Two more workflows spelled a
+# single crate's Cargo.toml / source path directly: docker.yml's release
+# VERSION extraction (`ironclaw_reborn_cli`) and nightly-deep-ci.yml's
+# mutation-audit target (`ironclaw_capabilities`). All of these break the
+# moment their crate moves into a family directory (crates/<family>/
+# ironclaw_*, PROPOSAL §5).
+#
+# `cache-dependency-path` is a static YAML value `actions/setup-node` globs at
+# runtime rather than a shell site — verified against the pinned commit's
+# bundled dist/setup/index.js: `hashFiles` walks ONE globber built from every
+# newline-separated pattern, and `restoreCache` only throws when that COMBINED
+# walk finds nothing — so its fix twins the flat lockfile line with a nested
+# wildcard sibling instead of resolving dynamically. Every other site (`cd`,
+# `working-directory`, docker.yml's VERSION grep, nightly-deep-ci.yml's
+# mutation-audit path) resolves once through scripts/ci/crate-dir.sh
+# (scripts/ci/lib/crate_tree.py) and must carry no literal trace of the flat
+# path it replaced.
+#
+# Two contracts, one per site shape:
+#   `validate_webui_frontend_sites` scans every `.github/workflows/*.yml` for
+#   the flat WebUI frontend literal. The ONLY sanctioned shape is the
+#   cache-dependency-path pairing (flat line immediately followed by its
+#   nested sibling); anything else is the dynamic-site regression.
+#   `validate_crate_name_residue` pins docker.yml and nightly-deep-ci.yml to
+#   still name the crate they resolve, with that name still resolvable — the
+#   same `name in text` + `crate_directory(name)` shape CRATE_SCOPE_FILTERS
+#   already uses for its `crates=` tuples.
+# ---------------------------------------------------------------------------
+
+DOCKER_WORKFLOW = ".github/workflows/docker.yml"
+NIGHTLY_DEEP_CI_WORKFLOW = ".github/workflows/nightly-deep-ci.yml"
+
+WEBUI_FRONTEND_CRATE = "ironclaw_webui"
+WEBUI_NESTED_LOCKFILE_PATTERN = (
+    f"crates/*/{WEBUI_FRONTEND_CRATE}/frontend/pnpm-lock.yaml"
+)
+
+
+def _yaml_code_portion(line: str) -> str:
+    """`line` with any YAML comment suffix removed.
+
+    A `#` starts a comment only when it is at the start of the line or
+    preceded by whitespace (the YAML spec rule) — enough to separate workflow
+    CODE from an explanatory comment without a full parser.
+    """
+
+    for index, char in enumerate(line):
+        if char == "#" and (index == 0 or line[index - 1] in " \t"):
+            return line[:index]
+    return line
+
+
+def validate_webui_frontend_sites(
+    workflows: dict[str, str], root: Path = ROOT
+) -> list[str]:
+    """Return every way a WebUI frontend directory site could go dark.
+
+    The flat literal is sanctioned in exactly one shape: the
+    `cache-dependency-path` flat lockfile line, immediately followed by its
+    nested wildcard sibling on the next non-blank line. Anywhere else — a bare
+    `cd`, a `working-directory:` key, a cache-dependency-path line missing its
+    sibling, or a sibling that has drifted — is the WS10 regression this pin
+    exists to catch.
+    """
+
+    errors: list[str] = []
+    try:
+        webui_dir = crate_directory(WEBUI_FRONTEND_CRATE, root)
+    except CrateTreeError as error:
+        return [
+            f"crate inventory cannot resolve {WEBUI_FRONTEND_CRATE!r}, the crate "
+            f"every WebUI frontend workflow site is derived from: {error}"
+        ]
+    flat_frontend_dir = f"{webui_dir}/frontend"
+    flat_lockfile = f"{flat_frontend_dir}/pnpm-lock.yaml"
+
+    # The glob machinery itself, independent of any workflow text: the flat
+    # line must match today's real tree, the nested line must match a
+    # plausible moved tree, and the nested line must not ALREADY match today's
+    # tree — a pattern that matches everything is not depth-tolerant, it is
+    # just broad (the same principle CRATE_SCOPE_FILTERS enforces on `paths:`).
+    if not (root / flat_lockfile).is_file():
+        errors.append(
+            f"probe {flat_lockfile} does not exist on disk — the WebUI "
+            "cache-dependency-path pin is unmeasurable; repoint it to wherever "
+            "the frontend lockfile really is"
+        )
+    flat_pattern = github_glob_to_regex(flat_lockfile)
+    nested_pattern = github_glob_to_regex(WEBUI_NESTED_LOCKFILE_PATTERN)
+    nested_probe = (
+        f"crates/{NESTED_FAMILY}/{WEBUI_FRONTEND_CRATE}/frontend/pnpm-lock.yaml"
+    )
+    if not flat_pattern.match(flat_lockfile):
+        errors.append(
+            f"flat cache-dependency-path line {flat_lockfile!r} does not match itself"
+        )
+    if not nested_pattern.match(nested_probe):
+        errors.append(
+            f"nested cache-dependency-path line {WEBUI_NESTED_LOCKFILE_PATTERN!r} "
+            f"does not match a plausible moved location ({nested_probe})"
+        )
+    if nested_pattern.match(flat_lockfile):
+        errors.append(
+            f"nested cache-dependency-path line {WEBUI_NESTED_LOCKFILE_PATTERN!r} "
+            f"already matches today's flat location ({flat_lockfile}) — it must "
+            "stay depth-tolerant, not just broad"
+        )
+
+    cache_sites = 0
+    for path in sorted(workflows):
+        if not path.startswith(".github/workflows/") or not path.endswith(".yml"):
+            continue
+        lines = workflows[path].splitlines()
+        for index, raw_line in enumerate(lines):
+            code = _yaml_code_portion(raw_line)
+            if flat_frontend_dir not in code:
+                continue
+            stripped = code.strip()
+            if stripped == flat_lockfile:
+                rest = (candidate.strip() for candidate in lines[index + 1 :])
+                following = next((candidate for candidate in rest if candidate), "")
+                if following == WEBUI_NESTED_LOCKFILE_PATTERN:
+                    cache_sites += 1
+                    continue
+                errors.append(
+                    f"{path}:{index + 1}: cache-dependency-path flat lockfile line "
+                    f"is not twinned with {WEBUI_NESTED_LOCKFILE_PATTERN!r} on the "
+                    "next non-blank line — the family move will go dark here"
+                )
+                continue
+            errors.append(
+                f"{path}:{index + 1}: hardcodes {flat_frontend_dir!r} outside a "
+                "comment — resolve it through scripts/ci/crate-dir.sh "
+                f"{WEBUI_FRONTEND_CRATE} instead of the flat literal"
+            )
+
+    if cache_sites == 0:
+        errors.append(
+            "no workflow pairs the flat WebUI lockfile line with its nested "
+            "sibling — the cache-dependency-path probe set is empty"
+        )
+    return errors
+
+
+# (crate-governing workflow, crate name) — the workflow's text must still
+# spell the name as a token, and the inventory must still resolve it. Both
+# sites already resolve their PATH dynamically through scripts/ci/crate-dir.sh
+# once fixed (B1/B2 in #7155); this is the pin that catches the workflow TEXT
+# itself going stale — a rename or deletion the workflow never followed.
+CRATE_NAME_RESIDUE: tuple[tuple[str, str], ...] = (
+    (DOCKER_WORKFLOW, "ironclaw_reborn_cli"),
+    (NIGHTLY_DEEP_CI_WORKFLOW, "ironclaw_capabilities"),
+)
+
+
+def validate_crate_name_residue(
+    workflows: dict[str, str], root: Path = ROOT
+) -> list[str]:
+    """Return every way a governed crate name could go dark in its workflow."""
+
+    errors: list[str] = []
+    for workflow, name in CRATE_NAME_RESIDUE:
+        text = workflows.get(workflow)
+        if text is None:
+            errors.append(f"{workflow}: workflow not loaded")
+            continue
+        if name not in text:
+            errors.append(
+                f"{workflow}: no longer names crate {name!r} — the step that "
+                "resolves this crate's directory has nothing to resolve"
+            )
+        try:
+            crate_directory(name, root)
+        except CrateTreeError as error:
+            errors.append(
+                f"{workflow}: names crate {name!r}, which the crate inventory "
+                f"cannot resolve — repoint it rather than leaving a token that "
+                f"matches nothing ({error})"
+            )
+    return errors
+
+
 def validate_workflow_texts(
     workflows: dict[str, str], root: Path = ROOT
 ) -> list[str]:
@@ -636,14 +843,28 @@ def validate_workflow_texts(
     if code_style is not None:
         errors.extend(validate_production_lint_targets(code_style))
     errors.extend(validate_crate_scope_filters(workflows, root))
+    errors.extend(validate_crate_name_residue(workflows, root))
+    errors.extend(validate_webui_frontend_sites(workflows, root))
     return errors
 
 
 def load_workflows(root: Path) -> dict[str, str]:
-    paths = dict.fromkeys(
-        (*REQUIRED_MARKERS, *(scope.workflow for scope in CRATE_SCOPE_FILTERS))
-    )
-    return {path: (root / path).read_text(encoding="utf-8") for path in paths}
+    """Every `.github/workflows/*.yml` file, repo-relative path -> text.
+
+    A handful of contracts key off one specific known path (REQUIRED_MARKERS,
+    CRATE_SCOPE_FILTERS, CRATE_NAME_RESIDUE); `validate_webui_frontend_sites`
+    must see EVERY workflow, since the whole point of that pin is to catch the
+    flat WebUI literal reappearing somewhere nobody enumerated. Loading every
+    (small) workflow file eagerly costs nothing and keeps one loader for every
+    consumer — a superset of the old explicit path list, so every existing
+    `workflows.get(path)` lookup keeps working unchanged.
+    """
+
+    workflows_dir = root / ".github" / "workflows"
+    return {
+        path.relative_to(root).as_posix(): path.read_text(encoding="utf-8")
+        for path in sorted(workflows_dir.glob("*.yml"))
+    }
 
 
 def main() -> int:

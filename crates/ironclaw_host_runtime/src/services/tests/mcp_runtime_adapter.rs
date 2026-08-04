@@ -5,7 +5,7 @@ use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
     dispatch::DispatchError,
     ids::{ExtensionId, VendorId},
-    resource::ResourceEstimate,
+    resource::{ResourceEstimate, RuntimeResourceBudget},
     runtime::RuntimeKind,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
@@ -162,7 +162,7 @@ struct FailingMcpExecutor {
 impl McpExecutor for FailingMcpExecutor {
     async fn execute_extension_json(
         &self,
-        _governor: &dyn ResourceGovernor,
+        _budget: &dyn RuntimeResourceBudget,
         _request: McpExecutionRequest<'_>,
     ) -> Result<McpExecutionResult, McpError> {
         Err(McpError::Client {
@@ -175,7 +175,7 @@ impl McpExecutor for FailingMcpExecutor {
 impl McpExecutor for AuthRequiredMcpExecutor {
     async fn execute_extension_json(
         &self,
-        _governor: &dyn ResourceGovernor,
+        _budget: &dyn RuntimeResourceBudget,
         _request: McpExecutionRequest<'_>,
     ) -> Result<McpExecutionResult, McpError> {
         Err(McpError::AuthRequired {

@@ -878,11 +878,12 @@ pub(crate) async fn open_standalone_extension_installation_store_for_test(
             reason: format!("extension installation state path invalid: {error}"),
         }
     })?;
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        RebornBuildError::InvalidConfig {
-            reason: format!("extension host port catalog could not be loaded: {error}"),
-        }
-    })?;
+    let host_ports =
+        ironclaw_host_api::host_port::default_host_port_catalog().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("extension host port catalog could not be loaded: {error}"),
+            }
+        })?;
     let host_api_contracts = product_extension_host_api_contract_registry().map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("extension host API contracts could not be loaded: {error}"),

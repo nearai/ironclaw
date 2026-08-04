@@ -1,6 +1,6 @@
 use std::io::Read;
 
-use ironclaw_extensions::ExtensionAssetPath;
+use ironclaw_extension_contracts::runtime::ExtensionAssetPath;
 
 /// Zip-bomb guards for uploaded extension bundles. The HTTP route caps only
 /// the compressed body, so these bounds the archive entries and decompressed

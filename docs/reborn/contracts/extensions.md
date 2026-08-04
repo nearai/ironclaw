@@ -30,7 +30,7 @@ It does **not** execute capabilities.
 Execution belongs to:
 
 - `ironclaw_wasm` for WASM modules
-- `ironclaw_scripts` for Docker-backed native CLI/script capabilities
+- `ironclaw_sandbox` for Docker-backed native CLI/script capabilities
 - `ironclaw_mcp` for MCP adapter calls
 - host-policy-selected service crates for first-party/system work
 
