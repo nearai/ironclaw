@@ -73,7 +73,7 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_mcp: "llm-mcp",
       ironclaw_network: "llm-mcp",
       ironclaw_outbound: "llm-mcp",
-      ironclaw_process_sandbox: "llm-mcp",
+      ironclaw_sandbox: "llm-mcp",
       ironclaw_processes: "llm-mcp",
 
       ironclaw_conversations: "events-conversations",
@@ -97,7 +97,6 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_memory_native: "memory-skills",
       ironclaw_memory_mem0: "memory-skills",
       ironclaw_observability: "memory-skills",
-      ironclaw_scripts: "memory-skills",
       ironclaw_skill_learning: "memory-skills",
       ironclaw_skills: "memory-skills",
 

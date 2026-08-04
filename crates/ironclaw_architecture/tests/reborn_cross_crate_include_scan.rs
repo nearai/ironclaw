@@ -10,7 +10,8 @@
 //!
 //! **This scan does not fail on the inventory it finds.** Arming it as a gate
 //! today would fail CI on ~60 pre-existing sites that only WS1–WS4 can fix
-//! (`providers.json` becoming a crate asset, `wit/` moving into the wasm lane,
+//! (`providers.json` becoming a crate asset, package colocation; `wit/` moved
+//! into the wasm lane under WS4 and is no longer in this inventory,
 //! package colocation). Warn mode makes that debt visible and countable now,
 //! at WS0, so the later PRs can prove they shrank it.
 //!
@@ -20,7 +21,7 @@
 //! binary; verify with the new §11.2.7 scan"* (workstream #6920, epic #3773).
 //! That PR sets `REPORT_ONLY = false` below, at which point the `cross-crate`
 //! findings become assertions. The `repo-root asset` half stays reported until
-//! its owners land (WS1 `providers.json`, WS4 `wit/`), then the whole scan is
+//! its owners land (WS1 `providers.json`; WS4 `wit/` is done), then the whole scan is
 //! enforcing and this comment goes away with `REPORT_ONLY`.
 //!
 //! To read the inventory:
@@ -88,7 +89,7 @@ struct EscapingInclude {
     resolved: String,
     /// The workspace package that owns the target, when one does — the
     /// cross-crate reach-ins §11.2.7 exists for. `None` means a repo-root
-    /// asset (`providers.json`, `wit/`, `migrations/`, `tests/fixtures/`).
+    /// asset (`providers.json`, `migrations/`, `tests/fixtures/`).
     target_crate: Option<String>,
 }
 
@@ -383,8 +384,8 @@ fn reborn_cross_crate_include_paths_are_inventoried() {
         render(&cross_crate)
     );
     eprintln!(
-        "\n  repo-root asset reach-ins (WS1 `providers.json`, WS4 `wit/`, and the migration/\
-         fixture owners):\n{}",
+        "\n  repo-root asset reach-ins (WS1 `providers.json` and the migration/\
+         fixture owners; WS4 `wit/` is done):\n{}",
         render(&repo_root)
     );
 

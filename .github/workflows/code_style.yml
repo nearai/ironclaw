@@ -205,6 +205,20 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
+      # `working-directory:` is a YAML key, not a shell command — it cannot glob
+      # or resolve a path at runtime, so the family move (crates/<family>/
+      # ironclaw_webui, PROPOSAL §5) is resolved once here through the shared
+      # crate inventory (scripts/ci/crate-dir.sh -> scripts/ci/lib/crate_tree.py)
+      # rather than left as a literal every step below would need updating.
+      # `env` populated via $GITHUB_ENV is available to a later step's
+      # `working-directory:` (docs.github.com/actions: context availability for
+      # jobs.<job_id>.steps.working-directory includes `env`), so every
+      # subsequent step in THIS job can read it back through ${{ env.* }}.
+      - name: Resolve WebUI frontend directory
+        run: |
+          set -euo pipefail
+          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
+          echo "WEBUI_FRONTEND_DIR=${webui_dir}/frontend" >> "$GITHUB_ENV"
       - name: Enable pnpm
         run: corepack enable pnpm
       - name: Install Node.js
@@ -212,17 +226,25 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+          # actions/setup-node hashes this list to build the cache key
+          # (verified against the pinned commit's bundled dist/setup/index.js:
+          # `hashFiles` walks one globber built from every newline-separated
+          # pattern and only throws when the COMBINED walk finds nothing), so
+          # the flat line stays live for today's tree and the nested line picks
+          # up the family move without either one needing to be conditional.
+          cache-dependency-path: |
+            crates/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
       # `no-undef` over WebUI v2 JavaScript catches production modules that reference a
       # symbol they never imported. The VM-based component suites stub
       # every collaborator through a `vm` context, so that class of bug (e.g. an
       # htm `${Component}` used without an import) passes the unit tests and only
       # surfaces at runtime — this is the gate the eval harness cannot provide.
       - name: Install WebUI v2 frontend deps
-        working-directory: crates/ironclaw_webui/frontend
+        working-directory: ${{ env.WEBUI_FRONTEND_DIR }}
         run: pnpm install --frozen-lockfile
       - name: Lint WebUI v2 JS
-        working-directory: crates/ironclaw_webui/frontend
+        working-directory: ${{ env.WEBUI_FRONTEND_DIR }}
         run: pnpm lint
       # The full vitest suite (chat, extensions, telegram/slack panels, gate
       # routing, channels tab, configure modal — the vm-tsx harness) previously
@@ -231,14 +253,14 @@ jobs:
       # vm-tsx setup file is declared in vite.config.ts setupFiles; no extra
       # CI configuration beyond node + pnpm is needed.
       - name: WebUI v2 frontend tests (vitest)
-        working-directory: crates/ironclaw_webui/frontend
+        working-directory: ${{ env.WEBUI_FRONTEND_DIR }}
         run: pnpm test
       # The SPA build is embedded into the serve binary at compile time through
       # Cargo's OUT_DIR (see ironclaw_webui/build.rs), so a frontend that lints
       # and tests but does not build still breaks downstream binary builds.
       # Keep the build in the same job so the three gates travel together.
       - name: Build WebUI v2 frontend
-        working-directory: crates/ironclaw_webui/frontend
+        working-directory: ${{ env.WEBUI_FRONTEND_DIR }}
         run: pnpm build
 
   clippy:
@@ -270,14 +292,20 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+          # See the webui-v2-js-lint job above for why this is a depth-tolerant
+          # glob list rather than a single literal.
+          cache-dependency-path: |
+            crates/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
       - name: Enable pnpm
         if: contains(matrix.flags, '--all-features')
         run: corepack enable pnpm
       - name: Install WebUI frontend dependencies
         if: contains(matrix.flags, '--all-features')
         run: |
-          cd crates/ironclaw_webui/frontend
+          set -euo pipefail
+          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
+          cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -338,14 +366,20 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+          # See the webui-v2-js-lint job above for why this is a depth-tolerant
+          # glob list rather than a single literal.
+          cache-dependency-path: |
+            crates/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
       - name: Enable pnpm
         if: contains(matrix.flags, '--all-features')
         run: corepack enable pnpm
       - name: Install WebUI frontend dependencies
         if: contains(matrix.flags, '--all-features')
         run: |
-          cd crates/ironclaw_webui/frontend
+          set -euo pipefail
+          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
+          cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:

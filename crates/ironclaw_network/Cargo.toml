@@ -7,6 +7,16 @@ publish = false
 [package.metadata.ironclaw]
 layer = "substrates"
 
+[features]
+# Dev-only seam (`.claude/rules/cargo-features.md` bar: dev-only seam AND a
+# privilege boundary). Compiles the env-gated host-rewrite transport used by the
+# E2E harnesses. Debug builds get it implicitly, so no lane needs to pass this;
+# it exists for a release-PROFILE build that still needs the seam (and for the
+# release-profile regression test that proves the refusal arm).
+# Production/dist builds enable neither this nor debug_assertions, so the seam
+# is not compiled into a shipped binary at all.
+test-support = []
+
 [dependencies]
 async-trait = "0.1"
 ironclaw_host_api = { path = "../ironclaw_host_api" }

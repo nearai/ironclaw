@@ -11,7 +11,11 @@ use serde_json::Value;
 
 const COMPOSITION_CRATE: &str = "ironclaw_reborn_composition";
 
-use ratchet_support::workspace_root;
+// Crate paths are spelled flat (`crates/ironclaw_x/...`) and RESOLVED through
+// the crate inventory, so the family move (PROPOSAL section 5) repoints them
+// without editing the literals. Identity on today's tree - pinned by
+// `reborn_crate_inventory.rs` (CHECKLIST WS10).
+use ratchet_support::{crate_path, workspace_root};
 
 const SUBSTRATE_CRATES: &[&str] = &[
     "ironclaw_auth",
@@ -34,7 +38,7 @@ const SUBSTRATE_CRATES: &[&str] = &[
     "ironclaw_memory",
     "ironclaw_host_runtime",
     "ironclaw_mcp",
-    "ironclaw_scripts",
+    "ironclaw_sandbox",
     "ironclaw_wasm",
     "ironclaw_turns",
     "ironclaw_threads",
@@ -69,17 +73,20 @@ fn composition_root_is_workspace_member() {
 
 #[test]
 fn composition_public_api_is_service_shaped() {
-    let lib = std::fs::read_to_string(
-        workspace_root().join("crates/ironclaw_reborn_composition/src/lib.rs"),
-    )
+    let lib = std::fs::read_to_string(crate_path(
+        &workspace_root(),
+        "crates/ironclaw_reborn_composition/src/lib.rs",
+    ))
     .expect("composition lib readable");
-    let input = std::fs::read_to_string(
-        workspace_root().join("crates/ironclaw_reborn_composition/src/input.rs"),
-    )
+    let input = std::fs::read_to_string(crate_path(
+        &workspace_root(),
+        "crates/ironclaw_reborn_composition/src/input.rs",
+    ))
     .expect("composition input readable");
-    let factory = std::fs::read_to_string(
-        workspace_root().join("crates/ironclaw_reborn_composition/src/factory.rs"),
-    )
+    let factory = std::fs::read_to_string(crate_path(
+        &workspace_root(),
+        "crates/ironclaw_reborn_composition/src/factory.rs",
+    ))
     .expect("composition factory readable");
     let public_surface = format!("{lib}\n{input}\n{factory}");
 
@@ -232,8 +239,9 @@ fn extension_host_cluster_stays_internal() {
 #[test]
 fn reborn_binary_main_is_thin_bootstrap() {
     let root = workspace_root();
-    let reborn_main = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/src/main.rs"))
-        .expect("reborn cli main.rs readable");
+    let reborn_main =
+        std::fs::read_to_string(crate_path(&root, "crates/ironclaw_reborn_cli/src/main.rs"))
+            .expect("reborn cli main.rs readable");
 
     assert!(
         reborn_main.contains("cli::run()"),
@@ -275,7 +283,7 @@ fn reborn_binary_main_is_thin_bootstrap() {
 /// is `HookRegistrar::install`.
 #[test]
 fn composition_crate_installs_installed_tier_only_through_registrar() {
-    let crate_src = workspace_root().join("crates/ironclaw_reborn_composition/src");
+    let crate_src = crate_path(&workspace_root(), "crates/ironclaw_reborn_composition/src");
     let sources = rust_sources(&crate_src);
     assert!(
         !sources.is_empty(),
@@ -387,7 +395,7 @@ const EXTENSION_HOST_EXTERNALIZED_GENERIC_MODULES: &[&str] = &[
 ];
 
 fn composition_src_path() -> PathBuf {
-    workspace_root().join("crates/ironclaw_reborn_composition/src")
+    crate_path(&workspace_root(), "crates/ironclaw_reborn_composition/src")
 }
 
 fn extract_pub_use_surface(contents: &str) -> String {

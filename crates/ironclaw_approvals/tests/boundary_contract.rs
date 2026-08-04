@@ -12,7 +12,7 @@ fn approvals_crate_stays_out_of_runtime_and_host_workflow_crates() {
         "ironclaw_resources",
         "ironclaw_extensions",
         "ironclaw_wasm",
-        "ironclaw_scripts",
+        "ironclaw_sandbox",
         "ironclaw_mcp",
     ] {
         assert!(

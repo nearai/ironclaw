@@ -4,7 +4,9 @@
 //! `ironclaw_mcp` adapts manifest-declared MCP tools into IronClaw
 //! capabilities. It does not grant MCP servers ambient filesystem, secret, or
 //! network authority; the host-selected client is the only integration point and
-//! resource accounting still happens through the host governor.
+//! resource accounting still happens host-side, through the narrow
+//! [`RuntimeResourceBudget`] port — this lane holds no budget authority of its
+//! own and can only reserve, reconcile, and release.
 
 use std::{
     collections::HashMap,
@@ -18,12 +20,15 @@ use std::{
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
 use ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge;
-use ironclaw_extensions::{
-    ExtensionPackage, ExtensionRuntime, HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations,
+use ironclaw_extension_contracts::hosted_mcp::{
+    HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations,
 };
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_host_api::{
     action::{NetworkMethod, NetworkPolicy},
-    capability::{RuntimeCredentialRequirement, RuntimeCredentialRequirementSource},
+    capability::{
+        CapabilityDescriptor, RuntimeCredentialRequirement, RuntimeCredentialRequirementSource,
+    },
     decision::RuntimeCredentialAuthRequirement,
     http::{
         CapabilityHostHttpRequest, RuntimeCredentialInjection, RuntimeCredentialSource,
@@ -31,11 +36,11 @@ use ironclaw_host_api::{
     },
     ids::{CapabilityId, ExtensionId, ResourceReservationId, SecretHandle},
     resource::{
-        CapabilityHostResult, ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
+        CapabilityHostResult, ResourceEstimate, ResourceReceipt, ResourceReservation,
+        ResourceScope, ResourceUsage, RuntimeResourceBudget, RuntimeResourceError,
     },
     runtime::RuntimeKind,
 };
-use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -87,7 +92,32 @@ pub struct McpInvocation {
 /// Full resource-governed MCP execution request.
 #[derive(Debug)]
 pub struct McpExecutionRequest<'a> {
-    pub package: &'a ExtensionPackage,
+    /// The extension whose manifest declares this lane.
+    ///
+    /// The lane deliberately does **not** receive the `ExtensionPackage`: it
+    /// read only the id, the capability descriptors, and the runtime stanza,
+    /// and taking the package forced a `runtimes -> loops` dependency on the
+    /// registry crate (the W7 `ironclaw_mcp -> ironclaw_extensions` exception).
+    /// The caller, which owns the package, projects those three.
+    ///
+    /// **Caller obligation (the cost of that carve-out).** `extension`,
+    /// `capabilities`, and `runtime` are three independent borrows, so the type
+    /// no longer *structurally* guarantees they came from one package the way
+    /// `&ExtensionPackage` did. `execute_extension_json` re-checks the
+    /// descriptor half (`descriptor.provider == extension`), but nothing in an
+    /// `&ExtensionRuntime` identifies its owning extension, so the runtime half
+    /// cannot be re-derived here — a caller that paired extension A's
+    /// descriptors with extension B's runtime stanza would authenticate as A
+    /// and dial B. **Always project all three from the same `ExtensionPackage`
+    /// in one expression.** The single production caller
+    /// (`ironclaw_host_runtime::services::runtime_adapters`) does exactly that.
+    /// Restoring the compile-time binding needs a sealed projection minted by
+    /// the package owner — it cannot be a check inside this lane, and it must
+    /// not be a re-addition of the registry edge; tracked with the WS3 lane
+    /// work.
+    pub extension: &'a ExtensionId,
+    pub capabilities: &'a [CapabilityDescriptor],
+    pub runtime: &'a ExtensionRuntime,
     pub capability_id: &'a CapabilityId,
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
@@ -1733,7 +1763,7 @@ fn invalid_tool_list(cause: McpInvalidToolListCause) -> String {
 #[derive(Debug, Error)]
 pub enum McpError {
     #[error("resource governor error: {0}")]
-    Resource(Box<ResourceError>),
+    Resource(RuntimeResourceError),
     #[error("MCP client error: {reason}")]
     Client { reason: String },
     #[error("MCP server advertised an invalid tool catalog: {reason}")]
@@ -1764,9 +1794,9 @@ pub enum McpError {
     OutputLimitExceeded { limit: u64, actual: u64 },
 }
 
-impl From<ResourceError> for McpError {
-    fn from(error: ResourceError) -> Self {
-        Self::Resource(Box::new(error))
+impl From<RuntimeResourceError> for McpError {
+    fn from(error: RuntimeResourceError) -> Self {
+        Self::Resource(error)
     }
 }
 
@@ -1789,13 +1819,13 @@ where
         &self.config
     }
 
-    pub async fn execute_extension_json<G>(
+    pub async fn execute_extension_json<Budget>(
         &self,
-        governor: &G,
+        budget: &Budget,
         request: McpExecutionRequest<'_>,
     ) -> Result<McpExecutionResult, McpError>
     where
-        G: ResourceGovernor + ?Sized,
+        Budget: RuntimeResourceBudget + ?Sized,
     {
         let client_request = self.prepare_client_request(&request)?;
         let auth_context = client_request.auth_context;
@@ -1805,7 +1835,7 @@ where
             return Err(McpError::HostHttpEgressRequired { transport });
         }
         let reservation = reserve_or_use_existing(
-            governor,
+            budget,
             request.scope.clone(),
             request.estimate.clone(),
             request.resource_reservation.clone(),
@@ -1815,7 +1845,7 @@ where
             Ok(output) => output,
             Err(error) => {
                 return Err(release_after_failure(
-                    governor,
+                    budget,
                     reservation.id,
                     mcp_error_from_client_error(error, auth_context),
                 ));
@@ -1825,7 +1855,7 @@ where
         let serialized_len = serde_json::to_vec(&output.output)
             .map_err(|error| {
                 release_after_failure(
-                    governor,
+                    budget,
                     reservation.id,
                     McpError::InvalidInvocation {
                         reason: error.to_string(),
@@ -1839,7 +1869,7 @@ where
             .max(serialized_len);
         if output_bytes > self.config.max_output_bytes {
             return Err(release_after_failure(
-                governor,
+                budget,
                 reservation.id,
                 McpError::OutputLimitExceeded {
                     limit: self.config.max_output_bytes,
@@ -1853,7 +1883,7 @@ where
         if transport == "stdio" {
             usage.process_count = usage.process_count.max(1);
         }
-        let receipt = governor.reconcile(reservation.id, usage.clone())?;
+        let receipt = budget.reconcile(reservation.id, usage.clone())?;
         Ok(McpExecutionResult {
             result: CapabilityHostResult {
                 output: output.output,
@@ -1870,7 +1900,6 @@ where
         request: &McpExecutionRequest<'_>,
     ) -> Result<PreparedMcpClientRequest, McpError> {
         let descriptor = request
-            .package
             .capabilities
             .iter()
             .find(|descriptor| &descriptor.id == request.capability_id)
@@ -1881,20 +1910,20 @@ where
 
         if descriptor.runtime != RuntimeKind::Mcp {
             return Err(McpError::ExtensionRuntimeMismatch {
-                extension: request.package.id.clone(),
+                extension: request.extension.clone(),
                 actual: descriptor.runtime,
             });
         }
-        if descriptor.provider != request.package.id {
+        if descriptor.provider != *request.extension {
             return Err(McpError::DescriptorMismatch {
                 reason: format!(
                     "descriptor {} provider {} does not match package {}",
-                    descriptor.id, descriptor.provider, request.package.id
+                    descriptor.id, descriptor.provider, *request.extension
                 ),
             });
         }
 
-        let (transport, command, args, url) = match &request.package.manifest.runtime {
+        let (transport, command, args, url) = match request.runtime {
             ExtensionRuntime::Mcp {
                 transport,
                 command,
@@ -1903,7 +1932,7 @@ where
             } => (transport, command, args, url),
             other => {
                 return Err(McpError::ExtensionRuntimeMismatch {
-                    extension: request.package.id.clone(),
+                    extension: request.extension.clone(),
                     actual: other.kind(),
                 });
             }
@@ -1927,7 +1956,7 @@ where
 
         Ok(PreparedMcpClientRequest {
             request: McpClientRequest {
-                provider: request.package.id.clone(),
+                provider: request.extension.clone(),
                 capability_id: request.capability_id.clone(),
                 scope: request.scope.clone(),
                 transport: transport.clone(),
@@ -1986,7 +2015,7 @@ fn mcp_auth_context(
 pub trait McpExecutor: Send + Sync {
     async fn execute_extension_json(
         &self,
-        governor: &dyn ResourceGovernor,
+        budget: &dyn RuntimeResourceBudget,
         request: McpExecutionRequest<'_>,
     ) -> Result<McpExecutionResult, McpError>;
 }
@@ -1998,10 +2027,10 @@ where
 {
     async fn execute_extension_json(
         &self,
-        governor: &dyn ResourceGovernor,
+        budget: &dyn RuntimeResourceBudget,
         request: McpExecutionRequest<'_>,
     ) -> Result<McpExecutionResult, McpError> {
-        McpRuntime::execute_extension_json(self, governor, request).await
+        McpRuntime::execute_extension_json(self, budget, request).await
     }
 }
 
@@ -2009,35 +2038,35 @@ fn requires_host_http_egress(transport: &str) -> bool {
     matches!(transport, "http" | "sse")
 }
 
-fn reserve_or_use_existing<G>(
-    governor: &G,
+fn reserve_or_use_existing<Budget>(
+    budget: &Budget,
     scope: ResourceScope,
     estimate: ResourceEstimate,
     reservation: Option<ResourceReservation>,
 ) -> Result<ResourceReservation, McpError>
 where
-    G: ResourceGovernor + ?Sized,
+    Budget: RuntimeResourceBudget + ?Sized,
 {
     if let Some(reservation) = reservation {
         if reservation.scope != scope || reservation.estimate != estimate {
-            return Err(McpError::Resource(Box::new(
-                ResourceError::ReservationMismatch { id: reservation.id },
-            )));
+            return Err(McpError::Resource(
+                RuntimeResourceError::reservation_mismatch(reservation.id),
+            ));
         }
         return Ok(reservation);
     }
-    governor.reserve(scope, estimate).map_err(McpError::from)
+    budget.reserve(scope, estimate).map_err(McpError::from)
 }
 
-fn release_after_failure<G>(
-    governor: &G,
+fn release_after_failure<Budget>(
+    budget: &Budget,
     reservation_id: ResourceReservationId,
     original: McpError,
 ) -> McpError
 where
-    G: ResourceGovernor + ?Sized,
+    Budget: RuntimeResourceBudget + ?Sized,
 {
-    let _ = governor.release(reservation_id);
+    let _ = budget.release(reservation_id);
     original
 }
 

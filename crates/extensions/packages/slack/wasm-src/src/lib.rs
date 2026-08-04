@@ -39,7 +39,7 @@ use types::{SlackUserAction, ToolContext};
 // Generate bindings from the WIT interface.
 wit_bindgen::generate!({
     world: "sandboxed-tool",
-    path: "../../../../../wit/tool.wit",
+    path: "../../../../ironclaw_wasm/wit/tool.wit",
 });
 
 /// Implementation of the tool interface.

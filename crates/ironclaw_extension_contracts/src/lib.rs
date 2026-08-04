@@ -50,6 +50,7 @@ pub mod lifecycle_id;
 pub mod memory;
 pub mod preference_target;
 pub mod recipe;
+pub mod runtime;
 pub mod state;
 pub mod surface;
 #[cfg(any(test, feature = "test-support"))]

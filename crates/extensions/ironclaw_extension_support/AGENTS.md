@@ -37,9 +37,32 @@
 - Deterministic tool behavior behind narrow explicit request types.
 - Scoped handles granted by host runtime or composition.
 
+## The Executor/Adapter Seam
+
+Every tool here is an **executor**, never a capability handler. That means:
+
+- It takes a request type this crate defines (`GsuiteDispatchRequest`,
+  `WebAccessDispatchRequest`, `SkillUrlFetchContext`, …) carrying only
+  contracts-layer values the host hands it per invocation — `ResourceScope`,
+  `CapabilityId`, `Arc<dyn RuntimeHttpEgress>`, `Arc<dyn RootFilesystem>`.
+- It returns this crate's own error type (`…DispatchError`,
+  `SkillManagementCapabilityError`), which carries a
+  `RuntimeDispatchErrorKind` and optionally the `ResourceUsage` burned before
+  the failure. The caller maps it.
+- The `FirstPartyCapabilityHandler` impl, the `CapabilityManifest` that declares
+  the tool, and the registry insertion live **outside** — in
+  `ironclaw_host_runtime::first_party_tools` for the always-on builtins, or in
+  the binary's `FirstPartyHandlerRegistrar` for the binary-registered ones.
+
+`ironclaw_host_runtime` and `ironclaw_extensions` are on this crate's forbidden
+list (`reborn_dependency_boundaries.rs`), so this is enforced, not a
+convention. If an executor cannot be written without one of them, the seam is
+in the wrong place — move less, not the rule.
+
 ## Do Not Move In Here
 
 - Host runtime composition, authorization, approvals, resource accounting, or capability registry wiring.
+- Capability-handler implementations or the capability manifests that declare them.
 - Loop-facing skill context ports, turn-run adapters, or Reborn composition wiring.
 - Raw secrets, network clients, dispatcher handles, or ambient host authority.
 

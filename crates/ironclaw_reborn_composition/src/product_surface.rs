@@ -295,7 +295,9 @@ pub(crate) fn build_llm_config_service(
     runtime: &RebornRuntime,
 ) -> Option<Arc<dyn LlmConfigService>> {
     let boot = runtime.webui_boot_config()?;
-    let keys = ironclaw_operator::LlmKeyStore::new(runtime.secret_store());
+    let keys = ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+        runtime.secret_store(),
+    ));
     let mut llm_config = ironclaw_operator::RebornLlmConfigService::new(boot.clone(), keys);
     if let Some(reload) = runtime.webui_llm_reload_trigger() {
         llm_config = llm_config.with_reload_trigger(reload);

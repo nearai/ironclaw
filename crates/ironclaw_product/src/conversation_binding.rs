@@ -802,8 +802,26 @@ fn map_conversation_error(
                 reason: "conversation binding store unavailable".into(),
             }
         }
+        // Unreachable on this surface, and kept only for exhaustiveness. Every
+        // `InboundTurnError` this function sees comes from
+        // `ConversationBindingService` — resolve/lookup/link/validate and the
+        // id constructors — which never submits a turn; the submission
+        // orchestration is `ironclaw_conversations::InboundTurnService`, which
+        // this crate does not use (it has its own `DefaultInboundTurnService`
+        // calling the coordinator directly, and that is where every live
+        // `ProductSurfaceFailure::TurnSubmissionFailed` is minted, with a real
+        // `TurnError`).
+        //
+        // Since WS5's port inversion, conversations carries the *port's*
+        // `TurnSubmissionError` here rather than a `TurnError`. A `TurnError`
+        // is deliberately NOT synthesized back from it: fabricating a kernel
+        // error to satisfy a variant no caller can reach would be a shim.
+        // The port error's own rendering is carried through instead, so the
+        // typed cause is preserved in the message rather than dropped.
         ironclaw_conversations::InboundTurnError::TurnSubmissionFailed { error } => {
-            ProductSurfaceFailure::TurnSubmissionFailed { error }
+            ProductSurfaceFailure::TurnSubmissionRejected {
+                reason: error.to_string(),
+            }
         }
     }
 }

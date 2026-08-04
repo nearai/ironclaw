@@ -73,7 +73,7 @@ codegen-units = 1
 
 ## 3. Implement the channel interface
 
-Now that the crate is ready, implement the channel guest interface exposed by `wit/channel.wit`, and implement the guest trait methods to handle incoming messages and send responses.
+Now that the crate is ready, implement the channel guest interface exposed by `crates/ironclaw_wasm/wit/channel.wit`, and implement the guest trait methods to handle incoming messages and send responses.
 
 ### Required Imports
 
@@ -81,7 +81,8 @@ Now that the crate is ready, implement the channel guest interface exposed by `w
 // Generate bindings from the WIT file
 wit_bindgen::generate!({
     world: "sandboxed-channel",
-    path: "../../wit/channel.wit",  // Adjust path as needed
+    // Relative to the guest crate, e.g. crates/extensions/packages/<name>/wasm-src.
+    path: "../../../../ironclaw_wasm/wit/channel.wit",
 });
 
 use serde::{Deserialize, Serialize};

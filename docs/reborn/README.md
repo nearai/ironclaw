@@ -33,7 +33,7 @@ This repo exposes Reborn structure primarily through implementation crates, crat
 | Process lifecycle state | `crates/ironclaw_processes/` |
 | Approval and gate state | `crates/ironclaw_approvals/` |
 | WASM runtime lane and WIT HTTP adapter | `crates/ironclaw_wasm/` |
-| Script runtime lane and host HTTP adapter | `crates/ironclaw_scripts/` |
+| Script runtime lane and host HTTP adapter | `crates/ironclaw_sandbox/` (`src/script.rs`) |
 | MCP runtime lane and host-mediated HTTP/fail-closed process policy | `crates/ironclaw_mcp/` |
 | Replay / recorded-model fixtures | `tests/fixtures/llm_traces/README.md` |
 | Recorded-fixture gate | `.github/workflows/reborn-tests.yml` (`Reborn QA recorded fixtures` job) + `scripts/ci/check-reborn-qa-fixtures.sh` |

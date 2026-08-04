@@ -76,7 +76,7 @@ Pick one lane first. Do not blend lanes to make a tool work.
 | WASM capability provider | Provider logic can run in a sandboxed component and use host HTTP egress. This is the default for provider tools. | GitHub, Gmail, Google Calendar, Google Drive, Google Docs, Google Sheets, Google Slides | `crates/extensions/packages/<id>/manifest.toml`, `schemas/`, `prompts/`, optional `wasm-src/` |
 | Hosted HTTP MCP | The provider already exposes an MCP server and the host should lock egress to that endpoint. | Notion hosted MCP | `assets/<id>-mcp/manifest.toml`, schemas/prompts, `crates/ironclaw_reborn_composition/src/mcp.rs` only if adding a new host-bundled MCP policy shape |
 | Product adapter | The extension receives external inbound events or product webhooks. This is not just a model-callable tool lane. | Slack/Telegram-style adapters, not the main focus of this guide | `crates/ironclaw_product_adapters`, `crates/ironclaw_product_adapter_registry`, `crates/ironclaw_wasm_product_adapters` |
-| Script | Sandboxed process/CLI capability. Use only when a process boundary is the product requirement. | Project tools / CLI-style tools | `crates/ironclaw_scripts` runtime path plus manifest runtime `script` |
+| Script | Sandboxed process/CLI capability. Use only when a process boundary is the product requirement. | Project tools / CLI-style tools | `crates/ironclaw_sandbox` script runtime path plus manifest runtime `script` |
 
 For a new provider API like Linear, Jira, or a small internal SaaS API, start
 with WASM unless you have a concrete reason not to.
@@ -431,12 +431,12 @@ failure and not a model-visible token prompt.
 
 ## WASM implementation pattern
 
-WASM tools implement `wit/tool.wit`:
+WASM tools implement `crates/ironclaw_wasm/wit/tool.wit`:
 
 ```rust
 wit_bindgen::generate!({
     world: "sandboxed-tool",
-    path: "../../../../../wit/tool.wit",
+    path: "../../../../ironclaw_wasm/wit/tool.wit",
 });
 
 struct ExampleTool;

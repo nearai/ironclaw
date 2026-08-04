@@ -44,6 +44,7 @@ mod memory_binding;
 mod memory_provider_factory;
 mod model_gateway_assembly;
 mod observability;
+mod operator_secret_store;
 mod operator_tool_catalog;
 mod outbound;
 mod outbound_store_assembly;
@@ -67,6 +68,7 @@ mod trigger_fire_access;
 mod trigger_poller_assembly;
 
 pub use admin_token::AdminApiTokenMinter;
+pub use automation::conversation_turn_submitter::conversation_turn_submitter;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;
 #[cfg(feature = "test-support")]
@@ -147,6 +149,7 @@ pub use memory_provider_factory::{
     Mem0ConnectionConfig, MemoryLifecycleConsumers, MemoryProviderDeps, ResolvedMemoryProvider,
     create_provider, memory_lifecycle_consumers, resolve_memory_provider,
 };
+pub use operator_secret_store::RuntimeOperatorSecretValueStore;
 // Re-exported for the host-owned `ironclaw_webui::webui_v2_app`
 // (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped
 // verified-bearer evidence for protected OpenAI-compatible mounts. Ingress must

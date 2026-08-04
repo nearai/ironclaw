@@ -18,6 +18,7 @@ wasmtime = { workspace = true }
 wasmtime-wasi = { workspace = true }
 
 [dev-dependencies]
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 async-trait = "0.1"
 # Dev-only: `wasm_dispatch_integration` drives the real `RuntimeDispatcher`.
 # Previously reached through the `ironclaw_dispatcher` re-export shim (deleted

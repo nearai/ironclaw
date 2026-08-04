@@ -21,7 +21,6 @@ ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_triggers = { path = "../ironclaw_triggers", version = "0.1.0" }
-ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -31,5 +30,18 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 ironclaw_triggers = { path = "../ironclaw_triggers", version = "0.1.0", features = ["test-support"] }
+# Dev-only, and deliberately not a normal dependency (WS5 port inversion). This
+# crate's production code no longer names the turn kernel at all — the
+# orchestration reaches it through the `ConversationTurnSubmitter` port that
+# `ironclaw_reborn_composition` implements. The test fakes stand in for that
+# composition adapter, so they mint the same `SubmitTurnRequest`
+# (`product_context` included, via `product_context::resolve_inbound`) the real
+# adapter mints. Keeping the fakes on the real request shape is what lets the
+# run-origin guards — including
+# `untrusted_trigger_adapter_records_product_inbound_not_scheduled_trigger`,
+# the proof that an untrusted adapter cannot spoof trusted-trigger
+# classification — keep asserting on the exact value that reaches the
+# coordinator instead of a paraphrase of it.
+ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "sync"] }

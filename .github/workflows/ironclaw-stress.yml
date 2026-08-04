@@ -264,7 +264,9 @@ jobs:
 
       - name: Install WebUI frontend dependencies
         run: |
-          cd crates/ironclaw_webui/frontend
+          set -euo pipefail
+          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
+          cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2

@@ -12,8 +12,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_secrets::SecretStore;
 
-use crate::{
-    CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, RuntimeProcessPort,
+use crate::RuntimeProcessPort;
+use ironclaw_host_api::process::{
+    CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError,
 };
 
 #[derive(Debug)]

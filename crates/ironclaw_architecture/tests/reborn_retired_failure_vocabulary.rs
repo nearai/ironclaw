@@ -47,7 +47,11 @@ const RETIRED_TYPES: &[&str] = &[
     "FailureKindValue",
 ];
 
-use ratchet_support::workspace_root;
+// Crate paths are spelled flat (`crates/ironclaw_x/...`) and RESOLVED through
+// the crate inventory, so the family move (PROPOSAL section 5) repoints them
+// without editing the literals. Identity on today's tree - pinned by
+// `reborn_crate_inventory.rs` (CHECKLIST WS10).
+use ratchet_support::{crate_path, workspace_root};
 
 /// Conversion helpers that existed only to move a value between two spellings
 /// of the same domain. Their absence is what proves the collapse is real
@@ -198,7 +202,7 @@ fn reborn_code_never_redeclares_the_failure_vocabulary() {
 #[test]
 fn the_surviving_failure_vocabulary_stays_closed() {
     let root = workspace_root();
-    let result_meta = root.join("crates/ironclaw_host_api/src/result_meta.rs");
+    let result_meta = crate_path(&root, "crates/ironclaw_host_api/src/result_meta.rs");
     let raw = std::fs::read_to_string(&result_meta)
         .unwrap_or_else(|error| panic!("read {}: {error}", result_meta.display()));
     // Same rule as the scan above: prose explaining the retired open set is

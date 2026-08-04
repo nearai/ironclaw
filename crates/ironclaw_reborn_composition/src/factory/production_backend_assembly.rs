@@ -637,7 +637,7 @@ pub(super) async fn build_backend_production(
     let services = attach_hosted_mcp_runtime(services)?;
     let extension_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
     let extension_host_ports =
-        ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+        ironclaw_host_api::host_port::default_host_port_catalog().map_err(|error| {
             RebornBuildError::InvalidConfig {
                 reason: format!("extension host port catalog could not be loaded: {error}"),
             }

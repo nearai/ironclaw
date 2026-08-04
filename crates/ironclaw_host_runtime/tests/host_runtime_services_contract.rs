@@ -72,7 +72,7 @@ use ironclaw_resources::{
     InMemoryResourceGovernor, JsonFileResourceGovernorStore, PersistentResourceGovernor,
     ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits, ResourceTally,
 };
-use ironclaw_scripts::{ScriptRuntime, ScriptRuntimeConfig};
+use ironclaw_sandbox::{ScriptRuntime, ScriptRuntimeConfig};
 use ironclaw_secrets::{InMemoryCredentialBroker, SecretMaterial, SecretStore, SecretStorePort};
 use ironclaw_triggers::InMemoryTriggerRepository;
 use ironclaw_turns::NoopTurnRunWakeNotifier;
