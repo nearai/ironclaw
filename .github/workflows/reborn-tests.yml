@@ -164,7 +164,17 @@ jobs:
           echo "run_group_tests=$(jq -r '.run_group_tests' <<< "${plan}")" >> "$GITHUB_OUTPUT"
           echo "run_integration_tests=$(jq -r '.integration_lanes | length > 0' <<< "${plan}")" >> "$GITHUB_OUTPUT"
           echo "integration_lanes=$(jq -c '.integration_lanes' <<< "${plan}")" >> "$GITHUB_OUTPUT"
-          echo "run_coverage=$(jq -r '.coverage_mode == "full"' <<< "${plan}")" >> "$GITHUB_OUTPUT"
+          # Owner decision 2026-08-04 (Ben + Firat): coverage collection,
+          # the report job, the floors, and the changed-line gate all run on
+          # pushes to main ONLY. PR and merge-queue lanes run plain
+          # (uninstrumented) tests — llvm-cov overhead was a large share of
+          # the ~hour cycle — and a post-merge coverage breach lands as a red
+          # main run that main-ci-slack-alerts.yml announces, fixed forward.
+          run_coverage="$(jq -r '.coverage_mode == "full"' <<< "${plan}")"
+          if [[ "${{ github.event_name }}" != "push" ]]; then
+            run_coverage=false
+          fi
+          echo "run_coverage=${run_coverage}" >> "$GITHUB_OUTPUT"
           echo "run_qa_replay=$(jq -r '.run_qa_replay' <<< "${plan}")" >> "$GITHUB_OUTPUT"
 
           scripts/ci/check-test-suite-boundaries.sh
@@ -1070,13 +1080,21 @@ jobs:
               "${{ needs.changes.outputs.run_root_tests }}" \
               "${{ needs.changes.outputs.run_group_tests }}" \
               "${{ needs.changes.outputs.run_integration_tests }}" \
-              "${{ needs.changes.outputs.run_coverage }}" \
               "${{ needs.changes.outputs.run_qa_replay }}"; do
               if [[ "${flag}" != "true" ]]; then
                 echo "Full Reborn plan omitted a required lane"
                 exit 1
               fi
             done
+            # Coverage is push-only by owner decision (2026-08-04, Ben +
+            # Firat): full-mode merge_group runs plain tests, so run_coverage
+            # must be true exactly when the event is a push and false
+            # otherwise — either mismatch is a wiring bug worth failing on.
+            expected_coverage=${{ github.event_name == 'push' }}
+            if [[ "${{ needs.changes.outputs.run_coverage }}" != "${expected_coverage}" ]]; then
+              echo "run_coverage=${{ needs.changes.outputs.run_coverage }} but expected ${expected_coverage} for ${{ github.event_name }}"
+              exit 1
+            fi
           fi
 
           check_planned_job() {
