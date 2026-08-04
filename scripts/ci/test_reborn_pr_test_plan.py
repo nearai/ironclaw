@@ -469,11 +469,13 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertEqual(plan["integration_lanes"], [], path)
 
     def test_repo_wide_test_guidance_selects_no_rust_lane(self) -> None:
-        plan = self.plan("pull_request", ["tests/CLAUDE.md"])
-        self.assertEqual(plan["mode"], "none")
-        self.assertEqual(plan["crate_buckets"], [])
-        self.assertEqual(plan["root_partitions"], [])
-        self.assertEqual(plan["integration_lanes"], [])
+        for path in ("tests/CLAUDE.md", "tests/integration/CLAUDE.md"):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none")
+                self.assertEqual(plan["crate_buckets"], [])
+                self.assertEqual(plan["root_partitions"], [])
+                self.assertEqual(plan["integration_lanes"], [])
 
     def test_decided_repo_root_script_paths_are_owned_by_other_workflows(self) -> None:
         """Repo-root `scripts/` files that another workflow owns.

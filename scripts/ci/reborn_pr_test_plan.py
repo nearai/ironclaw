@@ -27,7 +27,10 @@ FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "sch
 # not a policy anyone chose. Classifying it is the fix; loosening the
 # fail-closed arm is not.
 IGNORED_PREFIXES = ("docs/", ".claude/", ".github/ISSUE_TEMPLATE/")
-IGNORED_GUIDANCE_PATHS = {"tests/CLAUDE.md"}
+IGNORED_GUIDANCE_PATHS = {
+    "tests/CLAUDE.md",
+    "tests/integration/CLAUDE.md",
+}
 DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
 QA_HARNESS_PREFIXES = (
     "scripts/live-canary/",

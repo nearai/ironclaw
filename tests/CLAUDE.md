@@ -14,6 +14,7 @@ document in the SAME commit.**
 
 - New `tests/integration/group_*/scenario_*.rs` → add a row to §3.
 - New `tests/integration/<name>.rs` bin → add a row to §4.
+- New `tests/integration/auth/<name>.rs` bin → add a row to §4.
 - New `tests/*.rs` bin → add a row to §5.
 - New `tests/e2e/scenarios/test_*.py` → add a row to §6.
 - Closing a gap listed in §7 → delete that gap row and add the coverage row.
@@ -33,9 +34,9 @@ The counts in each section header are checked-in facts, not estimates. Update th
 | Tier | Location | What is real | What is faked | Cost |
 |---|---|---|---|---|
 | **Group scenarios** (§3) | `tests/integration/group_*/scenario_*.rs` | whole Reborn turn, shared runtime + shared stores across several threads | the model, at the vendor-SDK seam | fast, offline, no setup |
-| **Flat integration** (§4) | `tests/integration/<name>.rs` | whole Reborn turn, one thread | the model | fast, offline |
+| **Flat integration** (§4) | `tests/integration/*.rs`, `tests/integration/auth/*.rs` | whole Reborn turn, one thread | the model | fast, offline |
 | **Binary / parity / QA-trace** (§5) | `tests/*.rs` | composed runtime or shipping binary; recorded real-LLM traces | model responses replayed from committed traces | medium |
-| **Python E2E** (§6) | `tests/e2e/scenarios/test_*.py` | real `ironclaw serve` process, real HTTP, real browser (Playwright), fake Slack/Telegram/Google/GitHub providers | LLM (mock or recorded), external SaaS (Emulate/fakes) | slow |
+| **Python E2E** (§6) | `tests/e2e/scenarios/test_*.py` | current Reborn scenarios use real `ironclaw serve`, HTTP, and Playwright; retained legacy-fixture scenarios are pending migration | LLM (mock or recorded), external SaaS (Emulate/fakes) | slow |
 
 Authoring guides: `tests/integration/CLAUDE.md` (Rust harness, group mechanics,
 assertions) and `tests/e2e/CLAUDE.md` (pytest fixtures, Playwright, mock LLM).
@@ -156,7 +157,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 
 ---
 
-## 4. Flat integration bins — `tests/integration/*.rs` (54)
+## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (54)
 
 One thread, whole real turn. Grouped by what the user experiences.
 
@@ -232,7 +233,10 @@ One thread, whole real turn. Grouped by what the user experiences.
 | The test harness's runtime wiring stays field-identical to production's | `wiring_parity.rs` |
 | WebUI v2 routes work over the real services facade | `webui_v2_product_api.rs`, `webui_v2_router_smoke.rs` |
 | Identity resolution runs on the coverage lane | `identity_resolution_smoke.rs` |
-| *(retired placeholder — delivery journeys moved elsewhere)* | `delivery_user_journeys.rs` |
+
+The 54th registered bin, `delivery_user_journeys.rs`, is a retired Cargo target
+with no scenario behavior. Current delivery evidence is listed under Extensions
+& channels and the group trigger scenarios; the retired target is not coverage.
 
 ---
 
@@ -286,10 +290,14 @@ enums), `trace_format.rs`, `trace_llm_tests.rs`,
 
 ## 6. Python E2E scenarios — `tests/e2e/scenarios/` (102 files, 867 tests)
 
-Real `ironclaw serve` process, real HTTP, real browser. `test_reborn_*` files target
-the Reborn WebChat v2 surface; bare `test_*` and `test_v2_*` files target the legacy
-`ironclaw` gateway (kept for runtime/compat coverage — see `tests/e2e/CLAUDE.md`
-§"Reborn E2E coverage gate" before adding anything to the coverage manifest).
+This is an exhaustive inventory, not a claim that every retained scenario is
+currently executable. Current Reborn coverage starts `ironclaw serve` through the
+`reborn_v2_*` fixtures or exercises a current provider/API harness. Any cited test
+that still uses `ironclaw_binary`, `ironclaw_server`, or the legacy `page`/`SEL`
+fixtures is inventory-only, non-functional, and pending migration under #6369 —
+even when it appears beside current Reborn evidence in the same row. See
+`tests/e2e/CLAUDE.md` §"Reborn E2E coverage gate" before adding coverage-manifest
+entries.
 
 ### 6.1 Chat, shell & session
 | The user can… | Evidence |
@@ -297,7 +305,7 @@ the Reborn WebChat v2 surface; bare `test_*` and `test_v2_*` files target the le
 | Load the app, sign in with a token, navigate, and be rejected without one | `test_reborn_webui_v2_legacy_core.py`, `test_reborn_webui_v2_smoke.py::test_reborn_v2_serves_shell_and_gates_auth` |
 | Send a message and see a streamed reply; empty messages don't send | `test_reborn_webui_v2_legacy_core.py::test_reborn_legacy_core_send_message_and_receive_response`, `…::test_reborn_legacy_core_empty_message_not_sent` |
 | See their message immediately, keep it through a reconnect/reload, and not see it duplicated once confirmed | `test_reborn_webui_v2_legacy_pending_messages.py` (12), `test_pending_user_messages.py` (8) |
-| Reload the page and still see history, tool cards, and in-progress turns | `test_reborn_webui_v2_legacy_sse_history.py` (10), `test_message_persistence.py` (10) |
+| Reload the page and still see history, tool cards, and in-progress turns | `test_reborn_webui_v2_legacy_sse_history.py` (10), `test_reborn_webui_v2_legacy_message_persistence.py`, `test_message_persistence.py` (10) |
 | Type a draft while a run is processing | `test_reborn_webui_v2_smoke.py::test_reborn_v2_composer_accepts_draft_while_run_is_processing` |
 | Start a new chat while a run is active (the #5256 deadlock regression) | `test_reborn_webui_v2_smoke.py` |
 | Page through older messages/threads without losing scroll position | `test_reborn_webui_v2_smoke.py::test_reborn_v2_timeline_pagination`, `…::test_reborn_v2_loading_older_messages_preserves_viewport` |
@@ -306,6 +314,7 @@ the Reborn WebChat v2 surface; bare `test_*` and `test_v2_*` files target the le
 | Delete a thread behind a shared confirmation dialog | `test_reborn_webui_v2_smoke.py::test_reborn_v2_thread_delete_uses_shared_confirmation_dialog` |
 | Collapse the sidebar, pick a theme, pick a language — and have it persist | `test_reborn_webui_v2_smoke.py` |
 | Reconnect SSE without gaps or duplicates; multiple tabs both get the reply; excess connections are rate-limited | `test_reborn_webui_v2_legacy_sse_history.py`, `test_reborn_webui_v2_streaming_run_control_api.py` (10) |
+| Keep execution-only engine threads out of the chat sidebar while preserving deep-linked history | `test_v2_thread_visibility.py` (2; pending legacy migration #6369) |
 
 ### 6.2 Tools, approvals & auth prompts (UI)
 | The user can… | Evidence |
@@ -318,6 +327,7 @@ the Reborn WebChat v2 surface; bare `test_*` and `test_v2_*` files target the le
 | Cancel an in-flight turn from the UI | `test_reborn_webui_v2_tool_gates.py::test_reborn_v2_cancel_in_flight_turn_ends_cancelled` |
 | Paste a manual token in the auth card, with the token never landing in the DOM or history | `test_reborn_webui_v2_legacy_auth_flows.py` (13), `test_v2_github_pat_flow.py` (7) |
 | Set per-tool permissions and "always approve", surviving reload and restart | `test_reborn_webui_v2_legacy_tool_permissions.py` (9), `test_tool_permissions.py` (6), `test_v2_engine_approval_flow.py` (7) |
+| Receive one authentication gate without a duplicate instruction response | `test_auth_no_duplicate_response.py` (pending legacy migration #6369) |
 
 ### 6.3 OAuth & credentials
 | The user can… | Evidence |
@@ -361,7 +371,9 @@ the Reborn WebChat v2 surface; bare `test_*` and `test_v2_*` files target the le
 | Create event-triggered routines, have them fire on match, respect cooldown, pause/resume | `test_routine_event_batch.py` (8) |
 | Run a full-job routine end-to-end with tools, trigger it manually, see failures in the UI | `test_routine_full_job.py` (3) |
 | Have routines run with injected OAuth credentials | `test_routine_oauth_credential_injection.py` (3) |
+| Create a Gmail-draft mission, pause it for authentication, and resume it after OAuth | `test_mission_gmail_3133.py` (pending legacy migration #6369) |
 | Still reach their v1 routines after upgrading to v2 (#2982) | `test_routines_tab_after_v2_upgrade.py` (11) |
+| Use the Missions tab instead of the removed Routines tab and activity strip | `test_v2_activity_shell.py` (2; pending legacy migration #6369) |
 | See routines created in one surface from another (owner scope) | `test_owner_scope.py` (3) |
 | Browse projects, create one, open a scoped chat, list and download workspace files | `test_reborn_webui_v2_legacy_projects.py` (6), `test_project_detail.py` (3), `test_reborn_v2_file_download.py` (4) |
 | Get notified about automation activity and open the thread from the notification | `test_reborn_webui_v2_notifications.py` (4) |
