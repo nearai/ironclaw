@@ -469,6 +469,14 @@ async fn verify_read_before_edit(
             resolved.scoped_path.as_str(),
         ));
     }
+    if is_opaque_binary_document_path(resolved.scoped_path.as_str())
+        || is_pdf_document_path(resolved.scoped_path.as_str())
+    {
+        return Err(binary_document_write_error(
+            operation,
+            resolved.scoped_path.as_str(),
+        ));
+    }
     // A file grown past what read_file can return cannot match any recorded
     // read; report it as changed instead of fingerprinting unbounded bytes.
     if stat.len > MAX_READ_SIZE {
