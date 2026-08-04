@@ -125,7 +125,8 @@ pub(crate) struct HostRuntimeHarnessOptions {
     pub(crate) google_oauth_backend_for_test: bool,
     /// Raise the deployment's workspace scoping to per-caller, exactly as
     /// `serve` does unconditionally
-    /// (`RebornHostBindings::with_workspace_scoped_per_caller`). `false` (the
+    /// (`RebornRuntimeInput::with_workspace_scoped_per_caller_services`,
+    /// which the harness applies in `new_with_options`). `false` (the
     /// default) keeps the Standalone profile's shared workspace root that
     /// every pre-existing harness assertion (`workspace_file_path`) assumes.
     pub(crate) workspace_scoped_per_caller: bool,

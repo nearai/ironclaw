@@ -1066,4 +1066,33 @@ async fn never_written_mount_root_reads_as_empty_but_subpaths_stay_not_found() {
         matches!(sub_stat, Err(FilesystemError::NotFound { .. })),
         "missing sub-path stat must stay NotFound, got {sub_stat:?}"
     );
+
+    // The write half of the same rule: the first write into the
+    // never-materialized root creates it (parents included) and the root then
+    // lists as a REAL directory with that entry.
+    scoped
+        .write_file(
+            &scope,
+            &ScopedPath::new("/workspace/notes/scoped.txt").unwrap(),
+            b"scoped-body",
+        )
+        .await
+        .expect("first write materializes the mount root and parents");
+    let entries = scoped
+        .list_dir(&scope, &ScopedPath::new("/workspace").unwrap())
+        .await
+        .expect("written root lists");
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected the written entry, got {entries:?}"
+    );
+    let bytes = scoped
+        .read_file(
+            &scope,
+            &ScopedPath::new("/workspace/notes/scoped.txt").unwrap(),
+        )
+        .await
+        .expect("written file reads back");
+    assert_eq!(bytes, b"scoped-body");
 }

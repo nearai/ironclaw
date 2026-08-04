@@ -664,6 +664,16 @@ impl RebornIntegrationGroupBuilder {
     /// coding-read verbs (`list_dir`/`glob`/`grep`) are surfaced so a fresh
     /// caller's never-written workspace root is read through the production
     /// turn path.
+    ///
+    /// SINGLE-CALLER GROUP — do not add a second actor. The harness's grant
+    /// view is resolved ONCE for the canonical subject, while
+    /// `with_run_owner_scoped_capability_dispatch` resolves the execution
+    /// user per run: a thread built `.with_actor_id(..)` would execute under
+    /// its own owner while holding the canonical subject's subtree grant,
+    /// silently inverting the isolation this group exists to prove.
+    /// Cross-actor mount isolation is pinned where the grant is per-caller by
+    /// construction: `workspace_scoping_tests` (crate tier) and the two-user
+    /// `webui_v2_e2e` workspace test.
     pub async fn multiuser_scoped_workspace(self) -> HarnessResult<RebornIntegrationGroup> {
         use ironclaw_host_api::ids::CapabilityId;
         let base = self.build_base().await?;
