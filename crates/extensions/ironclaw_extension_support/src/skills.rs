@@ -535,7 +535,7 @@ mod tests {
 
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        ids::{CapabilityId, InvocationId, UserId},
+        ids::{InvocationId, UserId},
         mount::MountView,
         resource::ResourceScope,
     };
@@ -561,20 +561,5 @@ mod tests {
         let error = dispatch(&request).await.unwrap_err();
 
         assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
-    }
-
-    /// A fetch context with no egress, which must never be used.
-    ///
-    /// Both cases below are decided from the input shape alone, so reaching the
-    /// network at all would itself be the bug — and with `runtime_http_egress:
-    /// None` a fetch could not succeed anyway, so a regression that started
-    /// taking the url arm fails loudly here instead of going quiet.
-    fn unused_fetch_context() -> SkillUrlFetchContext {
-        SkillUrlFetchContext {
-            capability_id: CapabilityId::new("ironclaw.skill.install").unwrap(),
-            scope: ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
-                .unwrap(),
-            runtime_http_egress: None,
-        }
     }
 }
