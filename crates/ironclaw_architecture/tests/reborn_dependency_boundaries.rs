@@ -450,6 +450,33 @@ fn reborn_crate_dependency_boundaries_hold() {
             .collect::<Vec<_>>(),
     );
 
+    // Carrier purity — `ironclaw_host_ingress` (WS2 re-layer, #7092).
+    //
+    // This crate exists for one reason: to keep `axum` out of the contracts
+    // tier while still letting a crate hand a prebuilt router plus its
+    // `ironclaw_host_api` ingress descriptors to whoever binds the listener.
+    // That is the whole charter, and it is why WS2 moved it from `products` to
+    // `substrates` — at `products` it blocked `ironclaw_extension_host`'s
+    // `products -> loops` flip while depending on nothing above `contracts`.
+    //
+    // The layer matrix alone will not hold it there. `substrates -> substrates`
+    // is legal, so the matrix would happily let this crate acquire
+    // `ironclaw_filesystem`, `ironclaw_secrets`, or any other domain — none of
+    // which it may have, because every consumer that wants only the carrier
+    // shapes would then compile that cone. An allowlist, not a blocklist, for
+    // the same reason as the three contracts tiers above: a list of today's
+    // offenders cannot stop tomorrow's. `families/product.md` states the same
+    // rule in prose ("Never depends on: anything else, without exception").
+    let host_ingress_allowed = ["ironclaw_host_ingress", "ironclaw_host_api"];
+    assert_no_normal_workspace_deps(
+        &dependencies,
+        "ironclaw_host_ingress",
+        workspace_ironclaw_crates(&dependencies)
+            .into_iter()
+            .filter(|name| !host_ingress_allowed.contains(name))
+            .collect::<Vec<_>>(),
+    );
+
     for rule in boundary_rules() {
         assert_no_normal_workspace_deps(&dependencies, rule.crate_name, rule.forbidden);
     }

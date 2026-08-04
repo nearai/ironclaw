@@ -314,7 +314,7 @@ crates/
 │   │                                                            service lifecycle) implementing product_contracts ports
 │   ├── ironclaw_openai_compat        ▣ [products] (renamed)     OpenAI-compatible ingress adapter over ProductSurface
 │   ├── ironclaw_webui                ▣ [products]               WebChat v2 routes/gateway/serve/auth + SPA
-│   └── ironclaw_host_ingress         ▣ [products]               Axum route-mount carriers (keeps Axum out of contracts)
+│   └── ironclaw_host_ingress         ▣ [substrates] (moved layer) Axum route-mount carriers (keeps Axum out of contracts)
 ├── app/                              ▢ assembly & enforcement
 │   ├── ironclaw_composition          ▣ [app] (renamed, narrowed)
 │   │                                                            THE assembly root: deployment selection + wiring only
