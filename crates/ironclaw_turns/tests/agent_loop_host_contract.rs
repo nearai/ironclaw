@@ -769,7 +769,16 @@ async fn instruction_bundle_renders_runtime_context_section() {
                 safe_summary: "identity safe".to_string(),
                 compaction: None,
             }],
-            messages: Vec::new(),
+            // A thread message is REQUIRED here: without one the ordering
+            // assertions below only prove runtime context follows identity and
+            // instructions, and a regression that put it ahead of the
+            // transcript would still pass (#6985).
+            messages: vec![LoopContextMessage {
+                message_ref: Some(LoopMessageRef::new("msg:thread").unwrap()),
+                role: "user".to_string(),
+                safe_summary: "the user's question".to_string(),
+                compaction: None,
+            }],
             compaction_message_index: Vec::new(),
             instruction_snippets: vec![LoopContextSnippet {
                 snippet_ref: "instruction:system".to_string(),
@@ -839,6 +848,19 @@ async fn instruction_bundle_renders_runtime_context_section() {
         runtime_msg_idx > instruction_idx,
         "runtime must be after the instruction snippets — per-run context \
          must not sit inside the cached prompt prefix"
+    );
+    // The load-bearing boundary: runtime context must follow the THREAD
+    // messages, not merely the instruction sections. Anything emitted ahead of
+    // the transcript relocates every byte after it on each re-render.
+    let last_thread_idx = first
+        .messages
+        .iter()
+        .rposition(|m| m.content_ref.as_str() == "msg:thread")
+        .expect("thread message must exist in messages list");
+    assert!(
+        runtime_msg_idx > last_thread_idx,
+        "runtime must be after the thread messages — it re-renders every run, \
+         so ahead of the transcript it would rewrite the whole cached prefix"
     );
 }
 

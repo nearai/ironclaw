@@ -1890,6 +1890,10 @@ fn unavailable_requested_capability_guard(
     messages: &[ChatMessage],
     tool_definitions: &[ProviderToolDefinition],
 ) -> Option<UnavailableCapabilityGuard> {
+    // `Role::User` only — never `renders_as_user()`. The tail carries a
+    // `Role::HostReminder` (the runtime clock, loop-control nudges) on nearly
+    // every call, so matching the wire shape here would guard the reminder text
+    // instead of the capability the user actually asked for (#6985).
     let latest_user = messages
         .iter()
         .rev()
@@ -2501,17 +2505,22 @@ fn convert_messages(
 }
 
 /// Coalesce the LEADING run of system messages into one system block and keep
-/// every later system message at its position as a `<system-reminder>`-framed
-/// user message.
+/// every later system message at its position as a [`Role::HostReminder`]
+/// message.
 ///
 /// Only the leading run may fold into the system block: that block is the
 /// provider-cached prompt prefix, and hoisting a mid- or tail-positioned
 /// system message (a loop-control nudge rendered on iteration N, the per-run
 /// runtime clock, a compaction summary) into it would rewrite the prefix and
-/// invalidate the provider prompt cache on every change (#6985). The framing
-/// keeps host authority explicit — the content is host guidance, not user
-/// speech — without granting transcript-positioned text the system block's
-/// standing.
+/// invalidate the provider prompt cache on every change (#6985).
+///
+/// The demoted message keeps host authority two ways, and both are needed.
+/// `<system-reminder>` framing tells the *model* the text is host-authored
+/// rather than user speech; the distinct [`Role::HostReminder`] tells *host
+/// code* the same thing, so consumers that ask "what did the user last say?"
+/// (`unavailable_requested_capability_guard` below, smart-routing complexity
+/// classification, trace-replay hints) keep reading the real request instead
+/// of the runtime clock.
 fn coalesce_system_messages_at_start(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     let mut system_content = Vec::new();
     let mut transcript = Vec::with_capacity(messages.len());
@@ -2521,7 +2530,7 @@ fn coalesce_system_messages_at_start(messages: Vec<ChatMessage>) -> Vec<ChatMess
             if in_leading_run {
                 system_content.push(message.content);
             } else {
-                transcript.push(ChatMessage::user(system_reminder_message(&message.content)));
+                transcript.push(ChatMessage::host_reminder(&message.content));
             }
         } else {
             in_leading_run = false;
@@ -2536,12 +2545,6 @@ fn coalesce_system_messages_at_start(messages: Vec<ChatMessage>) -> Vec<ChatMess
     normalized.push(ChatMessage::system(system_content.join("\n\n")));
     normalized.extend(transcript);
     normalized
-}
-
-/// Frame transcript-positioned host guidance so the model treats it as
-/// host-authored context rather than user speech.
-fn system_reminder_message(content: &str) -> String {
-    format!("<system-reminder>\n{content}\n</system-reminder>")
 }
 
 fn tool_summary_message(summary: String) -> String {

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, one match arm forced by the new Role::HostReminder variant (#6985); no new concern in this file, plan #6985
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -1434,7 +1435,7 @@ impl GeminiOauthProvider {
                 Role::System => {
                     // System messages are handled via systemInstruction top-level field
                 }
-                Role::User => {
+                Role::User | Role::HostReminder => {
                     // Text part first, then any inline base64 images as
                     // `inlineData` parts so a vision model receives the pixels.
                     let mut parts = vec![serde_json::json!({ "text": msg.content })];

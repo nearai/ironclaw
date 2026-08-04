@@ -1,3 +1,4 @@
+// arch-exempt: large_file, four comment lines recording why classify() must keep matching Role::User rather than the wire shape (#6985); no logic added, plan #6985
 //! Smart routing provider that routes requests to cheap or primary models based on task complexity.
 //!
 //! Uses a 13-dimension complexity scorer (from PR #208 by @onlyamicrowave) to analyze prompts
@@ -791,6 +792,10 @@ impl SmartRoutingProvider {
     ///
     /// Priority: explicit tier hints > pattern overrides > 13-dimension scorer.
     fn classify(&self, request: &CompletionRequest) -> TaskComplexity {
+        // `Role::User` only — never `renders_as_user()`. A `Role::HostReminder`
+        // (the runtime clock, loop-control nudges) sits at the conversation
+        // tail on nearly every call (#6985); scoring that boilerplate instead
+        // of the real request would route every turn to the same tier.
         let last_user_msg = request
             .messages
             .iter()
