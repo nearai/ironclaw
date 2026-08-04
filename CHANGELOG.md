@@ -86,15 +86,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/webhooks/extensions/slack/events`; generic product-auth OAuth callbacks are
   unchanged.
 
+## [1.0.0] - 2026-07-27
+
+First stable release of a rearchitected IronClaw. This is not an increment on
+the 0.29.x line — it is a ground-up rebuild of the agent runtime, storage,
+extension host, and web UI.
+
+**The `ironclaw` binary is the rearchitected CLI.** The v1 monolith builds as
+the `ironclaw-legacy` binary and is not published; 1.0.0 publishes the new
+`ironclaw` binary only.
+
+### This is not an in-place upgrade from 0.29.x
+
+There is no migration for v1 config, databases, settings, or secrets, and
+installing 1.0.0 does not touch your existing v1 data. Treat it as a fresh
+install: point `IRONCLAW_REBORN_HOME` at a new directory, run
+`ironclaw onboard`, and reconnect your providers and channels. Do not point it
+at a v1 data directory.
+
+### What ships
+
+- **Platforms.** Seven targets — macOS (Apple Silicon, Intel), Linux
+  (`x86_64`/`aarch64`, gnu and static musl), and Windows (`x86_64`), with shell,
+  PowerShell, and MSI installers.
+- **Guided setup.** `ironclaw onboard` provisions the config, the encrypted
+  credential store, an LLM provider (interactive key entry with a live probe),
+  a WebUI login token, and — on macOS and Linux — the background service. The
+  credential store's master key is provisioned in the OS keychain when one is
+  available, falling back to a locally cached key file otherwise.
+- **Model providers.** 26 providers in the built-in catalog, including NEAR AI,
+  OpenAI, Anthropic, Gemini, Bedrock, Ollama, OpenRouter, Groq, DeepSeek, and
+  any OpenAI-compatible endpoint. Manage routes with `ironclaw models`.
+- **Web UI.** `ironclaw serve` starts the WebChat v2 interface with the frontend
+  embedded in the binary — no separate asset deploy. Chat, extensions,
+  automations, settings, and admin surfaces are served from root-level routes.
+- **Extensions.** Twelve first-party extensions ship embedded and install
+  without a network fetch: GitHub, Gmail, Google Calendar, Docs, Drive, Sheets,
+  Slides, Notion, NEAR AI MCP, Slack, Telegram, and web access. Manage them with
+  `ironclaw extension` or the WebUI registry.
+- **Channels.** Slack and Telegram, both configured from the WebUI; Slack
+  connects per user through OAuth, Telegram through a per-user pairing code.
+- **Runtime.** Skills, scheduled and triggered automations, subagents, workspace
+  memory, and trace capture.
+- **Storage.** File-backed libSQL by default, so a stock install needs no
+  external database; PostgreSQL is opt-in via `[storage]`.
+- **Service management.** `ironclaw service install|start|stop|restart|status|uninstall`
+  runs the binary as a launchd user agent (macOS) or systemd user unit (Linux).
+
+### Known limitations
+
+- `ironclaw channels list`, `hooks list`, and `logs` appear in `--help` but
+  return an explicit "not implemented yet" error.
+- `mcp`, `memory`, `pairing`, `import`, and `login` subcommands from v1 have no
+  equivalent in this release; MCP servers and memory are reached through
+  extensions and the WebUI instead.
+- `onboard --import-history` parses but does nothing.
+- `skills` is list-only from the CLI.
+- `extension` and `skills` work out of the box: `ironclaw onboard` defaults to
+  the `local-dev` profile, where both are fully supported (as under
+  `local-dev-yolo`, `hosted-single-tenant`, and `hosted-single-tenant-volume`).
+  Only operators who explicitly choose `production` or `migration-dry-run`
+  hit a clear error instead.
+
+Please report problems at https://github.com/nearai/ironclaw/issues — include
+`ironclaw status --json` output.
+
+The itemized changes since 1.0.0-rc.1 follow; see the 1.0.0-rc.1 entry below for
+everything that landed between 0.29.1 and the release candidate.
+
+### Fixed
+
+- *(webui)* restore SSE streams across navigation, so chat keeps streaming when
+  the user moves between WebUI routes mid-turn ([#6425](https://github.com/nearai/ironclaw/pull/6425)).
+- *(webui)* stop the WebChat "Disconnected" lockout caused by rate-limit budget
+  exhaustion and navigation-race SSE thrash ([#6592](https://github.com/nearai/ironclaw/pull/6592)).
+
+### CI / Release
+
+- *(release)* update the Reborn Dockerfile and make the Reborn Docker image
+  buildable ([#6612](https://github.com/nearai/ironclaw/pull/6612)).
+- *(ci)* run the full Reborn test and E2E gates on `release-fix-*` pull-request
+  branches ([#6537](https://github.com/nearai/ironclaw/pull/6537)).
+
 ## [1.0.0-rc.1] - 2026-07-20
 
-First release candidate of the rearchitected IronClaw, internally called
-**Reborn**. This is not an increment on the 0.29.x line — it is a ground-up
-rebuild of the agent runtime, storage, extension host, and web UI.
+First release candidate of a rearchitected IronClaw. This is not an increment
+on the 0.29.x line — it is a ground-up rebuild of the agent runtime, storage,
+extension host, and web UI.
 
-**The `ironclaw` binary is now the Reborn CLI.** The v1 monolith now builds as
-the `ironclaw-legacy` binary and is no longer published; 1.0.0-rc.1 publishes
-the Reborn `ironclaw` binary only.
+**The `ironclaw` binary is now the rearchitected CLI.** The v1 monolith now
+builds as the `ironclaw-legacy` binary and is no longer published; 1.0.0-rc.1
+publishes the new `ironclaw` binary only.
 
 ### This is not an in-place upgrade from 0.29.x
 
@@ -138,8 +220,8 @@ it at a v1 data directory.
 - `ironclaw channels list`, `hooks list`, and `logs` appear in `--help` but
   return an explicit "not implemented yet" error.
 - `mcp`, `memory`, `pairing`, `import`, and `login` subcommands from v1 have no
-  Reborn equivalent; MCP servers and memory are reached through extensions and
-  the WebUI instead.
+  equivalent in this release; MCP servers and memory are reached through
+  extensions and the WebUI instead.
 - `onboard --import-history` parses but does nothing.
 - `skills` is list-only from the CLI.
 - `extension` and `skills` work out of the box: `ironclaw onboard` defaults to
