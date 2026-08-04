@@ -581,6 +581,74 @@ assert_contains "A6f: names both colliding directories" "${CAP_ERR}" \
 assert_contains "A6f: says why a merged number is refused" "${CAP_ERR}" \
   "one bucket and one floor"
 
+# A6g (#7083, review): the adversarial companion to A6d/M5.
+#
+# The inventory anchor is a path-*suffix* match, so a source outside the
+# repository that repeats a discovered crate directory verbatim
+# (`.../foreign-1.0.0/crates/extensions/packages/slack/src/lib.rs`) is
+# attributed to that crate. A6d and M5 do not exercise this: their `wasmtime`
+# path matches no inventory entry, so they prove the filter *runs* — not that
+# it is contained. A fixture that passes because its input never reaches the
+# code under test is the failure mode this whole file exists to kill, so the
+# input that does reach it is supplied here.
+#
+# What this pins is the property that actually protects the accounting: the
+# producer (`reborn-coverage-merge-lcov.sh`, which filters every record the
+# aggregator ever sees) and the consumer (`lib/reborn_coverage_lcov.py`) make
+# the SAME call on it. Restricting only the consumer to paths contained under
+# the resolved repo root was reviewed and deliberately not taken: the producer
+# applies the identical `(?:^|/)` inventory anchor with no containment, so a
+# one-sided rule puts the two halves back out of step — and producer/consumer
+# disagreement is exactly what made #7083 silent instead of loud. Whichever way
+# the rule goes it goes in both halves at once (and in `crate_tree.py`, which
+# both already share). This case is what turns a one-sided change red.
+#
+# Unreachable from the real pipeline as it stands: `cargo llvm-cov` emits only
+# workspace-member sources, so every `SF:` record in a lane tracefile already
+# lives under the checkout root — 1067 of 1067 per lane, 1139 of 1139 merged,
+# measured on run 30865483401. The guard is for the day that stops being true.
+cat > "${fixtures_dir}/a6g_vendored_collision.lcov" <<'EOF'
+SF:/work/ironclaw/crates/ironclaw_runner/src/a.rs
+DA:1,1
+DA:2,0
+LF:2
+LH:1
+end_of_record
+SF:/home/runner/.cargo/registry/src/index/foreign-1.0.0/crates/extensions/packages/slack/src/lib.rs
+DA:1,1
+DA:2,1
+LF:2
+LH:2
+end_of_record
+EOF
+# Both halves are asked about the SAME fixture, in parallel — the merge script
+# on it, and the summary on it directly (as every other A-section case does),
+# not on the merge's output. Chaining them would only ever compare the consumer
+# against a record the producer had already dropped, so a producer-only change
+# would stay invisible; the two verdicts have to be independent for the
+# comparison to mean anything in both directions.
+capture "${merge_sh}" "${tmp_root}/a6g_merged.lcov" \
+  "${fixtures_dir}/a6g_vendored_collision.lcov"
+assert_exit_code "A6g: merge exits 0 on the vendored-collision fixture" 0 "${CAP_RC}"
+if grep -q "foreign-1.0.0" "${tmp_root}/a6g_merged.lcov"; then
+  a6g_producer="kept"
+else
+  a6g_producer="dropped"
+fi
+capture "${summary_sh}" "${fixtures_dir}/a6g_vendored_collision.lcov" "${empty_exemptions}"
+assert_exit_code "A6g: summary exits 0 on the vendored-collision fixture" 0 "${CAP_RC}"
+if [[ "${CAP_OUT}" == *"| \`slack\` |"* ]]; then
+  a6g_consumer="kept"
+else
+  a6g_consumer="dropped"
+fi
+assert_eq "A6g: producer and consumer make the same call on a vendored path that repeats a crate directory" \
+  "${a6g_producer}" "${a6g_consumer}"
+assert_eq "A6g: today both halves keep it — containment belongs in both or neither" \
+  "kept" "${a6g_producer}"
+assert_contains "A6g: the mis-attribution is stated, not implied — the vendored lines land in the slack bucket" \
+  "${CAP_OUT}" "| \`slack\` | 100% | 2 / 2 |"
+
 # A7: exemptions manifest excludes a file from the accounting entirely and
 # lists it in the report's own Exemptions section.
 cat > "${fixtures_dir}/a7_exemptions.toml" <<'TOML'
