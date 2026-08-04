@@ -7,6 +7,14 @@ import {
 } from "../lib/connection-status";
 
 const ACTIVE_STREAM_STALL_DEADLINE_MS = 30_000;
+// Per-chunk reconnects (e.g. a proxy closing the SSE body between streamed
+// frames) fire `onRequest` and would otherwise flip the badge to "Reconnecting"
+// for every chunk. A short grace window keeps the status silently CONNECTED
+// for routine in-flight reconnects that settle quickly; a reconnect that
+// actually drags on past the deadline surfaces "Reconnecting" as before.
+// Genuine loss paths (request error, retryable HTTP, watchdog stall, offline,
+// replay rebase) bypass the grace and set RECONNECTING immediately.
+const RECONNECT_GRACE_MS = 1_000;
 const SSE_CONNECTION_ID = clientActionId();
 let nextConnectionGeneration = 0;
 
@@ -53,6 +61,7 @@ export function useSSE({
     }
     let controller = null;
     let activityWatchdog = null;
+    let reconnectGraceTimer = null;
     let disposed = false;
     let terminalErrorReceived = false;
     let connectedOnce = false;
@@ -75,8 +84,36 @@ export function useSSE({
       }
     }
 
+    function clearReconnectGrace() {
+      if (reconnectGraceTimer) {
+        clearTimeout(reconnectGraceTimer);
+        reconnectGraceTimer = null;
+      }
+    }
+
     function activityIsExpected() {
       return activityExpectedRef.current === true;
+    }
+
+    // `graceful: true` is for routine in-flight reconnects (the `onRequest`
+    // hook firing because the previous stream body ended). Those reconnects
+    // are expected and usually settle in well under a second, so we hide the
+    // "Reconnecting" badge behind a grace timer to avoid per-chunk flicker.
+    // Loss paths that already represent a real interruption call this with
+    // `graceful: false` (the default) to set RECONNECTING immediately.
+    function markReconnecting({ graceful = false } = {}) {
+      if (disposed || terminalErrorReceived) return;
+      if (graceful && connectedOnce) {
+        clearReconnectGrace();
+        reconnectGraceTimer = setTimeout(() => {
+          reconnectGraceTimer = null;
+          if (disposed || terminalErrorReceived) return;
+          setStatus(CONNECTION_STATUS.RECONNECTING);
+        }, RECONNECT_GRACE_MS);
+        return;
+      }
+      clearReconnectGrace();
+      setStatus(CONNECTION_STATUS.RECONNECTING);
     }
 
     function scheduleActivityWatchdog() {
@@ -99,13 +136,14 @@ export function useSSE({
         ) {
           return;
         }
-        setStatus(CONNECTION_STATUS.RECONNECTING);
+        markReconnecting();
         controller.reconnect();
       }, ACTIVE_STREAM_STALL_DEADLINE_MS);
     }
 
     function markConnected() {
       if (disposed || terminalErrorReceived) return;
+      clearReconnectGrace();
       connectedOnce = true;
       setStatus(CONNECTION_STATUS.CONNECTED);
     }
@@ -129,15 +167,18 @@ export function useSSE({
             ...options.query,
             connection_generation: connectionGeneration(),
           };
-          setStatus(
-            connectedOnce
-              ? CONNECTION_STATUS.RECONNECTING
-              : CONNECTION_STATUS.CONNECTING,
-          );
+          if (!connectedOnce) {
+            setStatus(CONNECTION_STATUS.CONNECTING);
+            return;
+          }
+          // Routine in-flight reconnect (e.g. proxy closed the stream body
+          // between chunks). Stay silently CONNECTED under the grace window
+          // instead of flashing "Reconnecting" for every chunk.
+          markReconnecting({ graceful: true });
         },
         onRequestError() {
           if (disposed || terminalErrorReceived) return;
-          setStatus(CONNECTION_STATUS.RECONNECTING);
+          markReconnecting();
         },
         onResponse({ response }) {
           if (disposed || terminalErrorReceived) return;
@@ -151,12 +192,13 @@ export function useSSE({
         onResponseError({ response }) {
           if (disposed || terminalErrorReceived) return;
           if (isRetryableResponseStatus(response.status)) {
-            setStatus(CONNECTION_STATUS.RECONNECTING);
+            markReconnecting();
             return;
           }
           terminalErrorReceived = true;
           streamOpen = false;
           clearActivityWatchdog();
+          clearReconnectGrace();
           controller?.abort("non-retryable stream response");
           setStatus(CONNECTION_STATUS.DISCONNECTED);
         },
@@ -182,6 +224,7 @@ export function useSSE({
             terminalErrorReceived = true;
             streamOpen = false;
             clearActivityWatchdog();
+            clearReconnectGrace();
             controller?.abort("non-retryable stream event");
             setStatus(CONNECTION_STATUS.DISCONNECTED);
             return;
@@ -192,7 +235,7 @@ export function useSSE({
             frame.retryable === true
           ) {
             stream.lastEventId = undefined;
-            setStatus(CONNECTION_STATUS.RECONNECTING);
+            markReconnecting();
             controller?.reconnect();
           }
         },
@@ -210,6 +253,7 @@ export function useSSE({
       if (disposed || terminalErrorReceived) return;
       streamOpen = false;
       clearActivityWatchdog();
+      clearReconnectGrace();
       controller?.abort("document hidden");
       setStatus(CONNECTION_STATUS.PAUSED);
     }
@@ -230,12 +274,12 @@ export function useSSE({
 
     function handleNetworkOffline() {
       if (disposed || terminalErrorReceived) return;
-      setStatus(CONNECTION_STATUS.RECONNECTING);
+      markReconnecting();
     }
 
     function handleNetworkOnline() {
       if (disposed || terminalErrorReceived) return;
-      setStatus(CONNECTION_STATUS.RECONNECTING);
+      markReconnecting();
       controller?.reconnect();
     }
 
@@ -258,6 +302,7 @@ export function useSSE({
       window.removeEventListener("offline", handleNetworkOffline);
       window.removeEventListener("online", handleNetworkOnline);
       clearActivityWatchdog();
+      clearReconnectGrace();
       syncActivityWatchdogRef.current = () => {};
       controller?.abort("component disposed");
       controller = null;

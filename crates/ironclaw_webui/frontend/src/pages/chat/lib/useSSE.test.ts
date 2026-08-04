@@ -227,6 +227,39 @@ test("useSSE delegates framing, credentials, and retries to EventSourcePlus", ()
   assert.equal(statuses.at(-1), "reconnecting");
 });
 
+test("useSSE hides routine in-flight reconnects behind a grace window (regression for #7071)", () => {
+  // A proxy closing the SSE body between streamed chunks fires `onRequest`
+  // for the next reconnect. That used to flip the badge to "Reconnecting"
+  // for every chunk; the grace window keeps the status silently CONNECTED
+  // until the deadline elapses, while a real loss still surfaces immediately.
+  const { streams, statuses, timers } = createHarness();
+  const stream = streams[0];
+  stream.respond();
+  assert.equal(statuses.at(-1), "connected");
+
+  // Routine reconnect: stays CONNECTED, grace timer armed, no flicker.
+  stream.request();
+  assert.equal(statuses.at(-1), "connected");
+  const grace = timers.find(
+    (timer) => timer.delay === 1_000 && !timer.cleared,
+  );
+  assert.ok(grace, "reconnect grace timer armed");
+
+  // A successful reconnect before the deadline clears the grace and stays CONNECTED.
+  stream.respond();
+  assert.equal(statuses.at(-1), "connected");
+  assert.ok(grace.cleared, "grace timer cleared once the reconnect succeeds");
+
+  // If the reconnect actually drags on past the deadline, "Reconnecting" surfaces.
+  stream.request();
+  const grace2 = timers.find(
+    (timer) => timer.delay === 1_000 && !timer.cleared,
+  );
+  assert.ok(grace2);
+  grace2.handler();
+  assert.equal(statuses.at(-1), "reconnecting");
+});
+
 test("useSSE dispatches typed frames from the packaged parser", () => {
   const events = [];
   const { streams } = createHarness({ onEvent: (event) => events.push(event) });
@@ -292,7 +325,7 @@ test("useSSE rejects a successful response that is not an event stream", () => {
 });
 
 test("useSSE pauses while hidden and reconnects when visible", () => {
-  const { context, documentListeners, statuses, streams } = createHarness();
+  const { context, documentListeners, statuses, streams, timers } = createHarness();
   const stream = streams[0];
   stream.respond();
 
@@ -304,7 +337,16 @@ test("useSSE pauses while hidden and reconnects when visible", () => {
   context.document.visibilityState = "visible";
   documentListeners.get("visibilitychange")();
   assert.equal(stream.controller.reconnectCalls, 1);
-  assert.equal(statuses.at(-2), "connecting");
+  // A routine in-flight reconnect (here triggered by the visibility resume)
+  // stays silently CONNECTED under the reconnect grace window instead of
+  // flashing "Reconnecting"; the badge only surfaces once the grace deadline
+  // elapses without a successful reconnect.
+  assert.equal(statuses.at(-1), "connecting");
+  const grace = timers.find(
+    (timer) => timer.delay === 1_000 && !timer.cleared,
+  );
+  assert.ok(grace, "a reconnect grace timer is armed");
+  grace.handler();
   assert.equal(statuses.at(-1), "reconnecting");
 });
 
