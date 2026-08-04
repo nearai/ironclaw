@@ -8,6 +8,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -287,3 +288,47 @@ else:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IsolatedEnvironmentTests(unittest.TestCase):
+    """The smoke runs the packaged binary in a scrubbed environment. What that
+    environment does and does not carry is a contract, not an accident."""
+
+    def test_windows_identity_variables_reach_the_binary(self) -> None:
+        # The product resolves the ACL grantee for the standalone secrets
+        # master key from these when the process-token lookup is unavailable.
+        # Dropping them made `extension search --json` abort with "USERNAME is
+        # unset" on Windows, which is what failed release preflight 30955514028.
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            with unittest.mock.patch.dict(
+                os.environ,
+                {"USERNAME": "runneradmin", "USERDOMAIN": "CORP", "PATH": "/usr/bin"},
+                clear=True,
+            ):
+                environment = SMOKE._isolated_environment(root)
+
+        self.assertEqual(environment["USERNAME"], "runneradmin")
+        self.assertEqual(environment["USERDOMAIN"], "CORP")
+
+    def test_ambient_configuration_is_still_scrubbed(self) -> None:
+        # The passthrough list is an allow-list; widening it for Windows
+        # identity must not turn it into "inherit the CI job's environment".
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            with unittest.mock.patch.dict(
+                os.environ,
+                {
+                    "DATABASE_URL": "postgres://leaked",
+                    "ANTHROPIC_API_KEY": "leaked",
+                    "IRONCLAW_REBORN_PROFILE": "production",
+                    "PATH": "/usr/bin",
+                },
+                clear=True,
+            ):
+                environment = SMOKE._isolated_environment(root)
+
+        self.assertNotIn("DATABASE_URL", environment)
+        self.assertNotIn("ANTHROPIC_API_KEY", environment)
+        self.assertNotIn("IRONCLAW_REBORN_PROFILE", environment)
+        self.assertEqual(environment["IRONCLAW_DISABLE_OS_KEYCHAIN"], "1")

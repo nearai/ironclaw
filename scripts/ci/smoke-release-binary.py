@@ -24,6 +24,12 @@ REQUIRED_EVIDENCE = frozenset(
     }
 )
 REQUIRED_BUNDLED_RUNTIME_KINDS = frozenset({"first_party", "mcp_server", "wasm_tool"})
+# Kept minimal on purpose: the smoke has to prove the packaged binary works
+# from a clean environment, not from whatever the CI job happens to export.
+# USERNAME/USERDOMAIN are here because a real Windows session always sets them
+# and the product reads them when restricting ACLs on the standalone secrets
+# master key — withholding them made the harness less Windows-like than any
+# machine a user would run this on.
 _PASSTHROUGH_ENV = (
     "PATH",
     "SystemRoot",
@@ -32,6 +38,8 @@ _PASSTHROUGH_ENV = (
     "TMP",
     "TEMP",
     "LANG",
+    "USERNAME",
+    "USERDOMAIN",
 )
 
 
