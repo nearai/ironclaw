@@ -1064,6 +1064,25 @@ fn ironhub_help_lists_catalog_and_install_verbs() {
 }
 
 #[test]
+fn ironhub_hub_alias_resolves() {
+    let output = Command::new(reborn_bin())
+        .arg("hub")
+        .arg("--help")
+        .output()
+        .expect("ironclaw hub --help should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for verb in ["search", "list", "info", "install"] {
+        assert!(stdout.contains(verb), "missing `{verb}` verb: {stdout}");
+    }
+}
+
+#[test]
 fn ironhub_install_help_lists_safety_and_replacement_flags() {
     let output = Command::new(reborn_bin())
         .args(["ironhub", "install", "--help"])

@@ -238,6 +238,15 @@
                 ]
               },
               {
+                "group": "IronHub",
+                "icon": "archive",
+                "pages": [
+                  "zh/hub/overview",
+                  "zh/hub/installing",
+                  "zh/hub/contributing"
+                ]
+              },
+              {
                 "group": "扩展（工具）",
                 "icon": "hammer",
                 "pages": [
