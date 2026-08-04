@@ -31,6 +31,14 @@ IGNORED_GUIDANCE_PATHS = {
     "tests/CLAUDE.md",
     "tests/integration/CLAUDE.md",
 }
+# Operator-facing reference documentation that happens to live outside `docs/`.
+# `.env.example` is the environment-variable catalogue `CLAUDE.md` and five
+# operator docs point readers at; it is annotated prose, and nothing in the
+# repository *reads* it — no Rust test, no CI gate, no E2E harness opens the
+# file (every reference to it is a comment or a doc string). Same class as
+# `docs/`, same reasoning #7064 applied to `.claude/`: classify the class, do
+# not loosen the fail-closed arm.
+IGNORED_DOCUMENTATION_PATHS = {".env.example"}
 DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
 DEDICATED_E2E_PREFIX = "tests/e2e/"
 QA_HARNESS_PREFIXES = (
@@ -63,6 +71,14 @@ PR_STATIC_CONTROL_PATHS = {
     #     invoke the script.
     "scripts/no_panics_reborn_baseline.txt",
     "scripts/reborn-e2e-rust.sh",
+    # The Reborn container entrypoint is shell, not Rust: no Reborn test lane
+    # executes it. Code Style owns it end to end — `code_style.yml`'s `has_code`
+    # filter names `docker/reborn/entrypoint.sh` and its "Self-test CI scripts"
+    # step runs `scripts/ci/test-reborn-docker-entrypoint.sh`, which drives the
+    # real script. (`platform-and-compat.yml`'s `has_docker_risk` deliberately
+    # does not cover it — that filter is keyed to `Dockerfile`/`.dockerignore`
+    # and owns the image build, not the entrypoint's behaviour.)
+    "docker/reborn/entrypoint.sh",
 }
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/")
 BUCKET_WEIGHTS = {
@@ -380,6 +396,7 @@ def build_plan(
             continue
         if (
             path in IGNORED_GUIDANCE_PATHS
+            or path in IGNORED_DOCUMENTATION_PATHS
             or path.startswith(IGNORED_PREFIXES)
             or (path.endswith(".md") and "/" not in path)
         ):

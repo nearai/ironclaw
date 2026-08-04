@@ -507,6 +507,84 @@ class RebornPrTestPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
             self.plan("pull_request", ["scripts/some-undecided-helper.sh"])
 
+    def test_operator_env_reference_is_classified_and_selects_no_rust_lane(
+        self,
+    ) -> None:
+        """`.env.example` is prose, like `docs/**`.
+
+        Regression for the gap that failed `Detect Reborn test scope` — and
+        therefore the whole `Tests (Reborn)` roll-up — on run 30921860394:
+        `Reborn PR test planner failed: unclassified pull-request path:
+        .env.example`. It sorts first, so it also masked the second miss in the
+        same diff (`docker/reborn/entrypoint.sh`, below).
+
+        Nothing in the repository reads the file; every reference to it is a
+        comment or a doc string. Paired assertion, same as the `.claude/` case:
+        it must be *accepted* and must select no Rust lane, so a later
+        "classification" that turns an env-doc edit into a matrix fails here.
+        """
+        plan = self.plan("pull_request", [".env.example"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["crate_buckets"], [])
+        self.assertEqual(plan["root_partitions"], [])
+        self.assertEqual(plan["integration_lanes"], [])
+
+    def test_reborn_container_entrypoint_is_owned_by_code_style(self) -> None:
+        """`docker/reborn/entrypoint.sh` is shell that Code Style self-tests.
+
+        Second half of the same rejection. It is deliberately *not* an ignore:
+        the plan names an owner, because one exists —
+        `scripts/ci/test-reborn-docker-entrypoint.sh` drives the real script in
+        Code Style's script self-test step, and `code_style.yml`'s `has_code`
+        filter lights that lane for this exact path. No Reborn Rust lane
+        executes it, so it selects nothing here.
+        """
+        plan = self.plan("pull_request", ["docker/reborn/entrypoint.sh"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["crate_buckets"], [])
+        self.assertIn(
+            "static CI or workspace-policy checks own: docker/reborn/entrypoint.sh",
+            plan["reasons"],
+        )
+
+    def test_classified_operator_paths_do_not_mask_a_real_lane(self) -> None:
+        """Neither classification may swallow its neighbours.
+
+        The planner raises on the *first* unclassified path in sorted order, so
+        a per-PR shortcut would look identical to a per-path rule on the diff
+        that motivated them. Drive both together with a crate change and assert
+        the crate lane still gets selected.
+        """
+        plan = self.plan(
+            "pull_request",
+            [
+                ".env.example",
+                "docker/reborn/entrypoint.sh",
+                "crates/alpha/src/lib.rs",
+            ],
+        )
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["alpha"])
+        self.assertNotEqual(plan["crate_buckets"], [])
+
+    def test_sibling_container_inputs_still_require_a_decision(self) -> None:
+        """The entrypoint is decided; its neighbours are not.
+
+        `docker/` is classified per-file for the same reason repo-root
+        `scripts/` is: a blanket prefix would silently absorb the runtime
+        configs, which have no owning lane yet. Keep the fail-closed arm proven
+        for the paths nobody has decided.
+        """
+        for path in (
+            "docker/reborn/config.production.toml",
+            "docker/process-sandbox-entrypoint.sh",
+        ):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(
+                    ValueError, "unclassified pull-request path"
+                ):
+                    self.plan("pull_request", [path])
+
     def test_agent_guidance_does_not_mask_a_real_lane_in_the_same_pr(self) -> None:
         """Classifying `.claude/` must not swallow its neighbours.
 
