@@ -165,6 +165,9 @@ h1,h2,h3,p{margin:0}
 .cpill .cstate svg{width:12px;height:12px}
 .cpill.on{border-color:color-mix(in srgb,var(--v2-positive-text) 45%,var(--v2-panel-border));background:color-mix(in srgb,var(--v2-positive-soft) 55%,var(--v2-surface))}
 .cpill.on .cstate{background:var(--v2-positive-text);border-color:var(--v2-positive-text);color:#fff}
+.collapsebtn{margin-left:auto;display:inline-grid;place-items:center;width:38px;height:38px;flex:none;border-radius:11px;border:1px solid var(--v2-panel-border);background:var(--v2-surface);color:var(--v2-text-muted);cursor:pointer}
+.collapsebtn:hover{color:var(--v2-text-strong);border-color:color-mix(in srgb,var(--v2-accent) 42%,var(--v2-panel-border))}
+.collapsebtn svg{width:16px;height:16px}
 .cstack{display:inline-flex;align-items:center;border:0;background:transparent;padding:4px 2px;cursor:pointer;font:inherit;animation:card-in .34s ease both}
 .cstack:focus-visible{outline:2px solid color-mix(in srgb,var(--v2-accent) 45%,transparent);outline-offset:3px;border-radius:999px}
 .cstack .stackicons{display:inline-flex;align-items:center}
@@ -178,10 +181,20 @@ h1,h2,h3,p{margin:0}
 
 /* ---------- carousel strip (Done for you) ---------- */
 .carousel{width:100%}
-.carousel .chd{display:flex;align-items:center;gap:7px;margin-bottom:9px;padding:0 2px}
+.carousel .chd{display:flex;align-items:center;gap:9px;margin-bottom:9px;padding:0 2px}
 .carousel .chd .spk{width:15px;height:15px;color:var(--v2-accent-text)}
-.carousel .chd .ttl{font-size:13px;font-weight:600;color:var(--v2-text-strong)}
-.carousel .chd .sub{font-size:11px;color:var(--v2-text-faint)}
+.carousel .chd .chtext{display:flex;flex-direction:column;gap:0;min-width:0}
+.carousel .chd .chl1{display:flex;align-items:baseline;min-width:0}
+.carousel .chd .ttl{font-size:13px;font-weight:600;color:var(--v2-text-strong);white-space:nowrap}
+.carousel .chd .sub{font-size:11px;color:var(--v2-text-faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.carousel .chd .chmeta{font-family:var(--font-mono);font-size:11px;color:var(--v2-text-faint);font-variant-numeric:tabular-nums;white-space:nowrap}
+.carousel .chd .chmeta:not(:empty)::before{content:"·";margin:0 6px 0 4px;color:var(--v2-text-faint)}
+.nearmark{display:inline-flex;flex:none;color:var(--near-blue)}
+.nearmark .near{width:16px;height:16px;overflow:visible;transform-box:fill-box;transform-origin:center}
+.nearmark.busy .near{animation:near-beat 2s ease-in-out infinite}
+.nearmark.busy .near .near-comet{display:block;animation:near-chase 1.1s linear infinite}
+.nearmark.done .near .near-base{opacity:1}
+@media (prefers-reduced-motion:reduce){.nearmark.busy .near{animation:none}.nearmark .near-comet{display:none!important}}
 .strip{display:flex;gap:10px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none}
 .strip::-webkit-scrollbar{display:none}
 
@@ -466,16 +479,14 @@ h1,h2,h3,p{margin:0}
           <div class="rev flagwrap" id="carouselBlock">
             <span class="flag"><span class="tag native">New UX</span><span class="tag newevt">New Feature</span></span>
             <div class="carousel">
-              <div class="chd"><svg class="spk" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l1.9 4.7L18 9l-4 2.7L15.5 17 12 14.4 8.5 17l1.5-5.3L6 9l4.1-1.3z"/></svg><span class="ttl" id="carTtl">Done for you</span><span class="sub" id="carSub">Completed automatically — review or undo anytime</span></div>
+              <div class="chd"><span class="nearmark" id="carNear"><svg class="near" viewBox="0 0 24 24" aria-hidden="true"><defs><clipPath id="carNearClip"><path d="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z"/></clipPath></defs><path class="near-base" d="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z"/><g clip-path="url(#carNearClip)"><path class="near-comet" d="M2.6 22.2 L2.6 2.4 L21.4 21.6 L21.4 1.8"/></g></svg></span><span class="chtext"><span class="chl1"><span class="ttl" id="carTtl">Done for you</span><span class="chmeta" id="carMeta"></span></span><span class="sub" id="carSub">Completed automatically — review or undo anytime</span></span></div>
               <div class="strip" id="realStrip"></div>
             </div>
           </div>
         </div>
 
-        <div class="livestat" id="nearStat" style="display:none">
-          <svg class="near" viewBox="0 0 24 24" aria-hidden="true"><defs><clipPath id="nearClip"><path d="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z"/></clipPath></defs><path class="near-base" d="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z"/><g clip-path="url(#nearClip)"><path class="near-comet" d="M2.6 22.2 L2.6 2.4 L21.4 21.6 L21.4 1.8"/></g></svg>
-          <span class="verb" id="nearVerb">Getting to know your inbox…</span><span class="el" id="nearEl">0:01</span>
-        </div>
+        <!-- live NEAR indicator relocated into the carousel header (#carNear) -->
+
 
         <div class="composer flagwrap">
           <span class="flag"><span class="tag recompose">Redesign</span></span>
@@ -591,7 +602,8 @@ h1,h2,h3,p{margin:0}
     users:'<path d="M17 21v-2a4 4 0 0 0-3-3.9M9 21v-2a4 4 0 0 1 3-3.9M12 7a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>',
     list:'<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
     arrow:'<path d="M9 6l6 6-6 6"/>',
-    plus:'<path d="M12 5v14M5 12h14"/>'
+    plus:'<path d="M12 5v14M5 12h14"/>',
+    arrowLeft:'<path d="M15 6l-6 6 6 6"/>'
   };
   function svg(name,sw){return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="'+(sw||1.8)+'" stroke-linecap="round" stroke-linejoin="round">'+ICON[name]+'</svg>';}
   function chipStyle(accent){return 'color:'+accent+';background:color-mix(in srgb,'+accent+' 16%,transparent);border-color:color-mix(in srgb,'+accent+' 38%,transparent)';}
@@ -628,7 +640,9 @@ h1,h2,h3,p{margin:0}
         return '<button class="cpill'+(on?' on':'')+'" data-app="'+a.key+'" type="button" aria-pressed="'+on+'">'
           +appChip(a)+'<span class="an">'+a.label+'</span>'
           +'<span class="cstate">'+svg('check',3)+'</span></button>';
-      }).join('');
+      }).join('')
+        + (n>0 ? '<button class="collapsebtn" id="collapseBtn" type="button" aria-label="Collapse connected tools into a stack">'+svg('arrowLeft',2.2)+'</button>' : '');
+      var cbtn=document.getElementById('collapseBtn'); if(cbtn) cbtn.onclick=function(){ condensed=true; renderConnect(); };
       appRow.querySelectorAll('.cpill').forEach(function(b){
         b.onclick=function(){
           var k=b.getAttribute('data-app'),i=connSet.indexOf(k);
@@ -660,7 +674,7 @@ h1,h2,h3,p{margin:0}
 
   var connectBlock=document.getElementById('connectBlock'),ghostBlock=document.getElementById('ghostBlock'),
       carouselBlock=document.getElementById('carouselBlock'),realStrip=document.getElementById('realStrip'),
-      nearStat=document.getElementById('nearStat'),nearVerb=document.getElementById('nearVerb'),nearEl=document.getElementById('nearEl'),
+      carNear=document.getElementById('carNear'),carMeta=document.getElementById('carMeta'),
       heroTitle=document.getElementById('heroTitle'),heroSub=document.getElementById('heroSub'),
       carTtl=document.getElementById('carTtl'),carSub=document.getElementById('carSub'),
       capN=document.getElementById('capN'),capC=document.getElementById('capC'),
@@ -683,7 +697,7 @@ h1,h2,h3,p{margin:0}
   ];
   var nearStart=0,elTimer=null;
   function fmt(ms){var s=Math.floor(ms/1000);return Math.floor(s/60)+':'+String(s%60).padStart(2,'0');}
-  function tickEl(){nearEl.textContent=fmt(Date.now()-nearStart);}
+  function tickEl(){carMeta.textContent=fmt(Date.now()-nearStart);}
   function show(el,on){el.classList.toggle('hide',!on);}
 
   function render(){
@@ -701,25 +715,22 @@ h1,h2,h3,p{margin:0}
         carTtl.textContent='Working on your first automations';
         carSub.textContent='I’ll drop them here the moment they’re done';
         realStrip.innerHTML='<div class="sk"><div class="ln w40"></div><div class="ln w70"></div><div class="ln w55"></div></div>'.repeat(3);
+        carNear.classList.add('busy');carNear.classList.remove('done');
+        if(!nearStart)nearStart=Date.now(); if(!elTimer){elTimer=setInterval(tickEl,250);} tickEl();
       } else {
         carTtl.textContent='Done for you';
         carSub.textContent='Completed automatically — review or undo anytime';
         var n=(step===3)?1:CARDS.length,html='';
         for(var i=0;i<n;i++){ html+=cardHTML(CARDS[i], 'reveal'+(i===0&&step===3?' first':'')); }
         realStrip.innerHTML=html;
+        carNear.classList.remove('busy');carNear.classList.add('done');
+        if(elTimer){clearInterval(elTimer);elTimer=null;}
+        carMeta.textContent=(step===3?'worked for 8s':'worked for 14s');
       }
-    } else { realStrip.innerHTML=''; }
-    if(working){
-      nearStat.style.display='';nearStat.classList.add('busy');nearStat.classList.remove('done');
-      nearVerb.textContent='Getting to know your inbox…';nearEl.style.display='';
-      if(!nearStart)nearStart=Date.now(); if(!elTimer){elTimer=setInterval(tickEl,250);} tickEl();
-    } else if(step>=3){
-      nearStat.style.display='';nearStat.classList.remove('busy');nearStat.classList.add('done');
-      nearVerb.textContent=(step===3?'Handled your first one — worked for 8s':'All caught up — worked for 14s');
-      nearEl.style.display='none'; if(elTimer){clearInterval(elTimer);elTimer=null;}
     } else {
-      nearStat.style.display='none';nearStat.classList.remove('busy','done');
-      if(elTimer){clearInterval(elTimer);elTimer=null;} nearStart=0;
+      realStrip.innerHTML='';
+      carNear.classList.remove('busy','done');
+      if(elTimer){clearInterval(elTimer);elTimer=null;} nearStart=0; carMeta.textContent='';
     }
     trackFill.style.width=(step/MAX*100)+'%'; beatLbl.textContent=step+' / '+MAX;
   }
@@ -749,7 +760,7 @@ h1,h2,h3,p{margin:0}
   var field=document.getElementById('composerField'),runBtn=document.getElementById('runBtn');
   function syncRun(){runBtn.disabled=!(field.value.trim());}
   field.addEventListener('input',function(){field.style.height='auto';field.style.height=Math.min(field.scrollHeight,120)+'px';syncRun();});
-  var ncomet=document.querySelector('#nearStat .near-comet');
+  var ncomet=document.querySelector('#carNear .near-comet');
   if(ncomet&&ncomet.getTotalLength){var nlen=ncomet.getTotalLength();var nseg=nlen*0.15;ncomet.style.strokeDasharray=nseg.toFixed(1)+' '+(nlen-nseg).toFixed(1);ncomet.style.setProperty('--nearlen',nlen.toFixed(1)+'px');}
 
   // ================= THREAD scene (calendar reschedule) =================
