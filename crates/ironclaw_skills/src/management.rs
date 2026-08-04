@@ -176,6 +176,14 @@ pub struct SkillSummary {
     /// Whether the skill participates in automatic activation (mirrors
     /// `SkillManifest::auto_activate`). `false` means explicit-mention only.
     pub auto_activate: bool,
+    /// Whether the bundle carries a `scripts/` directory.
+    ///
+    /// This PR is what lets an agent author a skill containing a script, so the Skills page has to be
+    /// able to show that it did. The WebUI has rendered a `scripts/` chip since #6194 and the wire
+    /// field has existed since #7002, but the server hardcoded `false` -- so a scripted skill looked
+    /// identical to a prose-only one, including `portfolio`, a bundled skill shipping four Python
+    /// scripts.
+    pub has_scripts: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -944,7 +952,38 @@ async fn read_skill_summary(
         tags: parsed.manifest.activation.tags,
         requires_skills: parsed.manifest.requires.skills,
         auto_activate: parsed.manifest.auto_activate,
+        has_scripts: skill_bundle_has_scripts(context, path).await?,
     }))
+}
+
+/// Does this bundle carry a `scripts/` directory?
+///
+/// One stat against the skill's sibling `scripts` path. Absent is the common case and is not an
+/// error, so only a genuine backend failure is logged -- a skill listing must never fail because one
+/// skill has no scripts.
+async fn skill_bundle_has_scripts(
+    context: &SkillManagementContext,
+    skill_md_path: &ScopedPath,
+) -> Result<bool, SkillManagementError> {
+    let raw = skill_md_path.as_str();
+    let Some(bundle_root) = raw.strip_suffix(&format!("/{SKILL_FILE_NAME}")) else {
+        return Ok(false);
+    };
+    let scripts_path = match ScopedPath::new(format!("{bundle_root}/scripts")) {
+        Ok(path) => path,
+        Err(_) => return Ok(false),
+    };
+    match stat_optional(context, &scripts_path).await {
+        Ok(entry) => Ok(entry.is_some()),
+        Err(error) => {
+            tracing::debug!(
+                scoped_path = %scripts_path,
+                ?error,
+                "skill management could not stat the bundle scripts directory; reporting none"
+            );
+            Ok(false)
+        }
+    }
 }
 
 fn skill_root_scoped_path(root: &str, name: &str) -> Result<ScopedPath, SkillManagementError> {
