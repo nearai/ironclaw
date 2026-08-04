@@ -433,10 +433,10 @@ pub(crate) fn channel_admin_users(
             identity.agent_id.clone(),
             identity.project_id.clone(),
         );
-    Arc::new(crate::admin_user_directory::RebornAdminUserDirectory::new(
+    Arc::new(ironclaw_product::RebornAdminUserDirectory::new(
         directory,
         Arc::clone(&services.admin_secret_provisioner),
-        Arc::new(crate::admin_token::RejectingAdminApiTokenMinter),
+        Arc::new(ironclaw_product::RejectingAdminApiTokenMinter),
     ))
 }
 

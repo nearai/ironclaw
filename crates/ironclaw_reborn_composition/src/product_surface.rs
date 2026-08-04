@@ -97,13 +97,12 @@ pub(crate) fn build_product_surface_with_channel_connection(
     // Admin user-management surface: the directory and secret provisioner are
     // core runtime handles; only token minting is deployment-supplied.
     if let Some(minter) = runtime.reborn_admin_token_minter() {
-        api = api.with_admin_user_service(Arc::new(
-            crate::admin_user_directory::RebornAdminUserDirectory::new(
+        api =
+            api.with_admin_user_service(Arc::new(ironclaw_product::RebornAdminUserDirectory::new(
                 runtime.reborn_user_directory(),
                 runtime.reborn_admin_secret_provisioner(),
                 minter,
-            ),
-        ));
+            )));
     }
     if let Some(workspace_filesystem) = runtime.webui_workspace_filesystem() {
         api = api

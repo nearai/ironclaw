@@ -25,6 +25,7 @@
 #![forbid(unsafe_code)]
 
 mod action;
+mod admin_user_directory;
 mod approval_interaction;
 mod approval_prompt;
 mod auth_continuation;
@@ -34,6 +35,7 @@ mod automation_product_service;
 mod automation_thread_metadata;
 mod binding;
 mod binding_ref;
+mod blocked_auth_resume;
 mod command_admission;
 mod command_dispatch;
 mod commands;
@@ -54,6 +56,7 @@ mod ledger;
 mod lifecycle;
 mod outbound_delivery;
 mod policy;
+mod process_gate_turn_view;
 mod product_auth_prompt;
 mod product_surface_inbound;
 mod project_create_capability;
@@ -70,6 +73,9 @@ pub use project_create_capability::{PROJECT_CREATE_CAPABILITY_ID, project_create
 pub use project_service::RebornProjectService;
 
 pub use action::{ActionDispatchKind, ActionPhase, ProductInboundAction};
+pub use admin_user_directory::{
+    AdminSecretProvisioner, RebornAdminUserDirectory, RejectingAdminApiTokenMinter,
+};
 pub use approval_interaction::{
     ApprovalBlockedTurnRun, ApprovalGateRecord, ApprovalInteractionActionView,
     ApprovalInteractionDecision, ApprovalInteractionReadModel, ApprovalInteractionRejectionKind,
@@ -112,6 +118,7 @@ pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding, route_kind_for_inbound_payload,
 };
+pub use blocked_auth_resume::BlockedAuthResumeFanout;
 pub use command_admission::DirectConversationCommandAdmission;
 pub use command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService,
@@ -126,6 +133,7 @@ pub use commands::{
     required_audience, validate_declared_product_command,
 };
 pub use communication_context::RuntimeCommunicationContextProvider;
+pub use process_gate_turn_view::{current_turn_gate_runs, first_turn_run_for_gate};
 // `ProductConversationRouteKey`, `ProductConversationSubjectRouteResolutionRequest`,
 // and `ProductConversationSubjectRouteResolver` are deliberately absent: they
 // moved to `ironclaw_product_contracts::subject_route` (WS2.2), and that crate

@@ -83,7 +83,17 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// and the nudge-window assertion below correctly refused a ceiling that
 /// moved without its record (371 > 200). Measured on the merged tree with
 /// `bash scripts/ci/check-composition-budget.sh --print`.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 45127;
+///
+/// ✎ Re-recorded 45_127 → 42_938 on 2026-08-04 by the WS6 service-cluster
+/// eviction: the admin-user directory and blocked-auth resume fan-out moved to
+/// `ironclaw_product`, and turn-end trace capture split into
+/// `ironclaw_reborn_traces::capture` + `ironclaw_runner::trace_capture`.
+/// **−2,189 LOC**, and the share metric's blindness shows again in the same
+/// run: 654 bp → 622 bp is a 32 bp move for a 4.9% absolute cut, because the
+/// denominator barely noticed. The manifest's `loc_ceiling`/`loc_observed` are
+/// lowered to match in the same commit, which is the obligation the nudge
+/// assertion below exists to make visible.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42938;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

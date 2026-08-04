@@ -366,7 +366,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) broadcast_budget_event_sink: Arc<BroadcastBudgetEventSink>,
     pub(crate) event_log: Arc<dyn DurableEventLog>,
     pub(crate) audit_log: Arc<dyn DurableAuditLog>,
-    pub(crate) admin_secret_provisioner: Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
+    pub(crate) admin_secret_provisioner: Arc<dyn ironclaw_product::AdminSecretProvisioner>,
     pub(crate) project_service: Arc<dyn ProjectService>,
     pub(crate) trigger_conversation_services: RebornFilesystemConversationServices,
     /// Pre-minted scheduler wake wiring for the production composition path.

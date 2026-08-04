@@ -1,12 +1,13 @@
-//! Composition adapter implementing the product-workflow
-//! [`AdminUserService`](ironclaw_product_contracts::admin_users::AdminUserService) port over
-//! the Reborn identity user-directory + admin secret provisioner + a token
-//! minter.
+//! Product-tier implementation of the
+//! [`AdminUserService`](ironclaw_product_contracts::admin_users::AdminUserService)
+//! port over the Reborn identity user-directory, an admin secret provisioner,
+//! and a token minter.
 //!
-//! This is the one place identity, secrets, and token issuance meet — the
-//! composition root is the only crate allowed to depend on all three, so the
-//! product-workflow service and the webui_v2 routes stay free of those deps
-//! (the crate boundary the architecture tests enforce).
+//! Admin user management is product workflow — tenant scoping, role/status
+//! transitions, one-time bearer issuance — so the adapter lives beside the rest
+//! of the product surface rather than in the composition root (PROPOSAL
+//! §6.10.1, WS6). Composition keeps only the *deployment* half: which secret
+//! backend implements [`AdminSecretProvisioner`], and which minter is wired.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -14,29 +15,74 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_host_api::ids::{SecretHandle, TenantId, UserId};
 use ironclaw_product_contracts::admin_users::{
-    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
-    AdminUserSecretMeta, AdminUserService, AdminUserStatus,
+    AdminApiTokenMinter, AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord,
+    AdminUserRole, AdminUserSecretMeta, AdminUserService, AdminUserStatus,
 };
 use ironclaw_reborn_identity::{
     RebornIdentityError, RebornUser, RebornUserDirectory, RebornUserProfileUpdate, RebornUserRole,
     RebornUserStatus,
 };
-use ironclaw_secrets::{SecretMetadata, SecretStoreError};
+use ironclaw_secrets::{SecretMaterial, SecretMetadata, SecretStoreError};
 use secrecy::SecretString;
 
-use crate::admin_secrets::AdminSecretProvisioner;
-use crate::admin_token::AdminApiTokenMinter;
+/// Admin provisioning of per-user secrets for an arbitrary target `(tenant,
+/// user)`.
+///
+/// The `ironclaw_secrets` store isolates tenant/user by the caller's
+/// `MountView`, not the `ResourceScope` argument, so provisioning a secret for
+/// a *target* user — the admin use case — needs a store mounted at that user's
+/// subtree. Building that mount is deployment shape, so the port is declared
+/// here (beside its one caller) and implemented in the composition root.
+#[async_trait]
+pub trait AdminSecretProvisioner: Send + Sync {
+    async fn list(
+        &self,
+        tenant: &TenantId,
+        user: &UserId,
+    ) -> Result<Vec<SecretMetadata>, SecretStoreError>;
+
+    async fn put(
+        &self,
+        tenant: &TenantId,
+        user: &UserId,
+        handle: SecretHandle,
+        material: SecretMaterial,
+    ) -> Result<SecretMetadata, SecretStoreError>;
+
+    async fn delete(
+        &self,
+        tenant: &TenantId,
+        user: &UserId,
+        handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError>;
+}
+
+/// Fail-closed placeholder for composition paths that need an
+/// [`AdminUserService`] handle purely for tenant-scoped role reads
+/// (channel-command admission's `get_user` calls, which never mint tokens)
+/// rather than the WebUI admin `create_user` route.
+/// [`RebornAdminUserDirectory::create_user`] is the sole caller of the minter;
+/// this always denies it rather than silently succeeding without a configured
+/// minter.
+pub struct RejectingAdminApiTokenMinter;
+
+#[async_trait]
+impl AdminApiTokenMinter for RejectingAdminApiTokenMinter {
+    async fn mint(&self, _tenant: &TenantId, _user_id: &UserId) -> Result<SecretString, String> {
+        Err("admin API token minting is not configured for this composition path".to_string())
+    }
+}
 
 /// Adapter wiring the identity directory, admin secret provisioner, and token
-/// minter into the product-workflow `AdminUserService` contract.
-pub(crate) struct RebornAdminUserDirectory {
+/// minter into the [`AdminUserService`] contract.
+pub struct RebornAdminUserDirectory {
     directory: Arc<dyn RebornUserDirectory>,
     secrets: Arc<dyn AdminSecretProvisioner>,
     token_minter: Arc<dyn AdminApiTokenMinter>,
 }
 
 impl RebornAdminUserDirectory {
-    pub(crate) fn new(
+    pub fn new(
         directory: Arc<dyn RebornUserDirectory>,
         secrets: Arc<dyn AdminSecretProvisioner>,
         token_minter: Arc<dyn AdminApiTokenMinter>,

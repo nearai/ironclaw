@@ -32,8 +32,8 @@ use ironclaw_loop_host::{
     HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_reborn_composition::{
-    AdminApiTokenMinter, PollSettings, RebornHostBindings, RebornRuntime, RebornRuntimeIdentity,
-    RebornRuntimeInput, build_reborn_runtime,
+    PollSettings, RebornHostBindings, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
+    build_reborn_runtime,
 };
 use ironclaw_webui::{
     EnvBearerAuthenticator, SessionAuthenticator, SignedTokenSessionStore, signed_session_store,
@@ -74,7 +74,7 @@ struct SessionTokenMinter {
 }
 
 #[async_trait]
-impl AdminApiTokenMinter for SessionTokenMinter {
+impl ironclaw_product_contracts::admin_users::AdminApiTokenMinter for SessionTokenMinter {
     async fn mint(&self, tenant: &TenantId, user_id: &UserId) -> Result<SecretString, String> {
         self.store
             .create_session(
@@ -161,9 +161,10 @@ async fn build_admin_harness_from(
     // always accepted.
     let operator_secret = SecretString::from(OPERATOR_TOKEN.to_string());
     let session_store = signed_session_store(&operator_secret, &tenant);
-    let minter: Arc<dyn AdminApiTokenMinter> = Arc::new(SessionTokenMinter {
-        store: session_store.clone(),
-    });
+    let minter: Arc<dyn ironclaw_product_contracts::admin_users::AdminApiTokenMinter> =
+        Arc::new(SessionTokenMinter {
+            store: session_store.clone(),
+        });
 
     let input = RebornRuntimeInput::from_build_input(build_input)
         .with_identity(RebornRuntimeIdentity {

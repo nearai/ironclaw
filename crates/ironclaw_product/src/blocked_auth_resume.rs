@@ -44,14 +44,14 @@ use crate::process_gate_turn_view::{turn_run_id_from_process_id, turn_scope_from
 
 /// Decorates the single-run continuation dispatcher with the caller-wide
 /// blocked-run fan-out described in the module docs.
-pub(crate) struct BlockedAuthResumeFanout {
+pub struct BlockedAuthResumeFanout {
     inner: Arc<dyn RebornAuthContinuationDispatcher>,
     gate_source: Arc<dyn ProcessGateQuerySource<Error = TurnError>>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
 }
 
 impl BlockedAuthResumeFanout {
-    pub(crate) fn new(
+    pub fn new(
         inner: Arc<dyn RebornAuthContinuationDispatcher>,
         gate_source: Arc<dyn ProcessGateQuerySource<Error = TurnError>>,
         turn_coordinator: Arc<dyn TurnCoordinator>,

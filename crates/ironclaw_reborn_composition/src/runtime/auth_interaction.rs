@@ -16,7 +16,7 @@ use ironclaw_product::{
     ResolveAuthInteractionResponse,
 };
 
-use crate::process_gate_turn_view::{current_turn_gate_runs, first_turn_run_for_gate};
+use ironclaw_product::{current_turn_gate_runs, first_turn_run_for_gate};
 
 pub(super) struct ProcessGateAuthInteractionReadModel {
     gates: Arc<dyn ProcessGateQuerySource<Error = ironclaw_turns::TurnError>>,

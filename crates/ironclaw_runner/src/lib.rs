@@ -45,6 +45,7 @@ pub mod runtime;
 pub mod steering_reconcile;
 pub mod subagent;
 pub mod text_loop_driver;
+pub mod trace_capture;
 pub mod turn_run_executor;
 pub mod turn_runner;
 pub mod turn_scheduler;

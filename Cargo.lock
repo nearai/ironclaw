@@ -4420,9 +4420,11 @@ dependencies = [
  "ironclaw_product_contracts",
  "ironclaw_projects",
  "ironclaw_reborn_composition",
+ "ironclaw_reborn_identity",
  "ironclaw_reborn_traces",
  "ironclaw_runner",
  "ironclaw_safety",
+ "ironclaw_secrets",
  "ironclaw_telegram_extension",
  "ironclaw_threads",
  "ironclaw_triggers",
@@ -4788,6 +4790,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -4841,6 +4844,7 @@ dependencies = [
  "ironclaw_outbound",
  "ironclaw_processes",
  "ironclaw_reborn_event_store",
+ "ironclaw_reborn_traces",
  "ironclaw_resources",
  "ironclaw_runner",
  "ironclaw_safety",
@@ -4862,6 +4866,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracing-test",
+ "uuid",
  "wat",
 ]
 

@@ -414,7 +414,8 @@ pub struct RebornRuntimeInput {
     /// Mints the one-time API bearer returned when an admin creates a user. The
     /// serve layer supplies a session-store-backed minter; when unset, the admin
     /// user-management surface stays unwired (create reports unavailable).
-    pub admin_api_token_minter: Option<Arc<dyn crate::AdminApiTokenMinter>>,
+    pub admin_api_token_minter:
+        Option<Arc<dyn ironclaw_product_contracts::admin_users::AdminApiTokenMinter>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
     /// Cost table to pair with the model-gateway override. Without this,
@@ -539,7 +540,7 @@ impl RebornRuntimeInput {
     /// admin user-management surface stays unwired.
     pub fn with_admin_api_token_minter(
         mut self,
-        minter: Arc<dyn crate::AdminApiTokenMinter>,
+        minter: Arc<dyn ironclaw_product_contracts::admin_users::AdminApiTokenMinter>,
     ) -> Self {
         self.admin_api_token_minter = Some(minter);
         self

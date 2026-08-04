@@ -1399,7 +1399,10 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         // output or synthetic provider tools.
         "crates/ironclaw_reborn_composition/src/llm_admin/openai_compat_serve.rs",
         "crates/ironclaw_loop_host/src/synthetic_capability.rs",
-        "crates/ironclaw_reborn_composition/src/observability/trace_capture.rs",
+        // Trace capture rebuilds a provider-shaped tool-call transcript from
+        // stored replay metadata for the Trace Commons envelope; it moved out
+        // of composition into the turn-runner observer seam (WS6, §6.10.1).
+        "crates/ironclaw_runner/src/trace_capture.rs",
     ]
     .into_iter()
     .map(|entry| resolve_crate_relative(&root, entry))

@@ -1,64 +1,42 @@
-//! Autonomous Trace Commons turn-end capture for the Reborn runtime.
+//! Turn-runner observer seam for autonomous Trace Commons capture.
 //!
-//! Mirrors the v1 binary's turn-end capture (`src/agent/thread_ops.rs::
-//! spawn_autonomous_trace_contribution`) and periodic queue flush
-//! (`src/agent/agent_loop.rs::spawn_trace_queue_flush_worker`): every terminal
-//! turn lifecycle event spawns a detached best-effort task that reads the
-//! owner's standing contribution policy, captures the recent thread
-//! transcript, redacts and scores it locally, and queues + flushes eligible
-//! envelopes. Non-enrolled users pay one policy-file read per turn and
-//! nothing else.
+//! Every terminal turn lifecycle event spawns a detached best-effort task that
+//! reads the owner's thread transcript, adapts it into the neutral
+//! [`ConversationMessage`] shape, and hands it to
+//! [`ironclaw_reborn_traces::capture`], which owns the consent policy,
+//! envelope build, queue and flush.
+//!
+//! This module is the *observer* half of that split (PROPOSAL §6.10.1, WS6:
+//! "trace capture ... -> `trace_commons` + the turn-runner observer seam"). It
+//! holds exactly what needs turn and thread vocabulary — the [`TurnEventSink`]
+//! implementation, the history-read port, and the record-to-message
+//! adaptation — and nothing about what Trace Commons then does with the
+//! transcript. Neither half can hold the other: `ironclaw_reborn_traces` is a
+//! `substrates` crate and `ironclaw_turns` is `kernel`.
 //!
 //! Capture must never block or fail the turn lifecycle path: the sink is
 //! subscribed best-effort and all work happens on a spawned task whose
 //! errors are logged at `debug!` only (`info!`/`warn!` corrupt the REPL).
-//!
-//! Credit-notice delivery (v1 broadcasts via `ChannelManager`) is
-//! intentionally not wired here yet: the composition layer has no outbound
-//! notification surface. The notice outbox still accumulates on disk and is
-//! delivered when the same scope runs under the v1 binary; a Reborn-native
-//! delivery path is a follow-up.
 
-use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_reborn_traces::ConversationMessage;
-use ironclaw_reborn_traces::client::{
-    TraceClientAutonomousCaptureOutcome, TraceClientAutonomousCaptureRequest, TraceClientHost,
-    TraceClientScope,
+use ironclaw_reborn_traces::capture::{
+    CAPTURE_MESSAGE_LIMIT, ObservedTraceScopes, capture_conversation_trace, record_observed_scope,
 };
-use ironclaw_reborn_traces::contribution::{self as trace, resolve_effective_capture_policy};
+use ironclaw_reborn_traces::contribution as trace;
 use ironclaw_threads::{
     ContextWindow, LoadContextWindowRequest, MessageKind, MessageStatus, SessionThreadError,
     SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
 };
 use ironclaw_turns::{TurnError, TurnEventKind, TurnEventSink, TurnLifecycleEvent};
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
-
-/// Recent-transcript bound, mirroring v1 (last 24 messages, max 5 turns).
-const CAPTURE_MESSAGE_LIMIT: usize = 24;
-const CAPTURE_MAX_TURNS: usize = 5;
-/// Immediate flush limit after queueing one envelope (v1 parity).
-const CAPTURE_FLUSH_LIMIT: usize = 10;
-/// Periodic queue-flush cadence and per-scope limit (v1 parity).
-const TRACE_QUEUE_WORKER_INTERVAL: Duration = Duration::from_secs(300);
-const TRACE_QUEUE_WORKER_FLUSH_LIMIT: usize = 25;
-
-/// Scopes whose queues the periodic worker flushes. Seeded with the runtime
-/// owner and extended with every scope seen at capture time. Queued items for
-/// scopes not seen since boot only flush on that scope's next turn — the
-/// composition layer has no user directory to enumerate (v1 lists active
-/// users from its database).
-pub(crate) type ObservedTraceScopes = Arc<Mutex<BTreeSet<String>>>;
 
 /// Narrow history-read seam so tests don't have to fake the full
 /// [`SessionThreadService`] surface.
 #[async_trait]
-pub(crate) trait TraceCaptureHistorySource: Send + Sync {
+pub trait TraceCaptureHistorySource: Send + Sync {
     async fn thread_history_messages(
         &self,
         request: ThreadHistoryRequest,
@@ -124,13 +102,13 @@ fn context_window_to_records(window: ContextWindow) -> Vec<ThreadMessageRecord> 
         .collect()
 }
 
-pub(crate) struct TraceCaptureTurnEventSink {
+pub struct TraceCaptureTurnEventSink {
     history: Arc<dyn TraceCaptureHistorySource>,
     observed_scopes: ObservedTraceScopes,
 }
 
 impl TraceCaptureTurnEventSink {
-    pub(crate) fn new(
+    pub fn new(
         thread_service: Arc<dyn SessionThreadService>,
         observed_scopes: ObservedTraceScopes,
     ) -> Self {
@@ -179,114 +157,23 @@ impl TurnEventSink for TraceCaptureTurnEventSink {
     }
 }
 
-fn record_observed_scope(observed_scopes: &ObservedTraceScopes, scope: &str) {
-    let mut scopes = match observed_scopes.lock() {
-        Ok(scopes) => scopes,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    scopes.insert(scope.to_string());
-}
-
-/// One turn's best-effort capture. Errors never propagate — every exit is a
+/// One turn's best-effort capture: read the transcript, adapt it, and hand it
+/// to the Trace Commons pipeline. Errors never propagate — every exit is a
 /// `debug!` line keyed by the pseudonymous contributor ref, never raw content.
-pub(crate) async fn capture_turn_trace(
+pub async fn capture_turn_trace(
     history: Arc<dyn TraceCaptureHistorySource>,
     event: TurnLifecycleEvent,
     scope: String,
 ) {
     let scope_ref = trace::local_pseudonymous_contributor_id(&scope);
-    // Gate on the EFFECTIVE enrollment (personal-invite OR admin-provisioned
-    // instance), mirroring the flush gate: an instance-only-enrolled user has no
-    // enabled per-user policy, so a per-user-only check would drop their turns
-    // before queueing — leaving the instance-aware flush nothing to submit. The
-    // resolver returns the governing (and always-enabled) policy, or None when
-    // the scope is enrolled in neither.
-    let policy = match resolve_effective_capture_policy(Some(scope.as_str())) {
-        Ok(Some(policy)) => policy,
-        Ok(None) => return,
-        Err(error) => {
-            tracing::debug!(%error, %scope_ref, "Reborn trace capture could not resolve policy");
-            return;
-        }
-    };
-
     let Some(messages) = load_capture_messages(&history, &event, &scope_ref).await else {
         return;
     };
-    if messages.is_empty() {
-        return;
-    }
-
+    // The transcript carries no structured outcome; the lifecycle event's
+    // terminal status is authoritative, and it is the one thing the pipeline
+    // cannot derive for itself.
     let turn_failed = matches!(event.kind, TurnEventKind::Failed);
-    let outcome = TraceClientHost
-        .prepare_autonomous_envelope_from_messages(TraceClientAutonomousCaptureRequest {
-            scope: TraceClientScope::user(scope.clone()),
-            // The lifecycle event does not identify the product surface
-            // (REPL/WebUI/channel) behind the turn, so the channel is the
-            // honest catch-all rather than a guess.
-            channel: trace::TraceChannel::Other,
-            messages: &messages,
-            policy: &policy,
-            max_turns: CAPTURE_MAX_TURNS,
-            // Reborn thread transcripts carry no structured outcome payload;
-            // the lifecycle event's terminal status is authoritative.
-            outcome_override: turn_failed.then_some(trace::TaskSuccess::Failure),
-        })
-        .await;
-    match outcome {
-        Ok(TraceClientAutonomousCaptureOutcome::Submit(envelope)) => {
-            let trace_scope = TraceClientScope::user(scope.clone());
-            if let Err(error) = TraceClientHost.queue_envelope_for_scope(&trace_scope, &envelope) {
-                tracing::debug!(%error, %scope_ref, "Reborn trace capture failed to queue envelope");
-                return;
-            }
-            if let Err(error) = TraceClientHost
-                .flush_scope_queue(&trace_scope, CAPTURE_FLUSH_LIMIT)
-                .await
-            {
-                tracing::debug!(%error, %scope_ref, "Reborn trace queue flush failed; worker retries");
-            }
-        }
-        Ok(TraceClientAutonomousCaptureOutcome::Held {
-            kind,
-            reason,
-            envelope,
-        }) => {
-            let submission_id = envelope.submission_id;
-            // Only manual-review holds (e.g. High residual-PII-risk) are
-            // retained for the user to authorize. Policy/value gates (low
-            // score, disallowed tools) are not review-worthy and are dropped
-            // as before — just logged for diagnostics.
-            if !matches!(kind, trace::TraceQueueHoldKind::ManualReview) {
-                tracing::debug!(
-                    %submission_id,
-                    %reason,
-                    %scope_ref,
-                    "Reborn trace capture held by policy gate (dropped)"
-                );
-                return;
-            }
-            // Retain: queue with a ManualReview hold sidecar so the flush
-            // worker skips it until it is authorized.
-            let trace_scope = TraceClientScope::user(scope.clone());
-            if let Err(error) =
-                TraceClientHost.queue_held_envelope_for_scope(&trace_scope, &envelope, &reason)
-            {
-                tracing::debug!(%error, %scope_ref, "Reborn trace capture failed to retain held envelope");
-                return;
-            }
-            tracing::debug!(
-                %submission_id,
-                %reason,
-                %scope_ref,
-                "Reborn trace capture held for manual review (retained)"
-            );
-        }
-        Ok(TraceClientAutonomousCaptureOutcome::Skipped) => {}
-        Err(error) => {
-            tracing::debug!(%error, %scope_ref, "Reborn trace capture failed to build envelope");
-        }
-    }
+    capture_conversation_trace(&scope, &messages, turn_failed).await;
 }
 
 async fn load_capture_messages(
@@ -440,75 +327,12 @@ fn tool_call_capture_json(
     serde_json::Value::Object(entry)
 }
 
-pub(crate) struct TraceQueueFlushWorkerHandle {
-    cancel: CancellationToken,
-    handle: JoinHandle<()>,
-}
-
-impl TraceQueueFlushWorkerHandle {
-    pub(crate) async fn shutdown(self) {
-        self.cancel.cancel();
-        if let Err(error) = self.handle.await {
-            tracing::debug!(%error, "Reborn trace queue flush worker did not shut down cleanly");
-        }
-    }
-}
-
-/// Periodic queue flush, mirroring v1's 300s worker: retries envelopes whose
-/// immediate flush failed (network blips, endpoint downtime) for every scope
-/// observed since boot.
-pub(crate) fn spawn_trace_queue_flush_worker(
-    observed_scopes: ObservedTraceScopes,
-) -> TraceQueueFlushWorkerHandle {
-    let cancel = CancellationToken::new();
-    let worker_cancel = cancel.clone();
-    let handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(TRACE_QUEUE_WORKER_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // The first tick fires immediately; consume it so the first flush
-        // happens one full interval after boot.
-        interval.tick().await;
-        loop {
-            tokio::select! {
-                _ = worker_cancel.cancelled() => break,
-                _ = interval.tick() => {}
-            }
-            let scopes: Vec<String> = {
-                let scopes = match observed_scopes.lock() {
-                    Ok(scopes) => scopes,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                scopes.iter().cloned().collect()
-            };
-            if scopes.is_empty() {
-                continue;
-            }
-            if let Err(error) = TraceClientHost
-                .flush_queue_worker_tick(scopes.clone(), TRACE_QUEUE_WORKER_FLUSH_LIMIT)
-                .await
-            {
-                tracing::debug!(%error, "Reborn trace queue worker tick failed");
-            }
-            // Prune drained scopes so the observed set stays bounded by actual
-            // pending backlog, not by every caller ever seen on this runtime. A
-            // scope with no flushable queue entries is dropped; its next turn
-            // re-adds it via `record_observed_scope`. Scopes that still hold
-            // pending work (e.g. a flush that hit the per-tick limit, or an
-            // endpoint that's down) are retained so the next tick retries them.
-            {
-                let mut observed = match observed_scopes.lock() {
-                    Ok(observed) => observed,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                observed.retain(|scope| trace::trace_scope_has_pending_queue(scope.as_str()));
-            }
-        }
-    });
-    TraceQueueFlushWorkerHandle { cancel, handle }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
     use ironclaw_host_api::ids::{CapabilityId, UserId};
     use ironclaw_threads::{ProviderToolCallReferenceEnvelope, ThreadMessageId};
     use ironclaw_turns::{EventCursor, TurnRunId, TurnScope, TurnStatus};

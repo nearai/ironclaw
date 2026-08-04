@@ -1,3 +1,10 @@
+//! Pure projections of durable process-gate records into turn vocabulary.
+//!
+//! Read by the auth-interaction services and by the blocked-auth resume
+//! fan-out beside them: a gate record is process-lifecycle evidence, and
+//! what the product surface needs from it is the run it belongs to and the
+//! turn scope to resume under. No I/O, no policy — mapping only.
+
 use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnScope};
 use ironclaw_host_api::{
     ids::ProcessId,
@@ -5,7 +12,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_processes::ProcessGateRecord;
 
-pub(crate) fn current_turn_gate_runs(
+pub fn current_turn_gate_runs(
     records: impl IntoIterator<Item = ProcessGateRecord>,
 ) -> Vec<(TurnRunId, TurnGateRef)> {
     let mut runs = records
@@ -21,7 +28,7 @@ pub(crate) fn current_turn_gate_runs(
     runs
 }
 
-pub(crate) fn first_turn_run_for_gate(
+pub fn first_turn_run_for_gate(
     records: impl IntoIterator<Item = ProcessGateRecord>,
 ) -> Option<TurnRunId> {
     let mut runs = records

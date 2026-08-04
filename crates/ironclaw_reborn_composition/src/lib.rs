@@ -18,13 +18,10 @@
 use std::sync::Arc;
 
 mod admin_secrets;
-mod admin_token;
-mod admin_user_directory;
 #[cfg(test)]
 mod approval_test_support;
 mod automation;
 mod backend_store_assembly;
-mod blocked_auth_resume;
 mod builtin_capability_policy;
 mod capability_authorization;
 #[cfg(test)]
@@ -48,7 +45,6 @@ mod operator_secret_store;
 mod operator_tool_catalog;
 mod outbound;
 mod outbound_store_assembly;
-mod process_gate_turn_view;
 mod product_capability;
 mod product_surface;
 mod production_runtime_policy;
@@ -67,7 +63,6 @@ pub mod test_support;
 mod trigger_fire_access;
 mod trigger_poller_assembly;
 
-pub use admin_token::AdminApiTokenMinter;
 pub use automation::conversation_turn_submitter::conversation_turn_submitter;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;
