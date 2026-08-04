@@ -64,7 +64,7 @@ fn resolve_path(
                 RuntimeDispatchErrorKind::InputEncode,
                 format!(
                     "{} is not under an available scoped root (available roots: {})",
-                    summary_path_hint(path),
+                    safe_summary_path(path),
                     available_roots(mounts)
                 ),
             )
@@ -80,7 +80,7 @@ fn resolve_path(
             RuntimeDispatchErrorKind::FilesystemDenied,
             format!(
                 "{} does not resolve inside an available scoped root (available roots: {})",
-                summary_path_hint(path),
+                safe_summary_path(path),
                 available_roots(mounts)
             ),
         )
@@ -95,7 +95,7 @@ fn resolve_path(
             RuntimeDispatchErrorKind::FilesystemDenied,
             format!(
                 "the mount for {} does not permit this operation",
-                summary_path_hint(path)
+                safe_summary_path(path)
             ),
         ));
     }
@@ -106,27 +106,13 @@ fn resolve_path(
     })
 }
 
-/// Delimiter-free path rendering for loop-safe failure summaries, mirroring
-/// `file.rs::safe_summary_path`: "/testbed/replacer.go" → "path testbed
-/// replacer.go". The strict summary validator bans `/` and `\`.
-fn summary_path_hint(path: &str) -> String {
-    let hint = path.trim_start_matches('/').replace(['/', '\\'], " ");
-    format!("path {hint}")
-}
-
 fn available_roots(mounts: &ironclaw_host_api::mount::MountView) -> String {
     let mut roots: Vec<String> = mounts
         .mounts
         .iter()
         // Aliases are absolute ("/workspace"); render them without the
         // leading delimiter so the summary stays loop-safe.
-        .map(|mount| {
-            mount
-                .alias
-                .as_str()
-                .trim_start_matches('/')
-                .replace(['/', '\\'], " ")
-        })
+        .map(|mount| safe_summary_path_text(mount.alias.as_str()))
         .collect();
     roots.sort_unstable();
     roots.join(", ")
@@ -390,4 +376,47 @@ pub(super) fn filesystem_error(error: FilesystemError) -> CodingCapabilityError 
         // denial here until coding-tool semantics for it are designed.
         _ => CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied),
     }
+}
+
+pub(super) fn filesystem_error_with_summary(
+    operation: &str,
+    scoped_path: &str,
+    error: FilesystemError,
+) -> CodingCapabilityError {
+    let scoped_path = safe_summary_path(scoped_path);
+    let summary = match &error {
+        FilesystemError::NotFound { .. } => {
+            format!("{operation} failed for {scoped_path}: file not found")
+        }
+        FilesystemError::PermissionDenied { .. }
+        | FilesystemError::MountNotFound { .. }
+        | FilesystemError::PathOutsideMount { .. }
+        | FilesystemError::SymlinkEscape { .. }
+        | FilesystemError::MountConflict { .. }
+        | FilesystemError::VersionMismatch { .. }
+        | FilesystemError::Unsupported { .. }
+        | FilesystemError::IndexConflict { .. } => {
+            format!("{operation} failed for {scoped_path}: permission denied or unsupported path")
+        }
+        FilesystemError::Backend { .. } | FilesystemError::BackendInfrastructure { .. } => {
+            format!("{operation} failed for {scoped_path}: filesystem backend error")
+        }
+        FilesystemError::Contract(_) => {
+            format!("{operation} failed for {scoped_path}: invalid path")
+        }
+        _ => format!("{operation} failed for {scoped_path}: filesystem error"),
+    };
+    let kind = filesystem_error(error).kind();
+    CodingCapabilityError::with_safe_summary(kind, summary)
+}
+
+pub(super) fn safe_summary_path(scoped_path: &str) -> String {
+    // The strict loop summary validator bans path delimiters. Keep all coding
+    // tool path hints on this single renderer so resolution and filesystem
+    // failures cannot drift into different redaction behavior.
+    format!("path {}", safe_summary_path_text(scoped_path))
+}
+
+fn safe_summary_path_text(path: &str) -> String {
+    path.trim_start_matches('/').replace(['/', '\\'], " ")
 }
