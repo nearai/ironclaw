@@ -39,6 +39,23 @@
 #   OPENROUTER_API_KEY=... scripts/e2e-skill-self-creation.sh
 #   E2E_PORT=3200 E2E_MODEL=deepseek/deepseek-v4-flash scripts/e2e-skill-self-creation.sh
 #
+# Two profiles, because they are genuinely different systems:
+#
+#   E2E_PROFILE=local-dev (default)
+#     `/projects` and `/projects/workspace` are HOST DISK, and the workspace root is the server's own
+#     cwd. There is a real `builtin.shell` (LocalHost process backend). This is the shape a developer
+#     runs, and the only shape where a skill's script has any chance of executing.
+#
+#   E2E_PROFILE=production
+#     Every root -- `/tenants`, `/projects`, `/memory`, `/system/*` -- resolves to the DATABASE
+#     (`production_database_root_filesystem`), so the workspace is DB-backed too and there is no host
+#     disk. `HostedMultiTenant` + `SecureDefault` resolves to `ProcessBackendKind::None`, which strips
+#     `builtin.shell` entirely. So a skill script CANNOT run here by policy, not by accident, and the
+#     agent has exactly one namespace with nothing to disagree with it.
+#
+# Production mode needs a Postgres reachable at E2E_POSTGRES_URL (default: the local `reborn-pg`
+# container this repo's docs use) and recreates its database, so never point it at anything real.
+#
 # Runs on its own port and its own IRONCLAW_REBORN_HOME, so it never disturbs a running dev server.
 
 set -uo pipefail
@@ -46,6 +63,9 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+PROFILE="${E2E_PROFILE:-local-dev}"
+POSTGRES_URL="${E2E_POSTGRES_URL:-postgres://postgres:reborn@127.0.0.1:55432/reborn}"
+PG_CONTAINER="${E2E_PG_CONTAINER:-reborn-pg}"
 PORT="${E2E_PORT:-3100}"
 MODEL="${E2E_MODEL:-deepseek/deepseek-v4-flash}"
 HOME_DIR="${E2E_HOME:-$HOME/.ironclaw-reborn-e2e-skills}"
@@ -199,6 +219,12 @@ await_answer() {
 }
 
 db_paths() {
+  if [ "$PROFILE" = "production" ]; then
+    docker exec "$PG_CONTAINER" psql -U postgres -d reborn -tAc \
+      "select path from root_filesystem_entries where path like '%$1%' order by path" 2>/dev/null \
+      | sed 's/^ *//' | grep -v '^$'
+    return
+  fi
   # Local-dev keeps the virtual filesystem in libSQL under the profile subdir.
   python3 - "$HOME_DIR" "$1" <<'PY'
 import glob, os, sqlite3, sys
@@ -219,10 +245,45 @@ PY
 }
 
 echo "e2e skill self-creation"
+echo "  profile: $PROFILE"
 echo "  port   : $PORT"
 echo "  model  : $MODEL"
 echo "  home   : $HOME_DIR (recreated)"
 echo "  logs   : $LOG_DIR"
+
+if [ "$PROFILE" = "production" ]; then
+  # A production build fails closed without durable Postgres storage and an explicit policy, so the
+  # config file is part of the fixture rather than something the operator must remember.
+  mkdir -p "$HOME_DIR"
+  cat > "$HOME_DIR/config.toml" <<CONFIG
+[llm]
+[llm.default]
+provider_id = "openrouter"
+model = "$MODEL"
+api_key_env = "OPENROUTER_API_KEY"
+
+[storage]
+backend = "postgres"
+url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+pool_max_size = 4
+
+[policy]
+deployment_mode = "hosted_multi_tenant"
+default_profile = "secure_default"
+CONFIG
+  export IRONCLAW_REBORN_PROFILE=production
+  export IRONCLAW_REBORN_POSTGRES_URL="$POSTGRES_URL"
+  export IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON=true
+  export IRONCLAW_REBORN_SECRET_MASTER_KEY="${E2E_SECRET_MASTER_KEY:-$(openssl rand -hex 32)}"
+  # Fresh database, so "listed after a restart" cannot pass on a previous run's rows.
+  if ! docker exec "$PG_CONTAINER" psql -U postgres -c "DROP DATABASE IF EXISTS reborn;" >/dev/null 2>&1; then
+    echo "cannot reach the Postgres container '$PG_CONTAINER'; start it or set E2E_PG_CONTAINER"
+    exit 2
+  fi
+  docker exec "$PG_CONTAINER" psql -U postgres -c "CREATE DATABASE reborn;" >/dev/null 2>&1
+  echo "  postgres  : $POSTGRES_URL (database recreated)"
+fi
 
 REPO_BEFORE="$WORK/repo-before.txt"
 git -C "$REPO_ROOT" status --porcelain > "$REPO_BEFORE" 2>/dev/null || : > "$REPO_BEFORE"
@@ -230,7 +291,9 @@ git -C "$REPO_ROOT" status --porcelain > "$REPO_BEFORE" 2>/dev/null || : > "$REP
 pkill -f "ironclaw serve --port ${PORT}" 2>/dev/null
 sleep 2
 rm -rf "$HOME_DIR"
-IRONCLAW_REBORN_HOME="$HOME_DIR" "$BIN" models set-provider openrouter --model "$MODEL" >/dev/null 2>&1
+if [ "$PROFILE" != "production" ]; then
+  IRONCLAW_REBORN_HOME="$HOME_DIR" "$BIN" models set-provider openrouter --model "$MODEL" >/dev/null 2>&1
+fi
 
 start_server 1 || exit 1
 
@@ -380,7 +443,16 @@ for m in d.get("messages") or []:
 print("yes" if ran else "no")
 PY
 )
-  if [ "$RAN_FILE" = "yes" ]; then
+  if [ "$PROFILE" = "production" ]; then
+    # No host process backend exists here, so the question is not whether the script ran but whether
+    # the shell was correctly withheld. A shell call appearing under HostedMultiTenant would be a
+    # policy escape, which matters far more than the script.
+    if grep -q '"shell_cmds": \[\]' <<<"$B"; then
+      pass "B5 no shell was available, as HostedMultiTenant + SecureDefault requires"
+    else
+      fail "B5 a shell ran under hosted multi-tenant, where ProcessBackendKind::None must strip it"
+    fi
+  elif [ "$RAN_FILE" = "yes" ]; then
     pass "B5 the bundled script was executed from the skill bundle"
   elif [ "${E2E_REQUIRE_SCRIPT_EXEC:-0}" = "1" ]; then
     fail "B5 the bundled script was never executed; the agent inlined the algorithm instead"
