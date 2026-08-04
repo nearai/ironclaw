@@ -42,6 +42,7 @@ IGNORED_GUIDANCE_PATHS = {
 # rather than loosen the arm that catches genuinely unknown paths.
 IGNORED_ROOT_FILES = (".env.example",)
 DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
+DEDICATED_E2E_PREFIX = "tests/e2e/"
 QA_HARNESS_PREFIXES = (
     "scripts/live-canary/",
     "scripts/reborn_webui_v2_live_qa/",
@@ -376,6 +377,9 @@ def build_plan(
             continue
         if path.startswith(DEDICATED_WORKFLOW_PREFIXES):
             reasons.append(f"dedicated stress workflow owns: {path}")
+            continue
+        if path.startswith(DEDICATED_E2E_PREFIX):
+            reasons.append(f"dedicated Reborn E2E workflow owns: {path}")
             continue
         if path.startswith(QA_HARNESS_PREFIXES):
             qa_evidence_changed = True

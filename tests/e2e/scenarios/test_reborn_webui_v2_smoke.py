@@ -38,7 +38,9 @@ from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, capture_native_dialogs
 from reborn_webui_harness import (
     USER_ID,
     create_thread as _create_thread,
+    reborn_bearer_headers,
     reborn_v2_browser,  # noqa: F401 - imported fixture
+    reborn_v2_first_run_server,  # noqa: F401 - imported fixture
     reborn_v2_page,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture
     send_and_settle as _send_and_settle,
@@ -510,6 +512,166 @@ async def test_reborn_v2_shared_control_typography_is_stable(
         assert viewport_metrics["documentWidth"] <= viewport_metrics["viewportWidth"], (
             f"{locale} layout overflowed at {width}px: {viewport_metrics}"
         )
+    finally:
+        await context.close()
+
+
+async def test_reborn_v2_first_run_onboarding_configures_llm_and_survives_restart(
+    reborn_v2_first_run_server,
+    reborn_v2_browser,
+    mock_llm_server,
+):
+    """A fresh install can configure its first provider without leaking the key."""
+    state, start, stop = reborn_v2_first_run_server
+    base_url = state["base_url"]
+    api_key = "first-run-e2e-secret-7054"
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1280, "height": 720}
+    )
+    page = await context.new_page()
+
+    try:
+        await page.goto(
+            f"{base_url}/chat?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        await page.wait_for_url(re.compile(r".*/welcome(?:[?#].*)?$"), timeout=15000)
+        await expect(
+            page.get_by_role("heading", name="Welcome to IronClaw")
+        ).to_be_visible(timeout=15000)
+
+        openai_row = page.locator(
+            SEL_V2["onboarding_provider_card_for"].format(provider_id="openai")
+        )
+        await openai_row.locator(SEL_V2["onboarding_provider_setup"]).click()
+
+        dialog = page.get_by_role("dialog")
+        await expect(
+            dialog.get_by_role("heading", name="Configure OpenAI")
+        ).to_be_visible(timeout=5000)
+        await dialog.get_by_label("Base URL").fill(f"{mock_llm_server}/v1")
+        await dialog.get_by_label("API key").fill(api_key)
+        await dialog.get_by_label("Default model").fill("mock-model")
+
+        async with page.expect_response(
+            lambda response: response.request.method == "POST"
+            and response.url.endswith("/api/webchat/v2/llm/test-connection")
+        ) as probe_info:
+            await dialog.get_by_role("button", name="Test connection").click()
+        probe = await probe_info.value
+        probe_body = await probe.text()
+        assert probe.status == 200, probe_body
+        assert (await probe.json())["ok"] is True
+        assert api_key not in probe_body
+
+        async with page.expect_response(
+            lambda response: response.request.method == "POST"
+            and response.url.endswith("/api/webchat/v2/llm/providers")
+        ) as upsert_info:
+            async with page.expect_response(
+                lambda response: response.request.method == "POST"
+                and response.url.endswith("/api/webchat/v2/llm/active")
+            ) as active_info:
+                await dialog.get_by_role("button", name="Save").click()
+
+        upsert = await upsert_info.value
+        active = await active_info.value
+        upsert_body = await upsert.text()
+        active_body = await active.text()
+        assert upsert.status == 200, upsert_body
+        assert active.status == 200, active_body
+        assert api_key not in upsert_body
+        assert api_key not in active_body
+
+        await page.wait_for_url(re.compile(r".*/chat(?:[?#].*)?$"), timeout=15000)
+        composer = page.locator(SEL_V2["chat_composer"])
+        await expect(composer).to_be_visible(timeout=15000)
+
+        async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+            providers = await client.get(
+                f"{base_url}/api/webchat/v2/llm/providers",
+                timeout=15,
+            )
+            providers.raise_for_status()
+            providers_body = providers.json()
+            openai = next(
+                provider
+                for provider in providers_body["providers"]
+                if provider["id"] == "openai"
+            )
+            assert providers_body["active"] == {
+                "provider_id": "openai",
+                "model": "mock-model",
+            }
+            assert openai["api_key_set"] is True
+            assert api_key not in providers.text
+
+        browser_state = await page.evaluate(
+            """() => JSON.stringify({
+              html: document.documentElement.outerHTML,
+              inputValues: Array.from(
+                document.querySelectorAll("input, textarea"),
+                (element) => element.value,
+              ),
+              localStorage: Array.from(
+                { length: localStorage.length },
+                (_, index) => localStorage.getItem(localStorage.key(index)),
+              ),
+              sessionStorage: Array.from(
+                { length: sessionStorage.length },
+                (_, index) => sessionStorage.getItem(sessionStorage.key(index)),
+              ),
+            })"""
+        )
+        assert REBORN_V2_AUTH_TOKEN in browser_state
+        assert api_key not in browser_state
+        persisted_config = (
+            state["home_dir"] / "reborn-home" / "config.toml"
+        ).read_text(encoding="utf-8")
+        assert api_key not in persisted_config
+
+        await page.reload()
+        await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(
+            timeout=15000
+        )
+        assert urlparse(page.url).path == "/chat"
+
+        await composer.fill("hello from first-run onboarding")
+        await composer.press("Enter")
+        await expect(page.locator(SEL_V2["msg_assistant"]).first).to_contain_text(
+            "Hello!", timeout=30000
+        )
+
+        await stop()
+        restarted_url = await start()
+        await page.goto(
+            f"{restarted_url}/chat?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(
+            timeout=15000
+        )
+        assert urlparse(page.url).path == "/chat"
+
+        async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+            providers = await client.get(
+                f"{restarted_url}/api/webchat/v2/llm/providers",
+                timeout=15,
+            )
+            providers.raise_for_status()
+            assert providers.json()["active"] == {
+                "provider_id": "openai",
+                "model": "mock-model",
+            }
+            assert api_key not in providers.text
+
+        await stop()
+        captured_logs = "\n".join(
+            path.read_text(encoding="utf-8", errors="replace")
+            for path in state["log_paths"]
+            if path.exists()
+        )
+        assert captured_logs, "first-run server logs were not captured"
+        assert "Using OpenAI-compatible provider" in captured_logs
+        assert api_key not in captured_logs
     finally:
         await context.close()
 
