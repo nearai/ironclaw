@@ -92,9 +92,7 @@ fn scripted_failed_state(category: &str) -> ScriptedRunState {
     ScriptedRunState {
         status: TurnStatus::Failed,
         gate_ref: None,
-        failure: Some(
-            SanitizedFailure::new(category.to_string()).expect("valid failure category"),
-        ),
+        failure: Some(SanitizedFailure::new(category.to_string()).expect("valid failure category")),
     }
 }
 
@@ -2145,11 +2143,7 @@ async fn triggered_oauth_prompt_to_non_dm_target_cancels_and_notifies() {
 
 #[tokio::test]
 async fn triggered_failed_run_delivers_failure_summary_to_preference_target() {
-    let harness = build_triggered_harness(
-        vec![scripted_failed_state("model_error")],
-        None,
-        true,
-    );
+    let harness = build_triggered_harness(vec![scripted_failed_state("model_error")], None, true);
     seed_preference(&harness.store).await;
     let run_id = TurnRunId::new();
 
@@ -2183,11 +2177,8 @@ async fn triggered_failed_run_delivers_failure_summary_to_preference_target() {
 async fn triggered_failed_run_without_failure_category_falls_back_to_generic_summary() {
     // A Failed run whose sanitized failure was lost (legacy/older row) still
     // delivers the generic unknown-category summary rather than vanishing.
-    let harness = build_triggered_harness(
-        vec![scripted_state(TurnStatus::Failed, None)],
-        None,
-        true,
-    );
+    let harness =
+        build_triggered_harness(vec![scripted_state(TurnStatus::Failed, None)], None, true);
     seed_preference(&harness.store).await;
     let run_id = TurnRunId::new();
 
@@ -2241,11 +2232,8 @@ async fn triggered_run_that_times_out_before_actionable_delivers_timeout_notice(
     // A run that never reaches an actionable state before `max_wait` used to
     // only log a warn and record `Failed` — hiding the hang from the creator.
     // It now delivers the timeout notice as a terminal reply (#6896).
-    let harness = build_triggered_harness(
-        vec![scripted_state(TurnStatus::Running, None)],
-        None,
-        true,
-    );
+    let harness =
+        build_triggered_harness(vec![scripted_state(TurnStatus::Running, None)], None, true);
     seed_preference(&harness.store).await;
     let run_id = TurnRunId::new();
 

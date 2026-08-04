@@ -17,9 +17,8 @@ pub use ports::{
     ActiveHoldReason, BlockedActiveRunKind, MissingTriggerActiveRunLookup,
     NoopTriggerFireSettlementObserver, TriggerAcceptedFireSettlement, TriggerActiveRunLookup,
     TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerFailedFireSettlement,
-    TriggerFireSettlementObserver, TrustedTriggerFireSubmitOutcome,
-    TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest, active_hold_projection,
-    active_holds_for_records,
+    TriggerFireSettlementObserver, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
+    TrustedTriggerSubmitRequest, active_hold_projection, active_holds_for_records,
 };
 pub use report::{
     TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerFireReport,

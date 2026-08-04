@@ -35,8 +35,7 @@ pub(crate) const DELIVERY_ERROR_MESSAGE: &str =
 /// operator action). A scheduled run has no user in the channel to act on a
 /// cancel, so this is informational only — it closes the loop on a fire that
 /// would otherwise vanish (#6896).
-pub(crate) const TRIGGERED_RUN_CANCELED_MESSAGE: &str =
-    "This scheduled run was canceled before it could finish. Open the Ironclaw web app for details.";
+pub(crate) const TRIGGERED_RUN_CANCELED_MESSAGE: &str = "This scheduled run was canceled before it could finish. Open the Ironclaw web app for details.";
 /// Posted when the blocking run is `BlockedApproval` and no gate_ref is
 /// available.
 pub(crate) const BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pending approval before taking new messages — reply `approve` or `deny` (or `approve gate:<ref>`) to resume.";
