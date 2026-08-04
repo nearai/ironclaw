@@ -1505,12 +1505,21 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// entries of `ALLOWLIST` above (`ALLOWLIST.len()`, printed by the ratchet
 /// below on failure).
 ///
+/// Re-measured 2026-08-04 during the Wave 4 consolidation, and **lowered
+/// 125 → 124**. The vendor-config retirement removes two net entries, which
+/// against the `origin/main` this branch was first cut from (`1e2a294083`,
+/// `ALLOWLIST` = 127) gave 125. #7094 then deleted a further entry on `main`
+/// (127 → 126), so the same two removals now land on **124**. The count is
+/// read off the ratchet's own failure message with this constant temporarily
+/// set to `0`, never counted by eye — a plain paren count over the literal
+/// answers 142, because the entries' comments contain parentheses too.
+///
 /// PROPOSAL §11.2.8 shrinks this list to the §8.1 rule-4 set and CHECKLIST
 /// WS12 wants it empty. The staleness half of that discipline already lives in
 /// the gate above (an entry that no longer matches fails); this ceiling is the
 /// other half — the list cannot *grow* untracked either. Lower it in the same
 /// PR that deletes entries so the new floor is locked in.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 125;
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 124;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 #[test]
