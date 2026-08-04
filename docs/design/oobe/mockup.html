@@ -225,9 +225,11 @@ h1,h2,h3,p{margin:0}
 .tcard .termrow svg{width:13px;height:13px;flex:none}
 .tcard.reveal{animation:card-in .42s cubic-bezier(.2,.7,.2,1) both}
 @keyframes card-in{from{opacity:0;transform:translateY(10px) scale(.98)}to{opacity:1;transform:none}}
+@property --ai-angle{syntax:"<angle>";initial-value:0deg;inherits:false}
 .tcard.first{position:relative}
-.tcard.first::after{content:"";position:absolute;inset:-1px;border-radius:13px;border:1px solid color-mix(in srgb,var(--v2-accent) 55%,transparent);box-shadow:0 0 0 4px var(--v2-accent-soft);pointer-events:none;animation:ring-fade 2.2s ease forwards}
-@keyframes ring-fade{0%{opacity:0}18%{opacity:1}100%{opacity:0}}
+/* Gemini-style ai-spark: a color gradient chases the border once, then dissipates */
+.tcard.first::after{content:"";position:absolute;inset:-2px;border-radius:15px;padding:2.5px;background:conic-gradient(from var(--ai-angle),transparent 0deg 232deg,#4285F4 284deg,#9168C0 322deg,#D96570 350deg,#ffe1ea 359deg,transparent 360deg);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude;pointer-events:none;opacity:0;filter:drop-shadow(0 0 5px rgba(145,104,192,.7)) drop-shadow(0 0 9px rgba(217,101,112,.35));animation:ai-spark 1.35s linear forwards}
+@keyframes ai-spark{0%{--ai-angle:0deg;opacity:0}9%{opacity:1}82%{opacity:1}100%{--ai-angle:360deg;opacity:0}}
 @media (prefers-reduced-motion:reduce){.tcard.reveal{animation:none}.tcard.first::after{display:none}}
 
 /* ghost / preview cards (Coach direction) */
