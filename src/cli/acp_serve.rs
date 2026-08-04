@@ -44,6 +44,10 @@ pub struct AcpServeArgs {
     /// Working directory for the agent
     #[arg(long)]
     cwd: Option<String>,
+
+    /// Enable dev tools (shell, filesystem) for local ACP agents
+    #[arg(long)]
+    dev_tools: bool,
 }
 
 // ── Internal bridge types ──────────────────────────────────────────────────
@@ -280,6 +284,27 @@ pub async fn run_acp_serve(args: AcpServeArgs) -> anyhow::Result<()> {
 
     let config = components.config;
 
+    // Seed WASM tool secrets from environment into the ephemeral secrets store.
+    // In --no-db mode the store is in-memory and won't persist, so env vars
+    // provide a practical way to provision credentials for WASM tools.
+    if let Some(ref secrets_store) = components.secrets_store {
+        let owner_id = &config.owner_id;
+        if let Ok(key) = std::env::var("BUZZ_PRIVATE_KEY") {
+            if !key.is_empty() {
+                match secrets_store
+                    .create(
+                        owner_id,
+                        crate::secrets::CreateSecretParams::new("buzz_private_key", &key),
+                    )
+                    .await
+                {
+                    Ok(_) => tracing::info!("ACP: seeded buzz_private_key from env into secrets store"),
+                    Err(e) => tracing::warn!("ACP: failed to seed buzz_private_key: {e}"),
+                }
+            }
+        }
+    }
+
     // Notification channel: agent task → LocalSet writer
     let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<NotifyRequest>();
 
@@ -301,8 +326,11 @@ pub async fn run_acp_serve(args: AcpServeArgs) -> anyhow::Result<()> {
         .register_message_tools(Arc::clone(&channels), components.extension_manager.clone())
         .await;
 
-    // Register buzz_send tool for direct Buzz channel publishing
-    components.tools.register_buzz_send_tool().await;
+    // Register dev tools (shell, filesystem) only when explicitly enabled
+    if args.dev_tools {
+        tracing::info!("ACP: dev tools enabled (--dev-tools)");
+        components.tools.register_dev_tools();
+    }
 
     let deps = crate::agent::AgentDeps {
         owner_id: config.owner_id.clone(),

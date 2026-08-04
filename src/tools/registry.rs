@@ -844,22 +844,6 @@ impl ToolRegistry {
         tracing::debug!("Registered message tool");
     }
 
-    /// Register buzz_send tool for publishing messages to Buzz channels
-    /// via the `buzz messages send` CLI.
-    pub async fn register_buzz_send_tool(&self) {
-        use crate::tools::builtin::BuzzSendTool;
-        let tool = Arc::new(BuzzSendTool);
-        self.tools
-            .write()
-            .await
-            .insert(tool.name().to_string(), tool as Arc<dyn Tool>);
-        self.builtin_names
-            .write()
-            .await
-            .insert("buzz_send".to_string());
-        tracing::debug!("Registered buzz_send tool");
-    }
-
     /// Set the default channel and target for the message tool.
     /// Call this before each agent turn with the current conversation's context.
     pub async fn set_message_tool_context(&self, channel: Option<String>, target: Option<String>) {
