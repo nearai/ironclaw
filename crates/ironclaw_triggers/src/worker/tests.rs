@@ -689,16 +689,23 @@ async fn tick_records_failed_terminal_active_run_as_error() {
     record.active_fire_slot = Some(fire_slot);
     record.active_run_ref = Some(run_id);
     repo.upsert_trigger(record).await.expect("insert active");
-    let worker = worker(
-        repo.clone(),
-        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
-        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
-        Arc::new(RecordingActiveRunLookup::with_state(
-            TriggerActiveRunState::Terminal {
-                status: TriggerRunHistoryStatus::Error,
-            },
-        )),
-    );
+    let observer = Arc::new(RecordingSettlementObserver::default());
+    let worker = TriggerPollerWorker::new(
+        TriggerPollerWorkerConfig::default(),
+        TriggerPollerWorkerDeps {
+            repository: repo.clone(),
+            source_provider: Arc::new(crate::ScheduleTriggerSourceProvider),
+            materializer: Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+            trusted_submitter: Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+            active_run_lookup: Arc::new(RecordingActiveRunLookup::with_state(
+                TriggerActiveRunState::Terminal {
+                    status: TriggerRunHistoryStatus::Error,
+                },
+            )),
+            fire_settlement_observer: observer.clone(),
+        },
+    )
+    .expect("valid worker");
 
     let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
 
@@ -714,6 +721,16 @@ async fn tick_records_failed_terminal_active_run_as_error() {
     assert_eq!(runs[0].run_id, Some(run_id));
     assert_eq!(runs[0].status, TriggerRunHistoryStatus::Error);
     assert!(runs[0].completed_at.is_some());
+    assert_eq!(
+        observer.failed_events(),
+        vec![TriggerFailedFireSettlement {
+            tenant_id: tenant("tenant-a"),
+            trigger_id,
+            fire_slot,
+            run_id,
+        }],
+        "a durably cleared terminal error must emit exactly one failure settlement"
+    );
 }
 
 #[tokio::test]
@@ -2815,6 +2832,7 @@ impl TrustedTriggerFireSubmitter for RecordingSubmitter {
 #[derive(Default)]
 struct RecordingSettlementObserver {
     events: Mutex<Vec<TriggerAcceptedFireSettlement>>,
+    failed_events: Mutex<Vec<TriggerFailedFireSettlement>>,
     visibility_assertion: Option<SettlementVisibilityAssertion>,
 }
 
@@ -2838,6 +2856,7 @@ impl RecordingSettlementObserver {
     ) -> Self {
         Self {
             events: Mutex::new(Vec::new()),
+            failed_events: Mutex::new(Vec::new()),
             visibility_assertion: Some(SettlementVisibilityAssertion {
                 repository,
                 tenant_id,
@@ -2851,6 +2870,13 @@ impl RecordingSettlementObserver {
 
     fn events(&self) -> Vec<TriggerAcceptedFireSettlement> {
         self.events.lock().expect("events lock").clone()
+    }
+
+    fn failed_events(&self) -> Vec<TriggerFailedFireSettlement> {
+        self.failed_events
+            .lock()
+            .expect("failed events lock")
+            .clone()
     }
 }
 
@@ -2881,6 +2907,13 @@ impl TriggerFireSettlementObserver for RecordingSettlementObserver {
             );
         }
         self.events.lock().expect("events lock").push(event);
+    }
+
+    async fn on_failed_fire_settled(&self, event: TriggerFailedFireSettlement) {
+        self.failed_events
+            .lock()
+            .expect("failed events lock")
+            .push(event);
     }
 }
 

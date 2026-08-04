@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::OutboundPart;
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_host_api::failure::summary::reborn_failure_summary_for_category;
 use ironclaw_host_api::ids::{AgentId, UserId};
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
@@ -322,6 +323,7 @@ async fn deliver_triggered_run(
 
     let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
     let mut messages_to_delete_after_final: Vec<DeliveredChannelMessage> = Vec::new();
+    let trigger_label = prompts::triggered_label_from_prompt(&prompt);
 
     loop {
         let state = match wait_for_actionable_state(
@@ -348,6 +350,49 @@ async fn deliver_triggered_run(
                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
                 return outcome;
             }
+            Err(RunDeliveryError::RunWaitTimedOut { .. }) => {
+                let notification_context = TriggeredNotificationContext {
+                    scope: &scope,
+                    thread_scope: &thread_scope,
+                    actor: &actor,
+                    run_id,
+                    trigger_context: &trigger_context,
+                    delivery_target: delivery_target.as_ref(),
+                    authority: &authority,
+                };
+                let notification = TriggeredNotification {
+                    event_kind: RunNotificationEventKind::FinalReplyReady,
+                    intent: DeliveryIntent::TriggeredDelivery,
+                    text: format!(
+                        "{}{}",
+                        prompts::DELIVERY_TIMEOUT_MESSAGE,
+                        prompts::triggered_update_footer(&trigger_label)
+                    ),
+                    attachments: Vec::new(),
+                    gate_ref_for_routing: None,
+                    require_direct_message_target: false,
+                };
+                let outcome = match deliver_triggered_notification(
+                    services,
+                    &notification_context,
+                    notification,
+                )
+                .await
+                {
+                    Ok(_) => TriggeredRunDeliveryOutcomeKind::Delivered,
+                    Err(error) => {
+                        tracing::warn!(
+                            target = "ironclaw::reborn::run_delivery",
+                            %run_id,
+                            error = %error,
+                            "triggered run timeout notification delivery failed"
+                        );
+                        TriggeredRunDeliveryOutcomeKind::Failed
+                    }
+                };
+                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+                return outcome;
+            }
             Err(err) => {
                 tracing::warn!(
                     target = "ironclaw::reborn::run_delivery",
@@ -361,7 +406,6 @@ async fn deliver_triggered_run(
             }
         };
 
-        let trigger_label = prompts::triggered_label_from_prompt(&prompt);
         let notification = match triggered_notification_for_state(
             services,
             &scope,
@@ -554,15 +598,17 @@ async fn deliver_triggered_run(
 /// ## Triggered channel surface contract
 ///
 /// A triggered run is **output-only over the channel, plus gate-resolution
-/// input** — it is NOT a conversational surface. Only three outputs are
+/// input** — it is NOT a conversational surface. Its outputs are
 /// minted here:
 ///
 /// - `BlockedApproval` → gate prompt (approve/deny)
 /// - `BlockedAuth`     → auth prompt (OAuth link) or, for non-OAuth, a
 ///   cancel + final-reply carrying the auth-unavailable notice
 /// - `Completed`       → final reply
+/// - failed terminals  → sanitized failure summary
+/// - `Cancelled`       → cancellation notice
 ///
-/// Anything else yields `None` — triggered delivery deliberately does not
+/// Non-actionable states yield `None` — triggered delivery deliberately does not
 /// stream progress; that belongs to the live WebUI surface. Preserve that
 /// boundary when extending this function.
 async fn triggered_notification_for_state(
@@ -717,7 +763,39 @@ async fn triggered_notification_for_state(
                 }
             }
         }
-        _ => Ok(None),
+        TurnStatus::Failed | TurnStatus::RecoveryRequired => {
+            let summary = reborn_failure_summary_for_category(
+                state.failure.as_ref().map(|failure| failure.category()),
+            );
+            Ok(Some(TriggeredNotification {
+                event_kind: RunNotificationEventKind::FinalReplyReady,
+                intent: DeliveryIntent::TriggeredDelivery,
+                text: format!(
+                    "{summary}{}",
+                    prompts::triggered_update_footer(trigger_label)
+                ),
+                attachments: Vec::new(),
+                gate_ref_for_routing: None,
+                require_direct_message_target: false,
+            }))
+        }
+        TurnStatus::Cancelled => Ok(Some(TriggeredNotification {
+            event_kind: RunNotificationEventKind::FinalReplyReady,
+            intent: DeliveryIntent::TriggeredDelivery,
+            text: format!(
+                "The run was cancelled before it could finish.{}",
+                prompts::triggered_update_footer(trigger_label)
+            ),
+            attachments: Vec::new(),
+            gate_ref_for_routing: None,
+            require_direct_message_target: false,
+        })),
+        TurnStatus::Queued
+        | TurnStatus::Running
+        | TurnStatus::BlockedResource
+        | TurnStatus::BlockedDependentRun
+        | TurnStatus::BlockedExternalTool
+        | TurnStatus::CancelRequested => Ok(None),
     }
 }
 

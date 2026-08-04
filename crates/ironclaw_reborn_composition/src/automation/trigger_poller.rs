@@ -212,6 +212,16 @@ impl TriggerFireSettlementObserver for PostSubmitHookObserver {
         };
         spawn_post_submit_delivery(hook, event);
     }
+
+    async fn on_failed_fire_settled(&self, event: ironclaw_triggers::TriggerFailedFireSettlement) {
+        tracing::warn!(
+            tenant_id = %event.tenant_id,
+            trigger_id = %event.trigger_id,
+            fire_slot = %event.fire_slot,
+            run_id = %event.run_id,
+            "accepted trigger fire settled with a failed run"
+        );
+    }
 }
 
 async fn run_trigger_poller(

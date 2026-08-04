@@ -39,8 +39,8 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
-    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse,
+    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -73,6 +73,7 @@ const QA_9B_PROMPT: &str = "QA_9B scheduled health digest";
 const QA_9B_RESULT: &str = "QA_9B scheduled health digest complete";
 const QA_9D_PROMPT: &str = "QA_9D scheduled release digest";
 const QA_9D_RESULT: &str = "QA_9D scheduled release digest complete";
+const FAILED_RUN_PROMPT: &str = "scheduled model failure notification";
 const SLACK_TEAM: &str = "T-TRIGGER-E2E";
 const SLACK_USER: &str = "U-TRIGGER-E2E";
 const SLACK_DEFAULT_DM: &str = "D-TRIGGER-DEFAULT";
@@ -173,6 +174,10 @@ impl HostManagedModelGateway for DeliveryJourneyGateway {
         &self,
         request: HostManagedModelRequest,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let fails = request
+            .messages
+            .iter()
+            .any(|message| message.content.contains(FAILED_RUN_PROMPT));
         let reply = if request
             .messages
             .iter()
@@ -189,6 +194,12 @@ impl HostManagedModelGateway for DeliveryJourneyGateway {
             "unexpected scheduled-trigger prompt"
         };
         self.requests.lock().await.push(request);
+        if fails {
+            return Err(HostManagedModelError::new(
+                HostManagedModelErrorKind::InvalidRequest,
+                "scripted terminal model failure",
+            ));
+        }
         Ok(HostManagedModelResponse::assistant_reply(reply.to_string()))
     }
 }
@@ -1141,16 +1152,17 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
     );
 }
 
-/// QA-9B + QA-9D whole-path regression:
+/// QA-9B + QA-9D whole-path regression plus #6896 failed-run delivery:
 ///
 /// due trigger -> trusted ingress -> real Reborn run -> persisted final reply
 /// -> generic triggered-delivery hook -> real Slack adapter -> host-mediated
 /// credential injection -> fake Slack HTTP boundary.
 ///
-/// The two arms prove that the creator's default DM is used when the trigger
-/// has no target and that an explicit per-trigger target overrides that
-/// default. Re-polling and rebuilding the runtime over the same durable store
-/// must not repeat either provider mutation.
+/// The success arms prove that the creator's default DM is used when the
+/// trigger has no target and that an explicit per-trigger target overrides
+/// that default. The failure arm proves a terminal model error also reaches
+/// the creator's channel with its safe summary. Re-polling and rebuilding the
+/// runtime over the same durable store must not repeat any provider mutation.
 #[tokio::test]
 async fn scheduled_trigger_results_reach_exact_slack_targets_once_across_restart() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -1174,24 +1186,27 @@ async fn scheduled_trigger_results_reach_exact_slack_targets_once_across_restart
     let default_target_trigger = seed_due_delivery_trigger(&repository, QA_9B_PROMPT, None).await;
     let explicit_target_trigger =
         seed_due_delivery_trigger(&repository, QA_9D_PROMPT, Some(QA_9D_TARGET_ID)).await;
+    let failed_run_trigger = seed_due_delivery_trigger(&repository, FAILED_RUN_PROMPT, None).await;
 
     wait_for_delivered_run(&repository, &delivery_store, default_target_trigger).await;
     wait_for_delivered_run(&repository, &delivery_store, explicit_target_trigger).await;
+    wait_for_delivered_run(&repository, &delivery_store, failed_run_trigger).await;
 
     let provider_messages = slack_provider.provider_messages();
     assert_eq!(
         provider_messages.len(),
-        2,
+        3,
         "one provider-side message per scheduled trigger: {provider_messages:?}"
     );
     assert_slack_dm_delivery_evidence(&provider_messages);
     assert_slack_channel_delivery_evidence(&provider_messages);
+    assert_slack_failed_run_delivery_evidence(&provider_messages);
 
     let wire_messages = slack_provider.wire_messages();
     assert_eq!(
         wire_messages.len(),
-        2,
-        "exactly two Slack wire mutations: {wire_messages:?}"
+        3,
+        "exactly three Slack wire mutations: {wire_messages:?}"
     );
     assert!(
         wire_messages.iter().all(|message| {
@@ -1212,11 +1227,18 @@ async fn scheduled_trigger_results_reach_exact_slack_targets_once_across_restart
         1,
         "QA-9D must execute exactly one model run"
     );
+    assert_eq!(
+        model_gateway
+            .request_count_containing(FAILED_RUN_PROMPT)
+            .await,
+        1,
+        "the failed scheduled run must execute exactly once"
+    );
 
     tokio::time::sleep(Duration::from_millis(250)).await;
     assert_eq!(
         slack_provider.provider_messages().len(),
-        2,
+        3,
         "re-polling completed one-shot triggers must not duplicate delivery"
     );
     runtime.shutdown().await.expect("first runtime shutdown");
@@ -1236,7 +1258,7 @@ async fn scheduled_trigger_results_reach_exact_slack_targets_once_across_restart
 
     assert_eq!(
         slack_provider.provider_messages().len(),
-        2,
+        3,
         "restart over the same durable trigger state must not duplicate provider effects"
     );
     assert_eq!(
@@ -1248,6 +1270,13 @@ async fn scheduled_trigger_results_reach_exact_slack_targets_once_across_restart
         model_gateway.request_count_containing(QA_9D_PROMPT).await,
         1,
         "restart must not rerun QA-9D"
+    );
+    assert_eq!(
+        model_gateway
+            .request_count_containing(FAILED_RUN_PROMPT)
+            .await,
+        1,
+        "restart must not rerun the failed scheduled trigger"
     );
 }
 
@@ -1284,6 +1313,24 @@ fn assert_slack_channel_delivery_evidence(messages: &[Value]) {
         matching.count(),
         expected_count,
         "QA-9D must create exactly one unthreaded message in C-TRIGGER-OVERRIDE: {messages:?}"
+    );
+}
+
+fn assert_slack_failed_run_delivery_evidence(messages: &[Value]) {
+    let expected_summary = ironclaw_host_api::failure::summary::reborn_failure_summary_for_category(
+        Some("driver_failed"),
+    );
+    let matching = messages.iter().filter(|message| {
+        message["channel"] == SLACK_DEFAULT_DM
+            && message.get("thread_ts").is_none()
+            && message["text"]
+                .as_str()
+                .is_some_and(|text| text.contains(expected_summary))
+    });
+    assert_eq!(
+        matching.count(),
+        1,
+        "the failed scheduled run must deliver exactly one safe failure summary: {messages:?}"
     );
 }
 

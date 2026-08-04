@@ -113,9 +113,20 @@ pub struct TriggerAcceptedFireSettlement {
     pub turn_scope: TurnScope,
 }
 
+/// A previously accepted trigger fire whose run durably settled as an error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerFailedFireSettlement {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub fire_slot: Timestamp,
+    pub run_id: TurnRunId,
+}
+
 #[async_trait]
 pub trait TriggerFireSettlementObserver: Send + Sync {
     async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement);
+
+    async fn on_failed_fire_settled(&self, event: TriggerFailedFireSettlement);
 }
 
 #[derive(Debug, Default)]
@@ -124,6 +135,8 @@ pub struct NoopTriggerFireSettlementObserver;
 #[async_trait]
 impl TriggerFireSettlementObserver for NoopTriggerFireSettlementObserver {
     async fn on_accepted_fire_settled(&self, _event: TriggerAcceptedFireSettlement) {}
+
+    async fn on_failed_fire_settled(&self, _event: TriggerFailedFireSettlement) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

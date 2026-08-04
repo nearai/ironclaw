@@ -19,7 +19,7 @@ use ironclaw_extension_contracts::preference_target::{
 };
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
-    SourceBindingRef, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
+    SanitizedFailure, SourceBindingRef, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     attachment::WorkspaceFile,
@@ -71,12 +71,22 @@ use ironclaw_turns::{
 struct ScriptedRunState {
     status: TurnStatus,
     gate_ref: Option<TurnGateRef>,
+    failure: Option<SanitizedFailure>,
 }
 
 fn scripted_state(status: TurnStatus, gate_ref: Option<&str>) -> ScriptedRunState {
     ScriptedRunState {
         status,
         gate_ref: gate_ref.map(|s| TurnGateRef::new(s).expect("gate ref")),
+        failure: None,
+    }
+}
+
+fn scripted_failed_state(category: &'static str) -> ScriptedRunState {
+    ScriptedRunState {
+        status: TurnStatus::Failed,
+        gate_ref: None,
+        failure: Some(SanitizedFailure::from_trusted_static(category)),
     }
 }
 
@@ -162,7 +172,7 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
             gate_ref: scripted.gate_ref,
             blocked_activity_id: None,
             credential_requirements: Vec::new(),
-            failure: None,
+            failure: scripted.failure,
             event_cursor: EventCursor(1),
             product_context: None,
             resume_disposition: None,
@@ -2002,6 +2012,82 @@ async fn triggered_final_reply_reaches_the_preference_target_with_footer() {
         envelopes[0].target.conversation.conversation_id(),
         "dm-creator",
         "delivered to the decoded preference target"
+    );
+}
+
+#[tokio::test]
+async fn triggered_failed_run_reaches_the_preference_target_with_safe_summary() {
+    let harness = build_triggered_harness(vec![scripted_failed_state("model_error")], None, true);
+    seed_preference(&harness.store).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1, "one failure notification must be delivered");
+    assert!(
+        texts[0].contains("The run failed while calling the model."),
+        "notification must use the sanitized category summary: {}",
+        texts[0]
+    );
+    assert!(
+        texts[0].contains("From a triggered event: “watch the deploys”."),
+        "failure notification must retain trigger context: {}",
+        texts[0]
+    );
+}
+
+#[tokio::test]
+async fn triggered_cancelled_run_reaches_the_preference_target() {
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::Cancelled, None)],
+        None,
+        true,
+    );
+    seed_preference(&harness.store).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1, "one cancellation notification");
+    assert!(
+        texts[0].contains("The run was cancelled before it could finish."),
+        "{}",
+        texts[0]
+    );
+}
+
+#[tokio::test]
+async fn triggered_run_wait_timeout_reaches_the_preference_target() {
+    let harness =
+        build_triggered_harness(vec![scripted_state(TurnStatus::Running, None)], None, true);
+    seed_preference(&harness.store).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1, "one timeout notification");
+    assert!(
+        texts[0].contains("This is taking longer than expected"),
+        "{}",
+        texts[0]
     );
 }
 
