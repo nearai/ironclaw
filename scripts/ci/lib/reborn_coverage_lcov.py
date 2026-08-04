@@ -10,7 +10,14 @@
 #
 # Two entry points:
 #   load_exemptions(path) -> (exempt_modules, exempt_crates, exemptions)
-#   aggregate(lcov_path, exempt_modules, exempt_crates) -> (by_crate, total, hit)
+#   aggregate(lcov_path, exempt_modules, exempt_crates, repo_root=None)
+#       -> (by_crate, total, hit)
+#
+# `repo_root` names the tree whose crate inventory defines the accounting scope
+# (default: IRONCLAW_REPO_ROOT, else this file's own repository). Both consuming
+# scripts call the three-argument form; the fourth exists for the self-test's
+# fixture trees. See crate_pattern() for why the scope is inventory-derived
+# rather than a `crates/ironclaw_*` path shape (#7083).
 
 import os
 import pathlib
