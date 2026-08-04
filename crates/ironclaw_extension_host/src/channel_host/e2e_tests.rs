@@ -609,7 +609,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     // them: the preference-target codec — no storage-root override.
     assembly
         .register_extras(
-            "slack",
+            &ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
             ChannelExtras {
                 preference_target_codec: Some(Arc::new(SlackPreferenceTargetCodec)),
                 subject_route_resolver: None,

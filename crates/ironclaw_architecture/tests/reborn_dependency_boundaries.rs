@@ -3236,9 +3236,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_events",
                 "ironclaw_extensions",
                 // `ironclaw_filesystem` is permitted: the durable
-                // OpenAiCompatRefStore lives behind the
-                // `storage`/`libsql`/`postgres` features and persists opaque refs
-                // through the universal RootFilesystem port.
+                // OpenAiCompatRefStore persists opaque refs through the universal
+                // RootFilesystem port. It is unconditional — this crate declares no
+                // cargo features, and WS5 collapsed the LibSql/Postgres ref-store
+                // newtypes onto that one backend-neutral form.
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",
                 "ironclaw_llm",
@@ -3426,6 +3427,49 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // response/error DTO primitives used by product-auth HTTP routes;
             // secret storage and durable auth ownership stay behind
             // `ironclaw_auth`, not `ironclaw_secrets`.
+            //
+            // ✎ **Re-derived 2026-08-04 (WS5 `webui` row) against PROPOSAL
+            // §6.9.4.** The row asked for the derivation nobody had done. Result:
+            // **zero removals, nine additions**, all no-op ratchets (webui's ten
+            // normal workspace deps are `host_api`, `product_contracts`,
+            // `extension_contracts`, `extension_host`, `host_ingress`, `auth`,
+            // `attachments`, `common`, `product`, `reborn_openai_compat` — none of
+            // the nine appears in any dependency kind).
+            //
+            // What the derivation is *from*, since §6.9.4 carries no forbidden
+            // list of its own: §8.2's `product/` row ("**app ✗**", "product still
+            // ✗ host_runtime/dispatch/lanes"), §8.2's retained named rules
+            // ("concrete extension crates link only from the binary"), and
+            // `families/product.md`'s "never touches a lane crate / the extension
+            // registry or hosting crates". Additions, in that order:
+            // `ironclaw_reborn_composition` (§8.2 app ✗ — and the direction is
+            // backwards: this crate *receives* handles from composition; it is on
+            // 15 other rules and on every other products-layer rule but
+            // `ironclaw_product`'s), `ironclaw_wasm_limiter` (§8.2 ✗ lanes — the
+            // **only one of the nine no other gate covers**; zero rules named it
+            // workspace-wide, and the existing wasm_limiter gate checks its
+            // outbound deps, not its inbound edges), `ironclaw_slack_extension` +
+            // `ironclaw_telegram_extension` (concrete extension crates),
+            // `ironclaw_event_projections` + `ironclaw_event_streams` +
+            // `ironclaw_extension_support` + `ironclaw_first_party_extension_ports`
+            // + `ironclaw_storage` (parity with `ironclaw_reborn_openai_compat`,
+            // the sibling transport, whose list these five closed the gap to).
+            //
+            // Explicitly NOT added, because the charter sanctions them:
+            // `ironclaw_product` (§12.11 D-B, permanent edge — not a pending
+            // flip), `ironclaw_extension_host` (§6.9.4's 2026-08-02 pairing
+            // amendment; the pairing *service* core stays in the host by §6.8.2),
+            // `ironclaw_reborn_openai_compat`, `ironclaw_attachments`,
+            // `ironclaw_host_api`, `ironclaw_host_ingress`,
+            // `ironclaw_product_contracts`, `ironclaw_extension_contracts`,
+            // `ironclaw_auth`, `ironclaw_common`. Memory providers are covered by
+            // `only_the_sanctioned_residue_names_a_memory_provider`, deliberately.
+            //
+            // **Keep this rule normal-deps-only.** Four entries on the list below
+            // (`ironclaw_secrets`, `ironclaw_loop_host`, `ironclaw_threads`,
+            // `ironclaw_turns`) are live *dev*-dependencies of `ironclaw_webui`;
+            // tightening this rule to all dependency kinds would go red on four
+            // counts on the day it landed.
             crate_name: "ironclaw_webui",
             forbidden: vec![
                 "ironclaw_legacy",
@@ -3433,9 +3477,13 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_capabilities",
                 "ironclaw_conversations",
                 "ironclaw_engine",
+                "ironclaw_event_projections",
+                "ironclaw_event_streams",
                 "ironclaw_events",
+                "ironclaw_extension_support",
                 "ironclaw_extensions",
                 "ironclaw_filesystem",
+                "ironclaw_first_party_extension_ports",
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",
                 "ironclaw_llm",
@@ -3447,6 +3495,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_runner",
                 "ironclaw",
+                "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
@@ -3456,11 +3505,15 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
+                "ironclaw_slack_extension",
+                "ironclaw_storage",
+                "ironclaw_telegram_extension",
                 "ironclaw_threads",
                 "ironclaw_trust",
                 "ironclaw_tui",
                 "ironclaw_turns",
                 "ironclaw_wasm",
+                "ironclaw_wasm_limiter",
             ],
         },
         BoundaryRule {

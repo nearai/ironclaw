@@ -4749,7 +4749,6 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_product",
  "ironclaw_product_contracts",
- "ironclaw_reborn_openai_compat",
  "ironclaw_threads",
  "ironclaw_turns",
  "serde",

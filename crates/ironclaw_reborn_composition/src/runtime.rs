@@ -147,8 +147,9 @@ use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagement
 use ironclaw_extension_manager::admin_configuration::{
     ComposedAdminConfigurationService, ComposedExtensionAdminConfigurationResolver,
 };
+pub(crate) use ironclaw_product::blocked_auth_flow_canceller;
+pub use ironclaw_product::product_auth_challenge_provider;
 use ironclaw_product::projection::{RebornProjectionServices, build_reborn_projection_services};
-pub use ironclaw_product::{blocked_auth_flow_canceller, product_auth_challenge_provider};
 use ironclaw_product::{current_turn_gate_runs, first_turn_run_for_gate};
 use ironclaw_secrets::SecretStorePort;
 use ironclaw_skills::ScopedSkillManagementPort;
@@ -4089,7 +4090,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // `RebornRuntimeInput::with_budget_event_observer`.
     let budget_event_projection = Some({
         let observer = budget_event_observer.unwrap_or_else(|| {
-            Arc::new(crate::TracingBudgetEventObserver) as Arc<dyn crate::BudgetEventObserver>
+            Arc::new(crate::observability::budget_events::TracingBudgetEventObserver)
+                as Arc<dyn crate::BudgetEventObserver>
         });
         crate::observability::budget_events::BudgetEventProjection::spawn(
             broadcast_budget_event_sink.as_ref(),

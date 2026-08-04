@@ -866,7 +866,7 @@ pub(super) async fn build_backend_production(
         .filter_map(|manifest| {
             channel_extension_bindings
                 .iter()
-                .find(|binding| binding.extension_id == manifest.id.as_str())
+                .find(|binding| binding.extension_id == manifest.id)
                 .map(|binding| {
                     ironclaw_extension_host::DeploymentChannelBinding::new(
                         Arc::clone(manifest),

@@ -40,6 +40,7 @@ use ironclaw_extensions::{
     ExtensionInstallationError, ExtensionInstallationStorePort, ExtensionManifest,
     ExtensionPackage, ResolvedExtensionManifest,
 };
+use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_host_api::path::VirtualPath;
 use ironclaw_host_runtime::{ExtensionLaneToolBinder, ExtensionToolBindError};
 use ironclaw_resources::ResourceGovernor;
@@ -63,7 +64,7 @@ pub struct GenericExtensionHost {
 pub struct GenericExtensionHostParams {
     pub binder: ExtensionLaneToolBinder,
     pub native_factories: Vec<Arc<dyn NativeExtensionFactory>>,
-    pub channel_adapters: Vec<(String, Arc<dyn ChannelAdapter>)>,
+    pub channel_adapters: Vec<(ExtensionId, Arc<dyn ChannelAdapter>)>,
     pub installation_store: Arc<dyn ExtensionInstallationStorePort>,
     pub boot_installations: Vec<InstallationRecord>,
     pub governor: Arc<dyn ResourceGovernor>,
@@ -293,7 +294,7 @@ struct CompositionExtensionLoader {
     /// extensions whose TOOLS load via the runtime lanes (P4 ingress cutover).
     /// An extension without an entry binds the transitional bridge until its
     /// adapter lands.
-    channel_adapters: HashMap<String, Arc<dyn ChannelAdapter>>,
+    channel_adapters: HashMap<ExtensionId, Arc<dyn ChannelAdapter>>,
     governor: Arc<dyn ResourceGovernor>,
     installation_store: Arc<dyn ExtensionInstallationStorePort>,
 }
@@ -381,7 +382,7 @@ impl ExtensionLoader for CompositionExtensionLoader {
             // rule satisfied until the adapter lands.
             channel: declares_channel.then(|| {
                 self.channel_adapters
-                    .get(&ctx.extension_id)
+                    .get(&extension_id)
                     .cloned()
                     .unwrap_or_else(|| Arc::new(HostServedChannelBridge) as Arc<dyn ChannelAdapter>)
             }),

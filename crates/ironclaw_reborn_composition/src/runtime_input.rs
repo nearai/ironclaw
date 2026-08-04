@@ -73,8 +73,8 @@ impl Default for RebornRuntimeIdentity {
     }
 }
 
-pub const DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
-pub const DEFAULT_TURN_RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(200);
+pub(crate) const DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+pub(crate) const DEFAULT_TURN_RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Fire-time access request for a persisted trigger.
 ///
@@ -202,7 +202,7 @@ impl TriggerFireAccessPolicy {
     }
 }
 
-pub use ironclaw_operator::{RebornProviderFactory, ResolvedRebornLlm};
+pub(crate) use ironclaw_operator::ResolvedRebornLlm;
 
 /// Configuration for the turn-runner worker spawned by the runtime.
 #[derive(Debug, Clone)]

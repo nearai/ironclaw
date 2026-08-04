@@ -498,7 +498,11 @@ impl GenericChannelHostAssembly {
     /// Register one extension's vendor extras, then re-reconcile the
     /// extension against the current snapshot so the remaining extras apply
     /// to the next build.
-    pub async fn register_extras(&self, extension_id: &str, extras: ChannelExtras) {
+    pub async fn register_extras(
+        &self,
+        extension_id: &ironclaw_host_api::ids::ExtensionId,
+        extras: ChannelExtras,
+    ) {
         let ChannelExtras {
             preference_target_codec,
             subject_route_resolver,
@@ -506,7 +510,7 @@ impl GenericChannelHostAssembly {
         } = extras;
         if let Ok(mut stored) = self.extras.lock() {
             stored.insert(
-                extension_id.to_string(),
+                extension_id.as_str().to_string(),
                 StoredChannelExtras {
                     preference_target_codec,
                     subject_route_resolver,
@@ -515,7 +519,7 @@ impl GenericChannelHostAssembly {
             );
         }
         let mut reconciled = self.reconciled.lock().await;
-        reconciled.remove(extension_id);
+        reconciled.remove(extension_id.as_str());
         drop(reconciled);
         self.reconcile(self.deps.watch.current()).await;
     }

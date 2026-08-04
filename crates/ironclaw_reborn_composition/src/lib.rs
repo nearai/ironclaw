@@ -63,127 +63,110 @@ pub mod test_support;
 mod trigger_fire_access;
 mod trigger_poller_assembly;
 
+// The public re-export wall — a *documented* surface (PROPOSAL §6.10, CHECKLIST WS6
+// "`RebornRuntime` slimmed"). An entry earns its place only when the consumer cannot
+// reach the symbol at its owner: no dependency on that crate (the app tier has none by
+// design), or a private home module here. Anything importable from its owner must be.
+// `pinned by` = the test that fails if the entry goes, else the build that does. Gated by
+// `reborn_composition_boundaries.rs`: `..._surface_matches_snapshot` pins the set,
+// `..._entries_name_their_consumer` pins these annotations.
+// consumer: `ironclaw_conversations::inbound`, `tests/integration/support/triggered_submit.rs` · pinned by: `ironclaw_conversations/tests/inbound_contract.rs`
 pub use automation::conversation_turn_submitter::conversation_turn_submitter;
-pub use automation::trigger_poller::PostSubmitDeliveryHook;
+// consumer: every `build_*` caller in the app tier and the test tiers · pinned by: `composition/tests/service_factory.rs`
 pub use error::RebornBuildError;
+// consumer: `tests/integration/support/harness` recorder · pinned by: `tests/integration/support/harness/recorder.rs`
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;
+// consumer: root integration harness · pinned by: `tests/integration/extension_delivery.rs`
 #[cfg(feature = "test-support")]
 pub use factory::ChannelHostAssemblyTestWiring;
+// consumer: root integration harness · pinned by: `tests/integration/support/harness/mod.rs`
 #[cfg(feature = "test-support")]
 pub use factory::RebornApprovalTestParts;
+// consumer: `ironclaw_reborn_cli` onboard + runtime + status · pinned by: `ironclaw_reborn_cli/tests/smoke.rs`
 pub use factory::STANDALONE_SECRETS_MASTER_KEY_PATH;
-/// Crate-root alias for composition's own unit tests (the src `#[cfg(test)]`
-/// modules that build a production trust policy from the concrete inventory).
+/// Crate-root alias for composition's own `#[cfg(test)]` trust-policy builders.
 #[cfg(test)]
 pub(crate) use factory::builtin_first_party_trust_policy;
+// consumer: `ironclaw_reborn_cli` config/set + onboard + runtime · pinned by: `ironclaw_reborn_cli/tests/smoke.rs`
 pub use factory::open_standalone_secret_store;
-/// Production first-party trust-policy builder over the neutral injected bundle
-/// set. Public so integration tests (which convert the concrete first-party
-/// inventory via the dev-dependency) can build the same trust policy the
-/// production binary composes at build time.
+/// Production first-party trust-policy builder over the neutral injected bundle set,
+/// public so integration tests build the same policy the binary composes.
+// consumer: composition's own contract tests · pinned by: `composition/tests/support/first_party.rs`
 pub use factory::production_first_party_trust_policy;
+// consumer: `ironclaw_reborn_cli` onboard/master_key · pinned by: `ironclaw_reborn_cli` build (the outcome is the fn's return type; `factory` is private)
 pub use factory::{KeychainMasterKeyOutcome, provision_standalone_keychain_master_key};
+// consumer: `ironclaw_reborn_cli` status + runtime · pinned by: `ironclaw_reborn_cli` build
 pub use filesystem_assembly::standalone_db_path;
+// consumer: `ironclaw_reborn_cli` config/set · pinned by: `ironclaw_reborn_cli` build (the error is the store's; module is private)
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
+// consumer: `ironclaw_reborn_cli` serve/runtime/native_extensions, `harness/latency/runner` · pinned by: `composition/tests/admin_api_e2e.rs`
 pub use input::{
     ChannelExtensionBinding, OAuthClientConfig, RebornHostBindings, RebornRuntimeProcessBinding,
 };
-/// OAuth redirect-URI newtype re-exported for runtime input construction; the
-/// remaining product-auth contracts are named directly from `ironclaw_auth`.
-pub use ironclaw_auth::OAuthRedirectUri;
-#[cfg(any(test, feature = "test-support"))]
-pub use ironclaw_auth::{
-    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId, CredentialAccountLabel,
-    CredentialAccountStatus, CredentialOwnership, Timestamp,
-};
-pub use ironclaw_auth::{CredentialAccount, CredentialAccountSelectionRequest};
-pub use ironclaw_host_api::{
-    action::{NetworkScheme, NetworkTargetPattern},
-    capability::{RuntimeCredentialRequirement, RuntimeCredentialRequirementSource},
-    dispatch::RuntimeDispatchErrorKind,
-    error::HostApiError,
-    http::RuntimeCredentialTarget,
-    ids::{CapabilityId, SecretHandle},
-};
-pub use ironclaw_host_api::{
-    capability::RuntimeCredentialAccountSetup,
-    decision::RuntimeCredentialAuthRequirement,
-    ids::{ExtensionId, VendorId},
-};
-pub use ironclaw_host_runtime::{
-    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
-    FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
-};
-/// The channel-adapter contract the assembling binary implements is reached at
-/// its owner, `ironclaw_extension_contracts::channel_adapter` — WS1.4 deleted
-/// the re-export chain that gave it a second import path through here.
-pub use ironclaw_product::RebornChannelConnectStrategy;
-pub use ironclaw_product::{
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleSearchExtensionSummary,
-};
-pub use ironclaw_product_contracts::account_setup::{
-    ChannelConnectionNoticePolicy, ExtensionAccountSetupDescriptor,
-};
-pub use ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement;
-pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
+// WS1.4 deleted the `extension_contracts::channel_adapter` second import path; WS6 did
+// the same for the `auth`/`host_api`/`host_runtime`/`product_contracts`/`failure_lane`/
+// `runtime_policy`/`triggers`/`provider_identity` pass-throughs.
+// consumer: `ironclaw_reborn_cli` extension command (no `ironclaw_product` dep) · pinned by: `ironclaw_reborn_cli` build
+pub use ironclaw_product::LifecycleProductResponse;
+// consumer: `ironclaw_reborn_cli` runtime (no `ironclaw_runner` dep) · pinned by: `ironclaw_reborn_cli` build
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
-pub use ironclaw_runtime_policy::{
-    ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
-};
+// consumer: `ironclaw_reborn_cli` skills command (no `ironclaw_skills` dep) · pinned by: `ironclaw_reborn_cli` build
 pub use ironclaw_skills::{
-    ManagedSkillSource as RebornSkillSource, SkillSummary as RebornSkillSummary,
-    skill_summary_json as reborn_skill_summary_json,
+    SkillSummary as RebornSkillSummary, skill_summary_json as reborn_skill_summary_json,
 };
-pub use ironclaw_triggers::TriggerId;
+// consumer: `ironclaw_reborn_cli` runtime (no `ironclaw_turns` dep) · pinned by: `ironclaw_reborn_cli` build
 pub use ironclaw_turns::TurnStatus;
+// consumer: `ironclaw_reborn_cli` serve wiring · pinned by: `ironclaw_reborn_cli` build
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
+// consumer: `ironclaw_reborn_cli` runtime · pinned by: `composition/tests/memory_mem0_swap.rs`
 pub use memory_binding::{memory_binding_diagnostics, resolve_memory_binding_policy};
+// consumer: `ironclaw_reborn_cli` runtime, `tests/integration/group_memory` · pinned by: `composition/tests/memory_mem0_swap.rs` (`MemoryLifecycleConsumers` is the fn's return type)
 pub use memory_provider_factory::{
     Mem0ConnectionConfig, MemoryLifecycleConsumers, MemoryProviderDeps, ResolvedMemoryProvider,
-    create_provider, memory_lifecycle_consumers, resolve_memory_provider,
+    memory_lifecycle_consumers, resolve_memory_provider,
 };
+// consumer: composition's operator LLM-key wiring test · pinned by: `composition/tests/operator_llm_key_store_wiring.rs`
 pub use operator_secret_store::RuntimeOperatorSecretValueStore;
-// Re-exported for the host-owned `ironclaw_webui::webui_v2_app`
-// (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped
-// verified-bearer evidence for protected OpenAI-compatible mounts. Ingress must
-// not depend on `ironclaw_product` directly (architecture boundary), so
-// it reaches this helper through composition's facade.
+// consumer: `ironclaw_reborn_cli` serve + runtime, `harness/latency/runner`, root QA suites · pinned by: `composition/tests/profile_acceptance.rs`
+// (`RebornRuntimeProfileError` left: `deployment` is a `pub mod`, so it stays nameable there.)
 pub use deployment::{
-    RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
+    RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
     hosted_single_tenant_volume_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options, standalone_runtime_policy,
     standalone_unrestricted_runtime_policy,
 };
+// consumer: `ironclaw_product/tests/support/planned_agent_loop.rs`, root integration harness · pinned by: `composition/tests/budget_e2e.rs`
 #[cfg(any(test, feature = "test-support"))]
-pub use deployment::{local_filesystem_build_input, local_filesystem_build_input_with_profile};
-pub use ironclaw_extension_host::provider_identity::ProviderIdentityActorResolver;
-pub use ironclaw_host_api::user_identity::{
-    RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
-    RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
-    RebornUserIdentityBindingStore, RebornUserIdentityLookup, RebornUserIdentityLookupError,
-    installation_scoped_provider_user_id,
-};
+pub use deployment::local_filesystem_build_input;
+// consumer: `ironclaw_reborn_cli` serve wiring · pinned by: `composition/tests/webui_v2_serve.rs`
 pub use ironhub_link_serve::{
     IRONHUB_REGISTER_PATH, IronhubRegisterRouteState, ironhub_register_route_mount,
 };
+// consumer: root integration harness group wiring · pinned by: `tests/integration/support/group.rs`
 pub use observability::budget::build_default_budget_accountant;
-pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
+// consumer: composition budget contract tests · pinned by: `composition/tests/budget_e2e.rs`
+pub use observability::budget_events::BudgetEventObserver;
+// consumer: composition hook-projection tests · pinned by: `composition/tests/third_party_hook_projection.rs` (the factory type is the builder fn's return type; `observability` is private)
 pub use observability::hooks::{
-    HOOKS_ENABLED_ENV, HOOKS_THIRD_PARTY_ENABLED_ENV, HookDispatcherBuilderFactory,
-    HookProjectionRegistry, HooksActivationConfig, MAX_INSTALLED_EXTENSIONS_CONSIDERED,
-    MAX_TOTAL_HOOKS_PER_TENANT, ThirdPartyDiscoveryInput, build_hook_dispatcher_builder_factory,
-    build_hook_dispatcher_builder_factory_for_tenant, build_hook_projection_registry,
-    tenant_extension_root,
+    HookDispatcherBuilderFactory, HookProjectionRegistry, HooksActivationConfig,
+    MAX_INSTALLED_EXTENSIONS_CONSIDERED, ThirdPartyDiscoveryInput,
+    build_hook_dispatcher_builder_factory, build_hook_projection_registry,
 };
+// consumer: root integration harness hook suites · pinned by: `tests/integration/hooks.rs`
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
+// consumer: `harness/latency/runner`, composition substrate suites · pinned by: `composition/tests/libsql_substrate.rs`
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
+// consumer: `ironclaw_reborn_cli` serve readiness reporting · pinned by: `composition/tests/profile_acceptance.rs`
 pub use readiness::{
     RebornReadiness, RebornReadinessDiagnostic, RebornReadinessDiagnosticComponent,
     RebornReadinessDiagnosticReason, RebornReadinessDiagnosticStatus, RebornReadinessState,
     RebornServiceReadiness, RebornWorkerReadiness,
 };
+// consumer: `ironclaw_product` test support + root integration harness · pinned by: `composition/tests/product_live_adapters.rs`
+// Reached through the `test-support`-featured dev-dependency in `ironclaw_product/Cargo.toml`.
+// CHECKLIST WS6 called this block dead and asked for its deletion; it is NOT — deleting
+// it strands a sibling crate's test support. See the row's recorded refutation.
 #[cfg(any(test, feature = "test-support"))]
 pub use root::product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
@@ -191,23 +174,29 @@ pub use root::product_live_adapters::{
     ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig,
     capability_allowlist, visible_capability_request_for_run,
 };
+// consumer: `ironclaw_reborn_cli` serve + runtime, `harness/latency/runner`, root QA suites · pinned by: `composition/tests/admin_api_e2e.rs` (the parse error is `FromStr::Err`; `root` is private)
 pub use root::profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
+// consumer: composition + root QA turn-drive suites · pinned by: `composition/tests/runtime.rs`
 #[cfg(any(test, feature = "test-support"))]
 pub use runtime::RebornTurnDriveOutcome;
+// consumer: `ironclaw_reborn_cli` (extension/ironhub/serve/runtime) · pinned by: `composition/tests/runtime.rs`
+// Also `harness/latency/runner`, `ironclaw_product` test support, root integration + QA suites.
+// The `RebornSkill*` types are `RebornRuntime`'s public skill signatures; `runtime` is private.
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
     RebornSkillActivationMode, RebornSkillActivationSource, RebornSkillAsset, RebornSkillBundle,
-    RebornSkillExecutionPlan, RebornSkillExecutionResult, blocked_auth_flow_canceller,
-    build_reborn_runtime, build_runtime, product_auth_challenge_provider,
+    RebornSkillExecutionPlan, RebornSkillExecutionResult, build_reborn_runtime, build_runtime,
+    product_auth_challenge_provider,
 };
+// consumer: `ironclaw_reborn_cli` runtime input construction · pinned by: `composition/tests/admin_api_e2e.rs`
+// Also `harness/latency/runner`, `ironclaw_product` test support, root integration + QA suites.
+// `TriggerFireAccess*` is `TriggerFireAccessPolicy`'s vocabulary; `runtime_input` is private.
 pub use runtime_input::{
-    DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL,
     KeepaliveSweepSettings, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
     TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
     TriggerFireAccessError, TriggerFireAccessGrant, TriggerFireAccessPolicy, TriggerPollerSettings,
     TurnRunnerSettings,
 };
-pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
 
 /// Re-exported IronHub command vocabulary for the `ironclaw` binary's
 /// `ironhub` subcommand and serve wiring. This facade keeps runtime input
@@ -241,9 +230,10 @@ pub mod host_api {
 /// `ironclaw_reborn_identity` directly. The concrete filesystem-backed store
 /// stays private to this composition layer (composition CLAUDE.md: "keep
 /// lower substrate handles private").
+// consumer: `ironclaw_reborn_cli` user_directory + webui_auth (no `ironclaw_reborn_identity` dep) · pinned by: `composition/tests/production_runtime_identity.rs`
 pub use ironclaw_reborn_identity::{
-    ExternalSubjectId, IdentityKeyError, ProviderInstanceId, ProviderKind, RebornIdentityError,
-    RebornIdentityResolver, ResolveExternalIdentity, SurfaceKind,
+    ExternalSubjectId, ProviderKind, RebornIdentityError, RebornIdentityResolver,
+    ResolveExternalIdentity, SurfaceKind,
 };
 
 /// Test-support: build a standalone canonical Reborn identity resolver on an

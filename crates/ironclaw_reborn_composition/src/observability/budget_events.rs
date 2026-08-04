@@ -33,7 +33,7 @@ pub trait BudgetEventObserver: Send + Sync + std::fmt::Debug + 'static {
 /// (e.g. tracing-only deploys, standalone binaries that just want the
 /// observability without an SSE bridge).
 #[derive(Debug, Default, Clone, Copy)]
-pub struct TracingBudgetEventObserver;
+pub(crate) struct TracingBudgetEventObserver;
 
 impl BudgetEventObserver for TracingBudgetEventObserver {
     fn observe(&self, event: BudgetEvent) {
