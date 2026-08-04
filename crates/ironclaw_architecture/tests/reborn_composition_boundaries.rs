@@ -166,25 +166,8 @@ fn composition_root_embeds_no_prompt_content() {
     // commit earlier, so the directory itself is pinned rather than only its
     // `include_str!` call sites. Crate guides (`AGENTS.md` / `CLAUDE.md`) are
     // documentation, not prompt content.
-    let shipped_markdown: Vec<String> = markdown_assets(&crate_root)
+    let shipped_markdown: Vec<String> = shipped_non_guidance_markdown(&crate_root)
         .into_iter()
-        .filter(|path| {
-            !path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    matches!(
-                        name.to_ascii_uppercase().as_str(),
-                        // `CONTRACT.MD` belongs here for the same reason as the
-                        // other three: the repo already ships it as crate-local
-                        // guidance (`ironclaw_reborn_identity`, `ironclaw_trust`)
-                        // and CLAUDE.md's module-spec table names it. Without it,
-                        // a composition `CONTRACT.md` would be reported as prompt
-                        // content and send the author to the wrong fix.
-                        "AGENTS.MD" | "CLAUDE.MD" | "README.MD" | "CONTRACT.MD"
-                    )
-                })
-        })
         .map(|path| path.display().to_string())
         .collect();
     assert!(
@@ -463,6 +446,36 @@ fn is_test_module_file(path: &Path) -> bool {
         || path
             .components()
             .any(|component| component.as_os_str() == "tests")
+}
+
+/// Is this file crate guidance rather than a shipped asset?
+///
+/// `CONTRACT.MD` belongs here for the same reason as the other three: the repo
+/// already ships it as crate-local guidance (`ironclaw_reborn_identity`,
+/// `ironclaw_trust`) and CLAUDE.md's module-spec table names it. Without it, a
+/// composition `CONTRACT.md` would be reported as prompt content and send the
+/// author to the wrong fix.
+fn is_crate_guidance(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            matches!(
+                name.to_ascii_uppercase().as_str(),
+                "AGENTS.MD" | "CLAUDE.MD" | "README.MD" | "CONTRACT.MD"
+            )
+        })
+}
+
+/// The markdown a crate *ships* — every `.md` under it that is not crate
+/// guidance.
+///
+/// The gate and its test both go through this, so a change to the guidance
+/// allowlist cannot pass because the test carries its own stale copy of it.
+fn shipped_non_guidance_markdown(dir: &Path) -> Vec<PathBuf> {
+    markdown_assets(dir)
+        .into_iter()
+        .filter(|path| !is_crate_guidance(path))
+        .collect()
 }
 
 /// Refuse a symlink handed in as the *root* of either walk.
@@ -897,21 +910,35 @@ mod markdown_include_scan_tests {
              (config-as-data is squarely composition's charter)"
         );
 
-        // The caller's guidance filter — kept in step with the gate above.
-        let shipped: Vec<&String> = found
-            .iter()
-            .filter(|name| {
-                !matches!(
-                    name.to_ascii_uppercase().as_str(),
-                    "AGENTS.MD" | "CLAUDE.MD" | "README.MD" | "CONTRACT.MD"
-                )
+        // Drives the **production** filter, not a copy of it. A copied
+        // allowlist would keep returning `seed.MD` even if the real gate
+        // started dropping `CONTRACT.MD` — the gate would go quiet and this
+        // test would not notice ("test through the caller").
+        let mut shipped: Vec<String> = super::shipped_non_guidance_markdown(root.path())
+            .into_iter()
+            .map(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("utf-8 file name")
+                    .to_string()
             })
             .collect();
+        shipped.sort();
         assert_eq!(
             shipped,
             vec!["seed.MD"],
             "only the non-guidance asset may survive the filter, and `.MD` must survive it"
         );
+
+        // Each guidance name individually, so dropping one from the allowlist
+        // fails here rather than only when someone adds that file to the
+        // composition crate.
+        for name in ["AGENTS.md", "CLAUDE.md", "README.md", "CONTRACT.md"] {
+            assert!(
+                super::is_crate_guidance(std::path::Path::new(name)),
+                "{name} must be treated as crate guidance, not as a shipped asset"
+            );
+        }
     }
 
     /// A symlinked subtree used to be stepped over silently by both walks,

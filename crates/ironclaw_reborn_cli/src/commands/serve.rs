@@ -911,10 +911,18 @@ fn reject_retired_config_sections(
 ) -> anyhow::Result<()> {
     config_file.retired_section_migration(config_path)?;
     for notice in config_file.retired_section_notices(config_path) {
-        // Same target as every other warn on this serve path: announcing an
-        // inert retired section is pointless if an operator filtering on the
-        // documented startup target cannot see it.
-        tracing::warn!(target = "ironclaw::reborn::cli::serve", "{notice}");
+        // `target:`, not `target =`. The `=` form records a *field* named
+        // `target` and leaves the event's metadata target as the module path,
+        // so a subscriber filtering `ironclaw::reborn::cli::serve` would never
+        // see this notice — which is the whole point of emitting it rather
+        // than silently ignoring an inert retired section. Measured with a
+        // capturing subscriber, not assumed, and pinned by
+        // `retired_section_notice_is_emitted_on_the_serve_target`.
+        //
+        // The three sibling warns on this path still use the `=` form and are
+        // mis-targeted for the same reason. That is pre-existing and repo-wide
+        // (121 sites), so it is filed rather than fixed under a consolidation.
+        tracing::warn!(target: "ironclaw::reborn::cli::serve", "{notice}");
     }
     Ok(())
 }
@@ -1440,6 +1448,61 @@ slack_user_id = "U123"
             config_file.retired_section_notices(&config_path).len(),
             1,
             "an inert retired section must still announce itself"
+        );
+    }
+
+    /// The notice must reach a subscriber filtering the documented serve
+    /// target. Asserts the emitted event's **metadata target**, which is the
+    /// only thing a `RUST_LOG=ironclaw::reborn::cli::serve=warn` filter reads.
+    ///
+    /// This exists because `tracing::warn!(target = "…")` — the form three
+    /// sibling warns on this path still use — does *not* set the metadata
+    /// target. It records a field named `target` and leaves the metadata
+    /// target as the module path, so the notice is invisible to exactly the
+    /// filter it was written for. Measured, not assumed: with `target =` this
+    /// test observes `ironclaw::commands::serve`; with `target:` it observes
+    /// the serve target.
+    #[test]
+    fn retired_section_notice_is_emitted_on_the_serve_target() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+
+        #[derive(Default, Clone)]
+        struct CaptureTargets(Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> Layer<S> for CaptureTargets {
+            fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+                self.0
+                    .lock()
+                    .expect("capture lock")
+                    .push(event.metadata().target().to_string());
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_path = temp.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "api_version = \"ironclaw.runtime/v1\"\n\n[telegram]\nenabled = true\n",
+        )
+        .expect("write config");
+        let config_file = ironclaw_reborn_config::RebornConfigFile::load(&config_path)
+            .expect("config file loads")
+            .expect("config exists");
+
+        let captured = CaptureTargets::default();
+        let subscriber = tracing_subscriber::registry::Registry::default().with(captured.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            reject_retired_config_sections(&config_file, &config_path)
+                .expect("an inert retired section must not block startup");
+        });
+
+        let targets = captured.0.lock().expect("capture lock").clone();
+        assert!(
+            targets
+                .iter()
+                .any(|target| target == "ironclaw::reborn::cli::serve"),
+            "the retired-section notice must be emitted on the serve target so an \
+             operator filtering it sees the announcement; observed targets: {targets:?}"
         );
     }
 

@@ -54,7 +54,12 @@ fn charter_assignments() -> BTreeMap<String, Vec<String>> {
         .expect("CLAUDE.md must contain a '## Sub-owner map' section");
     // Stop at the next top-level heading so neighbouring tables are not read.
     let section = section.split("\n## ").next().unwrap_or(section);
+    parse_sub_owner_table(section)
+}
 
+/// The table parser, split out from the file read so a fixture can exercise
+/// separator shapes the checked-in `CLAUDE.md` does not currently use.
+fn parse_sub_owner_table(section: &str) -> BTreeMap<String, Vec<String>> {
     let mut assignments: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut saw_row = false;
     for line in section.lines() {
@@ -151,4 +156,53 @@ fn every_source_file_has_exactly_one_sub_owner() {
         duplicated.len(),
         duplicated.join("\n")
     );
+}
+
+/// An **aligned** separator row (`|:---|`) must not parse as data.
+///
+/// The regression this pins: the separator was matched with
+/// `cells[0].starts_with("---")`, which sees `:---` and lets the row through.
+/// `:---` then becomes both a sub-owner and an assigned path, and — worse —
+/// `saw_row` goes true, so the zero-rows shape guard stays quiet and the gate
+/// reports `:---` as a stale entry instead of diagnosing anything real.
+///
+/// The checked-in `CLAUDE.md` uses `|---|`, so without this fixture a
+/// reversion of the `trim_matches(':')` fix would still pass.
+#[test]
+fn an_aligned_separator_row_is_not_parsed_as_data() {
+    let unaligned = "\n\
+        | Sub-owner | Charter | Never | Files |\n\
+        |---|---|---|---|\n\
+        | `providers` | impls | contracts | `openai.rs` |\n";
+    let aligned = "\n\
+        | Sub-owner | Charter | Never | Files |\n\
+        |:---|:---|:---|:---|\n\
+        | `providers` | impls | contracts | `openai.rs` |\n";
+    let centred = "\n\
+        | Sub-owner | Charter | Never | Files |\n\
+        |:---:|:---:|:---:|:---:|\n\
+        | `providers` | impls | contracts | `openai.rs` |\n";
+
+    for (label, table) in [
+        ("unaligned", unaligned),
+        ("left-aligned", aligned),
+        ("centred", centred),
+    ] {
+        let parsed = parse_sub_owner_table(table);
+        assert_eq!(
+            parsed.keys().collect::<Vec<_>>(),
+            vec!["openai.rs"],
+            "{label}: only the data row may be parsed; a separator must never \
+             contribute a path (got {parsed:?})"
+        );
+        assert_eq!(
+            parsed.get("openai.rs").map(Vec::as_slice),
+            Some(["providers".to_string()].as_slice()),
+            "{label}: the owner must come from the data row, not the separator"
+        );
+        assert!(
+            !parsed.keys().any(|key| key.contains("---")),
+            "{label}: a separator cell leaked in as an assigned path: {parsed:?}"
+        );
+    }
 }
