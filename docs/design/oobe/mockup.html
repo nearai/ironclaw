@@ -169,7 +169,7 @@ h1,h2,h3,p{margin:0}
 .connclose:hover{background:var(--v2-surface-muted);color:var(--v2-text-strong)}
 .connclose svg{width:14px;height:14px}
 /* composer pill shown when the connect panel is dismissed */
-.connpill{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 5px 0 10px;margin-right:6px;border-radius:999px;border:1px solid color-mix(in srgb,var(--v2-accent) 32%,var(--v2-panel-border));background:var(--v2-accent-soft);color:var(--v2-accent-text);font:inherit;font-size:12.5px;font-weight:560;cursor:pointer;white-space:nowrap}
+.connpill{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 5px 0 10px;margin-left:8px;border-radius:999px;border:1px solid color-mix(in srgb,var(--v2-accent) 32%,var(--v2-panel-border));background:var(--v2-accent-soft);color:var(--v2-accent-text);font:inherit;font-size:12.5px;font-weight:560;cursor:pointer;white-space:nowrap}
 .connpill:hover{border-color:color-mix(in srgb,var(--v2-accent) 52%,var(--v2-panel-border))}
 .connpill svg{width:14px;height:14px}
 .connpill .px{display:inline-grid;place-items:center;width:19px;height:19px;border-radius:999px;color:var(--v2-accent-text);opacity:.7}
@@ -491,7 +491,6 @@ h1,h2,h3,p{margin:0}
             <textarea class="field" id="composerField" rows="1" placeholder="Ask me anything, or tell me what to take off your plate…"></textarea>
           </div>
           <div class="actions">
-            <button class="connpill" id="connPill" type="button" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg><span class="pt">Connect your tools</span><span class="px" id="connPillX" role="button" aria-label="Dismiss"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span></button>
             <div class="modewrap">
               <button class="modebtn" id="modeBtn" type="button" aria-expanded="false"><span class="dot"></span><span id="modeLabel">Suggest</span><svg class="mode-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></button>
               <div class="modemenu" id="modeMenu" hidden>
@@ -501,6 +500,7 @@ h1,h2,h3,p{margin:0}
                 <button class="modeopt" type="button" data-mode="Bypass"><span class="mo-t">Bypass</span><span class="mo-d">Full automation — act without approvals. Use with care.</span></button>
               </div>
             </div>
+            <button class="connpill" id="connPill" type="button" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg><span class="pt">Connect your tools</span><span class="px" id="connPillX" role="button" aria-label="Dismiss"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span></button>
             <div class="rightcluster">
               <button class="iconbtn" title="Dictate" aria-label="Dictate"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg></button>
               <button class="iconbtn" title="Attach" aria-label="Attach"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v16M4 12h16"/></svg></button>
