@@ -1780,3 +1780,273 @@ owner = "@nearai/runtime"
 reason = "Composition wiring for the requester-scoped recipe resolver; runs only in a fully composed runtime, which the integration lane does not build."
 issue = "https://github.com/nearai/ironclaw/issues/7069"
 review_after = "2026-11-30"
+
+# ---------------------------------------------------------------------------
+# WS6 traces contribution.rs split (PR #7139, slice #7124). The 17,470-line
+# `contribution.rs` was split into chartered `contribution/` modules with a
+# 501 -> 501 public-item roster and 216 -> 216 tests — a verbatim intra-crate
+# relocation, no behavior change. The changed-line gate re-attributes every
+# moved line as new-and-uncovered; the SAME merge-queue run that failed this
+# gate PASSED ironclaw_reborn_traces' per-crate covered-line floor, which is
+# the direct proof the split lost no real coverage (a genuine loss of 1,284
+# covered lines would have failed that floor first). Same class as the WS1.1
+# entry above; tracked as the gate-vs-restructure collision in #6963. The 27
+# genuinely-new uncovered lines in this PR's other slices are deliberately
+# NOT exempted and ride under the aggregate floor on their own.
+
+[[exemption]]
+path = "crates/ironclaw_reborn_traces/src/contribution/canonical.rs"
+lines = [
+  150, 151, 152, 202, 203, 206, 207, 208, 209, 211, 216, 217,
+  218, 219, 232, 237, 238, 239, 259, 276, 277, 278, 279, 280,
+  281, 282, 283, 295, 296, 297, 298,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_reborn_traces per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_traces/src/contribution/capture.rs"
+lines = [
+  102, 123, 126, 129, 131, 229, 230, 231, 233, 234, 235, 236,
+  237, 238, 239, 240, 241, 242, 243, 244, 245, 285, 286, 287,
+  288, 289, 290, 291, 292, 293, 294, 296, 297, 298, 299, 305,
+  306, 307, 308, 309, 310, 311, 313, 314, 315, 319, 320, 321,
+  323, 324, 329, 330, 331, 332, 333, 334, 335, 336, 337, 338,
+  339, 340, 413, 416, 417, 418, 419, 420, 421, 424, 425, 426,
+  429, 430, 431, 432, 433, 434, 435, 436, 437, 438, 439, 441,
+  442, 443, 444, 445, 446, 447, 448, 449, 450, 451, 466, 469,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_reborn_traces per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_traces/src/contribution/classification.rs"
+lines = [
+  41, 59, 60, 61, 62, 64, 65, 66, 67, 68, 79, 108,
+  109, 110, 111, 112, 113, 114, 118, 119, 120, 121, 122, 123,
+  124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135,
+  136, 137, 138, 184, 189, 210, 211, 226, 228, 236, 237, 238,
+  239, 240, 242, 243, 244, 245, 248, 250, 262, 263, 264, 285,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_reborn_traces per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_traces/src/contribution/credit.rs"
+lines = [
+  110, 136, 140, 145, 192, 195, 196, 197, 198, 201,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_reborn_traces per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_traces/src/contribution/envelope.rs"
+lines = [
+  458, 459, 460, 461, 462, 463, 464, 465, 466, 467, 468,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_reborn_traces per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_traces/src/contribution/maintenance.rs"
+lines = [
+  67, 89, 90, 91, 94, 97, 115, 120, 121, 122, 125, 140,
+  141, 142, 143, 152, 153, 154, 155, 188, 189, 248, 303, 304,
+  317, 318, 319, 322, 324, 325, 326, 329, 434, 478, 494, 496,
+  528, 548, 551, 553, 642, 644, 645, 647, 648, 652, 661, 662,
+  672, 674, 675, 677, 678, 713, 714, 715, 718, 741, 742, 744,
+  779, 790, 810, 811, 812, 813, 815, 816, 817, 818, 819, 820,
+  821, 850, 851, 853, 856, 876, 877, 879, 882, 885, 886, 887,
+  888, 889, 890, 891, 894, 895, 896, 897, 898, 899, 900, 924,
+  925, 926, 929, 931, 932, 933, 935, 938, 939, 940, 941, 942,
+  945, 946, 947, 948, 951, 963, 965, 967, 971, 972, 974, 976,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_reborn_traces per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_traces/src/contribution/notice.rs"
+lines = [
+  13, 26, 27, 50, 51, 52, 53, 54, 55, 56, 57, 58,
+  59, 60, 61, 62, 63, 64, 65, 66, 67, 96, 107, 123,
+  155, 184, 217, 393, 394, 395, 398, 400, 401, 402, 405, 451,
+  452, 453, 454, 549, 565,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_reborn_traces per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_traces/src/contribution/policy.rs"
+lines = [
+  80, 81, 82, 83, 85, 106, 107, 108, 109, 111, 112, 113,
+  114, 115, 116, 211, 212, 213, 214, 215, 216, 217, 242, 243,
+  244, 245, 247, 248, 249, 285, 286, 287,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_reborn_traces per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_traces/src/contribution/privacy.rs"
+lines = [
+  60, 61, 73, 74, 129, 167, 168, 169, 179, 180, 181, 182,
+  184, 185, 196, 197, 198, 199, 200, 201, 202, 203, 211, 212,
+  213, 214, 217, 218, 219, 220, 284, 286, 316, 317, 318, 319,
+  321, 322, 323, 324, 369, 370, 371, 374, 381, 382, 384, 385,
+  386, 387, 388, 389, 390, 391, 392, 393, 399, 400, 401, 403,
+  405, 406, 439, 440, 441, 442, 443, 455, 456, 457, 458, 460,
+  461, 462, 463, 464, 465, 466, 467, 468, 469, 470, 471, 472,
+  473, 474, 475, 476, 477, 478, 479, 480, 481, 482, 483, 484,
+  487, 488, 489, 490, 491, 544, 583, 585, 586, 587, 588, 589,
+  590, 591, 592, 594, 595, 596, 597, 598, 599, 601, 630, 631,
+  632, 633, 634, 665, 666, 667, 668, 669, 670, 671, 834, 835,
+  836, 837, 865, 866, 867, 876, 921, 934, 936, 954, 955,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_reborn_traces per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_traces/src/contribution/queue.rs"
+lines = [
+  149, 150, 276, 277, 278, 279, 280, 281, 411, 412, 413, 475,
+  506, 507, 508, 509, 510, 541, 549, 566, 567, 704, 705, 706,
+  714, 715, 716, 717, 720, 721, 722, 723, 725, 837, 852, 857,
+  858, 859, 860, 861, 862, 863, 864, 865, 866, 867, 870, 871,
+  872, 873, 874, 875, 877, 878, 879, 880, 881, 882, 891, 892,
+  893, 894, 895, 896, 936, 1081, 1086, 1097, 1098, 1099, 1102, 1132,
+  1135, 1185, 1186, 1188,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_reborn_traces per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_traces/src/contribution/remote/account.rs"
+lines = [
+  94, 95, 147, 148, 149, 150, 151, 154, 155, 156, 157, 158,
+  159, 160, 161, 173, 174, 175, 176, 179, 180, 181, 182, 183,
+  184, 185, 217, 225, 226, 227, 234, 235, 236, 237, 248, 251,
+  252, 268, 269, 271, 272, 273, 276, 277, 281, 282, 283, 284,
+  289, 290, 301, 302, 303, 304, 361, 362, 363, 364, 365, 366,
+  367, 368, 369, 370, 371, 372, 373, 374, 375, 393, 394, 395,
+  396, 397, 398, 399, 400, 401, 402, 403, 404, 405, 417, 423,
+  459, 460, 461, 462, 482,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_reborn_traces per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_traces/src/contribution/remote/claim.rs"
+lines = [
+  226, 227, 228, 229, 230, 231, 232, 233, 275, 285, 286, 287,
+  288, 289, 290, 292, 293, 294, 295, 296, 298, 299, 300, 301,
+  302, 303, 305, 306, 307, 309, 350, 354, 355, 356, 357, 358,
+  359, 360, 361, 362, 371, 373, 437, 446, 453, 561, 565, 592,
+  593, 594, 595, 602, 603, 604, 611, 612, 613, 620, 621, 624,
+  625, 681, 682, 684, 686, 687, 689, 705, 706, 710, 713, 716,
+  717, 718, 721, 845, 848, 852, 864, 886, 894, 924, 925, 953,
+  954, 955, 958, 969, 970, 973, 974, 993, 994, 995, 997, 1010,
+  1011, 1014, 1030, 1031, 1032, 1034, 1045, 1046, 1047, 1049, 1058, 1059,
+  1065, 1066, 1067, 1069, 1077, 1078, 1079, 1080, 1081, 1082, 1083, 1084,
+  1088, 1089, 1090, 1091, 1092, 1093, 1094, 1097, 1099, 1100, 1126, 1131,
+  1133, 1180, 1181, 1182, 1188, 1204, 1205, 1209, 1218, 1248, 1249, 1250,
+  1251, 1253, 1254, 1255, 1256, 1257, 1258, 1259, 1267, 1268, 1269, 1270,
+  1280,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_reborn_traces per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_traces/src/contribution/remote/client.rs"
+lines = [
+  75, 76, 78, 82, 83, 85, 88, 89, 91, 108, 109,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_reborn_traces per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_traces/src/contribution/remote/profile.rs"
+lines = [
+  54, 90, 91, 92, 93, 94, 95, 96, 103, 104, 105, 106,
+  107, 109, 110, 111, 112, 113, 114, 115, 116, 131, 132, 133,
+  194, 195, 196, 197, 198, 199, 200, 201, 207, 208, 209, 210,
+  211, 212, 213, 215, 216, 217, 218, 219, 220, 221, 222, 223,
+  224, 241, 250, 251, 252, 253, 254, 255, 287, 288, 289, 290,
+  291, 292, 293, 295, 296, 297, 298, 299, 300, 301, 302, 303,
+  309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 319, 320,
+  321, 322, 336, 337, 347, 348, 350, 372, 376, 384, 385, 386,
+  463, 464, 493, 508, 509, 511, 514, 522, 523, 535, 536, 538,
+  540,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_reborn_traces per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_traces/src/contribution/submission.rs"
+lines = [
+  13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+  98, 99, 100, 101, 102, 106, 107, 108, 109, 110, 111, 112,
+  113, 114, 127, 197, 198, 199, 234, 235, 261, 268, 269, 272,
+  275, 284, 286, 287, 290, 291, 292, 293, 294, 295, 296, 297,
+  298, 299, 358, 373, 374, 387, 388, 389, 390, 391, 392, 393,
+  394, 395, 397, 398, 399, 400, 406, 407, 408, 409, 411, 413,
+  414, 417, 418, 419, 420, 421, 422, 423, 424, 426, 427, 428,
+  430, 431, 432, 433, 434, 435, 436, 437, 438, 439, 440, 441,
+  442, 459, 462, 490, 491, 495, 502, 503, 504, 505, 508, 509,
+  510, 516, 523, 524, 525, 526, 527, 528, 529, 530, 531, 532,
+  533, 534, 535, 536, 537, 538, 539, 541, 542, 543, 544, 545,
+  546, 547, 548, 549, 550, 551, 552, 553, 554, 555, 571, 655,
+  687, 723, 724, 725, 726, 727, 764, 790, 791, 792, 795, 797,
+  798, 799, 802, 858, 859, 860, 861, 862, 863, 864, 865, 867,
+  868, 869, 871, 872, 874, 875, 876, 877, 899, 919, 922, 1092,
+  1093, 1094, 1095, 1096, 1097, 1098, 1099, 1100, 1101, 1102, 1103, 1104,
+  1105, 1106, 1107, 1108, 1110, 1111, 1112, 1113, 1114, 1115, 1116, 1117,
+  1118, 1119, 1120, 1121, 1122, 1123, 1124, 1145, 1151, 1152, 1153, 1154,
+  1155, 1156, 1157, 1158, 1159, 1160, 1161, 1162, 1163, 1164, 1178, 1183,
+  1253, 1254, 1255, 1256, 1257, 1259, 1260, 1261, 1262,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_reborn_traces per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_traces/src/contribution/tool_payloads.rs"
+lines = [
+  47, 48, 49, 50, 51, 109, 340, 364, 376, 377, 378, 379,
+  380, 382, 392, 393, 394, 396, 403, 404, 405, 406, 407, 409,
+  410, 411, 412, 414, 420, 424, 435, 458, 459, 460, 461, 472,
+  473, 474, 490, 508, 509, 510, 511, 512, 513, 514, 515, 517,
+  518, 520, 521, 522, 523, 524, 525, 526, 527, 528, 530, 531,
+  532,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim intra-crate split of contribution.rs into chartered modules (#7124 in #7139); re-attribution artifact — the same queue run passed the ironclaw_reborn_traces per-crate covered-line floor, proving no coverage was lost."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
