@@ -38,7 +38,7 @@ use ironclaw_events::{
     DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry, EventReplay,
     EventStreamKey, InMemoryDurableAuditLog, InMemoryDurableEventLog, ReadScope, RuntimeEvent,
 };
-use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{PostgresConnectionPool, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{audit::AuditEnvelope, ids::AgentId};
 use ironclaw_host_api::{
     mount::{MountGrant, MountPermissions, MountView},
@@ -84,29 +84,18 @@ impl std::str::FromStr for RebornPostgresSslMode {
     }
 }
 
-/// Open a PostgreSQL pool using the same TLS policy as the production event
-/// store backend.
-pub fn open_postgres_pool(
-    url: SecretString,
-) -> Result<deadpool_postgres::Pool, RebornEventStoreError> {
-    postgres_backed::build_pool(url, DEFAULT_POSTGRES_POOL_MAX_SIZE, Default::default())
-}
-
-/// Open a PostgreSQL pool with an explicit maximum connection count.
-pub fn open_postgres_pool_with_max_size(
-    url: SecretString,
-    max_size: usize,
-) -> Result<deadpool_postgres::Pool, RebornEventStoreError> {
-    postgres_backed::build_pool(url, max_size, Default::default())
-}
-
-/// Open a PostgreSQL pool with explicit TLS options.
+/// Open a PostgreSQL pool with explicit TLS options, under this crate's
+/// production TLS policy.
+///
+/// Returns the workspace's own [`PostgresConnectionPool`] carrier rather than
+/// `deadpool_postgres::Pool`: the driver cone belongs to this crate and to the
+/// filesystem substrate, not to this crate's callers (PROPOSAL §6.3.2).
 pub fn open_postgres_pool_with_tls_options(
     url: SecretString,
     max_size: usize,
     tls_options: PostgresPoolTlsOptions,
-) -> Result<deadpool_postgres::Pool, RebornEventStoreError> {
-    postgres_backed::build_pool(url, max_size, tls_options)
+) -> Result<PostgresConnectionPool, RebornEventStoreError> {
+    postgres_backed::build_pool(url, max_size, tls_options).map(PostgresConnectionPool::new)
 }
 
 /// Validate PostgreSQL TLS policy without opening a network connection.
@@ -149,7 +138,7 @@ pub enum RebornEventStoreConfig {
     ///
     /// Hosted production uses this to avoid opening a second independent
     /// Postgres pool for event logs when the substrate already owns a pool.
-    PostgresPool { pool: deadpool_postgres::Pool },
+    PostgresPool { pool: PostgresConnectionPool },
     /// libSQL backend configuration. The store opens a
     /// [`LibSqlRootFilesystem`](ironclaw_filesystem::LibSqlRootFilesystem)
     /// over the provided local path or remote URL and runs durable-log ops
@@ -577,13 +566,15 @@ mod postgres_backed {
         tls_options: PostgresPoolTlsOptions,
     ) -> Result<RebornEventStores, RebornEventStoreError> {
         let pool = build_pool(url, super::DEFAULT_POSTGRES_POOL_MAX_SIZE, tls_options)?;
-        build_from_pool(pool).await
+        build_from_pool(super::PostgresConnectionPool::new(pool)).await
     }
 
     pub(super) async fn build_from_pool(
-        pool: Pool,
+        pool: super::PostgresConnectionPool,
     ) -> Result<RebornEventStores, RebornEventStoreError> {
-        let filesystem = Arc::new(PostgresRootFilesystem::new(pool));
+        // `PostgresRootFilesystem` is the driver's owner, so this is where the
+        // carrier is unwrapped rather than at any crate boundary above.
+        let filesystem = Arc::new(PostgresRootFilesystem::new(pool.into_driver()));
         filesystem.run_migrations().await.map_err(|source| {
             RebornEventStoreError::backend("postgres", "run migrations", source)
         })?;
