@@ -310,6 +310,24 @@ jobs:
       - name: Check all-target lints
         if: github.event_name != 'pull_request'
         run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings
+      # #7119. The PR lane above lints only the *changed* packages, so a crate
+      # that is merely a dependency of that set compiles with whatever features
+      # the set happens to enable. `--lib --bins` builds no dev-dependencies, and
+      # in this workspace `test-support` is turned on exclusively through
+      # dev-dependency edges — so it is OFF here and ON in every `--tests` lane.
+      # Code behind `cfg(any(test, feature = "test-support"))` then vanishes and
+      # a `use` that only it names becomes an unused import, which no
+      # whole-workspace lane could see: `--all --tests` builds the dev-deps that
+      # unify the feature back on. This step is that missing shape, workspace-
+      # wide, so the failure lands at merge time instead of waiting for the one
+      # PR whose diff happens to produce the tripping package set.
+      #
+      # Deliberately the `default` flavor: `--all-features` re-enables
+      # `test-support` on every selected package and masks the exact class this
+      # step exists to catch.
+      - name: Check production-target lints (workspace, no dev-dependency features)
+        if: github.event_name != 'pull_request' && matrix.name == 'default'
+        run: cargo clippy --all --lib --bins -- -D warnings
 
   clippy-windows:
     name: Clippy Windows (${{ matrix.name }})

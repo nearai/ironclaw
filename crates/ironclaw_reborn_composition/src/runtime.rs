@@ -407,8 +407,18 @@ pub use skills::{
 use skills::skill_asset_error;
 
 use ironclaw_operator::ResolvedRebornLlm;
+// Named only by `#[cfg(any(test, feature = "test-support"))]` accessors below,
+// so the imports carry the same gate. Without it, any build that compiles this
+// crate as a *dependency* with `test-support` off — e.g. `cargo clippy -p
+// ironclaw --lib --bins`, where the dev-dependency that would have unified the
+// feature on is not in the selected set — sees three unused imports and fails
+// `-D warnings`. See #7119; `clippy_dependency_shape` in code_style.yml keeps
+// the shape linted.
+#[cfg(any(test, feature = "test-support"))]
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+#[cfg(any(test, feature = "test-support"))]
 use ironclaw_product_contracts::admin_users::AdminUserService;
+#[cfg(any(test, feature = "test-support"))]
 use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
 use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
 
