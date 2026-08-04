@@ -5579,6 +5579,34 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertIsNone(slack["setup"]["team_id"])
             self.assertIsNone(slack["setup"]["api_app_id"])
 
+    def test_prepare_reborn_home_skips_slack_auth_for_non_slack_cases(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            args = argparse.Namespace(
+                output_dir=root / "out",
+                reborn_home=root / "missing-source-home",
+                require_slack_live=False,
+            )
+            env = {
+                "LIVE_OPENAI_COMPATIBLE_API_KEY": "fake-live-llm-key",
+                "REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV": "LIVE_OPENAI_COMPATIBLE_API_KEY",
+                "IRONCLAW_REBORN_SLACK_SIGNING_SECRET": "signing-secret",
+                "IRONCLAW_REBORN_SLACK_BOT_TOKEN": "xoxb-bot-token",
+            }
+
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch.object(run_live_qa, "_slack_auth_test") as slack_auth_test,
+            ):
+                prepared = run_live_qa.prepare_reborn_home(
+                    args,
+                    ["qa_3b_endpoint_status_live_chat"],
+                )
+
+            slack_auth_test.assert_not_called()
+            self.assertFalse(prepared.preflight["slack"]["requires_slack"])
+            self.assertFalse(prepared.preflight["slack"]["auth_test"]["checked"])
+
     def test_slack_setup_payload_uses_persisted_oauth_client_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             reborn_home = Path(tmpdir) / "reborn-home"

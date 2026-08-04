@@ -595,11 +595,12 @@ def prepare_reborn_home(
         else {"configured": False}
     )
     slack_target_present = _has_slack_delivery_target(config, prepared_home, auth_user_id)
-    slack_auth = (
-        _slack_auth_test(config, process_env)
-        if _has_live_slack_env(process_env)
-        else {"checked": False, "ok": False, "error": "Slack env unavailable"}
-    )
+    if not needs_slack:
+        slack_auth = {"checked": False, "ok": False, "error": "Slack not required"}
+    elif _has_live_slack_env(process_env):
+        slack_auth = _slack_auth_test(config, process_env)
+    else:
+        slack_auth = {"checked": False, "ok": False, "error": "Slack env unavailable"}
     if needs_slack and not _has_live_slack_env(process_env):
         if args.require_slack_live:
             raise LiveQaError(
