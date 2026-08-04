@@ -17,4 +17,5 @@
 - Lookup-only binding resolution must not create threads, bindings, route-access widening, external-event route reservations, or accepted-message state.
 - Explicit links are idempotent only for the same target thread; never silently retarget an already-bound external conversation to another thread.
 - Current durable PostgreSQL/libSQL adapters in this crate are limited to conversation binding, accepted-message idempotency, and turn-submission state-store records; keep transcript content and thread storage behind their owning storage boundaries.
+- The `1.0.0-rc.1` channel-root fold is owned here: `migrate_conversation_state_root` reads the released external-ref spelling, preflights every authority collision, retains the source for rollback, and fails closed on malformed or divergent canonical thread state. Do not replace it with a raw blob copy or a last-writer-wins merge.
 - Any future durable adapter expansion must name the scoped storage boundary first, keep raw message content out of turn-facing rows, and add PostgreSQL/libSQL parity tests with migration coverage.

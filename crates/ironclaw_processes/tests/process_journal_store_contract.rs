@@ -1043,6 +1043,25 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
             "spawn_tree_root_run_id": root_run_id,
             "product_context": null
         }],
+        "active_locks": [{
+            "run_id": run_id,
+            "key": {"scope": turn_scope},
+            "status": "BlockedApproval",
+            "lock_version": 1,
+            "acquired_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:01Z"
+        }],
+        "checkpoints": [{
+            "checkpoint_id": checkpoint_id,
+            "run_id": run_id,
+            "scope": turn_scope,
+            "sequence": 1,
+            "status": "BlockedApproval",
+            "gate_ref": "gate:migration-approval",
+            "kind": "before_block",
+            "state_ref": "state:migration",
+            "created_at": "2026-01-01T00:00:01Z"
+        }],
         "loop_checkpoints": [
             {
                 "checkpoint_id": checkpoint_id,
@@ -1086,6 +1105,19 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
                 "created_at": "2026-01-01T00:00:00Z"
             }
         ],
+        "events": [{
+            "cursor": 41,
+            "scope": turn_scope,
+            "run_id": run_id,
+            "status": "BlockedApproval",
+            "kind": "status_changed"
+        }],
+        "admission_reservations": [{
+            "run_id": run_id,
+            "admission_class": "interactive",
+            "buckets": [],
+            "released": false
+        }],
         "spawn_tree_reservations": [{
             "scope": turn_scope,
             "root_run_id": root_run_id,
@@ -1176,13 +1208,16 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
         .expect("seed deployed per-user capability run");
 
     let store = ProcessJournalStore::new(Arc::clone(&filesystem));
-    assert_eq!(
-        store
-            .migrate_legacy_journal()
-            .await
-            .expect("pre-start deployed migration"),
-        3
-    );
+    let migration = store
+        .migrate_legacy_journal_with_report()
+        .await
+        .expect("pre-start deployed migration");
+    assert_eq!(migration.imported_journal_entries, 3);
+    assert!(!migration.already_complete);
+    assert_eq!(migration.disposition.legacy_events_superseded, 1);
+    assert_eq!(migration.disposition.active_locks_expired, 1);
+    assert_eq!(migration.disposition.checkpoint_metadata_superseded, 1);
+    assert_eq!(migration.disposition.admission_reservations_expired, 1);
     let imported_rows = filesystem
         .query(
             &ResourceScope::system(),
@@ -1293,13 +1328,13 @@ async fn deployed_turn_blob_and_run_state_import_before_first_process_request() 
         per_user_capability.status,
         ProcessLifecycleStatus::Completed
     );
-    assert_eq!(
-        store
-            .migrate_legacy_journal()
-            .await
-            .expect("migration rerun is idempotent"),
-        0
-    );
+    let rerun = store
+        .migrate_legacy_journal_with_report()
+        .await
+        .expect("migration rerun is idempotent");
+    assert!(rerun.already_complete);
+    assert_eq!(rerun.imported_journal_entries, 0);
+    assert_eq!(rerun.disposition, Default::default());
 }
 
 #[tokio::test]
@@ -1398,6 +1433,163 @@ async fn deployed_turn_row_layout_imports_materialized_run_rows() {
         .expect("row-native deployed run imports");
     assert_eq!(imported.status, ProcessLifecycleStatus::Completed);
     assert_eq!(imported.journal_cursor, ProcessJournalCursor(7));
+}
+
+/// Release-pair acceptance: row-shaped rc1 run authority must be enumerated
+/// past the filesystem backend's maximum page before initialization becomes
+/// durable. A first-page-only import would make every later startup trust an
+/// incomplete process journal.
+#[tokio::test]
+async fn deployed_turn_row_layout_imports_beyond_one_backend_page() {
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(InMemoryBackend::new()),
+        MountView::new(vec![
+            MountGrant::new(
+                MountAlias::new("/processes").expect("processes alias"),
+                VirtualPath::new("/engine/processes-pages").expect("processes target"),
+                MountPermissions::read_write_list_delete(),
+            ),
+            MountGrant::new(
+                MountAlias::new("/turns").expect("turns alias"),
+                VirtualPath::new("/engine/turns-pages").expect("turns target"),
+                MountPermissions::read_write_list_delete(),
+            ),
+        ])
+        .expect("migration mounts"),
+    ));
+    let row_count = Page::MAX_LIMIT as usize + 1;
+    let mut last_run_id = None;
+    for cursor in 1..=row_count {
+        let run_id = TurnRunId::new();
+        let row = released_turn_run_row(&run_id, cursor as u64);
+        filesystem
+            .put(
+                &ResourceScope::system(),
+                &ScopedPath::new(format!("/turns/rows/v1/runs/{run_id}.json"))
+                    .expect("legacy run row path"),
+                Entry::bytes(
+                    serde_json::to_vec(&json!({
+                        "journal_seq": cursor,
+                        "value": row
+                    }))
+                    .expect("serialize released run row"),
+                ),
+                CasExpectation::Absent,
+            )
+            .await
+            .expect("seed released run row");
+        last_run_id = Some(run_id);
+    }
+    filesystem
+        .put(
+            &ResourceScope::system(),
+            &ScopedPath::new("/turns/rows/v1/meta/state.json").expect("legacy metadata path"),
+            Entry::bytes(
+                serde_json::to_vec(&json!({
+                    "journal_seq": row_count,
+                    "event_retention_floor": 0
+                }))
+                .expect("serialize released metadata"),
+            ),
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("seed released metadata");
+
+    let store = ProcessJournalStore::new(Arc::clone(&filesystem));
+    let report = store
+        .migrate_legacy_journal_with_report()
+        .await
+        .expect("migrate every released run row");
+    assert_eq!(report.imported_journal_entries, row_count);
+    assert!(!report.already_complete);
+
+    let first_page = filesystem
+        .query(
+            &ResourceScope::system(),
+            &ScopedPath::new("/processes/materialized/process").expect("process row root"),
+            &Filter::All,
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .expect("read first materialized process page");
+    let second_page = filesystem
+        .query(
+            &ResourceScope::system(),
+            &ScopedPath::new("/processes/materialized/process").expect("process row root"),
+            &Filter::All,
+            Page::new(u64::from(Page::MAX_LIMIT), Page::MAX_LIMIT),
+        )
+        .await
+        .expect("read second materialized process page");
+    assert_eq!(first_page.len(), Page::MAX_LIMIT as usize);
+    assert_eq!(second_page.len(), 1);
+
+    let last_run_id = last_run_id.expect("at least one released run row");
+    let mut imported_scope = ResourceScope::system();
+    imported_scope.tenant_id = TenantId::new("tenant-process-pages").expect("tenant");
+    imported_scope.user_id = UserId::new("user-process-pages").expect("user");
+    imported_scope.agent_id = Some(AgentId::new("agent-process-pages").expect("agent"));
+    imported_scope.project_id = Some(ProjectId::new("project-process-pages").expect("project"));
+    imported_scope.thread_id = Some(ThreadId::new("thread-process-pages").expect("thread"));
+    imported_scope.invocation_id = InvocationId::from_uuid(last_run_id.as_uuid());
+    let last = store
+        .get_process_snapshot(GetProcessSnapshotRequest {
+            scope: imported_scope,
+            process_id: ProcessId::from_uuid(last_run_id.as_uuid()),
+        })
+        .await
+        .expect("last run beyond the first backend page is usable");
+    assert_eq!(last.journal_cursor, ProcessJournalCursor(row_count as u64));
+
+    let rerun = store
+        .migrate_legacy_journal_with_report()
+        .await
+        .expect("completed page-spanning migration is idempotent");
+    assert!(rerun.already_complete);
+    assert_eq!(rerun.imported_journal_entries, 0);
+}
+
+fn released_turn_run_row(run_id: &TurnRunId, event_cursor: u64) -> serde_json::Value {
+    json!({
+        "run_id": run_id,
+        "turn_id": TurnId::new(),
+        "scope": {
+            "tenant_id": "tenant-process-pages",
+            "agent_id": "agent-process-pages",
+            "project_id": "project-process-pages",
+            "thread_id": "thread-process-pages",
+            "thread_owner": {
+                "mode": "explicit_user",
+                "owner_user_id": "user-process-pages"
+            }
+        },
+        "accepted_message_ref": format!("accepted:{run_id}"),
+        "source_binding_ref": format!("source:{run_id}"),
+        "reply_target_binding_ref": format!("reply:{run_id}"),
+        "status": "Completed",
+        "profile": {
+            "id": "default",
+            "version": 1,
+            "allow_steering": false,
+            "auto_queue_followups": false
+        },
+        "checkpoint_id": null,
+        "gate_ref": null,
+        "credential_requirements": [],
+        "failure": null,
+        "event_cursor": event_cursor,
+        "runner_id": null,
+        "lease_token": null,
+        "lease_expires_at": null,
+        "last_heartbeat_at": null,
+        "claim_count": 0,
+        "received_at": "2026-01-02T00:00:00Z",
+        "parent_run_id": null,
+        "subagent_depth": 0,
+        "spawn_tree_root_run_id": null,
+        "product_context": null
+    })
 }
 
 #[tokio::test]

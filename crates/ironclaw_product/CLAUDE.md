@@ -235,6 +235,12 @@ resolve. Thread hints in subscription requests may narrow to the already
 resolved binding only; they are not authority to switch threads or tenants.
 Projection/subscription resolution is lookup-only and must not create bindings,
 threads, or external-event route reservations.
+
+The `1.0.0-rc.1` channel idempotency-root fold is owned by the filesystem
+ledger module. `migrate_idempotency_ledger_root` must retain old rows, enumerate
+bounded pages, parse the released action wire, rewrite the current record kind
+and indexes, skip only transient prune leases, and reject malformed or
+divergent collisions before writing any target row.
 Shared-route subject users are also first-bind scope, not a live overlay on
 existing external conversation bindings. Route admin updates apply to new
 bindings; existing Slack threads must continue resolving under the owner that

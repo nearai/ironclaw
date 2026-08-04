@@ -35,6 +35,7 @@ mod cleanup;
 mod domain;
 mod flows;
 mod interactions;
+mod migration;
 mod paths;
 mod provider;
 #[cfg(test)]
@@ -52,6 +53,10 @@ fn flow_requires_lifecycle_cleanup(flow: &AuthFlowRecord) -> bool {
             ))
 }
 
+pub use migration::{
+    OAuthProviderAliasMigrationError, OAuthProviderAliasMigrationReport,
+    migrate_legacy_oauth_provider_alias,
+};
 pub use provider::UnavailableAuthProviderClient;
 
 /// Durable production implementation of the product-auth ports.

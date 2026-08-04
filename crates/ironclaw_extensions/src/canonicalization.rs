@@ -104,10 +104,27 @@ pub fn canonicalize_installation_rows(
                     reason: "installation group unexpectedly empty".to_string(),
                 })?;
             let installation_id = ExtensionInstallationId::new(extension_id.as_str())?;
+            // Merging duplicate legacy identities must never widen activation.
+            // Only an all-enabled group stays enabled; disabled beats
+            // installed because it records an explicit operator choice.
+            let activation_state = if rows.iter().all(|installation| {
+                installation.persisted_activation_state()
+                    == crate::ExtensionActivationState::Enabled
+            }) {
+                crate::ExtensionActivationState::Enabled
+            } else if rows.iter().any(|installation| {
+                installation.persisted_activation_state()
+                    == crate::ExtensionActivationState::Disabled
+            }) {
+                crate::ExtensionActivationState::Disabled
+            } else {
+                crate::ExtensionActivationState::Installed
+            };
 
             ExtensionInstallation::from_persisted_parts(ExtensionInstallationPersistedParts {
                 installation_id,
                 extension_id,
+                activation_state,
                 manifest_ref,
                 incarnation_id,
                 credential_bindings,

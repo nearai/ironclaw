@@ -13,10 +13,10 @@ use ironclaw_extension_host::{
     product_extension_host_api_contract_registry, restore_extension_lifecycle_state,
 };
 use ironclaw_extensions::{
-    ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
-    ExtensionInstallationStorePort, ExtensionLifecycleService, ExtensionManifestRecord,
-    ExtensionManifestRef, ExtensionRegistry, InstallationOwner, ManifestHash, ManifestSource,
-    PackageRootBinding, SharedExtensionRegistry,
+    ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
+    ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionLifecycleService,
+    ExtensionManifestRecord, ExtensionManifestRef, ExtensionRegistry, InstallationOwner,
+    ManifestHash, ManifestSource, PackageRootBinding, SharedExtensionRegistry,
 };
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::{approval::sha256_digest_token, ids::CapabilityId, ids::UserId};
@@ -84,6 +84,16 @@ async fn persist_installation(
     record: ExtensionManifestRecord,
     owner: &UserId,
 ) {
+    persist_installation_with_activation(store, record, owner, ExtensionActivationState::Enabled)
+        .await;
+}
+
+async fn persist_installation_with_activation(
+    store: &Arc<dyn ExtensionInstallationStorePort>,
+    record: ExtensionManifestRecord,
+    owner: &UserId,
+    activation_state: ExtensionActivationState,
+) {
     let extension_id = record.resolved().id.clone();
     let manifest_hash = record
         .manifest_hash()
@@ -99,11 +109,79 @@ async fn persist_installation(
         chrono::Utc::now(),
         InstallationOwner::user(owner.clone()),
     )
-    .expect("installation row constructs");
+    .expect("installation row constructs")
+    .with_activation_state(activation_state);
     store
         .upsert_manifest_and_installation(record, installation)
         .await
         .expect("persist manifest + installation row");
+}
+
+#[tokio::test]
+async fn restore_does_not_reactivate_an_rc1_disabled_installation() {
+    let owner = UserId::new("disabled-restore-user").expect("valid owner id");
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+    let installation_store: Arc<dyn ExtensionInstallationStorePort> = Arc::new(
+        ExtensionInstallationStore::load_at(
+            Arc::clone(&filesystem),
+            ExtensionInstallationStore::default_state_path().expect("default state path"),
+            host_port_catalog(),
+            contracts(),
+        )
+        .await
+        .expect("installation store opens"),
+    );
+    persist_installation_with_activation(
+        &installation_store,
+        hosted_mcp_manifest_record("mcp-healthy", DISCOVERED_TOOL_TOML),
+        &owner,
+        ExtensionActivationState::Disabled,
+    )
+    .await;
+
+    let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+    let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+        active_registry.snapshot_owned(),
+    )));
+    let trust_policy = Arc::new(
+        HostTrustPolicy::new(vec![Box::new(AdminConfig::new())]).expect("trust policy builds"),
+    );
+    let active_extensions = ActiveExtensionPublisher::new(
+        Arc::clone(&active_registry),
+        trust_policy,
+        Arc::new(InvalidationBus::new()),
+    );
+    let mut catalog = AvailableExtensionCatalog::from_packages(Vec::new());
+
+    restore_extension_lifecycle_state(
+        &mut catalog,
+        &filesystem,
+        &installation_store,
+        &lifecycle_service,
+        &active_extensions,
+        &owner,
+    )
+    .await
+    .expect("disabled installation restores without activation");
+
+    let extension_id =
+        ironclaw_host_api::ids::ExtensionId::new("mcp-healthy").expect("extension id");
+    assert!(
+        lifecycle_service
+            .lock()
+            .await
+            .registry()
+            .get_extension(&extension_id)
+            .is_some(),
+        "the package remains installed"
+    );
+    assert!(
+        active_extensions
+            .snapshot()
+            .get_extension(&extension_id)
+            .is_none(),
+        "restore must preserve disabled state instead of widening it to enabled"
+    );
 }
 
 /// Regression for the boot-critical guard in `restore_extension_lifecycle_state`

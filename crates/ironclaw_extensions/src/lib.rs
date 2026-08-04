@@ -262,12 +262,13 @@ pub type CapabilityManifest = CapabilityDeclV2;
 
 pub use canonicalization::canonicalize_installation_rows;
 pub use installations::{
-    ExtensionCredentialBinding, ExtensionCredentialHandle, ExtensionInstallation,
-    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
-    ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionManifestRecord,
-    ExtensionManifestRef, ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId,
-    ExtensionRemovalCleanupBinding, ExtensionRemovalCleanupRequirement, InstallationIncarnationId,
-    InstallationOwner, ManifestHash, MembershipDeactivation,
+    ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
+    ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
+    ExtensionInstallationPersistedParts, ExtensionInstallationStore,
+    ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef,
+    ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
+    ExtensionRemovalCleanupRequirement, InstallationIncarnationId, InstallationOwner, ManifestHash,
+    MembershipDeactivation, Rc1SnapshotMigrationReport,
 };
 pub use lifecycle::{
     ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,

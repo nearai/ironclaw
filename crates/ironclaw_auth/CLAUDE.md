@@ -13,6 +13,11 @@
 - Keep Reborn auth code independent from V1 route handlers, V1 pending state,
   V1 extension manager authority, V1 secret-store implementation details,
   WebUI route serving, and host-runtime credential injection adapters.
+- The release-pair startup fold for 1.0.0-rc.1 Slack OAuth records is owned by
+  `product_auth/durable/migration.rs`. It must run before auth workers or route
+  serving, preserve account ids and secret handles, expire non-terminal legacy
+  flows, retain exact tenant-scoped rollback copies, use CAS for live rewrites,
+  and fail closed on malformed records or conflicting backups.
 - Serializable records may contain hashes, ids, handles, statuses, and redacted metadata. They must not contain raw OAuth state, PKCE verifiers, authorization codes, tokens, secret values, provider response bodies, backend internals, or host paths.
 - Raw OAuth callback material may appear only in non-serializable one-shot inputs to provider exchange boundaries.
 - Token refresh must go through `CredentialAccountService::refresh_account` and `AuthProviderClient::refresh_token`. Refresh requests/results stay behind host-mediated auth/provider boundaries, revalidate scope/provider/ownership/grants, and project recoverable failures as stable statuses rather than raw provider detail.

@@ -27,6 +27,7 @@ mod error;
 mod ids;
 mod inbound;
 mod memory;
+mod startup_migration;
 mod state_store;
 mod stored_refs;
 mod traits;
@@ -35,6 +36,10 @@ mod types;
 
 pub use conversation_state_store::{ConversationStateStore, RebornFilesystemConversationServices};
 pub use error::InboundTurnError;
+pub use startup_migration::{
+    ConversationStateMigrationError, ConversationStateMigrationReport, ConversationThreadReference,
+    migrate_conversation_state_root,
+};
 // `ExternalActorRef` / `ExternalConversationRef` are deliberately **not**
 // re-exported. Their one home is
 // `ironclaw_extension_contracts::external`; consumers import them from there,

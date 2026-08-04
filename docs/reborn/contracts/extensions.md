@@ -139,6 +139,17 @@ views:
 /system/extensions/.installations/installations/<hashed_installation_id>.json
 ```
 
+Startup first discovers every `ironclaw-v1.0.0-rc.1` hosted monolithic snapshot
+at `/tenants/{tenant}/system/extensions/.installations/state.json` (plus the
+local store's adjacent `state.json`), compiles it into the global compatibility
+rows, then runs the ordinary v2 bootstrap. Snapshots are retained for rollback;
+an exact replay is a no-op, while malformed input or a divergent
+compatibility/v2 target fails startup without replacing either history. The
+reader preserves the released `installed`/`disabled`/`enabled`
+`activation_state` on the durable installation. Restore installs disabled or
+not-yet-enabled packages without enabling or publishing them. The released
+`health` field remains diagnostic-only and is not promoted to authority.
+
 Store startup imports each legacy manifest+installation pair only when no v2
 authority record exists; an orphaned legacy manifest with no installation is
 the legacy flow's durable cleanup tombstone and imports as a
@@ -164,6 +175,16 @@ prefix `/extension-admin-configuration/groups`. Its stable key is the
 identical group. Secrets are referenced by opaque handles and only presence is
 projected. Admin configuration is deployment state: saving it does not add any
 user to an extension's membership set.
+
+The `1.0.0-rc.1` channel-state startup import is owned by
+`ironclaw_extension_host`. It copies Slack and Telegram setup, active identity
+bindings, Slack routes, and DM targets from their retired tenant-shared roots
+into these generic stores without deleting the source. Equal target values are
+idempotent; malformed source rows or divergent P0 targets fail startup.
+Telegram pairing challenges and incomplete legacy completion notices are not
+wire-compatible with the generic pairing snapshot, so startup validates them,
+leaves the source records intact, and reports redacted expired counts rather
+than silently presenting them as live challenges.
 
 Recommended package layout:
 

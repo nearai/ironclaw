@@ -14,3 +14,13 @@
   reads bind that partition before ordering. Existing rows are repaired only
   through `migrate_transcript_indexes_for_scope`, never through a read
   fallback.
+- `thread.json` remains authoritative for thread discovery migrations. The
+  `thread-index-v2` migration must physically re-encode pre-v2 index rows so
+  backend-maintained ordered projections receive `scope_key`, `activity_sort`,
+  and `thread_id`; a decoded-record equality no-op is not a completed backfill.
+  Do not reuse an older completion marker after changing projection metadata.
+- `transcript-index-v2` first materializes the bounded rc1 `message_appends`
+  log into missing per-message records, retaining the log for rollback and
+  letting an existing message record win so updates/redactions are never
+  reversed. Only then may message, summary, and lookup projections rebuild and
+  the v2 completion marker become durable.

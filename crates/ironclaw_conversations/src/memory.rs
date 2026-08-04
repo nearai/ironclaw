@@ -1120,7 +1120,7 @@ impl InMemoryConversationServices {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct InMemoryState {
     #[serde(default, skip)]
     pub(crate) persistence_revision: i64,
@@ -1484,14 +1484,14 @@ impl ThreadKey {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ThreadRecord {
     pub(crate) agent_id: Option<AgentId>,
     pub(crate) project_id: Option<ProjectId>,
     pub(crate) participants: HashSet<UserId>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ReplyRouteAccess {
     pub(crate) owner_actor_key: ActorKey,
     pub(crate) shared: bool,
@@ -1519,7 +1519,7 @@ impl ReplyRouteAccess {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ReplyTargetRecord {
     pub(crate) tenant_id: TenantId,
     pub(crate) adapter_kind: AdapterKind,
@@ -1591,7 +1591,7 @@ impl BindingTarget {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct BindingRecord {
     pub(crate) tenant_id: TenantId,
     pub(crate) adapter_kind: AdapterKind,
@@ -1674,7 +1674,7 @@ impl BindingRecord {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct StoredAcceptedMessageReplay {
     pub(crate) external_conversation_identity: ExternalConversationIdentity,
     pub(crate) replay: AcceptedConversationMessageReplay,

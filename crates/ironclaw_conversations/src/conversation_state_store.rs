@@ -110,8 +110,8 @@ where
 /// this envelope keeps the equivalent contract within a single JSON
 /// document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredConversationState {
-    revision: i64,
+pub(crate) struct StoredConversationState {
+    pub(crate) revision: i64,
     pairings: Vec<(ActorKey, UserId)>,
     #[serde(default)]
     pairing_epochs: Vec<(ActorKey, ExternalActorBindingEpoch)>,
@@ -128,7 +128,7 @@ struct StoredConversationState {
 }
 
 impl StoredConversationState {
-    fn from_state(revision: i64, state: &InMemoryState) -> Self {
+    pub(crate) fn from_state(revision: i64, state: &InMemoryState) -> Self {
         Self {
             revision,
             pairings: state
@@ -182,7 +182,7 @@ impl StoredConversationState {
         }
     }
 
-    fn into_state(self) -> InMemoryState {
+    pub(crate) fn into_state(self) -> InMemoryState {
         InMemoryState {
             persistence_revision: 0,
             pairings: self.pairings.into_iter().collect(),
@@ -197,6 +197,40 @@ impl StoredConversationState {
             submission_keys: self.submission_keys.into_iter().collect(),
             submitted_message_responses: self.submitted_message_responses.into_iter().collect(),
             messages: self.messages,
+        }
+    }
+}
+
+impl StoredConversationState {
+    pub(crate) fn validate_unique_keys(&self) -> Result<(), ()> {
+        fn unique<K, V>(items: &[(K, V)]) -> bool
+        where
+            K: Eq + std::hash::Hash,
+        {
+            let mut keys = std::collections::HashSet::with_capacity(items.len());
+            items.iter().all(|(key, _)| keys.insert(key))
+        }
+
+        if unique(&self.pairings)
+            && unique(&self.pairing_epochs)
+            && unique(&self.bindings)
+            && unique(&self.threads)
+            && unique(&self.external_event_routes)
+            && unique(&self.message_idempotency)
+            && unique(&self.message_replays)
+            && unique(&self.submission_keys)
+            && unique(&self.submitted_message_responses)
+            && {
+                let mut message_refs =
+                    std::collections::HashSet::with_capacity(self.messages.len());
+                self.messages
+                    .iter()
+                    .all(|message| message_refs.insert(&message.accepted.message_ref))
+            }
+        {
+            Ok(())
+        } else {
+            Err(())
         }
     }
 }
@@ -305,7 +339,7 @@ fn state_path() -> Result<ScopedPath, InboundTurnError> {
 /// resolved path, so in practice the projection holds zero or one
 /// tenant id; the multi-tenant case is the single-tenant default mount
 /// view used for tests and the long-lived composition.
-fn state_entry(body: Vec<u8>, state: &InMemoryState) -> Entry {
+pub(crate) fn state_entry(body: Vec<u8>, state: &InMemoryState) -> Entry {
     let tenant_ids = collect_tenant_ids(state);
     let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
     if !tenant_ids.is_empty() {

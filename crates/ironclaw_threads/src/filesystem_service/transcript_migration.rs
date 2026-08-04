@@ -6,7 +6,8 @@
 //! listing projection does not need to understand any of it.
 
 use ironclaw_filesystem::{
-    CasExpectation, Entry, FileType, Filter, Page, RecordKind, RootFilesystem,
+    CasExpectation, Entry, FileType, FilesystemError, FilesystemOperation, Filter, Page,
+    RecordKind, RootFilesystem, SeqNo,
 };
 use ironclaw_host_api::{ids::ThreadId, path::ScopedPath};
 
@@ -16,13 +17,34 @@ use crate::{
 };
 
 use super::{
-    IndexDeclarationPolicy, deserialize, invalid_path, is_not_found, messages_root,
-    scope_axes_string, scoped_path, summaries_root,
+    IndexDeclarationPolicy, deserialize, invalid_path, is_not_found, message_record_path,
+    messages_root, scope_axes_string, scoped_path, summaries_root, thread_root_string,
 };
 
 /// Bounded retries for a transcript-migration page that lost a CAS or
 /// writer-contention race against live turn writes.
 const TRANSCRIPT_PAGE_CONFLICT_RETRIES: u32 = 5;
+const TRANSCRIPT_MIGRATION_MARKER_BODY: &[u8] = b"transcript-index-v2";
+
+/// Bounded read size for the append log written by `1.0.0-rc.1`.
+const LEGACY_APPEND_PAGE_LIMIT: usize = 256;
+
+/// Redacted counts from materializing the append-only transcript format used
+/// by `1.0.0-rc.1`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LegacyAppendMigrationReport {
+    pub scanned: usize,
+    pub materialized: usize,
+    pub unchanged: usize,
+}
+
+/// One scope's complete transcript migration result.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TranscriptMigrationReport {
+    pub already_complete: bool,
+    pub append: LegacyAppendMigrationReport,
+    pub projected_rows: usize,
+}
 
 /// Outcome of one transactional transcript-migration page.
 enum TranscriptPageOutcome {
@@ -47,6 +69,121 @@ impl<F> FilesystemSessionThreadService<F>
 where
     F: RootFilesystem,
 {
+    /// Materialize finalized messages that `1.0.0-rc.1` persisted only in the
+    /// per-thread append log.
+    ///
+    /// Existing per-message rows are authoritative. This preserves later
+    /// updates and redactions that shadow an older append event. The legacy
+    /// event log is deliberately retained for rollback; this forward migration
+    /// only creates missing current-format rows.
+    pub async fn migrate_legacy_append_logs_for_scope(
+        &self,
+        scope: &ThreadScope,
+    ) -> Result<LegacyAppendMigrationReport, SessionThreadError> {
+        let root = scoped_path(&format!("{}/threads", scope_axes_string(scope)))?;
+        let entries = match self
+            .filesystem
+            .list_dir(&scope.to_resource_scope(), &root)
+            .await
+        {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        let thread_ids = entries
+            .into_iter()
+            .filter(|entry| entry.file_type == FileType::Directory)
+            .map(|entry| ThreadId::new(entry.name).map_err(invalid_path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut report = LegacyAppendMigrationReport::default();
+
+        for thread_id in thread_ids {
+            if self
+                .read_thread_versioned(scope, &thread_id)
+                .await?
+                .is_none()
+            {
+                return Err(SessionThreadError::Backend(
+                    "legacy append log belongs to an unknown thread".to_string(),
+                ));
+            }
+            let append_path = legacy_message_append_log_path(scope, &thread_id)?;
+            let mut after = SeqNo::ZERO;
+            loop {
+                let events = match self
+                    .filesystem
+                    .tail_bounded(
+                        &scope.to_resource_scope(),
+                        &append_path,
+                        after,
+                        LEGACY_APPEND_PAGE_LIMIT,
+                    )
+                    .await
+                {
+                    Ok(events) => events,
+                    Err(FilesystemError::NotFound { .. }) => break,
+                    // rc1 fell back to per-message rows when append/tail was
+                    // unavailable, so there is no append-only state to import
+                    // on such a backend.
+                    Err(FilesystemError::Unsupported {
+                        operation: FilesystemOperation::Tail,
+                        ..
+                    }) => break,
+                    Err(error) => return Err(error.into()),
+                };
+                if events.is_empty() {
+                    break;
+                }
+                let received = events.len();
+                for event in events {
+                    after = event.seq;
+                    report.scanned = report.scanned.saturating_add(1);
+                    let message = deserialize::<ThreadMessageRecord>(&event.payload)?;
+                    if message.thread_id != thread_id {
+                        return Err(SessionThreadError::Backend(
+                            "legacy append event references a different thread".to_string(),
+                        ));
+                    }
+                    let message_path = message_record_path(scope, &thread_id, message.message_id)?;
+                    if self
+                        .filesystem
+                        .get(&scope.to_resource_scope(), &message_path)
+                        .await?
+                        .is_some()
+                    {
+                        report.unchanged = report.unchanged.saturating_add(1);
+                        continue;
+                    }
+                    let entry = Self::message_entry(&message)?;
+                    match self
+                        .filesystem
+                        .put(
+                            &scope.to_resource_scope(),
+                            &message_path,
+                            entry,
+                            CasExpectation::Absent,
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            report.materialized = report.materialized.saturating_add(1);
+                        }
+                        // A concurrent materializer or current writer won the
+                        // race. Its per-message row is authoritative.
+                        Err(FilesystemError::VersionMismatch { .. }) => {
+                            report.unchanged = report.unchanged.saturating_add(1);
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                if received < LEGACY_APPEND_PAGE_LIMIT {
+                    break;
+                }
+            }
+        }
+        Ok(report)
+    }
+
     /// Idempotent rebuild for message, summary, and exact-lookup projections.
     pub async fn migrate_transcript_indexes_for_scope(
         &self,
@@ -253,39 +390,62 @@ where
         }
     }
 
-    pub(super) async fn ensure_transcript_indexes_migrated(
+    /// Materialize rc1 append-only messages, rebuild all transcript
+    /// projections, and durably mark the scope complete.
+    pub async fn migrate_transcript_for_scope(
         &self,
         scope: &ThreadScope,
-    ) -> Result<(), SessionThreadError> {
+    ) -> Result<TranscriptMigrationReport, SessionThreadError> {
         let marker = transcript_index_migration_marker_path(scope)?;
-        if self
+        if let Some(existing_marker) = self
             .filesystem
             .get(&scope.to_resource_scope(), &marker)
             .await?
-            .is_some()
         {
-            return Ok(());
+            if existing_marker.entry.body != TRANSCRIPT_MIGRATION_MARKER_BODY {
+                return Err(SessionThreadError::Backend(
+                    "transcript index migration marker has an unexpected body".to_string(),
+                ));
+            }
+            return Ok(TranscriptMigrationReport {
+                already_complete: true,
+                ..TranscriptMigrationReport::default()
+            });
         }
-        self.migrate_transcript_indexes_for_scope(scope).await?;
+        let append = self.migrate_legacy_append_logs_for_scope(scope).await?;
+        let projected_rows = self.migrate_transcript_indexes_for_scope(scope).await?;
         self.filesystem
             .put(
                 &scope.to_resource_scope(),
                 &marker,
-                Entry::bytes(b"transcript-index-v1".to_vec()),
+                Entry::bytes(TRANSCRIPT_MIGRATION_MARKER_BODY.to_vec()),
                 CasExpectation::Any,
             )
             .await?;
-        if self
+        let written_marker = self
             .filesystem
             .get(&scope.to_resource_scope(), &marker)
-            .await?
-            .is_none()
+            .await?;
+        if written_marker
+            .as_ref()
+            .is_none_or(|entry| entry.entry.body != TRANSCRIPT_MIGRATION_MARKER_BODY)
         {
             return Err(SessionThreadError::Backend(
-                "transcript index migration marker was not durable after write".to_string(),
+                "transcript index migration marker failed exact readback".to_string(),
             ));
         }
-        Ok(())
+        Ok(TranscriptMigrationReport {
+            already_complete: false,
+            append,
+            projected_rows,
+        })
+    }
+
+    pub(super) async fn ensure_transcript_indexes_migrated(
+        &self,
+        scope: &ThreadScope,
+    ) -> Result<(), SessionThreadError> {
+        self.migrate_transcript_for_scope(scope).await.map(|_| ())
     }
 }
 
@@ -293,7 +453,17 @@ fn transcript_index_migration_marker_path(
     scope: &ThreadScope,
 ) -> Result<ScopedPath, SessionThreadError> {
     scoped_path(&format!(
-        "{}/index-migrations/transcript-index-v1.complete",
+        "{}/index-migrations/transcript-index-v2.complete",
         scope_axes_string(scope)
+    ))
+}
+
+fn legacy_message_append_log_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/message_appends",
+        thread_root_string(scope, thread_id)
     ))
 }

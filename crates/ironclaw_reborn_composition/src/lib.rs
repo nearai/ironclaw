@@ -53,6 +53,7 @@ mod product_surface;
 mod production_runtime_policy;
 mod profile_approval_authorization;
 mod readiness;
+mod release_pair_migration;
 mod root;
 mod runtime;
 mod runtime_input;

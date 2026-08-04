@@ -145,6 +145,142 @@ async fn blank_secret_preserves_the_previous_revision_handle() {
 }
 
 #[tokio::test]
+async fn legacy_import_is_partial_idempotent_and_conflict_aware() {
+    let (service, _) = service();
+    let scope = sample_scope("tenant-a", "operator-a");
+    let client_id = AdminConfigurationSubmittedValue {
+        handle: SecretHandle::new("client_id").unwrap(),
+        value: SecretMaterial::from("legacy-client".to_string()),
+    };
+
+    assert_eq!(
+        service
+            .import_legacy_values(
+                &scope,
+                &group_id(),
+                "rc1-provider-setup-v1",
+                vec![client_id],
+            )
+            .await
+            .unwrap(),
+        1,
+        "a released setup may predate today's required secret field"
+    );
+    let partial = service.get(&scope, &group_id()).await.unwrap();
+    assert_eq!(partial.fields[0].value.as_deref(), Some("legacy-client"));
+    assert!(!partial.complete);
+
+    assert_eq!(
+        service
+            .import_legacy_values(
+                &scope,
+                &group_id(),
+                "rc1-provider-setup-v1",
+                vec![AdminConfigurationSubmittedValue {
+                    handle: SecretHandle::new("client_id").unwrap(),
+                    value: SecretMaterial::from("legacy-client".to_string()),
+                }],
+            )
+            .await
+            .unwrap(),
+        0,
+        "the second startup must not rewrite an equal import"
+    );
+
+    let conflict = service
+        .import_legacy_values(
+            &scope,
+            &group_id(),
+            "rc1-provider-setup-v1",
+            vec![AdminConfigurationSubmittedValue {
+                handle: SecretHandle::new("client_id").unwrap(),
+                value: SecretMaterial::from("different-client".to_string()),
+            }],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        conflict,
+        AdminConfigurationServiceError::IdempotencyConflict,
+        "a divergent current value must stop startup"
+    );
+    assert_eq!(
+        service
+            .non_secret_value(
+                &scope,
+                &group_id(),
+                &SecretHandle::new("client_id").unwrap(),
+            )
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("legacy-client"),
+        "conflict detection must leave current state untouched"
+    );
+
+    assert_eq!(
+        service
+            .import_legacy_values(
+                &scope,
+                &group_id(),
+                "rc1-provider-secret-v1",
+                vec![AdminConfigurationSubmittedValue {
+                    handle: SecretHandle::new("client_secret").unwrap(),
+                    value: SecretMaterial::from("legacy-secret".to_string()),
+                }],
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(service.get(&scope, &group_id()).await.unwrap().complete);
+    assert_eq!(
+        service
+            .import_legacy_values(
+                &scope,
+                &group_id(),
+                "rc1-provider-secret-v1",
+                vec![AdminConfigurationSubmittedValue {
+                    handle: SecretHandle::new("client_secret").unwrap(),
+                    value: SecretMaterial::from("legacy-secret".to_string()),
+                }],
+            )
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        service
+            .import_legacy_values(
+                &scope,
+                &group_id(),
+                "rc1-provider-secret-v1",
+                vec![AdminConfigurationSubmittedValue {
+                    handle: SecretHandle::new("client_secret").unwrap(),
+                    value: SecretMaterial::from("different-secret".to_string()),
+                }],
+            )
+            .await
+            .unwrap_err(),
+        AdminConfigurationServiceError::IdempotencyConflict
+    );
+    let material = service
+        .secret_material(
+            &scope,
+            &group_id(),
+            &SecretHandle::new("client_secret").unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        secrecy::ExposeSecret::expose_secret(&material),
+        "legacy-secret",
+        "divergent secret import must not overwrite the migrated secret"
+    );
+}
+
+#[tokio::test]
 async fn runtime_resolvers_follow_descriptor_kinds_and_return_effective_values() {
     let (service, _) = service();
     let scope = sample_scope("tenant-a", "operator-a");

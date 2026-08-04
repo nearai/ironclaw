@@ -1,10 +1,10 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use ironclaw_extensions::{
-    CapabilityVisibility, ExtensionInstallation, ExtensionInstallationError,
-    ExtensionInstallationId, ExtensionInstallationStorePort, ExtensionLifecycleService,
-    ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage, InstallationOwner,
-    ManifestHash, ManifestSource, canonicalize_installation_rows,
+    CapabilityVisibility, ExtensionActivationState, ExtensionInstallation,
+    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStorePort,
+    ExtensionLifecycleService, ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage,
+    InstallationOwner, ManifestHash, ManifestSource, canonicalize_installation_rows,
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{approval::sha256_digest_token, ids::UserId};
@@ -90,6 +90,14 @@ pub async fn restore_extension_lifecycle_state(
                 .install(available.package.clone())
                 .await
                 .map_err(map_extension_error)?;
+            if installation.persisted_activation_state() != ExtensionActivationState::Enabled {
+                tracing::debug!(
+                    extension_id = installation.extension_id().as_str(),
+                    activation_state = ?installation.persisted_activation_state(),
+                    "restored extension installation without widening its rc1 activation state"
+                );
+                continue;
+            }
             if !has_activatable_surface {
                 tracing::debug!(
                     extension_id = installation.extension_id().as_str(),

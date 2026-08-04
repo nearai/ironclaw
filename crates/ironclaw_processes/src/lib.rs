@@ -71,8 +71,8 @@ pub use journal::{
     SubmitProcessWithCheckpointRequest, SuspendProcessRequest,
 };
 pub use journal_store::{
-    DEFAULT_PROCESS_LEASE_DURATION, MAX_CRASH_RECOVERY_RECLAIMS, ProcessJournalStore,
-    ProcessJournalStoreError,
+    DEFAULT_PROCESS_LEASE_DURATION, LegacyProcessDispositionReport, LegacyProcessMigrationReport,
+    MAX_CRASH_RECOVERY_RECLAIMS, ProcessJournalStore, ProcessJournalStoreError,
 };
 pub use result_store::ProcessResultStore;
 pub use services::{

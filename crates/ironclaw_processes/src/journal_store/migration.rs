@@ -1,7 +1,9 @@
 use std::collections::{HashMap, VecDeque};
 
 use chrono::Utc;
-use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{
+    FileType, FilesystemError, Filter, Page, RootFilesystem, ScopedFilesystem,
+};
 use ironclaw_host_api::{
     Timestamp,
     ids::{InvocationId, ProcessId},
@@ -18,6 +20,21 @@ use crate::{
     ProcessCheckpointRecord, ProcessCheckpointRef, ProcessJournalCursor, ProcessKind,
     ProcessLeaseSnapshot, ProcessLifecycleStatus, ProcessSuspension, ProcessTreeReservation,
 };
+
+/// Redacted disposition of deployed turn-store state consumed by the process
+/// journal migration.
+///
+/// Some rc1 collections are authoritative inputs; others are redundant
+/// projections or restart-local reservations. The latter are retained at the
+/// old authority for rollback, but are only superseded after their references
+/// have been validated against the imported runs/checkpoints.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LegacyProcessDispositionReport {
+    pub legacy_events_superseded: usize,
+    pub active_locks_expired: usize,
+    pub checkpoint_metadata_superseded: usize,
+    pub admission_reservations_expired: usize,
+}
 
 pub(super) fn legacy_turn_record_contains_data(
     path: &str,
@@ -117,6 +134,122 @@ where
     Ok(imported)
 }
 
+pub(super) async fn validate_deployed_legacy_dispositions<F>(
+    filesystem: &ScopedFilesystem<F>,
+) -> Result<LegacyProcessDispositionReport, ProcessJournalStoreError>
+where
+    F: RootFilesystem,
+{
+    let mut collections = legacy_blob_collections(filesystem).await?;
+    for name in [
+        "runs",
+        "active_locks",
+        "checkpoints",
+        "loop_checkpoints",
+        "events",
+        "admission_reservations",
+    ] {
+        collections
+            .entry(name)
+            .or_default()
+            .extend(legacy_row_collection(filesystem, name).await?);
+    }
+
+    let run_ids = string_field_set(
+        collections.get("runs").map(Vec::as_slice).unwrap_or(&[]),
+        "run_id",
+    )?;
+    validate_references(
+        collections
+            .get("active_locks")
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+        "run_id",
+        &run_ids,
+        "active lock",
+    )?;
+    validate_references(
+        collections
+            .get("checkpoints")
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+        "run_id",
+        &run_ids,
+        "checkpoint metadata",
+    )?;
+    validate_references(
+        collections.get("events").map(Vec::as_slice).unwrap_or(&[]),
+        "run_id",
+        &run_ids,
+        "lifecycle event",
+    )?;
+    validate_references(
+        collections
+            .get("admission_reservations")
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+        "run_id",
+        &run_ids,
+        "admission reservation",
+    )?;
+
+    let loop_state_refs = string_field_set(
+        collections
+            .get("loop_checkpoints")
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+        "state_ref",
+    )?;
+    for checkpoint in collections
+        .get("checkpoints")
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+    {
+        let state_ref = required_string(checkpoint, "state_ref")?;
+        if !loop_state_refs.contains(&state_ref) {
+            return Err(invalid_legacy(format!(
+                "legacy checkpoint metadata references missing loop checkpoint {state_ref}"
+            )));
+        }
+    }
+
+    Ok(LegacyProcessDispositionReport {
+        legacy_events_superseded: collections.get("events").map_or(0, Vec::len),
+        active_locks_expired: collections.get("active_locks").map_or(0, Vec::len),
+        checkpoint_metadata_superseded: collections.get("checkpoints").map_or(0, Vec::len),
+        admission_reservations_expired: collections
+            .get("admission_reservations")
+            .map_or(0, Vec::len),
+    })
+}
+
+fn string_field_set(
+    records: &[Value],
+    field: &str,
+) -> Result<std::collections::HashSet<String>, ProcessJournalStoreError> {
+    records
+        .iter()
+        .map(|record| required_string(record, field))
+        .collect()
+}
+
+fn validate_references(
+    records: &[Value],
+    field: &str,
+    targets: &std::collections::HashSet<String>,
+    record_name: &str,
+) -> Result<(), ProcessJournalStoreError> {
+    for record in records {
+        let target = required_string(record, field)?;
+        if !targets.contains(&target) {
+            return Err(invalid_legacy(format!(
+                "legacy {record_name} references missing run {target}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 async fn legacy_blob_collections<F>(
     filesystem: &ScopedFilesystem<F>,
 ) -> Result<HashMap<&'static str, Vec<Value>>, ProcessJournalStoreError>
@@ -135,8 +268,12 @@ where
     for name in [
         "turns",
         "runs",
+        "active_locks",
+        "checkpoints",
         "loop_checkpoints",
         "idempotency_records",
+        "events",
+        "admission_reservations",
         "spawn_tree_reservations",
     ] {
         collections.insert(name, collection_values(root.get(name)));
@@ -158,38 +295,43 @@ where
     {
         return Ok(Vec::new());
     }
-    // Legacy import is an explicit one-time migration. It must enumerate the
-    // complete deployed collection: the bounded directory API silently
-    // truncates at its limit and would make the initialization sentinel
-    // permanent after importing only a prefix.
-    let entries = match filesystem
-        .list_dir(&ResourceScope::system(), &directory)
-        .await
-    {
-        Ok(entries) => entries,
-        Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    };
     let mut values = Vec::new();
-    for entry in entries {
-        if entry.file_type != FileType::File {
-            continue;
-        }
-        let path = scoped(&format!("{}/{}", directory.as_str(), entry.name))?;
-        let Some(versioned) = get_optional(filesystem, &path).await? else {
-            continue;
+    let mut offset = 0u64;
+    loop {
+        let rows = match filesystem
+            .query(
+                &ResourceScope::system(),
+                &directory,
+                &Filter::All,
+                Page::new(offset, Page::MAX_LIMIT),
+            )
+            .await
+        {
+            Ok(rows) => rows,
+            Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
         };
-        let value: Value = decode(&versioned.entry.body)?;
-        match value {
-            Value::Object(mut object) if object.contains_key("journal_seq") => {
-                if let Some(value) = object.remove("value")
-                    && !value.is_null()
-                {
-                    values.push(value);
-                }
-            }
-            value => values.push(value),
+        if rows.is_empty() {
+            break;
         }
+        let received = rows.len();
+        for versioned in rows {
+            let value: Value = decode(&versioned.entry.body)?;
+            match value {
+                Value::Object(mut object) if object.contains_key("journal_seq") => {
+                    if let Some(value) = object.remove("value")
+                        && !value.is_null()
+                    {
+                        values.push(value);
+                    }
+                }
+                value => values.push(value),
+            }
+        }
+        if received < Page::MAX_LIMIT as usize {
+            break;
+        }
+        offset = offset.saturating_add(received as u64);
     }
     Ok(values)
 }

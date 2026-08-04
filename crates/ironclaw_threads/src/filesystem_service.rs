@@ -34,8 +34,11 @@
 
 mod message_lookup_index;
 mod message_read;
+mod startup_migration;
 mod thread_index;
 mod transcript_migration;
+pub use startup_migration::{ThreadStartupMigrationReport, migrate_all_thread_scopes};
+pub use transcript_migration::{LegacyAppendMigrationReport, TranscriptMigrationReport};
 
 use std::{
     collections::{HashMap, HashSet},

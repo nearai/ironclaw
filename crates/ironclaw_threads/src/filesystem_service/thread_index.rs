@@ -22,12 +22,22 @@ const THREAD_SCOPE_INDEX_KEY: &str = "scope_key";
 const THREAD_ACTIVITY_SORT_KEY: &str = "activity_sort";
 const THREAD_ID_INDEX_KEY: &str = "thread_id";
 const THREAD_INDEX_KNOWN_ROW_MAX: usize = 100_000;
+const CURRENT_THREAD_INDEX_PROJECTION_VERSION: u32 = 2;
+const THREAD_INDEX_MIGRATION_MARKER_BODY: &[u8] = b"thread-index-v2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct ThreadIndexRecord {
     #[serde(flatten)]
     pub(super) record: SessionThreadRecord,
     pub(super) next_sequence: u64,
+    /// Version of the persisted index-entry projection shape.
+    ///
+    /// rc1 rows deserialize as zero. Advancing them to the current version is
+    /// intentionally a semantic change so `cas_update` cannot take its
+    /// equality no-op path: the physical rewrite is what adds the ordered
+    /// projection metadata consumed by `query_ordered`.
+    #[serde(default)]
+    projection_schema_version: u32,
     flags: ThreadIndexFlags,
     /// Sidebar label derived from the thread's first user message, written at
     /// message-accept time (and healed lazily for rows that predate it).
@@ -49,6 +59,26 @@ impl<F> FilesystemSessionThreadService<F>
 where
     F: RootFilesystem,
 {
+    async fn thread_index_migration_complete(
+        &self,
+        scope: &ThreadScope,
+    ) -> Result<bool, SessionThreadError> {
+        let marker = thread_index_migration_marker_path(scope)?;
+        let Some(marker) = self
+            .filesystem
+            .get(&scope.to_resource_scope(), &marker)
+            .await?
+        else {
+            return Ok(false);
+        };
+        if marker.entry.body != THREAD_INDEX_MIGRATION_MARKER_BODY {
+            return Err(SessionThreadError::Backend(
+                "thread index migration marker has an unexpected body".to_string(),
+            ));
+        }
+        Ok(true)
+    }
+
     fn thread_index_entry(record: &ThreadIndexRecord) -> Result<Entry, SessionThreadError> {
         let body = serialize_pretty(record)?;
         let kind = RecordKind::new(THREAD_INDEX_KIND).map_err(|error| {
@@ -71,7 +101,7 @@ where
             ))
     }
 
-    async fn ensure_thread_index_query(
+    pub(super) async fn ensure_thread_index_query(
         &self,
         scope: &ThreadScope,
         required: bool,
@@ -85,16 +115,8 @@ where
         if already_declared && !required {
             return Ok(());
         }
-        if already_declared {
-            let marker = thread_index_migration_marker_path(scope)?;
-            if self
-                .filesystem
-                .get(&scope.to_resource_scope(), &marker)
-                .await?
-                .is_some()
-            {
-                return Ok(());
-            }
+        if already_declared && self.thread_index_migration_complete(scope).await? {
+            return Ok(());
         }
         let _declaration_guard = self.thread_index_declaration_lock.lock().await;
         let already_declared = self
@@ -105,16 +127,8 @@ where
         if already_declared && !required {
             return Ok(());
         }
-        if already_declared {
-            let marker = thread_index_migration_marker_path(scope)?;
-            if self
-                .filesystem
-                .get(&scope.to_resource_scope(), &marker)
-                .await?
-                .is_some()
-            {
-                return Ok(());
-            }
+        if already_declared && self.thread_index_migration_complete(scope).await? {
+            return Ok(());
         }
         // The listing projection is declared once per mount at the `/threads`
         // alias root, not per scope. Ancestor-prefix resolution lets the
@@ -134,12 +148,7 @@ where
         }
         if required {
             let marker = thread_index_migration_marker_path(scope)?;
-            if self
-                .filesystem
-                .get(&scope.to_resource_scope(), &marker)
-                .await?
-                .is_none()
-            {
+            if !self.thread_index_migration_complete(scope).await? {
                 if let Err(error) = self.migrate_thread_index_for_scope(scope).await {
                     if let Ok(mut ready) = self.ready_thread_index_scopes.lock() {
                         ready.remove(&scope_key);
@@ -150,18 +159,13 @@ where
                     .put(
                         &scope.to_resource_scope(),
                         &marker,
-                        Entry::bytes(b"thread-index-v1".to_vec()),
+                        Entry::bytes(THREAD_INDEX_MIGRATION_MARKER_BODY.to_vec()),
                         CasExpectation::Any,
                     )
                     .await?;
-                if self
-                    .filesystem
-                    .get(&scope.to_resource_scope(), &marker)
-                    .await?
-                    .is_none()
-                {
+                if !self.thread_index_migration_complete(scope).await? {
                     return Err(SessionThreadError::Backend(
-                        "thread index migration marker was not durable after write".to_string(),
+                        "thread index migration marker failed exact readback".to_string(),
                     ));
                 }
             }
@@ -173,6 +177,7 @@ where
         ThreadIndexRecord {
             record: stored.record.clone(),
             next_sequence: stored.next_sequence,
+            projection_schema_version: CURRENT_THREAD_INDEX_PROJECTION_VERSION,
             derived_title: None,
             flags: ThreadIndexFlags {
                 title_present: stored.record.title.is_some(),
@@ -667,7 +672,7 @@ fn thread_index_migration_marker_path(
     scope: &ThreadScope,
 ) -> Result<ScopedPath, SessionThreadError> {
     scoped_path(&format!(
-        "{}/index-migrations/thread-index-v1.complete",
+        "{}/index-migrations/thread-index-v2.complete",
         scope_axes_string(scope)
     ))
 }
@@ -727,6 +732,7 @@ where
 fn no_op_thread_index_record(scope: ThreadScope, thread_id: ThreadId) -> ThreadIndexRecord {
     ThreadIndexRecord {
         derived_title: None,
+        projection_schema_version: CURRENT_THREAD_INDEX_PROJECTION_VERSION,
         record: SessionThreadRecord {
             scope,
             thread_id,
@@ -759,7 +765,7 @@ mod tests {
     };
 
     use super::super::thread_record_path;
-    use super::{ThreadIndexFlags, ThreadIndexRecord};
+    use super::{CURRENT_THREAD_INDEX_PROJECTION_VERSION, ThreadIndexFlags, ThreadIndexRecord};
 
     #[test]
     fn merge_thread_index_records_prefers_present_source_fields() {
@@ -778,6 +784,7 @@ mod tests {
                 updated_at: Some(created_at),
             },
             next_sequence: 3,
+            projection_schema_version: CURRENT_THREAD_INDEX_PROJECTION_VERSION,
             derived_title: None,
             flags: ThreadIndexFlags {
                 title_present: true,
@@ -797,6 +804,7 @@ mod tests {
                 updated_at: Some(created_at),
             },
             next_sequence: 7,
+            projection_schema_version: CURRENT_THREAD_INDEX_PROJECTION_VERSION,
             derived_title: None,
             flags: ThreadIndexFlags {
                 title_present: true,

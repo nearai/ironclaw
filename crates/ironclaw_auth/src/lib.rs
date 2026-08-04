@@ -107,7 +107,11 @@ pub use product_auth::credentials::runtime_credentials::{
     RuntimeCredentialAccountSelectionService, RuntimeCredentialAccountVisibilityPolicy,
     map_account_error, runtime_credential_account_selection_request,
 };
-pub use product_auth::durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
+pub use product_auth::durable::{
+    FilesystemAuthProductServices, OAuthProviderAliasMigrationError,
+    OAuthProviderAliasMigrationReport, UnavailableAuthProviderClient,
+    migrate_legacy_oauth_provider_alias,
+};
 pub use product_auth::oauth::oauth_gate::{
     OAuthGateChallengeRequest, OAuthGateFlowDriver, auth_scope_for_blocked_turn, turn_gate_query,
 };

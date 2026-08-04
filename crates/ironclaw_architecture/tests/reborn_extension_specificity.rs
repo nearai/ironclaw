@@ -1130,6 +1130,18 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // re-carved. The entry is deleted, not repointed — the allowlist shrinks.
     ("crates/ironclaw_product/src/lib.rs", "telegram"),
     ("crates/ironclaw_product/src/reborn_services.rs", "slack"),
+    // One-release compatibility adapter: exact rc1 provider wires must be
+    // named to preserve setup, identities, routes, and pairing disposition.
+    // Generic storage/copy primitives remain vendor-neutral; delete these two
+    // entries with the adapter after the documented rollback release expires.
+    (
+        "crates/ironclaw_extension_host/src/legacy_channel_state_migration.rs",
+        "slack",
+    ),
+    (
+        "crates/ironclaw_extension_host/src/legacy_channel_state_migration.rs",
+        "telegram",
+    ),
     // WS5 port inversion: these three wire-DTO sites moved to the contracts
     // crate with their code (`NearAiAuthProvider`'s OAuth identity providers and
     // the project-metadata doc example). Same terms, same debt, new file.
@@ -1513,7 +1525,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// not with `grep`, which also matches prose. Tracked as #7147; whichever of
 /// the concurrent branches touching this list merges last must recount the
 /// union rather than trusting any single branch's number.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 125;
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 127;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 #[test]

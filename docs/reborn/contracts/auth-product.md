@@ -219,6 +219,17 @@ updates the pre-authorized account id captured in the flow. Completed flows
 return their stored credential account id on callback retry/replay, so provider
 code is not re-exchanged after a completed durable claim.
 
+The 1.0.0-rc.1 to 1.1.0-rc.1 startup migration folds the retired Slack OAuth
+provider id into the unified `slack` provider before auth workers or routes
+start. Configured accounts retain their account ids, access/refresh secret
+handles, ownership, grants, scopes, and provider identity; secret-store rows
+are not rewritten or re-encrypted. Non-terminal legacy flows are expired with
+a stable `unknown_or_expired_flow` reason because their callback contract is no
+longer resumable. Each exact source entry is retained beside the live record
+under a non-live backup suffix before a CAS-fenced rewrite, so rollback can
+restore the old authority. Malformed records, path/scope mismatches, backup
+collisions, and concurrent writes fail startup rather than silently skipping.
+
 Google OAuth production config is resolved by host composition before provider
 client construction. Injected `OAuthClientConfig` is the canonical production
 source for client id, optional client secret, and redirect URI in this slice.

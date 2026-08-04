@@ -20,9 +20,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
     BackendCapabilities, CasExpectation, DirEntry, DiskFilesystem, Entry, Fault, FaultInjecting,
-    FaultKind, FileStat, FilesystemError, FilesystemOperation, Filter, InMemoryBackend, IndexSpec,
-    OrderedPage, Page, RecordVersion, RootFilesystem, ScopedFilesystem, SeqNo, StorageTxn,
-    TxnCapability, VersionedEntry,
+    FaultKind, FileStat, FilesystemError, FilesystemOperation, Filter, InMemoryBackend, IndexKey,
+    IndexSpec, OrderedPage, Page, RecordVersion, RootFilesystem, ScopedFilesystem, SeqNo,
+    StorageTxn, TxnCapability, VersionedEntry,
 };
 use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
@@ -41,7 +41,7 @@ use ironclaw_threads::{
     ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
     SessionThreadError, SessionThreadService, SummaryKind, SummaryModelContextPolicy,
     ThreadHistoryRequest, ThreadMessageId, ThreadScope, ToolResultSafeSummary,
-    UpdateAssistantDraftRequest,
+    UpdateAssistantDraftRequest, migrate_all_thread_scopes,
 };
 use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
 
@@ -2609,7 +2609,7 @@ async fn filesystem_transcript_migration_retries_writer_admission_contention() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -2668,7 +2668,7 @@ async fn filesystem_transcript_migration_retries_a_lost_cas_race() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -2692,7 +2692,7 @@ async fn filesystem_transcript_migration_retries_a_lost_cas_race() {
     let marker_writes = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .filter(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .filter(|path| path.as_str().contains("transcript-index-v2.complete"))
         .count();
     assert_eq!(
         marker_writes, 2,
@@ -2731,7 +2731,7 @@ async fn filesystem_transcript_migration_conflict_retries_are_bounded() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -2885,6 +2885,638 @@ async fn filesystem_explicit_migration_rebuilds_missing_thread_index_rows() {
     );
 }
 
+/// Regression: rc1 thread-index rows predate the ordered projection metadata.
+/// A migration must physically rewrite an existing legacy row, even when its
+/// decoded domain record is otherwise unchanged, and must not trust the v1
+/// completion marker written by the affected migration.
+#[tokio::test]
+async fn filesystem_upgrade_reindexes_existing_rc1_thread_rows() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-index-rc1", "alice");
+    let scope = scope("index-rc1");
+    let thread_id = ThreadId::new("legacy-existing-index").unwrap();
+
+    let writer = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    writer
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("legacy existing index".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let index_path = thread_index_record_path_for_test(&scope, thread_id.as_str());
+    let versioned = scoped
+        .get(&scope.to_resource_scope(), &index_path)
+        .await
+        .expect("read current index row")
+        .expect("current index row exists");
+    let mut rc1_entry = versioned.entry;
+    let mut rc1_body: serde_json::Value =
+        serde_json::from_slice(&rc1_entry.body).expect("decode current index body");
+    rc1_body
+        .as_object_mut()
+        .expect("thread index body is an object")
+        .remove("projection_schema_version");
+    rc1_entry.body = serde_json::to_vec_pretty(&rc1_body).expect("encode rc1 index body");
+    rc1_entry.indexed.clear();
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &index_path,
+            rc1_entry,
+            CasExpectation::Version(versioned.version),
+        )
+        .await
+        .expect("replace index row with rc1 shape");
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &legacy_thread_index_migration_marker_path_for_test(&scope),
+            Entry::bytes(b"thread-index-v1".to_vec()),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("seed marker written by affected migration");
+
+    let upgraded = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let listed = upgraded
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .expect("upgrade migration succeeds");
+    assert_eq!(
+        listed
+            .threads
+            .iter()
+            .map(|thread| thread.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        [thread_id.as_str()],
+        "the ordered listing must rediscover the intact rc1 thread"
+    );
+    let reindexed = scoped
+        .get(&scope.to_resource_scope(), &index_path)
+        .await
+        .expect("read migrated index row")
+        .expect("migrated index row exists");
+    for key in ["scope_key", "activity_sort", "thread_id"] {
+        assert!(
+            reindexed
+                .entry
+                .indexed
+                .contains_key(&IndexKey::new(key).unwrap()),
+            "migration must persist ordered projection key {key}"
+        );
+    }
+    assert!(
+        scoped
+            .get(
+                &scope.to_resource_scope(),
+                &thread_index_migration_marker_path_for_test(&scope),
+            )
+            .await
+            .expect("read current migration marker")
+            .is_some(),
+        "the current marker must land only after reindexing"
+    );
+
+    let reopened = FilesystemSessionThreadService::new(scoped);
+    let listed_again = reopened
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .expect("reopened listing succeeds");
+    assert_eq!(listed_again.threads.len(), 1, "migration must be durable");
+}
+
+/// Frozen `1.0.0-rc.1` append payload. The release serialized the private
+/// stored-message wrapper directly into `message_appends`; 1.1 removed that
+/// read path, so the startup migration must materialize it before rebuilding
+/// transcript projections.
+const RC1_APPEND_ONLY_ASSISTANT_MESSAGE: &[u8] = br#"{
+  "message_id": "11111111-1111-4111-8111-111111111111",
+  "thread_id": "thread-rc1-append",
+  "sequence": 2,
+  "kind": "assistant",
+  "status": "finalized",
+  "created_at": "2026-07-01T12:00:00Z",
+  "updated_at": "2026-07-01T12:00:00Z",
+  "actor_id": null,
+  "source_binding_id": null,
+  "reply_target_binding_id": null,
+  "turn_id": null,
+  "turn_run_id": "run-rc1-append",
+  "content": "reply persisted only in the rc1 append log",
+  "redaction_ref": null
+}"#;
+
+#[tokio::test]
+async fn filesystem_upgrade_materializes_rc1_append_log_and_keeps_message_file_authoritative() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-rc1-append", "alice");
+    let scope = scope("rc1-append");
+    let thread_id = ThreadId::new("thread-rc1-append").unwrap();
+    let writer = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    writer
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let file_message = writer
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("the per-message file wins"),
+        })
+        .await
+        .unwrap();
+
+    // Recreate the release boundary: the affected v1 marker may already be
+    // present, while the v2 marker cannot be trusted until append rows and
+    // projections have both been verified.
+    let _ = scoped
+        .delete(
+            &scope.to_resource_scope(),
+            &transcript_index_migration_marker_path_for_test(&scope),
+        )
+        .await;
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &legacy_transcript_index_migration_marker_path_for_test(&scope),
+            Entry::bytes(b"transcript-index-v1".to_vec()),
+            CasExpectation::Any,
+        )
+        .await
+        .unwrap();
+
+    let stale_append_copy = serde_json::to_vec_pretty(&serde_json::json!({
+        "message_id": file_message.message_id,
+        "thread_id": thread_id,
+        "sequence": file_message.sequence,
+        "kind": "user",
+        "status": "accepted",
+        "created_at": "2026-07-01T11:59:00Z",
+        "updated_at": "2026-07-01T11:59:00Z",
+        "actor_id": "actor-a",
+        "source_binding_id": null,
+        "reply_target_binding_id": null,
+        "turn_id": null,
+        "turn_run_id": null,
+        "content": "stale append copy must not overwrite the file",
+        "redaction_ref": null
+    }))
+    .unwrap();
+    let append_path = legacy_message_append_log_path_for_test(&scope, &thread_id);
+    scoped
+        .append(&scope.to_resource_scope(), &append_path, stale_append_copy)
+        .await
+        .unwrap();
+    scoped
+        .append(
+            &scope.to_resource_scope(),
+            &append_path,
+            RC1_APPEND_ONLY_ASSISTANT_MESSAGE.to_vec(),
+        )
+        .await
+        .unwrap();
+
+    let upgraded = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let first = upgraded
+        .migrate_legacy_append_logs_for_scope(&scope)
+        .await
+        .expect("rc1 append materialization succeeds");
+    assert_eq!(first.scanned, 2);
+    assert_eq!(first.materialized, 1);
+    assert_eq!(first.unchanged, 1);
+
+    let history = upgraded
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+        })
+        .await
+        .expect("upgraded history remains readable");
+    assert_eq!(history.messages.len(), 2);
+    assert_eq!(
+        history.messages[0].content.as_deref(),
+        Some("the per-message file wins")
+    );
+    assert_eq!(
+        history.messages[1].content.as_deref(),
+        Some("reply persisted only in the rc1 append log")
+    );
+
+    let second = upgraded
+        .migrate_legacy_append_logs_for_scope(&scope)
+        .await
+        .expect("second append materialization pass succeeds");
+    assert_eq!(second.materialized, 0, "second pass changes no rows");
+    assert_eq!(second.unchanged, 2);
+    assert_eq!(
+        scoped
+            .tail_bounded(&scope.to_resource_scope(), &append_path, SeqNo::ZERO, 10,)
+            .await
+            .expect("legacy append log remains rollback-readable")
+            .len(),
+        2,
+        "the migration must retain the rc1 authority for rollback"
+    );
+    assert!(
+        scoped
+            .get(
+                &scope.to_resource_scope(),
+                &transcript_index_migration_marker_path_for_test(&scope),
+            )
+            .await
+            .unwrap()
+            .is_some(),
+        "v2 marker lands after materialization and projection rebuild"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_upgrade_rejects_malformed_rc1_append_without_v2_marker() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-rc1-append-bad", "alice");
+    let scope = scope("rc1-append-bad");
+    let thread_id = ThreadId::new("thread-rc1-append-bad").unwrap();
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &legacy_transcript_index_migration_marker_path_for_test(&scope),
+            Entry::bytes(b"transcript-index-v1".to_vec()),
+            CasExpectation::Any,
+        )
+        .await
+        .unwrap();
+    scoped
+        .append(
+            &scope.to_resource_scope(),
+            &legacy_message_append_log_path_for_test(&scope, &thread_id),
+            b"{not-json".to_vec(),
+        )
+        .await
+        .unwrap();
+
+    service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id,
+        })
+        .await
+        .expect_err("malformed P0 state must fail closed");
+    assert!(
+        scoped
+            .get(
+                &scope.to_resource_scope(),
+                &transcript_index_migration_marker_path_for_test(&scope),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "a failed migration must not write the v2 completion marker"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_startup_migration_discovers_every_durable_scope_before_reads() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scope_a = scope("startup-discovery-a");
+    let scope_b = scope("startup-discovery-b");
+    let thread_a = ThreadId::new("thread-rc1-append").unwrap();
+    let thread_b = ThreadId::new("thread-startup-discovery-b").unwrap();
+
+    for (thread_scope, thread_id) in [(&scope_a, thread_a.clone()), (&scope_b, thread_b.clone())] {
+        let scoped = scoped_threads_fs_at(
+            Arc::clone(&backend),
+            thread_scope.tenant_id.as_str(),
+            thread_scope
+                .owner_user_id
+                .as_ref()
+                .expect("test scope owner")
+                .as_str(),
+        );
+        let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope.clone(),
+                thread_id: Some(thread_id.clone()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(format!("startup {thread_id}")),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        let _ = scoped
+            .delete(
+                &thread_scope.to_resource_scope(),
+                &transcript_index_migration_marker_path_for_test(thread_scope),
+            )
+            .await;
+        let _ = scoped
+            .delete(
+                &thread_scope.to_resource_scope(),
+                &thread_index_migration_marker_path_for_test(thread_scope),
+            )
+            .await;
+        scoped
+            .put(
+                &thread_scope.to_resource_scope(),
+                &legacy_transcript_index_migration_marker_path_for_test(thread_scope),
+                Entry::bytes(b"transcript-index-v1".to_vec()),
+                CasExpectation::Any,
+            )
+            .await
+            .unwrap();
+    }
+    let scoped_a = scoped_threads_fs_at(
+        Arc::clone(&backend),
+        scope_a.tenant_id.as_str(),
+        scope_a
+            .owner_user_id
+            .as_ref()
+            .expect("test scope owner")
+            .as_str(),
+    );
+    scoped_a
+        .append(
+            &scope_a.to_resource_scope(),
+            &legacy_message_append_log_path_for_test(&scope_a, &thread_a),
+            RC1_APPEND_ONLY_ASSISTANT_MESSAGE.to_vec(),
+        )
+        .await
+        .unwrap();
+
+    let startup_scoped = dynamic_threads_fs(Arc::clone(&backend));
+    let first = migrate_all_thread_scopes(Arc::clone(&backend), startup_scoped)
+        .await
+        .expect("startup discovers and migrates every scope");
+    assert_eq!(first.thread_rows, 2);
+    assert_eq!(first.discovered_scopes, 2);
+    assert_eq!(first.transcript_scopes_migrated, 2);
+    assert_eq!(first.scopes.len(), 2);
+    assert!(first.scopes.iter().all(|scope| scope.failed == 0));
+    assert_eq!(first.append_events_scanned, 1);
+    assert_eq!(first.append_messages_materialized, 1);
+
+    let reopened_a = FilesystemSessionThreadService::new(scoped_a);
+    let history = reopened_a
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope_a.clone(),
+            thread_id: thread_a,
+        })
+        .await
+        .expect("append-only history is readable immediately after startup");
+    assert_eq!(history.messages.len(), 1);
+    let reopened_b = FilesystemSessionThreadService::new(scoped_threads_fs_at(
+        Arc::clone(&backend),
+        scope_b.tenant_id.as_str(),
+        scope_b
+            .owner_user_id
+            .as_ref()
+            .expect("test scope owner")
+            .as_str(),
+    ));
+    let listed = reopened_b
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_b.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .expect("second scope listing is ready before its first request");
+    assert_eq!(listed.threads[0].thread_id, thread_b);
+
+    let second = migrate_all_thread_scopes(
+        Arc::clone(&backend),
+        dynamic_threads_fs(Arc::clone(&backend)),
+    )
+    .await
+    .expect("second startup migration succeeds");
+    assert_eq!(second.transcript_scopes_migrated, 0);
+    assert_eq!(second.transcript_scopes_unchanged, 2);
+    assert_eq!(second.scopes.len(), 2);
+    assert!(second.scopes.iter().all(|scope| scope.migrated == 0));
+    assert_eq!(second.append_messages_materialized, 0);
+}
+
+/// Release-pair acceptance: discovery, append materialization, and transcript
+/// projection must all continue beyond the filesystem backend's maximum page.
+/// Otherwise a large rc1 workspace can persist a completion marker after only
+/// its first page of threads or assistant replies has become visible to 1.1.
+#[tokio::test]
+async fn filesystem_startup_migration_crosses_backend_pages_for_threads_and_messages() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let thread_scope = scope("startup-pages");
+    let tenant_id = thread_scope.tenant_id.as_str();
+    let owner_user_id = thread_scope
+        .owner_user_id
+        .as_ref()
+        .expect("test scope owner")
+        .as_str();
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), tenant_id, owner_user_id);
+    let writer = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let migrated_thread_id = ThreadId::new("thread-rc1-append").unwrap();
+    writer
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(migrated_thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("rc1 append authority".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    replace_thread_index_with_rc1_shape(&scoped, &thread_scope, &migrated_thread_id).await;
+
+    let record_count = Page::MAX_LIMIT as usize + 1;
+    for index in 1..record_count {
+        let thread_id = ThreadId::new(format!("thread-page-{index:04}")).unwrap();
+        writer
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope.clone(),
+                thread_id: Some(thread_id.clone()),
+                created_by_actor_id: "actor-a".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        replace_thread_index_with_rc1_shape(&scoped, &thread_scope, &thread_id).await;
+    }
+
+    let append_path = legacy_message_append_log_path_for_test(&thread_scope, &migrated_thread_id);
+    let first_message_id = ThreadMessageId::parse("11111111-1111-4111-8111-111111111111")
+        .expect("frozen rc1 message id");
+    let mut last_message_id = first_message_id;
+    for index in 0..record_count {
+        let payload = if index == 0 {
+            RC1_APPEND_ONLY_ASSISTANT_MESSAGE.to_vec()
+        } else {
+            last_message_id = ThreadMessageId::new();
+            rc1_append_only_message(last_message_id, index as u64 + 2)
+        };
+        scoped
+            .append(&thread_scope.to_resource_scope(), &append_path, payload)
+            .await
+            .unwrap();
+    }
+
+    for marker in [
+        thread_index_migration_marker_path_for_test(&thread_scope),
+        transcript_index_migration_marker_path_for_test(&thread_scope),
+    ] {
+        let _ = scoped
+            .delete(&thread_scope.to_resource_scope(), &marker)
+            .await;
+    }
+    for (marker, body) in [
+        (
+            legacy_thread_index_migration_marker_path_for_test(&thread_scope),
+            b"thread-index-v1".as_slice(),
+        ),
+        (
+            legacy_transcript_index_migration_marker_path_for_test(&thread_scope),
+            b"transcript-index-v1".as_slice(),
+        ),
+    ] {
+        scoped
+            .put(
+                &thread_scope.to_resource_scope(),
+                &marker,
+                Entry::bytes(body.to_vec()),
+                CasExpectation::Any,
+            )
+            .await
+            .expect("seed released migration marker");
+    }
+
+    let report = migrate_all_thread_scopes(
+        Arc::clone(&backend),
+        dynamic_threads_fs(Arc::clone(&backend)),
+    )
+    .await
+    .expect("startup migration crosses every page");
+    assert_eq!(report.thread_rows, record_count);
+    assert_eq!(report.discovered_scopes, 1);
+    assert_eq!(report.scopes.len(), 1);
+    assert_eq!(report.append_events_scanned, record_count);
+    assert_eq!(report.append_messages_materialized, record_count);
+    assert_eq!(report.transcript_rows_projected, record_count);
+
+    let reopened = FilesystemSessionThreadService::new(scoped);
+    let mut visible_threads = 0usize;
+    let mut cursor = None;
+    loop {
+        let page = reopened
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope: thread_scope.clone(),
+                limit: Some(100),
+                cursor,
+            })
+            .await
+            .expect("list every migrated rc1 thread-index page");
+        visible_threads = visible_threads.saturating_add(page.threads.len());
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+    assert_eq!(visible_threads, record_count);
+    let history = reopened
+        .list_thread_history(ThreadHistoryRequest {
+            scope: thread_scope.clone(),
+            thread_id: migrated_thread_id.clone(),
+        })
+        .await
+        .expect("all migrated append-only replies remain visible");
+    assert_eq!(history.messages.len(), record_count);
+    assert_eq!(history.messages[0].message_id, first_message_id);
+    assert_eq!(
+        history.messages[record_count - 1].message_id,
+        last_message_id
+    );
+    assert!(
+        reopened
+            .read_thread_message(&thread_scope, &migrated_thread_id, last_message_id)
+            .await
+            .expect("read message beyond the first backend page")
+            .is_some(),
+        "the final rc1 reply must be point-readable after migration"
+    );
+}
+
+fn rc1_append_only_message(message_id: ThreadMessageId, sequence: u64) -> Vec<u8> {
+    let mut wire: serde_json::Value = serde_json::from_slice(RC1_APPEND_ONLY_ASSISTANT_MESSAGE)
+        .expect("decode frozen rc1 append wire");
+    wire["message_id"] = serde_json::json!(message_id);
+    wire["sequence"] = serde_json::json!(sequence);
+    wire["content"] = serde_json::json!(format!("rc1 append-only reply {sequence}"));
+    serde_json::to_vec_pretty(&wire).expect("encode released append wire")
+}
+
+async fn replace_thread_index_with_rc1_shape<F>(
+    filesystem: &ScopedFilesystem<F>,
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+) where
+    F: RootFilesystem,
+{
+    let path = thread_index_record_path_for_test(scope, thread_id.as_str());
+    let versioned = filesystem
+        .get(&scope.to_resource_scope(), &path)
+        .await
+        .expect("read current thread index")
+        .expect("current thread index exists");
+    let mut entry = versioned.entry;
+    let mut body: serde_json::Value =
+        serde_json::from_slice(&entry.body).expect("decode current thread index");
+    body.as_object_mut()
+        .expect("thread index body is an object")
+        .remove("projection_schema_version");
+    entry.body = serde_json::to_vec_pretty(&body).expect("encode released thread index");
+    entry.indexed.clear();
+    filesystem
+        .put(
+            &scope.to_resource_scope(),
+            &path,
+            entry,
+            CasExpectation::Version(versioned.version),
+        )
+        .await
+        .expect("replace current thread index with rc1 shape");
+}
+
 /// Break caught: a message updated after the migration query but before the
 /// migration transaction starts must not make conversation history unavailable.
 #[tokio::test]
@@ -2992,6 +3624,65 @@ async fn optional_index_write_cache_does_not_skip_required_migration_marker() {
             .expect("read marker after required query")
             .is_some(),
         "required query must durably finish migration despite the optional cache entry"
+    );
+}
+
+#[tokio::test]
+async fn malformed_thread_and_transcript_completion_markers_fail_closed() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-marker-body", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("marker-body");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("marker-body-thread").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("seed thread");
+
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &thread_index_migration_marker_path_for_test(&scope),
+            Entry::bytes(b"wrong-thread-marker".to_vec()),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("seed malformed thread marker");
+    assert!(
+        service
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope: scope.clone(),
+                limit: None,
+                cursor: None,
+            })
+            .await
+            .is_err(),
+        "marker presence alone must not suppress the required projection migration"
+    );
+
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &transcript_index_migration_marker_path_for_test(&scope),
+            Entry::bytes(b"wrong-transcript-marker".to_vec()),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("seed malformed transcript marker");
+    assert!(
+        service
+            .list_thread_history(ThreadHistoryRequest {
+                scope,
+                thread_id: thread.thread_id,
+            })
+            .await
+            .is_err(),
+        "a malformed transcript marker must fail startup/readback closed"
     );
 }
 
@@ -3927,6 +4618,24 @@ fn thread_index_record_path_for_test(scope: &ThreadScope, thread_id: &str) -> Sc
 
 fn thread_index_migration_marker_path_for_test(scope: &ThreadScope) -> ScopedPath {
     ScopedPath::new(format!(
+        "/threads/agents/{}/projects/{}/owners/{}/index-migrations/thread-index-v2.complete",
+        scope.agent_id.as_str(),
+        scope
+            .project_id
+            .as_ref()
+            .expect("test scope has project")
+            .as_str(),
+        scope
+            .owner_user_id
+            .as_ref()
+            .expect("test scope has owner")
+            .as_str()
+    ))
+    .unwrap()
+}
+
+fn legacy_thread_index_migration_marker_path_for_test(scope: &ThreadScope) -> ScopedPath {
+    ScopedPath::new(format!(
         "/threads/agents/{}/projects/{}/owners/{}/index-migrations/thread-index-v1.complete",
         scope.agent_id.as_str(),
         scope
@@ -3945,6 +4654,24 @@ fn thread_index_migration_marker_path_for_test(scope: &ThreadScope) -> ScopedPat
 
 fn transcript_index_migration_marker_path_for_test(scope: &ThreadScope) -> ScopedPath {
     ScopedPath::new(format!(
+        "/threads/agents/{}/projects/{}/owners/{}/index-migrations/transcript-index-v2.complete",
+        scope.agent_id.as_str(),
+        scope
+            .project_id
+            .as_ref()
+            .expect("test scope has project")
+            .as_str(),
+        scope
+            .owner_user_id
+            .as_ref()
+            .expect("test scope has owner")
+            .as_str()
+    ))
+    .unwrap()
+}
+
+fn legacy_transcript_index_migration_marker_path_for_test(scope: &ThreadScope) -> ScopedPath {
+    ScopedPath::new(format!(
         "/threads/agents/{}/projects/{}/owners/{}/index-migrations/transcript-index-v1.complete",
         scope.agent_id.as_str(),
         scope
@@ -3957,6 +4684,17 @@ fn transcript_index_migration_marker_path_for_test(scope: &ThreadScope) -> Scope
             .as_ref()
             .expect("test scope has owner")
             .as_str()
+    ))
+    .unwrap()
+}
+
+fn legacy_message_append_log_path_for_test(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+) -> ScopedPath {
+    ScopedPath::new(format!(
+        "{}/message_appends",
+        thread_root_path_for_test(scope, thread_id.as_str()).as_str()
     ))
     .unwrap()
 }
@@ -4025,6 +4763,23 @@ where
     )])
     .expect("mount view");
     Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
+}
+
+fn dynamic_threads_fs<F>(backend: Arc<F>) -> Arc<ScopedFilesystem<F>>
+where
+    F: RootFilesystem,
+{
+    Arc::new(ScopedFilesystem::new(backend, |resource_scope| {
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/threads")?,
+            VirtualPath::new(format!(
+                "/tenants/{}/users/{}/threads",
+                resource_scope.tenant_id.as_str(),
+                resource_scope.user_id.as_str()
+            ))?,
+            MountPermissions::read_write_list_delete(),
+        )])
+    }))
 }
 
 /// Real thread store backend that fails every write to a message lookup-index

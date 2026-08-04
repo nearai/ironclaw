@@ -13,9 +13,10 @@ use ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest;
 use ironclaw_extension_contracts::lifecycle_id::LifecycleBlockerRef;
 use ironclaw_extension_contracts::{state::InstallationState, surface::CapabilitySurfaceKind};
 use ironclaw_extensions::{
-    CapabilityVisibility, ExtensionError, ExtensionInstallation, ExtensionInstallationError,
-    ExtensionInstallationId, ExtensionLifecycleService, ExtensionManifestRecord, ExtensionPackage,
-    InstallationOwner, MembershipDeactivation, canonicalize_installation_rows,
+    CapabilityVisibility, ExtensionActivationState as PersistedExtensionActivationState,
+    ExtensionError, ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
+    ExtensionLifecycleService, ExtensionManifestRecord, ExtensionPackage, InstallationOwner,
+    MembershipDeactivation, canonicalize_installation_rows,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
@@ -98,7 +99,11 @@ trait ExtensionInstallationActivationCompat {
 
 impl ExtensionInstallationActivationCompat for ExtensionInstallation {
     fn activation_state(&self) -> ExtensionActivationState {
-        ExtensionActivationState::Enabled
+        match ExtensionInstallation::persisted_activation_state(self) {
+            PersistedExtensionActivationState::Installed => ExtensionActivationState::Installed,
+            PersistedExtensionActivationState::Disabled => ExtensionActivationState::Disabled,
+            PersistedExtensionActivationState::Enabled => ExtensionActivationState::Enabled,
+        }
     }
 }
 
@@ -118,10 +123,16 @@ where
 {
     async fn set_activation_state(
         &self,
-        _installation_id: &ExtensionInstallationId,
-        _state: ExtensionActivationState,
+        installation_id: &ExtensionInstallationId,
+        state: ExtensionActivationState,
     ) -> Result<(), ExtensionInstallationError> {
-        Ok(())
+        let state = match state {
+            ExtensionActivationState::Installed => PersistedExtensionActivationState::Installed,
+            ExtensionActivationState::Disabled => PersistedExtensionActivationState::Disabled,
+            ExtensionActivationState::Enabled => PersistedExtensionActivationState::Enabled,
+        };
+        self.set_persisted_activation_state(installation_id, state)
+            .await
     }
 }
 

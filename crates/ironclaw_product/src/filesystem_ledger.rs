@@ -26,7 +26,13 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
 
+mod migration;
 mod path;
+
+pub use migration::{
+    IdempotencyLedgerMigrationError, IdempotencyLedgerMigrationReport,
+    migrate_idempotency_ledger_root,
+};
 
 use path::{
     action_path, default_scoped_ledger_root, prune_lease_path, scoped_ledger_root_for_scope,

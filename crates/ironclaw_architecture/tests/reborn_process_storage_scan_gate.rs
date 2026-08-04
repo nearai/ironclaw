@@ -54,7 +54,7 @@ fn process_and_thread_request_storage_paths_do_not_enumerate_collections() {
     assert_calls_are_confined_to(
         &transcript_migration,
         "list_dir",
-        "pub async fn migrate_transcript_indexes_for_scope",
+        "pub async fn migrate_legacy_append_logs_for_scope",
         "async fn migrate_transcript_page",
     );
 }

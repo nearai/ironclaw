@@ -59,6 +59,7 @@ mod hosted_mcp_preparation;
 pub mod inbound_batches;
 pub mod ingress;
 pub mod install_policy;
+pub mod legacy_channel_state_migration;
 pub mod lifecycle;
 pub mod lifecycle_restore;
 pub mod lifecycle_vocabulary;
@@ -201,6 +202,12 @@ pub use install_policy::{
 pub use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
+};
+pub use legacy_channel_state_migration::{
+    Rc1ChannelMigrationScope, Rc1ChannelRootMigrationSpec, Rc1ChannelStateMigrationError,
+    Rc1ChannelStateMigrationInputs, Rc1ChannelStateMigrationReport,
+    discover_rc1_channel_migration_scopes, is_rc1_channel_state_path, migrate_rc1_channel_state,
+    rc1_channel_root_migration_specs,
 };
 pub use lifecycle::{
     DrainController, EgressFactory, ExtensionHost, ExtensionHostDeps, HookError, LifecycleError,

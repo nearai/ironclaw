@@ -48,9 +48,19 @@ mod state;
 pub use state::MAX_CRASH_RECOVERY_RECLAIMS;
 mod validation;
 use command::StoredProcessCommand;
+pub use migration::LegacyProcessDispositionReport;
 use migration::{
     import_deployed_legacy_authorities, legacy_run_state_records, legacy_turn_record_contains_data,
+    validate_deployed_legacy_dispositions,
 };
+
+/// Redacted startup result for the rc1 process-journal migration.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LegacyProcessMigrationReport {
+    pub already_complete: bool,
+    pub imported_journal_entries: usize,
+    pub disposition: LegacyProcessDispositionReport,
+}
 use observer::RegisteredProcessObserver;
 use state::ProcessJournalMaterializedState;
 use validation::{
@@ -370,15 +380,34 @@ where
     /// Production composition invokes this during startup so migration failure
     /// fails startup closed instead of surfacing inside the first user request.
     pub async fn migrate_legacy_journal(&self) -> Result<usize, ProcessJournalStoreError> {
+        Ok(self
+            .migrate_legacy_journal_with_report()
+            .await?
+            .imported_journal_entries)
+    }
+
+    /// Startup migration with an explicit disposition for rc1 collections
+    /// that are restart-local or redundant with imported process snapshots.
+    pub async fn migrate_legacy_journal_with_report(
+        &self,
+    ) -> Result<LegacyProcessMigrationReport, ProcessJournalStoreError> {
         let _guard = self.migration.lock().await;
         rows::ensure_indexes(self.filesystem.as_ref()).await?;
         if rows::is_initialized(self.filesystem.as_ref()).await? {
             self.materialized_ready.store(true, Ordering::Release);
-            return Ok(0);
+            return Ok(LegacyProcessMigrationReport {
+                already_complete: true,
+                ..LegacyProcessMigrationReport::default()
+            });
         }
+        let disposition = validate_deployed_legacy_dispositions(self.filesystem.as_ref()).await?;
         let imported = self.initialize_materialized(true).await?;
         self.materialized_ready.store(true, Ordering::Release);
-        Ok(imported)
+        Ok(LegacyProcessMigrationReport {
+            already_complete: false,
+            imported_journal_entries: imported,
+            disposition,
+        })
     }
 
     /// Explicit offline rebuild for row-native ordered projections.
