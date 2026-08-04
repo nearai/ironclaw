@@ -175,7 +175,13 @@ fn composition_root_embeds_no_prompt_content() {
                 .is_some_and(|name| {
                     matches!(
                         name.to_ascii_uppercase().as_str(),
-                        "AGENTS.MD" | "CLAUDE.MD" | "README.MD"
+                        // `CONTRACT.MD` belongs here for the same reason as the
+                        // other three: the repo already ships it as crate-local
+                        // guidance (`ironclaw_reborn_identity`, `ironclaw_trust`)
+                        // and CLAUDE.md's module-spec table names it. Without it,
+                        // a composition `CONTRACT.md` would be reported as prompt
+                        // content and send the author to the wrong fix.
+                        "AGENTS.MD" | "CLAUDE.MD" | "README.MD" | "CONTRACT.MD"
                     )
                 })
         })
@@ -459,6 +465,17 @@ fn is_test_module_file(path: &Path) -> bool {
             .any(|component| component.as_os_str() == "tests")
 }
 
+/// Refuse a symlink handed in as the *root* of either walk.
+///
+/// `reject_symlink` below only sees entries `read_dir` yields, and both walks
+/// push their root onto the stack before that ever runs — so a symlinked root
+/// was followed to its target silently, which is the same hole one level up.
+fn reject_symlink_root(dir: &Path) {
+    let metadata = std::fs::symlink_metadata(dir)
+        .unwrap_or_else(|error| panic!("readable walk root {dir:?}: {error}"));
+    reject_symlink(&metadata.file_type(), dir);
+}
+
 /// Refuse a symlink encountered by either ownership walk.
 ///
 /// `DirEntry::file_type()` reports the **link's** type without following it, so
@@ -471,17 +488,6 @@ fn is_test_module_file(path: &Path) -> bool {
 /// containment plus cycle detection to be safe, and neither crate scanned here
 /// has ever contained a symlink. If one is ever wanted, this panic is where the
 /// decision gets made deliberately rather than silently.
-/// Refuse a symlink handed in as the *root* of either walk.
-///
-/// `reject_symlink` below only sees entries `read_dir` yields, and both walks
-/// push their root onto the stack before that ever runs — so a symlinked root
-/// was followed to its target silently, which is the same hole one level up.
-fn reject_symlink_root(dir: &Path) {
-    let metadata = std::fs::symlink_metadata(dir)
-        .unwrap_or_else(|error| panic!("readable walk root {dir:?}: {error}"));
-    reject_symlink(&metadata.file_type(), dir);
-}
-
 fn reject_symlink(file_type: &std::fs::FileType, path: &Path) {
     assert!(
         !file_type.is_symlink(),
@@ -857,6 +863,54 @@ mod markdown_include_scan_tests {
                 "const P: &str = include_str!(\"policy.toml\");\nconst Q: &str = \"../prompt.md\";"
             )
             .is_empty()
+        );
+    }
+
+    /// `markdown_assets` had no test beyond the symlink panic, so two behaviours
+    /// the gate's message depends on were unpinned: the case-insensitive `.md`
+    /// match, and the guidance-file exemption applied by the caller. Both drift
+    /// in the *quiet* direction — a missed asset makes the shipped-asset
+    /// assertion pass on a crate it never really checked.
+    #[test]
+    fn markdown_assets_matches_any_case_and_the_caller_keeps_only_non_guidance() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("AGENTS.md"), "# guidance\n").expect("write guidance");
+        std::fs::write(root.path().join("CONTRACT.md"), "# contract\n").expect("write contract");
+        std::fs::create_dir(root.path().join("prompts")).expect("create prompts dir");
+        std::fs::write(root.path().join("prompts/seed.MD"), "# prompt\n").expect("write prompt");
+        std::fs::write(root.path().join("policy.toml"), "k = 1\n").expect("write config");
+
+        let mut found: Vec<String> = super::markdown_assets(root.path())
+            .into_iter()
+            .map(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("utf-8 file name")
+                    .to_string()
+            })
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            vec!["AGENTS.md", "CONTRACT.md", "seed.MD"],
+            "the walk must find markdown in any case and must not pick up `policy.toml` \
+             (config-as-data is squarely composition's charter)"
+        );
+
+        // The caller's guidance filter — kept in step with the gate above.
+        let shipped: Vec<&String> = found
+            .iter()
+            .filter(|name| {
+                !matches!(
+                    name.to_ascii_uppercase().as_str(),
+                    "AGENTS.MD" | "CLAUDE.MD" | "README.MD" | "CONTRACT.MD"
+                )
+            })
+            .collect();
+        assert_eq!(
+            shipped,
+            vec!["seed.MD"],
+            "only the non-guidance asset may survive the filter, and `.MD` must survive it"
         );
     }
 

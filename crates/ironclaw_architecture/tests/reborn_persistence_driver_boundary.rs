@@ -84,18 +84,18 @@ fn only_chartered_crates_link_the_postgres_driver() {
 /// two blind spots that made the gate weaker than its own docs claimed: items
 /// *after* the module body, and every sibling file (`coalescing_sink.rs`,
 /// `durable_log.rs`).
+///
+/// The walk is **recursive and symlink-rejecting**. A third revision of "weaker
+/// than its docs claimed": the scan used a flat `read_dir`, so the word "every"
+/// held only while `src/` stayed flat. A later `src/postgres/pool.rs` — exactly
+/// where a driver mention would go — would have been skipped, and a skipped file
+/// is indistinguishable from a clean one. `crates/ironclaw_reborn_event_store/src`
+/// is flat today, so this was latent rather than live; it is fixed here so the
+/// doc sentence is true by construction rather than by luck.
 #[test]
 fn event_store_names_the_driver_only_inside_its_private_backend_module() {
     let src = workspace_root().join("crates/ironclaw_reborn_event_store/src");
-    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&src)
-        .unwrap_or_else(|error| panic!("readable event store src {src:?}: {error}"))
-        .map(|entry| {
-            entry
-                .unwrap_or_else(|error| panic!("readable entry under {src:?}: {error}"))
-                .path()
-        })
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
-        .collect();
+    let mut files = rust_sources_recursive(&src);
     files.sort();
     assert!(
         files.len() >= 2,
@@ -178,6 +178,49 @@ fn raw_string_end(bytes: &[u8], hashes: usize) -> Option<usize> {
 /// a `{` there stretched it past the real closing brace and swallowed the
 /// driver mentions that followed. That second direction is fail-open, and it is
 /// pinned by a fixture in both directions.
+/// Every `.rs` file under `dir`, recursively, failing loud on anything it cannot
+/// read.
+///
+/// Fail-closed on purpose, matching `reborn_composition_boundaries.rs`: for a
+/// containment gate, "the walk could not look" and "there is nothing there" must
+/// not produce the same verdict. Symlinks are rejected rather than followed —
+/// `DirEntry::file_type()` reports the *link*, so a symlinked subtree is neither
+/// `is_dir()` nor an `.rs` file and the walk would step over it silently.
+fn rust_sources_recursive(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let metadata = std::fs::symlink_metadata(dir)
+        .unwrap_or_else(|error| panic!("readable walk root {dir:?}: {error}"));
+    assert!(
+        !metadata.file_type().is_symlink(),
+        "{dir:?} is a symlink; the driver-boundary walk does not follow symlinks"
+    );
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let read = std::fs::read_dir(&current)
+            .unwrap_or_else(|error| panic!("readable directory {current:?}: {error}"));
+        for entry in read {
+            let entry =
+                entry.unwrap_or_else(|error| panic!("readable entry under {current:?}: {error}"));
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .unwrap_or_else(|error| panic!("readable file type for {path:?}: {error}"));
+            assert!(
+                !file_type.is_symlink(),
+                "{path:?} is a symlink; the driver-boundary walk does not follow \
+                 symlinks, and stepping over one would let the gate report clean \
+                 on a subtree it never read"
+            );
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
 fn private_backend_module_body(
     source: &str,
     path: &std::path::Path,
@@ -329,11 +372,78 @@ fn normal_dependents_of(name: &str) -> BTreeSet<String> {
 
 #[cfg(test)]
 mod backend_module_body_tests {
-    use super::private_backend_module_body;
+    use super::{private_backend_module_body, rust_sources_recursive};
     use std::path::Path;
 
     fn body(source: &str) -> Option<std::ops::Range<usize>> {
         private_backend_module_body(source, Path::new("fixture.rs"))
+    }
+
+    /// The walk must reach a nested module. `src/` is flat today, so a flat
+    /// `read_dir` passed — but `src/postgres/pool.rs` is exactly where a driver
+    /// mention would live, and a skipped file reads as a clean one.
+    #[test]
+    fn the_walk_reaches_a_nested_module() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("lib.rs"), "// root\n").expect("write lib");
+        std::fs::create_dir(root.path().join("postgres")).expect("create nested dir");
+        std::fs::write(
+            root.path().join("postgres/pool.rs"),
+            "pub fn leak(p: deadpool_postgres::Pool) {}\n",
+        )
+        .expect("write nested source");
+
+        let found = rust_sources_recursive(root.path());
+        assert_eq!(
+            found.len(),
+            2,
+            "both the root and the nested file: {found:?}"
+        );
+        assert!(
+            found.iter().any(|p| p.ends_with("postgres/pool.rs")),
+            "the nested module must be scanned, else a driver mention there is invisible: {found:?}"
+        );
+    }
+
+    /// A symlinked subtree must fail the walk rather than be stepped over.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_subtree_fails_the_walk() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).expect("create real dir");
+        std::fs::write(real.join("a.rs"), "// nothing\n").expect("write source");
+        std::os::unix::fs::symlink(&real, root.path().join("linked")).expect("symlink");
+
+        let panicked = std::panic::catch_unwind(|| rust_sources_recursive(root.path()));
+        assert!(
+            panicked.is_err(),
+            "a symlinked subtree must fail the walk, not be skipped"
+        );
+    }
+
+    /// A `{` inside a line comment must not open the body. Without this the
+    /// exempt range stretches past the real closing brace and swallows every
+    /// driver mention after it — the fail-open direction.
+    #[test]
+    fn a_brace_in_a_line_comment_does_not_move_the_body_boundary() {
+        let source = "mod postgres_backed {\n    // opens nothing {\n}\npub fn leak(p: deadpool_postgres::Pool) {}\n";
+        let range = body(source).expect("module found");
+        assert!(
+            !range.contains(&3),
+            "line 4 (index 3) is after the body and must still be scanned"
+        );
+    }
+
+    /// Block comments nest in Rust, so a single `*/` must not re-enter code.
+    #[test]
+    fn a_brace_in_a_nested_block_comment_does_not_move_the_body_boundary() {
+        let source = "mod postgres_backed {\n    /* outer /* inner { */ still comment { */\n}\npub fn leak(p: deadpool_postgres::Pool) {}\n";
+        let range = body(source).expect("module found");
+        assert!(
+            !range.contains(&3),
+            "line 4 (index 3) is after the body and must still be scanned"
+        );
     }
 
     /// A driver mention *inside* the body is permitted — that is the whole

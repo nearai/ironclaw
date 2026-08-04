@@ -911,7 +911,10 @@ fn reject_retired_config_sections(
 ) -> anyhow::Result<()> {
     config_file.retired_section_migration(config_path)?;
     for notice in config_file.retired_section_notices(config_path) {
-        tracing::warn!("{notice}");
+        // Same target as every other warn on this serve path: announcing an
+        // inert retired section is pointless if an operator filtering on the
+        // documented startup target cannot see it.
+        tracing::warn!(target = "ironclaw::reborn::cli::serve", "{notice}");
     }
     Ok(())
 }

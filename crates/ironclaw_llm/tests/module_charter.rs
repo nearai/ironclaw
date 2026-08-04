@@ -63,8 +63,14 @@ fn charter_assignments() -> BTreeMap<String, Vec<String>> {
             continue;
         }
         let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
-        // Header (`Sub-owner | ...`) and the `|---|` separator carry no data.
-        if cells.len() < 4 || cells[0] == "Sub-owner" || cells[0].starts_with("---") {
+        // Header (`Sub-owner | ...`) and the separator carry no data. The
+        // separator is matched after stripping alignment colons: a table written
+        // `|:---|:---|` yields `:---`, which would otherwise parse as a data row
+        // and be inserted as an assigned path — `saw_row` then goes true, so the
+        // shape guard below stays quiet and the stale assertion reports `:---`
+        // instead of a real diagnosis.
+        let separator_cell = cells[0].trim_matches(':');
+        if cells.len() < 4 || cells[0] == "Sub-owner" || separator_cell.starts_with("---") {
             continue;
         }
         let owner = cells[0].trim_matches('`').to_string();
