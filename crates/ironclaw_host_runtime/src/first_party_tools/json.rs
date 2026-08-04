@@ -353,7 +353,10 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::{JSON_CAPABILITY_ID, MAX_JSON_FILE_BYTES, dispatch, parse_query_path, query_json};
+    use super::{
+        JSON_CAPABILITY_ID, MAX_JSON_FILE_BYTES, MAX_QUERY_PATH_BYTES, MAX_QUERY_PATH_COMPONENTS,
+        dispatch, parse_query_path, query_json,
+    };
     use crate::FirstPartyCapabilityRequest;
 
     const WORKSPACE_TARGET: &str = "/projects/json-tool-tests";
@@ -439,6 +442,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn query_path_enforces_length_component_and_resolution_bounds() {
+        let longest_path = "a".repeat(MAX_QUERY_PATH_BYTES);
+        assert_eq!(
+            parse_query_path(&longest_path)
+                .expect("maximum-length path remains valid")
+                .len(),
+            1
+        );
+
+        let oversized_path = format!("{longest_path}a");
+        let oversized_error =
+            parse_query_path(&oversized_path).expect_err("oversized path must fail");
+        assert_eq!(
+            oversized_error.safe_summary(),
+            Some("JSON query path failed validation")
+        );
+
+        let maximum_components = vec!["a"; MAX_QUERY_PATH_COMPONENTS].join(".");
+        assert_eq!(
+            parse_query_path(&maximum_components)
+                .expect("maximum component count remains valid")
+                .len(),
+            MAX_QUERY_PATH_COMPONENTS
+        );
+        let too_many_components = format!("{maximum_components}.a");
+        let component_error = parse_query_path(&too_many_components)
+            .expect_err("path with too many components must fail");
+        assert_eq!(
+            component_error.safe_summary(),
+            Some("JSON query path failed validation")
+        );
+
+        let unresolved_error = query_json(&json!({"present": true}), "missing")
+            .expect_err("missing component must fail");
+        assert_eq!(
+            unresolved_error.safe_summary(),
+            Some("JSON query path did not resolve")
+        );
+    }
+
     #[tokio::test]
     async fn file_query_requires_invocation_mount_authority() {
         let error = dispatch(&request(json!({
@@ -511,6 +555,51 @@ mod tests {
             assert_eq!(issues.len(), 1);
             assert_eq!(issues[0].path, "file_path");
             assert_eq!(issues[0].code, DispatchInputIssueCode::InvalidValue);
+        }
+    }
+
+    #[tokio::test]
+    async fn file_query_reports_missing_and_malformed_json() {
+        let root = Arc::new(InMemoryBackend::new());
+        root.put(
+            &VirtualPath::new(format!("{WORKSPACE_TARGET}/malformed.json"))
+                .expect("malformed file target"),
+            Entry::bytes(br#"{"unterminated": "#.to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("seed malformed file");
+
+        for (file_name, expected_summary) in [
+            ("missing.json", "JSON query file was not found"),
+            ("malformed.json", "JSON input is not valid JSON"),
+        ] {
+            let mut request = request(json!({
+                "operation": "query",
+                "file_path": format!("/workspace/{file_name}"),
+                "path": "$"
+            }));
+            request.mounts = Some(workspace_mount(MountPermissions::read_only()));
+            request.services.filesystem = root.clone();
+
+            let error = dispatch(&request)
+                .await
+                .expect_err("missing and malformed files must fail safely");
+            assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::InputEncode));
+            assert_eq!(error.safe_summary(), Some(expected_summary));
+
+            let crate::FirstPartyCapabilityError::Dispatch {
+                detail: Some(detail),
+                ..
+            } = error
+            else {
+                panic!("expected structured invalid-input error");
+            };
+            let DispatchFailureDetail::InvalidInput { issues } = *detail else {
+                panic!("expected invalid-input details");
+            };
+            assert_eq!(issues.len(), 1);
+            assert_eq!(issues[0].path, "file_path");
         }
     }
 
