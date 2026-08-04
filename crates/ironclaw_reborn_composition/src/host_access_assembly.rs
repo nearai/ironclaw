@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ironclaw_filesystem::{CompositeRootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::mount::{MountPermissions, MountView};
+use ironclaw_host_api::mount::MountPermissions;
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, ProcessBackendKind, SecretMode,
 };
@@ -10,13 +10,13 @@ use ironclaw_host_runtime::HostProcessPort;
 
 use crate::RebornBuildError;
 use crate::runtime_mounts::{
-    ambient_workspace_mount_view, scoped_skill_context_mount_view, workspace_mount_view,
+    WorkspaceMountPolicy, scoped_skill_context_mount_view, workspace_mount_view,
 };
 
 pub(crate) type WorkspaceFilesystems = (
     Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     Arc<ScopedFilesystem<CompositeRootFilesystem>>,
-    MountView,
+    WorkspaceMountPolicy,
 );
 
 pub(crate) struct HostHomeRoot {
@@ -49,9 +49,15 @@ pub(crate) struct HostAccessAssembly {
 }
 
 impl HostAccessAssembly {
+    /// `workspace_scoped_per_caller` is the deployment's single workspace
+    /// scoping decision (see
+    /// [`crate::deployment::DeploymentConfig::workspace_scoped_per_caller`]).
+    /// Passing it here keeps the ambient host aliases below reachable only for
+    /// the deployments that are allowed them.
     pub(crate) fn build_workspace_filesystems(
         &self,
         filesystem: Arc<CompositeRootFilesystem>,
+        workspace_scoped_per_caller: bool,
     ) -> Result<WorkspaceFilesystems, RebornBuildError> {
         let read_only_workspace_mounts = workspace_mount_view(MountPermissions::read_only(), &[])
             .map_err(|error| RebornBuildError::InvalidConfig {
@@ -67,8 +73,8 @@ impl HostAccessAssembly {
         } else {
             Vec::new()
         };
-        let runtime_workspace_mounts = ambient_workspace_mount_view(
-            MountPermissions::read_write(),
+        let runtime_workspace_mounts = WorkspaceMountPolicy::resolve(
+            workspace_scoped_per_caller,
             &workspace_aliases,
             &host_home_aliases,
         )

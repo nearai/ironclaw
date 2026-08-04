@@ -7,7 +7,7 @@ use std::{
 };
 
 use glob::Pattern;
-use ironclaw_filesystem::{FileStat, FileType, FilesystemOperation};
+use ironclaw_filesystem::{FileStat, FileType, FilesystemError, FilesystemOperation};
 use ironclaw_host_api::{
     dispatch::RuntimeDispatchErrorKind,
     path::{ScopedPath, VirtualPath},
@@ -25,9 +25,9 @@ use super::{
     input_error,
     inputs::{optional_usize, optional_usize_allow_zero, required_str},
     paths::{
-        filesystem_error, filesystem_error_with_summary, is_excluded_name,
-        is_sensitive_scoped_path, operation_allowed, resolve_optional_path, scoped_child_path,
-        type_filter_matches, validate_relative_pattern, virtual_to_relative,
+        filesystem_error_with_summary, is_excluded_name, is_sensitive_scoped_path,
+        list_dir_empty_if_missing_root, operation_allowed, resolve_optional_path,
+        scoped_child_path, type_filter_matches, validate_relative_pattern, virtual_to_relative,
     },
     text::{decode_text, previous_char_boundary, reject_binary_probe},
     types::{GrepFileResult, GrepLine, ResolvedPath},
@@ -42,13 +42,22 @@ pub(super) async fn grep(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
-    let root_stat = request
-        .filesystem
-        .stat(&resolved.virtual_path)
-        .await
-        .map_err(|error| {
+    // A missing mount ROOT behaves as an existing empty directory: the grant
+    // names it, nothing has been written under it yet. The walk below then
+    // lists it as empty via `list_dir_empty_if_missing_root`. Any other stat
+    // failure keeps the path-carrying diagnostic summary.
+    let root_stat = match request.filesystem.stat(&resolved.virtual_path).await {
+        Err(FilesystemError::NotFound { .. }) if resolved.is_mount_root() => FileStat {
+            path: resolved.virtual_path.clone(),
+            file_type: FileType::Directory,
+            len: 0,
+            modified: None,
+            sensitive: false,
+        },
+        other => other.map_err(|error| {
             filesystem_error_with_summary("grep", resolved.scoped_path.as_str(), error)
-        })?;
+        })?,
+    };
     if root_stat.sensitive {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
@@ -247,11 +256,7 @@ async fn walk_files(
     let mut stack = vec![root.virtual_path.clone()];
     let mut visited = 0usize;
     while let Some(dir) = stack.pop() {
-        let entries = request
-            .filesystem
-            .list_dir(&dir)
-            .await
-            .map_err(filesystem_error)?;
+        let entries = list_dir_empty_if_missing_root(request, root, &dir).await?;
         for entry in entries {
             visited += 1;
             if visited > MAX_VISITED_ENTRIES {

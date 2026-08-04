@@ -591,6 +591,9 @@ pub struct RebornRuntime {
         Option<Arc<dyn ironclaw_product_contracts::ironhub::IronhubLinkService>>,
     pub(crate) owner_user_id: UserId,
     pub(crate) extension_filesystem: Arc<CompositeRootFilesystem>,
+    /// The deployment's single workspace scoping decision, carried so the WebUI
+    /// attachment handle addresses the same subtree as agent tool writes.
+    pub(crate) workspace_mount_policy: crate::runtime_mounts::WorkspaceMountPolicy,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
     #[cfg(any(test, feature = "test-support"))]
@@ -738,7 +741,7 @@ pub(crate) struct InteractionServiceTestParts {
     approval_requests: Arc<crate::factory::ComposedApprovalRequestStore>,
     capability_leases: Arc<crate::factory::ComposedCapabilityLeaseStore>,
     extension_registry: Arc<ExtensionRegistry>,
-    workspace_mounts: MountView,
+    workspace_mounts: crate::runtime_mounts::WorkspaceMountPolicy,
     skill_mounts: MountView,
     memory_mounts: MountView,
     system_extensions_lifecycle_mounts: MountView,
@@ -1375,16 +1378,10 @@ impl RebornRuntime {
     fn read_write_workspace_filesystem(
         &self,
     ) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
-        let extension_filesystem = &self.extension_filesystem;
-        let attachment_mounts = crate::runtime_mounts::workspace_mount_view(
-            ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
-            &[],
+        crate::runtime_mounts::read_write_workspace_filesystem(
+            &self.extension_filesystem,
+            &self.workspace_mount_policy,
         )
-        .ok()?;
-        Some(Arc::new(ScopedFilesystem::with_fixed_view(
-            Arc::clone(extension_filesystem),
-            attachment_mounts,
-        )))
     }
 
     /// Seed a bare `secret_handle` secret for an owner scope so keyed
@@ -4176,6 +4173,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         ironhub_link_service,
         owner_user_id: services.owner_user_id.clone(),
         extension_filesystem: services.extension_filesystem.clone(),
+        workspace_mount_policy: services.workspace_mounts.clone(),
         system_extensions_lifecycle_mounts: services.system_extensions_lifecycle_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),
         #[cfg(any(test, feature = "test-support"))]
