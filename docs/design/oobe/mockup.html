@@ -226,22 +226,22 @@ h1,h2,h3,p{margin:0}
 .tcard.reveal{animation:card-in .42s cubic-bezier(.2,.7,.2,1) both}
 @keyframes card-in{from{opacity:0;transform:translateY(10px) scale(.98)}to{opacity:1;transform:none}}
 /* first card is conjured into being: it materializes as the spark traces its border */
-.tcard.first{position:relative;animation:conjure .5s cubic-bezier(.2,.8,.2,1.03) both}
-@keyframes conjure{0%{opacity:0;transform:scale(.84);filter:blur(7px)}45%{opacity:1}72%{transform:scale(1.02);filter:blur(0)}100%{transform:scale(1);opacity:1;filter:blur(0)}}
-/* spell lands: a quick glow pulse around the card as the spark completes its loop */
-.tcard.first::after{content:"";position:absolute;inset:-2px;border-radius:14px;pointer-events:none;z-index:1;opacity:0;box-shadow:0 0 24px 3px var(--ais-glow);animation:spell-land .5s ease-out forwards}
-@keyframes spell-land{0%,52%{opacity:0}76%{opacity:.85}100%{opacity:0}}
+.tcard.first{position:relative;animation:conjure .5s cubic-bezier(.2,.8,.2,1.01) both}
+@keyframes conjure{0%{opacity:0;transform:scale(.92);filter:blur(4px)}45%{opacity:1}72%{transform:scale(1.006);filter:blur(0)}100%{transform:scale(1);opacity:1;filter:blur(0)}}
+/* spell lands: a soft glow pulse around the card as the spark completes its loop */
+.tcard.first::after{content:"";position:absolute;inset:-2px;border-radius:14px;pointer-events:none;z-index:1;opacity:0;box-shadow:0 0 14px 1px var(--ais-glow);animation:spell-land .5s ease-out forwards}
+@keyframes spell-land{0%,52%{opacity:0}76%{opacity:.4}100%{opacity:0}}
 /* Gemini-style ai-spark: a gradient spark chases the border path once, then dissipates.
    SVG stroke-dashoffset (always repaints) — avoids the conic/@property paint bug. */
 /* ai-spark colors — deeper/saturated on light, brighter on dark */
-:root{--ais-1:#1a6fd4;--ais-2:#6f36cf;--ais-3:#cf2b74;--ais-glow:rgba(111,54,207,.5)}
-@media (prefers-color-scheme:dark){:root{--ais-1:#5aa8ee;--ais-2:#a684ea;--ais-3:#ec7d9a;--ais-glow:rgba(166,132,234,.85)}}
-:root[data-theme="dark"]{--ais-1:#5aa8ee;--ais-2:#a684ea;--ais-3:#ec7d9a;--ais-glow:rgba(166,132,234,.85)}
-:root[data-theme="light"]{--ais-1:#1a6fd4;--ais-2:#6f36cf;--ais-3:#cf2b74;--ais-glow:rgba(111,54,207,.5)}
+:root{--ais-1:#1a6fd4;--ais-2:#6f36cf;--ais-3:#cf2b74;--ais-glow:rgba(111,54,207,.4)}
+@media (prefers-color-scheme:dark){:root{--ais-1:#5aa8ee;--ais-2:#a684ea;--ais-3:#ec7d9a;--ais-glow:rgba(166,132,234,.62)}}
+:root[data-theme="dark"]{--ais-1:#5aa8ee;--ais-2:#a684ea;--ais-3:#ec7d9a;--ais-glow:rgba(166,132,234,.62)}
+:root[data-theme="light"]{--ais-1:#1a6fd4;--ais-2:#6f36cf;--ais-3:#cf2b74;--ais-glow:rgba(111,54,207,.4)}
 .aispark{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none;z-index:2}
 .aispark .ais0{stop-color:var(--ais-1)}.aispark .ais1{stop-color:var(--ais-2)}.aispark .ais2{stop-color:var(--ais-3)}
 /* tapered comet: a solid head fading to sparser dashes for the tail; the glow blurs it smooth */
-.aispark .asrect{stroke-dasharray:7,1.2,3,1.6,2,2.2,1.4,3,0.9,4,0.6,73.1;filter:drop-shadow(0 0 3px var(--ais-glow)) drop-shadow(0 0 8px var(--ais-glow));animation:ai-chase .5s linear forwards}
+.aispark .asrect{stroke-dasharray:7,1.2,3,1.6,2,2.2,1.4,3,0.9,4,0.6,73.1;filter:drop-shadow(0 0 2px var(--ais-glow)) drop-shadow(0 0 5px var(--ais-glow));animation:ai-chase .5s linear forwards}
 @keyframes ai-chase{0%{stroke-dashoffset:0;opacity:0}10%{opacity:1}80%{opacity:1}100%{stroke-dashoffset:-100;opacity:0}}
 @media (prefers-reduced-motion:reduce){.tcard.reveal{animation:none}.tcard.first{animation:none}.tcard.first::after{display:none}.aispark{display:none}}
 
@@ -697,7 +697,7 @@ h1,h2,h3,p{margin:0}
         +'<button class="revert" data-act="revert" data-i="'+idx+'">'+svg('undo')+'Revert</button></div>';
     }
     var cls='tcard'+(opts.ghost?' ghost':'')+(opts.first?' first':'')+(term?' term':'');
-    var spark=opts.first?'<svg class="aispark" aria-hidden="true"><defs><linearGradient id="aiGrad" x1="0" y1="0" x2="1" y2="1"><stop class="ais0" offset="0"/><stop class="ais1" offset=".5"/><stop class="ais2" offset="1"/></linearGradient></defs><rect class="asrect" x="0" y="0" width="100%" height="100%" rx="13" pathLength="100" fill="none" stroke="url(#aiGrad)" stroke-width="2.6" stroke-linecap="round"/></svg>':'';
+    var spark=opts.first?'<svg class="aispark" aria-hidden="true"><defs><linearGradient id="aiGrad" x1="0" y1="0" x2="1" y2="1"><stop class="ais0" offset="0"/><stop class="ais1" offset=".5"/><stop class="ais2" offset="1"/></linearGradient></defs><rect class="asrect" x="0" y="0" width="100%" height="100%" rx="13" pathLength="100" fill="none" stroke="url(#aiGrad)" stroke-width="2.1" stroke-linecap="round"/></svg>':'';
     return '<div class="'+cls+'" data-i="'+idx+'">'+head+ttl+(term?'':'<div class="metrics">'+m+'</div>')+acts+spark+'</div>';
   }
   var agentMode='Suggest';
