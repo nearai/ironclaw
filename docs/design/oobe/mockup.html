@@ -181,14 +181,13 @@ h1,h2,h3,p{margin:0}
 
 /* ---------- carousel strip (Done for you) ---------- */
 .carousel{width:100%}
-.carousel .chd{display:flex;align-items:center;gap:9px;margin-bottom:9px;padding:0 2px}
+.carousel .chd{display:flex;align-items:center;gap:7px;margin-bottom:9px;padding:0 2px}
 .carousel .chd .spk{width:15px;height:15px;color:var(--v2-accent-text)}
-.carousel .chd .chtext{display:flex;flex-direction:column;gap:0;min-width:0}
-.carousel .chd .chl1{display:flex;align-items:baseline;min-width:0}
-.carousel .chd .ttl{font-size:13px;font-weight:600;color:var(--v2-text-strong);white-space:nowrap}
-.carousel .chd .sub{font-size:11px;color:var(--v2-text-faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.carousel .chd .chmeta{font-family:var(--font-mono);font-size:11px;color:var(--v2-text-faint);font-variant-numeric:tabular-nums;white-space:nowrap}
+.carousel .chd .ttl{font-size:13px;font-weight:600;color:var(--v2-text-strong);white-space:nowrap;flex:none}
+.carousel .chd .sub{font-size:11px;color:var(--v2-text-faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto;min-width:0}
+.carousel .chd .chmeta{font-family:var(--font-mono);font-size:11px;color:var(--v2-text-faint);font-variant-numeric:tabular-nums;white-space:nowrap;flex:none}
 .carousel .chd .chmeta:not(:empty)::before{content:"·";margin:0 6px 0 4px;color:var(--v2-text-faint)}
+:root:not(.flags-off) .carousel .chd{padding-right:160px}
 .nearmark{display:inline-flex;flex:none;color:var(--near-blue)}
 .nearmark .near{width:16px;height:16px;overflow:visible;transform-box:fill-box;transform-origin:center}
 .nearmark.busy .near{animation:near-beat 2s ease-in-out infinite}
@@ -485,7 +484,7 @@ h1,h2,h3,p{margin:0}
           <div class="rev flagwrap" id="carouselBlock">
             <span class="flag"><span class="tag native">New UX</span><span class="tag newevt">New Feature</span></span>
             <div class="carousel">
-              <div class="chd"><span class="nearmark" id="carNear"><svg class="near" viewBox="0 0 24 24" aria-hidden="true"><defs><clipPath id="carNearClip"><path d="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z"/></clipPath></defs><path class="near-base" d="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z"/><g clip-path="url(#carNearClip)"><path class="near-comet" d="M2.6 22.2 L2.6 2.4 L21.4 21.6 L21.4 1.8"/></g></svg></span><span class="chtext"><span class="chl1"><span class="ttl" id="carTtl">Done for you</span><span class="chmeta" id="carMeta"></span></span><span class="sub" id="carSub">Completed automatically — review or undo anytime</span></span></div>
+              <div class="chd"><span class="nearmark" id="carNear"><svg class="near" viewBox="0 0 24 24" aria-hidden="true"><defs><clipPath id="carNearClip"><path d="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z"/></clipPath></defs><path class="near-base" d="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z"/><g clip-path="url(#carNearClip)"><path class="near-comet" d="M2.6 22.2 L2.6 2.4 L21.4 21.6 L21.4 1.8"/></g></svg></span><span class="ttl" id="carTtl">Done for you</span><span class="chmeta" id="carMeta"></span><span class="sub" id="carSub">Completed automatically — review or undo anytime</span></div>
               <div class="strip" id="realStrip"></div>
             </div>
           </div>
@@ -757,13 +756,13 @@ h1,h2,h3,p{margin:0}
     if(step>=2){
       if(working){
         carTtl.textContent = prop ? 'Looking for things to suggest' : 'Working on your first automations';
-        carSub.textContent = prop ? 'I’ll surface them here in a moment' : 'I’ll drop them here the moment they’re done';
+        carSub.textContent = '';
         realStrip.innerHTML='<div class="sk"><div class="ln w40"></div><div class="ln w70"></div><div class="ln w55"></div></div>'.repeat(3);
         carNear.classList.add('busy');carNear.classList.remove('done');
         if(!nearStart)nearStart=Date.now(); if(!elTimer){elTimer=setInterval(tickEl,250);} tickEl();
       } else {
         carTtl.textContent = prop ? 'Suggested for you' : 'Done for you';
-        carSub.textContent = prop ? 'Approve to run, or tweak first' : 'Completed automatically — review or undo anytime';
+        carSub.textContent = prop ? 'Approve to run, or tweak first' : 'Review or undo anytime';
         var n=(step===3)?1:CARDS.length,html='';
         for(var i=0;i<n;i++){ html+=cardHTML(CARDS[i], i, cardStates[i], {first:(i===0&&step===3)}); }
         realStrip.innerHTML=html;
