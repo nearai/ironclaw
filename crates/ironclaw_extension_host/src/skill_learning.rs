@@ -1437,8 +1437,14 @@ mod learning {
             }
         }
 
-        const EXISTING_SKILL: &str = "---\nname: file-count\nversion: 1\ndescription: count chars\nactivation:\n  keywords: [file, count]\n---\n\n# File Count\n\n## Steps\n\n1. read the file\n";
-        const REFINED_RESPONSE: &str = "---\nname: file-count\nversion: 2\ndescription: count chars\nactivation:\n  keywords: [file, count, character]\n---\n\n# File Count\n\n## Gotchas\n\n- spaces count too\n";
+        // Keywords must be specific enough to pass the BLOCKING half of the routing-metadata lint,
+        // which `parse_refinement` gates on. `[file, count]` does not: every token of each keyword is
+        // in `NON_SPECIFIC_TERMS`, so both are rejected as "too generic to identify this skill", the
+        // refinement returns `UnusableRoutingMetadata`, and the merge degrades to `KeepExisting` --
+        // which is what these tests were failing on. Multi-word terms are treated as specific, so
+        // these say what the skill is actually for.
+        const EXISTING_SKILL: &str = "---\nname: file-count\nversion: 1\ndescription: count chars\nactivation:\n  keywords: [\"character count\", \"count characters in file\"]\n---\n\n# File Count\n\n## Steps\n\n1. read the file\n";
+        const REFINED_RESPONSE: &str = "---\nname: file-count\nversion: 2\ndescription: count chars\nactivation:\n  keywords: [\"character count\", \"count characters in file\", \"whitespace counting\"]\n---\n\n# File Count\n\n## Gotchas\n\n- spaces count too\n";
 
         fn refiner(response: &str) -> LlmSkillRefiner {
             LlmSkillRefiner::new(Arc::new(CannedInference {

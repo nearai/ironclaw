@@ -1385,6 +1385,18 @@ pub(super) async fn build_postgres_production(
         database_filesystem,
         "production-postgres-reborn-state",
     )?;
+    // Seed the built-in skills into the DATABASE-backed `/system/skills`.
+    //
+    // Hosted multi-tenant production shipped with zero built-in skills. The bundled seeder is only
+    // reachable from `bootstrap_standalone_host`, which this path does not run (correctly -- it writes
+    // through a host-disk filesystem, and a tenant here has no host disk). `/system/skills` is mounted
+    // here, to the database, and nothing ever wrote to it, so Settings -> Skills read an empty root and
+    // said "No skills installed" while local-dev listed all 32.
+    ironclaw_extension_host::bundled_skills::ensure_bundled_reborn_skills_installed_in(
+        filesystem.as_ref(),
+        &ironclaw_host_api::path::VirtualPath::new("/system/skills")?,
+    )
+    .await?;
     finish_production_backend(
         context,
         filesystem,

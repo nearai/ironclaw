@@ -190,6 +190,30 @@ pub fn production_skill_context_mount_view_for_test(
     crate::factory::production_backend_assembly::production_skill_context_mount_view(scope)
 }
 
+/// The filesystem tools' mount view for a run, including the read-only skill paths.
+///
+/// Exposed so a test can pin that `read_file` can reach a SKILL.md and cannot write one.
+pub fn capability_workspace_mounts_with_skills_for_test(
+    workspace_mounts: ironclaw_host_api::mount::MountView,
+    scope: &ironclaw_host_api::resource::ResourceScope,
+) -> Result<ironclaw_host_api::mount::MountView, ironclaw_host_api::error::HostApiError> {
+    crate::runtime::capability_host::with_read_only_skill_paths_for_test(workspace_mounts, scope)
+}
+
+/// Expose the production database composite so a test can assert what production actually mounts.
+///
+/// Used to pin that `/system/skills` is seeded with the bundled skills on the Postgres path, which
+/// shipped empty.
+pub fn production_database_root_filesystem_for_test<F>(
+    backend: std::sync::Arc<F>,
+    backend_id: &str,
+) -> Result<std::sync::Arc<ironclaw_filesystem::CompositeRootFilesystem>, crate::RebornBuildError>
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+{
+    crate::filesystem_assembly::production_database_root_filesystem(backend, backend_id)
+}
+
 /// Read-side skill mounts for the local-dev / local-storage / hosted-single-tenant shapes.
 ///
 /// A separate seam because those shapes take a different branch: they supply their own

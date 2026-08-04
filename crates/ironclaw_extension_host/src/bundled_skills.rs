@@ -238,27 +238,65 @@ struct BundledSkillMarker {
 pub async fn ensure_bundled_reborn_skills_installed(
     standalone_storage_root: &Path,
 ) -> Result<(), RebornBuildError> {
-    let bundled_skills = embedded_reborn_skill_bundles()?;
     let filesystem = standalone_storage_filesystem(standalone_storage_root)?;
     let system_skills_root = system_skills_root_path()?;
-    create_dir_all(&filesystem, &system_skills_root).await?;
-    let install_lock = BundledSkillInstallLock::acquire(&filesystem, &system_skills_root).await?;
+    ensure_bundled_reborn_skills_installed_in(&filesystem, &system_skills_root).await
+}
+
+/// Install the bundled skills into ANY skill root, on any filesystem backend.
+///
+/// Extracted from [`ensure_bundled_reborn_skills_installed`], which builds a `DiskFilesystem` from a
+/// storage root and is only reachable from the standalone bootstrap. Hosted multi-tenant production
+/// has no tenant host disk and never ran that bootstrap, so it shipped with **zero** built-in skills:
+/// `/system/skills` is mounted there, to the database, and nothing ever wrote to it. The Skills page
+/// read an empty root and correctly said "No skills installed".
+///
+/// Every helper below already took `&dyn RootFilesystem`; only the entry point was disk-bound. The
+/// marker, install lock, and stale-skill removal are unchanged, so this stays idempotent across boots
+/// and safe when several instances share one database.
+pub async fn ensure_bundled_reborn_skills_installed_in(
+    filesystem: &dyn RootFilesystem,
+    system_skills_root: &VirtualPath,
+) -> Result<(), RebornBuildError> {
+    let bundled_skills = embedded_reborn_skill_bundles()?;
+    // Best-effort, and it must be: `RootFilesystem::create_dir_all` is documented as deprecated
+    // because "the entry plane infers directories from path prefixes" -- writing a leaf establishes
+    // its hierarchy. On the database backends it also cannot succeed for a root that is itself a
+    // mount: `create_dir_all("/system/skills")` walks up to `/system`, which is not a known virtual
+    // root, and fails with "virtual path must begin with a known root". That is exactly the
+    // production shape, where `/system/skills` is mounted straight onto the database, so insisting on
+    // it is what kept production from ever having a single built-in skill.
+    //
+    // Still attempted, because the disk backend does want the directory to exist up front.
+    if let Err(error) = create_dir_all(filesystem, system_skills_root).await {
+        tracing::debug!(
+            %error,
+            root = system_skills_root.as_str(),
+            "skill root directory not created explicitly; the backend infers directories from path \
+             prefixes"
+        );
+    }
+    let install_lock = BundledSkillInstallLock::acquire(filesystem, system_skills_root).await?;
+    let filesystem_ref = filesystem;
+    let system_skills_root = system_skills_root.clone();
+    let system_skills_root = &system_skills_root;
+    let filesystem = filesystem_ref;
 
     let result = async {
         let bundled_names = bundled_skills
             .iter()
             .map(|skill| skill.name.as_str())
             .collect::<HashSet<_>>();
-        remove_stale_managed_skills(&filesystem, &system_skills_root, &bundled_names).await?;
+        remove_stale_managed_skills(filesystem, system_skills_root, &bundled_names).await?;
 
         for skill in bundled_skills {
-            install_bundled_skill(&filesystem, &system_skills_root, skill).await?;
+            install_bundled_skill(filesystem, system_skills_root, skill).await?;
         }
         Ok(())
     }
     .await;
 
-    let release_result = install_lock.release(&filesystem).await;
+    let release_result = install_lock.release(filesystem).await;
     match (result, release_result) {
         (Err(error), _) => Err(error),
         (Ok(()), Err(error)) => Err(error),

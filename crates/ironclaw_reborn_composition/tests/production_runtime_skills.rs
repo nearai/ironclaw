@@ -486,3 +486,164 @@ async fn local_dev_skill_read_and_write_mounts_resolve_to_the_same_tree() {
          bundled skill in a tree discovery never reads"
     );
 }
+
+/// Production must ship the built-in skills, not an empty Skills page.
+///
+/// Hosted multi-tenant production shipped with **zero** built-in skills. The bundled seeder is only
+/// reachable from `bootstrap_standalone_host`, which the Postgres path does not run — correctly, since
+/// that bootstrap writes through a host-disk filesystem and a tenant here has no host disk. But
+/// `/system/skills` *is* mounted on this path, to the database, and nothing ever wrote to it. So
+/// Settings → Skills read an empty root and said "No skills installed" while local-dev listed all 32,
+/// and there was no error anywhere to notice.
+///
+/// Asserted through the same composite filesystem the product reads, so it fails if the seeding moves,
+/// the mount moves, or the root path changes.
+#[tokio::test]
+async fn the_production_database_is_seeded_with_the_bundled_skills() {
+    use ironclaw_filesystem::RootFilesystem;
+    use ironclaw_host_api::path::VirtualPath;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("bundled.db");
+    let db = Arc::new(
+        libsql::Builder::new_local(&db_path)
+            .build()
+            .await
+            .expect("libsql db"),
+    );
+    let database = Arc::new(
+        ironclaw_filesystem::LibSqlRootFilesystem::new(Arc::clone(&db)).expect("libsql filesystem"),
+    );
+    database.run_migrations().await.expect("migrations");
+
+    let filesystem =
+        ironclaw_reborn_composition::test_support::production_database_root_filesystem_for_test(
+            database,
+            "bundled-skill-seeding-test",
+        )
+        .expect("production database composite");
+
+    let system_skills_root = VirtualPath::new("/system/skills").expect("virtual path");
+    ironclaw_extension_host::bundled_skills::ensure_bundled_reborn_skills_installed_in(
+        filesystem.as_ref(),
+        &system_skills_root,
+    )
+    .await
+    .expect("bundled skills install into the database");
+
+    let entries = RootFilesystem::list_dir(filesystem.as_ref(), &system_skills_root)
+        .await
+        .expect("the seeded system skill root lists");
+    let skill_dirs = entries
+        .iter()
+        .filter(|entry| !entry.name.starts_with('.'))
+        .count();
+    let expected = ironclaw_extension_host::bundled_skills::bundled_reborn_skill_summaries()
+        .expect("bundled summaries")
+        .len();
+    assert!(
+        skill_dirs >= expected,
+        "production must ship every bundled skill in the database-backed system root: found \
+         {skill_dirs}, expected at least {expected}. Zero here is what production actually did -- an \
+         empty Skills page with nothing logged."
+    );
+
+    // Idempotent: production boots repeatedly, and several instances can share one database.
+    ironclaw_extension_host::bundled_skills::ensure_bundled_reborn_skills_installed_in(
+        filesystem.as_ref(),
+        &system_skills_root,
+    )
+    .await
+    .expect("a second boot re-runs cleanly");
+    let after = RootFilesystem::list_dir(filesystem.as_ref(), &system_skills_root)
+        .await
+        .expect("list after second seed")
+        .iter()
+        .filter(|entry| !entry.name.starts_with('.'))
+        .count();
+    assert_eq!(
+        after, skill_dirs,
+        "re-seeding must not duplicate or drop skills"
+    );
+}
+
+/// A model must be able to READ a skill file with the ordinary filesystem tools.
+///
+/// Skill mounts were granted to the skill capabilities only, so `read_file` saw nothing but
+/// `workspace`. Observed on a real production turn: the model installed a skill, tried to read it
+/// back to verify it, and got
+///
+/// ```text
+/// path skills clinical-lab-conversions SKILL.md does not resolve inside an available scoped root
+/// (available roots: workspace)
+/// ```
+///
+/// It burned a tool call and fell back to `skill_activate`. This is a parity gap, not just an unhelpful
+/// error: in Claude Code a SKILL.md *is* a file, so models are trained to read it, and skills reference
+/// sibling files (`references/*.md`, `scripts/*.py`) that progressive disclosure expects the agent to
+/// open on demand — dead ends without a readable path.
+///
+/// Read-only is asserted too: writes must stay exclusive to `skill_install`/`skill_update`, which
+/// validate the manifest. A writable `/skills` alias here would let an agent hand-write a bundle that
+/// discovery then silently skips, which is the failure this whole change removes.
+#[tokio::test]
+async fn skill_files_are_readable_through_the_filesystem_tools_but_not_writable() {
+    use ironclaw_host_api::{
+        ids::{InvocationId, UserId},
+        resource::ResourceScope,
+    };
+
+    let scope = ResourceScope::local_default(
+        UserId::new("skill-read-user").expect("user id"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+
+    let workspace_only =
+        ironclaw_reborn_composition::test_support::scoped_workspace_mount_view_for_test(
+            &scope,
+            ironclaw_host_api::mount::MountPermissions::read_write(),
+        )
+        .expect("workspace mount view");
+    let unreachable = workspace_only
+        .scoped_path("/skills/example/SKILL.md")
+        .map(|path| workspace_only.resolve(&path).is_err())
+        .unwrap_or(true);
+    assert!(
+        unreachable,
+        "premise of this test: the workspace-only view cannot resolve a skill path -- that is the \
+         error a real turn hit"
+    );
+
+    let with_skills =
+        ironclaw_reborn_composition::test_support::capability_workspace_mounts_with_skills_for_test(
+            workspace_only,
+            &scope,
+        )
+        .expect("workspace + skill read view");
+
+    let probe = with_skills
+        .scoped_path("/skills/example/SKILL.md")
+        .expect("skill paths are addressable");
+    let (resolved, grant) = with_skills
+        .resolve_with_grant(&probe)
+        .expect("a skill path resolves for the filesystem tools");
+    assert!(
+        resolved.as_str().starts_with("/tenants/"),
+        "must resolve into the DB-backed skill tree, the one skill_install writes; got {resolved}"
+    );
+    assert!(
+        !grant.permissions.write,
+        "the filesystem tools' skill grant must be read-only: writes belong to skill_install, which \
+         validates the manifest a hand-written bundle would fail"
+    );
+
+    // The workspace itself must be unchanged -- this fix adds reach, it does not move anything.
+    let workspace_probe = with_skills
+        .scoped_path("/workspace/notes.md")
+        .expect("workspace still addressable");
+    assert!(
+        with_skills.resolve(&workspace_probe).is_ok(),
+        "adding skill aliases must not disturb the workspace grant"
+    );
+}

@@ -244,6 +244,48 @@ struct RefreshingLoopCapabilityPortFactory {
     external_tool_catalog: Arc<dyn ExternalToolCatalog>,
 }
 
+/// Make skill files readable by the ordinary filesystem tools, read-only.
+///
+/// Skill mounts are granted to the skill capabilities only, so `read_file` saw nothing but
+/// `workspace` and a model reaching for `skills/<name>/SKILL.md` got "does not resolve inside an
+/// available scoped root (available roots: workspace)". Observed on a real turn: the model installed a
+/// skill, then tried to read it back to check it, burned a tool call on that error, and had to fall
+/// back to `skill_activate`.
+///
+/// It is a parity gap, not just a bad error message. In Claude Code a SKILL.md *is* a file, so models
+/// are trained to read it, and skills routinely reference sibling files (`references/policy.md`,
+/// `scripts/*.py`) that progressive disclosure expects the agent to open on demand. Without a
+/// readable path those references are dead ends.
+///
+/// Read-only and additive: the write path stays exclusively the skill capabilities
+/// (`skill_install`/`skill_update`), so a skill can still only be changed through the port that
+/// validates its manifest. Aliases already present are left untouched, so this can never widen or
+/// downgrade an existing grant.
+fn with_read_only_skill_paths(
+    workspace_mounts: MountView,
+    scope: &ResourceScope,
+) -> Result<MountView, ironclaw_host_api::error::HostApiError> {
+    let skill_reads = crate::runtime_mounts::db_backed_skill_context_mount_view(scope)?;
+    let mut mounts = workspace_mounts.mounts;
+    for grant in skill_reads.mounts {
+        if !mounts
+            .iter()
+            .any(|existing| existing.alias.as_str() == grant.alias.as_str())
+        {
+            mounts.push(grant);
+        }
+    }
+    MountView::new(mounts)
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) fn with_read_only_skill_paths_for_test(
+    workspace_mounts: MountView,
+    scope: &ResourceScope,
+) -> Result<MountView, ironclaw_host_api::error::HostApiError> {
+    with_read_only_skill_paths(workspace_mounts, scope)
+}
+
 #[async_trait::async_trait]
 impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
     async fn create_capability_port(
@@ -261,6 +303,8 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
         let workspace_mounts = self
             .workspace_mounts
             .capability_grant_view(&resource_scope)
+            .map_err(host_api_agent_loop_error)?;
+        let workspace_mounts = with_read_only_skill_paths(workspace_mounts, &resource_scope)
             .map_err(host_api_agent_loop_error)?;
         create_refreshing_capability_port(RefreshingCapabilityPortConfig {
             runtime: Arc::clone(&self.runtime),
