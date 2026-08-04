@@ -384,6 +384,28 @@ fn apply_credential_injection(
         .map_err(|_| RuntimeHttpEgressError::Credential {
             reason: "credential injection target is invalid".to_string(),
         })?;
+    // Every injection kind attaches a secret to the outbound request, so every
+    // one of them needs TLS — this used to be checked for `PathPlaceholder`
+    // alone, leaving `Header`, `QueryParam` and `BodyJsonPointer` free to put a
+    // bearer token on a plaintext `http://` URL (#7144). Transport
+    // confidentiality rested entirely on upstream validators; the manifest
+    // audience gate does reject non-https for WASM/MCP, but
+    // `host_port::stage_credentials` performs no audience match at all, so
+    // nothing guaranteed it here. This is the point that attaches the
+    // credential, so this is where it fails closed.
+    //
+    // No loopback carve-out, deliberately: the `PathPlaceholder` arm has shipped
+    // without one, and the measured loopback-http consumers (Ollama, a
+    // self-hosted mem0, the sandbox broker) all use their own clients and never
+    // reach this chokepoint.
+    {
+        let url = parsed_request_url(&request.url, parsed_url)?;
+        if url.scheme() != "https" {
+            return Err(RuntimeHttpEgressError::Credential {
+                reason: "credential injection requires HTTPS".to_string(),
+            });
+        }
+    }
     match target {
         RuntimeCredentialTarget::Header { name, prefix } => {
             let injected = match prefix {
@@ -408,11 +430,6 @@ fn apply_credential_injection(
                 });
             }
             let url = parsed_request_url(&request.url, parsed_url)?;
-            if url.scheme() != "https" {
-                return Err(RuntimeHttpEgressError::Credential {
-                    reason: "credential injection path placeholder requires HTTPS".to_string(),
-                });
-            }
             let Some(_) = url.path_segments() else {
                 return Err(RuntimeHttpEgressError::Credential {
                     reason: "credential injection target URL has no path segments".to_string(),

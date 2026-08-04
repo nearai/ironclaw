@@ -489,6 +489,89 @@ async fn host_http_egress_helper_injects_staged_credentials_from_handoff_store()
     );
 }
 
+/// #7144: only the `PathPlaceholder` injection kind checked the URL scheme, so
+/// `Header`, `QueryParam` and `BodyJsonPointer` would happily attach a bearer
+/// token to a plaintext `http://` URL. Transport confidentiality rested entirely
+/// on upstream validators, and `host_port::stage_credentials` performs no
+/// audience match at all — so nothing guaranteed it.
+///
+/// Driven through the configured egress port rather than
+/// `apply_credential_injection`: the injection sits behind policy authorization
+/// and the staged-obligation lookup, and the assertion that matters is that the
+/// *network* never saw the secret.
+#[tokio::test]
+async fn host_http_egress_refuses_to_attach_a_credential_over_plaintext_http() {
+    for target in [
+        RuntimeCredentialTarget::Header {
+            name: "authorization".to_string(),
+            prefix: Some("Bearer ".to_string()),
+        },
+        RuntimeCredentialTarget::QueryParam {
+            name: "access_token".to_string(),
+        },
+    ] {
+        let scope = sample_scope();
+        let capability_id = sample_capability_id();
+        let handle = SecretHandle::new("api-token").unwrap();
+
+        let network = RecordingNetwork::ok();
+        let recorded_requests = Arc::clone(&network.requests);
+        let services = test_services()
+            .with_secret_store(Arc::new(SecretStore::ephemeral()))
+            .try_with_host_http_egress(network)
+            .expect("host HTTP egress should wire with graph secret store");
+        let mut policy = staged_policy();
+        // Let the *policy* admit plaintext http, so the refusal under test is
+        // the credential guard and not the network allowlist.
+        policy.allowed_targets = vec![NetworkTargetPattern {
+            scheme: None,
+            host_pattern: "api.example.test".to_string(),
+            port: None,
+        }];
+        services
+            .network_policy_store
+            .insert(&scope, &capability_id, policy.clone());
+        services
+            .secret_injection_store
+            .insert(
+                &scope,
+                &capability_id,
+                &handle,
+                SecretMaterial::from("staged-secret"),
+            )
+            .expect("staged credential should be seeded");
+        let egress = configured_egress(&services);
+
+        let mut request =
+            request_with_staged_credential(scope, capability_id.clone(), handle.clone());
+        request.url = "http://api.example.test/v1/run".to_string();
+        request.network_policy = policy;
+        request.credential_injections = vec![RuntimeCredentialInjection {
+            handle,
+            source: RuntimeCredentialSource::StagedObligation { capability_id },
+            target: target.clone(),
+            required: true,
+        }];
+
+        let error = egress
+            .execute(request)
+            .await
+            .expect_err("a credential must never be attached to a plaintext URL");
+        assert!(
+            matches!(
+                &error,
+                ironclaw_host_api::http::RuntimeHttpEgressError::Credential { reason }
+                    if reason.contains("HTTPS")
+            ),
+            "expected an HTTPS credential refusal for {target:?}, got {error:?}"
+        );
+        assert!(
+            recorded_requests.lock().unwrap().is_empty(),
+            "the request must not reach the network at all for {target:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn host_http_egress_helper_consumes_staged_credentials_after_first_egress() {
     let scope = sample_scope();

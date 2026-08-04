@@ -7443,6 +7443,21 @@ async fn pinned_trace_remote_http_client(
             "trace remote endpoint is not a valid URL: {error}"
         ))
     })?;
+    // Every request built here carries the enrolled bearer token, so the
+    // endpoint has to be TLS (or literal loopback for standalone). The comment
+    // above claimed this lane was "validated ... via
+    // `validate_trace_commons_ingest_url`", but nothing on the
+    // submit/status/revoke path ever called it — that validator only ran from
+    // `community_profile_url_from_policy`. Meanwhile `ironclaw traces opt-in
+    // --endpoint <url>` writes `policy.ingestion_endpoint` unvalidated, so
+    // `--endpoint http://public-host/...` plus a bearer shipped the token in
+    // clear text (#7144). Validating in the builder makes the claim true: this
+    // is what attaches the credential, so this is where it fails closed.
+    validate_trace_commons_ingest_url(&url).map_err(|error| {
+        TraceRemoteRequestFailure::endpoint_invalid(format!(
+            "trace remote endpoint rejected: {error}"
+        ))
+    })?;
     let host = url
         .host_str()
         .ok_or_else(|| {
@@ -17457,14 +17472,53 @@ mod tests {
         // The background submit/status/revoke lane pins DNS per request: a host
         // resolving to a private/link-local address must be rejected before any
         // bearer-authenticated request is built (DNS-rebinding defense).
+        //
+        // Since #7144 the endpoint is also validated in the builder, so a
+        // link-local literal is now refused one step earlier — as `Endpoint`
+        // rather than `NetworkDns`. Still rejected, and rejected sooner; the
+        // assertion follows the stronger guard rather than pinning the weaker
+        // one.
         let error = pinned_trace_remote_http_client("http://169.254.169.254/v1/traces")
             .await
             .expect_err("link-local endpoint host must be rejected");
-        assert_eq!(error.kind, TraceQueueTelemetryFailureKind::NetworkDns);
+        assert_eq!(error.kind, TraceQueueTelemetryFailureKind::Endpoint);
 
         // The literal-loopback standalone exception still applies.
         pinned_trace_remote_http_client("http://127.0.0.1:8080/v1/traces")
             .await
             .expect("literal loopback endpoint builds (standalone exception)");
+    }
+
+    /// #7144: the builder attaches the enrolled bearer to whatever endpoint the
+    /// policy carries, and `ironclaw traces opt-in --endpoint <url>` writes that
+    /// endpoint unvalidated. Before this, `http://` to a public host built a
+    /// client happily and the token went out in clear text — the comment above
+    /// the builder claimed a validator ran on this lane, and none did.
+    #[tokio::test]
+    async fn pinned_trace_remote_client_refuses_plaintext_http_to_a_public_host() {
+        let error = pinned_trace_remote_http_client("http://traces.example.test/v1/traces")
+            .await
+            .expect_err("a bearer must never be attached to a plaintext public endpoint");
+        assert_eq!(error.kind, TraceQueueTelemetryFailureKind::Endpoint);
+        assert!(
+            error.message.contains("https"),
+            "the refusal must say why: {}",
+            error.message
+        );
+
+        // The guard is about the scheme, not the host, so it must not have
+        // become a blanket refusal: the same host over https gets past the
+        // endpoint validator and fails later, at the DNS pin. Asserted as "not
+        // Endpoint" rather than "builds", because `.test` never resolves — a
+        // success assertion here would depend on the runner having a network.
+        let https_error = pinned_trace_remote_http_client("https://traces.example.test/v1/traces")
+            .await
+            .expect_err("an unresolvable host still fails, but later");
+        assert_eq!(
+            https_error.kind,
+            TraceQueueTelemetryFailureKind::NetworkDns,
+            "https must clear the endpoint guard and reach DNS pinning, got: {}",
+            https_error.message
+        );
     }
 }
