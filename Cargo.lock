@@ -4307,7 +4307,6 @@ dependencies = [
 name = "ironclaw_observability"
 version = "0.1.0"
 dependencies = [
- "serde_json",
  "tracing",
 ]
 
