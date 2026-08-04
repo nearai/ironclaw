@@ -1,0 +1,808 @@
+schema_version = "reborn.extension_manifest.v3"
+id = "github"
+name = "GitHub"
+version = "0.2.8"
+description = "GitHub repository, issue, pull request, search, branch, file, release, workflow, fork, and webhook capabilities."
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/github_tool.wasm"
+
+# GitHub REST endpoints return heterogeneous provider-owned response shapes.
+# Detail tools preserve those raw JSON contracts. High-cardinality pull request
+# list/search tools keep their established top-level shapes but project compact
+# model-facing summaries; their prompt docs name the dedicated detail tools.
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.get_repo"
+description = "Get a GitHub repository."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_repo.input.v1.json"
+prompt_doc_ref = "prompts/github/get_repo.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.create_repo"
+description = "Create a GitHub repository."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/create_repo.input.v1.json"
+prompt_doc_ref = "prompts/github/create_repo.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.list_issues"
+description = "List issues in one repository."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/list_issues.input.v1.json"
+prompt_doc_ref = "prompts/github/list_issues.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.create_issue"
+description = "Create an issue."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/create_issue.input.v1.json"
+prompt_doc_ref = "prompts/github/create_issue.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.update_issue"
+description = "Update an issue."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/update_issue.input.v1.json"
+prompt_doc_ref = "prompts/github/update_issue.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.add_issue_labels"
+description = "Add labels to an issue or pull request."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/add_issue_labels.input.v1.json"
+prompt_doc_ref = "prompts/github/add_issue_labels.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.remove_issue_label"
+description = "Remove one label from an issue or pull request."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/remove_issue_label.input.v1.json"
+prompt_doc_ref = "prompts/github/remove_issue_label.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.add_issue_assignees"
+description = "Add assignees to an issue or pull request."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/add_issue_assignees.input.v1.json"
+prompt_doc_ref = "prompts/github/add_issue_assignees.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.remove_issue_assignees"
+description = "Remove assignees from an issue or pull request."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/remove_issue_assignees.input.v1.json"
+prompt_doc_ref = "prompts/github/remove_issue_assignees.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.get_issue"
+description = "Fetch one issue or pull request by issue number."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_issue.input.v1.json"
+prompt_doc_ref = "prompts/github/get_issue.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.list_issue_comments"
+description = "List issue or pull request timeline comments."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/list_issue_comments.input.v1.json"
+prompt_doc_ref = "prompts/github/list_issue_comments.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.create_issue_comment"
+description = "Add an issue or pull request comment."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/create_issue_comment.input.v1.json"
+prompt_doc_ref = "prompts/github/create_issue_comment.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.comment_issue"
+description = "Compatibility alias for github.create_issue_comment."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/comment_issue.input.v1.json"
+prompt_doc_ref = "prompts/github/comment_issue.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.list_pull_requests"
+description = "List compact pull request summaries in one repository."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/list_pull_requests.input.v1.json"
+prompt_doc_ref = "prompts/github/list_pull_requests.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.create_pull_request"
+description = "Create a pull request."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/create_pull_request.input.v1.json"
+prompt_doc_ref = "prompts/github/create_pull_request.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.update_pull_request"
+description = "Update pull request metadata."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/update_pull_request.input.v1.json"
+prompt_doc_ref = "prompts/github/update_pull_request.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.get_pull_request"
+description = "Fetch one pull request."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_pull_request.input.v1.json"
+prompt_doc_ref = "prompts/github/get_pull_request.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.get_pull_request_files"
+description = "List files changed in a pull request."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_pull_request_files.input.v1.json"
+prompt_doc_ref = "prompts/github/get_pull_request_files.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.create_pr_review"
+description = "Create a pull request review."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/create_pr_review.input.v1.json"
+prompt_doc_ref = "prompts/github/create_pr_review.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.list_pull_request_comments"
+description = "List pull request review comments."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/list_pull_request_comments.input.v1.json"
+prompt_doc_ref = "prompts/github/list_pull_request_comments.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.reply_pull_request_comment"
+description = "Reply to a pull request review comment."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/reply_pull_request_comment.input.v1.json"
+prompt_doc_ref = "prompts/github/reply_pull_request_comment.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.get_pull_request_reviews"
+description = "List pull request reviews."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_pull_request_reviews.input.v1.json"
+prompt_doc_ref = "prompts/github/get_pull_request_reviews.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.list_pull_request_review_threads"
+description = "List inline pull request review threads."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/list_pull_request_review_threads.input.v1.json"
+prompt_doc_ref = "prompts/github/list_pull_request_review_threads.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.resolve_review_thread"
+description = "Resolve an inline pull request review thread."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/resolve_review_thread.input.v1.json"
+prompt_doc_ref = "prompts/github/resolve_review_thread.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.unresolve_review_thread"
+description = "Unresolve an inline pull request review thread."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/unresolve_review_thread.input.v1.json"
+prompt_doc_ref = "prompts/github/unresolve_review_thread.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.get_combined_status"
+description = "Fetch combined commit status for a ref."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_combined_status.input.v1.json"
+prompt_doc_ref = "prompts/github/get_combined_status.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.merge_pull_request"
+description = "Merge a pull request."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/merge_pull_request.input.v1.json"
+prompt_doc_ref = "prompts/github/merge_pull_request.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.get_authenticated_user"
+description = "Get the authenticated GitHub user for the configured token."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_authenticated_user.input.v1.json"
+prompt_doc_ref = "prompts/github/get_authenticated_user.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.list_repos"
+description = "List repositories visible to the authenticated GitHub user, or public repositories for a named user or organization."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/list_repos.input.v1.json"
+prompt_doc_ref = "prompts/github/list_repos.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.search_repositories"
+description = "Search repositories."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/search_repositories.input.v1.json"
+prompt_doc_ref = "prompts/github/search_repositories.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.search_code"
+description = "Search code."
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/search_code.input.v1.json"
+prompt_doc_ref = "prompts/github/search_code.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.search_issues"
+description = "Compatibility alias for compact github.search_issues_pull_requests results."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/search_issues.input.v1.json"
+prompt_doc_ref = "prompts/github/search_issues.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.search_issues_pull_requests"
+description = "Search compact GitHub issue and pull request summaries."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/search_issues_pull_requests.input.v1.json"
+prompt_doc_ref = "prompts/github/search_issues_pull_requests.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.list_branches"
+description = "List repository branches."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/list_branches.input.v1.json"
+prompt_doc_ref = "prompts/github/list_branches.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.create_branch"
+description = "Create a branch from another branch or tag ref."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/create_branch.input.v1.json"
+prompt_doc_ref = "prompts/github/create_branch.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.get_file_content"
+description = "Fetch repository file content metadata/content."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_file_content.input.v1.json"
+prompt_doc_ref = "prompts/github/get_file_content.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.create_or_update_file"
+description = "Create or update a repository file."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/create_or_update_file.input.v1.json"
+prompt_doc_ref = "prompts/github/create_or_update_file.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.delete_file"
+description = "Delete a repository file."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/delete_file.input.v1.json"
+prompt_doc_ref = "prompts/github/delete_file.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.list_releases"
+description = "List repository releases."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/list_releases.input.v1.json"
+prompt_doc_ref = "prompts/github/list_releases.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.create_release"
+description = "Create a repository release."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/create_release.input.v1.json"
+prompt_doc_ref = "prompts/github/create_release.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.trigger_workflow"
+description = "Dispatch a GitHub Actions workflow."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/trigger_workflow.input.v1.json"
+prompt_doc_ref = "prompts/github/trigger_workflow.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.get_workflow_runs"
+description = "List GitHub Actions workflow runs."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_workflow_runs.input.v1.json"
+prompt_doc_ref = "prompts/github/get_workflow_runs.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.get_workflow_run_jobs"
+description = "List jobs for a GitHub Actions workflow run."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_workflow_run_jobs.input.v1.json"
+prompt_doc_ref = "prompts/github/get_workflow_run_jobs.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.get_job_logs"
+description = "Get the plain-text logs for a GitHub Actions workflow job."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_job_logs.input.v1.json"
+output_schema_ref = "schemas/github/raw_output.v1.json"
+prompt_doc_ref = "prompts/github/get_job_logs.md"
+# The logs endpoint 302-redirects to a short-lived, pre-signed Azure blob URL
+# (e.g. productionresultssaN.blob.core.windows.net). The host egress follows the
+# redirect only after re-authorizing the destination against this allowlist and
+# strips the Authorization header on the hop, so the GitHub token is never sent
+# to blob storage. No credential is injected for these hosts.
+network_targets = [
+  { scheme = "https", host_pattern = "*.blob.core.windows.net" },
+]
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.get_workflow_run_artifacts"
+description = "List artifacts for a GitHub Actions workflow run."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/github/get_workflow_run_artifacts.input.v1.json"
+prompt_doc_ref = "prompts/github/get_workflow_run_artifacts.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.rerun_failed_workflow_run_jobs"
+description = "Rerun failed jobs in a GitHub Actions workflow run."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/rerun_failed_workflow_run_jobs.input.v1.json"
+prompt_doc_ref = "prompts/github/rerun_failed_workflow_run_jobs.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.rerun_workflow_job"
+description = "Rerun one GitHub Actions workflow job."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/rerun_workflow_job.input.v1.json"
+prompt_doc_ref = "prompts/github/rerun_workflow_job.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.fork_repo"
+description = "Fork a repository."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/fork_repo.input.v1.json"
+prompt_doc_ref = "prompts/github/fork_repo.md"
+
+[[tools.credentials]]
+handle = "github_runtime_token"
+vendor = "github"
+audience = { scheme = "https", host = "api.github.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "github.handle_webhook"
+description = "Normalize a GitHub webhook payload into system event intents."
+effects = []
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/handle_webhook.input.v1.json"
+prompt_doc_ref = "prompts/github/handle_webhook.md"
+
+[auth.github]
+method = "api_key"
+display_name = "GitHub personal access token"
+fields = [ { handle = "github_runtime_token", label = "Personal access token", secret = true } ]
+validation = { method = "GET", url = "https://api.github.com/user", success_status = [200], inject = { handle = "github_runtime_token", type = "header", name = "authorization", prefix = "Bearer " } }

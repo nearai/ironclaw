@@ -22,17 +22,17 @@ use ironclaw_auth::{
     SecretSubmitRequest, SecretSubmitResult,
 };
 use ironclaw_auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
+use ironclaw_extension_contracts::state::LifecyclePublicState;
 use ironclaw_host_api::{
     ids::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId},
-    product_surface::{ProductSurfaceCaller, ProductSurfaceError},
     resource::ResourceScope,
-    state::LifecyclePublicState,
 };
 use ironclaw_product::{
     EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
     RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
     RebornExtensionSetupSecret, RebornSetupExtensionResponse, rejecting_product_surface_error,
 };
+use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
 use ironclaw_webui::{
     ProductAuthRouteState, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
     product_auth_route_mount, webui_v2_app,
@@ -274,25 +274,27 @@ impl UnusedServices {
 }
 
 #[async_trait]
-impl ironclaw_host_api::product_surface::ProductSurface for UnusedServices {
+impl ironclaw_product_contracts::surface::ProductSurface for UnusedServices {
     async fn invoke(
         &self,
         _caller: ProductSurfaceCaller,
-        _request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse, ProductSurfaceError>
-    {
+        _request: ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
+        ProductSurfaceError,
+    > {
         Err(rejecting_product_surface_error())
     }
 
     async fn query(
         &self,
         _caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+        request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_product_contracts::surface::ProductSurfaceQueryPage, ProductSurfaceError>
     {
         match request.view_id.as_str() {
             id if id == EXTENSIONS_VIEW.id => Ok(
-                ironclaw_host_api::product_surface::ProductSurfaceQueryPage {
+                ironclaw_product_contracts::surface::ProductSurfaceQueryPage {
                     items: vec![
                         serde_json::to_value(RebornExtensionListResponse {
                             extensions: self.installed_extensions.clone(),
@@ -312,12 +314,13 @@ impl ironclaw_host_api::product_surface::ProductSurface for UnusedServices {
                     LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
                         .map_err(ProductSurfaceError::internal_from)?;
                 Ok(
-                    ironclaw_host_api::product_surface::ProductSurfaceQueryPage {
+                    ironclaw_product_contracts::surface::ProductSurfaceQueryPage {
                         items: vec![
                             serde_json::to_value(RebornSetupExtensionResponse {
                                 package_ref,
                                 phase: LifecyclePublicState::SetupNeeded,
                                 blockers: Vec::new(),
+                                message: None,
                                 payload: None,
                                 secrets: vec![RebornExtensionSetupSecret {
                                     name: "google_oauth".to_string(),
@@ -351,9 +354,11 @@ impl ironclaw_host_api::product_surface::ProductSurface for UnusedServices {
     async fn stream_events(
         &self,
         _caller: ProductSurfaceCaller,
-        _request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceStreamResponse, ProductSurfaceError>
-    {
+        _request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
+        ProductSurfaceError,
+    > {
         Err(rejecting_product_surface_error())
     }
 }
@@ -428,7 +433,7 @@ impl ironclaw_auth::EngineClientCredentialsSource for StaticVendorClientCredenti
     async fn resolve(
         &self,
         vendor: &str,
-        _credentials: &ironclaw_host_api::recipe::RecipeClientCredentials,
+        _credentials: &ironclaw_extension_contracts::recipe::RecipeClientCredentials,
     ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, AuthProductError> {
         let client_id = match vendor {
             "google" => "google-client.apps.googleusercontent.com",
@@ -465,30 +470,32 @@ impl ironclaw_host_api::http::RuntimeHttpEgress for PanicVendorEgress {
 /// (ceiling rejection, host-built params) is exercised as production data
 /// would drive it.
 fn google_test_engine() -> Arc<ironclaw_auth::AuthEngine> {
-    let recipe: ironclaw_host_api::recipe::VendorAuthRecipe = serde_json::from_value(json!({
-        "method": "oauth2_code",
-        "display_name": "Google account",
-        "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
-        "token_endpoint": "https://oauth2.googleapis.com/token",
-        "scopes": [GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE],
-        "extra_authorize_params": {
-            "access_type": "offline",
-            "include_granted_scopes": "true",
-            "prompt": "consent"
-        },
-        "client_credentials": { "client_id_handle": "google_oauth_client_id" },
-        "token_response": {
-            "access_token": "/access_token",
-            "refresh_token": "/refresh_token",
-            "expires_in": "/expires_in",
-            "scope": { "path": "/scope", "missing": "fallback_to_requested" }
-        },
-    }))
-    .expect("google test recipe parses");
+    let recipe: ironclaw_extension_contracts::recipe::VendorAuthRecipe =
+        serde_json::from_value(json!({
+            "method": "oauth2_code",
+            "display_name": "Google account",
+            "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+            "token_endpoint": "https://oauth2.googleapis.com/token",
+            "scopes": [GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE],
+            "extra_authorize_params": {
+                "access_type": "offline",
+                "include_granted_scopes": "true",
+                "prompt": "consent"
+            },
+            "client_credentials": { "client_id_handle": "google_oauth_client_id" },
+            "token_response": {
+                "access_token": "/access_token",
+                "refresh_token": "/refresh_token",
+                "expires_in": "/expires_in",
+                "scope": { "path": "/scope", "missing": "fallback_to_requested" }
+            },
+        }))
+        .expect("google test recipe parses");
     vendor_test_engine(ironclaw_auth::ResolvedVendorAuthRecipe {
         vendor: "google".to_string(),
         recipe,
         token_exchange_resource: None,
+        protected_resource_metadata_url: None,
     })
 }
 
@@ -1367,10 +1374,12 @@ async fn product_auth_oauth_flow_status_hides_cross_scope_flow_as_not_found() {
     );
     let flow = shared
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: Some(AuthFlowId::new()),
             scope: other_scope,
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("github").expect("provider"),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .expect("authorization url"),

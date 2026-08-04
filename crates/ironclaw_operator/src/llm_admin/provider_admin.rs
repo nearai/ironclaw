@@ -7,10 +7,11 @@
 
 use std::path::PathBuf;
 
-use ironclaw_host_api::operator_llm::{
-    DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, ProviderMenuEntry, ProviderProbeOutcome,
-    RebornModelRoutesState, RebornProviderInfo, RebornProviderList, RebornProviderMetadata,
-    RebornProviderSelection, RebornProviderStatus, RebornProviderWriteOutcome, RebornV1State,
+use ironclaw_product_contracts::operator_llm::{
+    DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, LlmProbeRequest, ProviderMenuEntry,
+    ProviderProbeOutcome, RebornModelRoutesState, RebornProviderInfo, RebornProviderList,
+    RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
+    RebornProviderWriteOutcome, RebornV1State,
 };
 use ironclaw_reborn_config::{
     DefaultLlmSlotUpdate, LlmSlotFieldUpdate, LlmSlotSelection, RebornBootConfig, RebornConfigFile,
@@ -425,7 +426,7 @@ impl RebornProviderAdmin {
             }
         })?;
         let base_url = candidate_probe_base_url(definition);
-        let request = ironclaw_product::LlmProbeRequest {
+        let request = LlmProbeRequest {
             adapter: provider_protocol_wire_name(definition.protocol),
             base_url,
             provider_id: provider_id.to_string(),

@@ -36,7 +36,7 @@ use ironclaw_extension_host::extension_ingress::{
     StaticIngressConfiguration, StaticIngressSecrets, VerifiedEvidenceMint,
     extension_ingress_route_mount,
 };
-use ironclaw_host_api::product_surface::ChannelInboundProductSurface;
+use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 use reborn_support::builder::StorageMode;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;

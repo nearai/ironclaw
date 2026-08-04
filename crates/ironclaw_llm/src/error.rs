@@ -62,6 +62,14 @@ pub enum LlmError {
     #[error("Empty response from {provider}: no content returned")]
     EmptyResponse { provider: String },
 
+    /// A streaming response ended before the provider's terminal frame.
+    ///
+    /// This is distinct from a completed but structurally invalid or empty
+    /// response: the former has connection-level retry evidence, while the
+    /// latter must enter bounded invalid-output recovery.
+    #[error("Response stream from {provider} was interrupted: {reason}")]
+    StreamInterrupted { provider: String, reason: String },
+
     #[error("Context length exceeded: {used} tokens used, {limit} allowed")]
     ContextLengthExceeded { used: usize, limit: usize },
 
@@ -91,6 +99,35 @@ pub enum LlmError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Whether a raw HTTP error carries concrete evidence that retrying may
+/// succeed: a connection/timeout/body-stream failure or an availability HTTP
+/// status. Decode and request-construction failures are intentionally false.
+pub fn is_transient_http_error(error: &reqwest::Error) -> bool {
+    error.is_timeout()
+        || error.is_connect()
+        || error.is_body()
+        || error.status().is_some_and(|status| {
+            status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+        })
+}
+
+/// Whether an opaque I/O error carries connection-level retry evidence.
+///
+/// In-tree `Io` producers are session-file operations, so filesystem and
+/// unknown error kinds fail closed. External providers that surface socket I/O
+/// retain retry behavior only for explicitly connection-shaped kinds.
+pub fn is_transient_io_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::NotConnected
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::TimedOut
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -981,6 +1018,50 @@ mod tests {
         assert!(auth_guidance("groq").contains("GROQ_API_KEY"));
         assert!(auth_guidance("ollama").contains("Ollama is running"));
         assert!(auth_guidance("bedrock").contains("AWS"));
+    }
+
+    #[test]
+    fn request_construction_http_errors_are_not_transient() {
+        let error = reqwest::Client::new()
+            .get("http://[invalid")
+            .build()
+            .expect_err("fixture URL must fail request construction");
+        assert!(!is_transient_http_error(&error));
+    }
+
+    #[tokio::test]
+    async fn refused_http_connections_are_transient() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let address = listener.local_addr().expect("loopback address");
+        drop(listener);
+
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client builds")
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .expect_err("closed loopback port must refuse the connection");
+        assert!(
+            error.is_connect(),
+            "expected connection evidence: {error:?}"
+        );
+        assert!(is_transient_http_error(&error));
+    }
+
+    #[test]
+    fn io_retryability_requires_connection_shaped_error_kind() {
+        assert!(is_transient_io_error(&std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "socket reset"
+        )));
+        assert!(!is_transient_io_error(&std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "session file denied"
+        )));
     }
 
     #[test]

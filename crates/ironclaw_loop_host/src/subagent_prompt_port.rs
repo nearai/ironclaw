@@ -2,14 +2,12 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_host_api::ids::CapabilityId;
-use ironclaw_turns::{
-    TurnRunId,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, LoopInlineMessage, LoopInlineMessageBody,
-        LoopInlineMessageRole, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, sanitize_model_visible_text,
-    },
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, LoopInlineMessage, LoopInlineMessageBody,
+    LoopInlineMessageRole, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
+    LoopRunContext, sanitize_model_visible_text,
 };
+use ironclaw_turns::TurnRunId;
 
 use crate::model_capability_view::intersect_model_capability_view;
 
@@ -241,7 +239,7 @@ pub fn subagent_run_id_from_context(run_context: &LoopRunContext) -> TurnRunId {
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::ids::CapabilityId;
-    use ironclaw_turns::run_profile::{LoopInlineMessageRole, LoopModelCapabilityView};
+    use ironclaw_loop_contracts::{LoopInlineMessageRole, LoopModelCapabilityView};
     use std::collections::BTreeSet;
     use tracing_test::traced_test;
 

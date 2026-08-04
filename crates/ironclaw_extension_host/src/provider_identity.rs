@@ -205,7 +205,8 @@ impl ProductActorUserResolver for ProviderIdentityActorResolver {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_product::{AdapterInstallationId, ExternalActorRef, ProductAdapterId};
+    use ironclaw_extension_contracts::external::ExternalActorRef;
+    use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
 
     use super::*;
 

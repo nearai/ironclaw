@@ -15,7 +15,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
-use ironclaw_host_api::recipe::{
+use ironclaw_extension_contracts::recipe::{
     HmacSha256VerificationRecipe, IngressVerificationRecipe, SharedSecretHeaderRecipe,
     SignatureEncoding, SignedPayloadSegment,
 };

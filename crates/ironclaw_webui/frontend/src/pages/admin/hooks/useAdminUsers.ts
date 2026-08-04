@@ -14,17 +14,100 @@ import {
   deleteUserSecret,
 } from "../lib/admin-api";
 
+const ADMIN_USERS_PAGE_SIZE = 20;
+
 export function useAdminUsers() {
   const queryClient = useQueryClient();
+  const requestedMoreRef = React.useRef(false);
 
   const query = useQuery({
     queryKey: ["admin", "users"],
-    queryFn: fetchAdminUsers,
-    refetchInterval: 10_000,
+    queryFn: ({ signal }) => fetchAdminUsers({
+      limit: ADMIN_USERS_PAGE_SIZE,
+      signal,
+    }),
+    // Poll the initial bounded page, but stop once the administrator attempts
+    // to load more. Additional pages are fetched directly below, so polling
+    // can never multiply traffic by the number of retained pages.
+    refetchInterval: (currentQuery) => {
+      return currentQuery.state.fetchStatus === "idle" &&
+        !requestedMoreRef.current
+        ? 10_000
+        : false;
+    },
   });
 
-  const rawUsers = query.data;
-  const users = Array.isArray(rawUsers) ? rawUsers : rawUsers?.users || [];
+  const [additionalPages, setAdditionalPages] = React.useState([]);
+  const [isLoadingMore, setIsLoadingMore] = React.useState(false);
+  const [loadMoreError, setLoadMoreError] = React.useState(null);
+  const initialPageUpdatedAtRef = React.useRef(query.dataUpdatedAt);
+  React.useEffect(() => {
+    if (initialPageUpdatedAtRef.current === query.dataUpdatedAt) return;
+    initialPageUpdatedAtRef.current = query.dataUpdatedAt;
+    setAdditionalPages([]);
+    setLoadMoreError(null);
+    requestedMoreRef.current = false;
+  }, [query.dataUpdatedAt]);
+
+  const pages = [query.data, ...additionalPages].filter(Boolean);
+  const users = React.useMemo(() => {
+    const seen = new Set();
+    return pages.flatMap((page) =>
+      (page?.users || []).filter((user) => {
+        const id = user?.id || user?.user_id;
+        if (!id || seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      }),
+    );
+  }, [query.data, additionalPages]);
+  const nextCursor = pages.at(-1)?.nextCursor || null;
+  const loadMoreInFlightRef = React.useRef(null);
+  const loadMore = React.useCallback(() => {
+    if (!nextCursor) return Promise.resolve();
+    requestedMoreRef.current = true;
+    if (loadMoreInFlightRef.current) return loadMoreInFlightRef.current;
+
+    setIsLoadingMore(true);
+    setLoadMoreError(null);
+    // The cursor page load retries once on a transient failure, so a 5xx
+    // or rate-limited response from the admin users endpoint surfaces the
+    // structured retry state instead of a terminal load-more error. This
+    // matches React Query's default retry policy for the initial page query
+    // above and keeps pagination resilient under brief backend hiccups.
+    // Non-retryable failures (4xx authorization/validation) fail fast.
+    const isTransient = (error) => {
+      const status = error?.status;
+      if (typeof status !== "number") return true;
+      if (status === 429 || status >= 500) return true;
+      return Boolean(error?.payload?.retryable);
+    };
+    const attempt = (retriesLeft: number) =>
+      fetchAdminUsers({
+        limit: ADMIN_USERS_PAGE_SIZE,
+        cursor: nextCursor,
+      })
+        .then((page) => {
+          setAdditionalPages((current) => [...current, page]);
+          return page;
+        })
+        .catch((error) => {
+          if (retriesLeft > 0 && isTransient(error)) {
+            return attempt(retriesLeft - 1);
+          }
+          setLoadMoreError(error);
+          return null;
+        });
+    const request = attempt(1)
+      .finally(() => {
+        setIsLoadingMore(false);
+        if (loadMoreInFlightRef.current === request) {
+          loadMoreInFlightRef.current = null;
+        }
+      });
+    loadMoreInFlightRef.current = request;
+    return request;
+  }, [nextCursor]);
   // Detect the forbidden state from the structured `ApiError` (see
   // `lib/api.ts`), not the humanized message: a non-admin caller gets HTTP 403
   // whose body kind is humanized to "Participant denied", so a string match on
@@ -87,6 +170,10 @@ export function useAdminUsers() {
     users,
     query,
     isForbidden,
+    hasMore: Boolean(nextCursor),
+    isLoadingMore,
+    loadMoreError,
+    loadMore,
     createUser: createMut.mutateAsync,
     isCreating: createMut.isPending,
     createError: createMut.error,

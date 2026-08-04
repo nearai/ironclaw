@@ -169,7 +169,7 @@ pub const BUNDLED_EXTENSION_CAPABILITY_IDS: &[&str] = &[
 ];
 
 /// Bundled first-party extension asset directories under
-/// `crates/ironclaw_first_party_extensions/assets/`, parsed by
+/// `crates/extensions/packages/`, parsed by
 /// [`bundled_extension_manifest_capability_ids`]. Excludes `github` (parsed
 /// separately by `github::capability_ids()`, which this list intentionally
 /// does not duplicate).
@@ -198,7 +198,7 @@ pub fn bundled_extension_manifest_capability_ids()
     let mut registry = ironclaw_extensions::ExtensionRegistry::new();
     for dir_name in BUNDLED_EXTENSION_MANIFEST_ASSET_DIRS {
         let asset_root = repo_root()
-            .join("crates/ironclaw_first_party_extensions/assets")
+            .join("crates/extensions/packages")
             .join(dir_name);
         // Parse through the single record entry point (the bundled assets
         // are manifest v3 documents since the first-party rewrite).

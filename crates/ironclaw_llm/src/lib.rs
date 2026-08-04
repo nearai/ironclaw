@@ -86,15 +86,8 @@ pub use provider::{
     ToolDefinition, ToolResult, generate_tool_call_id, normalized_model_override,
 };
 pub use reasoning::{
-    ActionPlan, CommunicationPresentationPolicy, Reasoning, ReasoningContext, RespondOutput,
-    RespondResult, ResponseAnomaly, ResponseMetadata, SILENT_REPLY_TOKEN, TOOL_INTENT_NUDGE,
-    TRUNCATED_TOOL_CALL_NOTICE, TokenUsage, ToolSelection, is_silent_reply,
-    llm_signals_tool_intent, user_signals_execution_intent,
-};
-pub use reasoning::{
     clean_response, contains_codex_text_tool_call_syntax,
-    recover_codex_text_tool_calls_from_content, recover_codex_text_tool_calls_from_tool_names,
-    recover_tool_calls_from_content,
+    recover_codex_text_tool_calls_from_tool_names,
 };
 pub use recording::{MemorySnapshotEntry, RecordingLlm};
 pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};

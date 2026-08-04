@@ -46,10 +46,11 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
-    CommandExecutionOutput, CommandExecutionRequest, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
-    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
-    HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+    APPLY_PATCH_CAPABILITY_ID, ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
+    CapabilitySurfacePolicy, CapabilitySurfaceVersion, CommandExecutionOutput,
+    CommandExecutionRequest, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID,
+    HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime, HostRuntimeServices,
+    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
     NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
     PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
@@ -5226,16 +5227,14 @@ async fn builtin_skill_install_accepts_and_replays_named_plain_markdown_content(
 /// An agent must not be able to forge install provenance.
 ///
 /// `source` and `source_url` are set by the URL-fetch path to record where a skill came from, so
-/// accepting them on a direct `content` install would let an agent label its own output as
-/// fetched from a trusted URL.
+/// accepting them on a direct `content` install would let an agent label its own output as fetched
+/// from a trusted URL.
 ///
-/// A `content` + `files` install was ALSO rejected here before #6745, and that case has been
-/// removed from this test deliberately rather than by accident: rejecting it was the bug. An
-/// agent attaching `scripts/analyze.py` had its entire install refused, which is why 0 of 27
-/// agent-authored skills shipped a resource file while 18 of 31 human-curated ones do. #6745
-/// accepts `content` + `files`; the provenance fields stay refused. (`main` still carried the old
-/// expectation, so the merge left this test asserting behaviour the handler had deliberately
-/// changed.)
+/// A `content` + `files` install was also rejected here before this PR, and that case is removed
+/// deliberately rather than by accident: rejecting it WAS the bug. An agent attaching
+/// `scripts/analyze.py` had its whole install refused, which is why 0 of 27 agent-authored skills
+/// shipped a resource file while 18 of 31 human-curated ones do. A skill that cannot carry a script
+/// is a prose description.
 #[tokio::test]
 async fn builtin_skill_install_rejects_forged_provenance_fields() {
     let cases = [
@@ -8330,6 +8329,100 @@ async fn builtin_apply_patch_accepts_file_content_written_by_same_scope() {
 }
 
 #[tokio::test]
+async fn builtin_write_file_rejects_docx_after_extracted_read_without_changing_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let original = skill_bundle_zip(&[(
+        "word/document.xml",
+        br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Original text</w:t></w:r></w:p></w:body></w:document>"#,
+    )]);
+    let document_path = temp.path().join("review.docx");
+    std::fs::write(&document_path, &original).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/review.docx"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(read["content"].as_str().unwrap().contains("Original text"));
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/review.docx", "content": "Replacement text"}),
+        context,
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("binary documents cannot be edited with text tools")
+    );
+    assert_eq!(std::fs::read(document_path).unwrap(), original);
+}
+
+#[tokio::test]
+async fn builtin_write_file_rejects_existing_pdf_overwrite_without_changing_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    // A minimal real PDF header so extraction/decode paths treat it as binary.
+    let original = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n";
+    let document_path = temp.path().join("report.pdf");
+    std::fs::write(&document_path, original).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/report.pdf", "content": "Replacement text"}),
+        context,
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("binary documents cannot be edited with text tools")
+    );
+    assert_eq!(std::fs::read(document_path).unwrap(), original.to_vec());
+}
+
+#[tokio::test]
+async fn builtin_write_file_allows_new_pdf_creation() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let output = invoke_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/fresh.pdf", "content": "%PDF-1.4 new file\n"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(output["success"].as_bool(), Some(true));
+    assert_eq!(
+        std::fs::read(temp.path().join("fresh.pdf")).unwrap(),
+        b"%PDF-1.4 new file\n".to_vec()
+    );
+}
+
+#[tokio::test]
 async fn builtin_apply_patch_rejects_when_old_string_is_no_longer_present() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("code.rs"), "old\n").unwrap();
@@ -9574,6 +9667,7 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
         TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
         OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
+        ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,
         LIST_DIR_CAPABILITY_ID,

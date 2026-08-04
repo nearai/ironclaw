@@ -15,7 +15,7 @@
 //! do not have to infer intent from assistant prose.
 
 use async_trait::async_trait;
-use ironclaw_turns::run_profile::AssistantReply;
+use ironclaw_loop_contracts::AssistantReply;
 
 use crate::{
     state::{LoopExecutionState, ReplyAdmissionRejection},

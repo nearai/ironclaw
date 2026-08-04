@@ -1,5 +1,10 @@
 # Reborn Integration Tests
 
+> **Adding, removing, renaming, or materially re-scoping a test here? Update
+> `tests/CLAUDE.md`** — the repo-wide scenario coverage map (what each scenario
+> proves, in plain English, and where the gaps are). Its maintenance rule is
+> binding: the row changes in the same commit.
+
 In-process tests that run a **whole Reborn turn** with the real internal stack —
 product workflow, turn coordinator, scheduler, the agent loop, the real
 `LlmProviderModelGateway` + the real `ironclaw_llm` decorator chain, and real
@@ -283,6 +288,15 @@ Script with `RebornScriptedReply::tool_call("mock-mcp.search", json!({}))`.
 
 - `assert_mcp_tool_called(tool_name)` — maps `tool_name` → `"mock-mcp.<tool_name>"` and delegates to `assert_tool_invoked`.
 
+User-registered hosted-MCP admission and lifecycle behavior belongs in
+`reborn_integration_hosted_mcp_registration` rather than the single-tool turn
+harness above. Its loopback server in
+`tests/support/hosted_mcp_registration_server.rs` drives registration,
+discovery, ordinary install/auth/activation, credential injection, restore,
+and invocation through production seams. Keep live public-server checks
+explicitly ignored canaries; deterministic cases use the recorded MCP fixture
+under `tests/fixtures/hosted_mcp/`.
+
 ### Credential injection (GitHub)
 
 `.with_github_issue_tools()` wires the real GitHub first-party WASM
@@ -388,11 +402,18 @@ On a harness built from a `live_approvals` group:
 
 `ironclaw_reborn_composition::test_support` exposes:
 
-- `build_secret_store_for_test(root, scoped)` — constructs the `StandaloneSecretStore` used by production local-dev composition; for store read-back in secrets tests.
+- `build_secret_store_for_test(root, scoped)` — returns the `Arc<ironclaw_secrets::SecretStore<F>>` that production standalone composition builds (via `factory::build_secret_store`); for store read-back in secrets tests.
 - `build_runtime_with_resource_governor_for_test(input)` — builds the ordinary production-composed runtime and returns the exact `ResourceGovernor` wired into its capability path. Use only for reservation read-back; resource policy remains owned by `ironclaw_resources`.
 
-`RebornRuntime` (returned by `build_runtime`, methods defined in `crates/ironclaw_reborn_composition/src/runtime/test_support.rs`) exposes:
+`RebornRuntime` (returned by `build_runtime`, test-only methods defined in
+`crates/ironclaw_reborn_composition/src/runtime.rs` and
+`crates/ironclaw_reborn_composition/src/runtime/test_support.rs`) exposes:
 
+- `outbound_delivery_stores_for_test()` — the exact composition-owned outbound
+  stores, including the reply-intent store shared by the built-in
+  reply-attachment capability and planned-runtime transcript finalizer. Group
+  harnesses must wire this same handle; a separate store makes successful tool
+  intents disappear at finalization.
 - `standalone_approval_interaction_service_for_test(turn_coordinator)` — real `DefaultApprovalInteractionService` wired like `build_reborn_runtime`. `None` without a local-dev runtime.
 - `standalone_auth_interaction_service_for_test(turn_coordinator)` — WebUI auth-interaction service via the same `build_webui_auth_interaction_service` helper production uses. `None` only without a local-dev runtime; falls back to `UnavailableAuthInteractionService` when `product_auth` has no flow-record source.
 
@@ -524,7 +545,7 @@ On a `live_auth_and_approval()` group thread:
   (`request_manual_token_setup` -> `submit_manual_token`), then resumes with
   `ResumeTurnPrecondition::BlockedAuthGate`; the parked `github.*` capability
   re-dispatches and completes. Only valid on this group (needs the
-  `build_reborn_services` product-auth wiring; `live_auth_gate()`'s
+  `build_reborn_runtime` product-auth wiring; `live_auth_gate()`'s
   lower-level fixture cannot complete an auth resume).
 - `deny_auth_gate(run_id, &gate_ref)` — works on both auth-gate groups.
 

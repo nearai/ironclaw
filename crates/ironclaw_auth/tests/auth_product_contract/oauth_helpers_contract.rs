@@ -7,8 +7,8 @@
 use super::common::*;
 use ironclaw_auth::{
     AuthFlowId, OAuthAuthorizationCode, OAuthCallbackState, OAuthCallbackStateKind, OAuthClientId,
-    OAuthRedirectUri, OAuthState, OAuthTokenResponse, PkceVerifierSecret, ProviderScope,
-    opaque_state_hash, pkce_s256_challenge, pkce_verifier_hash, scope_text,
+    OAuthRedirectUri, OAuthState, OAuthTokenResponse, PkceVerifierSecret, opaque_state_hash,
+    pkce_s256_challenge, pkce_verifier_hash, scope_text,
 };
 use secrecy::ExposeSecret;
 
@@ -51,14 +51,11 @@ fn recipe_callback_state_round_trips_and_rejects_foreign_prefixes() {
     let scope = auth_scope();
     let label = account_label("acct");
     let flow_id = AuthFlowId::new();
-    let scopes = provider_scopes(&["items:read"]);
-
     let encoded = OAuthCallbackState::new(
         OAuthCallbackStateKind::RECIPE,
         flow_id,
         scope,
         label.clone(),
-        scopes.clone(),
     )
     .unwrap()
     .encode()
@@ -69,7 +66,6 @@ fn recipe_callback_state_round_trips_and_rejects_foreign_prefixes() {
         OAuthCallbackState::decode(OAuthCallbackStateKind::RECIPE, encoded.as_str()).unwrap();
     assert_eq!(decoded.flow_id(), flow_id);
     assert_eq!(decoded.account_label(), &label);
-    assert_eq!(decoded.requested_scopes(), scopes.as_slice());
 
     // Values without the recipe prefix must not decode.
     let error = OAuthCallbackState::decode(OAuthCallbackStateKind::RECIPE, "icg1.someoldstate")
@@ -162,11 +158,4 @@ fn auth_scope() -> ironclaw_auth::AuthProductScope {
 
 fn account_label(value: &str) -> ironclaw_auth::CredentialAccountLabel {
     ironclaw_auth::CredentialAccountLabel::new(value).unwrap()
-}
-
-fn provider_scopes(values: &[&str]) -> Vec<ProviderScope> {
-    values
-        .iter()
-        .map(|value| ProviderScope::new(value.to_string()).unwrap())
-        .collect()
 }

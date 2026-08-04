@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
+use crate::stored_message::serialize_stored_thread_message;
 use crate::summary_artifacts::find_overlapping_summary;
 use crate::title::derive_thread_title;
 use crate::tool_result_records::{
@@ -20,6 +21,7 @@ use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
     AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
+    BoundedThreadMessageSnapshot, BoundedThreadMessages, BoundedThreadMessagesRequest,
     CapabilityDisplayPreviewEnvelope, ContextMessage, ContextMessages, ContextWindow,
     CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
     LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
@@ -253,8 +255,37 @@ impl SessionThreadService for InMemorySessionThreadService {
         turn_run_id: String,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let mut state = self.state.lock().await;
-        let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
-        ensure_user_accepted(message, "mark_message_submitted")?;
+        let thread = get_thread_mut(&mut state, scope, thread_id)?;
+        let message_index = thread
+            .messages
+            .iter()
+            .position(|message| message.message_id == message_id)
+            .ok_or(SessionThreadError::UnknownMessage { message_id })?;
+        // Idempotent re-submit: if this exact run already submitted the message,
+        // a redelivered/duplicate ack is a no-op rather than an
+        // `InvalidMessageTransition`. Mirrors the filesystem backend so the
+        // queued-message consumer's at-least-once ack path is tolerant on both
+        // stores. A *different* run, or a `RejectedBusy` row, still fails below.
+        {
+            let message = &thread.messages[message_index];
+            if message.status == MessageStatus::Submitted
+                && message.turn_run_id.as_deref() == Some(turn_run_id.as_str())
+            {
+                return Ok(message.clone());
+            }
+        }
+        let was_queued = {
+            let message = &thread.messages[message_index];
+            ensure_user_accepted(message, "mark_message_submitted")?;
+            message.status == MessageStatus::Queued
+        };
+        if was_queued {
+            let sequence = thread.next_sequence;
+            thread.next_sequence += 1;
+            thread.record.updated_at = Some(Utc::now());
+            thread.messages[message_index].sequence = sequence;
+        }
+        let message = &mut thread.messages[message_index];
         let before_created_at = message.created_at;
         let before_updated_at = message.updated_at;
         message.status = MessageStatus::Submitted;
@@ -268,7 +299,11 @@ impl SessionThreadService for InMemorySessionThreadService {
             message.updated_at,
             "mark_message_submitted",
         )?;
-        Ok(message.clone())
+        let submitted = message.clone();
+        if was_queued {
+            thread.messages.sort_by_key(|message| message.sequence);
+        }
+        Ok(submitted)
     }
 
     async fn mark_message_rejected_busy(
@@ -296,15 +331,58 @@ impl SessionThreadService for InMemorySessionThreadService {
         Ok(message.clone())
     }
 
+    async fn mark_message_queued(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+        active_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let mut state = self.state.lock().await;
+        let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
+        ensure_user_accepted(message, "mark_message_queued")?;
+        message.status = MessageStatus::Queued;
+        message.turn_id = None;
+        message.turn_run_id = Some(active_run_id);
+        Ok(message.clone())
+    }
+
+    async fn read_thread_message(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        let mut state = self.state.lock().await;
+        // Only genuine lookup misses read as absence — an unknown thread
+        // (including scope-hidden threads) or an unknown message, matching the
+        // filesystem backend's point-read contract. Every other error
+        // propagates instead of masquerading as a miss.
+        match get_message_mut(&mut state, scope, thread_id, message_id) {
+            Ok(message) => Ok(Some(message.clone())),
+            Err(
+                SessionThreadError::UnknownThread { .. }
+                | SessionThreadError::UnknownMessage { .. },
+            ) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn append_assistant_draft(
         &self,
         request: AppendAssistantDraftRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let mut state = self.state.lock().await;
         let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
-        if let Some(existing) = thread.messages.iter().find(|message| {
+        let requested_content = request.content.as_text().to_owned();
+        if let Some(existing) = thread.messages.iter().rev().find(|message| {
             message.kind == MessageKind::Assistant
                 && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
+                && crate::contract::should_reuse_assistant_run_message(
+                    message,
+                    &requested_content,
+                    request.content.attachments(),
+                )
         }) {
             return Ok(existing.clone());
         }
@@ -325,7 +403,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             turn_run_id: Some(request.turn_run_id),
             tool_result_ref: None,
             tool_result_provider_call: None,
-            content: Some(request.content.into_text()),
+            content: Some(requested_content),
             attachments: Vec::new(),
             redaction_ref: None,
         };
@@ -342,9 +420,13 @@ impl SessionThreadService for InMemorySessionThreadService {
         &self,
         request: AppendFinalizedAssistantMessageRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let (content, attachments) = request.content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
         let mut state = self.state.lock().await;
         let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
-        if let Some(existing) = thread.messages.iter_mut().find(|message| {
+        // Latest sibling first: a steered run finalizes more than one reply, so
+        // the dedup baseline is the most recent assistant message for the run.
+        if let Some(existing) = thread.messages.iter_mut().rev().find(|message| {
             message.kind == MessageKind::Assistant
                 && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
         }) {
@@ -353,8 +435,8 @@ impl SessionThreadService for InMemorySessionThreadService {
                 let before_created_at = existing.created_at;
                 let before_updated_at = existing.updated_at;
                 existing.status = MessageStatus::Finalized;
-                existing.content = Some(request.content.into_text());
-                existing.attachments = Vec::new();
+                existing.content = Some(content);
+                existing.attachments = attachments;
                 existing.updated_at = Some(now);
                 crate::contract::validate_message_timestamp_fields_not_cleared(
                     existing.message_id,
@@ -365,8 +447,31 @@ impl SessionThreadService for InMemorySessionThreadService {
                     "append_finalized_assistant_message",
                 )?;
                 thread.record.updated_at = Some(now);
+                return Ok(existing.clone());
             }
-            return Ok(existing.clone());
+            if crate::contract::should_reuse_assistant_run_message(existing, &content, &attachments)
+            {
+                // Retry of the same finalized reply (or a redacted/deleted
+                // row that must not be resurrected): idempotent return.
+                return Ok(existing.clone());
+            }
+            if existing.status == MessageStatus::Finalized
+                && existing.content.as_deref() == Some(content.as_str())
+            {
+                // Same finalized text with a DIFFERENT attachment set is a
+                // mismatched replay, not a steered second reply: appending a
+                // sibling would duplicate the visible reply, and returning
+                // the old row would silently drop the new attachments. Fail
+                // loud instead (the loop transcript port surfaces this as a
+                // transcript write failure).
+                return Err(SessionThreadError::InvalidMessageTransition {
+                    message_id: existing.message_id,
+                    from: MessageStatus::Finalized,
+                    attempted: "append_finalized_assistant_message with mismatched attachments",
+                });
+            }
+            // A DIFFERENT finalized reply in the same run — a steered run
+            // replying again. Fall through and append a sibling.
         }
         let now = Utc::now();
         let message = ThreadMessageRecord {
@@ -384,8 +489,8 @@ impl SessionThreadService for InMemorySessionThreadService {
             turn_run_id: Some(request.turn_run_id),
             tool_result_ref: None,
             tool_result_provider_call: None,
-            content: Some(request.content.into_text()),
-            attachments: Vec::new(),
+            content: Some(content),
+            attachments,
             redaction_ref: None,
         };
         thread.next_sequence += 1;
@@ -724,6 +829,8 @@ impl SessionThreadService for InMemorySessionThreadService {
         message_id: ThreadMessageId,
         content: MessageContent,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let (content, attachments) = content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
         let mut state = self.state.lock().await;
         let thread = get_thread_mut(&mut state, scope, thread_id)?;
         let message = thread
@@ -736,8 +843,8 @@ impl SessionThreadService for InMemorySessionThreadService {
         let before_created_at = message.created_at;
         let before_updated_at = message.updated_at;
         message.status = MessageStatus::Finalized;
-        message.content = Some(content.into_text());
-        message.attachments = Vec::new();
+        message.content = Some(content);
+        message.attachments = attachments;
         message.updated_at = Some(now);
         crate::contract::validate_message_timestamp_fields_not_cleared(
             message.message_id,
@@ -828,6 +935,41 @@ impl SessionThreadService for InMemorySessionThreadService {
             messages: history_messages(thread),
             summary_artifacts: history_summary_artifacts(thread),
         })
+    }
+
+    async fn list_thread_messages_bounded(
+        &self,
+        request: BoundedThreadMessagesRequest,
+    ) -> Result<BoundedThreadMessages, SessionThreadError> {
+        let state = self.state.lock().await;
+        let thread = get_thread(&state, &request.scope, &request.thread_id)?;
+        if thread.messages.len() > request.max_messages {
+            return Ok(BoundedThreadMessages::LimitExceeded);
+        }
+        let mut bytes = 0_usize;
+        for message in &thread.messages {
+            bytes = bytes.saturating_add(serialize_stored_thread_message(message)?.len());
+            if bytes > request.max_bytes {
+                return Ok(BoundedThreadMessages::LimitExceeded);
+            }
+        }
+        let message_ids = thread
+            .messages
+            .iter()
+            .map(|message| message.message_id)
+            .collect::<Vec<_>>();
+        Ok(BoundedThreadMessages::Complete(Box::new(
+            BoundedThreadMessageSnapshot {
+                history: ThreadMessageRange {
+                    thread: thread.record.clone(),
+                    messages: history_messages(thread),
+                },
+                context: ContextMessages {
+                    thread_id: request.thread_id,
+                    messages: context_messages_by_id(thread, &message_ids),
+                },
+            },
+        )))
     }
 
     async fn list_thread_messages_range(
@@ -1192,7 +1334,7 @@ fn ensure_user_accepted(
     if message.kind == MessageKind::User
         && matches!(
             message.status,
-            MessageStatus::Accepted | MessageStatus::DeferredBusy
+            MessageStatus::Accepted | MessageStatus::DeferredBusy | MessageStatus::Queued
         )
     {
         return Ok(());
@@ -1327,7 +1469,7 @@ fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
 /// apply — blocking it would silently drop a legitimate compacted range.
 ///
 /// Resurfaceable statuses (must still block the summary):
-///   Draft | Interrupted | Superseded | DeferredBusy
+///   Draft | Interrupted | Superseded | Queued | DeferredBusy
 /// Permanent non-visible (must NOT block):
 ///   RejectedBusy (terminal, user must explicitly resend)
 ///   CapabilityDisplayPreview kind (never model-visible regardless of status)
@@ -1341,6 +1483,7 @@ fn can_resurface_as_model_visible(message: &ThreadMessageRecord) -> bool {
         MessageStatus::Draft
             | MessageStatus::Interrupted
             | MessageStatus::Superseded
+            | MessageStatus::Queued
             | MessageStatus::DeferredBusy
     )
 }

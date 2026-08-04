@@ -151,7 +151,7 @@ mod tests {
     /// matter (the sentinel only echoes them into the error message).
     fn make_request() -> HostManagedModelRequest {
         HostManagedModelRequest {
-            model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("interactive_model")
+            model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("interactive_model")
                 .expect("valid model profile id"),
             fallback_index: 0,
             messages: Vec::new(),

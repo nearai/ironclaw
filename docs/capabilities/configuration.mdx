@@ -79,7 +79,6 @@ that have a routing destination:
 | `<provider>.api_key` | Encrypted secret store (prompts, hidden) |
 | `google.client_id`, `google.redirect_uri` | `config.toml` |
 | `google.client_secret` | Encrypted secret store (prompts, hidden) |
-| `slack.enabled` | `config.toml` |
 | `webui.token --rotate` | Web token file |
 
 ```bash
@@ -274,17 +273,14 @@ See [Routines](/capabilities/routines/cron).
 
 <Accordion title="channels and providers" icon="message">
 
-```toml
-[slack]
-enabled = false
-```
-
-`slack.*` covers app ids, bot token and signing secret variable names, and channel routes.
-`telegram.enabled` turns the Telegram channel on. `google.*` carries the OAuth client id,
-redirect URI, and hosted-domain hint.
-
-Configure these from the web interface rather than by hand — see
+Channels are not configured in this file. Slack and Telegram are turned on by installing
+their extension in the web interface and completing setup — there is no `[slack]` or
+`[telegram]` section, and no key that enables a channel. See
 [Channels](/channels/overview).
+
+`google.*` carries the OAuth client id, redirect URI, and hosted-domain hint. Set it either
+from the web interface or with `ironclaw config set google.client_id` /
+`google.client_secret` / `google.redirect_uri` — both paths are supported.
 
 </Accordion>
 

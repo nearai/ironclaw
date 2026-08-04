@@ -148,12 +148,12 @@ Owning regression coverage:
   cargo test -p ironclaw_host_api --lib resolution::tests::recoverable_failure_carries_its_model_visible_diagnostic -- --exact
   ```
 
-- `crates/ironclaw_turns/src/run_profile/host/capability.rs` test
-  `run_profile::host::capability::tests::legacy_capability_failure_without_detail_rehydrates_explicit_fallback`
+- `crates/ironclaw_loop_contracts/src/host/capability.rs` test
+  `host::capability::tests::legacy_capability_failure_without_detail_rehydrates_explicit_fallback`
   pins the reconstructed loop failure fallback and next-write upgrade. Run:
 
   ```bash
-  cargo test -p ironclaw_turns --lib run_profile::host::capability::tests::legacy_capability_failure_without_detail_rehydrates_explicit_fallback -- --exact
+  cargo test -p ironclaw_loop_contracts --lib host::capability::tests::legacy_capability_failure_without_detail_rehydrates_explicit_fallback -- --exact
   ```
 
 The diagnostic value is bounded to 4096 bytes, rejects empty text, disallowed

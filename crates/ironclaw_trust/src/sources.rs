@@ -43,7 +43,9 @@ use ironclaw_host_api::{
 
 use crate::decision::{EffectiveTrustClass, HostTrustAssignment, TrustProvenance};
 use crate::error::TrustError;
-use crate::policy::{SourceMatch, TrustPolicyInput};
+use ironclaw_host_api::trust::TrustPolicyInput;
+
+use crate::policy::SourceMatch;
 
 /// Contract for a single policy source.
 ///
@@ -233,7 +235,8 @@ pub struct AdminEntry {
     pub package_id: PackageId,
     /// Origin this entry binds to. The entry only matches packages whose
     /// `PackageIdentity::source` equals this value. Use the matching
-    /// `for_bundled` / `for_registry` / `for_admin` / `for_local_manifest`
+    /// `for_bundled` / `for_registry` / `for_direct_remote` / `for_admin` /
+    /// `for_local_manifest`
     /// constructor rather than building the variant by hand.
     pub source: PackageSource,
     /// Optional digest pin. When set, the entry only matches packages whose
@@ -278,6 +281,31 @@ impl AdminEntry {
         Self {
             package_id,
             source: PackageSource::Registry { url: registry_url },
+            digest,
+            effective_trust: trust.into_effective(),
+            allowed_effects,
+            max_resource_ceiling,
+        }
+    }
+
+    /// Bind an elevation to a tenant-registered direct remote endpoint.
+    ///
+    /// The endpoint and manifest digest are both identity pins: a package
+    /// with the same id cannot inherit this ceiling after either its remote
+    /// origin or its registered definition changes. Callers must use this
+    /// only for a host-mediated activation decision; registration alone is
+    /// not an elevation.
+    pub fn for_direct_remote(
+        package_id: PackageId,
+        endpoint: String,
+        digest: Option<String>,
+        trust: HostTrustAssignment,
+        allowed_effects: Vec<EffectKind>,
+        max_resource_ceiling: Option<ResourceCeiling>,
+    ) -> Self {
+        Self {
+            package_id,
+            source: PackageSource::DirectRemote { endpoint },
             digest,
             effective_trust: trust.into_effective(),
             allowed_effects,
@@ -702,5 +730,75 @@ pub(crate) fn admin_entry_with_trust(
         effective_trust,
         allowed_effects,
         max_resource_ceiling,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use ironclaw_host_api::{
+        capability::EffectKind,
+        ids::PackageId,
+        runtime::TrustClass,
+        trust::{PackageIdentity, PackageSource, RequestedTrustClass},
+    };
+
+    use ironclaw_host_api::trust::TrustPolicyInput;
+
+    use super::{AdminConfig, AdminEntry};
+    use crate::{HostTrustAssignment, HostTrustPolicy, TrustPolicy, TrustProvenance};
+
+    #[test]
+    fn direct_remote_entry_requires_the_exact_endpoint_and_digest() {
+        let package_id = PackageId::new("mcp-linear").expect("valid package id");
+        let endpoint = "https://mcp.linear.app/rpc".to_string();
+        let policy = HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries([
+            AdminEntry::for_direct_remote(
+                package_id.clone(),
+                endpoint.clone(),
+                Some("sha256:registered-v1".to_string()),
+                HostTrustAssignment::user_trusted(),
+                vec![EffectKind::DispatchCapability, EffectKind::Network],
+                None,
+            ),
+        ]))])
+        .expect("valid policy");
+
+        let input = |endpoint: String, digest: Option<String>| TrustPolicyInput {
+            identity: PackageIdentity::new(
+                package_id.clone(),
+                PackageSource::DirectRemote { endpoint },
+                digest,
+                None,
+            ),
+            requested_trust: RequestedTrustClass::ThirdParty,
+            requested_authority: BTreeSet::new(),
+        };
+
+        let decision = policy
+            .evaluate(&input(endpoint, Some("sha256:registered-v1".to_string())))
+            .expect("matching direct remote entry evaluates");
+        assert_eq!(decision.effective_trust.class(), TrustClass::UserTrusted);
+        assert_eq!(decision.provenance, TrustProvenance::AdminConfig);
+        assert_eq!(
+            decision.authority_ceiling.allowed_effects,
+            vec![EffectKind::DispatchCapability, EffectKind::Network]
+        );
+
+        for mismatched in [
+            input(
+                "https://evil.example/rpc".to_string(),
+                Some("sha256:registered-v1".to_string()),
+            ),
+            input(
+                "https://mcp.linear.app/rpc".to_string(),
+                Some("sha256:registered-v2".to_string()),
+            ),
+        ] {
+            let decision = policy.evaluate(&mismatched).expect("mismatch evaluates");
+            assert_eq!(decision.effective_trust.class(), TrustClass::Sandbox);
+            assert_eq!(decision.provenance, TrustProvenance::Default);
+        }
     }
 }

@@ -4,11 +4,10 @@
 //! implemented exactly once here.
 
 use chrono::Utc;
-use ironclaw_host_api::{
-    Timestamp,
-    ids::SecretHandle,
-    recipe::{MissingScopeBehavior, OAuth2CodeRecipe, PkceMode, TokenExchangeAuth},
+use ironclaw_extension_contracts::recipe::{
+    MissingScopeBehavior, OAuth2CodeRecipe, PkceMode, TokenExchangeAuth,
 };
+use ironclaw_host_api::{Timestamp, ids::SecretHandle};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
@@ -62,7 +61,7 @@ impl AuthEngine {
         let scope = context.scope.resource.clone();
         let vendor = request.provider.as_str().to_string();
         let client = self
-            .oauth_client_material(&scope, &vendor, &recipe, resource.as_deref(), false)
+            .oauth_client_material(&scope, &vendor, &recipe, resource.as_deref(), None, false)
             .await
             .map_err(|_| AuthProductError::TokenExchangeFailed)?;
         let redirect_uri = self
@@ -148,7 +147,7 @@ impl AuthEngine {
             .read_refresh_token(&scope, &request.refresh_secret)
             .await?;
         let client = self
-            .oauth_client_material(&scope, &vendor, &recipe, resource.as_deref(), false)
+            .oauth_client_material(&scope, &vendor, &recipe, resource.as_deref(), None, false)
             .await
             .map_err(|_| AuthProductError::RefreshFailed)?;
 

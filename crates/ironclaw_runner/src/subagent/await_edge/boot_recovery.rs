@@ -2,9 +2,10 @@
 
 use std::sync::Arc;
 
+use ironclaw_loop_contracts::AgentLoopHostError;
 use ironclaw_loop_host::{AwaitEdgeWriter, ResolveReport};
 use ironclaw_threads::SessionThreadService;
-use ironclaw_turns::{TurnScope, run_profile::AgentLoopHostError};
+use ironclaw_turns::TurnScope;
 
 use super::{resolver::AwaitEdgeResolver, store::AwaitEdgeStore};
 

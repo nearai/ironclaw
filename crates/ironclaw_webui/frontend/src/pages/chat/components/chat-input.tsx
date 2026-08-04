@@ -569,6 +569,13 @@ export function ChatInput({
 
   const hasPayload = text.trim() || attachments.length > 0;
   const isSubmitDisabled = disabled || sendDisabled;
+  // While a run is active the composer shows a cancel button, but as soon as
+  // the user types a new message we swap it for send so the follow-up can be
+  // queued behind the running turn instead of forcing a cancel first. Only
+  // swap when send is actually usable: with a draft and a disabled send
+  // (cooldown) the user would otherwise have to erase the draft to reach
+  // cancel.
+  const showCancelOnly = canCancel && (!hasPayload || isSubmitDisabled);
   const placeholder = isHero
     ? t("chat.heroPlaceholder")
     : t("chat.followUpPlaceholder");
@@ -830,11 +837,11 @@ export function ChatInput({
         />
 
         <div className="mt-2 flex items-center gap-2">
-          {isSubmitDisabled &&
+          {isSubmitDisabled && statusText &&
           (
             <span className="inline-flex items-center gap-2 text-xs text-[var(--v2-text-muted)]">
               <span className="h-2 w-2 rounded-full bg-[var(--v2-accent)]" />
-              {statusText || t("chat.statusWorking")}
+              {statusText}
             </span>
           )}
           <div className="ml-auto flex items-center gap-1.5">
@@ -848,7 +855,7 @@ export function ChatInput({
             >
               <Icon name="plus" className="h-5 w-5" />
             </button>
-            {canCancel
+            {showCancelOnly
               ? (
                 <Button
                   type="button"

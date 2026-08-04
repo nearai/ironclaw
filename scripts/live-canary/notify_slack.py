@@ -22,6 +22,7 @@ import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 MODEL = "claude-haiku-4-5-20251001"
@@ -82,6 +83,13 @@ class RebornQaCaseReport:
     failure_category: str = ""
     failure_status: str = ""
     inconclusive: bool = False
+    model_call_count: int | None = None
+    tool_call_count: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    uncached_input_tokens: int | None = None
+    cost_usd: str | None = None
     tool_calls: list["RebornQaToolCall"] = field(default_factory=list)
     debug_paths: list[str] = field(default_factory=list)
 
@@ -454,6 +462,26 @@ def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
             or case.replace("_", " ")
         )
         latency = entry.get("latency_ms")
+        metrics = details.get("metrics") or {}
+        if not isinstance(metrics, dict):
+            metrics = {}
+
+        def metric_int(name: str) -> int | None:
+            value = metrics.get(name)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                return value
+            return None
+
+        cost_usd = metrics.get("cost_usd")
+        if isinstance(cost_usd, str):
+            try:
+                parsed_cost = Decimal(cost_usd)
+                if not parsed_cost.is_finite() or parsed_cost < 0:
+                    cost_usd = None
+            except InvalidOperation:
+                cost_usd = None
+        else:
+            cost_usd = None
         tool_calls = parse_reborn_trace_tool_calls(lane_dir / "traces" / f"{case}.json")
         debug_paths = []
         if not entry.get("success"):
@@ -477,6 +505,13 @@ def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
                 failure_category=classification.failure_category,
                 failure_status=classification.failure_status,
                 inconclusive=classification.inconclusive,
+                model_call_count=metric_int("model_call_count"),
+                tool_call_count=metric_int("tool_call_count"),
+                input_tokens=metric_int("input_tokens"),
+                output_tokens=metric_int("output_tokens"),
+                cache_read_tokens=metric_int("cache_read_tokens"),
+                uncached_input_tokens=metric_int("uncached_input_tokens"),
+                cost_usd=cost_usd,
                 tool_calls=tool_calls,
                 debug_paths=debug_paths,
             )
@@ -710,8 +745,52 @@ def _format_reborn_tool_summary(cases: list[RebornQaCaseReport]) -> list[str]:
     if len(distinct_tools) > 8:
         tool_names += f", +{len(distinct_tools) - 8} more"
 
-    lines = [f"*Tools:* {len(calls)} calls across {len(distinct_tools)} tools: {tool_names}"]
+    # These names come from the bounded redacted diagnostic trace. Exact call
+    # counts are rendered from per-case LLM trace metrics above; do not imply
+    # that this ring is a complete counting source.
+    lines = [f"*Tools observed:* {len(distinct_tools)} tools: {tool_names}"]
     return lines
+
+
+def _format_reborn_metric_summary(cases: list[RebornQaCaseReport]) -> list[str]:
+    """Aggregate available scalar metrics without treating missing usage as zero."""
+    if not cases:
+        return []
+
+    parts: list[str] = []
+    count = len(cases)
+
+    def append_integer(label: str, field_name: str) -> None:
+        values = [
+            value
+            for case in cases
+            if isinstance((value := getattr(case, field_name)), int)
+        ]
+        if not values:
+            return
+        coverage = f" ({len(values)}/{count} cases)" if len(values) != count else ""
+        parts.append(f"{sum(values):,} {label}{coverage}")
+
+    append_integer("model calls", "model_call_count")
+    append_integer("tool calls", "tool_call_count")
+    append_integer("input tokens", "input_tokens")
+    append_integer("output tokens", "output_tokens")
+    append_integer("cache-read", "cache_read_tokens")
+    append_integer("uncached input", "uncached_input_tokens")
+
+    costs: list[Decimal] = []
+    for case in cases:
+        if case.cost_usd is None:
+            continue
+        try:
+            costs.append(Decimal(case.cost_usd))
+        except InvalidOperation:
+            continue
+    if costs:
+        coverage = f" ({len(costs)}/{count} cases)" if len(costs) != count else ""
+        parts.append(f"${sum(costs, Decimal(0)).normalize()}{coverage}")
+
+    return [f"*Usage:* {' · '.join(parts)}"] if parts else []
 
 
 def _format_reborn_failure_lines(
@@ -772,6 +851,7 @@ def _format_reborn_qa_group(
         f"*Cases:* {_trim_slack_text('; '.join(case_summaries), 900)}",
     ]
     lines.extend(_format_reborn_failure_lines(cases, run_url))
+    lines.extend(_format_reborn_metric_summary(cases))
     lines.extend(_format_reborn_tool_summary(cases))
     blocks: list[dict] = []
     current: list[str] = []
@@ -1011,6 +1091,25 @@ def _markdown_reborn_tool_trace(case: RebornQaCaseReport) -> str:
     return ", ".join(summaries)
 
 
+def _markdown_reborn_case_metrics(case: RebornQaCaseReport) -> str:
+    parts: list[str] = []
+    if case.model_call_count is not None:
+        parts.append(f"{case.model_call_count:,} model calls")
+    if case.tool_call_count is not None:
+        parts.append(f"{case.tool_call_count:,} tool calls")
+    if case.input_tokens is not None:
+        parts.append(f"{case.input_tokens:,} input tokens")
+    if case.cache_read_tokens is not None:
+        parts.append(f"{case.cache_read_tokens:,} cache-read")
+    if case.uncached_input_tokens is not None:
+        parts.append(f"{case.uncached_input_tokens:,} uncached input")
+    if case.output_tokens is not None:
+        parts.append(f"{case.output_tokens:,} output tokens")
+    if case.cost_usd is not None:
+        parts.append(f"${_github_md_text(case.cost_usd, 64)}")
+    return " · ".join(parts)
+
+
 def _markdown_reborn_case_lines(
     cases: list[RebornQaCaseReport],
     run_url: str | None,
@@ -1033,6 +1132,7 @@ def _markdown_reborn_case_lines(
         if inconclusive:
             heading += f", {inconclusive} inconclusive"
         lines.append(heading)
+        lines.extend(_format_reborn_metric_summary(group_cases))
         for case in group_cases:
             label, status = _case_outcome(case)
             latency = (
@@ -1044,6 +1144,9 @@ def _markdown_reborn_case_lines(
                 f"- {status} `{_github_md_code(_qa_case_rows(case))}` "
                 f"{_github_md_text(case.feature)}{latency}"
             )
+            metrics = _markdown_reborn_case_metrics(case)
+            if metrics:
+                lines.append(f"  - Metrics: {metrics}")
             if not case.success and case.message:
                 lines.append(f"  - {label}: {_github_md_text(case.message)}")
             if (

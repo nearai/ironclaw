@@ -1,3 +1,4 @@
+use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
@@ -13,28 +14,30 @@ use crate::{
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
 use ironclaw_approvals::ApprovalRequestStorePort;
+use ironclaw_host_api::turn::{
+    ModelInvalidOutputDetailReason, SanitizedFailure, TurnActor, TurnGateRef, TurnRunId, TurnScope,
+    TurnStatus,
+};
 use ironclaw_host_api::{
     action::{Action, NetworkMethod, NetworkScheme},
     approval::ApprovalRequest,
     ids::{InvocationId, UserId},
 };
+use ironclaw_loop_contracts::{
+    SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest, SystemInferenceTaskId,
+    SystemPromptId, SystemPromptSource, SystemTaskKind, sanitize_model_visible_text,
+};
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, ModelInvalidOutputDetailReason, SanitizedFailure, TurnActor,
-    TurnBlockedGateKind, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
-    TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionSource,
-    TurnEventReducerService, TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
-    run_profile::{
-        SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
-        SystemInferenceTaskId, SystemPromptId, SystemPromptSource, SystemTaskKind,
-        sanitize_model_visible_text,
-    },
+    GetRunStateRequest, TurnBlockedGateKind, TurnCoordinator, TurnError, TurnEventKind,
+    TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
+    TurnEventProjectionSource, TurnEventReducerService, TurnLifecycleEvent,
 };
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use crate::AuthChallengeProvider;
-use crate::{BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth};
-use ironclaw_runner::failure_categories::CHECKPOINT_REJECTED_CATEGORY;
-use ironclaw_runner::failure_summary::{
+use crate::auth_prompt_view_for_blocked_auth;
+use ironclaw_host_api::failure::categories::CHECKPOINT_REJECTED_CATEGORY;
+use ironclaw_host_api::failure::summary::{
     checkpoint_rejection_host_explanation_from_detail, pinned_failure_summary_for_category,
     reborn_failure_summary_for_category_and_detail,
 };
@@ -419,7 +422,7 @@ async fn blocked_prompt_payload(
                 fallback_owner_user_id: event.owner_user_id.as_ref().unwrap_or(caller_user_id),
                 scope: &event.scope,
                 run_id: event.run_id,
-                gate_ref: &gate_ref_str,
+                gate_ref,
                 invocation_id: blocked_invocation_id,
                 body: event
                     .sanitized_reason
@@ -468,7 +471,7 @@ async fn approval_gate_prompt(
     caller_user_id: &UserId,
     approval_requests: Option<&dyn ApprovalRequestStorePort>,
     event: &TurnLifecycleEvent,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
     gate_ref_string: String,
 ) -> Result<ProductOutboundPayload, ProductAdapterError> {
     let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
@@ -504,7 +507,7 @@ async fn approval_gate_prompt(
 /// the request is missing, or the lookup fails.
 pub async fn approval_prompt_context_view(
     approval_requests: Option<&dyn ApprovalRequestStorePort>,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
 ) -> Option<ApprovalPromptContextView> {
@@ -522,7 +525,7 @@ struct ApprovalPromptLookup {
 
 async fn approval_prompt_lookup(
     approval_requests: Option<&dyn ApprovalRequestStorePort>,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
 ) -> Result<ApprovalPromptLookup, ironclaw_approvals::ApprovalStoreError> {
@@ -992,9 +995,19 @@ fn failure_explanation_request(input: &FailureExplanationInput) -> Option<System
     })
 }
 
+/// The failure-explainer system prompt.
+///
+/// The asset is product-owned (WS1.7): this projection is its only consumer,
+/// and prompt *content* is explicitly out of charter for the loop tier
+/// (PROPOSAL §6.1.4/§6.7.2), where it used to live as
+/// `ironclaw_loop_host::FAILURE_EXPLANATION_SYSTEM_PROMPT`.
 fn failure_explanation_system_prompt() -> &'static str {
-    ironclaw_loop_host::FAILURE_EXPLANATION_SYSTEM_PROMPT
+    FAILURE_EXPLANATION_SYSTEM_PROMPT
 }
+
+/// Product-owned prompt asset; see [`failure_explanation_system_prompt`].
+const FAILURE_EXPLANATION_SYSTEM_PROMPT: &str =
+    include_str!("../../prompts/failure_explanation.md");
 
 pub(super) fn failure_explanation_user_prompt(input: &FailureExplanationInput) -> String {
     let mut prompt = format!(

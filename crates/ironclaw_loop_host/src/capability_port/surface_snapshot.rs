@@ -6,9 +6,9 @@ use ironclaw_host_api::{
     resource::ResourceEstimate,
     runtime::RuntimeKind,
 };
-use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView, ConcurrencyHint,
-    ProviderToolCall, ProviderToolDefinition,
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptionTrust,
+    CapabilityDescriptorView, ConcurrencyHint, ProviderToolCall, ProviderToolDefinition,
 };
 
 use crate::capability_info::{self, CapabilityInfoEntry};
@@ -19,6 +19,7 @@ pub(super) struct RuntimeSurfaceCapabilitySnapshot {
     pub(super) runtime: RuntimeKind,
     pub(super) estimate: ResourceEstimate,
     pub(super) safe_description: String,
+    pub(super) description_trust: CapabilityDescriptionTrust,
     pub(super) parameters_schema: serde_json::Value,
     pub(super) effects: Vec<EffectKind>,
     pub(super) provider_tool_name: ProviderToolName,
@@ -169,10 +170,10 @@ impl SurfaceCapabilitySnapshot {
     ) -> Result<Option<ProviderToolDefinition>, AgentLoopHostError> {
         match self {
             Self::Runtime(capability) => {
-                if !super::provider_schema_is_usable(&capability.parameters_schema) {
+                if !super::provider_schema_is_resolved(&capability.parameters_schema) {
                     tracing::debug!(
                         capability_id = capability_id.as_str(),
-                        "capability omitted from provider tool definitions because its parameter schema is not provider-usable"
+                        "capability omitted from provider tool definitions because its parameter schema contains an unresolved reference"
                     );
                     return Ok(None);
                 }
@@ -180,6 +181,7 @@ impl SurfaceCapabilitySnapshot {
                     capability_id: capability_id.clone(),
                     name: capability.provider_tool_name.clone(),
                     description: capability.safe_description.clone(),
+                    description_trust: capability.description_trust,
                     parameters: capability.parameters_schema.clone(),
                 }))
             }
@@ -210,7 +212,7 @@ impl RuntimeSurfaceCapabilitySnapshot {
         capability_id: &CapabilityId,
         tool_call: &ProviderToolCall,
     ) -> Result<PreparedSurfaceCapabilityCall, AgentLoopHostError> {
-        if !super::provider_schema_is_usable(&self.parameters_schema) {
+        if !super::provider_schema_is_resolved(&self.parameters_schema) {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "provider tool call was not advertised to the model",
@@ -274,6 +276,7 @@ impl SyntheticSurfaceCapabilitySnapshot {
                     capability_id: capability_id.clone(),
                     name: self.provider_tool_name.clone(),
                     description: self.safe_description.clone(),
+                    description_trust: Default::default(),
                     parameters: self.parameters_schema.clone(),
                 })
             }

@@ -2,32 +2,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AcceptedMessageRef, GateKind, GateRef, IdempotencyKey, ProductTurnContext,
+    AcceptedMessageRef, GateKind, GateResumeDisposition, IdempotencyKey, ProductTurnContext,
     ReplyTargetBindingRef, RunProfileRequest, SanitizedCancelReason, SourceBindingRef, TurnActor,
-    TurnRunId, TurnScope, TurnStatus,
+    TurnGateRef, TurnRunId, TurnScope, TurnStatus,
 };
 
 pub type TurnTimestamp = DateTime<Utc>;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GateResumeDisposition {
-    /// The user explicitly declined the gate (auth OR approval). The executor
-    /// surfaces this to the model as a non-retryable authorization failure rather
-    /// than re-dispatching the gate.
-    ///
-    /// New variants (e.g. `Deferred`) may be added here as needs arise.
-    Denied,
-}
-
-impl GateResumeDisposition {
-    /// Stable snake_case value shared with the serde wire representation.
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Denied => "denied",
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -125,7 +105,7 @@ pub struct ResumeTurnRequest {
     pub scope: TurnScope,
     pub actor: TurnActor,
     pub run_id: TurnRunId,
-    pub gate_resolution_ref: GateRef,
+    pub gate_resolution_ref: TurnGateRef,
     pub source_binding_ref: SourceBindingRef,
     pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub idempotency_key: IdempotencyKey,
@@ -181,7 +161,7 @@ mod tests {
             },
             actor: TurnActor::new(UserId::from_trusted("user:test".to_string())),
             run_id: TurnRunId::new(),
-            gate_resolution_ref: GateRef::new("gate:test-gate").expect("valid gate ref"),
+            gate_resolution_ref: TurnGateRef::new("gate:test-gate").expect("valid gate ref"),
             source_binding_ref: SourceBindingRef::new("source-binding").expect("valid source ref"),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-target")
                 .expect("valid reply target ref"),

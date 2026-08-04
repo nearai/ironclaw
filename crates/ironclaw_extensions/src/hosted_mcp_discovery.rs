@@ -24,9 +24,12 @@ pub struct HostedMcpDiscoveredTool {
 /// Advisory MCP tool behavior hints returned by `tools/list`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HostedMcpDiscoveredToolAnnotations {
+    pub title: Option<String>,
     pub destructive_hint: bool,
     pub side_effects_hint: bool,
     pub read_only_hint: bool,
+    pub idempotent_hint: Option<bool>,
+    pub open_world_hint: Option<bool>,
 }
 
 pub fn is_hosted_http_mcp_package(package: &ExtensionPackage) -> bool {
@@ -72,16 +75,34 @@ pub fn package_with_discovered_hosted_mcp_tools(
         })
         .collect();
 
-    ExtensionPackage::from_host_bundled_manifest_with_inline_dynamic_schemas(
-        manifest,
-        package.root.clone(),
-        package.manifest_digest(),
-        capabilities,
-    )
+    match package.manifest.source {
+        ManifestSource::HostBundled => {
+            ExtensionPackage::from_host_bundled_manifest_with_inline_dynamic_schemas(
+                manifest,
+                package
+                    .materialized_root()
+                    .map_err(|error| invalid_hosted_mcp_manifest(error.to_string()))?
+                    .clone(),
+                package.manifest_digest(),
+                capabilities,
+            )
+        }
+        ManifestSource::UserRegistered => ExtensionPackage::from_virtual_manifest(
+            manifest,
+            package.manifest_digest(),
+            capabilities,
+        ),
+        _ => Err(invalid_hosted_mcp_manifest(
+            "hosted MCP discovery requires bundled or user-registered provenance".to_string(),
+        )),
+    }
 }
 
 fn hosted_http_mcp_url(package: &ExtensionPackage) -> Option<&str> {
-    if package.manifest.source != ManifestSource::HostBundled {
+    if !matches!(
+        package.manifest.source,
+        ManifestSource::HostBundled | ManifestSource::UserRegistered
+    ) {
         return None;
     }
     let ExtensionRuntime::Mcp {
@@ -107,7 +128,6 @@ fn valid_hosted_mcp_url(url: &str) -> bool {
         && parsed.username().is_empty()
         && parsed.password().is_none()
         && parsed.host_str().is_some()
-        && parsed.query().is_none()
         && parsed.fragment().is_none()
 }
 

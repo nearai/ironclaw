@@ -1,4 +1,11 @@
-//! Shared low-level observability helpers.
+//! Zero-cost-when-off latency-trace macros over the `ironclaw_latency` target.
+//!
+//! Everything here is either a macro or a helper the macros need. The crate
+//! holds exactly one dependency, `tracing`, and that is the charter: a crate
+//! that wants to time an operation can take this without acquiring anything
+//! else. Nothing that merely *produces a value a trace happens to record*
+//! belongs here — that measurement belongs to whoever produces the thing being
+//! measured (see `crates/ironclaw_observability/AGENTS.md`).
 #![warn(unreachable_pub)]
 
 use std::time::Instant;
@@ -22,30 +29,6 @@ pub fn live_latency_enabled() -> bool {
 #[inline]
 pub fn live_latency_started_at() -> Option<Instant> {
     live_latency_enabled().then(Instant::now)
-}
-
-#[inline]
-pub fn json_value_bytes(value: &serde_json::Value) -> u64 {
-    let mut counter = JsonByteCounter::default();
-    serde_json::to_writer(&mut counter, value)
-        .map(|()| counter.bytes)
-        .unwrap_or(0)
-}
-
-#[derive(Default)]
-struct JsonByteCounter {
-    bytes: u64,
-}
-
-impl std::io::Write for JsonByteCounter {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.bytes = self.bytes.saturating_add(buffer.len() as u64);
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 #[macro_export]
@@ -90,34 +73,28 @@ macro_rules! live_latency_trace_error {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write as _;
-
-    use serde_json::json;
+    use std::time::{Duration, Instant};
 
     use super::*;
 
     #[test]
-    fn json_value_bytes_matches_serialized_value_length() {
-        let value = json!({
-            "message": "hello",
-            "count": 3,
-            "items": ["a", "b"]
-        });
-
-        assert_eq!(
-            json_value_bytes(&value),
-            serde_json::to_vec(&value).unwrap().len() as u64
-        );
+    fn elapsed_ms_saturates_instead_of_wrapping() {
+        // The only arithmetic in the crate. `u128 -> u64` can overflow for an
+        // absurd interval; it must clamp rather than wrap, because a wrapped
+        // duration reads as a *fast* operation in a latency trace.
+        assert_eq!(elapsed_ms(Instant::now()), 0);
+        let long_ago = Instant::now()
+            .checked_sub(Duration::from_millis(1_500))
+            .expect("1.5s before now is representable");
+        assert!(elapsed_ms(long_ago) >= 1_500);
     }
 
     #[test]
-    fn json_byte_counter_saturates_on_write() {
-        let mut counter = JsonByteCounter {
-            bytes: u64::MAX - 1,
-        };
-
-        counter.write_all(b"abc").unwrap();
-
-        assert_eq!(counter.bytes, u64::MAX);
+    fn started_at_is_none_when_the_latency_target_is_off() {
+        // No subscriber is installed in this test binary, so the
+        // `ironclaw_latency` TRACE target is disabled — the zero-cost-when-off
+        // property the whole crate exists for.
+        assert!(!live_latency_enabled());
+        assert!(live_latency_started_at().is_none());
     }
 }

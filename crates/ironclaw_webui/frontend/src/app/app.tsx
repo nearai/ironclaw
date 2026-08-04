@@ -193,6 +193,10 @@ function AuthenticatedLayout({ auth }) {
           isChecking={auth.isChecking}
           isAdmin={auth.isAdmin}
           rebornProjectsEnabled={auth.rebornProjectsEnabled}
+          workspaceRequiresScopedProjection={auth.workspaceRequiresScopedProjection}
+          regressionArtifactExportEnabled={
+            auth.regressionArtifactExportEnabled
+          }
           globalAutoApproveEnabled={auth.globalAutoApproveEnabled}
           onSignOut={auth.signOut}
         />
@@ -221,6 +225,10 @@ export function App() {
           <Route path="welcome" element={(<LazyRoute><OnboardingPage /></LazyRoute>)} />
           <Route path="chat" element={(<LazyRoute><ChatPage /></LazyRoute>)} />
           <Route path="chat/:threadId" element={(<LazyRoute><ChatPage /></LazyRoute>)} />
+          <Route
+            path="workspace/thread/:workspaceThreadId/*"
+            element={(<LazyRoute><WorkspacePage /></LazyRoute>)}
+          />
           <Route path="workspace/*" element={(<LazyRoute><WorkspacePage /></LazyRoute>)} />
           <Route path="projects" element={(<LazyRoute><ProjectsPage /></LazyRoute>)} />
           <Route path="projects/:projectId" element={(<LazyRoute><ProjectsPage /></LazyRoute>)} />

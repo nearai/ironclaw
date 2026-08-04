@@ -17,19 +17,24 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
+use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
+use ironclaw_extension_contracts::verified_inbound;
 use ironclaw_extension_host::ingress::{
     ExtensionIngressRouter, InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError,
     IngressConfigurationPort, IngressPortError, IngressSecretsPort, VerificationCandidate,
 };
-use ironclaw_host_api::{ids::SecretHandle, product_surface::ChannelInboundProductSurface};
-use ironclaw_product::{
-    AdapterInstallationId, ExternalConversationRef, ExternalEventId, NormalizedInboundMessage,
-    ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductSourceChannel,
-    ProtocolAuthEvidence, classify_channel_inbound_text,
+use ironclaw_host_api::ids::SecretHandle;
+use ironclaw_host_api::product_adapter::auth::ChannelIngressVerifier;
+use ironclaw_host_api::product_adapter::{
+    AdapterInstallationId, ProductAdapterId, ProtocolAuthEvidence,
 };
-use ironclaw_product::{
-    ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRejectedAdmission,
-    ChannelInboundSurfaceRequest,
+use ironclaw_product_contracts::inbound::{
+    ProductInboundAck, ProductInboundEnvelope, ProductSourceChannel, classify_channel_inbound_text,
+};
+use ironclaw_product_contracts::surface::{
+    ChannelInboundProductSurface, ChannelInboundSurfaceOutcome,
+    ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
 };
 use tokio::task::JoinSet;
 
@@ -61,7 +66,7 @@ pub trait PostAdmissionObserver: Send + Sync {
     async fn observe_error(
         &self,
         _envelope: ProductInboundEnvelope,
-        _error: ironclaw_product::ProductAdapterError,
+        _error: ironclaw_host_api::product_adapter_error::ProductAdapterError,
     ) {
     }
 }
@@ -79,19 +84,36 @@ pub enum VerifiedEvidenceMint {
     },
 }
 
+/// This crate is the generic ingress verifier — trust stage T2 — so it holds the
+/// one production `ChannelIngressVerifier` implementation in the workspace, and
+/// `reborn_sealed_evidence_mint_ratchet` keeps it that way. The impl sits on
+/// `VerifiedEvidenceMint` because that value *is* the recipe the router
+/// executed: the grant and the claim it authorizes are derived from the same
+/// verification, not from two independently-trusted facts.
+///
+/// A channel package never reaches this: it holds no grant, so
+/// `ironclaw_extension_contracts::verified_inbound` is uncallable from a
+/// package (PROPOSAL §12.1a).
+impl ChannelIngressVerifier for VerifiedEvidenceMint {}
+
 impl VerifiedEvidenceMint {
     fn mint(&self, subject: &str) -> ProtocolAuthEvidence {
         match self {
             Self::RequestSignature {
                 signature_header,
                 timestamp_header,
-            } => ironclaw_product::auth::mark_request_signature_verified(
+            } => verified_inbound::mark_request_signature_verified(
+                self.verified_inbound_grant(),
                 signature_header.clone(),
                 timestamp_header.clone(),
                 subject,
             ),
             Self::SharedSecretHeader { header } => {
-                ironclaw_product::auth::mark_shared_secret_header_verified(header.clone(), subject)
+                verified_inbound::mark_shared_secret_header_verified(
+                    self.verified_inbound_grant(),
+                    header.clone(),
+                    subject,
+                )
             }
         }
     }
@@ -341,44 +363,33 @@ pub struct ChannelInboundSinkConfig {
     pub observer: Option<Arc<dyn PostAdmissionObserver>>,
 }
 
-#[derive(Clone)]
-pub enum ChannelPairingOutcomeObserver {
-    RunDelivery(Arc<crate::channel_host::RunDeliveryPostAdmissionObserver>),
-    #[cfg(test)]
-    Recording(Arc<std::sync::Mutex<Vec<ChannelPairingConsumeOutcome>>>),
-}
-
-impl ChannelPairingOutcomeObserver {
-    async fn observe(
+/// Post-pairing notification seam.
+///
+/// A trait rather than an enum over concrete observers: the sink is generic
+/// channel machinery and must not name the delivery observer that happens to
+/// consume its outcomes today. Implementors supply the behavior; tests supply
+/// an ordinary double instead of a `#[cfg(test)]` variant compiled into the
+/// production type.
+#[async_trait]
+pub trait ChannelPairingOutcomeObserver: Send + Sync {
+    async fn observe_pairing_outcome(
         &self,
         conversation: ExternalConversationRef,
         event_id: ExternalEventId,
         outcome: ChannelPairingConsumeOutcome,
-    ) {
-        match self {
-            Self::RunDelivery(observer) => {
-                observer
-                    .observe_pairing_outcome(conversation, event_id, outcome)
-                    .await;
-            }
-            #[cfg(test)]
-            Self::Recording(outcomes) => match outcomes.lock() {
-                Ok(mut outcomes) => outcomes.push(outcome),
-                Err(poisoned) => poisoned.into_inner().push(outcome),
-            },
-        }
-    }
+    );
 }
 
 /// The generic [`InboundSink`]: builds the trusted inbound envelope from a
 /// normalized message and submits it synchronously through ProductSurface —
 /// the durable dedupe + admission commit the router requires
-/// before acking 2xx. Post-admission observers run on tracked background
-/// tasks drained at shutdown.
+/// before acking an ordinary-message 2xx, or before completing an
+/// asynchronously merged provider batch. Post-admission observers run on
+/// tracked background tasks drained at shutdown.
 pub struct GenericChannelInboundSink {
     config: ChannelInboundSinkConfig,
     pairing: Option<Arc<dyn ChannelPairingInterceptor>>,
-    pairing_outcome_observer: Option<ChannelPairingOutcomeObserver>,
+    pairing_outcome_observer: Option<Arc<dyn ChannelPairingOutcomeObserver>>,
     observer_tasks: tokio::sync::Mutex<JoinSet<()>>,
 }
 
@@ -395,7 +406,7 @@ impl GenericChannelInboundSink {
     pub fn with_pairing(
         mut self,
         pairing: Arc<dyn ChannelPairingInterceptor>,
-        observer: Option<ChannelPairingOutcomeObserver>,
+        observer: Option<Arc<dyn ChannelPairingOutcomeObserver>>,
     ) -> Self {
         self.pairing = Some(pairing);
         self.pairing_outcome_observer = observer;
@@ -452,6 +463,8 @@ impl InboundSink for GenericChannelInboundSink {
             extension_id: _,
             installation_id,
             message,
+            channel_adapter,
+            channel_egress,
         } = admission;
         let installation = AdapterInstallationId::new(&installation_id).map_err(Self::permanent)?;
         // Pairing pre-admission gate: a serviced pairing interaction is
@@ -468,7 +481,9 @@ impl InboundSink for GenericChannelInboundSink {
                         let conversation = message.conversation.clone();
                         let event_id = message.event_id.clone();
                         self.spawn_observer(async move {
-                            observer.observe(conversation, event_id, outcome).await;
+                            observer
+                                .observe_pairing_outcome(conversation, event_id, outcome)
+                                .await;
                         })
                         .await;
                     }
@@ -500,7 +515,29 @@ impl InboundSink for GenericChannelInboundSink {
             classification: classify_channel_inbound_text(&message.text, message.trigger),
             message,
         };
-        let response = Box::pin(self.config.surface.admit_channel_inbound(request)).await;
+        let response = if request.message.attachments.is_empty() {
+            Box::pin(self.config.surface.admit_channel_inbound(request)).await
+        } else {
+            // Attachment-bearing admission pins the exact adapter and
+            // manifest-restricted egress that parsed the request, so accepted
+            // intake can fetch bytes after replay dedupe and policy.
+            let Some(channel_egress) = channel_egress else {
+                return Err(InboundSinkError {
+                    retryable: true,
+                    reason: "channel attachment egress is unavailable".to_string(),
+                });
+            };
+            Box::pin(
+                self.config
+                    .surface
+                    .admit_channel_inbound_with_attachment_transfer(
+                        request,
+                        channel_adapter,
+                        channel_egress,
+                    ),
+            )
+            .await
+        };
         match response {
             ChannelInboundSurfaceOutcome::Admitted(admission) => {
                 let admission = *admission;
@@ -525,7 +562,25 @@ impl InboundSink for GenericChannelInboundSink {
                     })
                 }
             }
-            ChannelInboundSurfaceOutcome::Invalid(error) => Err(Self::permanent(error)),
+            // Honor the error's own retryability: a transient admission
+            // failure must not claim a durable permanent outcome. `Invalid`
+            // carries no envelope, so a permanent outcome here cannot reach
+            // the observer the way `Rejected` does — log it so a durably
+            // settled admission is never silent.
+            ChannelInboundSurfaceOutcome::Invalid(error) => {
+                let retryable = error.is_retryable();
+                if !retryable {
+                    tracing::debug!(
+                        adapter_id = %self.config.adapter_id,
+                        error = %error,
+                        "inbound admission settled permanently before an envelope existed"
+                    );
+                }
+                Err(InboundSinkError {
+                    retryable,
+                    reason: error.to_string(),
+                })
+            }
             ChannelInboundSurfaceOutcome::Rejected(rejection) => {
                 let ChannelInboundSurfaceRejectedAdmission { envelope, error } = *rejection;
                 let retryable = error.is_retryable();
@@ -629,6 +684,10 @@ pub fn build_extension_ingress(
     watch: ironclaw_extension_host::SnapshotWatch,
     deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     reply_context: Arc<dyn ironclaw_extension_host::ingress::ReplyContextStore>,
+    inbound_batches: Arc<dyn ironclaw_extension_host::inbound_batches::InboundBatchStore>,
+    channel_egress_transport: Option<
+        Arc<dyn ironclaw_extension_host::egress::ChannelEgressTransport>,
+    >,
 ) -> ExtensionIngressParts {
     let registry = Arc::new(ExtensionIngressRegistry::default());
     let router = Arc::new(
@@ -639,11 +698,14 @@ pub fn build_extension_ingress(
                 configuration: Arc::clone(&registry) as Arc<dyn IngressConfigurationPort>,
                 sink: Arc::clone(&registry) as Arc<dyn InboundSink>,
                 reply_context: Arc::clone(&reply_context),
+                inbound_batches,
+                channel_egress_transport,
             },
             ironclaw_extension_host::ingress::IngressRouterConfig::default(),
         )
         .with_deployment_channels(deployment_channels),
     );
+    router.start_pending_batch_recovery();
     ExtensionIngressParts {
         router,
         registry,
@@ -815,14 +877,25 @@ mod serve_mount {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ironclaw_host_api::ids::UserId;
-    use ironclaw_product::{
-        AuthResolutionPayload, AuthResolutionResult, ChannelInboundClassification,
-        ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome, InboundCommandPayload,
+    use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+    use ironclaw_extension_contracts::channel_adapter::{
+        ChannelAttachmentRef, ProductTriggerReason,
     };
-    use ironclaw_product::{
-        ExternalActorRef, ExternalConversationRef, ExternalEventId, ParsedProductInbound,
-        ProductInboundPayload, ProductTriggerReason, TrustedInboundContext, UserMessagePayload,
+    use ironclaw_extension_contracts::external::{
+        ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
+        ProductAttachmentKind,
+    };
+    use ironclaw_extension_contracts::tool_adapter::{
+        RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
+    };
+    use ironclaw_host_api::ids::UserId;
+    use ironclaw_product_contracts::inbound::{
+        AuthResolutionPayload, AuthResolutionResult, ChannelInboundClassification,
+        InboundCommandPayload, ParsedProductInbound, ProductInboundPayload, TrustedInboundContext,
+        UserMessagePayload,
+    };
+    use ironclaw_product_contracts::surface::{
+        ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
     };
     use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
@@ -831,6 +904,7 @@ mod tests {
 
     struct CountingSurface {
         submissions: AtomicUsize,
+        transfer_submissions: AtomicUsize,
         classifications: std::sync::Mutex<Vec<Option<ChannelInboundClassification>>>,
     }
 
@@ -838,12 +912,17 @@ mod tests {
         fn new() -> Self {
             Self {
                 submissions: AtomicUsize::new(0),
+                transfer_submissions: AtomicUsize::new(0),
                 classifications: std::sync::Mutex::new(Vec::new()),
             }
         }
 
         fn submit_count(&self) -> usize {
             self.submissions.load(Ordering::SeqCst)
+        }
+
+        fn transfer_submit_count(&self) -> usize {
+            self.transfer_submissions.load(Ordering::SeqCst)
         }
 
         fn classifications(&self) -> Vec<Option<ChannelInboundClassification>> {
@@ -900,6 +979,57 @@ mod tests {
                 ack,
             }))
         }
+
+        async fn admit_channel_inbound_with_attachment_transfer(
+            &self,
+            request: ChannelInboundSurfaceRequest,
+            _channel_adapter: Arc<dyn ChannelAdapter>,
+            _channel_egress: Arc<dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress>,
+        ) -> ChannelInboundSurfaceOutcome {
+            self.transfer_submissions.fetch_add(1, Ordering::SeqCst);
+            self.admit_channel_inbound(request).await
+        }
+    }
+
+    struct DefaultingAttachmentSurface;
+
+    #[async_trait]
+    impl ChannelInboundProductSurface for DefaultingAttachmentSurface {
+        async fn admit_channel_inbound(
+            &self,
+            _request: ChannelInboundSurfaceRequest,
+        ) -> ChannelInboundSurfaceOutcome {
+            panic!("attachment admission must use the channel-transfer entrypoint")
+        }
+    }
+
+    struct TestRestrictedEgress;
+
+    #[async_trait]
+    impl RestrictedEgress for TestRestrictedEgress {
+        async fn send(
+            &self,
+            _request: RestrictedEgressRequest,
+        ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
+            Err(RestrictedEgressError::PolicyDenied)
+        }
+    }
+
+    fn admission_with_attachment() -> InboundAdmission {
+        let mut admission = admission_for("review the attached report");
+        admission.message.attachments.push(ChannelAttachmentRef {
+            descriptor: ProductAttachmentDescriptor::new(
+                "file-1",
+                "application/pdf",
+                Some("report.pdf".to_string()),
+                Some(4),
+                ProductAttachmentKind::Document,
+            )
+            .expect("attachment descriptor"),
+            vendor_ref: "opaque-provider-file-reference".to_string(),
+        });
+        admission.channel_egress = Some(Arc::new(TestRestrictedEgress));
+        admission
     }
 
     struct ScriptedPairingInterceptor {
@@ -919,6 +1049,8 @@ mod tests {
 
     fn admission_for(text: &str) -> InboundAdmission {
         InboundAdmission {
+            channel_adapter: Arc::new(crate::test_support::FakeChannelAdapter::default()),
+            channel_egress: None,
             extension_id: "vendorx".to_string(),
             installation_id: "install".to_string(),
             message: NormalizedInboundMessage {
@@ -953,9 +1085,11 @@ mod tests {
         })
         .with_pairing(
             Arc::new(ScriptedPairingInterceptor { interception }),
-            Some(ChannelPairingOutcomeObserver::Recording(Arc::clone(
-                &outcomes,
-            ))),
+            Some(
+                Arc::new(crate::test_support::RecordingPairingOutcomeObserver {
+                    outcomes: Arc::clone(&outcomes),
+                }) as Arc<dyn ChannelPairingOutcomeObserver>,
+            ),
         );
         (sink, workflow, outcomes)
     }
@@ -1096,6 +1230,68 @@ mod tests {
         sink.drain().await;
         assert_eq!(workflow.submit_count(), 1);
         assert_eq!(observer.lock().expect("outcomes lock").pop(), None);
+    }
+
+    /// A deployment without a channel egress transport cannot fetch bytes.
+    /// That is operator-fixable rather than structural, so it asks the vendor
+    /// to redeliver instead of durably settling the message.
+    #[tokio::test]
+    async fn attachment_admission_without_channel_egress_is_retryable() {
+        let (sink, workflow, _observer) = pairing_sink(ChannelPairingInterception::NotHandled);
+        let mut admission = admission_with_attachment();
+        admission.channel_egress = None;
+
+        let error = sink
+            .admit(admission)
+            .await
+            .expect_err("missing channel egress must not claim durable acceptance");
+
+        assert!(error.retryable);
+        assert_eq!(error.reason, "channel attachment egress is unavailable");
+        assert_eq!(workflow.submit_count(), 0);
+        assert_eq!(workflow.transfer_submit_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn attachment_admission_with_egress_uses_the_transfer_entrypoint() {
+        let (sink, workflow, _observer) = pairing_sink(ChannelPairingInterception::NotHandled);
+
+        let ack = sink
+            .admit(admission_with_attachment())
+            .await
+            .expect("attachment admission with pinned egress is admitted");
+
+        assert_eq!(ack, InboundAdmissionAck::Accepted);
+        sink.drain().await;
+        assert_eq!(workflow.transfer_submit_count(), 1);
+    }
+
+    /// A surface that does not implement attachment transfer will not
+    /// implement it for a redelivery of the same message, so the inherited
+    /// default settles permanently. A retryable outcome here left the vendor
+    /// redelivering forever while the user received nothing at all — not even
+    /// the message text — and it disagreed with the equivalent default on the
+    /// inbound turn service, which was already permanent for this condition.
+    #[tokio::test]
+    async fn inherited_attachment_transfer_failure_settles_permanently() {
+        let sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
+            adapter_id: ProductAdapterId::new("vendorx").expect("adapter id"),
+            evidence: VerifiedEvidenceMint::SharedSecretHeader {
+                header: "X-Vendor-Secret".to_string(),
+            },
+            surface: Arc::new(DefaultingAttachmentSurface),
+            observer: None,
+        });
+
+        let error = sink
+            .admit(admission_with_attachment())
+            .await
+            .expect_err("an inherited unsupported transfer must not be admitted");
+
+        assert!(
+            !error.retryable,
+            "a structural transfer gap must not ask the vendor to redeliver"
+        );
     }
 
     #[tokio::test]

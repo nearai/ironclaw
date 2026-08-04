@@ -9,13 +9,13 @@ use ironclaw_host_api::{
     resolution::Resolution,
     result_meta::FailureKind,
 };
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityProgress,
+    ConcurrencyHint, LoopRunContext, resolution,
+};
 use ironclaw_loop_host::{
     CapabilityResultWrite, DurablePersistence, SyntheticCapability, SyntheticCapabilityDescriptor,
     SyntheticCapabilityHandler, SyntheticCapabilityInvocation,
-};
-use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityProgress,
-    ConcurrencyHint, LoopRunContext, resolution,
 };
 
 pub const PROJECT_CREATE_CAPABILITY_ID: &str = "builtin.project_create";

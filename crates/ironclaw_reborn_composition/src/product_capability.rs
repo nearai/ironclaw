@@ -21,7 +21,6 @@ use ironclaw_host_api::{
     invocation::InvocationOrigin,
     mount::MountView,
     path::ScopedPath,
-    product_surface::{ProductSurfaceCaller, ProductSurfaceError},
     resolution::{
         Blocked, Denial, GateWaypoint, Outcome, OutcomeRefs, ProcessWaypoint, Resolution,
         ResultPreviewMeta, Suspension, ToolVerdict,
@@ -42,6 +41,7 @@ use ironclaw_product::{
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
     SKILL_UPDATE_CAPABILITY_ID,
 };
+use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
 
 use crate::RebornRuntime;
 use ironclaw_skills::ScopedSkillManagementMountResolver;

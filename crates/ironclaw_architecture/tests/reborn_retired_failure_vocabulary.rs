@@ -29,7 +29,10 @@
 //! skips comment lines rather than path-scoping the files that carry that
 //! history.
 
-use std::path::{Path, PathBuf};
+#[allow(dead_code)]
+mod ratchet_support;
+
+use std::path::Path;
 
 /// Type names retired by the collapse. Any live reference means a layer has
 /// started re-declaring the failure domain again.
@@ -44,6 +47,8 @@ const RETIRED_TYPES: &[&str] = &[
     "FailureKindValue",
 ];
 
+use ratchet_support::workspace_root;
+
 /// Conversion helpers that existed only to move a value between two spellings
 /// of the same domain. Their absence is what proves the collapse is real
 /// rather than a rename with the mapping tax still attached.
@@ -55,14 +60,6 @@ const RETIRED_MAPPERS: &[&str] = &[
     "failure_kind_of",
     "exhausted_capability_failure_kind",
 ];
-
-fn workspace_root() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // crates/ironclaw_architecture -> crates -> workspace root
-    path.pop();
-    path.pop();
-    path
-}
 
 /// Blank out comment spans so prose about the retired vocabulary stays legal
 /// while code that names it does not, preserving line numbers for reporting.

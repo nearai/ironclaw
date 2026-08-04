@@ -8,23 +8,202 @@ use ironclaw_host_api::path::ScopedPath;
 
 use crate::{
     INSTALL_METADATA_FILE_NAME, InstalledSkillMetadata, MAX_INSTALL_METADATA_BYTES,
-    normalize_safe_relative_path,
+    MAX_PROMPT_FILE_SIZE, normalize_safe_relative_path, validate_skill_name,
 };
 
 use super::{
     SKILL_FILE_NAME, SkillInstallSource, SkillManagementContext, SkillManagementError,
     SkillManagementErrorKind, SkillSource, USER_SKILLS_ROOT, filesystem_error,
-    log_skill_filesystem_phase, scoped_sibling, skill_root_scoped_path, skill_scoped_path,
+    log_skill_filesystem_phase, scoped_sibling, skill_mutation_lock, skill_root_scoped_path,
+    skill_scoped_path, stat_optional,
 };
 
 pub const MAX_INSTALL_BUNDLE_FILES: usize = 256;
 pub const MAX_INSTALL_BUNDLE_FILE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_INSTALL_BUNDLE_TOTAL_BYTES: usize = 20 * 1024 * 1024;
+const MAX_SKILL_SNAPSHOT_FILES: usize = MAX_INSTALL_BUNDLE_FILES + 2;
+const MAX_SKILL_SNAPSHOT_ENTRIES: usize = MAX_SKILL_SNAPSHOT_FILES * 64;
+const MAX_SKILL_SNAPSHOT_TOTAL_BYTES: usize =
+    MAX_INSTALL_BUNDLE_TOTAL_BYTES + MAX_PROMPT_FILE_SIZE as usize + MAX_INSTALL_METADATA_BYTES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SkillInstallFile<'a> {
     pub relative_path: &'a str,
     pub contents: &'a [u8],
+}
+
+pub(crate) struct SkillBundleSnapshot {
+    files: Vec<OwnedSkillBundleFile>,
+    source: SkillSource,
+}
+
+struct OwnedSkillBundleFile {
+    relative_path: String,
+    contents: Vec<u8>,
+}
+
+pub(crate) async fn capture_skill_bundle(
+    context: &SkillManagementContext,
+    skill_name: &str,
+) -> Result<SkillBundleSnapshot, SkillManagementError> {
+    if !validate_skill_name(skill_name) {
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::InvalidInput,
+        ));
+    }
+    let mutation_lock = skill_mutation_lock(skill_name);
+    let _mutation_guard = mutation_lock.lock().await;
+    let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, skill_name)?;
+    let mut files = Vec::new();
+    let mut stack = vec![(skill_dir, String::new())];
+    let mut entry_count = 0usize;
+    let mut total_bytes = 0usize;
+
+    while let Some((dir_path, relative_prefix)) = stack.pop() {
+        let remaining_entries = MAX_SKILL_SNAPSHOT_ENTRIES
+            .checked_sub(entry_count)
+            .ok_or_else(|| SkillManagementError::new(SkillManagementErrorKind::Resource))?;
+        if remaining_entries == 0 {
+            return Err(SkillManagementError::new(
+                SkillManagementErrorKind::Resource,
+            ));
+        }
+        let entries = context
+            .filesystem
+            .list_dir_bounded(
+                &context.scope,
+                &dir_path,
+                remaining_entries.saturating_add(1),
+            )
+            .await
+            .map_err(filesystem_error)?;
+        if entries.len() > remaining_entries {
+            return Err(SkillManagementError::new(
+                SkillManagementErrorKind::Resource,
+            ));
+        }
+        entry_count = entry_count
+            .checked_add(entries.len())
+            .ok_or_else(|| SkillManagementError::new(SkillManagementErrorKind::Resource))?;
+
+        for entry in entries {
+            let relative_path = if relative_prefix.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{relative_prefix}{}", entry.name)
+            };
+            let relative_path = normalize_snapshot_relative_path(&relative_path)?;
+            let entry_path = scoped_child(&dir_path, &entry.name)?;
+            match entry.file_type {
+                FileType::File => {
+                    if files.len() >= MAX_SKILL_SNAPSHOT_FILES {
+                        return Err(SkillManagementError::new(
+                            SkillManagementErrorKind::Resource,
+                        ));
+                    }
+                    let contents = context
+                        .filesystem
+                        .read_bytes_bounded(
+                            &context.scope,
+                            &entry_path,
+                            MAX_INSTALL_BUNDLE_FILE_BYTES,
+                        )
+                        .await
+                        .map_err(filesystem_error)?
+                        .ok_or_else(|| {
+                            SkillManagementError::new(SkillManagementErrorKind::Resource)
+                        })?;
+                    total_bytes = total_bytes.saturating_add(contents.len());
+                    if total_bytes > MAX_SKILL_SNAPSHOT_TOTAL_BYTES {
+                        return Err(SkillManagementError::new(
+                            SkillManagementErrorKind::Resource,
+                        ));
+                    }
+                    files.push(OwnedSkillBundleFile {
+                        relative_path,
+                        contents,
+                    });
+                }
+                FileType::Directory => {
+                    stack.push((entry_path, format!("{relative_path}/")));
+                }
+                FileType::Symlink | FileType::Other => {
+                    return Err(SkillManagementError::new(
+                        SkillManagementErrorKind::InvalidSkill,
+                    ));
+                }
+            }
+        }
+    }
+
+    if !files
+        .iter()
+        .any(|file| file.relative_path == SKILL_FILE_NAME)
+    {
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::NotFound,
+        ));
+    }
+    files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    let source = files
+        .iter()
+        .find(|file| file.relative_path == INSTALL_METADATA_FILE_NAME)
+        .map(|file| install_metadata_source(SkillSource::User, &file.contents))
+        .unwrap_or(SkillSource::User);
+    Ok(SkillBundleSnapshot { files, source })
+}
+
+pub(crate) async fn restore_skill_bundle(
+    context: &SkillManagementContext,
+    skill_name: &str,
+    snapshot: SkillBundleSnapshot,
+) -> Result<SkillSource, SkillManagementError> {
+    if !validate_skill_name(skill_name) {
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::InvalidInput,
+        ));
+    }
+    let mutation_lock = skill_mutation_lock(skill_name);
+    let _mutation_guard = mutation_lock.lock().await;
+    let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, skill_name)?;
+    if stat_optional(context, &skill_dir).await?.is_some() {
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::Conflict,
+        ));
+    }
+
+    let result: Result<(), SkillManagementError> = async {
+        create_dir_all(context, skill_name, "restore_create_dir_all", &skill_dir).await?;
+        for file in &snapshot.files {
+            let relative_path = normalize_snapshot_relative_path(&file.relative_path)?;
+            let file_path = skill_bundle_file_scoped_path(skill_name, &relative_path)?;
+            if let Some(parent) = scoped_parent(&file_path)? {
+                create_dir_all(context, skill_name, "restore_create_parent", &parent).await?;
+            }
+            log_skill_filesystem_phase("restore_write_file", skill_name, &file_path);
+            context
+                .filesystem
+                .write_file(&context.scope, &file_path, &file.contents)
+                .await
+                .map_err(filesystem_error)?;
+        }
+        Ok(())
+    }
+    .await;
+
+    if let Err(error) = result {
+        if let Err(cleanup_error) = cleanup_partial_install(context, skill_name, &skill_dir).await {
+            let original_kind = error.kind();
+            return Err(SkillManagementError::with_reason(
+                original_kind,
+                format!(
+                    "skill bundle restore failed with {error:?}; partial cleanup also failed with {cleanup_error:?}"
+                ),
+            ));
+        }
+        return Err(error);
+    }
+    Ok(snapshot.source)
 }
 
 pub(super) async fn publish_skill_install(
@@ -300,12 +479,24 @@ fn skill_bundle_file_scoped_path(
 }
 
 fn normalize_install_relative_path(path: &str) -> Result<String, SkillManagementError> {
+    let normalized = normalize_snapshot_relative_path(path)?;
+    if path.contains("://")
+        || normalized == SKILL_FILE_NAME
+        || normalized == INSTALL_METADATA_FILE_NAME
+    {
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::InvalidInput,
+        ));
+    }
+    Ok(normalized)
+}
+
+fn normalize_snapshot_relative_path(path: &str) -> Result<String, SkillManagementError> {
     if path.is_empty()
         || path.starts_with('/')
         || path.contains('\\')
         || path.contains('\0')
         || path.chars().any(char::is_control)
-        || path.contains("://")
     {
         return Err(SkillManagementError::new(
             SkillManagementErrorKind::InvalidInput,
@@ -314,13 +505,6 @@ fn normalize_install_relative_path(path: &str) -> Result<String, SkillManagement
 
     let normalized = normalize_safe_relative_path(std::path::Path::new(path))
         .map_err(|_| SkillManagementError::new(SkillManagementErrorKind::InvalidInput))?;
-    if normalized == std::path::Path::new(SKILL_FILE_NAME)
-        || normalized == std::path::Path::new(INSTALL_METADATA_FILE_NAME)
-    {
-        return Err(SkillManagementError::new(
-            SkillManagementErrorKind::InvalidInput,
-        ));
-    }
     normalized
         .to_str()
         .map(str::to_string)
@@ -423,6 +607,21 @@ mod tests {
             "https://example.com/file.txt",
         ] {
             assert!(normalize_install_relative_path(path).is_err());
+        }
+    }
+
+    #[test]
+    fn normalize_snapshot_path_preserves_reserved_files_without_allowing_escape() {
+        assert_eq!(
+            normalize_snapshot_relative_path(SKILL_FILE_NAME).expect("skill path"),
+            SKILL_FILE_NAME
+        );
+        assert_eq!(
+            normalize_snapshot_relative_path(INSTALL_METADATA_FILE_NAME).expect("metadata path"),
+            INSTALL_METADATA_FILE_NAME
+        );
+        for path in ["/absolute", "../escape", r"nested\escape", "nested/\nfile"] {
+            assert!(normalize_snapshot_relative_path(path).is_err());
         }
     }
 }

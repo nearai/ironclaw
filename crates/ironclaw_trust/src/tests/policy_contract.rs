@@ -17,6 +17,7 @@
 //! a shared `InvalidationBus`). These prove ordering and grant-denial
 //! behavior at the integration boundary that PR3 will eventually own.
 
+use ironclaw_host_api::trust::TrustPolicyInput;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
@@ -31,8 +32,7 @@ use crate::invalidation::{
 use crate::sources::{DevTrustOverride, PolicySource};
 use crate::{
     AdminConfig, AdminEntry, BundledRegistry, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, InvalidationBus, TrustDecision, TrustError, TrustPolicy, TrustPolicyInput,
-    TrustProvenance,
+    HostTrustPolicy, InvalidationBus, TrustDecision, TrustError, TrustPolicy, TrustProvenance,
 };
 use chrono::Utc;
 use ironclaw_host_api::{

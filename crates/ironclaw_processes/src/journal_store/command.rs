@@ -59,6 +59,13 @@ impl StoredProcessCommand {
         }
     }
 
+    /// Legacy import rewrites the cursor allocator wholesale and reserves a
+    /// range the batch preview cannot account for, so it never shares a
+    /// group-commit transaction with ordinary lifecycle commands.
+    pub(super) fn requires_solo_transaction(&self) -> bool {
+        matches!(self, Self::ImportLegacyState(_))
+    }
+
     pub(super) fn load_references(
         &self,
     ) -> Result<rows::LoadReferences, super::ProcessJournalStoreError> {
@@ -70,10 +77,14 @@ impl StoredProcessCommand {
                 references.process_ids.extend(request.parent_process_id);
                 references.process_ids.extend(request.root_process_id);
                 references.tree_roots.extend(request.root_process_id);
-                references.submission_idempotency_key = submission_replay_key(request)?;
-                references.active_conflict = request
-                    .exclusive_within_scope
-                    .then(|| (request.scope.clone(), request.process_kind.clone()));
+                references
+                    .submission_idempotency_keys
+                    .extend(submission_replay_key(request)?);
+                references.active_conflicts.extend(
+                    request
+                        .exclusive_within_scope
+                        .then(|| (request.scope.clone(), request.process_kind.clone())),
+                );
                 if let Some(dependency) = &request.dependency {
                     references.process_ids.push(dependency.dependent_process_id);
                     references.process_ids.push(dependency.root_process_id);
@@ -92,17 +103,19 @@ impl StoredProcessCommand {
                 request, limits, ..
             } => {
                 references.process_ids.extend(request.process_id_filter);
-                references.claim = Some((request.clone(), limits.clone()));
+                references.claims.push((request.clone(), limits.clone()));
             }
             Self::RecoverExpired(request) => {
-                references.recover_expired = Some(request.clone());
+                references.recover_expired.push(request.clone());
             }
             Self::Heartbeat { request, .. } | Self::LeasedTransition { request, .. } => {
                 references.process_ids.push(request.process_id);
             }
             Self::Control(mutation) => {
                 references.process_ids.push(mutation.process_id);
-                references.control_idempotency_key = control_replay_key(mutation);
+                references
+                    .control_idempotency_keys
+                    .extend(control_replay_key(mutation));
             }
             Self::ReserveTree(request) => {
                 references.process_ids.push(request.root_process_id);
@@ -146,16 +159,7 @@ impl StoredProcessCommand {
                 references.checkpoints.push(request.checkpoint_id.clone());
             }
         }
-        references
-            .process_ids
-            .sort_by_key(|process_id| process_id.as_uuid());
-        references.process_ids.dedup();
-        references.tree_roots.sort_by_key(ProcessId::as_uuid);
-        references.tree_roots.dedup();
-        references
-            .dependencies
-            .sort_by_key(|(dependent, dependency)| (dependent.as_uuid(), dependency.as_uuid()));
-        references.dependencies.dedup();
+        references.normalize();
         Ok(references)
     }
 }

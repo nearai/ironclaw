@@ -1,29 +1,19 @@
 // @ts-nocheck
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 
 import { channelConnectionDisplayName } from "../../../lib/channel-connection-events";
+import { componentSourceForTest } from "../../../lib/vm-component-harness";
+import "../../../test/vm-tsx-setup";
 import { channelConnectionFromGate } from "./gates";
 import { messageBelongsToActiveRun } from "./message-types";
 
 function chatSourceForTest() {
-  const source = readFileSync(new URL("../chat.tsx", import.meta.url), "utf8");
-  const lines = [];
-  let skippingImport = false;
-  for (const line of source.split("\n")) {
-    if (!skippingImport && line.startsWith("import ")) {
-      skippingImport = !line.trimEnd().endsWith(";");
-      continue;
-    }
-    if (skippingImport) {
-      skippingImport = !line.trimEnd().endsWith(";");
-      continue;
-    }
-    lines.push(line.replace("export function Chat", "function Chat"));
-  }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { Chat };`;
+  return componentSourceForTest(
+    new URL("../chat.tsx", import.meta.url),
+    "Chat",
+  );
 }
 
 function findComponent(node, component) {
@@ -87,7 +77,15 @@ function renderChat({
   showChatLogsShortcut = true,
   onSelectThread = () => {},
   contextOverrides = {},
+  // Positional ref slots, shared by reference across repeated renderChat()
+  // calls that pass the same array -- lets a test simulate the same
+  // component "instance" re-rendering (e.g. a navigation-triggered
+  // rerender) with useRef state persisted across renders, the way real
+  // React would. Left undefined by default: each call gets fresh refs,
+  // matching every existing single-render test.
+  refs = [],
 }) {
+  let refSlot = 0;
   const components = {
     ApprovalCard() {},
     AuthGenericCard() {},
@@ -112,7 +110,12 @@ function renderChat({
         if (runEffects) effect();
       },
       useMemo: (fn) => fn(),
-      useRef: (initial) => ({ current: initial }),
+      useRef: (initial) => {
+        const slot = refSlot;
+        refSlot += 1;
+        if (!(slot in refs)) refs[slot] = { current: initial };
+        return refs[slot];
+      },
       useState: (initial) => [
         typeof initial === "function" ? initial() : initial,
         () => {},
@@ -329,7 +332,9 @@ test("Chat leaves the composer editable while a run is processing", () => {
   const chatInput = findComponent(tree, components.ChatInput);
   const props = componentProps(chatInput, components.ChatInput);
   assert.equal(props.disabled, false);
-  assert.equal(props.sendDisabled, true);
+  // Queued-message UX: a processing run no longer disables the composer send —
+  // a follow-up is accepted and queued behind the active run.
+  assert.equal(props.sendDisabled, false);
 });
 
 test("Chat shows typing indicator before assistant text streams", () => {
@@ -359,7 +364,7 @@ test("Chat shows typing indicator before assistant text streams", () => {
   assert.ok(findComponent(tree, components.TypingIndicator));
 });
 
-test("Chat hides typing indicator once the active run streams assistant text", () => {
+test("Chat keeps typing indicator while the active run streams assistant text", () => {
   const { tree, components } = renderChat({
     hookState: {
       messages: [
@@ -392,7 +397,7 @@ test("Chat hides typing indicator once the active run streams assistant text", (
     },
   });
 
-  assert.equal(findComponent(tree, components.TypingIndicator), null);
+  assert.ok(findComponent(tree, components.TypingIndicator));
 });
 
 test("Chat keeps typing indicator when streamed text belongs to another run", () => {
@@ -467,7 +472,7 @@ test("Chat keeps typing indicator for a historical assistant draft without an ac
   assert.ok(findComponent(tree, components.TypingIndicator));
 });
 
-test("Chat refuses composer sends while a run is processing", async () => {
+test("Chat admits composer sends while a run is processing (queued)", async () => {
   let sendCalls = 0;
   const { tree, components } = renderChat({
     hookState: {
@@ -499,8 +504,10 @@ test("Chat refuses composer sends while a run is processing", async () => {
   const props = componentProps(chatInput, components.ChatInput);
   const response = await props.onSend("draft while busy");
 
-  assert.equal(response, null);
-  assert.equal(sendCalls, 0);
+  // Queued-message UX: the send is admitted (reaches useChat.send, which routes
+  // it to the backend queue) rather than being refused locally.
+  assert.notEqual(response, null);
+  assert.equal(sendCalls, 1);
 });
 
 test("Chat cancel button ignores active runs from another thread", () => {
@@ -1119,4 +1126,248 @@ test("Chat landing view submits unknown slash text as an ordinary message", asyn
   await props.onSend("/unknown-text", {});
   assert.deepEqual(commandRuns, [], "unrecognized slash text is not a command");
   assert.deepEqual(sends, ["/unknown-text"], "unknown slash text still sends as an ordinary message");
+});
+
+
+test("Chat does not double-navigate when multiple sends resolve before either can navigate away from the empty-thread view", async () => {
+  // Regression test for issue #6581's frontend half: firing several
+  // "new chat" sends before the first one's response has navigated the
+  // view away from the empty-thread state used to make every one of
+  // those sends independently navigate, each tearing down and reopening
+  // the single app-wide SSE stream -- exhausting the rate-limit budget
+  // through genuinely-accepted reconnects even with the backend fix in
+  // place.
+  const selections = [];
+  const { tree, components } = renderChat({
+    activeThreadId: null,
+    onSelectThread: (threadId, options) => selections.push({ threadId, options }),
+    hookState: {
+      messages: [],
+      isProcessing: false,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "closed",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: null,
+      send: async (content) => ({ thread_id: `thread-for-${content}` }),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  // No messages yet -> the landing composer (EmptyState), not the
+  // in-thread ChatInput, is what's rendered and wired to handleSend.
+  const emptyState = findComponent(tree, components.EmptyState);
+  const { onSend } = componentProps(emptyState, components.EmptyState);
+
+  const [first, second] = await Promise.all([
+    onSend("weather in NY"),
+    onSend("weather in LA"),
+  ]);
+
+  assert.equal(first.thread_id, "thread-for-weather in NY");
+  assert.equal(second.thread_id, "thread-for-weather in LA");
+  assert.equal(
+    selections.length,
+    1,
+    "only the first concurrent send should navigate the empty-thread view"
+  );
+  assert.equal(selections[0].threadId, "thread-for-weather in NY");
+  // Not deepEqual: the options object is constructed inside the vm-sandboxed
+  // chat.tsx source, so it's a cross-realm object relative to this test file
+  // and fails Node's strict deep-equality identity checks despite matching
+  // structurally.
+  assert.equal(selections[0].options.replace, true);
+});
+
+test("Chat does not double-navigate when a stale send resolves after the first navigation's rerender", async () => {
+  // Regression test for PR #6592 review comment: the previous reset rule
+  // ("clear the claim whenever activeThreadId is truthy") fires on the very
+  // rerender the first navigation itself causes, re-opening the window for
+  // a second, still-in-flight send -- one whose closure captured the old
+  // null activeThreadId, same as the first -- to navigate again and
+  // reproduce the SSE thrash. This is a genuinely distinct race from
+  // "Chat does not double-navigate when multiple sends resolve before
+  // either can navigate away from the empty-thread view" above: that test
+  // resolves both sends within a single render and never exercises the
+  // rerender in between, so it can't see this bug. Reproducing it needs
+  // controllable send resolution order plus a real second render sharing
+  // ref state, which is why it's a separate test rather than an extra
+  // assertion on the existing one.
+  const selections = [];
+  let resolveFirst;
+  let resolveSecond;
+  const hookState = {
+    messages: [],
+    isProcessing: false,
+    pendingGate: null,
+    suggestions: [],
+    sseStatus: "closed",
+    historyLoading: false,
+    hasMore: false,
+    cooldownSeconds: 0,
+    recoveryNotice: null,
+    activeRun: null,
+    send: async (content) =>
+      content === "weather in NY"
+        ? new Promise((resolve) => {
+            resolveFirst = resolve;
+          })
+        : new Promise((resolve) => {
+            resolveSecond = resolve;
+          }),
+    cancelRun: async () => {},
+    retryMessage: () => {},
+    approve: () => {},
+    recoverHistory: () => {},
+    loadMore: () => {},
+    setSuggestions: () => {},
+    submitAuthToken: async () => {},
+  };
+  const refs = [];
+
+  // Render 1: the empty-thread landing view (activeThreadId = null). Both
+  // sends are fired from this render, so both handleSend closures capture
+  // activeThreadId = null -- exactly like two concurrent "new chat" sends.
+  const render1 = renderChat({
+    activeThreadId: null,
+    onSelectThread: (threadId, options) => selections.push({ threadId, options }),
+    hookState,
+    refs,
+  });
+  const emptyState1 = findComponent(render1.tree, render1.components.EmptyState);
+  const { onSend } = componentProps(emptyState1, render1.components.EmptyState);
+
+  const firstSend = onSend("weather in NY");
+  const secondSend = onSend("weather in LA");
+
+  // The first send resolves and claims the navigation.
+  resolveFirst({ thread_id: "thread-for-weather in NY" });
+  await firstSend;
+  assert.equal(selections.length, 1, "first send should navigate");
+  assert.equal(selections[0].threadId, "thread-for-weather in NY");
+
+  // Render 2: simulates the rerender `onSelectThread` triggers once the
+  // parent adopts the new thread id -- activeThreadId is now truthy. Shares
+  // `refs` with render 1 so the navigation-claim ref persists across
+  // renders the way a real mounted component would.
+  renderChat({
+    activeThreadId: "thread-for-weather in NY",
+    onSelectThread: (threadId, options) => selections.push({ threadId, options }),
+    hookState,
+    refs,
+  });
+
+  // The second send -- still holding its stale render-1 closure with
+  // activeThreadId = null -- resolves after the rerender.
+  resolveSecond({ thread_id: "thread-for-weather in LA" });
+  await secondSend;
+
+  assert.equal(
+    selections.length,
+    1,
+    "a stale send resolving after the first navigation's rerender must not navigate again"
+  );
+});
+
+test("Chat does not let a stale send from an earlier empty-thread cycle hijack a new cycle started by \"+ New\"", async () => {
+  // Regression test for PR #6592 review comment (chat.tsx:201, Medium):
+  // the previous reset rule cleared the navigation claim on *any*
+  // truthy->falsy transition of activeThreadId without regard to which
+  // batch of sends the transition belonged to. Sequence: A and B are both
+  // fired from the landing composer (both closures capture
+  // activeThreadId = null). A resolves first and claims/navigates to
+  // threadA. The user clicks "+ New" -- a genuine new empty-thread cycle
+  // begins, and the old code reset the claim unconditionally. B, a stale
+  // closure from the *original* batch, then resolves and -- because the
+  // claim was reset and its captured activeThreadId is still null --
+  // hijacks the brand-new empty cycle by navigating to threadB.
+  const selections = [];
+  let resolveFirst;
+  let resolveSecond;
+  const hookState = {
+    messages: [],
+    isProcessing: false,
+    pendingGate: null,
+    suggestions: [],
+    sseStatus: "closed",
+    historyLoading: false,
+    hasMore: false,
+    cooldownSeconds: 0,
+    recoveryNotice: null,
+    activeRun: null,
+    send: async (content) =>
+      content === "weather in NY"
+        ? new Promise((resolve) => {
+            resolveFirst = resolve;
+          })
+        : new Promise((resolve) => {
+            resolveSecond = resolve;
+          }),
+    cancelRun: async () => {},
+    retryMessage: () => {},
+    approve: () => {},
+    recoverHistory: () => {},
+    loadMore: () => {},
+    setSuggestions: () => {},
+    submitAuthToken: async () => {},
+  };
+  const refs = [];
+
+  // Render 1: the empty-thread landing view (activeThreadId = null). Both
+  // sends are fired from this render, so both handleSend closures capture
+  // activeThreadId = null.
+  const render1 = renderChat({
+    activeThreadId: null,
+    onSelectThread: (threadId, options) => selections.push({ threadId, options }),
+    hookState,
+    refs,
+  });
+  const emptyState1 = findComponent(render1.tree, render1.components.EmptyState);
+  const { onSend } = componentProps(emptyState1, render1.components.EmptyState);
+
+  const firstSend = onSend("weather in NY");
+  const secondSend = onSend("weather in LA");
+
+  // A resolves and claims the navigation.
+  resolveFirst({ thread_id: "thread-for-weather in NY" });
+  await firstSend;
+  assert.equal(selections.length, 1, "first send should navigate");
+  assert.equal(selections[0].threadId, "thread-for-weather in NY");
+
+  // Render 2: the post-navigation rerender, activeThreadId is now truthy.
+  renderChat({
+    activeThreadId: "thread-for-weather in NY",
+    onSelectThread: (threadId, options) => selections.push({ threadId, options }),
+    hookState,
+    refs,
+  });
+
+  // Render 3: the user clicks "+ New" -- activeThreadId goes back to null,
+  // a genuinely new empty-thread cycle begins.
+  renderChat({
+    activeThreadId: null,
+    onSelectThread: (threadId, options) => selections.push({ threadId, options }),
+    hookState,
+    refs,
+  });
+
+  // B -- still holding its stale render-1 closure with activeThreadId =
+  // null from the *original* batch -- resolves after the "+ New" reset.
+  resolveSecond({ thread_id: "thread-for-weather in LA" });
+  await secondSend;
+
+  assert.equal(
+    selections.length,
+    1,
+    "a stale send from the original batch must not hijack the new empty-thread cycle started by \"+ New\""
+  );
 });

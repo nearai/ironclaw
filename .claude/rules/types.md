@@ -16,8 +16,8 @@ carry a type that makes misuse a compile error.
 - **Fixed small sets** → enums with `#[serde(rename_all = "snake_case")]`
   or explicit `#[serde(rename = "...")]`. Never compare strings like
   `status == "in_progress"`.
-- **Units, shapes, modes** → enums (`SandboxPolicy`, `ExecutionMode`,
-  `ThreadState`). Never booleans-plus-magic-strings.
+- **Units, shapes, modes** → enums (`ThreadState`, `PermissionMode`,
+  `TurnStatus`). Never booleans-plus-magic-strings.
 
 Two values with the same shape but different meanings must be
 different types. The compiler is the only durable enforcement —
@@ -45,17 +45,25 @@ See `CLAUDE.md` → "Extension/Auth Invariants" for routing rules. The
 types live in `crates/ironclaw_common/src/identity.rs`:
 
 - [`CredentialName`] — backend secret identity (e.g.
-  `telegram_bot_token`, `google_oauth_token`). Used for secrets-store
-  keys, gate resume payloads, credential injection.
+  `telegram_bot_token`, `google_oauth_token`), intended for secrets-store
+  keys, gate resume payloads, and credential injection.
 - [`ExtensionName`] — user-facing installed extension/channel identity
-  (e.g. `telegram`, `gmail`). Used for onboarding UI, setup/configure
-  routing, Python action dispatch. Hyphens fold to underscores at
+  (e.g. `telegram`, `gmail`), intended for onboarding UI and
+  setup/configure routing. Hyphens fold to underscores at
   construction time.
+
+⚠ Status check (measure before relying on this): both newtypes currently have
+**no consumers outside `ironclaw_common`** —
+`rg -l "CredentialName|ExtensionName" crates/` returns only `ironclaw_common`
+itself. The rule below is the intended discipline for code that adopts them;
+it does not describe a wiring that exists today.
 
 Never cast between them or recompute one from the other by string manipulation.
 Carry the typed identity from the owning manifest, installation, or credential
-contract. When only credential identity is available, route conversion through
-`AuthManager::resolve_extension_name_for_auth_flow`; never cast or re-derive it.
+contract; never cast or re-derive one from the other. (Earlier versions of this
+rule named `AuthManager::resolve_extension_name_for_auth_flow` as the sanctioned
+conversion seam — neither that type nor that method exists any more, so a
+replacement seam has to be named when these newtypes are actually adopted.)
 
 ## Canonical newtype template
 
@@ -136,14 +144,16 @@ may not satisfy the current rule.
 
 Don't "migrate" them to `try_from` — you will break rehydration of
 pre-existing DB rows. New code must still construct them through
-`::new()`. The `from_trusted(String)` helper on those two types is a
-compatibility escape hatch for values handed over from a typed upstream (DB
-row, parsed `ExtensionManifest` field); do not copy that pattern onto
-new newtypes.
+`::new()`. The `from_trusted(String)` helper is a compatibility escape hatch
+for values handed over from a typed upstream (DB row, parsed
+`ExtensionManifest` field); do not copy that pattern onto new newtypes. Four
+types carry it today: `CredentialName` and `ExtensionName` (via the
+`identity_newtype!` macro), plus `ExternalThreadId` and `McpServerName`, each
+with its own documented rationale in `crates/ironclaw_common/src/identity.rs`.
 
 Review flag: `#[serde(transparent)]` on a newly added validated
-newtype, or a `from_trusted` helper on anything other than the two
-existing identity types. References: PR #2685, PR #2681, PR #2687.
+newtype, or a `from_trusted` helper on anything other than the four
+types listed above. References: PR #2685, PR #2681, PR #2687.
 
 ## Byte-length vs. character-length
 

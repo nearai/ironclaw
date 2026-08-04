@@ -3,12 +3,26 @@
 //! [`ProductSurfaceFailure`] is the internal error type used within the workflow
 //! crate. It converts to [`ProductAdapterError`] at the service boundary so
 //! adapters never see host-layer details.
+//!
+//! It is the **superset** half of a two-part vocabulary, and the claim above is
+//! now enforced rather than asserted. The boundary half —
+//! [`ProductOperationFailure`], the six string-or-nothing variants a port
+//! implementor below product may produce — lives in
+//! `ironclaw_product_contracts::error` so `ironclaw_extension_host` and its
+//! successors never depend on this crate to describe their own failures. What
+//! stays here is what is genuinely workflow-internal: the turn-coordinator
+//! variants carrying [`TurnError`], the interaction rejection kinds, the
+//! idempotency replay, and the inbound-attachment and policy failures. The
+//! [`From<ProductOperationFailure>`] below is total and 1:1, so a port failure
+//! reaching product through `?` keeps its exact discriminant.
+//!
+//! See `docs/reborn/target-architecture/PROPOSAL.md` §6.1.3 for the recorded
+//! ownership decision and the alternatives it beat.
 
 use crate::{ProductAdapterError, ProductSurfaceRejectionKind, RedactedString};
-use ironclaw_host_api::{
-    error::HostApiError,
-    product_surface::{ProductSurfaceError, ProductSurfaceErrorCode},
-};
+use ironclaw_host_api::error::HostApiError;
+use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::surface::ProductSurfaceError;
 use ironclaw_turns::{TurnError, TurnErrorCategory};
 use thiserror::Error;
 
@@ -121,6 +135,10 @@ pub enum ProductSurfaceFailure {
     #[error("before-inbound policy failed: {reason}")]
     BeforeInboundPolicyFailed { reason: String, permanent: bool },
 
+    /// Deferred channel attachment transfer failed before message acceptance.
+    #[error("inbound attachment transfer failed: {reason}")]
+    InboundAttachmentFailed { reason: String, retryable: bool },
+
     /// The action was identified as a duplicate and the prior outcome should be replayed.
     #[error("duplicate action")]
     DuplicateAction {
@@ -145,6 +163,39 @@ impl From<HostApiError> for ProductSurfaceFailure {
     }
 }
 
+/// Absorb a port implementor's failure into the workflow vocabulary.
+///
+/// Total and 1:1 — every [`ProductOperationFailure`] discriminant has exactly
+/// one image here and carries its payload unchanged, so `?` at a product call
+/// site over a `product_contracts` port loses nothing. This direction is the
+/// only one that exists: product never narrows a workflow failure back down,
+/// because the turn-coordinator and interaction variants have no boundary
+/// image and inventing one would flatten them into `Transient`.
+impl From<ProductOperationFailure> for ProductSurfaceFailure {
+    fn from(value: ProductOperationFailure) -> Self {
+        match value {
+            ProductOperationFailure::BindingResolutionFailed { reason } => {
+                ProductSurfaceFailure::BindingResolutionFailed { reason }
+            }
+            ProductOperationFailure::BindingAccessDenied => {
+                ProductSurfaceFailure::BindingAccessDenied
+            }
+            ProductOperationFailure::InvalidBindingRequest { reason } => {
+                ProductSurfaceFailure::InvalidBindingRequest { reason }
+            }
+            ProductOperationFailure::ProviderInstanceNotConfigured { reason } => {
+                ProductSurfaceFailure::ProviderInstanceNotConfigured { reason }
+            }
+            ProductOperationFailure::UnsupportedActionKind { kind } => {
+                ProductSurfaceFailure::UnsupportedActionKind { kind }
+            }
+            ProductOperationFailure::Transient { reason } => {
+                ProductSurfaceFailure::Transient { reason }
+            }
+        }
+    }
+}
+
 fn surface_rejection_kind(category: TurnErrorCategory) -> ProductSurfaceRejectionKind {
     match category {
         TurnErrorCategory::ThreadBusy => ProductSurfaceRejectionKind::ThreadBusy,
@@ -158,30 +209,37 @@ fn surface_rejection_kind(category: TurnErrorCategory) -> ProductSurfaceRejectio
     }
 }
 
+/// Project a lifecycle failure onto the sanitized product-surface error.
+///
+/// The six discriminants product shares with its port implementors delegate to
+/// `ProductOperationFailure`'s own projection rather than repeating the status
+/// choices, so this path and the one `ironclaw_extension_host` takes cannot
+/// drift apart. What stays here is the logging (contracts may not log) and the
+/// workflow-only variants, which have no boundary image at all.
 pub fn lifecycle_product_surface_error(error: ProductSurfaceFailure) -> ProductSurfaceError {
     match error {
-        ProductSurfaceFailure::InvalidBindingRequest { .. }
-        | ProductSurfaceFailure::UnsupportedActionKind { .. } => {
-            ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
+        ProductSurfaceFailure::InvalidBindingRequest { reason } => {
+            ProductOperationFailure::InvalidBindingRequest { reason }.into()
         }
-        // WebUI gets a plain 400 with no free text (the wire contract has no
-        // free-text field): the exact `config set` remediation reaches users
-        // via the LLM tool path and `ironclaw status`; bespoke WebUI
-        // messaging is a deliberately deferred scope-cut.
-        ProductSurfaceFailure::ProviderInstanceNotConfigured { .. } => {
-            ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
+        ProductSurfaceFailure::UnsupportedActionKind { kind } => {
+            ProductOperationFailure::UnsupportedActionKind { kind }.into()
+        }
+        ProductSurfaceFailure::ProviderInstanceNotConfigured { reason } => {
+            ProductOperationFailure::ProviderInstanceNotConfigured { reason }.into()
         }
         ProductSurfaceFailure::BindingAccessDenied => {
-            ProductSurfaceError::from_status(ProductSurfaceErrorCode::Forbidden, 403, false)
+            ProductOperationFailure::BindingAccessDenied.into()
         }
-        ProductSurfaceFailure::Transient { ref reason } => {
+        ProductSurfaceFailure::Transient { reason } => {
             // The 503 body is sanitized; without this line the cause is
             // dropped entirely and the failure is diagnosable from logs.
             tracing::warn!(reason = %reason, "lifecycle action failed with a transient error");
-            ProductSurfaceError::service_unavailable(true)
+            ProductOperationFailure::Transient { reason }.into()
         }
-        ProductSurfaceFailure::BindingResolutionFailed { .. }
-        | ProductSurfaceFailure::BindingRequired { .. }
+        ProductSurfaceFailure::BindingResolutionFailed { reason } => {
+            ProductOperationFailure::BindingResolutionFailed { reason }.into()
+        }
+        ProductSurfaceFailure::BindingRequired { .. }
         | ProductSurfaceFailure::TurnSubmissionRejected { .. }
         | ProductSurfaceFailure::TurnSubmissionFailed { .. }
         | ProductSurfaceFailure::TurnResumeRejected { .. }
@@ -190,6 +248,7 @@ pub fn lifecycle_product_surface_error(error: ProductSurfaceFailure) -> ProductS
         | ProductSurfaceFailure::AuthInteractionRejected { .. }
         | ProductSurfaceFailure::AuthContinuationRejected { .. }
         | ProductSurfaceFailure::BeforeInboundPolicyFailed { .. }
+        | ProductSurfaceFailure::InboundAttachmentFailed { .. }
         | ProductSurfaceFailure::DuplicateAction { .. }
         | ProductSurfaceFailure::OutboundTargetNotDirectMessage
         | ProductSurfaceFailure::UnknownInstallation => ProductSurfaceError::internal_invariant(),
@@ -310,6 +369,20 @@ impl From<ProductSurfaceFailure> for ProductAdapterError {
                     }
                 }
             }
+            ProductSurfaceFailure::InboundAttachmentFailed { reason, retryable } => {
+                if retryable {
+                    ProductAdapterError::SurfaceTransient {
+                        reason: RedactedString::new(reason),
+                    }
+                } else {
+                    ProductAdapterError::SurfaceRejected {
+                        kind: ProductSurfaceRejectionKind::InvalidRequest,
+                        status_code: 400,
+                        retryable: false,
+                        reason: RedactedString::new(reason),
+                    }
+                }
+            }
             ProductSurfaceFailure::DuplicateAction { .. } => ProductAdapterError::Internal {
                 detail: RedactedString::new("duplicate action escaped workflow layer"),
             },
@@ -335,6 +408,100 @@ impl From<ProductSurfaceFailure> for ProductAdapterError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The absorption is total and payload-preserving: a port failure that
+    /// reaches product through `?` must arrive as the same discriminant with
+    /// the same text, or an extension-host diagnostic silently changes meaning
+    /// on the way into the workflow.
+    #[test]
+    fn every_operation_failure_absorbs_into_its_matching_workflow_variant() {
+        let cases = [
+            (
+                ProductOperationFailure::BindingResolutionFailed {
+                    reason: "no tenant".into(),
+                },
+                ProductSurfaceFailure::BindingResolutionFailed {
+                    reason: "no tenant".into(),
+                },
+            ),
+            (
+                ProductOperationFailure::BindingAccessDenied,
+                ProductSurfaceFailure::BindingAccessDenied,
+            ),
+            (
+                ProductOperationFailure::InvalidBindingRequest {
+                    reason: "bad ref".into(),
+                },
+                ProductSurfaceFailure::InvalidBindingRequest {
+                    reason: "bad ref".into(),
+                },
+            ),
+            (
+                ProductOperationFailure::ProviderInstanceNotConfigured {
+                    reason: "ironclaw config set google.client_id <id>".into(),
+                },
+                ProductSurfaceFailure::ProviderInstanceNotConfigured {
+                    reason: "ironclaw config set google.client_id <id>".into(),
+                },
+            ),
+            (
+                ProductOperationFailure::UnsupportedActionKind {
+                    kind: "unknown".into(),
+                },
+                ProductSurfaceFailure::UnsupportedActionKind {
+                    kind: "unknown".into(),
+                },
+            ),
+            (
+                ProductOperationFailure::Transient {
+                    reason: "db timeout".into(),
+                },
+                ProductSurfaceFailure::Transient {
+                    reason: "db timeout".into(),
+                },
+            ),
+        ];
+
+        for (boundary, expected) in cases {
+            let absorbed: ProductSurfaceFailure = boundary.clone().into();
+            assert_eq!(absorbed, expected, "absorbing {boundary:?}");
+        }
+    }
+
+    /// Product's lifecycle projection and the contract's own projection are the
+    /// same table for the six shared discriminants. Without this, a status
+    /// change made in one crate would silently apply to only half the callers —
+    /// the WebUI would answer 400 through product's lifecycle service and 503
+    /// through the extension host's, for the identical failure.
+    #[test]
+    fn lifecycle_projection_agrees_with_the_contract_projection_on_shared_variants() {
+        for boundary in [
+            ProductOperationFailure::BindingResolutionFailed {
+                reason: "no tenant".into(),
+            },
+            ProductOperationFailure::BindingAccessDenied,
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "bad ref".into(),
+            },
+            ProductOperationFailure::ProviderInstanceNotConfigured {
+                reason: "run ironclaw config set".into(),
+            },
+            ProductOperationFailure::UnsupportedActionKind {
+                kind: "unknown".into(),
+            },
+            ProductOperationFailure::Transient {
+                reason: "db timeout".into(),
+            },
+        ] {
+            let through_contract: ProductSurfaceError = boundary.clone().into();
+            let through_product =
+                lifecycle_product_surface_error(ProductSurfaceFailure::from(boundary.clone()));
+            assert_eq!(
+                through_product, through_contract,
+                "projections disagree for {boundary:?}"
+            );
+        }
+    }
 
     #[test]
     fn transient_maps_to_retryable() {
@@ -363,6 +530,32 @@ mod tests {
         .into();
         assert!(!err.is_retryable());
         assert!(matches!(err, ProductAdapterError::SurfaceRejected { .. }));
+    }
+
+    #[test]
+    fn attachment_failures_preserve_retryability_without_exposing_provider_detail() {
+        let retryable: ProductAdapterError = ProductSurfaceFailure::InboundAttachmentFailed {
+            reason: "channel attachment transfer failed".into(),
+            retryable: true,
+        }
+        .into();
+        assert!(retryable.is_retryable());
+
+        let permanent: ProductAdapterError = ProductSurfaceFailure::InboundAttachmentFailed {
+            reason: "attachment exceeds the per-file byte limit".into(),
+            retryable: false,
+        }
+        .into();
+        assert!(!permanent.is_retryable());
+        assert!(matches!(
+            permanent,
+            ProductAdapterError::SurfaceRejected {
+                kind: ProductSurfaceRejectionKind::InvalidRequest,
+                status_code: 400,
+                retryable: false,
+                ..
+            }
+        ));
     }
 
     #[test]

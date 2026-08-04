@@ -1,6 +1,7 @@
 // arch-exempt: large_file, §4.3 delete InMemoryDeliveredGateRouteStore (workflow default -> NoopDeliveredGateRouteStore; test doubles -> OutboundStateStore helper), no logic change, plan #6168
 //! Contract tests for the product workflow service.
 
+use ironclaw_loop_host::RejectingInputEnqueue;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -8,58 +9,66 @@ use std::time::Duration as StdDuration;
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
 use ironclaw_conversations::{
     ConversationBindingService as ConversationBindingPort, ExternalActorBindingEpoch,
     InMemoryConversationServices,
 };
+use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, LoopGateRef, RunProfileId, RunProfileVersion, TurnActor,
+    TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
+    attachment::InboundAttachment,
     ids::{AgentId, ApprovalRequestId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
     resource::ResourceScope,
 };
 use ironclaw_product::{
-    ActionDispatchKind, ActionFingerprintKey, ApprovalInteractionDecision,
-    ApprovalInteractionScope, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionScope, AuthInteractionService, AuthInteractionStatus, AuthRequestRef,
-    BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
-    FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,
-    FakeInboundTurnService, IdempotencyDecision, IdempotencyLedger, InMemoryIdempotencyLedger,
-    InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch, LinkedThreadActionId,
+    ActionDispatchKind, ApprovalInteractionDecision, ApprovalInteractionScope,
+    ApprovalInteractionService, AuthInteractionDecision, AuthInteractionScope,
+    AuthInteractionService, AuthInteractionStatus, BeforeInboundPolicy, BeforeInboundPolicyOutcome,
+    BeforeInboundPolicyRequest, ConversationBindingService, DefaultInboundTurnService,
+    DefaultProductSurface, FakeBeforeInboundPolicy, FakeConversationBindingService,
+    FakeIdempotencyLedger, FakeInboundTurnService, IdempotencyDecision, IdempotencyLedger,
+    InMemoryIdempotencyLedger, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
     ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, PendingApprovalInteractionView,
     PendingAuthInteractionView, ProductActorUserResolutionRequest, ProductActorUserResolver,
-    ProductCommandName, ProductConversationBindingService, ProductConversationRouteKey,
-    ProductConversationSubjectRouteResolutionRequest, ProductConversationSubjectRouteResolver,
-    ProductInstallationKey, ProductInstallationScope, ProductSurfaceFailure,
-    RebornFilesystemIdempotencyLedger, ResolveApprovalInteractionRequest,
+    ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
+    ProductSurfaceFailure, RebornFilesystemIdempotencyLedger, ResolveApprovalInteractionRequest,
     ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, ResolveBindingRequest, ResolvedBinding,
-    ResolvedProductActorUser, SourceBindingKey, StaticProductInstallationResolver,
-    approval_gate_ref,
+    ResolvedProductActorUser, StaticProductInstallationResolver, approval_gate_ref,
 };
 use ironclaw_product::{
     AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
-    AuthResolutionPayload, AuthResolutionResult, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, InboundCommandPayload, LinkedThreadActionPayload, ParsedProductInbound,
-    ProductAdapterError, ProductAdapterId, ProductControlActionPayload, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
-    ProductProjectionSubject, ProductProjectionSubscribeInput, ProductRejection,
-    ProductRejectionDisposition, ProductRejectionKind, ProductSurfaceRejectionKind,
-    ProductTriggerReason, ProjectionCursor, ProjectionReadPayload, ProjectionSubscriptionPayload,
-    ProtocolAuthEvidence, ScopedApprovalResolutionPayload, TrustedInboundContext,
-    UserMessagePayload,
+    AuthResolutionPayload, AuthResolutionResult, ExternalEventId, InboundCommandPayload,
+    LinkedThreadActionPayload, ParsedProductInbound, ProductAdapterError, ProductAdapterId,
+    ProductControlActionPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,
+    ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
+    ProductSurfaceRejectionKind, ProductTriggerReason, ProjectionCursor, ProjectionReadPayload,
+    ProjectionSubscriptionPayload, ProtocolAuthEvidence, ScopedApprovalResolutionPayload,
+    TrustedInboundContext, UserMessagePayload,
+};
+use ironclaw_product_contracts::action::{
+    ActionFingerprintKey, AuthRequestRef, LinkedThreadActionId, ProductCommandName,
+    SourceBindingKey,
+};
+use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::subject_route::{
+    ProductConversationRouteKey, ProductConversationSubjectRouteResolutionRequest,
+    ProductConversationSubjectRouteResolver,
 };
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-    GetRunStateRequest, LoopGateRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-    RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
-    TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    CancelRunRequest, CancelRunResponse, GetRunStateRequest, ReplyTargetBindingRef,
+    ResumeTurnRequest, ResumeTurnResponse, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+    ThreadBusy, TurnCoordinator, TurnError, TurnRunState,
 };
 
 fn sample_envelope(event_suffix: &str) -> ProductInboundEnvelope {
@@ -188,19 +197,49 @@ impl TurnCoordinator for RecordingTurnCoordinator {
         panic!("cancel_run is not used by product workflow contract tests")
     }
 
-    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        panic!("get_run_state is not used by product workflow contract tests")
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        // The busy-run steering enqueue path (`steering::enqueue_busy_steering`)
+        // reads the active run's state to recover its turn id before queueing.
+        // Return a minimal running-run state keyed to the requested scope/run so
+        // the enqueue step is exercised rather than panicking here.
+        Ok(TurnRunState {
+            scope: request.scope,
+            actor: None,
+            turn_id: TurnId::new(),
+            run_id: request.run_id,
+            status: TurnStatus::Running,
+            accepted_message_ref: AcceptedMessageRef::new("msg:active-run")
+                .expect("accepted message ref"),
+            source_binding_ref: SourceBindingRef::new("src:active-run")
+                .expect("source binding ref"),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:active-run")
+                .expect("reply target binding ref"),
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            allow_steering: true,
+            resolved_model_route: None,
+            received_at: Utc::now(),
+            checkpoint_id: None,
+            gate_ref: None,
+            blocked_activity_id: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: EventCursor::default(),
+            product_context: None,
+            resume_disposition: None,
+            model_usage: None,
+        })
     }
 }
 
 struct RecordingApprovalInteractionService {
-    pending: Vec<(GateRef, TurnRunId)>,
+    pending: Vec<(TurnGateRef, TurnRunId)>,
     fallback_run_id: TurnRunId,
     resolutions: Mutex<Vec<ResolveApprovalInteractionRequest>>,
 }
 
 impl RecordingApprovalInteractionService {
-    fn new(gate_ref: GateRef, run_id: TurnRunId) -> Self {
+    fn new(gate_ref: TurnGateRef, run_id: TurnRunId) -> Self {
         Self {
             pending: vec![(gate_ref, run_id)],
             fallback_run_id: run_id,
@@ -208,7 +247,7 @@ impl RecordingApprovalInteractionService {
         }
     }
 
-    fn with_pending(pending: Vec<(GateRef, TurnRunId)>) -> Self {
+    fn with_pending(pending: Vec<(TurnGateRef, TurnRunId)>) -> Self {
         let fallback_run_id = pending
             .first()
             .map(|(_, run_id)| *run_id)
@@ -291,12 +330,12 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
 /// scope still reports its gate as pending.
 struct ScopedPendingApprovalInteractionService {
     pending_thread: ThreadId,
-    pending: Vec<(GateRef, TurnRunId)>,
+    pending: Vec<(TurnGateRef, TurnRunId)>,
     resolutions: Mutex<Vec<ResolveApprovalInteractionRequest>>,
 }
 
 impl ScopedPendingApprovalInteractionService {
-    fn new(pending_thread: ThreadId, pending: Vec<(GateRef, TurnRunId)>) -> Self {
+    fn new(pending_thread: ThreadId, pending: Vec<(TurnGateRef, TurnRunId)>) -> Self {
         Self {
             pending_thread,
             pending,
@@ -369,13 +408,13 @@ impl ApprovalInteractionService for ScopedPendingApprovalInteractionService {
 }
 
 struct RecordingAuthInteractionService {
-    gate_ref: GateRef,
+    gate_ref: TurnGateRef,
     run_id: TurnRunId,
     resolutions: Mutex<Vec<ResolveAuthInteractionRequest>>,
 }
 
 impl RecordingAuthInteractionService {
-    fn new(gate_ref: GateRef, run_id: TurnRunId) -> Self {
+    fn new(gate_ref: TurnGateRef, run_id: TurnRunId) -> Self {
         Self {
             gate_ref,
             run_id,
@@ -1045,14 +1084,9 @@ fn auth_thread_reply_envelope(event_suffix: &str, gate_ref: &str) -> ProductInbo
 }
 
 fn delivered_gate_thread_fingerprint() -> String {
-    ironclaw_conversations::ExternalConversationRef::new(
-        None,
-        "conv1",
-        Some("delivered-gate-thread"),
-        None,
-    )
-    .expect("conversation route")
-    .conversation_fingerprint()
+    ExternalConversationRef::new(None, "conv1", Some("delivered-gate-thread"), None)
+        .expect("conversation route")
+        .conversation_fingerprint()
 }
 
 async fn record_conversation_route_for_gate_ref(
@@ -1088,7 +1122,7 @@ async fn record_conversation_route_for_gate_ref(
 async fn record_scoped_approval_conversation_route(
     store: &dyn ironclaw_outbound::DeliveredGateRouteStore,
     recorded_at: chrono::DateTime<Utc>,
-) -> (GateRef, TurnRunId, TurnScope) {
+) -> (TurnGateRef, TurnRunId, TurnScope) {
     let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
     let (run_id, scope) =
         record_conversation_route_for_gate_ref(store, gate_ref.as_str(), recorded_at).await;
@@ -1209,7 +1243,7 @@ async fn auth_resolution_payload_routes_through_auth_interaction_service() {
     let inbound = Arc::new(FakeInboundTurnService::new());
     let ledger = Arc::new(FakeIdempotencyLedger::new());
     let binding = Arc::new(FakeConversationBindingService::new());
-    let gate_ref = GateRef::new("gate:auth-product").expect("auth gate ref");
+    let gate_ref = TurnGateRef::new("gate:auth-product").expect("auth gate ref");
     let run_id = TurnRunId::new();
     let credential_ref = CredentialAccountId::new();
     let auth_service = Arc::new(RecordingAuthInteractionService::new(
@@ -1270,7 +1304,7 @@ async fn auth_callback_and_denied_payloads_route_through_auth_interaction_servic
         let inbound = Arc::new(FakeInboundTurnService::new());
         let ledger = Arc::new(FakeIdempotencyLedger::new());
         let binding = Arc::new(FakeConversationBindingService::new());
-        let gate_ref = GateRef::new(format!("gate:{event_suffix}")).expect("auth gate ref");
+        let gate_ref = TurnGateRef::new(format!("gate:{event_suffix}")).expect("auth gate ref");
         let run_id = TurnRunId::new();
         let auth_service = Arc::new(RecordingAuthInteractionService::new(
             gate_ref.clone(),
@@ -1304,7 +1338,7 @@ async fn auth_deny_from_threaded_direct_prompt_uses_base_direct_binding() {
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha")
                 .expect("installation"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -1333,7 +1367,7 @@ async fn auth_deny_from_threaded_direct_prompt_uses_base_direct_binding() {
         .resolve_binding(ResolveBindingRequest::from_envelope(&base_envelope))
         .await
         .expect("seed base direct conversation binding");
-    let gate_ref = GateRef::new("gate:auth-direct-thread").expect("auth gate");
+    let gate_ref = TurnGateRef::new("gate:auth-direct-thread").expect("auth gate");
     let auth_service = Arc::new(RecordingAuthInteractionService::new(
         gate_ref.clone(),
         TurnRunId::new(),
@@ -1761,7 +1795,7 @@ async fn scoped_approval_missing_gate_fallback_reuses_dispatcher_binding() {
 async fn auth_resolution_resolves_via_conversation_route_after_missing_auth() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let gate_ref = GateRef::new("gate:auth-conversation-route").expect("auth gate ref");
+    let gate_ref = TurnGateRef::new("gate:auth-conversation-route").expect("auth gate ref");
     let (run_id, route_scope) =
         record_conversation_route_for_gate_ref(route_store.as_ref(), gate_ref.as_str(), Utc::now())
             .await;
@@ -1802,8 +1836,8 @@ async fn auth_resolution_resolves_via_conversation_route_after_missing_auth() {
 async fn explicit_approval_delivered_route_requires_gate_ref_match() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let route_gate_ref = GateRef::new("gate:approval-route-match").expect("gate ref");
-    let payload_gate_ref = GateRef::new("gate:approval-route-mismatch").expect("gate ref");
+    let route_gate_ref = TurnGateRef::new("gate:approval-route-match").expect("gate ref");
+    let payload_gate_ref = TurnGateRef::new("gate:approval-route-mismatch").expect("gate ref");
     record_conversation_route_for_gate_ref(
         route_store.as_ref(),
         route_gate_ref.as_str(),
@@ -1838,8 +1872,8 @@ async fn explicit_approval_delivered_route_requires_gate_ref_match() {
 async fn explicit_auth_delivered_route_requires_gate_ref_match() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let route_gate_ref = GateRef::new("gate:auth-route-match").expect("gate ref");
-    let payload_gate_ref = GateRef::new("gate:auth-route-mismatch").expect("gate ref");
+    let route_gate_ref = TurnGateRef::new("gate:auth-route-match").expect("gate ref");
+    let payload_gate_ref = TurnGateRef::new("gate:auth-route-mismatch").expect("gate ref");
     record_conversation_route_for_gate_ref(
         route_store.as_ref(),
         route_gate_ref.as_str(),
@@ -1893,7 +1927,7 @@ async fn scoped_approval_two_pending_routes_resolves_most_recent() {
     let older_run = TurnRunId::new();
     let newer_run = TurnRunId::new();
     let make_record =
-        |gate_ref: &GateRef, run_id, recorded_at| ironclaw_outbound::DeliveredGateRouteRecord {
+        |gate_ref: &TurnGateRef, run_id, recorded_at| ironclaw_outbound::DeliveredGateRouteRecord {
             tenant_id: tenant_id.clone(),
             user_id: user_id.clone(),
             gate_ref: gate_ref.as_str().to_string(),
@@ -1970,7 +2004,7 @@ async fn scoped_approval_one_stale_one_pending_resolves_and_prunes() {
     let stale_gate = approval_gate_ref(ApprovalRequestId::new()).expect("gate");
     let pending_run = TurnRunId::new();
     let make_record =
-        |gate_ref: &GateRef, run_id, recorded_at| ironclaw_outbound::DeliveredGateRouteRecord {
+        |gate_ref: &TurnGateRef, run_id, recorded_at| ironclaw_outbound::DeliveredGateRouteRecord {
             tenant_id: tenant_id.clone(),
             user_id: user_id.clone(),
             gate_ref: gate_ref.as_str().to_string(),
@@ -2116,14 +2150,9 @@ async fn scoped_approval_actor_mismatch_filtered_out() {
             ),
             recorded_at: Utc::now(),
             delivered_conversation_fingerprints: vec![
-                ironclaw_conversations::ExternalConversationRef::new(
-                    None,
-                    "conv1",
-                    Some("delivered-gate-thread"),
-                    None,
-                )
-                .expect("conversation route")
-                .conversation_fingerprint(),
+                ExternalConversationRef::new(None, "conv1", Some("delivered-gate-thread"), None)
+                    .expect("conversation route")
+                    .conversation_fingerprint(),
             ],
         })
         .await
@@ -2159,8 +2188,8 @@ async fn scoped_approval_actor_mismatch_filtered_out() {
 async fn explicit_approval_gate_ref_mismatch_leaves_original_rejection() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let route_gate_ref = GateRef::new("gate:approval-stored-ref").expect("stored gate ref");
-    let payload_gate_ref = GateRef::new("gate:approval-payload-ref").expect("payload gate ref");
+    let route_gate_ref = TurnGateRef::new("gate:approval-stored-ref").expect("stored gate ref");
+    let payload_gate_ref = TurnGateRef::new("gate:approval-payload-ref").expect("payload gate ref");
     record_conversation_route_for_gate_ref(
         route_store.as_ref(),
         route_gate_ref.as_str(),
@@ -2214,7 +2243,7 @@ async fn auth_two_live_routes_same_conversation_rejects_ambiguous() {
     // actor, same gate_ref, not expired) but differ only in run_id + scope.
     let tenant_id = TenantId::new("tenant:install_alpha").expect("tenant");
     let user_id = UserId::new("user:user1").expect("user");
-    let shared_gate_ref = GateRef::new("gate:auth-ambiguous-shared").expect("shared gate ref");
+    let shared_gate_ref = TurnGateRef::new("gate:auth-ambiguous-shared").expect("shared gate ref");
     let make_record = |run_id: TurnRunId| ironclaw_outbound::DeliveredGateRouteRecord {
         tenant_id: tenant_id.clone(),
         user_id: user_id.clone(),
@@ -2229,14 +2258,9 @@ async fn auth_two_live_routes_same_conversation_rejects_ambiguous() {
         ),
         recorded_at: Utc::now(),
         delivered_conversation_fingerprints: vec![
-            ironclaw_conversations::ExternalConversationRef::new(
-                None,
-                "conv1",
-                Some("delivered-gate-thread"),
-                None,
-            )
-            .expect("conversation ref")
-            .conversation_fingerprint(),
+            ExternalConversationRef::new(None, "conv1", Some("delivered-gate-thread"), None)
+                .expect("conversation ref")
+                .conversation_fingerprint(),
         ],
     };
     let expected_fingerprint = delivered_gate_thread_fingerprint();
@@ -2313,7 +2337,7 @@ async fn auth_two_live_routes_same_conversation_rejects_ambiguous() {
 ///
 /// Both stored routes carry valid gate ref strings. The assertion is that the
 /// auth-kind filter (`is_auth_gate_ref`) drops the stale approval route by
-/// prefix — not by GateRef validation — leaving only the live auth route to be
+/// prefix — not by TurnGateRef validation — leaving only the live auth route to be
 /// forwarded to the auth interaction service.
 #[tokio::test]
 async fn bare_auth_deny_with_stale_approval_route_selects_auth_route_not_approval() {
@@ -2331,7 +2355,8 @@ async fn bare_auth_deny_with_stale_approval_route_selects_auth_route_not_approva
 
     // The auth deny uses a different, auth-prefixed gate_ref — the one that
     // was actually delivered with the auth prompt.
-    let auth_gate_ref = GateRef::new("gate:auth-deny-with-stale-approval").expect("auth gate ref");
+    let auth_gate_ref =
+        TurnGateRef::new("gate:auth-deny-with-stale-approval").expect("auth gate ref");
     let auth_service = Arc::new(MissingAuthThenRecordingAuthService::default());
     let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
@@ -2476,7 +2501,7 @@ impl ApprovalInteractionService for StaleGateReturningApprovalService {
 async fn auth_resolution_stale_auth_does_not_fall_back_to_delivered_route() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let gate_ref = GateRef::new("gate:auth-stale-no-fallback").expect("auth gate ref");
+    let gate_ref = TurnGateRef::new("gate:auth-stale-no-fallback").expect("auth gate ref");
     // Record a live delivered route for the same gate so that IF the fallback ran
     // it would resolve successfully — confirming the test would catch a regression.
     record_conversation_route_for_gate_ref(route_store.as_ref(), gate_ref.as_str(), Utc::now())
@@ -2691,8 +2716,8 @@ async fn exact_named_generic_approval_gate_is_forwarded_not_dropped_by_kind_filt
 async fn explicit_auth_gate_ref_mismatch_leaves_original_rejection() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let route_gate_ref = GateRef::new("gate:auth-stored-ref").expect("stored gate ref");
-    let payload_gate_ref = GateRef::new("gate:auth-payload-ref").expect("payload gate ref");
+    let route_gate_ref = TurnGateRef::new("gate:auth-stored-ref").expect("stored gate ref");
+    let payload_gate_ref = TurnGateRef::new("gate:auth-payload-ref").expect("payload gate ref");
     record_conversation_route_for_gate_ref(
         route_store.as_ref(),
         route_gate_ref.as_str(),
@@ -2731,14 +2756,14 @@ async fn explicit_auth_gate_ref_mismatch_leaves_original_rejection() {
 
 /// A stored delivered-route whose raw gate_ref string passes the approval-kind
 /// prefix predicate (`is_approval_gate_ref`: `starts_with("gate:approval-")`)
-/// but is too long to pass `GateRef::new` (> 256 bytes) must be SELECTED by
+/// but is too long to pass `TurnGateRef::new` (> 256 bytes) must be SELECTED by
 /// the kind filter — not silently dropped — and then surface an
 /// `InvalidGateRef` rejection rather than a silent Miss or BindingRequired.
 ///
 /// This verifies the `InvalidGateRef` branch in
 /// `resolve_via_delivered_approval_route` that was previously unreachable
-/// because the old `fn(&GateRef) -> bool` filter pre-validated the stored
-/// string with `GateRef::new`, silently dropping any route that failed
+/// because the old `fn(&TurnGateRef) -> bool` filter pre-validated the stored
+/// string with `TurnGateRef::new`, silently dropping any route that failed
 /// construction before the predicate could run.  The new `fn(&str) -> bool`
 /// predicate receives the raw stored string directly, so an
 /// oversized-but-prefixed string is selected and surfaces the error.
@@ -2746,20 +2771,20 @@ async fn explicit_auth_gate_ref_mismatch_leaves_original_rejection() {
 /// The invalid string used here is `"gate:approval-" + "a" * 243` = 257 bytes:
 ///  - passes `is_approval_gate_ref` (starts with `"gate:approval-"`)
 ///  - passes `validate_token_string` used by adapter payloads (max 512 bytes)
-///  - fails `GateRef::new` (`validate_ref` cap is 256 bytes)
+///  - fails `TurnGateRef::new` (`validate_ref` cap is 256 bytes)
 #[tokio::test]
 async fn bare_approve_with_invalid_stored_approval_route_rejects_invalid_gate_ref() {
-    // "gate:approval-" = 14 bytes; 14 + 243 = 257 bytes → fails GateRef::new.
+    // "gate:approval-" = 14 bytes; 14 + 243 = 257 bytes → fails TurnGateRef::new.
     let invalid_gate_ref_str = format!("gate:approval-{}", "a".repeat(243));
     assert_eq!(invalid_gate_ref_str.len(), 257);
-    // Confirm predicate accepts but GateRef::new rejects.
+    // Confirm predicate accepts but TurnGateRef::new rejects.
     assert!(
         ironclaw_product::is_approval_gate_ref(&invalid_gate_ref_str),
         "test string must pass is_approval_gate_ref"
     );
     assert!(
-        ironclaw_turns::GateRef::new(invalid_gate_ref_str.as_str()).is_err(),
-        "test string must fail GateRef::new"
+        ironclaw_host_api::turn::TurnGateRef::new(invalid_gate_ref_str.as_str()).is_err(),
+        "test string must fail TurnGateRef::new"
     );
 
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
@@ -2769,7 +2794,7 @@ async fn bare_approve_with_invalid_stored_approval_route_rejects_invalid_gate_re
 
     // with_pending(Vec::new()) → list_pending returns [] → MissingGate
     // fallback fires → resolve_via_delivered_approval_route(None, …) →
-    // kind filter runs → route is selected → GateRef::new fails → InvalidGateRef.
+    // kind filter runs → route is selected → TurnGateRef::new fails → InvalidGateRef.
     let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
     let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
@@ -2799,24 +2824,24 @@ async fn bare_approve_with_invalid_stored_approval_route_rejects_invalid_gate_re
         "expected InvalidGateRef → InvalidRequest/400, got: {err:?}"
     );
     // The approval service must NOT be called — the error comes from
-    // GateRef reconstruction in the delivered-route path, before the
+    // TurnGateRef reconstruction in the delivered-route path, before the
     // interaction service is reached.
     assert!(
         approval_service.resolutions().is_empty(),
-        "approval service must not be called when GateRef reconstruction fails"
+        "approval service must not be called when TurnGateRef reconstruction fails"
     );
 }
 
 /// A stored delivered-route whose raw gate_ref string passes the auth-kind
 /// prefix predicate (`is_auth_gate_ref`: `starts_with("gate:auth-")`) but is
-/// too long to pass `GateRef::new` (> 256 bytes) must be SELECTED by the
+/// too long to pass `TurnGateRef::new` (> 256 bytes) must be SELECTED by the
 /// exact-ref match in the BindingRequired delivered-route fallback — and then
 /// surface an `InvalidGateRef` rejection rather than a silent Miss.
 ///
 /// This verifies the `InvalidGateRef` branch in
 /// `resolve_via_delivered_auth_route`.  The BindingRequired fallback path is
 /// used because it fires BEFORE `dispatch_auth_resolution` calls
-/// `GateRef::new` on the payload string (line ~1135), allowing the oversized
+/// `TurnGateRef::new` on the payload string, allowing the oversized
 /// invalid gate_ref to reach the delivered-route selection code.  The
 /// BindingRequired path calls `resolve_via_delivered_auth_route` with
 /// `expected_gate_ref = Some(payload.auth_request_ref)`, so the oversized
@@ -2825,20 +2850,20 @@ async fn bare_approve_with_invalid_stored_approval_route_rejects_invalid_gate_re
 /// The invalid string used here is `"gate:auth-" + "a" * 247` = 257 bytes:
 ///  - passes `is_auth_gate_ref` (starts with `"gate:auth-"`)
 ///  - passes `validate_token_string` used by adapter payloads (max 512 bytes)
-///  - fails `GateRef::new` (`validate_ref` cap is 256 bytes)
+///  - fails `TurnGateRef::new` (`validate_ref` cap is 256 bytes)
 #[tokio::test]
 async fn bare_auth_deny_with_invalid_stored_auth_route_rejects_invalid_gate_ref() {
-    // "gate:auth-" = 10 bytes; 10 + 247 = 257 bytes → fails GateRef::new.
+    // "gate:auth-" = 10 bytes; 10 + 247 = 257 bytes → fails TurnGateRef::new.
     let invalid_gate_ref_str = format!("gate:auth-{}", "a".repeat(247));
     assert_eq!(invalid_gate_ref_str.len(), 257);
-    // Confirm predicate accepts but GateRef::new rejects.
+    // Confirm predicate accepts but TurnGateRef::new rejects.
     assert!(
         ironclaw_product::is_auth_gate_ref(&invalid_gate_ref_str),
         "test string must pass is_auth_gate_ref"
     );
     assert!(
-        ironclaw_turns::GateRef::new(invalid_gate_ref_str.as_str()).is_err(),
-        "test string must fail GateRef::new"
+        ironclaw_host_api::turn::TurnGateRef::new(invalid_gate_ref_str.as_str()).is_err(),
+        "test string must fail TurnGateRef::new"
     );
 
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
@@ -2854,7 +2879,7 @@ async fn bare_auth_deny_with_invalid_stored_auth_route_rejects_invalid_gate_ref(
     //
     // BindingRequired fallback → resolve_via_delivered_auth_route with
     // expected_gate_ref=Some(invalid_gate_ref_str) → exact-ref match selects
-    // the stored route → GateRef::new on the stored gate_ref fails → InvalidGateRef.
+    // the stored route → TurnGateRef::new on the stored gate_ref fails → InvalidGateRef.
     let auth_service = Arc::new(MissingAuthThenRecordingAuthService::default());
     let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
@@ -2888,7 +2913,7 @@ async fn bare_auth_deny_with_invalid_stored_auth_route_rejects_invalid_gate_ref(
     // is consulted — service must not be called at all.
     assert!(
         auth_service.resolutions().is_empty(),
-        "auth service must not be called when GateRef reconstruction fails in the BindingRequired fallback"
+        "auth service must not be called when TurnGateRef reconstruction fails in the BindingRequired fallback"
     );
 }
 
@@ -3867,7 +3892,7 @@ async fn projection_subscription_requires_existing_conversation_binding() {
             TenantId::new("tenant:alpha").expect("tenant"),
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -3922,6 +3947,7 @@ async fn preconfigured_actor_binding_accepts_user_message_without_legacy_pairing
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -3976,6 +4002,7 @@ async fn preconfigured_actor_binding_rejects_unconfigured_actor() {
             binding.clone(),
             InMemorySessionThreadService::default(),
             Arc::new(RecordingTurnCoordinator::default()),
+            Arc::new(RejectingInputEnqueue),
         )),
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
@@ -4012,6 +4039,7 @@ async fn actor_user_resolver_accepts_user_message_without_legacy_pairing() {
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -4061,7 +4089,7 @@ async fn actor_user_resolver_rewrites_pairing_after_explicit_unpair() {
             &TenantId::new("tenant:alpha").expect("tenant"),
             &ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             &ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            &ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            &ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
         )
         .await;
 
@@ -4086,6 +4114,7 @@ async fn actor_user_resolver_rejects_unknown_actor_before_turn_submission() {
             binding.clone(),
             InMemorySessionThreadService::default(),
             coordinator.clone(),
+            Arc::new(RejectingInputEnqueue),
         )),
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
@@ -4127,6 +4156,7 @@ async fn actor_user_resolver_rechecks_revocation_before_turn_submission() {
             binding.clone(),
             InMemorySessionThreadService::default(),
             coordinator.clone(),
+            Arc::new(RejectingInputEnqueue),
         )),
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
@@ -4162,12 +4192,10 @@ async fn actor_user_resolver_rechecks_revocation_before_turn_submission() {
                 "install_alpha",
             )
             .expect("install"),
-            external_actor_ref: ironclaw_conversations::ExternalActorRef::new("test", "user1")
+            external_actor_ref: ExternalActorRef::new("test", "user1", None::<String>)
                 .expect("actor"),
-            external_conversation_ref: ironclaw_conversations::ExternalConversationRef::new(
-                None, "conv1", None, None,
-            )
-            .expect("conversation"),
+            external_conversation_ref: ExternalConversationRef::new(None, "conv1", None, None)
+                .expect("conversation"),
             external_event_id: ironclaw_conversations::ExternalEventId::new(
                 "evt:resolver-revoked-mid-resolution-lookup",
             )
@@ -4213,12 +4241,10 @@ async fn actor_user_resolver_revalidation_cannot_unpair_a_newer_generation() {
                 "install_alpha",
             )
             .expect("install"),
-            external_actor_ref: ironclaw_conversations::ExternalActorRef::new("test", "user1")
+            external_actor_ref: ExternalActorRef::new("test", "user1", None::<String>)
                 .expect("actor"),
-            external_conversation_ref: ironclaw_conversations::ExternalConversationRef::new(
-                None, "conv1", None, None,
-            )
-            .expect("conversation"),
+            external_conversation_ref: ExternalConversationRef::new(None, "conv1", None, None)
+                .expect("conversation"),
             external_event_id: ironclaw_conversations::ExternalEventId::new(
                 "evt:resolver-replaced-mid-resolution-lookup",
             )
@@ -4249,6 +4275,7 @@ async fn actor_user_resolver_propagates_resolver_error_without_turn_submission()
             binding.clone(),
             InMemorySessionThreadService::default(),
             coordinator.clone(),
+            Arc::new(RejectingInputEnqueue),
         )),
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
@@ -4311,7 +4338,7 @@ async fn lookup_binding_with_actor_user_resolver_rejects_a_stale_actor_pairing()
             TenantId::new("tenant:alpha").expect("tenant"),
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:paired-bob").expect("user"),
         )
         .await;
@@ -4419,7 +4446,7 @@ async fn concrete_product_surface_accepts_user_message_for_trusted_installation(
             TenantId::new("tenant:alpha").expect("tenant"),
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -4438,6 +4465,7 @@ async fn concrete_product_surface_accepts_user_message_for_trusted_installation(
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -4487,7 +4515,7 @@ async fn concrete_product_surface_accepts_shared_route_participant_on_existing_t
             tenant_id.clone(),
             adapter_kind.clone(),
             installation_id.clone(),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -4496,7 +4524,7 @@ async fn concrete_product_surface_accepts_shared_route_participant_on_existing_t
             tenant_id.clone(),
             adapter_kind,
             installation_id,
-            ironclaw_conversations::ExternalActorRef::new("test", "user2").expect("actor"),
+            ExternalActorRef::new("test", "user2", None::<String>).expect("actor"),
             UserId::new("user:bob").expect("user"),
         )
         .await;
@@ -4515,6 +4543,7 @@ async fn concrete_product_surface_accepts_shared_route_participant_on_existing_t
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -4583,7 +4612,7 @@ async fn concrete_product_surface_persists_first_bind_default_scope() {
             TenantId::new("tenant:alpha").expect("tenant"),
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -4602,6 +4631,7 @@ async fn concrete_product_surface_persists_first_bind_default_scope() {
             binding_alpha.clone(),
             InMemorySessionThreadService::default(),
             Arc::new(RecordingTurnCoordinator::default()),
+            Arc::new(RejectingInputEnqueue),
         )),
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding_alpha),
@@ -4665,7 +4695,7 @@ async fn concrete_product_surface_keeps_installations_tenant_isolated() {
                 TenantId::new(tenant).expect("tenant"),
                 ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
                 ironclaw_conversations::AdapterInstallationId::new(install).expect("install"),
-                ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+                ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
                 UserId::new(user).expect("user"),
             )
             .await;
@@ -4694,6 +4724,7 @@ async fn concrete_product_surface_keeps_installations_tenant_isolated() {
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -4744,7 +4775,7 @@ async fn shared_route_without_configured_subject_requires_binding() {
             tenant_id.clone(),
             adapter_kind,
             installation_id,
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -4794,7 +4825,7 @@ async fn shared_route_uses_conversation_specific_subject_over_installation_defau
             tenant_id.clone(),
             adapter_kind,
             installation_id,
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -4856,7 +4887,7 @@ async fn static_shared_route_does_not_probe_existing_binding_before_resolve() {
             tenant_id.clone(),
             adapter_kind,
             installation_id,
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -4919,7 +4950,7 @@ async fn shared_route_uses_dynamic_subject_route_resolver_without_rebuilding_sco
             tenant_id.clone(),
             adapter_kind,
             installation_id,
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -5178,7 +5209,7 @@ async fn shared_route_can_disable_default_subject_for_unrouted_conversations() {
             tenant_id.clone(),
             adapter_kind,
             installation_id,
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -5383,7 +5414,7 @@ async fn shared_lookup_binding_rejects_existing_binding_when_resolved_actor_diff
             tenant_id.clone(),
             adapter_kind.clone(),
             installation_id.clone(),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -5405,9 +5436,9 @@ async fn shared_lookup_binding_rejects_existing_binding_when_resolved_actor_diff
             tenant_id: tenant_id.clone(),
             adapter_kind,
             adapter_installation_id: installation_id,
-            external_actor_ref: ironclaw_conversations::ExternalActorRef::new("test", "user1")
+            external_actor_ref: ExternalActorRef::new("test", "user1", None::<String>)
                 .expect("actor"),
-            external_conversation_ref: ironclaw_conversations::ExternalConversationRef::new(
+            external_conversation_ref: ExternalConversationRef::new(
                 Some("T-team"),
                 "C-eng",
                 Some("thread-1"),
@@ -5471,7 +5502,7 @@ async fn lookup_binding_does_not_backfill_legacy_ownerless_shared_route() {
             tenant_id.clone(),
             adapter_kind.clone(),
             installation_id.clone(),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -5481,9 +5512,9 @@ async fn lookup_binding_does_not_backfill_legacy_ownerless_shared_route() {
             tenant_id: tenant_id.clone(),
             adapter_kind,
             adapter_installation_id: installation_id,
-            external_actor_ref: ironclaw_conversations::ExternalActorRef::new("test", "user1")
+            external_actor_ref: ExternalActorRef::new("test", "user1", None::<String>)
                 .expect("actor"),
-            external_conversation_ref: ironclaw_conversations::ExternalConversationRef::new(
+            external_conversation_ref: ExternalConversationRef::new(
                 Some("T-team"),
                 "C-eng",
                 Some("thread-legacy"),
@@ -5564,7 +5595,7 @@ async fn direct_route_skips_dynamic_subject_route_resolver() {
             tenant_id.clone(),
             adapter_kind,
             installation_id,
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -5658,6 +5689,7 @@ async fn concrete_product_surface_bot_mention_uses_shared_route() {
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -5692,7 +5724,7 @@ async fn concrete_product_surface_reply_to_bot_requires_existing_binding() {
             TenantId::new("tenant:alpha").expect("tenant"),
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -5711,6 +5743,7 @@ async fn concrete_product_surface_reply_to_bot_requires_existing_binding() {
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -5764,6 +5797,7 @@ async fn concrete_product_surface_reuses_prepared_binding_for_content_only_polic
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let policy = Arc::new(FakeBeforeInboundPolicy::new());
     policy.rewrite_user_message(
@@ -5814,6 +5848,7 @@ async fn concrete_product_surface_recomputes_route_after_policy_rewrites_trigger
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let policy = Arc::new(FakeBeforeInboundPolicy::new());
     policy.rewrite_user_message(
@@ -5857,7 +5892,7 @@ async fn concrete_product_surface_rejects_unknown_installation_as_terminal() {
             TenantId::new("tenant:alpha").expect("tenant"),
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -5867,6 +5902,7 @@ async fn concrete_product_surface_rejects_unknown_installation_as_terminal() {
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -5914,6 +5950,7 @@ async fn concrete_product_surface_rejects_unpaired_actor_before_turn_submission(
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -5952,7 +5989,7 @@ async fn terminal_rejection_for_unpaired_actor_does_not_poison_other_actor_event
             TenantId::new("tenant:alpha").expect("tenant"),
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user2").expect("actor"),
+            ExternalActorRef::new("test", "user2", None::<String>).expect("actor"),
             UserId::new("user:bob").expect("user"),
         )
         .await;
@@ -5971,6 +6008,7 @@ async fn terminal_rejection_for_unpaired_actor_does_not_poison_other_actor_event
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -6028,7 +6066,7 @@ async fn accepted_message_replay_validates_current_actor_before_submit() {
             TenantId::new("tenant:alpha").expect("tenant"),
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -6048,6 +6086,7 @@ async fn accepted_message_replay_validates_current_actor_before_submit() {
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -6092,7 +6131,7 @@ async fn concrete_product_surface_replays_binding_access_denied_rejection() {
             TenantId::new("tenant:alpha").expect("tenant"),
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -6111,6 +6150,7 @@ async fn concrete_product_surface_replays_binding_access_denied_rejection() {
         binding.clone(),
         InMemorySessionThreadService::default(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     ));
     let workflow = DefaultProductSurface::new(
         inbound,
@@ -6127,7 +6167,7 @@ async fn concrete_product_surface_replays_binding_access_denied_rejection() {
             TenantId::new("tenant:alpha").expect("tenant"),
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user2").expect("actor"),
+            ExternalActorRef::new("test", "user2", None::<String>).expect("actor"),
             UserId::new("user:bob").expect("user"),
         )
         .await;
@@ -6597,7 +6637,7 @@ impl ProductActorUserResolver for ReplacingProductActorUserResolver {
                     ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
                     ironclaw_conversations::AdapterInstallationId::new("install_alpha")
                         .expect("install"),
-                    ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+                    ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
                     self.user_id.clone(),
                     epoch.clone(),
                 )
@@ -6762,7 +6802,7 @@ impl ProductConversationSubjectRouteResolver for RecordingSubjectRouteResolver {
     async fn resolve_product_conversation_subject_route(
         &self,
         request: ProductConversationSubjectRouteResolutionRequest,
-    ) -> Result<Option<UserId>, ProductSurfaceFailure> {
+    ) -> Result<Option<UserId>, ProductOperationFailure> {
         self.calls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -6794,12 +6834,12 @@ impl ProductConversationSubjectRouteResolver for FailingSubjectRouteResolver {
     async fn resolve_product_conversation_subject_route(
         &self,
         _request: ProductConversationSubjectRouteResolutionRequest,
-    ) -> Result<Option<UserId>, ProductSurfaceFailure> {
+    ) -> Result<Option<UserId>, ProductOperationFailure> {
         *self
             .calls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
-        Err(ProductSurfaceFailure::Transient {
+        Err(ProductOperationFailure::Transient {
             reason: "subject resolver backend down".into(),
         })
     }

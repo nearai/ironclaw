@@ -1,4 +1,4 @@
-use ironclaw_turns::ModelInvalidOutputDetailReason;
+use ironclaw_host_api::turn::ModelInvalidOutputDetailReason;
 
 use super::ModelErrorObservationClass;
 

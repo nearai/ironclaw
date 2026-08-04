@@ -13,9 +13,9 @@ use ironclaw_observability::live_latency_started_at;
 
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
-    CasExpectation, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation, Filter,
-    IndexSpec, OrderedPage, Page, RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
-    path_prefix_matches,
+    AtomicSubtreeEntry, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
+    FilesystemOperation, Filter, IndexSpec, OrderedPage, Page, RecordVersion, RootFilesystem,
+    ScopedAtomicSubtreeEntry, SeqNo, VersionedEntry, path_prefix_matches,
 };
 
 /// Resolver from a per-invocation [`ResourceScope`] to the [`MountView`] that
@@ -395,6 +395,47 @@ where
         }))
     }
 
+    /// Atomically publish a complete, previously absent directory subtree.
+    pub async fn create_subtree_atomic(
+        &self,
+        scope: &ResourceScope,
+        prefix: &ScopedPath,
+        entries: Vec<ScopedAtomicSubtreeEntry>,
+    ) -> Result<Vec<RecordVersion>, FilesystemError> {
+        let started_at = live_latency_started_at();
+        let bytes = entries
+            .iter()
+            .map(|item| item.entry.body.len())
+            .sum::<usize>();
+        let view = self.mount_view(scope)?;
+        let virtual_prefix =
+            resolve_with_permission_view(&view, prefix, FilesystemOperation::CreateSubtreeAtomic)?;
+        let mut virtual_entries = Vec::with_capacity(entries.len());
+        for item in entries {
+            let path = resolve_with_permission_view(
+                &view,
+                &item.path,
+                FilesystemOperation::CreateSubtreeAtomic,
+            )?;
+            virtual_entries.push(AtomicSubtreeEntry {
+                path,
+                entry: item.entry,
+            });
+        }
+        let result = self
+            .root
+            .create_subtree_atomic(&virtual_prefix, virtual_entries)
+            .await;
+        trace_fs_latency(
+            "create_subtree_atomic",
+            prefix,
+            started_at,
+            &result,
+            Some(bytes),
+        );
+        result
+    }
+
     // ─── Event/tail plane ─────────────────────────────────────────────────
 
     /// Append `payload` to the event log at `path`, returning the SeqNo.
@@ -584,9 +625,10 @@ where
         path: &ScopedPath,
     ) -> Result<Vec<DirEntry>, FilesystemError> {
         let started_at = live_latency_started_at();
-        let virtual_path =
-            self.resolve_with_permission(scope, path, FilesystemOperation::ListDir)?;
-        let result = self.root.list_dir(&virtual_path).await;
+        let (virtual_path, is_mount_root) =
+            self.resolve_read_root_aware(scope, path, FilesystemOperation::ListDir)?;
+        let result =
+            empty_when_missing_root(self.root.list_dir(&virtual_path).await, is_mount_root);
         trace_fs_latency("list_dir", path, started_at, &result, None);
         result
     }
@@ -598,9 +640,12 @@ where
         max_entries: usize,
     ) -> Result<Vec<DirEntry>, FilesystemError> {
         let started_at = live_latency_started_at();
-        let virtual_path =
-            self.resolve_with_permission(scope, path, FilesystemOperation::ListDir)?;
-        let result = self.root.list_dir_bounded(&virtual_path, max_entries).await;
+        let (virtual_path, is_mount_root) =
+            self.resolve_read_root_aware(scope, path, FilesystemOperation::ListDir)?;
+        let result = empty_when_missing_root(
+            self.root.list_dir_bounded(&virtual_path, max_entries).await,
+            is_mount_root,
+        );
         trace_fs_latency("list_dir_bounded", path, started_at, &result, None);
         result
     }
@@ -611,8 +656,22 @@ where
         path: &ScopedPath,
     ) -> Result<FileStat, FilesystemError> {
         let started_at = live_latency_started_at();
-        let virtual_path = self.resolve_with_permission(scope, path, FilesystemOperation::Stat)?;
-        let result = self.root.stat(&virtual_path).await;
+        let (virtual_path, is_mount_root) =
+            self.resolve_read_root_aware(scope, path, FilesystemOperation::Stat)?;
+        let result = match self.root.stat(&virtual_path).await {
+            // Same rule as `list_dir`: an authorized-but-not-yet-materialized
+            // mount root stats as the empty directory it behaves as. Callers
+            // walk parents through `stat` before listing, so without this the
+            // listing above never runs.
+            Err(FilesystemError::NotFound { .. }) if is_mount_root => Ok(FileStat {
+                path: virtual_path.clone(),
+                file_type: crate::FileType::Directory,
+                len: 0,
+                modified: None,
+                sensitive: false,
+            }),
+            other => other,
+        };
         trace_fs_latency("stat", path, started_at, &result, None);
         result
     }
@@ -723,6 +782,40 @@ where
         let view = self.mount_view(scope)?;
         resolve_with_permission_view(&view, path, operation)
     }
+
+    /// Resolve for a read, reporting whether the result IS a mount root.
+    ///
+    /// A mount root the caller is authorized for exists by definition: it is
+    /// the namespace their grant names, not a path they asked for. A backend
+    /// that has never had anything written under it reports `NotFound`, which
+    /// callers correctly treat as a hard error for ordinary paths. For the root
+    /// itself that would be wrong --- and it broke every brand-new per-caller
+    /// workspace, whose `tenants/{tenant}/users/{user}` directory does not
+    /// exist until the first write. Roots therefore read as EMPTY; anything
+    /// deeper keeps reporting `NotFound`.
+    fn resolve_read_root_aware(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+        operation: FilesystemOperation,
+    ) -> Result<(VirtualPath, bool), FilesystemError> {
+        let view = self.mount_view(scope)?;
+        let virtual_path = resolve_with_permission_view(&view, path, operation)?;
+        let is_mount_root = view.mounts.iter().any(|mount| mount.target == virtual_path);
+        Ok((virtual_path, is_mount_root))
+    }
+}
+
+/// `NotFound` on a mount root becomes an empty listing; every other error, and
+/// every other path, is passed through untouched.
+fn empty_when_missing_root<T: Default>(
+    result: Result<T, FilesystemError>,
+    is_mount_root: bool,
+) -> Result<T, FilesystemError> {
+    match result {
+        Err(FilesystemError::NotFound { .. }) if is_mount_root => Ok(T::default()),
+        other => other,
+    }
 }
 
 fn resolve_with_permission_view(
@@ -746,6 +839,7 @@ fn operation_allowed(permissions: &MountPermissions, operation: FilesystemOperat
         FilesystemOperation::WriteFile
         | FilesystemOperation::AppendFile
         | FilesystemOperation::CreateDirAll
+        | FilesystemOperation::CreateSubtreeAtomic
         | FilesystemOperation::EnsureIndex
         | FilesystemOperation::BeginTxn
         | FilesystemOperation::Append

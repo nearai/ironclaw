@@ -54,7 +54,7 @@ TOOL_SURFACES = [{"kind": "tool"}]
 TELEGRAM_MANIFEST = tomllib.loads(
     (
         Path(__file__).resolve().parents[3]
-        / "crates/ironclaw_first_party_extensions/assets/telegram/manifest.toml"
+        / "crates/extensions/packages/telegram/manifest.toml"
     ).read_text(encoding="utf-8")
 )
 TELEGRAM_PAIRING_INSTRUCTIONS = TELEGRAM_MANIFEST["channel"]["connection"]["instructions"]
@@ -1230,7 +1230,7 @@ async def test_reborn_legacy_extensions_reinstall_after_remove_requires_setup_ag
         _assert_install_requests(harness["install_requests"], "config-tool")
 
         reinstalled_card = _card_by_title(page, "Config Tool")
-        await expect(reinstalled_card.get_by_text("setup needed")).to_be_visible(
+        await expect(reinstalled_card.get_by_text("finish setup")).to_be_visible(
             timeout=5000
         )
         await expect(reinstalled_card.get_by_role("button", name="Configure")).to_have_count(
@@ -2334,7 +2334,7 @@ async def test_reborn_v2_current_extension_setup_and_delivery_matrix(
         await notion_card.get_by_role("button", name="Install").click()
         notion_modal = page.get_by_role("dialog", name="Configure Notion Workspace")
         await expect(notion_modal).to_be_visible(timeout=5000)
-        await expect(notion_card.get_by_text("setup needed", exact=True)).to_be_visible()
+        await expect(notion_card.get_by_text("finish setup", exact=True)).to_be_visible()
         await expect(page.get_by_role("button", name="Activate", exact=True)).to_have_count(
             0
         )

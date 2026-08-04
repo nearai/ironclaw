@@ -17,11 +17,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_loop_contracts::{CommunicationContextProvider, InstructionSafetyContext};
 use ironclaw_loop_host::CapabilityAllowSet;
+use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
-use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_turns::InMemoryTurnEventSink;
-use ironclaw_turns::run_profile::{CommunicationContextProvider, InstructionSafetyContext};
 
 use super::super::builder::StorageMode;
 use super::RebornIntegrationGroupBuilder;
@@ -54,7 +54,7 @@ impl RebornIntegrationGroupBuilder {
     pub fn with_bound_memory_provider(
         mut self,
         provider: std::sync::Arc<dyn ironclaw_memory::MemoryService>,
-        lifecycle: ironclaw_host_api::memory::MemoryDescriptor,
+        lifecycle: ironclaw_extension_contracts::memory::MemoryDescriptor,
     ) -> Self {
         self.bound_memory = Some((provider, lifecycle));
         self
@@ -88,10 +88,9 @@ impl RebornIntegrationGroupBuilder {
     /// Force `ToolDisclosureMode::Bridged` into the group's ONE planned
     /// runtime config (enabler (b)), regardless of `REBORN_TOOL_DISCLOSURE` —
     /// avoids the shared-process env-var race `apply_hermetic_env()` already
-    /// guards against (see `ToolDisclosureMode::from_env`). Defaults `None`
-    /// (resolves via `from_env()`, matching today's behavior).
+    /// guards against (see `ToolDisclosureMode::from_env`). Defaults to `Off`.
     pub fn with_tool_disclosure_bridged(mut self) -> Self {
-        self.tool_disclosure = Some(ToolDisclosureMode::Bridged);
+        self.tool_disclosure = ToolDisclosureMode::Bridged;
         self
     }
 
@@ -106,7 +105,7 @@ impl RebornIntegrationGroupBuilder {
     /// actually makes the control's assertion mode-specific rather than
     /// env-dependent.
     pub fn with_tool_disclosure_off(mut self) -> Self {
-        self.tool_disclosure = Some(ToolDisclosureMode::Off);
+        self.tool_disclosure = ToolDisclosureMode::Off;
         self
     }
 

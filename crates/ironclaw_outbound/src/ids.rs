@@ -100,8 +100,8 @@ impl OutboundDeliveryId {
     ) -> Result<Self, crate::OutboundError> {
         #[derive(Serialize)]
         struct PolicyDeliveryIdentity<'a> {
-            scope: &'a ironclaw_turns::TurnScope,
-            actor: &'a ironclaw_turns::TurnActor,
+            scope: &'a ironclaw_host_api::turn::TurnScope,
+            actor: &'a ironclaw_host_api::turn::TurnActor,
             modality: crate::CommunicationModality,
             candidate: &'a crate::OutboundPushCandidate,
         }

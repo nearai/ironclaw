@@ -14,6 +14,21 @@ on:
         required: false
         type: string
         default: ""
+      trigger_dind:
+        description: "Dispatch the optional ironclaw-dind image build"
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      DOCKER_REGISTRY_TOKEN:
+        description: "Docker Hub token for publishing the regular image"
+        required: true
+      GH_RELEASES_MANAGER_APP_ID:
+        description: "Optional app ID for an explicitly enabled DIND dispatch"
+        required: false
+      GH_RELEASES_MANAGER_APP_PRIVATE_KEY:
+        description: "Optional app key for an explicitly enabled DIND dispatch"
+        required: false
   # On-demand builds
   workflow_dispatch:
     inputs:
@@ -27,6 +42,11 @@ on:
         required: false
         type: string
         default: ""
+      trigger_dind:
+        description: "Dispatch the optional ironclaw-dind image build"
+        required: false
+        type: boolean
+        default: true
   # Rolling :staging image tags from main branch (hourly)
   schedule:
     - cron: '0 * * * *'
@@ -44,7 +64,7 @@ jobs:
       actions: write
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           ref: ${{ github.event_name == 'schedule' && 'main' || '' }}
           persist-credentials: false
@@ -110,12 +130,12 @@ jobs:
 
           # The Reborn Dockerfile has a single `runtime` stage — WASM
           # extensions are compiled into the binary via
-          # `ironclaw_first_party_extensions`, so there is no separate
+          # `ironclaw_extension_support`, so there is no separate
           # pre-bundled staging image target.
           echo "target=runtime" >> "$GITHUB_OUTPUT"
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c # v4.5.2
         with:
           username: ${{ vars.DOCKER_REGISTRY_USER }}
           password: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
@@ -145,11 +165,11 @@ jobs:
 
       - name: Set up Docker Buildx
         if: steps.check.outputs.skip != 'true'
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Build and push (ironclaw)
         if: steps.check.outputs.skip != 'true'
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           push: true
@@ -163,9 +183,11 @@ jobs:
 
       - name: Create releases-manager app token
         id: app-token
-        if: steps.check.outputs.skip != 'true'
+        # The release workflow explicitly disables this separate product.
+        # Direct manual and scheduled runs preserve their existing behavior.
+        if: (github.event_name == 'schedule' || inputs.trigger_dind) && steps.check.outputs.skip != 'true'
         continue-on-error: true
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.GH_RELEASES_MANAGER_APP_ID }}
           private-key: ${{ secrets.GH_RELEASES_MANAGER_APP_PRIVATE_KEY }}
@@ -173,7 +195,7 @@ jobs:
           repositories: ironclaw-dind
 
       - name: Trigger ironclaw-dind Build & Push
-        if: steps.app-token.outcome == 'success' && steps.check.outputs.skip != 'true'
+        if: (github.event_name == 'schedule' || inputs.trigger_dind) && steps.app-token.outcome == 'success' && steps.check.outputs.skip != 'true'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}

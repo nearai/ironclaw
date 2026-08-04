@@ -21,15 +21,13 @@ use ironclaw_host_api::{
     ids::{ApprovalRequestId, CapabilityId, UserId},
     resolution::{Resolution, ResolutionBatch},
 };
-use ironclaw_turns::{
-    LoopGateRef,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, LoopCapabilityPort,
-        LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolDefinition, RegisterProviderToolCallRequest,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
-    },
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, LoopCapabilityPort,
+    LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+    VisibleCapabilitySurface,
 };
+use ironclaw_turns::LoopGateRef;
 
 tokio::task_local! {
     static HOOK_GATE_INVOCATION: HookGateInvocationMetadata;

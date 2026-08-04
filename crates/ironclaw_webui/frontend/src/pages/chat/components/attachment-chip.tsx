@@ -1,15 +1,13 @@
-// Shared attachment chip + thumbnail, used by both message attachments
-// (`message.attachments`) and assistant project-file references
-// (`/workspace/...` chips). The chip body opens the shared
+// Shared attachment chip + thumbnail for structured message attachments.
+// The chip body opens the shared
 // `AttachmentPreviewModal`; a separate trailing download icon saves the bytes
 // directly without opening the modal.
 //
 // Kept generic over the attachment descriptor shape:
 //   { filename, mime_type, kind?, size_label?, fetch_url?, preview_url? }
 // `fetch_url` is a same-origin relative path the bearer-authenticated
-// `fetchAttachmentBlob` can GET (a message-attachment byte URL or a project
-// `/files/content?path=` URL). Optional `testId`/`dataPath`/`downloadTestId`
-// stamp test hooks so the project-file usage keeps its selectors.
+// `fetchAttachmentBlob` can GET. Optional `testId`/`dataPath`/`downloadTestId`
+// stamp stable test hooks for consumers.
 
 import React from "react";
 import { Icon } from "../../../design-system/icons";

@@ -10,18 +10,19 @@
 //! 3. Maps every error through [`WebUiV2HttpError`] so the wire shape stays
 //!    redacted and stable.
 //!
-//! [`ProductSurface`]: ironclaw_host_api::product_surface::ProductSurface
+//! [`ProductSurface`]: ironclaw_product_contracts::surface::ProductSurface
 
 // arch-exempt: large_file, ProductSurface service-collapse routes stay in the existing WebUI handler table until the WebUI route split lands, plan #5985
 
 mod run_artifact;
-pub use run_artifact::get_run_artifact;
+pub use run_artifact::{get_run_artifact, get_thread_artifact};
 
 use std::convert::Infallible;
 use std::time::Duration;
 
 use axum::Json;
 use axum::body::Body;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -29,6 +30,7 @@ use axum::response::{IntoResponse, Response};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::SinkExt;
 use futures::stream::Stream;
+use ironclaw_attachments::{AttachmentCapabilities, attachment_capabilities};
 use ironclaw_product::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_VIEW, ADMIN_USER_CREATE_COMMAND,
     ADMIN_USER_DELETE_CAPABILITY, ADMIN_USER_DELETE_SECRET_COMMAND,
@@ -36,91 +38,117 @@ use ironclaw_product::{
     ADMIN_USER_SET_STATUS_CAPABILITY, ADMIN_USER_UPDATE_CAPABILITY, ADMIN_USER_VIEW,
     ADMIN_USERS_VIEW, ATTACHMENT_READ_COMMAND, AUTOMATION_DELETE_COMMAND, AUTOMATION_PAUSE_COMMAND,
     AUTOMATION_RENAME_COMMAND, AUTOMATION_RESUME_COMMAND, AUTOMATIONS_VIEW, CANCEL_RUN_COMMAND,
-    CREATE_THREAD_COMMAND, CodexLoginStart, EXTENSION_IMPORT_CAPABILITY,
-    EXTENSION_INSTALL_CAPABILITY, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY,
-    EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
-    EmptyProductCommandInput, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_READ_COMMAND, FS_STAT_VIEW, FsMount,
-    GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY, LLM_CODEX_LOGIN_COMMAND, LLM_CONFIG_VIEW,
-    LLM_LIST_MODELS_COMMAND, LLM_NEARAI_LOGIN_COMMAND, LLM_NEARAI_WALLET_LOGIN_COMMAND,
-    LLM_PROVIDER_DELETE_CAPABILITY, LLM_PROVIDER_UPSERT_CAPABILITY, LLM_TEST_CONNECTION_COMMAND,
-    LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult,
-    LlmProbeResult, NearAiLoginStart, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
-    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY,
-    OPERATOR_CONFIG_SET_KEY_COMMAND, OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
-    OPERATOR_LOGS_VIEW, OPERATOR_SERVICE_LIFECYCLE_COMMAND, OPERATOR_SETUP_RUN_CAPABILITY,
-    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
-    OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_VIEW,
-    PRODUCT_COMMAND_EXECUTE_COMMAND, PRODUCT_COMMAND_LIST_COMMAND, PROJECT_CREATE_COMMAND,
-    PROJECT_DELETE_CAPABILITY, PROJECT_FS_LIST_VIEW, PROJECT_FS_READ_COMMAND, PROJECT_FS_STAT_VIEW,
-    PROJECT_MEMBER_ADD_CAPABILITY, PROJECT_MEMBER_REMOVE_CAPABILITY,
-    PROJECT_MEMBER_UPDATE_CAPABILITY, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY,
-    PROJECT_VIEW, PROJECTS_VIEW, ProductAttachmentCapabilities, ProductCancelRunRequest,
-    ProductCapabilityDescriptor, ProductCreateThreadRequest, ProductListAutomationsRequest,
-    ProductListThreadsRequest, ProductOutboundEnvelope, ProductRenameAutomationRequest,
-    ProductResolveGateRequest, ProductRetryRunRequest, ProductSetupExtensionRequest,
-    ProductSubmitTurnRequest, ProductSurfaceCommandDescriptor, ProjectFsFile, ProjectionCursor,
-    RESOLVE_GATE_COMMAND, RETRY_RUN_COMMAND, RebornAccountLoginLinkResponse,
-    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAdminCreateUserRequest,
-    RebornAdminDeleteSecretProductRequest, RebornAdminPutSecretProductRequest,
-    RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
-    RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
-    RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
+    CREATE_THREAD_COMMAND, EXTENSION_IMPORT_CAPABILITY, EXTENSION_INSTALL_CAPABILITY,
+    EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY,
+    EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FS_LIST_VIEW,
+    FS_MOUNTS_VIEW, FS_READ_COMMAND, FS_STAT_VIEW, GLOBAL_AUTO_APPROVE_VIEW,
+    LLM_ACTIVE_SET_CAPABILITY, LLM_CODEX_LOGIN_COMMAND, LLM_CONFIG_VIEW, LLM_LIST_MODELS_COMMAND,
+    LLM_NEARAI_LOGIN_COMMAND, LLM_NEARAI_WALLET_LOGIN_COMMAND, LLM_PROVIDER_DELETE_CAPABILITY,
+    LLM_PROVIDER_UPSERT_CAPABILITY, LLM_TEST_CONNECTION_COMMAND, LOGS_VIEW,
+    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY, OPERATOR_CONFIG_SET_KEY_COMMAND,
+    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
+    OPERATOR_SERVICE_LIFECYCLE_COMMAND, OPERATOR_SETUP_RUN_CAPABILITY, OPERATOR_SETUP_VIEW,
+    OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY,
+    OUTBOUND_PREFERENCES_VIEW, PRODUCT_COMMAND_EXECUTE_COMMAND, PRODUCT_COMMAND_LIST_COMMAND,
+    PROJECT_CREATE_COMMAND, PROJECT_DELETE_CAPABILITY, PROJECT_FS_LIST_VIEW,
+    PROJECT_FS_READ_COMMAND, PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY,
+    PROJECT_MEMBER_REMOVE_CAPABILITY, PROJECT_MEMBER_UPDATE_CAPABILITY, PROJECT_MEMBERS_VIEW,
+    PROJECT_UPDATE_CAPABILITY, PROJECT_VIEW, PROJECTS_VIEW, RESOLVE_GATE_COMMAND,
+    RETRY_RUN_COMMAND, RebornCreateThreadResponse, RebornExtensionListResponse,
+    RebornListThreadsResponse, RebornTimelineResponse, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
+    SKILL_REMOVE_CAPABILITY, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY, SKILLS_VIEW,
+    SUBMIT_TURN_COMMAND, THREAD_DELETE_CAPABILITY, THREADS_VIEW, TIMELINE_VIEW,
+    TRACE_ACCOUNT_LOGIN_LINK_COMMAND, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
+    TRACE_HOLD_AUTHORIZE_COMMAND,
+};
+use ironclaw_product_contracts::admin_users::{
+    RebornAdminCreateUserRequest, RebornAdminDeleteSecretProductRequest,
+    RebornAdminPutSecretProductRequest, RebornAdminPutSecretRequest,
+    RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleProductRequest,
+    RebornAdminSetRoleRequest, RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
     RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest,
     RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
-    RebornAdminUserSecretsListResponse, RebornAttachmentRequest, RebornAutomationMutationResponse,
-    RebornAutomationRequest, RebornCancelRunResponse, RebornCreateProjectRequest,
-    RebornCreateThreadResponse, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
-    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse,
-    RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
-    RebornFsStatResponse, RebornGetProjectRequest, RebornGlobalAutoApproveRequest,
-    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
-    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
-    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupResponse,
+    RebornAdminUserSecretsListResponse,
+};
+use ironclaw_product_contracts::descriptors::{
+    EmptyProductCommandInput, ProductCapabilityDescriptor, ProductSurfaceCommandDescriptor,
+};
+use ironclaw_product_contracts::inbound_requests::{
+    ProductCancelRunRequest, ProductCreateThreadRequest, ProductListAutomationsRequest,
+    ProductListThreadsRequest, ProductRenameAutomationRequest, ProductResolveGateRequest,
+    ProductRetryRunRequest, ProductSetupExtensionRequest, ProductSubmitTurnRequest,
+};
+use ironclaw_product_contracts::ironhub::{
+    IRONHUB_DELIVER_INSTALL_COMMAND, IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult,
+};
+use ironclaw_product_contracts::operator_llm::{
+    CodexLoginStart, LlmConfigSnapshot, LlmModelsResult, LlmProbeResult, NearAiLoginStart,
+    NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
+};
+use ironclaw_product_contracts::outbound::{ProductOutboundEnvelope, ProjectionCursor};
+use ironclaw_product_contracts::package_lifecycle::{
+    LifecyclePackageKind, LifecyclePackageRef, project_public_lifecycle_states,
+};
+use ironclaw_product_contracts::product_wire::{
+    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAttachmentRequest,
+    RebornAutomationMutationResponse, RebornAutomationRequest, RebornCancelRunResponse,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExecuteProductCommandRequest,
+    RebornExtensionActionResponse, RebornExtensionRegistryResponse, RebornGlobalAutoApproveRequest,
+    RebornListAutomationsResponse, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
+    RebornOperatorConfigListResponse, RebornOperatorConfigSetProductRequest,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupResponse,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
-    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
-    RebornProjectResponse, RebornRemoveMemberRequest, RebornRenameAutomationProductRequest,
+    RebornProductCommandListResponse, RebornRenameAutomationProductRequest,
     RebornResolveGateResponse, RebornRetryRunResponse, RebornSetOutboundPreferencesRequest,
     RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewDescriptor,
-    RebornViewPage, RebornViewQuery, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
-    SKILL_REMOVE_CAPABILITY, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY, SKILLS_VIEW,
-    SUBMIT_TURN_COMMAND, SetActiveLlmRequest, SettingsToolPermissionState,
-    THREAD_DELETE_CAPABILITY, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_LOGIN_LINK_COMMAND,
-    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND,
-    UpsertLlmProviderRequest, product_attachment_capabilities, project_public_lifecycle_states,
+    RebornTimelineRequest, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
+    RebornTraceHoldAuthorizeResponse, SettingsToolPermissionState,
+};
+use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewPage, RebornViewQuery};
+use ironclaw_product_contracts::workspace_views::{
+    FsMount, ProjectFsFile, RebornAddMemberRequest, RebornCreateProjectRequest,
+    RebornDeleteProjectRequest, RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest,
+    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
+    RebornGetProjectRequest, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornProjectFsListRequest,
+    RebornProjectFsListResponse, RebornProjectFsReadRequest, RebornProjectFsStatRequest,
+    RebornProjectFsStatResponse, RebornProjectMemberInfo, RebornProjectResponse,
+    RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
 };
 use secrecy::ExposeSecret;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use ironclaw_extension_contracts::hosted_mcp::{
+    HostedMcpAuthSelection, HostedMcpEndpoint, RegisterHostedMcpRequest, hosted_mcp_extension_id,
+};
+use ironclaw_extension_contracts::lifecycle_id::LifecyclePackageId;
+use ironclaw_extension_contracts::state::LifecyclePublicState;
 use ironclaw_host_api::turn::IdempotencyKey;
 use ironclaw_host_api::{
     ids::{ActivityId, SecretHandle, ThreadId, UserId},
-    product_surface::{
-        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-        ProductSurfaceErrorKind, ProductSurfaceValidationCode,
-    },
     resolution::{Blocked, Resolution},
     result_meta::FailureKind,
-    state::LifecyclePublicState,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ProductSurfaceValidationCode,
 };
 use uuid::Uuid;
 
+use crate::webui_rate_limit::mark_rate_limit_refundable;
 use crate::webui_v2::error::WebUiV2HttpError;
 use crate::webui_v2::router::{WebUiV2Capabilities, WebUiV2State};
 use crate::webui_v2::schema::{WebChatV2Event, WebChatV2EventFrame};
-use crate::webui_v2::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
+use crate::webui_v2::sse_capacity::{SSE_MAX_LIFETIME, SseAcquireResult, SseSlot};
+use ironclaw_product_contracts::admin_users::AdminUserSecretMeta;
 
 // Session bootstrap must stay cheap and non-blocking: this flag only tunes
 // initial approval UI state. It is mutable through `/settings/tools`, so do
@@ -138,21 +166,22 @@ pub struct WebUiV2SessionResponse {
     pub tenant_id: String,
     pub user_id: String,
     pub capabilities: WebUiV2Capabilities,
-    /// Deployment-wide feature gates the browser uses to show/hide
-    /// not-yet-finished surfaces. Distinct from `capabilities`, which are
-    /// per-token authorization flags.
+    /// Effective feature gates the browser uses to show/hide or constrain
+    /// surfaces. Distinct from `capabilities`, which are per-token
+    /// authorization flags.
     pub features: WebUiV2Features,
     /// Inline-attachment contract (allowed `accept` tokens + size budgets)
     /// the browser advertises on its file picker. Generated from the shared
     /// format registry so the picker can never drift from the server's
     /// allowed set; the send-message decode remains authoritative.
-    pub attachments: ProductAttachmentCapabilities,
+    pub attachments: AttachmentCapabilities,
 }
 
-/// Deployment-wide WebUI feature gates surfaced to the browser on
-/// `GET /session`. These are global "is this surface ready to show"
-/// toggles, not per-caller authorization — keep authorization in
-/// [`WebUiV2Capabilities`].
+/// Effective WebUI feature gates surfaced to the browser on `GET /session`.
+/// Most are deployment-level "is this surface ready to show" toggles. Keep
+/// authorization in [`WebUiV2Capabilities`]; feature values may still be
+/// derived from capabilities when they describe effective browser behavior for
+/// the authenticated bearer.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct WebUiV2Features {
     /// Reborn Projects surface (the conversations-panel entry + the
@@ -160,6 +189,14 @@ pub struct WebUiV2Features {
     /// `IRONCLAW_REBORN_PROJECTS`, while the surface is still being
     /// finished.
     pub reborn_projects: bool,
+    /// Whether the browser must hide raw workspace fallback and only show the
+    /// caller-scoped workspace projection. Hosted deployments enable this to
+    /// avoid showing artifacts from a shared `/workspace` root; local
+    /// deployments keep it disabled so single-user workspaces remain visible.
+    pub workspace_requires_scoped_projection: bool,
+    /// QA-only run and full-thread artifact export surface. Hidden and
+    /// unmounted unless the deployment explicitly opts in.
+    pub regression_artifact_export: bool,
     /// Effective global auto-approve setting for the authenticated caller.
     /// The browser treats it as a bootstrap UI flag and does not inspect the
     /// operator settings payload shape. Settings mutations should update local
@@ -183,15 +220,19 @@ pub async fn get_session(
     let tenant_id = caller.tenant_id.to_string();
     let user_id = caller.user_id.to_string();
     let global_auto_approve = global_auto_approve_enabled(&state, caller).await;
+    let workspace_requires_scoped_projection =
+        workspace_scoped_projection_required(&state, &capabilities);
     Json(WebUiV2SessionResponse {
         tenant_id,
         user_id,
         capabilities,
         features: WebUiV2Features {
             reborn_projects: state.reborn_projects_enabled(),
+            workspace_requires_scoped_projection,
+            regression_artifact_export: state.regression_artifact_export_enabled(),
             global_auto_approve,
         },
-        attachments: product_attachment_capabilities(),
+        attachments: attachment_capabilities(),
     })
 }
 
@@ -298,8 +339,8 @@ async fn read_admin_user_secret(
     caller: ProductSurfaceCaller,
     user_id: UserId,
     handle: String,
-) -> Result<ironclaw_product::AdminUserSecretMeta, WebUiV2HttpError> {
-    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(
+) -> Result<AdminUserSecretMeta, WebUiV2HttpError> {
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
         std::sync::Arc::clone(services),
         caller,
     );
@@ -736,19 +777,48 @@ pub async fn list_fs_mounts(
 pub async fn browse_fs_dir(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Query(query): Query<FsBrowseQuery>,
 ) -> Result<Json<RebornFsListResponse>, WebUiV2HttpError> {
+    let requested_path = query
+        .path
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or_default();
+    let projection = workspace_projection_for(&state, &caller, &capabilities)?;
+    let (served_path, scoped_prefix) =
+        workspace_served_path(&query.mount, &requested_path, projection)?;
+    let surface = state.bind_services(caller);
+    let mount = query.mount;
     let request = RebornFsListRequest {
         mount: query.mount,
-        // Absent, empty, or whitespace-only path lists the mount root.
-        path: query
-            .path
-            .filter(|path| !path.trim().is_empty())
-            .unwrap_or_default(),
+        path: served_path,
         project_id: query.project_id,
     };
-    let surface = state.bind_services(caller);
-    let response = FS_LIST_VIEW.query_on(&surface, request, None).await?;
+    let mut response = match FS_LIST_VIEW.query_on(&surface, request, None).await {
+        // A caller's own projection ROOT exists by authorization: it is the
+        // subtree their identity keys, not a path they chose. It has no
+        // backing directory until their first write, so a fresh user opening
+        // the Workspace tab must see an empty workspace, not an error. Deeper
+        // paths under it keep reporting NotFound.
+        Err(error)
+            if error.code == ProductSurfaceErrorCode::NotFound
+                && scoped_prefix.is_some()
+                && requested_path.trim_matches('/').is_empty() =>
+        {
+            RebornFsListResponse {
+                mount,
+                path: String::new(),
+                entries: Vec::new(),
+            }
+        }
+        other => other?,
+    };
+    response.path = requested_path;
+    if let Some(prefix) = scoped_prefix {
+        for entry in response.entries.iter_mut() {
+            entry.path = strip_workspace_prefix(&prefix, &entry.path);
+        }
+    }
     Ok(Json(response))
 }
 
@@ -758,15 +828,23 @@ pub async fn browse_fs_dir(
 pub async fn stat_fs_path(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Query(query): Query<FsBrowseQuery>,
 ) -> Result<Json<RebornFsStatResponse>, WebUiV2HttpError> {
+    let requested_path = require_fs_browse_path(query.path)?;
+    let projection = workspace_projection_for(&state, &caller, &capabilities)?;
+    let (served_path, scoped_prefix) =
+        workspace_served_path(&query.mount, &requested_path, projection)?;
+    let surface = state.bind_services(caller);
     let request = RebornFsStatRequest {
         mount: query.mount,
-        path: require_fs_browse_path(query.path)?,
+        path: served_path,
         project_id: query.project_id,
     };
-    let surface = state.bind_services(caller);
-    let response = FS_STAT_VIEW.query_on(&surface, request, None).await?;
+    let mut response = FS_STAT_VIEW.query_on(&surface, request, None).await?;
+    if let Some(prefix) = scoped_prefix {
+        response.stat.path = strip_workspace_prefix(&prefix, &response.stat.path);
+    }
     Ok(Json(response))
 }
 
@@ -777,14 +855,23 @@ pub async fn stat_fs_path(
 pub async fn read_fs_file(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Query(query): Query<FsBrowseQuery>,
 ) -> Result<Response, WebUiV2HttpError> {
+    let requested_path = require_fs_browse_path(query.path)?;
+    let projection = workspace_projection_for(&state, &caller, &capabilities)?;
+    let (served_path, scoped_prefix) =
+        workspace_served_path(&query.mount, &requested_path, projection)?;
     let request = RebornFsReadRequest {
         mount: query.mount,
-        path: require_fs_browse_path(query.path)?,
+        path: served_path,
         project_id: query.project_id,
     };
-    let file = invoke_product_command(state.services(), caller, FS_READ_COMMAND, request).await?;
+    let mut file =
+        invoke_product_command(state.services(), caller, FS_READ_COMMAND, request).await?;
+    if let Some(prefix) = scoped_prefix {
+        file.path = strip_workspace_prefix(&prefix, &file.path);
+    }
     project_fs_download_response(file)
 }
 
@@ -797,6 +884,101 @@ fn require_fs_browse_path(path: Option<String>) -> Result<String, WebUiV2HttpErr
             Err(ProductSurfaceError::validation("path", ProductSurfaceValidationCode::Blank).into())
         }
     }
+}
+
+/// Effective scoped-workspace mode for one authenticated caller. The deployment
+/// gate and the operator bypass are one policy; `/session` and the `/fs/*`
+/// handlers must never compute it differently.
+fn workspace_scoped_projection_required(
+    state: &WebUiV2State,
+    capabilities: &WebUiV2Capabilities,
+) -> bool {
+    state.workspace_requires_scoped_projection() || !capabilities.operator_webui_config
+}
+
+/// Effective caller-scoped workspace projection for an authenticated `/fs/*`
+/// request. The browser must confine Workspace reads to the caller's own
+/// subtree (`tenants/{tenant}/users/{user}`) when scoped projection is
+/// required. Memory is already caller-scoped server-side; Workspace is shared
+/// by default, so this projection is what prevents one user from listing
+/// another user's workspace artifacts through the browser.
+///
+/// Returns the per-caller prefix to prepend when `Ok(Some)`; `Ok(None)` means
+/// the raw shared workspace root is served (local/operator fallback). `Err`
+/// fails closed: scoped projection is required but the caller identity cannot
+/// key a subtree, so serving the shared root would reintroduce the leak the
+/// projection exists to prevent.
+fn workspace_projection_for(
+    state: &WebUiV2State,
+    caller: &ProductSurfaceCaller,
+    capabilities: &WebUiV2Capabilities,
+) -> Result<Option<String>, WebUiV2HttpError> {
+    if !workspace_scoped_projection_required(state, capabilities) {
+        return Ok(None);
+    }
+    let tenant = caller.tenant_id.as_str();
+    let user = caller.user_id.as_str();
+    if tenant.is_empty() || user.is_empty() {
+        return Err(
+            ProductSurfaceError::validation("caller", ProductSurfaceValidationCode::Blank).into(),
+        );
+    }
+    Ok(Some(format!("tenants/{tenant}/users/{user}")))
+}
+
+/// Translate a mount-relative browser path into the path the product layer
+/// should read. For `Workspace` under scoped projection, the caller prefix is
+/// prepended so the product layer reads inside the caller's subtree; a missing
+/// subtree surfaces as a clean empty/404 rather than the shared root. Other
+/// mounts (Memory is already caller-scoped) pass through unchanged.
+///
+/// Returns the served path plus the prefix that must be stripped from any
+/// paths the product layer echoes back, so the browser keeps round-tripping
+/// mount-relative paths.
+fn workspace_served_path(
+    mount: &FsMount,
+    requested: &str,
+    projection: Option<String>,
+) -> Result<(String, Option<String>), WebUiV2HttpError> {
+    if *mount == FsMount::Workspace
+        && let Some(prefix) = projection
+    {
+        let trimmed = requested.trim_matches('/');
+        // Reject parent-directory traversal before prepending the caller prefix.
+        // A `..` segment would otherwise become `tenants/{tenant}/users/{user}/../other`,
+        // which the product layer rejects too, but defense in depth keeps the
+        // browser from ever dispatching an escape attempt to the product layer.
+        if trimmed.split('/').any(|segment| segment == "..") {
+            return Err(ProductSurfaceError::validation(
+                "path",
+                ProductSurfaceValidationCode::InvalidValue,
+            )
+            .into());
+        }
+        let served = if trimmed.is_empty() {
+            prefix.clone()
+        } else {
+            format!("{prefix}/{trimmed}")
+        };
+        return Ok((served, Some(prefix)));
+    }
+    Ok((requested.to_string(), None))
+}
+
+/// Strip a caller-scoped workspace prefix from a path the product layer echoed
+/// back, yielding the mount-relative path the browser round-trips. A path that
+/// does not carry the prefix (e.g. a NotFound response that echoes the raw
+/// request) is returned trimmed of surrounding slashes.
+fn strip_workspace_prefix(prefix: &str, path: &str) -> String {
+    let base = prefix.trim_matches('/');
+    let value = path.trim_matches('/');
+    if value.is_empty() {
+        return String::new();
+    }
+    value
+        .strip_prefix(&format!("{base}/"))
+        .map(|rest| rest.trim_start_matches('/').to_string())
+        .unwrap_or_else(|| value.to_string())
 }
 
 /// Reject a missing or blank `?path=` on the stat/download routes with a
@@ -1025,7 +1207,7 @@ async fn read_project_member(
     project_id: String,
     user_id: String,
 ) -> Result<RebornProjectMemberInfo, WebUiV2HttpError> {
-    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
         std::sync::Arc::clone(services),
         caller,
     );
@@ -1168,7 +1350,7 @@ fn sse_poll_interval_for_idle_polls(idle_polls: u32) -> Duration {
 /// documented on [`ProductSurface::stream_events`].
 ///
 /// [`WebChatV2EventFrame`]: crate::webui_v2::schema::WebChatV2EventFrame
-/// [`ProductSurface::stream_events`]: ironclaw_host_api::product_surface::ProductSurface::stream_events
+/// [`ProductSurface::stream_events`]: ironclaw_product_contracts::surface::ProductSurface::stream_events
 /// [`SSE_MAX_LIFETIME`]: crate::webui_v2::sse_capacity::SSE_MAX_LIFETIME
 pub async fn stream_events(
     State(state): State<WebUiV2State>,
@@ -1185,8 +1367,8 @@ pub async fn stream_events(
         connection_id.and(query.connection_generation),
     ) {
         crate::webui_v2::sse_capacity::SseAcquireResult::Acquired(slot) => slot,
-        crate::webui_v2::sse_capacity::SseAcquireResult::AtCapacity => {
-            return Err(sse_concurrency_exhausted());
+        crate::webui_v2::sse_capacity::SseAcquireResult::AtCapacity { refundable } => {
+            return Ok(sse_capacity_rejected(refundable));
         }
         crate::webui_v2::sse_capacity::SseAcquireResult::StaleGeneration => {
             return Ok(StatusCode::NO_CONTENT.into_response());
@@ -1216,7 +1398,26 @@ pub async fn stream_events(
     Ok(response)
 }
 
-/// Build the 429 response for SSE openings that exceed the per-caller
+/// Build the 429 response for SSE openings (both [`stream_events`] and
+/// [`stream_events_ws`]) that exceed the per-caller concurrency cap.
+///
+/// `refundable` — decided by `SseCapacity::try_acquire_ordered`'s per-caller
+/// rejection streak — marks the response so it doesn't also drain
+/// `enforce_rate_limit`'s separate request-volume budget, *up to* a short
+/// burst of consecutive rejections; see that middleware's module doc for
+/// why refunding differs from e.g. turn-submission admission-control 429s,
+/// and `sse_capacity::REJECTION_REFUND_LIMIT` for why refunding stops once
+/// a caller hammers a saturated cap.
+fn sse_capacity_rejected(refundable: bool) -> Response {
+    let response = sse_concurrency_exhausted().into_response();
+    if refundable {
+        mark_rate_limit_refundable(response)
+    } else {
+        response
+    }
+}
+
+/// Build the 429 error for SSE openings that exceed the per-caller
 /// concurrency cap. `retryable: true` because the slot will free as soon
 /// as one of the caller's existing streams closes.
 fn sse_concurrency_exhausted() -> WebUiV2HttpError {
@@ -1265,7 +1466,19 @@ struct SseErrorPayload {
 
 fn webchat_sse_event_from_envelope(envelope: ProductOutboundEnvelope) -> Option<Event> {
     let frame = WebChatV2EventFrame::from_outbound(envelope);
-    let id = cursor_token(frame.cursor());
+    // Keep-alive frames are liveness pings, not durable resume positions.
+    // The product seam stamps an advancing cursor into every envelope
+    // (including `KeepAlive`), and the browser's `EventSource` echoes the
+    // last `id:` back as `Last-Event-ID` on reconnect. If a keep-alive is the
+    // last frame before a disconnect, resuming from its cursor skips real
+    // events that precede it. Omit the `id:` field for keep-alives so the
+    // browser keeps the last real event's id as the resume point.
+    let is_keep_alive = matches!(&frame.event, WebChatV2Event::KeepAlive);
+    let id = if is_keep_alive {
+        None
+    } else {
+        cursor_token(frame.cursor())
+    };
     match serde_json::to_string(&frame) {
         Ok(payload) => {
             let mut event = Event::default().event(frame.event_name()).data(payload);
@@ -1334,7 +1547,7 @@ fn build_sse_stream(
         let mut slot_guard = slot;
         let started_at = tokio::time::Instant::now();
         let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
-        let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(services, caller);
+        let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(services, caller);
 
         let mut idle_polls = 0_u32;
         loop {
@@ -1352,7 +1565,7 @@ fn build_sse_stream(
                 _ = slot_guard.cancelled() => return,
                 result = tokio::time::timeout(
                     remaining,
-                    surface.stream_events(ironclaw_host_api::product_surface::ProductSurfaceStreamRequest {
+                    surface.stream_events(ironclaw_product_contracts::surface::ProductSurfaceStreamRequest {
                         stream_id: Some(thread_id.clone()),
                         after_cursor: after_cursor
                             .as_ref()
@@ -1606,7 +1819,7 @@ pub struct ListThreadsQuery {
 pub async fn list_commands(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
-) -> Result<Json<ironclaw_product::RebornProductCommandListResponse>, WebUiV2HttpError> {
+) -> Result<Json<RebornProductCommandListResponse>, WebUiV2HttpError> {
     let response = invoke_product_command(
         state.services(),
         caller,
@@ -1633,7 +1846,7 @@ pub async fn execute_command(
         state.services(),
         caller,
         PRODUCT_COMMAND_EXECUTE_COMMAND,
-        ironclaw_product::RebornExecuteProductCommandRequest {
+        RebornExecuteProductCommandRequest {
             thread_id,
             text: body.text,
         },
@@ -2315,6 +2528,46 @@ pub async fn install_extension(
     Ok(Json(response))
 }
 
+/// `POST /api/webchat/v2/extensions/register-hosted-mcp`
+///
+/// Accepts only admission inputs. Caller identity, package source, manifests,
+/// discovered tools, and credentials remain owned by the product lifecycle.
+pub async fn register_hosted_mcp_extension(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    body: Result<Json<RegisterHostedMcpBody>, JsonRejection>,
+) -> Result<Json<RegisterHostedMcpResponse>, WebUiV2HttpError> {
+    let Json(body) = body.map_err(|_| {
+        ProductSurfaceError::validation("request", ProductSurfaceValidationCode::InvalidValue)
+    })?;
+    let desired_name = bounded_hosted_mcp_name(body.desired_name)?;
+    let package_ref = extension_package_ref_for_request(
+        hosted_mcp_extension_id(&body.desired_id).and_then(|extension_id| {
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id.as_str())
+        }),
+        "desired_id",
+    )?;
+    let request = RegisterHostedMcpRequest {
+        desired_id: body.desired_id,
+        desired_name,
+        endpoint: body.endpoint,
+        auth_selection: body.auth_selection,
+    };
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller,
+        EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY,
+        request,
+    )
+    .await?;
+    extension_lifecycle_mutation_succeeded(resolution)?;
+    Ok(Json(RegisterHostedMcpResponse {
+        success: true,
+        message: "Custom MCP registered.".to_string(),
+        package_ref,
+    }))
+}
+
 /// `POST /api/webchat/v2/extensions/import` — admin-only: upload a standalone
 /// tool bundle (a zip with manifest.toml + wasm/ + schemas/ + prompts/). The
 /// bundle is unpacked, validated, written under `/system/extensions/<id>/`, and
@@ -2335,6 +2588,22 @@ pub async fn import_extension(
     .await?;
     extension_lifecycle_mutation_succeeded(resolution)?;
     let response = extension_action_completed("Extension imported.");
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/ironhub/install`
+pub async fn ironhub_deliver_install(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Json(body): Json<IronhubInstallDeliveryRequest>,
+) -> Result<Json<IronhubInstallDeliveryResult>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        IRONHUB_DELIVER_INSTALL_COMMAND,
+        body,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -2770,7 +3039,7 @@ async fn invoke_product_capability_with_activity_id<T>(
 where
     T: Serialize,
 {
-    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
         std::sync::Arc::clone(services),
         caller,
     );
@@ -2789,7 +3058,7 @@ where
 {
     let input_value = serde_json::to_value(&input).map_err(ProductSurfaceError::internal_from)?;
     let activity_id = product_surface_activity_id(&caller, command.id, &input_value)?;
-    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
         std::sync::Arc::clone(services),
         caller,
     );
@@ -2944,13 +3213,13 @@ async fn query_product_page(
     caller: ProductSurfaceCaller,
     query: RebornViewQuery,
 ) -> Result<RebornViewPage, ProductSurfaceError> {
-    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
         std::sync::Arc::clone(services),
         caller,
     );
     let page = surface
         .query(
-            ironclaw_host_api::product_surface::ProductSurfaceQueryRequest {
+            ironclaw_product_contracts::surface::ProductSurfaceQueryRequest {
                 view_id: query.view_id,
                 input: query.params,
                 cursor: query.cursor,
@@ -3847,6 +4116,35 @@ pub struct InstallExtensionBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterHostedMcpBody {
+    pub desired_id: LifecyclePackageId,
+    pub desired_name: String,
+    pub endpoint: HostedMcpEndpoint,
+    #[serde(default)]
+    pub auth_selection: Option<HostedMcpAuthSelection>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegisterHostedMcpResponse {
+    pub success: bool,
+    pub message: String,
+    pub package_ref: LifecyclePackageRef,
+}
+
+fn bounded_hosted_mcp_name(name: String) -> Result<String, ProductSurfaceError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 256 || trimmed.chars().any(char::is_control)
+    {
+        return Err(ProductSurfaceError::validation(
+            "desired_name",
+            ProductSurfaceValidationCode::InvalidValue,
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+#[derive(Debug, Deserialize)]
 pub struct RemoveExtensionBody {
     /// Client gesture id (#6520): one distinct remove gesture = one stable
     /// ActivityId; a response-lost retry replays the same gesture. Required —
@@ -3917,14 +4215,24 @@ pub async fn stream_events_ws(
     Query(query): Query<StreamEventsQuery>,
     upgrade: axum::extract::ws::WebSocketUpgrade,
 ) -> Result<axum::response::Response, WebUiV2HttpError> {
-    let slot = state
-        .sse_capacity()
-        .try_acquire(
-            &caller.tenant_id,
-            &caller.user_id,
-            stream_connection_id(query.connection_id.as_deref()),
-        )
-        .ok_or_else(sse_concurrency_exhausted)?;
+    let slot = match state.sse_capacity().try_acquire(
+        &caller.tenant_id,
+        &caller.user_id,
+        stream_connection_id(query.connection_id.as_deref()),
+    ) {
+        SseAcquireResult::Acquired(slot) => slot,
+        SseAcquireResult::AtCapacity { refundable } => {
+            return Ok(sse_capacity_rejected(refundable));
+        }
+        // A stale generation on the upgrade path means a newer stream for
+        // the same connection id already holds the slot. Treat it as the
+        // ordinary capacity rejection this handler has always returned, but
+        // never refund it: it is not the saturation signal the refund
+        // budget exists to absorb.
+        SseAcquireResult::StaleGeneration => {
+            return Ok(sse_capacity_rejected(false));
+        }
+    };
     let services = state.services().clone();
     let initial_cursor = headers
         .get(LAST_EVENT_ID_HEADER)
@@ -3963,7 +4271,7 @@ async fn ws_drain_loop(
     let mut slot_guard = slot;
     let started_at = tokio::time::Instant::now();
     let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
-    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(services, caller);
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(services, caller);
 
     let mut idle_polls = 0_u32;
     loop {
@@ -3974,7 +4282,7 @@ async fn ws_drain_loop(
             return;
         }
         let service_call = surface.stream_events(
-            ironclaw_host_api::product_surface::ProductSurfaceStreamRequest {
+            ironclaw_product_contracts::surface::ProductSurfaceStreamRequest {
                 stream_id: Some(thread_id.clone()),
                 after_cursor: after_cursor
                     .as_ref()

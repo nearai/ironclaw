@@ -1,5 +1,5 @@
+use ironclaw_loop_contracts::PromptContextTokenBudget;
 use ironclaw_threads::ContextMessage;
-use ironclaw_turns::run_profile::PromptContextTokenBudget;
 
 use crate::estimate_tokens_from_chars;
 
@@ -33,8 +33,8 @@ pub(crate) fn select_prompt_context_messages(
 
 #[cfg(test)]
 mod tests {
+    use ironclaw_loop_contracts::PromptContextTokenBudget;
     use ironclaw_threads::{ContextMessage, MessageKind, ThreadMessageId};
-    use ironclaw_turns::run_profile::PromptContextTokenBudget;
 
     use super::select_prompt_context_messages;
 

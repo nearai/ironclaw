@@ -30,7 +30,7 @@ use ironclaw_outbound::{
     ProjectionUpdateRef, ThreadNotificationPolicy, ThreadNotificationTarget,
     UpdateDeliveryStatusRequest,
 };
-use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
+use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use tokio::{
     sync::Barrier,
     time::{Duration, timeout},

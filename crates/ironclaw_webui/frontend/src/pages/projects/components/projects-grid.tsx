@@ -2,10 +2,10 @@ import { useT } from "../../../lib/i18n";
 import { Button } from "../../../design-system/button";
 import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives";
 import {
-  formatCurrency,
-  formatProjectHealth,
-  formatProjectRelativeTime,
-  healthTone,
+  formatProjectDate,
+  formatProjectRole,
+  formatProjectState,
+  projectStateTone,
 } from "../lib/projects-presenters";
 
 function ProjectCard({ project, onOpen, t }) {
@@ -36,7 +36,10 @@ function ProjectCard({ project, onOpen, t }) {
             {project.description || t("projects.noDescription")}
           </p>
         </div>
-        <StatusPill tone={healthTone(project.health)} label={formatProjectHealth(project.health, t)} />
+        <StatusPill
+          tone={projectStateTone(project.state)}
+          label={formatProjectState(project.state, t)}
+        />
       </div>
 
       {project.goals?.length
@@ -51,26 +54,16 @@ function ProjectCard({ project, onOpen, t }) {
           )
         : null}
 
-      <div className="mt-5 grid gap-3 sm:grid-cols-2">
-        <div className="rounded-2xl border border-iron-700 bg-iron-950/55 p-3">
-          <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-iron-300">{t("projects.card.runtime")}</div>
-          <div className="mt-2 text-sm text-iron-100">
-            {t("projects.card.threadsToday", { count: project.threads_today || 0 })}
-          </div>
-        </div>
-        <div className="rounded-2xl border border-iron-700 bg-iron-950/55 p-3">
-          <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-iron-300">{t("projects.card.risk")}</div>
-          <div className="mt-2 text-sm text-iron-100">{t("projects.card.pendingGates", { count: project.pending_gates || 0 })}</div>
-          <div className="mt-1 text-xs text-iron-300">
-            {t("projects.card.failures24h", { count: project.failures_24h || 0 })}
-          </div>
-        </div>
-      </div>
-
       <div className="mt-5 flex items-center justify-between gap-3">
-        <div className="text-sm text-iron-300">
-          <div>{t("projects.card.spendToday", { value: formatCurrency(project.cost_today_usd || 0) })}</div>
-          <div className="mt-1 text-xs uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{formatProjectRelativeTime(project.last_activity, t)}</div>
+        <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm text-iron-300">
+          <StatusPill tone="muted" label={formatProjectRole(project.role, t)} />
+          <time
+            data-testid="project-updated-at"
+            dateTime={project.updated_at || undefined}
+            className="text-xs uppercase tracking-[0.16em] text-[var(--v2-text-muted)]"
+          >
+            {t("projects.snapshot.updated", { date: formatProjectDate(project.updated_at, t) })}
+          </time>
         </div>
         <Button
           data-testid="project-open-workspace"
@@ -114,10 +107,19 @@ function GeneralProjectCard({ project, onOpen, t }) {
             {t("projects.general.desc")}
           </p>
         </div>
-        <div className="flex flex-wrap gap-3">
-          <div className="rounded-2xl border border-iron-700 bg-iron-950/55 px-4 py-3 text-sm text-iron-200">
-            {t("projects.general.threadsToday", { count: project.threads_today || 0 })}
-          </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <StatusPill
+            tone={projectStateTone(project.state)}
+            label={formatProjectState(project.state, t)}
+          />
+          <StatusPill tone="muted" label={formatProjectRole(project.role, t)} />
+          <time
+            data-testid="project-updated-at"
+            dateTime={project.updated_at || undefined}
+            className="text-xs uppercase tracking-[0.16em] text-[var(--v2-text-muted)]"
+          >
+            {t("projects.snapshot.updated", { date: formatProjectDate(project.updated_at, t) })}
+          </time>
           <Button
             data-testid="project-open-workspace"
             variant="secondary"

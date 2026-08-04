@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt, stream};
+use ironclaw_loop_contracts::{LoopRunContext, SkillVisibility};
 use ironclaw_loop_host::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     SkillBundleDescriptor, SkillBundleId, SkillBundleSource, SkillBundleSourceError,
@@ -20,7 +21,6 @@ use ironclaw_skills::{
     LoadedSkill, SkillSelectionOptions, SkillSource, SkillTrust, extract_skill_mentions,
     parse_skill_md, prefilter_skills_with_options, skill_token_cost, validate_skill_name,
 };
-use ironclaw_turns::run_profile::{LoopRunContext, SkillVisibility};
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId, TurnScope};
 use thiserror::Error;
 
@@ -2255,14 +2255,12 @@ mod tests {
             .set_selection_mode(SkillActivationSelectionMode::ExplicitAndCriteria)
     }
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId};
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver,
+    };
     use ironclaw_loop_host::{SkillBundleId, SkillFilePath};
     use ironclaw_skills::SkillTrust;
-    use ironclaw_turns::{
-        TurnActor, TurnId, TurnRunId,
-        run_profile::{
-            InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver,
-        },
-    };
+    use ironclaw_turns::{TurnActor, TurnId, TurnRunId};
 
     struct StaticSkillBundleSource {
         descriptors: Vec<SkillBundleDescriptor>,

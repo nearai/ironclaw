@@ -4,13 +4,13 @@ use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{ids::InvocationId, resolution::Resolution, result_meta::FailureKind};
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, ConcurrencyHint,
+    resolution,
+};
 use ironclaw_loop_host::{
     CapabilityResultWrite, DurablePersistence, SkillBundleSource, SyntheticCapability,
     SyntheticCapabilityDescriptor, SyntheticCapabilityHandler, SyntheticCapabilityInvocation,
-};
-use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, ConcurrencyHint,
-    resolution,
 };
 
 use crate::{
@@ -115,7 +115,7 @@ where
         Ok(resolution::completed(
             write_result.result_ref,
             format!("activated {} skill(s)", activated.len()),
-            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
             false,
             write_result.byte_len,
             write_result.output_digest,

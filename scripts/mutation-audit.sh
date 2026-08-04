@@ -9,7 +9,7 @@
 # Usage:
 #   ./scripts/mutation-audit.sh -p ironclaw_event_projections \
 #       crates/ironclaw_event_projections/src/runtime_projection.rs
-#   ./scripts/mutation-audit.sh -p ironclaw_dispatcher            # whole package
+#   ./scripts/mutation-audit.sh -p ironclaw_capabilities          # whole package
 #
 # Options (env vars):
 #   MUT_JOBS=3          Parallel mutants (default: 3)
@@ -102,6 +102,10 @@ for file in "${files[@]:-}"; do
   args+=(-f "$file")
 done
 [ "$MUT_ITERATE" = "1" ] && args+=(--iterate)
+
+# cargo-mutants creates --output with a single-level mkdir, which fails when
+# an intermediate parent (such as target/) does not exist on a fresh runner.
+mkdir -p -- "$MUT_OUT"
 
 echo "▶ mutation audit: package=$package files=${files[*]:-<all>}"
 set +e

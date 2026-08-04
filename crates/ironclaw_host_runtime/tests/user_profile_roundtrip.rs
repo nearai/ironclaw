@@ -51,13 +51,13 @@ use ironclaw_host_runtime::{
     register_native_memory_tools,
 };
 use ironclaw_host_runtime::{builtin_first_party_package, native_memory_first_party_package};
+use ironclaw_loop_contracts::{
+    InMemoryRunProfileResolver, LoopRuntimeContext, RunProfileResolutionRequest, RunProfileResolver,
+};
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_triggers::InMemoryTriggerRepository;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
-use ironclaw_turns::{
-    RunProfileResolver, TurnActor, TurnId, TurnRunId, TurnScope,
-    run_profile::{InMemoryRunProfileResolver, LoopRuntimeContext, RunProfileResolutionRequest},
-};
+use ironclaw_turns::{TurnActor, TurnId, TurnRunId, TurnScope};
 use serde_json::json;
 
 // ── Noop HTTP egress (profile_set does not need network) ──
@@ -215,7 +215,7 @@ fn agent_scoped_context(
 async fn loop_run_context_with_user(
     tenant_id: &str,
     user_id: &str,
-) -> ironclaw_turns::run_profile::LoopRunContext {
+) -> ironclaw_loop_contracts::LoopRunContext {
     let resolved_run_profile = InMemoryRunProfileResolver::default()
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
         .await
@@ -227,7 +227,7 @@ async fn loop_run_context_with_user(
         ThreadId::new("thread-profile-roundtrip-test").unwrap(),
     );
     let actor = TurnActor::new(UserId::new(user_id).unwrap());
-    ironclaw_turns::run_profile::LoopRunContext::new(
+    ironclaw_loop_contracts::LoopRunContext::new(
         scope,
         TurnId::new(),
         TurnRunId::new(),

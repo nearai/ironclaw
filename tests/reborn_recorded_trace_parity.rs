@@ -6,8 +6,9 @@ mod parity_qa_support;
 mod reborn_support;
 mod support;
 
+use ironclaw_loop_contracts::LoopHostMilestoneKind;
 use ironclaw_loop_host::{HostManagedModelMessageRole, HostManagedModelResponse};
-use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
+use ironclaw_turns::TurnStatus;
 use parity_qa_support::binary_e2e::{
     RebornBinaryE2EHarness, assert_milestone_order, trace_tool_call_response,
 };

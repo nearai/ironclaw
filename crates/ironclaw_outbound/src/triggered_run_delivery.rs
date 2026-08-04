@@ -14,7 +14,7 @@
 //! - Personal scope only: non-personal triggers fail closed with `Denied`.
 
 use chrono::{DateTime, Utc};
-use ironclaw_turns::TurnRunId;
+use ironclaw_host_api::turn::TurnRunId;
 use serde::{Deserialize, Serialize};
 
 /// Terminal outcome of a triggered-run delivery attempt.

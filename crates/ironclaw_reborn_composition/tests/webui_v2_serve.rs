@@ -18,16 +18,13 @@ use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
+use ironclaw_extension_contracts::state::LifecyclePublicState;
 use ironclaw_host_api::{
     action::NetworkMethod,
     ids::{ActivityId, AgentId, ProjectId, ResultRef, TenantId, ThreadId, UserId},
-    product_surface::{
-        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    },
     resolution::{Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict},
     result_meta::{ResultProgress, TerminateHint},
     safe_summary::SafeSummary,
-    state::LifecyclePublicState,
 };
 use ironclaw_host_ingress::{ProtectedRouteMount, PublicRouteMount};
 use ironclaw_product::{
@@ -36,13 +33,25 @@ use ironclaw_product::{
     ProductResolveGateRequest, ProductSubmitTurnRequest, RebornCancelRunResponse,
     RebornCreateThreadResponse, RebornDeleteThreadRequest, RebornListThreadsResponse,
     RebornSetupExtensionResponse, RebornSubmitTurnResponse, RebornTimelineResponse,
-    RebornTraceCreditsResponse, RebornViewQuery, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
-    TIMELINE_VIEW, TRACE_CREDITS_VIEW,
+    RebornTraceCreditsResponse, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW,
+    TRACE_CREDITS_VIEW,
+};
+use ironclaw_product_contracts::ironhub::{
+    IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult, IronhubLinkError,
+    IronhubLinkService, IronhubRegisterRequest,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+};
+use ironclaw_product_contracts::views::RebornViewQuery;
+use ironclaw_reborn_composition::{
+    IRONHUB_REGISTER_PATH, IronhubRegisterRouteState, ironhub_register_route_mount,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_turns::{EventCursor, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus};
 use ironclaw_webui::{
-    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeError, webui_v2_app,
+    CompositeAuthenticator, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
+    WebuiServeError, webui_v2_app,
 };
 use serde_json::json;
 use tower::ServiceExt;
@@ -50,6 +59,8 @@ use tower::ServiceExt;
 const TENANT: &str = "tenant-alpha";
 const USER: &str = "user-alpha";
 const VALID_TOKEN: &str = "valid-bearer-token";
+const SESSION_TOKEN: &str = "valid-session-token";
+const OPERATOR_TOKEN: &str = "valid-operator-token";
 
 fn public_test_descriptor(
     route_id: &str,
@@ -146,6 +157,48 @@ impl WebuiAuthenticator for MultiUserToken {
     }
 }
 
+#[derive(Default)]
+struct RecordingIronhubLink {
+    register_calls: Mutex<Vec<IronhubRegisterRequest>>,
+}
+
+#[async_trait]
+impl IronhubLinkService for RecordingIronhubLink {
+    async fn register(&self, request: IronhubRegisterRequest) -> Result<(), IronhubLinkError> {
+        self.register_calls.lock().expect("lock").push(request);
+        Ok(())
+    }
+
+    async fn deliver_install(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: IronhubInstallDeliveryRequest,
+    ) -> Result<IronhubInstallDeliveryResult, IronhubLinkError> {
+        Err(IronhubLinkError::Unavailable)
+    }
+}
+
+struct FixedToken {
+    token: &'static str,
+    auth: WebuiAuthentication,
+    mount_operator_routes: bool,
+}
+
+#[async_trait]
+impl WebuiAuthenticator for FixedToken {
+    async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
+        if token == self.token {
+            Some(self.auth.clone())
+        } else {
+            None
+        }
+    }
+
+    fn mounts_operator_webui_config_routes(&self) -> bool {
+        self.mount_operator_routes
+    }
+}
+
 /// `WebuiAuthenticator` resolving [`VALID_TOKEN`] to a fixed,
 /// test-supplied user id. The trace-credits tests use it so the
 /// authenticated caller's user id equals a unique per-test trace
@@ -218,6 +271,7 @@ fn extension_setup_response(package_ref: LifecyclePackageRef) -> RebornSetupExte
         package_ref,
         phase: LifecyclePublicState::SetupNeeded,
         blockers: Vec::new(),
+        message: None,
         payload: None,
         secrets: Vec::new(),
         fields: Vec::new(),
@@ -431,13 +485,13 @@ mod openai_compat_mount_tests {
     }
 
     #[async_trait]
-    impl ironclaw_host_api::product_surface::ProductSurface for GatewayOpenAiSurface {
+    impl ironclaw_product_contracts::surface::ProductSurface for GatewayOpenAiSurface {
         async fn invoke(
             &self,
             caller: ProductSurfaceCaller,
-            request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
+            request: ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest,
         ) -> Result<
-            ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse,
+            ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
             ProductSurfaceError,
         > {
             let output = match request.operation_id.as_str() {
@@ -484,14 +538,14 @@ mod openai_compat_mount_tests {
                 }
                 _ => return Err(ProductSurfaceError::service_unavailable(false)),
             };
-            Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
+            Ok(ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output })
         }
 
         async fn query(
             &self,
             _caller: ProductSurfaceCaller,
-            _request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
-        ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+            _request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
+        ) -> Result<ironclaw_product_contracts::surface::ProductSurfaceQueryPage, ProductSurfaceError>
         {
             Err(ProductSurfaceError::service_unavailable(false))
         }
@@ -499,9 +553,9 @@ mod openai_compat_mount_tests {
         async fn stream_events(
             &self,
             _caller: ProductSurfaceCaller,
-            _request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+            _request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
         ) -> Result<
-            ironclaw_host_api::product_surface::ProductSurfaceStreamResponse,
+            ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
             ProductSurfaceError,
         > {
             Err(ProductSurfaceError::service_unavailable(false))
@@ -519,13 +573,13 @@ mod openai_compat_mount_tests {
     }
 
     #[async_trait]
-    impl ironclaw_host_api::product_surface::ProductSurface for AdmissionProductSurface {
+    impl ironclaw_product_contracts::surface::ProductSurface for AdmissionProductSurface {
         async fn invoke(
             &self,
             caller: ProductSurfaceCaller,
-            request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
+            request: ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest,
         ) -> Result<
-            ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse,
+            ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
             ProductSurfaceError,
         > {
             let output = match request.operation_id.as_str() {
@@ -626,14 +680,14 @@ mod openai_compat_mount_tests {
                 }
                 _ => return Err(ProductSurfaceError::service_unavailable(false)),
             };
-            Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
+            Ok(ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output })
         }
 
         async fn query(
             &self,
             _caller: ProductSurfaceCaller,
-            _request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
-        ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+            _request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
+        ) -> Result<ironclaw_product_contracts::surface::ProductSurfaceQueryPage, ProductSurfaceError>
         {
             Err(ProductSurfaceError::service_unavailable(false))
         }
@@ -641,9 +695,9 @@ mod openai_compat_mount_tests {
         async fn stream_events(
             &self,
             _caller: ProductSurfaceCaller,
-            _request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+            _request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
         ) -> Result<
-            ironclaw_host_api::product_surface::ProductSurfaceStreamResponse,
+            ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
             ProductSurfaceError,
         > {
             Err(ProductSurfaceError::service_unavailable(false))
@@ -843,13 +897,15 @@ struct StubServices {
 }
 
 #[async_trait]
-impl ironclaw_host_api::product_surface::ProductSurface for StubServices {
+impl ironclaw_product_contracts::surface::ProductSurface for StubServices {
     async fn invoke(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse, ProductSurfaceError>
-    {
+        request: ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
+        ProductSurfaceError,
+    > {
         let output = match request.operation_id.as_str() {
             "thread.create" => {
                 self.create_thread_calls.lock().expect("lock").push(caller);
@@ -944,14 +1000,14 @@ impl ironclaw_host_api::product_surface::ProductSurface for StubServices {
                 });
             }
         };
-        Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
+        Ok(ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output })
     }
 
     async fn query(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+        request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_product_contracts::surface::ProductSurfaceQueryPage, ProductSurfaceError>
     {
         let query = RebornViewQuery {
             view_id: request.view_id,
@@ -1025,7 +1081,7 @@ impl ironclaw_host_api::product_surface::ProductSurface for StubServices {
             }
         };
         Ok(
-            ironclaw_host_api::product_surface::ProductSurfaceQueryPage {
+            ironclaw_product_contracts::surface::ProductSurfaceQueryPage {
                 items: vec![payload],
                 next_cursor: None,
             },
@@ -1035,13 +1091,15 @@ impl ironclaw_host_api::product_surface::ProductSurface for StubServices {
     async fn stream_events(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceStreamResponse, ProductSurfaceError>
-    {
+        request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
+        ProductSurfaceError,
+    > {
         let _ = request;
         self.stream_events_calls.lock().expect("lock").push(caller);
         Ok(
-            ironclaw_host_api::product_surface::ProductSurfaceStreamResponse {
+            ironclaw_product_contracts::surface::ProductSurfaceStreamResponse {
                 events: Vec::new(),
                 next_cursor: None,
                 subscription: None,
@@ -1244,6 +1302,45 @@ async fn session_endpoint_reports_operator_capability_for_operator_authenticator
     assert_eq!(body["tenant_id"], TENANT);
     assert_eq!(body["user_id"], USER);
     assert_eq!(body["capabilities"]["operator_webui_config"], true);
+    assert_eq!(
+        body["features"]["workspace_requires_scoped_projection"], false,
+        "single-user/operator local WebUI keeps raw workspace fallback unless explicitly enabled"
+    );
+}
+
+#[tokio::test]
+async fn session_endpoint_reports_workspace_scoped_projection_from_serve_config() {
+    let services = Arc::new(StubServices::default());
+    let product_surface = services.clone();
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Arc::new(OnlyValidToken),
+        vec![HeaderValue::from_static("http://localhost:1234")],
+    )
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+    .with_workspace_requires_scoped_projection(true);
+    let app = webui_v2_app(product_surface, config).expect("webui v2 app");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_str(&read_body_string(response).await).expect("session json");
+    assert_eq!(
+        body["features"]["workspace_requires_scoped_projection"], true,
+        "WebuiServeConfig must feed scoped-workspace fallback behavior into /session"
+    );
 }
 
 #[tokio::test]
@@ -1267,6 +1364,73 @@ async fn session_endpoint_reports_no_operator_capability_for_multi_user_authenti
     assert_eq!(body["tenant_id"], TENANT);
     assert_eq!(body["user_id"], USER);
     assert_eq!(body["capabilities"]["operator_webui_config"], false);
+    assert_eq!(
+        body["features"]["workspace_requires_scoped_projection"], true,
+        "multi-user WebUI must fail closed instead of exposing a raw shared workspace root"
+    );
+}
+
+#[tokio::test]
+async fn session_endpoint_scopes_composite_signed_session_even_when_operator_routes_mount() {
+    let session_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(FixedToken {
+        token: SESSION_TOKEN,
+        auth: WebuiAuthentication::user(UserId::new("signed-user").expect("user id")),
+        mount_operator_routes: false,
+    });
+    let operator_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(FixedToken {
+        token: OPERATOR_TOKEN,
+        auth: WebuiAuthentication::operator(UserId::new(USER).expect("user id")),
+        mount_operator_routes: true,
+    });
+    let (app, _services) = build_app_with_authenticator(Arc::new(CompositeAuthenticator::new(
+        session_authenticator,
+        operator_authenticator,
+    )));
+
+    let session_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .header(header::AUTHORIZATION, format!("Bearer {SESSION_TOKEN}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(session_response.status(), StatusCode::OK);
+    let session_body: serde_json::Value =
+        serde_json::from_str(&read_body_string(session_response).await).expect("session json");
+    assert_eq!(session_body["user_id"], "signed-user");
+    assert_eq!(
+        session_body["capabilities"]["operator_webui_config"], false,
+        "signed session tokens must not inherit the env operator capability"
+    );
+    assert_eq!(
+        session_body["features"]["workspace_requires_scoped_projection"], true,
+        "signed sessions must not fall back to a raw shared workspace root just because operator routes are mounted"
+    );
+
+    let operator_response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .header(header::AUTHORIZATION, format!("Bearer {OPERATOR_TOKEN}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(operator_response.status(), StatusCode::OK);
+    let operator_body: serde_json::Value =
+        serde_json::from_str(&read_body_string(operator_response).await).expect("session json");
+    assert_eq!(operator_body["capabilities"]["operator_webui_config"], true);
+    assert_eq!(
+        operator_body["features"]["workspace_requires_scoped_projection"], false,
+        "local operator bearer keeps raw workspace fallback unless the deployment explicitly disables it"
+    );
 }
 
 #[tokio::test]
@@ -1782,6 +1946,43 @@ async fn mutation_body_within_descriptor_cap_reaches_service() {
         1,
         "service should be reached for in-budget payload",
     );
+}
+
+#[tokio::test]
+async fn send_message_body_above_axum_default_but_within_descriptor_cap_reaches_service() {
+    // Inline attachment bodies legitimately exceed Axum's 2 MiB extractor
+    // default: 10 MiB decoded files need roughly 13.4 MiB after base64. The
+    // descriptor-driven 14 MiB middleware is the authority, so an otherwise
+    // valid body above 2 MiB must not be rejected by Json<T>'s implicit cap.
+    let (app, services) = build_app();
+    let payload = json!({
+        "client_action_id": "large-inline-attachment",
+        "content": "read this",
+        "attachments": [{
+            "mime_type": "text/plain",
+            "filename": "large.txt",
+            "data_base64": "A".repeat(3 * 1024 * 1024),
+        }],
+    })
+    .to_string();
+    assert!(payload.len() > 2 * 1024 * 1024);
+    assert!(payload.len() < 14 * 1024 * 1024);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads/thread-large/messages")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(services);
 }
 
 #[tokio::test]
@@ -2682,28 +2883,50 @@ async fn static_i18n_module_guards_locale_race_and_clears_failed_pack_cache() {
 }
 
 #[tokio::test]
-async fn static_typing_dot_animation_respects_reduced_motion() {
+async fn static_near_process_animation_respects_reduced_motion() {
     // Content-shape regression guard for the typing-indicator animation
-    // contract (PR #4493 review): `.v2-typing-dot` is the single
-    // intentional animation exception, so it must animate by default and
-    // be suppressed under `prefers-reduced-motion: reduce`. A behavioral
-    // check that the dot computes to `animation: none` via the emulated
-    // media query needs a browser (`getComputedStyle`), which this
-    // workspace's Rust/oneshot harness cannot drive; that belongs in the
-    // deferred e2e scaffold.
+    // contract: the NEAR glyph and its comet animate while the assistant is
+    // working, and both animations are suppressed under
+    // `prefers-reduced-motion: reduce`.
     let body = served_app_stylesheet().await;
 
     assert!(
-        body.contains("animation:1.4s ease-in-out infinite v2-typing-bounce"),
-        "typing dots must animate by default",
+        body.contains("animation:2s ease-in-out infinite near-pulse"),
+        "the working NEAR glyph must pulse by default",
+    );
+    assert!(
+        body.contains(".near-process.is-busy .near-base{opacity:.24}"),
+        "the working NEAR glyph must be dimmed beneath the comet",
+    );
+    assert!(
+        body.contains(".near-process-label{color:var(--v2-text-muted);font-weight:400}"),
+        "the completed-state label must use muted presentation",
+    );
+    assert!(
+        body.contains(
+            ".near-process.is-busy .near-process-label{color:var(--v2-text-strong);\
+             font-weight:560}"
+        ),
+        "the working-state label must use strong presentation",
+    );
+    assert!(
+        body.contains("animation:1.1s linear infinite near-chase"),
+        "the working NEAR comet must chase by default",
     );
     assert!(
         body.contains("@media (prefers-reduced-motion:reduce)"),
         "stylesheet must carry a reduced-motion opt-out block",
     );
     assert!(
-        body.contains(".v2-typing-dot,.v2-spin{animation:none"),
-        "the typing dot must be suppressed under prefers-reduced-motion: reduce",
+        body.contains(
+            ".near-process.is-busy .near-process-icon,.near-process.is-busy \
+             .near-process-icon .near-comet{animation:none"
+        ),
+        "the NEAR glyph and comet must stop under prefers-reduced-motion: reduce",
+    );
+    assert!(
+        body.contains(".near-process .near-comet{display:none"),
+        "the comet must be hidden under prefers-reduced-motion: reduce",
     );
 }
 
@@ -2957,6 +3180,65 @@ async fn js_client_resolve_gate_path_decodes_percent_encoded_gate_ref() {
 /// #4116: without the merge in `webui_v2_app`, the SPA's
 /// unauthenticated `GET /auth/providers` would 401 before the
 /// host's OAuth router ever ran.
+#[tokio::test]
+async fn ironhub_register_mount_is_public_and_reaches_the_link_service() {
+    let services = Arc::new(StubServices::default());
+    let link = Arc::new(RecordingIronhubLink::default());
+    let mount = ironhub_register_route_mount(IronhubRegisterRouteState::new(
+        link.clone() as Arc<dyn IronhubLinkService>
+    ))
+    .expect("valid register mount");
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Arc::new(OnlyValidToken),
+        vec![HeaderValue::from_static("http://localhost:1234")],
+    )
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+    .with_public_route_mount(mount);
+    let app = webui_v2_app(services, config).expect("webui v2 app");
+    let body = json!({
+        "uid": "signed-user-claim",
+        "aid": "signed-agent-claim",
+        "ts": 1_700_000_000_u64,
+        "nonce": "register-nonce",
+        "sig": "signature-checked-by-link-service"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(IRONHUB_REGISTER_PATH)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(link.register_calls.lock().expect("lock").len(), 1);
+}
+
+#[tokio::test]
+async fn ironhub_register_handler_is_absent_when_the_gate_is_disabled() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(IRONHUB_REGISTER_PATH)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_policy() {
     use axum::extract::ConnectInfo;

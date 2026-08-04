@@ -13,10 +13,12 @@ use async_trait::async_trait;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures_core::Stream;
-use ironclaw_product::{
-    ProductInboundAck, ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
-    ProductProjectionState, ProjectionCursor, ProjectionSubscriptionRequest,
+use ironclaw_product_contracts::inbound::ProductInboundAck;
+use ironclaw_product_contracts::outbound::{
+    ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
+    ProjectionCursor,
 };
+use ironclaw_product_contracts::projection::ProjectionSubscriptionRequest;
 use serde::Serialize;
 use serde_json::json;
 

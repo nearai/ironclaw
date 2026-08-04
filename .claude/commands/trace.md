@@ -11,7 +11,7 @@ Trace the flow of `$ARGUMENTS` through the IronClaw codebase. Map every file and
 
 Discovery order: `bash scripts/codebase-graph.sh status` once — if the graph is FRESH and the codebase-memory MCP is connected, use `trace_path(mode="cross_service"|"data_flow")`; otherwise fall back to the anchors + recipes below without stalling.
 
-New features and almost all current work are **Reborn** (`crates/`). Trace v1 (`src/`) only when the symptom is explicitly in the legacy monolith (v1 gateway UI, TUI, engine-v2 bridge). If the graph is missing/stale/unavailable and you're unsure which stack owns the symptom: `grep -rn --include='*.rs' "<symptom>" crates/ | head` first, `src/` second. The legacy enclave (`ironclaw_engine`, `ironclaw_tui`, `ironclaw_gateway`, `ironclaw_oauth`, `ironclaw_embeddings`) is v1 despite living in `crates/`.
+Everything is **Reborn** (`crates/`) — the v1 `src/` monolith and its crates (`ironclaw_engine`, `ironclaw_tui`, `ironclaw_gateway`, `ironclaw_oauth`) have been deleted, so there is no second stack to disambiguate against. If the graph is missing/stale/unavailable: `grep -rn --include='*.rs' "<symptom>" crates/ | head`.
 
 ## Reborn flow anchors (verify with the recipe beside each — do not trust this table blindly)
 
@@ -24,13 +24,13 @@ New features and almost all current work are **Reborn** (`crates/`). Trace v1 (`
 | Turn accept | `SessionThreadService::accept_inbound_message` (`crates/ironclaw_threads`) → `TurnCoordinator::submit_turn` (`crates/ironclaw_turns/src/coordinator.rs`) | `grep -rn --include='*.rs' "submit_turn(" crates/` |
 | Claim + execute | `TurnRunScheduler` → `RebornTurnRunExecutor` (`crates/ironclaw_runner/src/`) | `grep -n "claim_next_run\|invoke_driver" crates/ironclaw_runner/src/turn_scheduler.rs crates/ironclaw_runner/src/turn_run_executor.rs` |
 | Loop | `PlannedDriver` (`crates/ironclaw_runner/src/planned_driver.rs`) → `CanonicalAgentLoopExecutor` (`crates/ironclaw_agent_loop/src/executor.rs`) → host ports (`crates/ironclaw_loop_host`) | `grep -rn "invoke_capability\|stream_model" crates/ironclaw_agent_loop/src/executor` |
-| Model call | `crates/ironclaw_runner/src/model_gateway.rs` → `ironclaw_llm` provider chain | `grep -n "complete_model_request\|CompletionRequest" crates/ironclaw_runner/src/model_gateway.rs` |
+| Model call | `crates/ironclaw_loop_host/src/model_gateway.rs` → `ironclaw_llm` provider chain | `grep -n "complete_model_request\|CompletionRequest" crates/ironclaw_loop_host/src/model_gateway.rs` |
 | Effects | `CapabilityHost::invoke_json` (`crates/ironclaw_capabilities/src/host.rs`) → dispatcher → wasm/scripts/mcp/first-party lanes | `grep -n "invoke_json" crates/ironclaw_capabilities/src/host.rs` |
 | Reply to browser | SSE projection drain: `stream_events` (`crates/ironclaw_webui/src/webui_v2/handlers.rs`) over `ProjectionStream` | `grep -n "stream_events" crates/ironclaw_webui/src/webui_v2/handlers.rs` |
 
 ## v1 anchors (legacy maintenance only)
 
-Message flow: `src/agent/agent_loop.rs` (`handle_message`, `run_agentic_loop`) → `crates/ironclaw_llm/src/reasoning.rs` (`respond_with_tools`) → `crates/ironclaw_llm/src/nearai_chat.rs`. Web/SSE: `src/channels/web/` (`handlers/`, `platform/`, `features/`) → `crates/ironclaw_gateway/static/js/core/sse.js`. Tools: `src/tools/registry.rs` → `src/agent/agent_loop.rs` `execute_chat_tool()` → `crates/ironclaw_safety/src/sanitizer.rs`. Engine v2 bridge: `src/bridge/` ↔ `crates/ironclaw_engine`.
+*(This section used to carry a v1 flow map through `src/agent/`, `src/channels/web/`, `src/tools/`, `src/bridge/` and `crates/ironclaw_gateway`. Every one of those paths has been deleted with the monolith; the Reborn anchors above are the only map.)*
 
 ## Tracing instructions
 

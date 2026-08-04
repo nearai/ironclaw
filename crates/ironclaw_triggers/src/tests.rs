@@ -25,6 +25,18 @@ fn user(value: &str) -> UserId {
     UserId::new(value).expect("valid user")
 }
 
+#[test]
+fn trigger_id_new_generates_a_parseable_ulid() {
+    let trigger_id = TriggerId::new();
+    let encoded = trigger_id.to_string();
+
+    assert_eq!(encoded.len(), 26);
+    assert_eq!(
+        TriggerId::parse(&encoded).expect("generated id parses"),
+        trigger_id
+    );
+}
+
 fn sample_record(
     trigger_id: TriggerId,
     tenant_id: TenantId,

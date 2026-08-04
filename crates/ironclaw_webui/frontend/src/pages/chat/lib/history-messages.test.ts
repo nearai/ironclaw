@@ -131,7 +131,7 @@ test("messagesFromTimeline: rejected_busy user record maps to error status with 
   );
 });
 
-test("messagesFromTimeline: deferred_busy user record maps to error status with durable resend copy", () => {
+test("messagesFromTimeline: deferred_busy user record maps to queued status with no error copy", () => {
   const messages = messagesFromTimeline([
     {
       message_id: "msg-db",
@@ -145,11 +145,11 @@ test("messagesFromTimeline: deferred_busy user record maps to error status with 
   assert.equal(messages.length, 1);
   assert.equal(messages[0].id, "msg-msg-db");
   assert.equal(messages[0].role, "user");
-  assert.equal(messages[0].status, "error");
-  assert.equal(
-    messages[0].error,
-    "This message wasn't sent because Ironclaw was busy. Resend it to try again.",
-  );
+  // A deferred-busy message was accepted-and-queued behind the active run, so
+  // it renders as "queued" (matching the optimistic live path), never as an
+  // error, and carries no "resend it" copy.
+  assert.equal(messages[0].status, "queued");
+  assert.equal(messages[0].error, undefined);
 });
 
 test("messagesFromTimeline: finalized assistant records are marked as final replies", () => {
@@ -361,7 +361,7 @@ test("messagesFromTimeline: projects attachment refs into render cards", () => {
           mime_type: "application/pdf",
           filename: "report.pdf",
           size_bytes: 2048,
-          storage_key: "attachments/2026-06-10/m1-0-report.pdf",
+          storage_key: "/workspace/attachments/2026-06-10/m1-0-report.pdf",
           extracted_text: "quarterly numbers",
         },
       ],
@@ -383,8 +383,78 @@ test("messagesFromTimeline: projects attachment refs into render cards", () => {
       size_label: "2 KB",
       preview_url: null,
       fetch_url: null,
+      workspace_path: "/workspace/attachments/2026-06-10/m1-0-report.pdf",
     },
   ]);
+});
+
+test("messagesFromTimeline: preserves assistant text and projects attachment cards", () => {
+  const messages = messagesFromTimeline([
+    {
+      message_id: "assistant-1",
+      kind: "assistant",
+      content:
+        "Literal [ bracket stays.\nCreated both files:\n" +
+        "1. [Readable report](/workspace/report.txt)\n" +
+        "2. [/workspace/data.csv](/workspace/data.csv)\n" +
+        "3. [Not attached](/workspace/missing.txt)",
+      sequence: 1,
+      status: "final",
+      attachments: [
+        {
+          id: "report",
+          kind: "document",
+          mime_type: "text/plain",
+          filename: "report.txt",
+          size_bytes: 3,
+          storage_key: "/workspace/report.txt",
+        },
+        {
+          id: "data",
+          kind: "document",
+          mime_type: "text/csv",
+          filename: "data.csv",
+          size_bytes: 4,
+          storage_key: "/workspace/data.csv",
+        },
+        {
+          id: "video",
+          mime_type: "video/mp4",
+          filename: "clip.mp4",
+          size_bytes: 5,
+          storage_key: "/workspace/clip.mp4",
+        },
+        {
+          id: "other",
+          mime_type: "model/gltf-binary",
+          filename: "scene.glb",
+          size_bytes: 6,
+          storage_key: "/workspace/scene.glb",
+        },
+      ],
+    },
+  ]);
+
+  assert.equal(
+    messages[0].content,
+    "Literal [ bracket stays.\nCreated both files:\n" +
+      "1. [Readable report](/workspace/report.txt)\n" +
+      "2. [/workspace/data.csv](/workspace/data.csv)\n" +
+      "3. [Not attached](/workspace/missing.txt)",
+  );
+  assert.deepEqual(
+    messages[0].attachments.map((attachment) => ({
+      id: attachment.id,
+      filename: attachment.filename,
+      kind: attachment.kind,
+    })),
+    [
+      { id: "report", filename: "report.txt", kind: "document" },
+      { id: "data", filename: "data.csv", kind: "document" },
+      { id: "video", filename: "clip.mp4", kind: "video" },
+      { id: "other", filename: "scene.glb", kind: "other" },
+    ],
+  );
 });
 
 // A landed image gets a `fetch_url` so the bubble can lazily resolve a

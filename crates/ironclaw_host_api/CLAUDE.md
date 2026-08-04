@@ -1,6 +1,7 @@
 # ironclaw_host_api guardrails
 
-- Own shared authority vocabulary only: IDs, scopes, paths, actions, decisions, resources, approvals, audits, dispatch port contracts, and host-owned ingress descriptors.
+- Own shared authority vocabulary only: IDs, scopes, paths, actions, decisions, resources, approvals, audits, dispatch port contracts, host-owned ingress descriptors, and the turn vocabulary (`turn`).
+- `turn` is the **complete** canonical turn language, not a partial one: if a crate needs to name a turn — its scope, ids, refs, status, gate kind, event cursor, or origin adapter — it depends on this crate, not on `ironclaw_turns`. When a turn type has to be named outside the turn kernel, the answer is to finish moving it here, never to re-export it from `ironclaw_turns`.
 - Do not depend on any other `ironclaw_*` system-service or runtime crate.
 - Keep behavior to validation/serialization helpers; do not add runtime execution, persistence, policy engines, or product workflow.
 - HTTP ingress contracts are route/policy vocabulary only. Listener binding, Axum/router mounting, auth enforcement, scope extraction, body/rate limits, CORS/Origin checks, audit emission, and effect dispatch belong to host composition.

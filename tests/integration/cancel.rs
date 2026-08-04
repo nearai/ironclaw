@@ -8,8 +8,10 @@
 //! wired coordinator fan-out.
 //!
 //! Also covers C-ERRORS: a leaked-permit regression guard (precedent: PR
-//! #5206's RAII `ReservationGuard` bugs), thread-busy rejection, and a
-//! non-retryable provider-`Err` reaching a categorized `TurnStatus::Failed`.
+//! #5206's RAII `ReservationGuard` bugs) and a non-retryable provider-`Err`
+//! reaching a categorized `TurnStatus::Failed`. (The busy-thread submit
+//! scenario lives in `steering.rs` now that a busy submit queues as steering
+//! input instead of rejecting.)
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -98,43 +100,6 @@ async fn cancelled_run_does_not_block_a_second_turn_on_the_same_thread() {
         .assert_reply_contains("second turn done")
         .await
         .expect("second turn's reply persisted");
-}
-
-/// A second submit on a thread whose first run is still active (parked) must
-/// be rejected — `InboundTurnOutcome::RejectedBusy` — not silently queued or
-/// accepted. Releases the park afterward so no parked task leaks past the test.
-#[tokio::test]
-async fn busy_reject_when_thread_already_has_an_active_run() {
-    let gate = ParkingModelGate::new();
-    let harness = RebornIntegrationHarness::test_default()
-        .park_model(gate.clone())
-        .script([RebornScriptedReply::text("first turn done")])
-        .build()
-        .await
-        .expect("harness builds");
-
-    let run_id = harness
-        .submit_turn_async("do a long thing")
-        .await
-        .expect("first turn submitted");
-    tokio::time::timeout(Duration::from_secs(10), gate.wait_until_parked())
-        .await
-        .expect("model call parks before the timeout");
-
-    let ack = harness
-        .submit_turn_ack("interrupt with something else")
-        .await
-        .expect("the busy-reject submit itself does not error");
-    assert!(
-        matches!(ack, ProductInboundAck::RejectedBusy { .. }),
-        "expected RejectedBusy while the thread has an active run, got {ack:?}"
-    );
-
-    gate.release();
-    harness
-        .wait_for_status(run_id, TurnStatus::Completed)
-        .await
-        .expect("first turn still completes after the rejected second submit");
 }
 
 /// A raw provider `Err` classified non-retryable by `ironclaw_llm`

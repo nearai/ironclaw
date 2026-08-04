@@ -123,6 +123,13 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// default) matches every pre-existing harness: no Google OAuth backend,
     /// i.e. this instance is "unconfigured".
     pub(crate) google_oauth_backend_for_test: bool,
+    /// Raise the deployment's workspace scoping to per-caller, exactly as
+    /// `serve` does unconditionally
+    /// (`RebornRuntimeInput::with_workspace_scoped_per_caller_services`,
+    /// which the harness applies in `new_with_options`). `false` (the
+    /// default) keeps the Standalone profile's shared workspace root that
+    /// every pre-existing harness assertion (`workspace_file_path`) assumes.
+    pub(crate) workspace_scoped_per_caller: bool,
 }
 
 impl HostRuntimeHarnessOptions {
@@ -148,6 +155,7 @@ impl HostRuntimeHarnessOptions {
             durable_capability_io: false,
             trigger_active_run_lookup_requested: false,
             google_oauth_backend_for_test: false,
+            workspace_scoped_per_caller: false,
         }
     }
 
@@ -287,6 +295,13 @@ impl HostRuntimeHarnessOptions {
     /// `google_oauth_backend_for_test`'s doc.
     pub(crate) fn with_google_oauth_backend_for_test(mut self) -> Self {
         self.google_oauth_backend_for_test = true;
+        self
+    }
+
+    /// Raise workspace scoping to per-caller. See
+    /// `workspace_scoped_per_caller`'s doc.
+    pub(crate) fn with_workspace_scoped_per_caller(mut self) -> Self {
+        self.workspace_scoped_per_caller = true;
         self
     }
 }

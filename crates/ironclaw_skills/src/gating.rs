@@ -1,3 +1,19 @@
+//! Requirement gating for skill activation: does the environment actually have what a skill
+//! declares it needs (`requires.bins` / `requires.env` / `requires.config`)?
+//!
+//! **Restored after main deleted this module as verified-dead (#6943).** It was genuinely dead, and
+//! the reason is the bug: `requires` was parsed into the manifest and then never consulted on the
+//! activation path. `check_requirements_sync` existed and its only callers were inside
+//! `SkillRegistry`, which has no consumers outside its own crate — so a skill declaring a binary it
+//! needs was offered, activated cleanly, and failed later in the shell with nothing connecting the
+//! failure back to the unmet requirement.
+//!
+//! This PR adds the first real caller (`unmet_requirements_refusal` in
+//! `ironclaw_first_party_extension_ports::activation`), which refuses activation and names the
+//! missing requirement so the model can adapt instead of meeting it as an unexplained shell error
+//! several steps later. Deleting the module was correct at the time; it is not correct once the
+//! requirement is enforced.
+
 //! Requirements gating for skills.
 //!
 //! Checks that a skill's declared requirements (binaries, environment variables,

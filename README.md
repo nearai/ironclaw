@@ -190,13 +190,10 @@ ironclaw config set webui.token --rotate
 ```
 
 Secret values never accept a positional argument; IronClaw prompts for them
-without echoing the value. Configure Slack credentials and channel mappings
-from the WebUI Extensions page. To enable its route from the CLI, use:
-
-```bash
-ironclaw config set slack.enabled true
-ironclaw service restart
-```
+without echoing the value. Channels such as Slack and Telegram have no
+configuration-file settings and no CLI enablement key: install the extension
+and complete its setup on the WebUI Extensions page, which is what makes the
+route serve.
 
 Configuration writes never restart the service automatically. Run
 `ironclaw service restart` after a change that affects the running service,

@@ -6,11 +6,11 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{ids::TenantId, path::ScopedPath, resource::ResourceScope};
+use ironclaw_loop_contracts::{LoopRunContext, SkillVisibility};
 use ironclaw_skills::{
     INSTALL_METADATA_FILE_NAME, InstalledSkillMetadata, MAX_INSTALL_METADATA_BYTES,
     MAX_PROMPT_FILE_SIZE, SkillTrust, parse_skill_md,
 };
-use ironclaw_turns::run_profile::{LoopRunContext, SkillVisibility};
 use parking_lot::Mutex as ParkingMutex;
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::warn;
@@ -579,10 +579,10 @@ mod tests {
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
     };
-    use ironclaw_turns::{
-        RunProfileResolutionRequest, RunProfileResolver, TurnActor, TurnId, TurnRunId, TurnScope,
-        run_profile::InMemoryRunProfileResolver,
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver,
     };
+    use ironclaw_turns::{TurnActor, TurnId, TurnRunId, TurnScope};
 
     fn skill_md(name: &str, description: &str) -> String {
         format!("---\nname: {name}\ndescription: {description}\n---\nUse the {name} skill.\n")

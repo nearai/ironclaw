@@ -9,7 +9,7 @@ source: tests/integration/support/golden.rs
       "role": "system"
     },
     {
-      "content": "what's in this image?\n\n<attachments>\n<attachment index=\"1\" type=\"image\" filename=\"diagram.png\" mime=\"image/png\" project_path=\"/workspace/attachments/<DATE>/evt-1-1-diagram.png\" size=\"8B\">\nSaved to project file: /workspace/attachments/<DATE>/evt-1-1-diagram.png\n[Image attached — the file is saved at the project path above; read it from there to view it.]\n</attachment>\n</attachments>",
+      "content": "what's in this image?\n\n<attachments>\n<attachment index=\"1\" type=\"image\" filename=\"diagram.png\" mime=\"image/png\" project_path=\"/workspace/attachments/<DATE>/evt-1/1-diagram.png\" size=\"8B\">\nSaved to project file: /workspace/attachments/<DATE>/evt-1/1-diagram.png\n[Image attached — the file is saved at the project path above; read it from there to view it.]\n</attachment>\n</attachments>",
       "content_parts": [
         {
           "image_url": {

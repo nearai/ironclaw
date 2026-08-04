@@ -4,6 +4,30 @@
 **Date:** 2026-05-06  
 **Depends on:** [`turn-persistence.md`](turn-persistence.md), [`turns-agent-loop.md`](turns-agent-loop.md), [`migration-compatibility.md`](migration-compatibility.md)
 
+> ✎ **Amended 2026-08-02 (CHECKLIST WS5, the `conversations`/`threads` naming
+> trap).** Three of this contract's answers moved, so they are corrected in
+> place below rather than left to be re-derived from code:
+>
+> 1. **`SessionThreadService` is now `InboundConversationService`**, and its DTO
+>    trio renamed with it (`AcceptInboundMessageRequest` →
+>    `AcceptConversationMessageRequest`, `AcceptedInboundMessage*` →
+>    `AcceptedConversationMessage*`, `ThreadMessageRecord` →
+>    `ConversationMessageRecord`). The old names collided with
+>    `ironclaw_threads`, and a caller that picked the wrong
+>    `accept_inbound_message` wrote to the wrong store and still compiled.
+> 2. **`ExternalActorRef` / `ExternalConversationRef` are no longer owned here.**
+>    Their one home is `ironclaw_extension_contracts::external`;
+>    `ironclaw_conversations` consumes them. It used to declare a second,
+>    field-divergent copy, and `ironclaw_product` bridged the two with
+>    hand-written translators that are now deleted.
+> 3. **The route's third field is `topic_id`, not `thread_id`** — it is the
+>    *channel's* sub-conversation, never a canonical `ThreadId`. Only the Rust
+>    spelling changed: the durable record keeps `thread_id`, deliberately, so a
+>    rollback can still read it. See `ironclaw_conversations::stored_refs`.
+>
+> `crates/ironclaw_architecture/tests/reborn_conversations_threads_attachments.rs`
+> pins 1 and 2 — the first rule by discovery, not enumeration.
+
 ---
 
 ## 1. Purpose
@@ -31,7 +55,7 @@ Reply-target binding is separate from external ingress identity. This contract b
 | Component | Owns | Does not own |
 | --- | --- | --- |
 | `ConversationBindingService` | Pairing/authenticated actor resolution, external conversation binding lookup/creation keyed by stable conversation identity, explicit conversation-to-thread links, source/reply target binding refs, reply-target validation with adapter installation and external routing data | Raw transcript content, run lifecycle, product payload parsing |
-| `SessionThreadService` | Accepted inbound message refs, external event idempotency, message-to-thread/source/reply refs | Durable transcript schema details owned by #3204, turn/run locks |
+| `InboundConversationService` (was `SessionThreadService`) | Accepted inbound message refs, external event idempotency, message-to-thread/source/reply refs | Durable transcript schema details owned by #3204, turn/run locks |
 | `InboundTurnService` | Facade composition: resolve binding, accept message, submit canonical turn; current untrusted ingress entry point and planned host-trusted ingress entry point | Adapter protocol parsing, assistant egress fanout |
 | `TurnCoordinator` | Turn/run admission and lifecycle after accepted message refs exist | External actor/conversation parsing, raw message storage |
 
@@ -41,8 +65,10 @@ Reply-target binding is separate from external ingress identity. This contract b
 
 `crates/ironclaw_conversations` provides the first contract slice:
 
-- typed external refs: `AdapterKind`, `AdapterInstallationId`, `ExternalActorRef`, `ExternalConversationRef`, `ExternalEventId`;
-- `ConversationBindingService`, `SessionThreadService`, and `InboundTurnService` traits/DTOs;
+- adapter-scoped typed refs it declares: `AdapterKind`, `AdapterInstallationId`, `ExternalEventId`
+  (the external actor/conversation pair — `ExternalActorRef`, `ExternalConversationRef` —
+  is *consumed* from `ironclaw_extension_contracts::external`, not declared here);
+- `ConversationBindingService`, `InboundConversationService`, and `InboundTurnService` traits/DTOs;
 - `InMemoryConversationServices` for semantic contract tests and future adapter wiring spikes;
 - optional `RebornLibSqlConversationServices` and `RebornPostgresConversationServices` durable wrappers backed by normalized PostgreSQL/libSQL tables for pairings, threads/participants, bindings, reply targets, event routes, accepted messages, replay records, submit idempotency keys, and submit responses;
 - caller-level tests proving the facade submits only canonical refs to `TurnCoordinator`.
@@ -60,11 +86,11 @@ This is not the final durable transcript store. The conversation contract stores
 5. First-contact binding creation does not trust raw adapter-supplied agent/project scope hints. Scope selection must happen through a trusted thread-creation/authorization seam or by explicit linking to an existing accessible thread.
 6. Pairing/authenticated actor resolution is scoped by `(tenant_id, adapter_kind, adapter_installation_id, external_actor_ref)`; a pairing on one tenant or adapter installation does not authorize another.
 7. External actor/conversation refs stay structured for equality. String fingerprints, when exposed for diagnostics, must be collision-safe for delimiter-like external IDs.
-8. Conversation binding identity uses stable conversation fields `(space_id, conversation_id, thread_id)`; per-message external IDs do not fork bindings or canonical threads.
+8. Conversation binding identity uses stable conversation fields `(space_id, conversation_id, topic_id)`; per-message external IDs do not fork bindings or canonical threads. `topic_id` is the channel's sub-conversation (Slack thread, Telegram topic), never a canonical `ThreadId`; the durable record still spells it `thread_id` so a rollback can read it.
 9. Explicit linking resolves the target thread inside the requested tenant; a caller cannot attach a different tenant's thread by reusing or guessing a thread id.
 10. Explicit linking is idempotent for the same target thread and fails closed rather than silently retargeting an already-bound external conversation to a different thread, including when only per-message external IDs differ.
 11. External inbound idempotency is keyed by `(tenant_id, source_binding_ref, external_event_id)` and replays the original accepted message ref and canonical actor without inserting a duplicate message only after route/ref validation passes; duplicate retries with mismatched stable routes fail closed. Implementations must reserve installation-wide external event IDs at resolution time and reject replays on a different stable conversation route before creating a second canonical binding/thread.
-12. Adapter retries after a transient turn-submission failure must retry `TurnCoordinator.submit_turn(...)` with the same accepted message ref, actor, original received timestamp, and original run-profile request until the accepted message is marked submitted, even if live pairing state changes after the original acceptance. Retry attempts must not reuse a submit idempotency key that the turn store can permanently replay as a transient failure; retries after a successful submission replay the original `SubmitTurnResponse` and do not submit a duplicate turn. Thread-busy admission for a user message is NOT a transient failure: it yields a durable `RejectedBusy` terminal outcome (settled; the user resends a new message rather than the adapter retrying the same accepted message). A duplicate delivery of an external event whose prior admission settled as `RejectedBusy` replays that terminal outcome using the original submit idempotency key and does not resubmit the turn.
+12. Adapter retries after a transient turn-submission failure must retry `TurnCoordinator.submit_turn(...)` with the same accepted message ref, actor, original received timestamp, and original run-profile request until the accepted message is marked submitted, even if live pairing state changes after the original acceptance. Retry attempts must not reuse a submit idempotency key that the turn store can permanently replay as a transient failure; retries after a successful submission replay the original `SubmitTurnResponse` and do not submit a duplicate turn. Thread-busy admission for a user message is NOT a transient failure. With a host steering input queue wired (the default composition), it settles as a durable `DeferredBusy` outcome: the accepted message is stored `Queued`, bound to the active run, and enqueued as steering input the running loop drains — the adapter does not retry (the queue owns delivery, and the transcript row flips `Queued` → `Submitted` when the loop consumes it). Without an input queue — or when the active run's resolved profile disallows steering (`SteeringPolicy::allow_steering = false`) — admission settles as the durable `RejectedBusy` terminal outcome (the user resends a new message rather than the adapter retrying the same accepted message). A run cancelled before draining its queue has its still-queued messages flipped `Queued` → `RejectedBusy` by the cancel-time reconciler, never auto-resubmitted. A duplicate delivery of an external event whose prior admission settled as `RejectedBusy` replays that terminal outcome using the original submit idempotency key and does not resubmit the turn. A `DeferredBusy` (queued) replay additionally RE-ENQUEUES the steering input idempotently before replaying — the `Queued` row is written before the enqueue, so a crash between the two must not leave the replay treating the row as proof of enqueue; a queued replay whose bound run is terminal or gone settles the row as `RejectedBusy` instead.
 13. Bound group/channel messages are authorized against thread participants when the adapter explicitly marks the external conversation route as shared; external channel membership alone is insufficient.
 14. Source binding and reply target binding refs are distinct. Egress must validate the stored reply target for the current actor/thread before sending, and validation returns the adapter kind, adapter installation id, and full external conversation route needed to address the reply. Reply routes are owner-scoped by default to the exact external actor pairing key, not just `UserId`; explicit shared/group markers may monotonically widen ordinary reply routes to thread participants. Authority-bearing outbound payloads such as approval prompts and auth prompts must not use shared/group widening and require exact-owner validation.
 15. Accepted inbound messages mint message-scoped reply target refs that snapshot the exact external route and route access policy for that inbound message. Stable binding-level reply target refs strip per-message IDs; reply routing for message-scoped refs must preserve them. Ingress writes must use the canonical binding-level reply ref, not an older message-scoped reply snapshot.

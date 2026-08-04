@@ -1,56 +1,22 @@
-/// Failure category identifier for model provider credit exhaustion.
-/// Exposed for cross-crate consumers that project this category to a user-facing message.
-pub const MODEL_CREDITS_EXHAUSTED_CATEGORY: &str = "model_credits_exhausted";
+//! Failure **classification** — deciding which category a failed stage gets.
+//!
+//! The category identifiers themselves are data and live in
+//! `ironclaw_host_api::failure::categories` (moved there by WS1.7 / PROPOSAL
+//! §6.1.1, so the product projection can key user-facing copy off them without
+//! depending on this crate). What stays here is the part that is *not* data:
+//! the stage→category mapping, which is typed on agent-loop vocabulary this
+//! crate is allowed to see and `ironclaw_host_api` is not.
 
-/// Failure category identifier for model provider credential or endpoint configuration failures.
-/// Exposed for cross-crate consumers that project this category to a user-facing message.
-pub const MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY: &str = "model_credentials_unavailable";
-
-/// Failure category for an exhausted host-configured model spend budget.
-pub const MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY: &str = "model_spend_budget_exhausted";
-
-/// Failure category for durable host-side resource accounting outages.
-/// This must not be presented as a provider balance or configured-budget outcome.
-pub const BUDGET_ACCOUNTING_FAILED_CATEGORY: &str = "budget_accounting_failed";
-
-/// Failure category for assistant output that could not be durably committed.
-pub const TRANSCRIPT_WRITE_FAILED_CATEGORY: &str = "transcript_write_failed";
-
-/// A deterministic checkpoint validation rejection.
-///
-/// The rejected state is never used to run a model or capability. The
-/// independent turn lifecycle journal records the terminal explanation.
-pub const CHECKPOINT_REJECTED_CATEGORY: &str = "checkpoint_rejected";
-
-/// Model-stage failures that are PERMANENT for an identical retry.
-///
-/// These four kinds previously returned no category and fell through to
-/// `host_stage_unavailable_model`, which `is_auto_retriable_category` treats as
-/// a transient outage that re-drives cleanly. None of them can succeed on an
-/// identical retry — policy does not change between attempts and a malformed
-/// request stays malformed — so the run burned retries on a call that could not
-/// work and reported a generic host outage instead of the real cause.
-///
-/// Deliberately NOT in `is_auto_retriable_category`.
-pub const MODEL_STAGE_REQUEST_INVALID_CATEGORY: &str = "model_stage_request_invalid";
-/// Model-stage call refused by policy. Permanent; see
-/// [`MODEL_STAGE_REQUEST_INVALID_CATEGORY`].
-pub const MODEL_STAGE_POLICY_DENIED_CATEGORY: &str = "model_stage_policy_denied";
-/// Model-stage call outside the granted scope — configuration-shaped, not
-/// transient. See [`MODEL_STAGE_REQUEST_INVALID_CATEGORY`].
-pub const MODEL_STAGE_SCOPE_MISMATCH_CATEGORY: &str = "model_stage_scope_mismatch";
-
-pub const HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY: &str = "host_stage_unavailable_prompt";
-pub const HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY: &str = "host_stage_unavailable_model";
-pub const HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY: &str = "host_stage_unavailable_capability";
-pub const HOST_STAGE_UNAVAILABLE_TRANSCRIPT_CATEGORY: &str = "host_stage_unavailable_transcript";
-pub const HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY: &str = "host_stage_unavailable_checkpoint";
-pub const HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY: &str = "host_stage_unavailable_input";
-pub const HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY: &str = "host_stage_unavailable_unknown";
+use ironclaw_host_api::failure::categories::{
+    HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY, HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY, HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY, HOST_STAGE_UNAVAILABLE_TRANSCRIPT_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY,
+};
 
 pub(crate) const MODEL_CREDITS_EXHAUSTED_REASON_KIND:
-    ironclaw_turns::run_profile::AgentLoopHostErrorReasonKind =
-    ironclaw_turns::run_profile::AgentLoopHostErrorReasonKind::ModelCreditsExhausted;
+    ironclaw_loop_contracts::AgentLoopHostErrorReasonKind =
+    ironclaw_loop_contracts::AgentLoopHostErrorReasonKind::ModelCreditsExhausted;
 
 pub(crate) fn host_stage_unavailable_category(reason: &str) -> &'static str {
     let stage = reason

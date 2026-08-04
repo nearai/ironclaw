@@ -47,6 +47,7 @@ account guide rather than introducing another bespoke runner layout.
 | `auth-channels` | WASM channel auth diagnostic lane | GitHub-hosted | Manual | No |
 | `auth-live-seeded` | Real-provider runtime checks using seeded tokens against a clean DB | GitHub-hosted | Hourly and manual | No |
 | `auth-browser-consent` | Real browser-consent OAuth using Playwright against provider login UIs | GitHub-hosted | Nightly and manual | No |
+| `reborn-webui-v2-live-qa` | Full implemented non-Telegram QA matrix against real model and provider surfaces | GitHub-hosted | Every 3 hours and manual | Opens issue on scheduled failure |
 
 ## Required Repository Configuration
 
@@ -88,13 +89,9 @@ Current provider material includes:
 
 ### Reborn WebUI v2 Slack lane
 
-The Reborn WebUI v2 live QA runner must not write legacy `[slack]` setup fields
-into `config.toml`. The generated Reborn config only enables Slack:
-
-```toml
-[slack]
-enabled = true
-```
+The Reborn WebUI v2 live QA runner does not write the retired `[slack]`
+configuration section. Slack cases are gated on the required live credentials
+below and their `auth.test` preflight.
 
 Bot installation setup is applied headlessly after `ironclaw serve`
 boots by saving the manifest-declared `extension.slack` group through the

@@ -12,7 +12,7 @@
 ## What This Crate Owns
 
 - Resource reservation, reconciliation, release, and quota accounting, currently:
-- The `ResourceGovernor` trait with `InMemoryResourceGovernor` and `PersistentResourceGovernor`; the `ResourceGovernorStore` trait with `JsonFileResourceGovernorStore` / `ResourceGovernorStore` backends.
+- The `ResourceGovernor` trait (`src/lib.rs`) with `InMemoryResourceGovernor`, `PersistentResourceGovernor`, and `FilesystemResourceGovernor` (`src/filesystem_governor.rs`, the one host-runtime wires); the `ResourceGovernorStorePort` trait with the `JsonFileResourceGovernorStore` and `ResourceGovernorStore` (`src/resource_store.rs`) implementations. Re-derive with `rg -n "pub (trait|struct) \\w*Governor\\w*" src/`.
 - Budget dimensions (`ResourceDimension`: `Usd`, `InputTokens`, `OutputTokens`, `WallClockMs`, `OutputBytes`, `NetworkEgressBytes`, `ProcessCount`, `ConcurrencySlots`) scoped by `ResourceAccount` (tenant/user/project/agent/mission/thread), with `ResourceLimits`, `ResourceValue`, `ResourceTally`, `ResourceDenial`, `ResourceError`, `ResourceGovernorSnapshot`.
 - Reservation/receipt vocabulary `ResourceReservation` / `ResourceReceipt`, re-exported from `ironclaw_host_api`.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.

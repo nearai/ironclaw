@@ -6,7 +6,7 @@ use ironclaw_auth::{
 };
 use ironclaw_host_api::{
     ids::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId},
-    mount::MountView,
+    mount::{MountPermissions, MountView},
     resource::ResourceScope,
 };
 
@@ -18,9 +18,9 @@ use super::super::super::extension_surface::{
 use super::super::super::github;
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{
-    HarnessResult, HostRuntimeCapabilityHarness, RecordingNetworkHttpEgress,
+    HarnessResult, HostRuntimeCapabilityHarness, RecordingNetworkHttpEgress, VendorResponseRouter,
     bundled_extension_provider_trust, capability_ids_from_strs, standalone_all_effects,
-    wildcard_test_policy,
+    wildcard_test_policy, workspace_mounts,
 };
 
 pub(crate) fn extension_lifecycle_tools_profile() -> HarnessResult<ToolsProfile> {
@@ -356,10 +356,8 @@ fn prompt_description_files(
     let fixture_root = repo_root
         .join("tests/fixtures/extension_prompt_trust")
         .join(package_id);
-    let module = std::fs::read(
-        repo_root
-            .join("crates/ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm"),
-    )?;
+    let module =
+        std::fs::read(repo_root.join("crates/extensions/packages/github/wasm/github_tool.wasm"))?;
     let mut files = vec![
         (
             "manifest.toml".to_string(),
@@ -640,14 +638,15 @@ impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
 pub(crate) struct AcmeFixtureChannelAdapter;
 
 #[async_trait::async_trait]
-impl ironclaw_product::ChannelAdapter for AcmeFixtureChannelAdapter {
+impl ironclaw_extension_contracts::channel_adapter::ChannelAdapter for AcmeFixtureChannelAdapter {
     fn inbound(
         &self,
         request: ironclaw_product::VerifiedInbound<'_>,
     ) -> Result<ironclaw_product::InboundOutcome, ironclaw_product::ChannelError> {
+        use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
         use ironclaw_product::{
             ChannelError, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-            ImmediateResponse, InboundOutcome, NormalizedInboundMessage, ProductTriggerReason,
+            ImmediateResponse, InboundOutcome, ProductTriggerReason,
         };
         let parse = |reason: String| ChannelError::Parse { reason };
         let value: serde_json::Value =
@@ -701,7 +700,7 @@ impl ironclaw_product::ChannelAdapter for AcmeFixtureChannelAdapter {
     async fn deliver(
         &self,
         envelope: ironclaw_product::OutboundEnvelope,
-        egress: &dyn ironclaw_host_api::tool_adapter::RestrictedEgress,
+        egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
     ) -> Result<ironclaw_product::DeliveryReport, ironclaw_product::ChannelError> {
         use ironclaw_product::{ChannelError, OutboundPart, PartDeliveryOutcome};
         if envelope.parts.is_empty() {
@@ -711,14 +710,15 @@ impl ironclaw_product::ChannelAdapter for AcmeFixtureChannelAdapter {
         }
         let mut parts = Vec::new();
         for part in &envelope.parts {
-            let outcome = match part {
-                OutboundPart::Text(text) => {
-                    let body = serde_json::json!({
-                        "conversation": envelope.target.conversation.conversation_id(),
-                        "text": text,
-                    });
-                    let response = egress
-                        .send(ironclaw_host_api::tool_adapter::RestrictedEgressRequest {
+            let outcome =
+                match part {
+                    OutboundPart::Text(text) => {
+                        let body = serde_json::json!({
+                            "conversation": envelope.target.conversation.conversation_id(),
+                            "text": text,
+                        });
+                        let response = egress
+                        .send(ironclaw_extension_contracts::tool_adapter::RestrictedEgressRequest {
                             method: ironclaw_host_api::action::NetworkMethod::Post,
                             url: "https://api.acme.example/messages".to_string(),
                             headers: vec![(
@@ -730,24 +730,24 @@ impl ironclaw_product::ChannelAdapter for AcmeFixtureChannelAdapter {
                             body_credentials: Vec::new(),
                         })
                         .await;
-                    match response {
-                        Ok(response) if (200..300).contains(&response.status) => {
-                            PartDeliveryOutcome::Sent {
-                                vendor_message_ref: None,
+                        match response {
+                            Ok(response) if (200..300).contains(&response.status) => {
+                                PartDeliveryOutcome::Sent {
+                                    vendor_message_ref: None,
+                                }
                             }
+                            Ok(response) => PartDeliveryOutcome::Permanent {
+                                reason: format!("acme vendor returned status {}", response.status),
+                            },
+                            Err(error) => PartDeliveryOutcome::Retryable {
+                                reason: error.to_string(),
+                            },
                         }
-                        Ok(response) => PartDeliveryOutcome::Permanent {
-                            reason: format!("acme vendor returned status {}", response.status),
-                        },
-                        Err(error) => PartDeliveryOutcome::Retryable {
-                            reason: error.to_string(),
-                        },
                     }
-                }
-                _ => PartDeliveryOutcome::Permanent {
-                    reason: "the acme fixture delivers text parts only".to_string(),
-                },
-            };
+                    _ => PartDeliveryOutcome::Permanent {
+                        reason: "the acme fixture delivers text parts only".to_string(),
+                    },
+                };
             let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
             parts.push(outcome);
             if !sent {
@@ -761,14 +761,14 @@ impl ironclaw_product::ChannelAdapter for AcmeFixtureChannelAdapter {
 struct AcmeFixtureToolAdapter;
 
 #[async_trait::async_trait]
-impl ironclaw_host_api::tool_adapter::ToolAdapter for AcmeFixtureToolAdapter {
+impl ironclaw_extension_contracts::tool_adapter::ToolAdapter for AcmeFixtureToolAdapter {
     async fn invoke(
         &self,
-        call: ironclaw_host_api::tool_adapter::ToolCall,
-        _ports: &ironclaw_host_api::tool_adapter::ToolPorts<'_>,
+        call: ironclaw_extension_contracts::tool_adapter::ToolCall,
+        _ports: &ironclaw_extension_contracts::tool_adapter::ToolPorts<'_>,
     ) -> Result<
-        ironclaw_host_api::tool_adapter::ToolResult,
-        ironclaw_host_api::tool_adapter::ToolError,
+        ironclaw_extension_contracts::tool_adapter::ToolResult,
+        ironclaw_extension_contracts::tool_adapter::ToolError,
     > {
         match call.capability_id.as_str() {
             ACME_SEND_NOTE_CAPABILITY_ID => {
@@ -783,17 +783,20 @@ impl ironclaw_host_api::tool_adapter::ToolAdapter for AcmeFixtureToolAdapter {
                 let output_bytes = serde_json::to_vec(&output)
                     .map(|bytes| bytes.len() as u64)
                     .unwrap_or_default();
-                Ok(ironclaw_host_api::tool_adapter::ToolResult {
+                Ok(ironclaw_extension_contracts::tool_adapter::ToolResult {
                     output,
                     display_preview: None,
                     output_bytes,
                 })
             }
-            _ => Err(ironclaw_host_api::tool_adapter::ToolError::Failed {
-                kind: ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::UndeclaredCapability,
-                safe_summary: None,
-                model_visible_cause: None,
-            }),
+            _ => Err(
+                ironclaw_extension_contracts::tool_adapter::ToolError::Failed {
+                    kind:
+                        ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::UndeclaredCapability,
+                    safe_summary: None,
+                    model_visible_cause: None,
+                },
+            ),
         }
     }
 }
@@ -920,8 +923,14 @@ fn delivery_vendor_router(
         ));
     }
     if request.url.contains("api.telegram.org") {
+        if request.url.contains("api.telegram.org/file/") {
+            // The manifest's path-prefixed download target streams raw bytes.
+            return Some((200, b"DATA".to_vec()));
+        }
         let body: &[u8] = if request.url.ends_with("/sendMessage") {
             br#"{"ok":true,"result":{"message_id":4242}}"#
+        } else if request.url.ends_with("/getFile") {
+            br#"{"ok":true,"result":{"file_path":"documents/report.pdf","file_size":4}}"#
         } else {
             // setWebhook / deleteWebhook and friends return a bool result.
             br#"{"ok":true,"result":true}"#
@@ -929,6 +938,22 @@ fn delivery_vendor_router(
         return Some((200, body.to_vec()));
     }
     None
+}
+
+/// The delivery router plus a scripted transient failure on the FIRST
+/// Telegram `getFile` lookup, so the attachment journey can prove the
+/// retryable-release-then-refetch ledger semantics on the production mount.
+fn delivery_vendor_router_with_flaky_get_file() -> Arc<VendorResponseRouter> {
+    let get_file_calls = std::sync::atomic::AtomicUsize::new(0);
+    Arc::new(move |request: &ironclaw_network::NetworkHttpRequest| {
+        if request.url.contains("api.telegram.org")
+            && request.url.ends_with("/getFile")
+            && get_file_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+        {
+            return Some((500, br#"{"ok":false,"error_code":500}"#.to_vec()));
+        }
+        delivery_vendor_router(request)
+    })
 }
 
 /// The acme runtime profile extended for the §5.4 delivery proofs: the
@@ -943,6 +968,12 @@ pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> 
         .push(ironclaw_host_api::ids::CapabilityId::new(
             ironclaw_host_runtime::OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
         )?);
+    profile
+        .capability_ids
+        .push(ironclaw_host_api::ids::CapabilityId::new(
+            ironclaw_host_runtime::ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
+        )?);
+    profile.options.mounts = workspace_mounts(MountPermissions::read_only())?;
     if let Some(trust) = profile.provider_trust_override.as_mut() {
         trust.push((
             ironclaw_host_api::ids::ExtensionId::new("telegram")?,
@@ -951,7 +982,7 @@ pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> 
     }
     let network_egress = Arc::new(
         RecordingNetworkHttpEgress::with_body(br#"{"ok":true}"#.to_vec())
-            .with_vendor_router(Arc::new(delivery_vendor_router)),
+            .with_vendor_router(delivery_vendor_router_with_flaky_get_file()),
     );
     profile.options = profile
         .options

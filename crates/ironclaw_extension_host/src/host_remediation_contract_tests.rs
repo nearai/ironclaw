@@ -35,12 +35,12 @@ use ironclaw_host_api::{
     result_meta::ModelDiagnostic, safe_summary::SafeSummary,
 };
 use ironclaw_host_runtime::FirstPartyCapabilityError;
-use ironclaw_reborn_config::HostRemediationText;
-use ironclaw_threads::{ToolResultReferenceEnvelope, ToolResultSafeSummary};
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     CapabilityFailureDetail, ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail,
     ToolObservationStatus, resolution,
 };
+use ironclaw_reborn_config::HostRemediationText;
+use ironclaw_threads::{ToolResultReferenceEnvelope, ToolResultSafeSummary};
 
 /// The exact string a degraded remediation collapses to. Asserted ABSENT
 /// everywhere below — this is the failure signature of the #6299 regression.
@@ -48,7 +48,7 @@ fn placeholder() -> String {
     SafeSummary::placeholder().as_str().to_string()
 }
 
-/// Drive the REAL host_api hop (`ironclaw_turns::run_profile::resolution::failed`,
+/// Drive the REAL host_api hop (`ironclaw_loop_contracts::resolution::failed`,
 /// the same constructor production uses) and return the model-visible text that
 /// reaches the verdict.
 fn text_through_host_api_hop(detail: CapabilityFailureDetail) -> Option<String> {
@@ -72,7 +72,7 @@ fn text_through_host_api_hop(detail: CapabilityFailureDetail) -> Option<String> 
 /// `validate_model_observation_text`.
 fn persists_to_thread_history(text: &str, trust: ObservationTrust) -> Result<(), String> {
     let observation = ModelVisibleToolObservation {
-        schema_version: ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+        schema_version: ironclaw_loop_contracts::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
         status: ToolObservationStatus::Error,
         summary: "the tool call failed".to_string(),
         detail: ToolObservationDetail::GenericFailure {

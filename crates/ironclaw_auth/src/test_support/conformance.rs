@@ -59,10 +59,12 @@ fn new_flow(
     expires_at: chrono::DateTime<Utc>,
 ) -> NewAuthFlow {
     NewAuthFlow {
+        requested_scopes: Vec::new(),
         id: None,
         scope: scope.clone(),
         kind: AuthFlowKind::IntegrationCredential,
         provider: provider.clone(),
+        requester_extension: None,
         challenge: AuthChallenge::OAuthUrl {
             authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                 .expect("conformance authorization url is valid"),

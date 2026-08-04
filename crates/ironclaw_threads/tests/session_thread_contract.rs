@@ -1456,6 +1456,89 @@ async fn rejected_busy_cannot_be_marked_submitted_is_terminal() {
 }
 
 #[tokio::test]
+async fn mark_message_submitted_is_idempotent_for_same_run() {
+    // The queued-message consumer (`InMemoryHostInputQueue::ack_consumed`) drives
+    // `mark_message_submitted` on an at-least-once ack path, so the SAME run may
+    // submit a message twice. A redelivered submit for the same run is an
+    // idempotent no-op; a DIFFERENT run is still rejected as an invalid
+    // transition (a message belongs to the run that first consumed it).
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("idempotent submit"),
+        })
+        .await
+        .unwrap();
+
+    service
+        .mark_message_submitted(
+            &scope("a"),
+            &thread.thread_id,
+            accepted.message_id,
+            "turn-1".into(),
+            "run-1".into(),
+        )
+        .await
+        .expect("first submit");
+
+    // Same run re-submits (redelivered ack): must be an idempotent no-op.
+    service
+        .mark_message_submitted(
+            &scope("a"),
+            &thread.thread_id,
+            accepted.message_id,
+            "turn-1".into(),
+            "run-1".into(),
+        )
+        .await
+        .expect("idempotent re-submit for the same run must succeed");
+
+    // A different run must NOT be able to claim an already-submitted message.
+    let foreign = service
+        .mark_message_submitted(
+            &scope("a"),
+            &thread.thread_id,
+            accepted.message_id,
+            "turn-2".into(),
+            "run-2".into(),
+        )
+        .await;
+    assert!(
+        matches!(
+            foreign,
+            Err(SessionThreadError::InvalidMessageTransition { .. })
+        ),
+        "a different run must not re-submit an already-submitted message, got {foreign:?}"
+    );
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages[0].status, MessageStatus::Submitted);
+    assert_eq!(history.messages[0].turn_run_id.as_deref(), Some("run-1"));
+}
+
+#[tokio::test]
 async fn assistant_streaming_updates_one_draft_and_finalizes_one_canonical_message() {
     let service = InMemorySessionThreadService::default();
     let thread = service
@@ -2695,7 +2778,7 @@ async fn summary_spanning_interior_draft_is_not_applied() {
 }
 
 #[tokio::test]
-async fn duplicate_assistant_draft_for_same_turn_run_is_idempotent() {
+async fn assistant_draft_append_allows_later_reply_in_same_turn_run() {
     let service = InMemorySessionThreadService::default();
     let thread = service
         .ensure_thread(EnsureThreadRequest {
@@ -2739,23 +2822,46 @@ async fn duplicate_assistant_draft_for_same_turn_run_is_idempotent() {
         )
         .await
         .unwrap();
-    let after_final = service
+    let retry_after_final = service
         .append_assistant_draft(AppendAssistantDraftRequest {
             scope: scope("a"),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-1".into(),
-            content: MessageContent::text("retry after final ignored"),
+            content: MessageContent::text("final answer"),
         })
         .await
         .unwrap();
 
-    assert_eq!(first.message_id, after_final.message_id);
+    assert_eq!(first.message_id, retry_after_final.message_id);
+
+    let second = service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            content: MessageContent::text("second answer"),
+        })
+        .await
+        .unwrap();
+    assert_ne!(first.message_id, second.message_id);
+    assert_eq!(second.status, MessageStatus::Draft);
+    assert_eq!(second.content.as_deref(), Some("second answer"));
+
+    service
+        .finalize_assistant_message(
+            &scope("a"),
+            &thread.thread_id,
+            second.message_id,
+            MessageContent::text("second answer"),
+        )
+        .await
+        .unwrap();
 
     service
         .redact_message(RedactMessageRequest {
             scope: scope("a"),
             thread_id: thread.thread_id.clone(),
-            message_id: first.message_id,
+            message_id: second.message_id,
             redaction_ref: "redaction/audit/assistant".into(),
         })
         .await
@@ -2769,7 +2875,7 @@ async fn duplicate_assistant_draft_for_same_turn_run_is_idempotent() {
         })
         .await
         .unwrap();
-    assert_eq!(first.message_id, after_redaction.message_id);
+    assert_eq!(second.message_id, after_redaction.message_id);
     assert_eq!(after_redaction.status, MessageStatus::Redacted);
     assert!(after_redaction.content.is_none());
 
@@ -2780,8 +2886,91 @@ async fn duplicate_assistant_draft_for_same_turn_run_is_idempotent() {
         })
         .await
         .unwrap();
-    assert_eq!(history.messages.len(), 1);
-    assert_eq!(history.messages[0].status, MessageStatus::Redacted);
+    assert_eq!(history.messages.len(), 2);
+    assert_eq!(history.messages[0].status, MessageStatus::Finalized);
+    assert_eq!(history.messages[0].content.as_deref(), Some("final answer"));
+    assert_eq!(history.messages[1].status, MessageStatus::Redacted);
+}
+
+#[tokio::test]
+async fn queued_user_message_is_resequenced_when_submitted() {
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("queued-order"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let queued = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope("queued-order"),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("queued follow-up"),
+        })
+        .await
+        .unwrap();
+    service
+        .mark_message_queued(
+            &scope("queued-order"),
+            &thread.thread_id,
+            queued.message_id,
+            "run-1".into(),
+        )
+        .await
+        .unwrap();
+    let assistant = service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope("queued-order"),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            content: MessageContent::text("assistant boundary"),
+        })
+        .await
+        .unwrap();
+    service
+        .finalize_assistant_message(
+            &scope("queued-order"),
+            &thread.thread_id,
+            assistant.message_id,
+            MessageContent::text("assistant boundary"),
+        )
+        .await
+        .unwrap();
+
+    let submitted = service
+        .mark_message_submitted(
+            &scope("queued-order"),
+            &thread.thread_id,
+            queued.message_id,
+            "turn-1".into(),
+            "run-1".into(),
+        )
+        .await
+        .unwrap();
+    assert!(assistant.sequence < submitted.sequence);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope("queued-order"),
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages[0].kind, MessageKind::Assistant);
+    assert_eq!(history.messages[1].kind, MessageKind::User);
+    assert_eq!(
+        history.messages[1].content.as_deref(),
+        Some("queued follow-up")
+    );
 }
 
 #[tokio::test]
@@ -2803,16 +2992,26 @@ async fn append_finalized_assistant_message_is_finalized_and_idempotent_by_turn_
             scope: scope("a"),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-finalized".into(),
-            content: MessageContent::text("final answer"),
+            content: MessageContent::with_attachments(
+                "final answer",
+                vec![sample_attachment_ref()],
+            ),
         })
         .await
         .unwrap();
+    // Idempotency baseline: a retry of the SAME finalized content — text AND
+    // attachment refs — reuses the existing record. (A DIFFERENT finalized
+    // reply in the same run appends a sibling instead — a steered run replies
+    // more than once; asserted below.)
     let duplicate = service
         .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
             scope: scope("a"),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-finalized".into(),
-            content: MessageContent::text("retry answer ignored"),
+            content: MessageContent::with_attachments(
+                "final answer",
+                vec![sample_attachment_ref()],
+            ),
         })
         .await
         .unwrap();
@@ -2821,6 +3020,7 @@ async fn append_finalized_assistant_message_is_finalized_and_idempotent_by_turn_
     assert_eq!(duplicate.kind, MessageKind::Assistant);
     assert_eq!(duplicate.status, MessageStatus::Finalized);
     assert_eq!(duplicate.content.as_deref(), Some("final answer"));
+    assert_eq!(duplicate.attachments, vec![sample_attachment_ref()]);
 
     let by_run = service
         .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
@@ -2832,7 +3032,82 @@ async fn append_finalized_assistant_message_is_finalized_and_idempotent_by_turn_
         .unwrap()
         .expect("finalized assistant message should be lookupable by run");
     assert_eq!(by_run.message_id, first.message_id);
+    assert_eq!(by_run.attachments, vec![sample_attachment_ref()]);
 
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
+    assert_eq!(history.messages[0].message_id, first.message_id);
+    assert_eq!(history.messages[0].status, MessageStatus::Finalized);
+    assert_eq!(
+        history.messages[0].attachments,
+        vec![sample_attachment_ref()]
+    );
+
+    // arch-exempt: large_file, steering sibling-reply coverage extends the owning contract suite, plan #5981
+    // A DIFFERENT finalized reply in the same run (steered run replying again)
+    // appends a sibling and moves the run lookup to it.
+    let sibling = service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized".into(),
+            content: MessageContent::text("steered second answer"),
+        })
+        .await
+        .unwrap();
+    assert_ne!(sibling.message_id, first.message_id);
+    assert_eq!(sibling.status, MessageStatus::Finalized);
+    let latest = service
+        .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized".into(),
+        })
+        .await
+        .unwrap()
+        .expect("latest finalized assistant message remains lookupable by run");
+    assert_eq!(latest.message_id, sibling.message_id);
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 2);
+    assert_eq!(history.messages[1].message_id, sibling.message_id);
+
+    // Attachment identity: the SAME text with a DIFFERENT attachment set is
+    // neither the same reply (reuse would silently drop the new attachment
+    // refs) nor a steered second reply (a sibling would duplicate the visible
+    // bubble). It is a mismatched replay and must fail loud — the loop
+    // transcript port pins the caller-visible rejection
+    // (`finalized_assistant_attachment_retry_rejects_mismatched_refs`).
+    let mismatch = service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized".into(),
+            content: MessageContent::with_attachments(
+                "steered second answer",
+                vec![second_attachment_ref()],
+            ),
+        })
+        .await;
+    assert!(
+        matches!(
+            mismatch,
+            Err(SessionThreadError::InvalidMessageTransition { message_id, .. })
+                if message_id == sibling.message_id
+        ),
+        "attachment-mismatched finalized replay must fail loud, got {mismatch:?}"
+    );
     let history = service
         .list_thread_history(ThreadHistoryRequest {
             scope: scope("a"),
@@ -2840,9 +3115,84 @@ async fn append_finalized_assistant_message_is_finalized_and_idempotent_by_turn_
         })
         .await
         .unwrap();
-    assert_eq!(history.messages.len(), 1);
-    assert_eq!(history.messages[0].message_id, first.message_id);
-    assert_eq!(history.messages[0].status, MessageStatus::Finalized);
+    assert_eq!(
+        history.messages.len(),
+        2,
+        "the mismatched replay must not append a duplicate visible reply"
+    );
+    assert!(
+        history.messages[1].attachments.is_empty(),
+        "the mismatched replay must not overwrite the finalized row's attachments"
+    );
+}
+
+#[tokio::test]
+async fn read_thread_message_reads_present_rows_and_maps_lookup_misses_to_none() {
+    let service = InMemorySessionThreadService::default();
+    let read_scope = scope("read-message");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: read_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-read-message").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: read_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("hello"),
+        })
+        .await
+        .unwrap();
+
+    let present = service
+        .read_thread_message(&read_scope, &thread.thread_id, accepted.message_id)
+        .await
+        .unwrap()
+        .expect("accepted message is point-readable");
+    assert_eq!(present.message_id, accepted.message_id);
+    assert_eq!(present.content.as_deref(), Some("hello"));
+
+    // Genuine lookup misses — unknown message, unknown thread, and a thread
+    // hidden by scope isolation — all read as absence, matching the
+    // filesystem backend's point-read contract.
+    assert!(
+        service
+            .read_thread_message(&read_scope, &thread.thread_id, ThreadMessageId::new())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        service
+            .read_thread_message(
+                &read_scope,
+                &ThreadId::new("thread-read-message-missing").unwrap(),
+                accepted.message_id,
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        service
+            .read_thread_message(
+                &scope("read-message-other"),
+                &thread.thread_id,
+                accepted.message_id,
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -2873,7 +3223,10 @@ async fn append_finalized_assistant_message_finalizes_existing_draft_by_turn_run
             scope: scope("a"),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-existing-draft".into(),
-            content: MessageContent::text("final answer"),
+            content: MessageContent::with_attachments(
+                "final answer",
+                vec![sample_attachment_ref()],
+            ),
         })
         .await
         .unwrap();
@@ -2881,6 +3234,7 @@ async fn append_finalized_assistant_message_finalizes_existing_draft_by_turn_run
     assert_eq!(finalized.message_id, draft.message_id);
     assert_eq!(finalized.status, MessageStatus::Finalized);
     assert_eq!(finalized.content.as_deref(), Some("final answer"));
+    assert_eq!(finalized.attachments, vec![sample_attachment_ref()]);
 }
 
 #[tokio::test]
@@ -3721,6 +4075,20 @@ fn sample_attachment_ref() -> AttachmentRef {
         // resolves through — not a raw host path.
         storage_key: Some("/workspace/attachments/2026-06-09/m1-report.pdf".into()),
         extracted_text: Some("quarterly numbers".into()),
+    }
+}
+
+/// A second, distinct attachment ref for reuse-identity cases: same shape as
+/// [`sample_attachment_ref`], different landed file.
+fn second_attachment_ref() -> AttachmentRef {
+    AttachmentRef {
+        id: "att-2".into(),
+        kind: AttachmentKind::Document,
+        mime_type: "application/pdf".into(),
+        filename: Some("addendum.pdf".into()),
+        size_bytes: Some(1024),
+        storage_key: Some("/workspace/attachments/2026-06-09/m2-addendum.pdf".into()),
+        extracted_text: Some("revised numbers".into()),
     }
 }
 
