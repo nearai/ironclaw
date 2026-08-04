@@ -54,6 +54,9 @@ BIN="${E2E_BIN:-$REPO_ROOT/target/debug/ironclaw}"
 API="http://127.0.0.1:${PORT}/api/webchat/v2"
 WORK="$(mktemp -d)"
 LOG_DIR="${E2E_LOG_DIR:-$WORK}"
+# Must exist before the first redirect: `nohup … > "$LOG_DIR/server-1.log"` fails silently on a
+# missing directory, so the server never launches and the log that would say why is never created.
+mkdir -p "$LOG_DIR"
 
 PASS=0
 FAIL=0
