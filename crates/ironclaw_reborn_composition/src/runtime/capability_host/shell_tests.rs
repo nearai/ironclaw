@@ -7,16 +7,14 @@ use ironclaw_host_api::{
     resolution::Resolution,
 };
 use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
+use ironclaw_loop_contracts::{
+    InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopRequest, LoopRunContext,
+    ProviderToolCall, RunProfileResolutionRequest, RunProfileResolver, VisibleCapabilityRequest,
+};
 use ironclaw_loop_host::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
-use ironclaw_turns::{
-    RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
-    run_profile::{
-        InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopRequest, LoopRunContext,
-        ProviderToolCall, VisibleCapabilityRequest,
-    },
-};
+use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
 use super::{
     ExtensionCapabilitySurfaceSource, RefreshingLoopCapabilityPortFactory, StagedCapabilityIo,
@@ -82,7 +80,7 @@ async fn standalone_yolo_shell_translates_workspace_workdir_without_scoped_mount
     let runtime_surfaces = services
         .local_runtime_for_test()
         .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
-    let workspace_mounts = runtime_surfaces.workspace_mounts_for_test().clone();
+    let workspace_mounts = runtime_surfaces.workspace_mount_policy_for_test().clone();
     let memory_mounts = runtime_surfaces.memory_mounts_for_test().clone();
     let policy = Arc::new(
         crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),

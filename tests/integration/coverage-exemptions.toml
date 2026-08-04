@@ -108,11 +108,17 @@ reason = "Declarative composition support facade: module declarations and re-exp
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[exemption]]
-module = "crates/ironclaw_slack_extension/src/lib.rs"
+module = "crates/extensions/packages/slack/src/lib.rs"
 reason = "Declarative Slack crate facade: module declarations and re-exports only; executable Slack modules remain covered."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[exemption]]
-module = "crates/ironclaw_telegram_extension/src/lib.rs"
+module = "crates/extensions/packages/telegram/src/lib.rs"
 reason = "Declarative Telegram crate facade: module declarations and re-exports only; executable Telegram modules remain covered."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
+
+[[exemption]]
+module = "crates/ironclaw_loop_contracts/src/lib.rs"
+reason = "Declaration-only public facade with no executable Rust statements; rustc emits no LCOV source record. Executable loop-contract behavior remains covered in the owned implementation modules."
+issue  = "https://github.com/nearai/ironclaw/issues/6524"
+

@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     LoopCancelReasonKind, LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest,
     LoopCompactionResponse, LoopContextCompactionMetadata,
 };

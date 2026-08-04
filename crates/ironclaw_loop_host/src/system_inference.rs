@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     AgentLoopHostErrorKind, LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelPolicyGuard,
     LoopRunContext, LoopSafeSummary, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput,
     SystemInferenceError, SystemInferencePort, SystemInferenceRequest, SystemInferenceResponse,
@@ -263,15 +263,13 @@ fn system_inference_ref(
 mod tests {
     use super::*;
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
-    use ironclaw_turns::{
-        RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
-        run_profile::{
-            AgentLoopHostErrorKind, InMemoryRunProfileResolver, LoopModelBudgetAccountant,
-            LoopModelGatewayError, LoopModelPolicyGuard, ModelWorkOutcome, ModelWorkRequest,
-            NoOpBudgetAccountant, NoOpPolicyGuard, SystemInferenceIdentity, SystemInferenceTaskId,
-            SystemPromptSource, SystemTaskKind,
-        },
+    use ironclaw_loop_contracts::{
+        AgentLoopHostErrorKind, InMemoryRunProfileResolver, LoopModelBudgetAccountant,
+        LoopModelGatewayError, LoopModelPolicyGuard, ModelWorkOutcome, ModelWorkRequest,
+        NoOpBudgetAccountant, NoOpPolicyGuard, RunProfileResolutionRequest, RunProfileResolver,
+        SystemInferenceIdentity, SystemInferenceTaskId, SystemPromptSource, SystemTaskKind,
     };
+    use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
     use std::sync::Mutex;
     use tokio::sync::Notify;
 
@@ -373,7 +371,7 @@ mod tests {
         ) -> Result<(), LoopModelGatewayError> {
             assert!(matches!(
                 request.kind,
-                ironclaw_turns::run_profile::ModelWorkKind::SystemInference { .. }
+                ironclaw_loop_contracts::ModelWorkKind::SystemInference { .. }
             ));
             Err(LoopModelGatewayError::new(
                 AgentLoopHostErrorKind::PolicyDenied,
@@ -394,7 +392,7 @@ mod tests {
         ) -> Result<(), LoopModelGatewayError> {
             assert!(matches!(
                 request.kind,
-                ironclaw_turns::run_profile::ModelWorkKind::SystemInference { .. }
+                ironclaw_loop_contracts::ModelWorkKind::SystemInference { .. }
             ));
             Err(LoopModelGatewayError::new(
                 AgentLoopHostErrorKind::BudgetExceeded,
@@ -428,7 +426,7 @@ mod tests {
         ) -> Result<(), LoopModelGatewayError> {
             assert!(matches!(
                 request.kind,
-                ironclaw_turns::run_profile::ModelWorkKind::SystemInference { .. }
+                ironclaw_loop_contracts::ModelWorkKind::SystemInference { .. }
             ));
             *self.pre_called.lock().expect("lock") = true;
             Ok(())
@@ -442,7 +440,7 @@ mod tests {
         ) -> Result<(), LoopModelGatewayError> {
             assert!(matches!(
                 request.kind,
-                ironclaw_turns::run_profile::ModelWorkKind::SystemInference { .. }
+                ironclaw_loop_contracts::ModelWorkKind::SystemInference { .. }
             ));
             self.post_outcomes.lock().expect("lock").push(outcome);
             Ok(())

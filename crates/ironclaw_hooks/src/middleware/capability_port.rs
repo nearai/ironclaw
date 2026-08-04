@@ -31,7 +31,7 @@ use ironclaw_host_api::{
     ids::TenantId,
     resolution::{Resolution, ResolutionBatch},
 };
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     AgentLoopHostError, CapabilityCallCandidate, CapabilityDeniedReasonKind, LoopCapabilityPort,
     LoopRequest, LoopRequestBatch, ProviderToolCall, ProviderToolCallCapabilityIds,
     ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
@@ -657,9 +657,9 @@ mod tests {
     use crate::sink::{RestrictedBeforeCapabilityHook, RestrictedGateSink};
     use crate::trust::HookTrustClass;
     use async_trait::async_trait;
+    use ironclaw_host_api::turn::LoopResultRef;
     use ironclaw_host_api::{decision::DenyReason, ids::CapabilityId, runtime::RuntimeKind};
-    use ironclaw_turns::LoopResultRef;
-    use ironclaw_turns::run_profile::{
+    use ironclaw_loop_contracts::{
         CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion,
     };
     use std::sync::Mutex;
@@ -709,7 +709,7 @@ mod tests {
                     safe_name: "cap.x".to_string(),
                     safe_description: "test capability".to_string(),
                     description_trust: Default::default(),
-                    concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::Exclusive,
+                    concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::Exclusive,
                     parameters_schema: serde_json::Value::Null,
                 }],
             })
@@ -726,7 +726,7 @@ mod tests {
             Ok(resolution::completed(
                 LoopResultRef::new(format!("result:{}", request.capability_id)).expect("ok"),
                 format!("ran {}", request.capability_id),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 false,
                 0,
                 None,
@@ -863,18 +863,18 @@ mod tests {
         async fn mint_approval_ref(
             &self,
             _reason: &str,
-        ) -> Result<ironclaw_turns::LoopGateRef, AgentLoopHostError> {
+        ) -> Result<ironclaw_host_api::turn::LoopGateRef, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
-                ironclaw_turns::run_profile::AgentLoopHostErrorKind::Internal,
+                ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
                 "no router",
             ))
         }
         async fn mint_auth_ref(
             &self,
             _reason: &str,
-        ) -> Result<ironclaw_turns::LoopGateRef, AgentLoopHostError> {
+        ) -> Result<ironclaw_host_api::turn::LoopGateRef, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
-                ironclaw_turns::run_profile::AgentLoopHostErrorKind::Internal,
+                ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
                 "no router",
             ))
         }
@@ -887,14 +887,12 @@ mod tests {
 
     fn snapshot_fixture_invocation() -> LoopRequest {
         LoopRequest {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
-            surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion::new(
-                "snapshot:v1",
-            )
-            .expect("surface version literal is valid"),
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
+            surface_version: ironclaw_loop_contracts::CapabilitySurfaceVersion::new("snapshot:v1")
+                .expect("surface version literal is valid"),
             capability_id: CapabilityId::new("cap.snapshot.fixture")
                 .expect("capability id literal is valid"),
-            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new(
+            input_ref: ironclaw_loop_contracts::CapabilityInputRef::new(
                 "input:cap.snapshot.fixture",
             )
             .expect("input ref literal is valid"),
@@ -935,14 +933,12 @@ mod tests {
     #[test]
     fn invocation_arguments_digest_is_stable_for_known_inputs() {
         let invocation = LoopRequest {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
-            surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion::new(
-                "snapshot:v1",
-            )
-            .expect("surface version literal is valid"),
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
+            surface_version: ironclaw_loop_contracts::CapabilitySurfaceVersion::new("snapshot:v1")
+                .expect("surface version literal is valid"),
             capability_id: CapabilityId::new("cap.snapshot.fixture")
                 .expect("capability id literal is valid"),
-            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new(
+            input_ref: ironclaw_loop_contracts::CapabilityInputRef::new(
                 "input:cap.snapshot.fixture",
             )
             .expect("input ref literal is valid"),
@@ -998,14 +994,12 @@ mod tests {
             TenantId::new("alpha").expect("ok"),
         );
         let invocation = LoopRequest {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
-            surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion::new(
-                "snapshot:v1",
-            )
-            .expect("surface version literal is valid"),
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
+            surface_version: ironclaw_loop_contracts::CapabilitySurfaceVersion::new("snapshot:v1")
+                .expect("surface version literal is valid"),
             capability_id: CapabilityId::new("cap.snapshot.fixture")
                 .expect("capability id literal is valid"),
-            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new(
+            input_ref: ironclaw_loop_contracts::CapabilityInputRef::new(
                 "input:cap.snapshot.fixture",
             )
             .expect("input ref literal is valid"),
@@ -1100,20 +1094,20 @@ mod tests {
     #[test]
     fn invocation_arguments_digest_differs_for_different_input_refs() {
         let cap_id = CapabilityId::new("cap.x").expect("ok");
-        let surface = ironclaw_turns::run_profile::CapabilitySurfaceVersion::new("v").expect("ok");
+        let surface = ironclaw_loop_contracts::CapabilitySurfaceVersion::new("v").expect("ok");
         let a = LoopRequest {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             surface_version: surface.clone(),
             capability_id: cap_id.clone(),
-            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:a").expect("ok"),
+            input_ref: ironclaw_loop_contracts::CapabilityInputRef::new("input:a").expect("ok"),
             approval_resume: None,
             auth_resume: None,
         };
         let b = LoopRequest {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             surface_version: surface,
             capability_id: cap_id,
-            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:b").expect("ok"),
+            input_ref: ironclaw_loop_contracts::CapabilityInputRef::new("input:b").expect("ok"),
             approval_resume: None,
             auth_resume: None,
         };
@@ -1125,7 +1119,7 @@ mod tests {
 
     fn invocation(capability: &str) -> LoopRequest {
         LoopRequest {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("v1").expect("ok"),
             capability_id: CapabilityId::new(capability).expect("ok"),
             input_ref: CapabilityInputRef::new(format!("input:{capability}")).expect("ok"),
@@ -1402,7 +1396,7 @@ mod tests {
                 _request: LoopRequest,
             ) -> Result<Resolution, AgentLoopHostError> {
                 Err(AgentLoopHostError::new(
-                    ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable,
+                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable,
                     "inner port failed",
                 ))
             }
@@ -1415,7 +1409,7 @@ mod tests {
                 // the same Unavailable error here so the observer-on-error
                 // contract from PR #3573 still has coverage.
                 Err(AgentLoopHostError::new(
-                    ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable,
+                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable,
                     "inner port failed",
                 ))
             }
@@ -1471,7 +1465,7 @@ mod tests {
             .expect_err("inner err propagates");
         assert_eq!(
             err.kind,
-            ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable
+            ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable
         );
         assert_eq!(
             *seen.lock().expect("not poisoned"),

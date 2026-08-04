@@ -46,7 +46,7 @@ pub use decision::{
 };
 pub use error::TrustError;
 pub use invalidation::{InvalidationBus, TrustChange, TrustChangeListener};
-pub use policy::{HostTrustPolicy, TrustPolicy, TrustPolicyInput};
+pub use policy::{HostTrustPolicy, TrustPolicy};
 pub use sources::{AdminConfig, AdminEntry, BundledEntry, BundledRegistry, PolicySource};
 
 #[cfg(test)]
@@ -55,6 +55,8 @@ mod tests {
     //! The full contract suite lives in `policy_contract_tests` below. If
     //! this module is empty, anyone running the bare command sees `0 passed`
     //! and might think nothing exercised the crate — which would be misleading.
+    use ironclaw_host_api::trust::TrustPolicyInput;
+
     use super::*;
 
     #[test]
@@ -92,6 +94,31 @@ mod tests {
         );
         assert!(decision.authority_ceiling.allowed_effects.is_empty());
         assert_eq!(decision.provenance, TrustProvenance::Default);
+    }
+
+    #[test]
+    fn fail_closed_policy_keeps_direct_remote_untrusted() {
+        use ironclaw_host_api::{
+            ids::PackageId,
+            trust::{PackageIdentity, PackageSource, RequestedTrustClass},
+        };
+        let identity = PackageIdentity::new(
+            PackageId::new("mcp-linear").unwrap(),
+            PackageSource::DirectRemote {
+                endpoint: "https://mcp.linear.example/rpc".to_string(),
+            },
+            None,
+            None,
+        );
+        let decision = HostTrustPolicy::fail_closed()
+            .evaluate(&TrustPolicyInput {
+                identity,
+                requested_trust: RequestedTrustClass::SystemRequested,
+                requested_authority: std::collections::BTreeSet::new(),
+            })
+            .unwrap();
+        assert_eq!(decision.provenance, TrustProvenance::Default);
+        assert!(!decision.effective_trust.is_privileged());
     }
 
     #[test]

@@ -65,6 +65,12 @@ pub enum FaultKind {
     NotFound,
     /// [`FilesystemError::Unsupported`] for the op's path.
     Unsupported,
+    /// [`FilesystemError::VersionMismatch`] for the op's path, with
+    /// `expected`/`found` unset — the shape of a lost CAS race whose winner is
+    /// unknown. This is the only way to exercise CAS-conflict retry paths
+    /// deterministically over the in-memory backend: its transactions hold the
+    /// whole-state lock, so a real concurrent writer cannot interleave.
+    VersionMismatch,
 }
 
 impl FaultKind {
@@ -79,6 +85,11 @@ impl FaultKind {
             FaultKind::BackendBusy => FilesystemError::BackendBusy { path, operation },
             FaultKind::NotFound => FilesystemError::NotFound { path, operation },
             FaultKind::Unsupported => FilesystemError::Unsupported { path, operation },
+            FaultKind::VersionMismatch => FilesystemError::VersionMismatch {
+                path,
+                expected: None,
+                found: None,
+            },
         }
     }
 }
@@ -148,6 +159,12 @@ impl Fault {
     /// Return the given [`FaultKind`].
     pub fn returning(mut self, kind: FaultKind) -> Self {
         self.kind = kind;
+        self
+    }
+
+    /// Return a [`FilesystemError::VersionMismatch`] — a lost CAS race.
+    pub fn version_mismatch(mut self) -> Self {
+        self.kind = FaultKind::VersionMismatch;
         self
     }
 

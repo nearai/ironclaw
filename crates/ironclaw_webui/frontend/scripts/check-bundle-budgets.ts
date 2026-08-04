@@ -30,7 +30,28 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // Router 8 and its required React 19.2 upgrade then moved the measured initial
 // route from 211 KB to 213.8 KB gzip, so retain about 1.2 KB of explicit
 // headroom for that supported dependency upgrade.
-const CHAT_GZIP_BUDGET = 215_000;
+// Hosted MCP registration (custom MCP server connect) added ~44
+// `extensions.customMcp*` i18n keys plus 2 `common.*` keys to `en.ts`, the
+// fallback locale pack `i18n.tsx` (~line 36) loads eagerly in `main.tsx` so it
+// ships on every page including /chat. The other 10 locale packs are lazy
+// per-locale dynamic imports (`i18n.tsx` ~41-50) and don't count against this
+// budget, and the registration modal itself is not the cause: `ExtensionsPage`
+// is already route-level `React.lazy`'d in `app.tsx` (~49-53), outside the
+// /chat closure. Copy was trimmed first: `en.ts` went from 211,326 to 211,218
+// bytes (108 gzip bytes saved) before further cuts hit sharp diminishing
+// returns (0.39 gzip bytes saved per raw byte cut, down to 0.17) and would
+// require gutting minimal labels like "OAuth" or "Server ID". The remaining
+// growth is ~44 new i18n keys of string content for hosted MCP registration,
+// not new eager code weight; the 215.0 KB budget below (already raised for the
+// React Router 8 / React 19.2 upgrade) still covers the measured total with
+// headroom to spare, so it was not raised further there. Workspace-file link
+// previews then added strict path parsing plus delegated-click verification to
+// the eager Markdown renderer. That validation must be present before a link
+// can open in the in-app preview, including for cached messages rendered on the
+// initial route, and prevents model-authored `data-workspace-path` metadata
+// from becoming trusted. The measured /chat closure is 215.8 KB gzip; 217.0 KB
+// retains about 1.2 KB of explicit headroom without weakening the feature.
+const CHAT_GZIP_BUDGET = 217_000;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {

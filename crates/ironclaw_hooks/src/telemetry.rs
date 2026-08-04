@@ -7,7 +7,7 @@
 //! types across the seam, this module produces the string-shaped
 //! representations the milestone sink expects.
 
-use ironclaw_turns::run_profile::HookDecisionSummary;
+use ironclaw_loop_contracts::HookDecisionSummary;
 
 use crate::failure_policy::{FailureCategory, FailureDisposition};
 use crate::identity::HookId;

@@ -46,7 +46,7 @@ SLACK_PERSONAL_ACCESS_TOKEN_ENV_NAMES = [
 SLACK_EXTENSION_INSTALLATION_ID = "slack"
 SLACK_EXTENSION_MANIFEST = (
     Path(__file__).resolve().parents[2]
-    / "crates/ironclaw_first_party_extensions/assets/slack/manifest.toml"
+    / "crates/extensions/packages/slack/manifest.toml"
 )
 # Optional SECOND human identity (a dedicated canary user, distinct from the
 # connected personal account AND from the bot). Arms that strictly need a
@@ -106,18 +106,6 @@ def _toml_string(value: str) -> str:
     return json.dumps(value)
 
 
-def _slack_enabled(config_text: str) -> bool:
-    in_slack = False
-    for raw_line in config_text.splitlines():
-        line = raw_line.strip()
-        if line.startswith("[") and line.endswith("]"):
-            in_slack = line == "[slack]"
-            continue
-        if in_slack and re.match(r"enabled\s*=\s*true\b", line):
-            return True
-    return False
-
-
 def _has_live_slack_env(extra_env: dict[str, str] | None = None) -> bool:
     return _env_present(SLACK_SIGNING_SECRET_ENV, extra_env) and _env_present(
         SLACK_BOT_TOKEN_ENV,
@@ -139,25 +127,6 @@ def _slack_config_value(config_text: str, key: str) -> str | None:
             value = match.group(1).strip()
             return value or None
     return None
-
-
-def _disable_slack_in_config(config_path: Path) -> None:
-    lines = config_path.read_text(encoding="utf-8").splitlines()
-    in_slack = False
-    changed = False
-    rewritten: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            in_slack = stripped == "[slack]"
-        if in_slack and re.match(r"^(\s*)enabled\s*=\s*true\b", line):
-            indent = re.match(r"^(\s*)", line).group(1)  # type: ignore[union-attr]
-            rewritten.append(f"{indent}enabled = false")
-            changed = True
-        else:
-            rewritten.append(line)
-    if changed:
-        config_path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
 
 
 def _set_slack_section_key(config_path: Path, key: str, value: str) -> bool:

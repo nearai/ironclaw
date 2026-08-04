@@ -9,17 +9,20 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_auth::{AuthProductError, AuthProviderId};
+use ironclaw_extension_contracts::auth_prompt::AuthPromptView;
+use ironclaw_host_api::product_adapter_error::ProductAdapterError;
+use ironclaw_host_api::turn::{TurnGateRef, TurnScope};
 use ironclaw_host_api::{capability::RuntimeCredentialAccountSetup, ids::UserId};
-use ironclaw_product::{
-    ApprovalPromptContextSource, AuthChallengeProvider, AuthChallengeView, BlockedAuthPromptSource,
-    PairingAuthChallengeView,
+use ironclaw_product::{AuthChallengeProvider, AuthChallengeView, PairingAuthChallengeView};
+use ironclaw_product_contracts::outbound::ApprovalPromptContextView;
+use ironclaw_product_contracts::prompt_source::{
+    ApprovalPromptContextSource, BlockedAuthPromptSource,
 };
-use ironclaw_product::{ApprovalPromptContextView, AuthPromptView, ProductAdapterError};
-use ironclaw_turns::{GateRef, TurnScope};
 
 use ironclaw_product::auth_prompt_view_for_blocked_auth;
 
 use crate::channel_pairing::ChannelPairingRegistry;
+use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
 
 /// One recipe-driven challenge materializer for every product surface.
 /// Product auth owns OAuth/manual challenges; the canonical channel-pairing
@@ -48,9 +51,9 @@ impl RecipeAuthChallengeProvider {
 impl AuthChallengeProvider for RecipeAuthChallengeProvider {
     async fn challenge_for_gate(
         &self,
-        scope: &ironclaw_turns::TurnScope,
+        scope: &ironclaw_host_api::turn::TurnScope,
         owner_user_id: &UserId,
-        run_id: ironclaw_turns::TurnRunId,
+        run_id: ironclaw_host_api::turn::TurnRunId,
         gate_ref: &str,
         credential_requirements: &[ironclaw_host_api::decision::RuntimeCredentialAuthRequirement],
     ) -> Result<Option<AuthChallengeView>, AuthProductError> {
@@ -79,7 +82,7 @@ impl AuthChallengeProvider for RecipeAuthChallengeProvider {
                 return Ok(None);
             };
             return Ok(Some(AuthChallengeView {
-                kind: ironclaw_product::AuthPromptChallengeKind::Pairing,
+                kind: ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind::Pairing,
                 provider: AuthProviderId::new(requirement.provider.as_str().to_string()).map_err(
                     |error| {
                         // `MalformedConfig` is a unit variant, so the cause has
@@ -138,7 +141,7 @@ impl ProjectionApprovalPromptContextSource {
 impl ApprovalPromptContextSource for ProjectionApprovalPromptContextSource {
     async fn approval_prompt_context(
         &self,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
         owner_user_id: &UserId,
         scope: &TurnScope,
     ) -> Option<ApprovalPromptContextView> {
@@ -167,7 +170,7 @@ impl ProductAuthBlockedAuthPromptSource {
 impl BlockedAuthPromptSource for ProductAuthBlockedAuthPromptSource {
     async fn auth_prompt_for_blocked_run(
         &self,
-        request: ironclaw_product::BlockedAuthPromptRequest<'_>,
+        request: BlockedAuthPromptRequest<'_>,
     ) -> Result<AuthPromptView, ProductAdapterError> {
         auth_prompt_view_for_blocked_auth(request, self.auth_challenges.as_deref()).await
     }

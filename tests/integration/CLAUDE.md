@@ -1,5 +1,10 @@
 # Reborn Integration Tests
 
+> **Adding, removing, renaming, or materially re-scoping a test here? Update
+> `tests/CLAUDE.md`** — the repo-wide scenario coverage map (what each scenario
+> proves, in plain English, and where the gaps are). Its maintenance rule is
+> binding: the row changes in the same commit.
+
 In-process tests that run a **whole Reborn turn** with the real internal stack —
 product workflow, turn coordinator, scheduler, the agent loop, the real
 `LlmProviderModelGateway` + the real `ironclaw_llm` decorator chain, and real
@@ -282,6 +287,15 @@ so the mock's OAuth gate passes; it rejects any URL not prefixed by the configur
 Script with `RebornScriptedReply::tool_call("mock-mcp.search", json!({}))`.
 
 - `assert_mcp_tool_called(tool_name)` — maps `tool_name` → `"mock-mcp.<tool_name>"` and delegates to `assert_tool_invoked`.
+
+User-registered hosted-MCP admission and lifecycle behavior belongs in
+`reborn_integration_hosted_mcp_registration` rather than the single-tool turn
+harness above. Its loopback server in
+`tests/support/hosted_mcp_registration_server.rs` drives registration,
+discovery, ordinary install/auth/activation, credential injection, restore,
+and invocation through production seams. Keep live public-server checks
+explicitly ignored canaries; deterministic cases use the recorded MCP fixture
+under `tests/fixtures/hosted_mcp/`.
 
 ### Credential injection (GitHub)
 

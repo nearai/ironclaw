@@ -38,6 +38,7 @@ mod filesystem_assembly;
 mod google_oauth_secret_store;
 mod host_access_assembly;
 mod input;
+mod ironhub_link_serve;
 mod llm_admin;
 mod memory_binding;
 mod memory_provider_factory;
@@ -117,26 +118,20 @@ pub use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
 };
-pub use ironclaw_product::PreferenceTargetCodec;
-/// Channel-adapter and codec contracts re-exported for the assembling
-/// binary's [`ChannelExtensionBinding`] construction.
-pub use ironclaw_product::{ChannelAdapter, NormalizedInboundMessage};
-pub use ironclaw_product::{
-    ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
-    RebornChannelConnectStrategy,
-};
+/// The channel-adapter contract the assembling binary implements is reached at
+/// its owner, `ironclaw_extension_contracts::channel_adapter` — WS1.4 deleted
+/// the re-export chain that gave it a second import path through here.
+pub use ironclaw_product::RebornChannelConnectStrategy;
 pub use ironclaw_product::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
+pub use ironclaw_product_contracts::account_setup::{
+    ChannelConnectionNoticePolicy, ExtensionAccountSetupDescriptor,
+};
+pub use ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement;
 pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
-// Re-exported for `ironclaw_reborn_cli` (`runtime/mod.rs` turn-failure display):
-// the CLI consumes composition as its facade and must not grow a direct
-// `ironclaw_runner` edge for one summary helper. All other run-failure
-// classifier items moved to `ironclaw_runner::{failure_lane, failure_summary,
-// retry_disposition}` with consumers repointed (no path-preservation shims).
-pub use ironclaw_runner::failure_summary::reborn_failure_summary_for_category;
 pub use ironclaw_runtime_policy::{
     ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
 };
@@ -172,7 +167,9 @@ pub use ironclaw_host_api::user_identity::{
     RebornUserIdentityBindingStore, RebornUserIdentityLookup, RebornUserIdentityLookupError,
     installation_scoped_provider_user_id,
 };
-pub use ironclaw_product::mark_bearer_token_verified_for_tenant;
+pub use ironhub_link_serve::{
+    IRONHUB_REGISTER_PATH, IronhubRegisterRouteState, ironhub_register_route_mount,
+};
 pub use observability::budget::build_default_budget_accountant;
 pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use observability::hooks::{
@@ -201,8 +198,8 @@ pub use root::profile::{RebornCompositionProfile, RebornCompositionProfileParseE
 pub use runtime::RebornTurnDriveOutcome;
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
-    RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
-    RebornSkillExecutionResult, RebornSkillSourceKind, blocked_auth_flow_canceller,
+    RebornSkillActivationMode, RebornSkillActivationSource, RebornSkillAsset, RebornSkillBundle,
+    RebornSkillExecutionPlan, RebornSkillExecutionResult, blocked_auth_flow_canceller,
     build_reborn_runtime, build_runtime, product_auth_challenge_provider,
 };
 pub use runtime_input::{
@@ -213,6 +210,17 @@ pub use runtime_input::{
     TurnRunnerSettings,
 };
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
+
+/// Re-exported IronHub command vocabulary for the `ironclaw` binary's
+/// `ironhub` subcommand and serve wiring. This facade keeps runtime input
+/// construction independent of the manager's wider public surface.
+pub mod ironhub {
+    pub use ironclaw_extension_manager::ironhub::{
+        IronHubCommand, IronHubEntryKind, IronHubInstallOptions, IronHubResponse,
+        IronhubManifestUrl, IronhubSharedKey, IronhubSharedKeyError,
+        execute_reborn_ironhub_command, render_reborn_ironhub_response, validated_manifest_url,
+    };
+}
 
 /// Re-exported identity vocabulary host binaries need to construct
 /// public runtime/WebUI types whose signatures mention a host-api identity.
@@ -282,9 +290,9 @@ pub fn open_reborn_identity_resolver(
 /// Reborn model purpose slot names exposed for diagnostic callers.
 ///
 /// This keeps CLI diagnostics on the composition boundary instead of making
-/// the CLI mirror `ironclaw_runner::model_routes::ModelSlot`.
+/// the CLI mirror `ironclaw_loop_host::ModelSlot`.
 pub fn reborn_model_slot_names() -> Vec<&'static str> {
-    ironclaw_runner::model_routes::ModelSlot::all()
+    ironclaw_loop_host::ModelSlot::all()
         .iter()
         .map(|slot| slot.as_str())
         .collect()
@@ -613,7 +621,7 @@ pub enum RebornCompositionError {
     #[error("reborn turn substrate failed: {0}")]
     Turn(#[from] TurnError),
     #[error("reborn run-profile resolver substrate failed: {0}")]
-    RunProfile(#[from] ironclaw_turns::run_profile::RunProfileRegistryError),
+    RunProfile(#[from] ironclaw_loop_contracts::RunProfileRegistryError),
     #[error("production tenant-sandbox process backend requires a tenant sandbox process binding")]
     MissingTenantSandboxProcessPort,
     #[error(

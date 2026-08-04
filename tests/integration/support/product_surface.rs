@@ -15,10 +15,11 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_product::{
-    ActionFingerprintKey, ActionPhase, ConversationBindingService, IdempotencyDecision,
-    IdempotencyLedger, ProductConversationRouteKind, ProductInboundAction, ProductSurfaceFailure,
+    ActionPhase, ConversationBindingService, IdempotencyDecision, IdempotencyLedger,
+    ProductConversationRouteKind, ProductInboundAction, ProductSurfaceFailure,
     ResolveBindingRequest, ResolvedBinding,
 };
+use ironclaw_product_contracts::action::ActionFingerprintKey;
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use thiserror::Error;

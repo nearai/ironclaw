@@ -75,13 +75,16 @@ impl ProjectService for RebornProjectService {
             .limit
             .map(|value| (value as usize).min(MAX_PROJECT_LIST_LIMIT))
             .unwrap_or(DEFAULT_PROJECT_LIST_LIMIT);
-        let records = self
+        let listing = self
             .repository
             .list_projects_for_user(&caller.tenant_id, &caller.user_id, limit)
             .await
             .map_err(map_repo_error)?;
-        let mut projects = Vec::with_capacity(records.len());
-        for record in records {
+        let mut total_projects = listing.total_projects;
+        let mut active_projects = listing.active_projects;
+        let mut archived_projects = listing.archived_projects;
+        let mut projects = Vec::with_capacity(listing.projects.len());
+        for record in listing.projects {
             // Effective role for the caller on each listed project. If access was
             // revoked between the list and this resolve, drop the project rather
             // than fabricate a role (authorization is live; never show a project
@@ -92,11 +95,25 @@ impl ProjectService for RebornProjectService {
                 .await
                 .map_err(map_repo_error)?
             else {
+                total_projects = total_projects.saturating_sub(1);
+                match record.state {
+                    ProjectState::Active => {
+                        active_projects = active_projects.saturating_sub(1);
+                    }
+                    ProjectState::Archived => {
+                        archived_projects = archived_projects.saturating_sub(1);
+                    }
+                }
                 continue;
             };
             projects.push(project_info(record, role));
         }
-        Ok(RebornListProjectsResponse { projects })
+        Ok(list_projects_response(
+            projects,
+            total_projects,
+            active_projects,
+            archived_projects,
+        ))
     }
 
     async fn create_project(
@@ -362,6 +379,15 @@ fn parse_user_id(value: &str) -> Result<UserId, ProjectServiceError> {
     })
 }
 
+fn list_projects_response(
+    projects: Vec<RebornProjectInfo>,
+    total_projects: usize,
+    active_projects: usize,
+    archived_projects: usize,
+) -> RebornListProjectsResponse {
+    RebornListProjectsResponse::new(projects, total_projects, active_projects, archived_projects)
+}
+
 fn project_info(record: ProjectRecord, role: ProjectRole) -> RebornProjectInfo {
     RebornProjectInfo {
         project_id: record.project_id.into_string(),
@@ -453,6 +479,7 @@ fn map_repo_error(error: ProjectError) -> ProjectServiceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_projects::ProjectList;
 
     /// Repository fake with canned responses, so tests drive the real
     /// access-control path (`require_role` → `resolve_access`) of the service.
@@ -490,9 +517,27 @@ mod tests {
             &self,
             _: &TenantId,
             _: &UserId,
-            _: usize,
-        ) -> Result<Vec<ProjectRecord>, ProjectError> {
-            Ok(self.list.clone())
+            limit: usize,
+        ) -> Result<ProjectList, ProjectError> {
+            let total_projects = self.list.len();
+            let active_projects = self
+                .list
+                .iter()
+                .filter(|project| project.state == ProjectState::Active)
+                .count();
+            let archived_projects = self
+                .list
+                .iter()
+                .filter(|project| project.state == ProjectState::Archived)
+                .count();
+            let mut projects = self.list.clone();
+            projects.truncate(limit);
+            Ok(ProjectList::new(
+                projects,
+                total_projects,
+                active_projects,
+                archived_projects,
+            ))
         }
         async fn list_members(
             &self,
@@ -606,6 +651,33 @@ mod tests {
             .await
             .unwrap();
         assert!(response.projects.is_empty());
+        assert_eq!(response.total_projects, 0);
+        assert_eq!(response.active_projects, 0);
+        assert_eq!(response.archived_projects, 0);
+    }
+
+    /// Lifecycle counts cover the caller's complete accessible set even when
+    /// the response records are capped.
+    #[tokio::test]
+    async fn list_reports_counts_beyond_response_limit() {
+        let active = a_record();
+        let mut archived = a_record();
+        archived.state = ProjectState::Archived;
+        let service = svc(FakeRepo {
+            access: Some(ProjectRole::Owner),
+            list: vec![active, archived],
+            ..Default::default()
+        });
+
+        let response = service
+            .list_projects(caller(), RebornListProjectsRequest { limit: Some(1) })
+            .await
+            .unwrap();
+
+        assert_eq!(response.projects.len(), 1);
+        assert_eq!(response.total_projects, 2);
+        assert_eq!(response.active_projects, 1);
+        assert_eq!(response.archived_projects, 1);
     }
 
     /// A revoked member cannot be resurrected by a role change — it reads as

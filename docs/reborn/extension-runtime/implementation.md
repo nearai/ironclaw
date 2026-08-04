@@ -31,12 +31,12 @@ behavior, and persistent behavior is proven on libSQL **and** PostgreSQL.
 Already generic on this branch: one manifest per extension parsed through
 `ExtensionManifestV2::parse`; surfaces projected by `capability_surfaces()`
 (`crates/ironclaw_extensions/src/v2.rs`); surface kinds in
-`crates/ironclaw_host_api/src/surface.rs`; channel surfaces on the extensions
+`crates/ironclaw_extension_contracts/src/surface.rs`; channel surfaces on the extensions
 wire with directions and connection affordance
 (`crates/ironclaw_product/src/reborn_services/{types,extensions}.rs`);
 a narrow channel protocol adapter trait
 (`crates/ironclaw_product_adapters/src/adapter.rs`) implemented by
-`crates/ironclaw_slack_extension`; retired-taxonomy architecture gate.
+`crates/extensions/packages/slack`; retired-taxonomy architecture gate.
 
 Not generic yet — the work:
 
@@ -55,7 +55,7 @@ Not generic yet — the work:
 | Concrete channel formatting in LLM prompt construction | `crates/ironclaw_llm/src/reasoning.rs` |
 | Concrete channel variants in trace contributions | `crates/ironclaw_reborn_traces/src/contribution.rs` |
 | Slack CLI command, cargo feature, config types | `crates/ironclaw_reborn_cli/src/commands/serve_slack.rs`, `slack-v2-host-beta` feature, `crates/ironclaw_reborn_config` |
-| Telegram adapter exists but is test-only | `crates/ironclaw_telegram_extension` |
+| Telegram adapter exists but is test-only | `crates/extensions/packages/telegram` |
 
 ## 3. Target crate and module map
 
@@ -78,7 +78,7 @@ Not generic yet — the work:
 | `ironclaw_dispatcher` | Resolve prebound `ToolAdapter` via injected resolver; delete per-invocation package/runtime-kind selection |
 | `ironclaw_product` | Generic delivery coordinator (all outbound intents); delete Slack cleanup literals |
 | `ironclaw_reborn_composition` | Assembly only: construct stores/ports/host/engine, mount routers, inject resolvers. `src/slack/**` deleted by P6; consumes the first-party package inventory as opaque bundles — no catalog, no extension names (P7) |
-| `ironclaw_first_party_extensions` | The package inventory: one module per package (`src/packages/<id>.rs`) owning that package's embeds, asset descriptors, digest, and bespoke copy, beside `assets/<id>/`; exports opaque bundles consumed by composition and the CLI |
+| `ironclaw_extension_support` | The package inventory: one module per package (`src/packages/<id>.rs`) owning that package's embeds, asset descriptors, digest, and bespoke copy, beside `assets/<id>/`; exports opaque bundles consumed by composition and the CLI |
 | `ironclaw_webui_v2` | Generic surface/config/connect UI from wire data; Slack components deleted |
 | `ironclaw` (`crates/ironclaw_reborn_cli`) | Assembles the native factory registry (the only generic-side crate allowed to link concrete extension crates); `serve_slack.rs` and Slack feature deleted |
 | `ironclaw_llm` | `CommunicationPresentationPolicy` input replaces concrete channel formatting |
@@ -276,7 +276,8 @@ branch anywhere in dispatch (`tests/integration/extension_runtime.rs`).
   deployment tick, due at half the declared lifetime, soonest-death-first
   under the per-tick cap). There is no per-vendor refresher code.
 - Shared vendors: unify recipes during internal publication (identical except
-  `scopes`/`display_name`, else conflict); scope union and incremental
+  `scopes` and presentation-only `display_name`/`instructions`/`setup_url`,
+  else conflict); scope union and incremental
   re-consent keep today's behavior; grants are vendor-scoped and survive
   removal of one consumer while another active extension shares the vendor.
 - Recipe reference (fields beyond `overview.md` §3): `scope_param` (default

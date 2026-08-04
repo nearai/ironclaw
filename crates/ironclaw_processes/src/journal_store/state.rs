@@ -620,7 +620,7 @@ impl ProcessJournalMaterializedState {
                     process_id: mutation.process_id,
                 });
             }
-            return Ok(StoredCommandOutcome::Controlled(result.clone(), None));
+            return Ok(StoredCommandOutcome::Controlled(result.clone()));
         }
         let snapshot = self.process_mut(mutation.process_id)?;
         if !process_scope_visible(&snapshot.scope, &mutation.scope) {
@@ -668,7 +668,7 @@ impl ProcessJournalMaterializedState {
                 already_terminal,
             };
             self.remember_control_result(replay_key, result.clone());
-            return Ok(StoredCommandOutcome::Controlled(result, None));
+            return Ok(StoredCommandOutcome::Controlled(result));
         };
         if status == snapshot.status {
             let result = ProcessControlResult {
@@ -677,7 +677,7 @@ impl ProcessJournalMaterializedState {
                 already_terminal,
             };
             self.remember_control_result(replay_key, result.clone());
-            return Ok(StoredCommandOutcome::Controlled(result, None));
+            return Ok(StoredCommandOutcome::Controlled(result));
         }
         let cursor = self.next_cursor();
         let snapshot = self.process_mut(mutation.process_id)?;
@@ -707,7 +707,7 @@ impl ProcessJournalMaterializedState {
             already_terminal,
         };
         self.remember_control_result(replay_key, result.clone());
-        Ok(StoredCommandOutcome::Controlled(result, Some(kind)))
+        Ok(StoredCommandOutcome::Controlled(result))
     }
 
     fn apply_reserve_tree(

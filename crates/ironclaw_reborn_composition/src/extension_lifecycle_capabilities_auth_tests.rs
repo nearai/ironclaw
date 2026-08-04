@@ -23,7 +23,7 @@ use crate::factory::{RebornRuntimeStores, build_runtime_substrate};
 use ironclaw_auth::RuntimeCredentialAccountSelectionRequest;
 use ironclaw_auth::{RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest};
 use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
-use ironclaw_extension_host::extension_lifecycle_capabilities::EXTENSION_ACTIVATE_CAPABILITY_ID;
+use ironclaw_extension_manager::extension_lifecycle_capabilities::EXTENSION_ACTIVATE_CAPABILITY_ID;
 
 #[tokio::test]
 async fn standalone_extension_activate_accepts_manual_token_from_webui_gate_scope() {
@@ -285,7 +285,7 @@ async fn install_inactive_for_user(
     services: &RebornRuntimeStores,
     extension_id: &str,
     caller: &UserId,
-) -> Result<(), ironclaw_product::ProductSurfaceFailure> {
+) -> Result<(), ironclaw_product_contracts::error::ProductOperationFailure> {
     let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
         .expect("valid extension package ref"); // safety: test helper callers pass static extension ids.
     services

@@ -1,5 +1,18 @@
 # ironclaw_reborn_openai_compat
 
+> **Product boundary (WS5 transport inversion, 2026-08-01).** This adapter
+> speaks `ironclaw_product_contracts` — `surface` for the membrane,
+> `inbound_requests` for the bodies it constructs, `inbound`/`outbound`/
+> `projection`/`product_wire` for what crosses back — plus
+> `ironclaw_extension_contracts` for the one channel-facing enum it stamps
+> (`ProductTriggerReason`). Its whole remaining `ironclaw_product` surface is
+> three command descriptor constants (`SUBMIT_TURN_COMMAND`,
+> `CREATE_THREAD_COMMAND`, `CANCEL_RUN_COMMAND`) — product's frozen inventory
+> per PROPOSAL §6.1.3. That list is pinned exactly and shrink-only by
+> `ironclaw_architecture/tests/reborn_transport_product_boundary.rs`; a new
+> `ironclaw_product` import fails it.
+
+
 Reborn-native OpenAI-compatible API contract surface for #3283 / #4442 /
 #4443 / #4444 / #4445 / #4446 / #4447.
 ## Boundary
@@ -78,9 +91,15 @@ handles Chat Completions create and optional projection-backed SSE streaming:
 - Streaming create consumes a composition-supplied projection streamer and must
   suppress keepalive/control frames, internal refs, projection cursors, and
   sanitized backend details.
-- This crate still must not call v1 gateway handlers, raw `SseManager`/
-  `AppEvent` streams, `ironclaw_llm`, `TurnCoordinator`, projection internals,
-  listener APIs, secrets, DBs, or the host runtime directly.
+- This crate still must not call v1 gateway handlers, `ironclaw_llm`,
+  `TurnCoordinator`, projection internals, listener APIs, secrets, DBs, or the
+  host runtime directly. (Corrected 2026-08-02: this list also named raw
+  `SseManager`/`AppEvent` streams. **Both types are deleted** — `AppEvent` went
+  with `ironclaw_common::event` in #6982 under the un-masking discipline, and
+  `SseManager` has no declaration anywhere in the workspace. A prohibition on a
+  type that does not exist reads as a live constraint and hides that the real
+  streaming boundary is the projection stream. The retired-name pin lives in the
+  architecture suite, not here.)
 
 ## Models Listing
 

@@ -447,6 +447,23 @@ pub trait ProcessJournalCommitObserver: Send + Sync {
     }
 
     async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String>;
+
+    /// Deliver one committed batch in a single call, in cursor order.
+    ///
+    /// The journal commits many lifecycle commands per transaction, so an
+    /// observer that persists per commit can group a whole batch into one
+    /// round trip by overriding this. The default applies the per-commit
+    /// method in order, which is what an observer with no groupable work
+    /// wants.
+    async fn observe_process_commits(
+        &self,
+        commits: Vec<ProcessJournalCommit>,
+    ) -> Result<(), String> {
+        for commit in commits {
+            self.observe_process_commit(commit).await?;
+        }
+        Ok(())
+    }
 }
 
 pub trait ProcessJournalObserverRegistry: Send + Sync {

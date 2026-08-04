@@ -9,14 +9,34 @@
 //!    Telegram pairing is the WebGeneratedCode flow under
 //!    `/api/webchat/v2/channels/telegram/pairing`.
 
+#[allow(dead_code)]
+mod ratchet_support;
+
 use std::path::{Path, PathBuf};
 
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("architecture crate lives two levels under the workspace root")
-        .to_path_buf()
+use ratchet_support::workspace_root;
+
+/// The Telegram package's `src/` tree, refusing rather than returning a path
+/// that is not there.
+///
+/// `rust_files` yields an empty vec for a root it cannot read, so the three
+/// gates below — deleted-abstraction, in-memory-store, and the line budget —
+/// all pass vacuously against a stale path. That is the same silent-green
+/// failure `assert_absent_within` was written to close for the absence
+/// assertions in this file; these three never got it, and WS2's package move
+/// (`crates/ironclaw_telegram_extension/src` ->
+/// `crates/extensions/packages/telegram/src`) is exactly the kind of change
+/// that would have exercised the hole.
+fn telegram_source_root() -> PathBuf {
+    let root = workspace_root().join("crates/extensions/packages/telegram/src");
+    assert!(
+        root.is_dir(),
+        "the Telegram package source root {} does not exist, so every gate keyed on it \
+         would pass without measuring anything — repoint this path in the same change that \
+         moved or renamed the package",
+        root.display()
+    );
+    root
 }
 
 fn rust_and_frontend_files(root: &Path) -> Vec<PathBuf> {
@@ -73,14 +93,49 @@ const DELETED_TELEGRAM_SYMBOLS: &[&str] = &[
 
 const TELEGRAM_PRODUCTION_LINE_BUDGET: usize = 999;
 
+/// `assert!(!p.exists())` is a gate whose passing state IS a missing path, so a
+/// wrong root makes it vacuously and permanently true — no file count or
+/// violation list would ever reveal it (CHECKLIST WS0, #6963). Every such
+/// assertion here is paired with a check that the directory it asserts *within*
+/// really exists.
+fn assert_absent_within(parent: &Path, absent: &Path, message: &str) {
+    assert!(
+        parent.is_dir(),
+        "cannot assert absence inside {} — the directory does not exist, so the check \
+         would pass without measuring anything",
+        parent.display()
+    );
+    assert!(!absent.exists(), "{message}: {}", absent.display());
+}
+
+/// The precondition must reject a parent that does not exist — otherwise the
+/// absence assertions it guards are vacuously true under a wrong root.
+#[test]
+#[should_panic(expected = "the directory does not exist")]
+fn absence_assertions_refuse_a_parent_that_is_not_there() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let missing = temp.path().join("no/such/dir");
+    assert_absent_within(&missing, &missing.join("anything.rs"), "unreachable");
+}
+
+/// …and must still pass when the parent is real and the file is genuinely gone.
+#[test]
+fn absence_assertions_pass_when_the_parent_exists_and_the_file_does_not() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    assert_absent_within(
+        temp.path(),
+        &temp.path().join("channel_delivery.rs"),
+        "unreachable",
+    );
+}
+
 #[test]
 fn generic_channel_delivery_is_not_owned_by_composition() {
-    let old_owner = workspace_root()
-        .join("crates/ironclaw_reborn_composition/src/outbound/channel_delivery.rs");
-    assert!(
-        !old_owner.exists(),
-        "generic channel-delivery behavior must be owned by ironclaw_extension_host, not {}",
-        old_owner.display()
+    let outbound = workspace_root().join("crates/ironclaw_reborn_composition/src/outbound");
+    assert_absent_within(
+        &outbound,
+        &outbound.join("channel_delivery.rs"),
+        "generic channel-delivery behavior must be owned by ironclaw_extension_host, not",
     );
 }
 
@@ -107,7 +162,7 @@ fn generic_extension_lifecycle_has_no_telegram_knowledge() {
 
 #[test]
 fn deleted_telegram_abstractions_and_dtos_stay_deleted() {
-    let source_root = workspace_root().join("crates/ironclaw_telegram_extension/src");
+    let source_root = telegram_source_root();
     let mut offenders = Vec::new();
     for file in rust_files(&source_root) {
         let source = std::fs::read_to_string(&file).expect("Telegram source readable");
@@ -126,7 +181,7 @@ fn deleted_telegram_abstractions_and_dtos_stay_deleted() {
 
 #[test]
 fn telegram_tests_use_the_real_filesystem_state() {
-    let source_root = workspace_root().join("crates/ironclaw_telegram_extension/src");
+    let source_root = telegram_source_root();
     let mut offenders = Vec::new();
     for file in rust_files(&source_root) {
         let source = std::fs::read_to_string(&file).expect("Telegram source readable");
@@ -177,7 +232,7 @@ fn in_memory_store_gate_catches_all_rust_visibility_forms() {
 
 #[test]
 fn telegram_production_files_meet_the_line_budget() {
-    let source_root = workspace_root().join("crates/ironclaw_telegram_extension/src");
+    let source_root = telegram_source_root();
     let mut offenders = Vec::new();
     for file in rust_files(&source_root) {
         let line_count = std::fs::read_to_string(&file)
@@ -201,13 +256,12 @@ fn telegram_composition_is_assembly_only() {
     // fold removed composition's telegram module entirely. Telegram host
     // behavior rides the generic channel-host/ingress/delivery seams, so
     // composition may not own any telegram-specific source at all.
-    let telegram_module_root =
-        workspace_root().join("crates/ironclaw_reborn_composition/src/telegram");
-    assert!(
-        !telegram_module_root.exists(),
-        "composition must not own telegram-specific modules; telegram host \
-         behavior rides the generic extension seams: {}",
-        telegram_module_root.display()
+    let composition_src = workspace_root().join("crates/ironclaw_reborn_composition/src");
+    assert_absent_within(
+        &composition_src,
+        &composition_src.join("telegram"),
+        "composition must not own telegram-specific modules; telegram host behavior \
+         rides the generic extension seams",
     );
 }
 

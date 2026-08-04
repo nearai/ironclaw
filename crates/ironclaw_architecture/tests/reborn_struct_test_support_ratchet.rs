@@ -37,8 +37,17 @@ struct FrozenPathCount {
 /// of the gate below on failure). Lowered to 81/282 by the **WS8** dead-module
 /// deletion (#6943), which removed
 /// `event_projections/src/pending_gate_projection.rs` and its one
-/// test-support method. (The `WS0_` prefix records when the baseline was
-/// *captured*, by #6936; deletions that lower it come from WS8.)
+/// test-support method. Lowered again to **80/277** by **WS1.5**, which
+/// deleted all five `dead-code` suppressions in
+/// `host_api/src/product_adapter/auth.rs`: they existed only because the mint
+/// family's constructors were `#[cfg(feature = "host-auth-mint")]`, so a
+/// feature-off build saw them as unreachable. Witness-gated minting compiles
+/// unconditionally, so the constructors have real callers in every build and
+/// the suppressions are not merely moved — they are unnecessary. The file's
+/// two `test-support` methods (`test_verified`/`test_verified_for_tenant`)
+/// stay and keep their entry. (The `WS0_` prefix records when the baseline was
+/// *captured*, by #6936; deletions that lower it come from WS8 and, here,
+/// WS1.5.)
 ///
 /// The per-path checks already refuse growth *within* a listed file and refuse
 /// staleness. These two totals close the remaining door: adding a **new** path
@@ -47,8 +56,8 @@ struct FrozenPathCount {
 /// more line in a long list. Both only ever move down; lower them in the same
 /// PR that deletes debt (CHECKLIST WS8 flips `dead_code`/`unreachable_pub` on
 /// workspace-wide once this inventory is gone).
-const WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE: usize = 81;
-const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 282;
+const WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE: usize = 80;
+const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 277;
 
 const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
@@ -86,12 +95,6 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         item_kind: "method",
         path: "crates/ironclaw_extension_host/src/channel_pairing.rs",
         count: 1,
-    },
-    FrozenPathCount {
-        category: "dead-code",
-        item_kind: "method",
-        path: "crates/ironclaw_host_api/src/product_adapter/auth.rs",
-        count: 5,
     },
     // Unwired sandbox credential-firewall primitives (W5/W8). Retire these
     // four entries when the egress proxy consumer (W6) lands on main and the
@@ -450,7 +453,7 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
-        path: "crates/ironclaw_product/src/scoped_fs/attachment_landing.rs",
+        path: "crates/ironclaw_product/src/scoped_fs/attachment_reader.rs",
         count: 1,
     },
     FrozenPathCount {
@@ -480,7 +483,7 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
-        path: "crates/ironclaw_runner/src/tool_disclosure.rs",
+        path: "crates/ironclaw_loop_host/src/tool_disclosure.rs",
         count: 1,
     },
     FrozenPathCount {

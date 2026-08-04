@@ -14,7 +14,7 @@ use tracing::{debug, error};
 
 use ironclaw_turns::{SanitizedFailure, runner::ClaimedTurnRun};
 
-use crate::failure_categories::{
+use ironclaw_host_api::failure::categories::{
     BUDGET_ACCOUNTING_FAILED_CATEGORY, CHECKPOINT_REJECTED_CATEGORY,
     MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
     MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
@@ -97,10 +97,7 @@ pub trait HostFactory: Send + Sync {
     async fn create_host(
         &self,
         claimed: &ClaimedTurnRun,
-    ) -> Result<
-        Box<dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync>,
-        HostFactoryError,
-    >;
+    ) -> Result<Box<dyn ironclaw_loop_contracts::AgentLoopDriverHost + Send + Sync>, HostFactoryError>;
 }
 
 /// Error returned when host construction fails.
@@ -128,7 +125,7 @@ impl std::error::Error for HostFactoryError {}
 #[cfg(test)]
 mod tests {
     use super::sanitized_driver_failure;
-    use crate::failure_categories::{
+    use ironclaw_host_api::failure::categories::{
         BUDGET_ACCOUNTING_FAILED_CATEGORY, CHECKPOINT_REJECTED_CATEGORY,
         MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
     };
@@ -197,14 +194,14 @@ mod tests {
     #[test]
     fn sanitized_driver_failure_preserves_transcript_write_category_and_safe_cause() {
         let failure = sanitized_driver_failure(
-            crate::failure_categories::TRANSCRIPT_WRITE_FAILED_CATEGORY,
+            ironclaw_host_api::failure::categories::TRANSCRIPT_WRITE_FAILED_CATEGORY,
             Some("assistant transcript write failed"),
         )
         .expect("transcript write category is valid");
 
         assert_eq!(
             failure.category(),
-            crate::failure_categories::TRANSCRIPT_WRITE_FAILED_CATEGORY
+            ironclaw_host_api::failure::categories::TRANSCRIPT_WRITE_FAILED_CATEGORY
         );
         assert_eq!(failure.detail(), Some("assistant transcript write failed"));
     }

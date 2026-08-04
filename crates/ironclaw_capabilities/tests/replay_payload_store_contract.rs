@@ -26,7 +26,7 @@ use ironclaw_host_api::{
     path::{MountAlias, VirtualPath},
     resource::{ResourceEstimate, ResourceScope},
 };
-use ironclaw_turns::run_profile::{AuthResumeApprovalIdentity, CapabilityInputRef};
+use ironclaw_loop_contracts::{AuthResumeApprovalIdentity, CapabilityInputRef};
 
 #[tokio::test]
 async fn replay_payload_round_trips_all_fields() {

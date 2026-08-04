@@ -17,6 +17,24 @@ use ironclaw_host_api::{
     resolution::{Resolution, ResolutionBatch},
     resource::ResourceScope,
 };
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
+    AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
+    CapabilityInputIssue, CapabilityInputRef, CapabilitySurfaceVersion,
+    EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
+    InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopCapabilityPort,
+    LoopContextBundle, LoopContextCompactionKind, LoopContextMessage, LoopContextPort,
+    LoopContextRequest, LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneKind,
+    LoopHostMilestoneSink, LoopInputCursor, LoopInputCursorToken, LoopModelCapabilityView,
+    LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopPromptBundle,
+    LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
+    LoopRequest, LoopRequestBatch, LoopRunContext, LoopTranscriptPort, ModelVisibleToolObservation,
+    ObservationTrust, ParentLoopOutput, PersonalContextPolicy, PromptMode,
+    PromptSkillContextMetadata, ProviderToolCallReference, ProviderToolCallReplay,
+    ProviderToolDefinition, RunProfileResolutionRequest, RunProfileResolver, SkillTrustLevel,
+    SkillVisibility, ToolObservationDetail, ToolObservationStatus, UpdateAssistantDraft,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+};
 use ironclaw_loop_host::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostIdentityMessageContent, HostManagedModelError,
@@ -48,28 +66,8 @@ use ironclaw_threads::{
     ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
     UpdateToolResultReferenceRequest,
 };
-use ironclaw_turns::{
-    LoopMessageRef, LoopResultRef, RunProfileResolutionRequest, RunProfileResolver, TurnActor,
-    TurnId, TurnRunId, TurnScope,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
-        AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
-        CapabilityInputIssue, CapabilityInputRef, CapabilitySurfaceVersion,
-        EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
-        HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver,
-        LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopDriverNoteKind,
-        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputCursor, LoopInputCursorToken,
-        LoopModelCapabilityView, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelRouteSnapshot, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef,
-        LoopPromptBundleRequest, LoopPromptPort, LoopRequest, LoopRequestBatch, LoopRunContext,
-        LoopTranscriptPort, ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput,
-        PersonalContextPolicy, PromptMode, PromptSkillContextMetadata, ProviderToolCallReference,
-        ProviderToolCallReplay, ProviderToolDefinition, SkillTrustLevel, SkillVisibility,
-        ToolObservationDetail, ToolObservationStatus, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
-    },
-};
+use ironclaw_turns::HostManagedLoopPromptPort;
+use ironclaw_turns::{LoopMessageRef, LoopResultRef, TurnActor, TurnId, TurnRunId, TurnScope};
 use tracing_test::traced_test;
 
 #[tokio::test]
@@ -86,7 +84,7 @@ async fn thread_context_port_loads_policy_filtered_transcript_messages() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -132,7 +130,7 @@ async fn thread_context_port_applies_prompt_token_budget_to_scanned_messages() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -174,8 +172,8 @@ async fn prompt_port_default_scan_reaches_past_old_sixteen_message_tail() {
     );
 
     let prompt_bundle = prompt_port
-        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: None,
@@ -454,7 +452,7 @@ async fn thread_context_port_rejects_run_actor_owner_mismatch() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .expect_err("owner mismatch must be rejected before the thread read");
@@ -492,7 +490,7 @@ async fn thread_context_port_accepts_explicit_owner_with_distinct_actor() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .expect("explicit owner should allow actor/owner divergence");
@@ -519,7 +517,7 @@ async fn thread_context_port_accepts_matching_run_actor_owner() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .expect("matching run actor owner must load context");
@@ -554,7 +552,7 @@ async fn thread_context_port_preserves_summary_replacements_as_system_messages()
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -603,7 +601,7 @@ async fn thread_context_port_builds_skill_instruction_snippets_from_real_skill_m
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -753,7 +751,7 @@ async fn context_port_populates_identity_when_source_set() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -809,7 +807,7 @@ async fn context_port_empty_identity_when_source_unset() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -837,7 +835,7 @@ async fn context_port_caches_stable_identity_within_run() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -845,7 +843,7 @@ async fn context_port_caches_stable_identity_within_run() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -1308,8 +1306,8 @@ async fn prompt_and_model_ports_materialize_trusted_identity_content() {
         HostManagedLoopPromptPort::new(fixture.run_context.clone(), context_port, milestones)
             .with_instruction_materialization_store(materialization_store);
     let prompt_bundle = prompt_port
-        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: None,
@@ -1523,7 +1521,7 @@ async fn thread_context_port_filters_skill_visibility_and_installed_prompt_conte
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -1605,7 +1603,7 @@ async fn thread_context_port_ignores_malformed_hidden_skill_content() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -1640,7 +1638,7 @@ async fn thread_context_port_fails_closed_when_visible_skill_content_is_missing(
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap_err();
@@ -1674,7 +1672,7 @@ async fn thread_context_port_fails_closed_when_skill_policy_data_is_missing() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap_err();
@@ -1710,8 +1708,8 @@ async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
     let prompt_port =
         HostManagedLoopPromptPort::new(fixture.run_context.clone(), context_port, milestones);
     let prompt_bundle = prompt_port
-        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: None,
@@ -1803,8 +1801,8 @@ async fn prompt_and_model_ports_resolve_skill_refs_after_prompt_sorting() {
     let prompt_port =
         HostManagedLoopPromptPort::new(fixture.run_context.clone(), context_port, milestones);
     let prompt_bundle = prompt_port
-        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: None,
@@ -1907,8 +1905,8 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
         HostManagedLoopPromptPort::new(fixture.run_context.clone(), context_port, milestones)
             .with_instruction_materialization_store(materialization_store.clone());
     let prompt_bundle = prompt_port
-        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: None,
@@ -2025,8 +2023,8 @@ async fn prompt_port_records_installed_skill_trust_metadata_without_prompt_paylo
     );
 
     prompt_port
-        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: None,
@@ -2086,8 +2084,8 @@ async fn prompt_port_records_multiple_active_skill_metadata_in_prompt_order() {
     );
 
     prompt_port
-        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: None,
@@ -2151,8 +2149,8 @@ async fn prompt_and_model_ports_keep_duplicate_skill_names_distinct() {
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
     );
     let prompt_bundle = prompt_port
-        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: None,
@@ -2221,8 +2219,8 @@ async fn model_port_rejects_skill_context_refs_when_source_changes_after_prompt_
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
     );
     let prompt_bundle = prompt_port
-        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: None,
@@ -2281,7 +2279,7 @@ async fn thread_context_port_rejects_non_origin_context_cursor() {
                 LoopInputCursorToken::new("input-cursor:after-first-input").unwrap(),
             )),
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap_err();
@@ -2305,7 +2303,7 @@ async fn thread_ports_reject_thread_scope_mismatch_before_thread_access() {
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap_err();
@@ -2336,7 +2334,7 @@ async fn context_port_rejects_cursor_from_another_run() {
                 LoopInputCursorToken::new("input-cursor:foreign-run").unwrap(),
             )),
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap_err();
@@ -3561,7 +3559,7 @@ async fn empty_capability_batch_returns_typed_denial_reason() {
     let port = EmptyLoopCapabilityPort;
 
     let outcome = port
-        .invoke_capability_batch(ironclaw_turns::run_profile::LoopRequestBatch {
+        .invoke_capability_batch(ironclaw_loop_contracts::LoopRequestBatch {
             invocations: vec![LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),
@@ -3594,7 +3592,7 @@ async fn empty_capability_batch_rejects_stale_surface() {
     let port = EmptyLoopCapabilityPort;
 
     let error = port
-        .invoke_capability_batch(ironclaw_turns::run_profile::LoopRequestBatch {
+        .invoke_capability_batch(ironclaw_loop_contracts::LoopRequestBatch {
             invocations: vec![LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: CapabilitySurfaceVersion::new("nonempty:v1").unwrap(),
@@ -3873,6 +3871,65 @@ async fn model_port_reads_image_attachment_bytes_into_model_image_parts() {
 }
 
 #[tokio::test]
+async fn model_port_merges_consecutive_text_user_messages_for_prompt() {
+    let fixture = ThreadFixture::new_with_user_content("first follow-up").await;
+    fixture
+        .accept_user_message("event-2", "second follow-up")
+        .await;
+    fixture
+        .accept_user_message("event-3", "third follow-up")
+        .await;
+
+    let gateway = Arc::new(RecordingGateway::reply("merged"));
+    let port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    );
+    issue_prompt_grant(&fixture.run_context, &[]);
+
+    port.stream_model(LoopModelRequest {
+        messages: Vec::new(),
+        inline_messages: Vec::new(),
+        surface_version: None,
+        model_preference: None,
+        capability_view: None,
+        fallback_index: 0,
+    })
+    .await
+    .unwrap();
+
+    let messages = {
+        let calls = gateway.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        calls[0].messages.clone()
+    };
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].role, HostManagedModelMessageRole::User);
+    assert_eq!(
+        messages[0].content,
+        "first follow-up\nsecond follow-up\nthird follow-up"
+    );
+
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let user_rows = history
+        .messages
+        .iter()
+        .filter(|message| message.kind == MessageKind::User)
+        .count();
+    assert_eq!(user_rows, 3, "durable transcript rows stay separate");
+}
+
+#[tokio::test]
 async fn model_port_threads_resolved_model_route_snapshot_to_gateway() {
     let fixture = ThreadFixture::new().await;
     let snapshot = LoopModelRouteSnapshot::new("anthropic", "claude-opus-4", "cfg-1", "auth-1");
@@ -4056,8 +4113,8 @@ async fn prompt_port_builds_bundle_with_tool_result_reference_context() {
     );
 
     let prompt_bundle = prompt_port
-        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        .build_prompt_bundle(ironclaw_loop_contracts::LoopPromptBundleRequest {
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: None,
@@ -4103,7 +4160,7 @@ async fn model_port_round_trips_tool_result_reference_context_as_typed_model_inp
         .load_loop_context(LoopContextRequest {
             after: None,
             limit: 16,
-            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            mode: ironclaw_loop_contracts::PromptMode::TextOnly,
         })
         .await
         .unwrap();
@@ -4624,7 +4681,7 @@ impl LoopContextPort for StaticLoopContextPort {
     async fn load_loop_context(
         &self,
         _request: LoopContextRequest,
-    ) -> Result<LoopContextBundle, ironclaw_turns::run_profile::AgentLoopHostError> {
+    ) -> Result<LoopContextBundle, ironclaw_loop_contracts::AgentLoopHostError> {
         Ok(self.bundle.clone())
     }
 }
@@ -4902,6 +4959,7 @@ fn provider_tool_definition(capability_id: CapabilityId, name: &str) -> Provider
         capability_id,
         name: ProviderToolName::new(name).expect("provider tool name"),
         description: "test provider tool".to_string(),
+        description_trust: Default::default(),
         parameters: serde_json::json!({"type": "object"}),
     }
 }
@@ -5648,11 +5706,11 @@ impl SessionThreadService for StaticContextThreadService {
 
 #[derive(Default)]
 struct FailOnceMilestoneSink {
-    attempts: Mutex<Vec<ironclaw_turns::run_profile::LoopHostMilestone>>,
+    attempts: Mutex<Vec<ironclaw_loop_contracts::LoopHostMilestone>>,
 }
 
 impl FailOnceMilestoneSink {
-    fn milestones(&self) -> Vec<ironclaw_turns::run_profile::LoopHostMilestone> {
+    fn milestones(&self) -> Vec<ironclaw_loop_contracts::LoopHostMilestone> {
         self.attempts
             .lock()
             .unwrap()
@@ -5670,7 +5728,7 @@ impl FailOnceMilestoneSink {
 async fn wait_for_in_memory_milestones(
     sink: &InMemoryLoopHostMilestoneSink,
     expected: usize,
-) -> Vec<ironclaw_turns::run_profile::LoopHostMilestone> {
+) -> Vec<ironclaw_loop_contracts::LoopHostMilestone> {
     for _ in 0..20 {
         let milestones = sink.milestones();
         if milestones.len() == expected {
@@ -5691,15 +5749,15 @@ async fn wait_for_fail_once_attempts(sink: &FailOnceMilestoneSink, expected: usi
 }
 
 #[async_trait]
-impl ironclaw_turns::run_profile::LoopHostMilestoneSink for FailOnceMilestoneSink {
+impl ironclaw_loop_contracts::LoopHostMilestoneSink for FailOnceMilestoneSink {
     async fn publish_loop_milestone(
         &self,
-        milestone: ironclaw_turns::run_profile::LoopHostMilestone,
-    ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
+        milestone: ironclaw_loop_contracts::LoopHostMilestone,
+    ) -> Result<(), ironclaw_loop_contracts::AgentLoopHostError> {
         let mut attempts = self.attempts.lock().unwrap();
         if attempts.is_empty() {
             attempts.push(milestone);
-            return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
+            return Err(ironclaw_loop_contracts::AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 "loop milestone sink unavailable",
             ));
@@ -5711,7 +5769,7 @@ impl ironclaw_turns::run_profile::LoopHostMilestoneSink for FailOnceMilestoneSin
 
 #[derive(Default)]
 struct FailOnModelStartedMilestoneSink {
-    published: Mutex<Vec<ironclaw_turns::run_profile::LoopHostMilestone>>,
+    published: Mutex<Vec<ironclaw_loop_contracts::LoopHostMilestone>>,
 }
 
 impl FailOnModelStartedMilestoneSink {
@@ -5726,13 +5784,13 @@ impl FailOnModelStartedMilestoneSink {
 }
 
 #[async_trait]
-impl ironclaw_turns::run_profile::LoopHostMilestoneSink for FailOnModelStartedMilestoneSink {
+impl ironclaw_loop_contracts::LoopHostMilestoneSink for FailOnModelStartedMilestoneSink {
     async fn publish_loop_milestone(
         &self,
-        milestone: ironclaw_turns::run_profile::LoopHostMilestone,
-    ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
+        milestone: ironclaw_loop_contracts::LoopHostMilestone,
+    ) -> Result<(), ironclaw_loop_contracts::AgentLoopHostError> {
         if matches!(milestone.kind, LoopHostMilestoneKind::ModelStarted { .. }) {
-            return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
+            return Err(ironclaw_loop_contracts::AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 "loop milestone sink unavailable",
             ));
@@ -5744,7 +5802,7 @@ impl ironclaw_turns::run_profile::LoopHostMilestoneSink for FailOnModelStartedMi
 
 #[derive(Default)]
 struct FailOnModelCompletedMilestoneSink {
-    published: Mutex<Vec<ironclaw_turns::run_profile::LoopHostMilestone>>,
+    published: Mutex<Vec<ironclaw_loop_contracts::LoopHostMilestone>>,
 }
 
 impl FailOnModelCompletedMilestoneSink {
@@ -5759,13 +5817,13 @@ impl FailOnModelCompletedMilestoneSink {
 }
 
 #[async_trait]
-impl ironclaw_turns::run_profile::LoopHostMilestoneSink for FailOnModelCompletedMilestoneSink {
+impl ironclaw_loop_contracts::LoopHostMilestoneSink for FailOnModelCompletedMilestoneSink {
     async fn publish_loop_milestone(
         &self,
-        milestone: ironclaw_turns::run_profile::LoopHostMilestone,
-    ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
+        milestone: ironclaw_loop_contracts::LoopHostMilestone,
+    ) -> Result<(), ironclaw_loop_contracts::AgentLoopHostError> {
         if matches!(milestone.kind, LoopHostMilestoneKind::ModelCompleted { .. }) {
-            return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
+            return Err(ironclaw_loop_contracts::AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 "loop milestone sink unavailable",
             ));
@@ -5956,16 +6014,14 @@ impl LoopCapabilityPort for StaticToolDefinitionPort {
 /// caller-level test can assert both the captured request and the once-per-run
 /// fetch guarantee.
 struct RecordingMemoryPromptContextService {
-    calls: Mutex<Vec<ironclaw_turns::run_profile::MemoryPromptContextRequest>>,
+    calls: Mutex<Vec<ironclaw_loop_contracts::MemoryPromptContextRequest>>,
 }
 
 #[async_trait]
-impl ironclaw_turns::run_profile::MemoryPromptContextService
-    for RecordingMemoryPromptContextService
-{
+impl ironclaw_loop_contracts::MemoryPromptContextService for RecordingMemoryPromptContextService {
     async fn load_memory_snippets(
         &self,
-        request: ironclaw_turns::run_profile::MemoryPromptContextRequest,
+        request: ironclaw_loop_contracts::MemoryPromptContextRequest,
     ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError> {
         self.calls.lock().expect("memory calls lock").push(request);
         Ok(vec![LoopContextSnippet {
@@ -6011,7 +6067,7 @@ async fn thread_context_port_loads_memory_snippets_through_wired_service_once_pe
     let request = || LoopContextRequest {
         after: None,
         limit: 16,
-        mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        mode: ironclaw_loop_contracts::PromptMode::TextOnly,
     };
     let first = adapter.load_loop_context(request()).await.unwrap();
     let second = adapter.load_loop_context(request()).await.unwrap();

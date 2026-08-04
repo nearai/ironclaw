@@ -12,12 +12,13 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_approvals::GateRecordStorePort;
 use ironclaw_host_api::{gate_record::GateRecord, ids::GateRef, resource::ResourceScope};
+use ironclaw_loop_contracts::{
+    AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopBlocked,
+    LoopBlockedKind, LoopExit,
+};
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_processes::ProcessTransitionPort;
-use ironclaw_turns::{
-    AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopBlocked,
-    LoopBlockedKind, LoopExit, TurnError, TurnStatus, runner::ClaimedTurnRun,
-};
+use ironclaw_turns::{TurnError, TurnStatus, runner::ClaimedTurnRun};
 use tracing::{debug, error, warn};
 
 /// The loop-facing routing-ref prefix an auth gate carries
@@ -27,11 +28,12 @@ use tracing::{debug, error, warn};
 /// prefix to recover the same key the loop-host persisted under.
 const AUTH_GATE_LOOP_REF_PREFIX: &str = "gate:auth-";
 
+use ironclaw_turns::loop_exit::LoopExitApplier;
+
 use crate::{
     after_turn_memory::AfterTurnMemoryRecorder,
     driver_registry::{DriverRegistry, LoopDriverRegistryKey},
     failure_categories::host_stage_unavailable_category,
-    loop_exit_applier::LoopExitApplier,
     turn_runner::{HostFactory, sanitized_driver_failure, sanitized_failure},
     turn_scheduler::{TurnRunExecutor, TurnRunExecutorError},
 };

@@ -1,11 +1,13 @@
 use axum::Json;
 use axum::extract::{Extension, Path, State};
-use ironclaw_host_api::product_surface::{
-    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceQueryRequest,
-};
 use ironclaw_product::{
-    RUN_ARTIFACT_VIEW, RebornRunArtifact, RebornRunArtifactRequest, RebornThreadArtifact,
-    RebornThreadArtifactRequest, THREAD_ARTIFACT_VIEW,
+    RUN_ARTIFACT_VIEW, RebornRunArtifact, RebornThreadArtifact, THREAD_ARTIFACT_VIEW,
+};
+use ironclaw_product_contracts::product_wire::{
+    RebornRunArtifactRequest, RebornThreadArtifactRequest,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceQueryRequest,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 

@@ -6,7 +6,7 @@ use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
     ids::VendorId,
 };
-use ironclaw_product::LifecycleExtensionCredentialSetup;
+use ironclaw_product_contracts::package_lifecycle::LifecycleExtensionCredentialSetup;
 
 pub fn package_runtime_credential_auth_requirements(
     package: &ExtensionPackage,

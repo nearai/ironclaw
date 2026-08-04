@@ -9,11 +9,11 @@ use std::sync::Arc;
 use super::*;
 use crate::TurnEventProjectionFromProcessJournal;
 use crate::{
-    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, CapabilityActivityId, EventCursor, GateRef,
-    IdempotencyKey, InMemoryRunProfileResolver, ReplyTargetBindingRef, RunProfileId,
-    RunProfileVersion, SourceBindingRef, TurnActor, TurnId, TurnRunProfile, TurnScope,
-    events::TurnEventProjectionSource,
+    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, CapabilityActivityId, EventCursor,
+    IdempotencyKey, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, SourceBindingRef,
+    TurnActor, TurnGateRef, TurnId, TurnRunProfile, TurnScope, events::TurnEventProjectionSource,
 };
+use ironclaw_loop_contracts::InMemoryRunProfileResolver;
 
 fn scope() -> TurnScope {
     TurnScope::new(
@@ -50,7 +50,7 @@ fn record_with_status(status: TurnStatus) -> TurnRunRecord {
         model_usage: None,
         checkpoint_id: None,
         gate_ref: GateKind::from_status(status)
-            .map(|_| GateRef::new("gate:process-journal").expect("gate")),
+            .map(|_| TurnGateRef::new("gate:process-journal").expect("gate")),
         blocked_activity_id: None,
         credential_requirements: Vec::new(),
         failure: None,
@@ -85,6 +85,7 @@ fn agent_turn_metadata(
             .expect("reply binding"),
         resolved_run_profile_id: run_profile.id,
         resolved_run_profile_version: run_profile.version,
+        allow_steering: true,
         resolved_run_profile: None,
         resolved_model_route: None,
         model_usage: None,
@@ -256,7 +257,7 @@ async fn resume_rejects_a_running_claim_without_clearing_its_lease() {
             scope: turn_scope.clone(),
             actor,
             run_id,
-            gate_resolution_ref: GateRef::new("gate:stale-resume").expect("gate"),
+            gate_resolution_ref: TurnGateRef::new("gate:stale-resume").expect("gate"),
             source_binding_ref: SourceBindingRef::new("source:stale-resume").expect("source"),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply:stale-resume")
                 .expect("reply"),
@@ -324,7 +325,7 @@ async fn foreign_actor_cannot_resume_or_cancel_and_leaves_process_unchanged() {
         .expect("claim")
         .pop()
         .expect("claimed");
-    let gate_ref = GateRef::new("gate:foreign-test").expect("gate");
+    let gate_ref = TurnGateRef::new("gate:foreign-test").expect("gate");
     store
         .suspend_process(SuspendProcessRequest {
             process_id: claim.state.process_id,
@@ -638,7 +639,7 @@ async fn retry_rejects_checkpoint_rejection_without_creating_a_process() {
         &turn_scope,
         run_id,
         None,
-        crate::LoopFailureKind::CheckpointRejected.as_str(),
+        ironclaw_loop_contracts::LoopFailureKind::CheckpointRejected.as_str(),
     )
     .await;
 
@@ -804,7 +805,7 @@ async fn retry_rejects_final_checkpoint_without_creating_a_process() {
             created_at: Utc::now(),
             link_to_process: true,
             metadata: serde_json::json!({
-                "kind": crate::run_profile::LoopCheckpointKind::Final,
+                "kind": ironclaw_loop_contracts::LoopCheckpointKind::Final,
             }),
         })
         .await
@@ -869,6 +870,7 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-retry").expect("reply"),
         resolved_run_profile_id: run_profile.id,
         resolved_run_profile_version: run_profile.version,
+        allow_steering: true,
         resolved_run_profile: None,
         resolved_model_route: None,
         model_usage: None,
@@ -909,7 +911,7 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
             link_to_process: true,
             metadata: serde_json::json!({
                 "source": "retry-test",
-                "kind": crate::run_profile::LoopCheckpointKind::BeforeModel,
+                "kind": ironclaw_loop_contracts::LoopCheckpointKind::BeforeModel,
             }),
         })
         .await
@@ -1095,11 +1097,12 @@ fn lifecycle_event_projects_to_process_journal_entry() {
             .expect("reply"),
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
+        allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
         received_at: Utc::now(),
         checkpoint_id: None,
-        gate_ref: Some(GateRef::new("gate:process-journal").expect("gate")),
+        gate_ref: Some(TurnGateRef::new("gate:process-journal").expect("gate")),
         blocked_activity_id: Some(CapabilityActivityId::new()),
         credential_requirements: Vec::new(),
         failure: None,
@@ -1141,6 +1144,7 @@ fn claimed_turn_run_projects_to_process_claim() {
             .expect("reply"),
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
+        allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
         received_at: Utc::now(),
@@ -1198,6 +1202,7 @@ fn claimed_process_round_trips_to_turn_executor_view() {
             .expect("reply"),
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
+        allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
         received_at: Utc::now(),
@@ -1313,12 +1318,12 @@ fn runner_outcomes_map_to_process_outcomes() {
     let failure = crate::SanitizedFailure::new("runner_failed").expect("failure");
     let blocked = TurnRunnerOutcome::Blocked {
         checkpoint_id: TurnCheckpointId::new(),
-        state_ref: crate::run_profile::LoopCheckpointStateRef::new(
+        state_ref: ironclaw_loop_contracts::LoopCheckpointStateRef::new(
             "checkpoint:state-process-journal".to_string(),
         )
         .expect("state ref"),
         reason: BlockedReason::ExternalTool {
-            gate_ref: GateRef::new("gate:process-journal").expect("gate"),
+            gate_ref: TurnGateRef::new("gate:process-journal").expect("gate"),
         },
         blocked_activity_id: Some(CapabilityActivityId::new()),
     };

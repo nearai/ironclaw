@@ -5,10 +5,10 @@ use ironclaw_event_projections::{
     ProjectionScope, ProjectionSnapshot,
 };
 use ironclaw_host_api::ids::ThreadId;
+use ironclaw_host_api::turn::TurnActor;
 use ironclaw_outbound::{
     OutboundError, OutboundPushCandidate, OutboundPushTargetRequest, OutboundStateStorePort,
 };
-use ironclaw_turns::TurnActor;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::{

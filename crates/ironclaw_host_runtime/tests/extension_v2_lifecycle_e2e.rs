@@ -724,7 +724,7 @@ fn mounted_github_package_fs() -> (tempfile::TempDir, DiskFilesystem) {
 fn github_first_party_asset_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("crates/ironclaw_first_party_extensions/assets/github")
+        .join("crates/extensions/packages/github")
 }
 
 fn copy_package_file(source_root: &Path, package_root: &Path, relative: &str) {

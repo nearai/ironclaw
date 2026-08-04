@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_loop_contracts::LoopRunContext;
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     SubagentPromptMaterialSource,
 };
-use ironclaw_turns::run_profile::LoopRunContext;
 use tracing::error;
 
 use crate::planned_driver_factory::is_subagent_planned_run_profile;
@@ -73,12 +73,12 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_agent_loop::test_support::test_run_context;
     use ironclaw_host_api::ids::CapabilityId;
+    use ironclaw_loop_contracts::{AgentLoopHostError, AgentLoopHostErrorKind, LoopRunContext};
     use ironclaw_loop_host::CapabilitySurfaceProfileResolver;
     use ironclaw_loop_host::{
         CapabilityAllowSet, CapabilityResolveError, SubagentPromptMaterial,
         SubagentPromptMaterialSource,
     };
-    use ironclaw_turns::run_profile::{AgentLoopHostError, AgentLoopHostErrorKind, LoopRunContext};
     use ironclaw_turns::{RunProfileId, RunProfileVersion};
 
     use crate::planned_driver_factory::{
@@ -96,7 +96,7 @@ mod tests {
         context.resolved_run_profile.profile_id =
             RunProfileId::new(SUBAGENT_PLANNED_PROFILE_ID).expect("subagent planned profile id");
         context.resolved_run_profile.loop_driver.id =
-            ironclaw_turns::run_profile::LoopDriverId::new(SUBAGENT_PLANNED_DRIVER_ID)
+            ironclaw_loop_contracts::LoopDriverId::new(SUBAGENT_PLANNED_DRIVER_ID)
                 .expect("subagent planned driver id");
         context.resolved_run_profile.loop_driver.version =
             RunProfileVersion::new(PLANNED_DRIVER_DEFAULT_VERSION);

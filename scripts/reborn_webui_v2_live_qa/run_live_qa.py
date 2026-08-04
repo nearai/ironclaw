@@ -108,7 +108,6 @@ from scripts.reborn_webui_v2_live_qa.slack_helpers import (  # noqa: E402
     SLACK_PERSONAL_ACCESS_TOKEN_ENV_NAMES,
     SLACK_SECOND_USER_TOKEN_ENV,
     SLACK_SIGNING_SECRET_ENV,
-    _disable_slack_in_config,
     _discover_slack_dm_route_channel,
     _has_live_slack_env,
     _has_slack_delivery_target,
@@ -126,7 +125,6 @@ from scripts.reborn_webui_v2_live_qa.slack_helpers import (  # noqa: E402
     _slack_auth_test,
     _slack_auth_provider,
     _slack_config_value,
-    _slack_enabled,
 )
 from scripts.reborn_webui_v2_live_qa.text_match import (  # noqa: E402
     required_text_matches,
@@ -347,9 +345,8 @@ def parse_args() -> argparse.Namespace:
         "--require-slack-live",
         action="store_true",
         help=(
-            "Require real Slack host env vars and keep [slack].enabled=true. "
-            "Without this, non-Slack cases disable Slack in the copied temp home "
-            "when Slack env vars are absent."
+            "Require real Slack host env vars and a successful Slack auth.test "
+            "for selected Slack cases."
         ),
     )
     args = parser.parse_args()
@@ -419,7 +416,7 @@ def _referenced_env_names(config_text: str) -> set[str]:
     return names
 
 
-def _write_minimal_reborn_config(path: Path, *, include_slack: bool) -> None:
+def _write_minimal_reborn_config(path: Path) -> None:
     api_key_env = os.environ.get(
         "REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV",
         "NEARAI_API_KEY" if os.environ.get("NEARAI_API_KEY") else "LIVE_OPENAI_COMPATIBLE_API_KEY",
@@ -448,13 +445,6 @@ def _write_minimal_reborn_config(path: Path, *, include_slack: bool) -> None:
     ]
     if base_url:
         llm_default_lines.append(f'base_url = "{base_url}"')
-    slack_lines: list[str] = []
-    if include_slack:
-        slack_lines = [
-            "[slack]",
-            "enabled = true",
-            "",
-        ]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "\n".join(
@@ -469,7 +459,6 @@ def _write_minimal_reborn_config(path: Path, *, include_slack: bool) -> None:
                 "[llm.default]",
                 *llm_default_lines,
                 "",
-                *slack_lines,
             ]
         ),
         encoding="utf-8",
@@ -543,7 +532,7 @@ def prepare_reborn_home(
     shutil.copytree(source_home, prepared_home, ignore=_ignore)
     config_path = prepared_home / "config.toml"
     if not config_path.exists() and (prepared_home / "local-dev" / "reborn-local-dev.db").exists():
-        _write_minimal_reborn_config(config_path, include_slack=needs_slack)
+        _write_minimal_reborn_config(config_path)
     legacy_setup_cleanup = _remove_legacy_slack_setup_fields(config_path)
     stale_dm_route_cleanup = _remove_dm_slack_channel_routes(config_path)
     route_configured_from_env = False
@@ -558,7 +547,7 @@ def prepare_reborn_home(
     )
     telegram_env, telegram_env_preflight = _materialize_telegram_env_for_reborn()
 
-    if _slack_enabled(config) and not _has_live_slack_env():
+    if needs_slack and not _has_live_slack_env():
         secret_env, secret_preflight = _materialize_slack_env_from_reborn_home(
             prepared_home,
             config,
@@ -573,7 +562,6 @@ def prepare_reborn_home(
     slack_route_discovery: dict[str, object] = {"checked": False}
     if (
         needs_slack_target
-        and _slack_enabled(config)
         and _has_live_slack_env(process_env)
         and not _has_slack_delivery_target(config, prepared_home, auth_user_id)
     ):
@@ -601,38 +589,26 @@ def prepare_reborn_home(
             "Reborn config references unset live env vars: " + ", ".join(missing)
         )
 
-    slack_enabled = _slack_enabled(config)
     slack_setup = (
         _slack_setup_preflight(prepared_home, config, process_env)
-        if slack_enabled
+        if needs_slack
         else {"configured": False}
     )
     slack_target_present = _has_slack_delivery_target(config, prepared_home, auth_user_id)
-    slack_auth = (
-        _slack_auth_test(config, process_env)
-        if slack_enabled and _has_live_slack_env(process_env)
-        else {"checked": False, "ok": False, "error": "Slack env unavailable"}
-    )
-    if args.require_slack_live and needs_slack and not slack_enabled:
-        raise LiveQaError(
-            "selected cases require live Slack, but [slack].enabled is not true "
-            "in the prepared Reborn config."
-        )
-    if slack_enabled and not _has_live_slack_env(process_env):
+    if not needs_slack:
+        slack_auth = {"checked": False, "ok": False, "error": "Slack not required"}
+    elif _has_live_slack_env(process_env):
+        slack_auth = _slack_auth_test(config, process_env)
+    else:
+        slack_auth = {"checked": False, "ok": False, "error": "Slack env unavailable"}
+    if needs_slack and not _has_live_slack_env(process_env):
         if args.require_slack_live:
             raise LiveQaError(
-                "Reborn config enables Slack, but live Slack env vars are missing "
-                "(expected IRONCLAW_REBORN_SLACK_SIGNING_SECRET and "
-                "IRONCLAW_REBORN_SLACK_BOT_TOKEN unless overridden in config)."
+                "selected cases require live Slack, but live Slack env vars are "
+                "missing (expected IRONCLAW_REBORN_SLACK_SIGNING_SECRET and "
+                "IRONCLAW_REBORN_SLACK_BOT_TOKEN)."
             )
-        if not needs_slack:
-            _disable_slack_in_config(config_path)
-            print(
-                "[reborn-webui-v2-live-qa] Slack disabled in copied temp home because "
-                "Slack live env vars are not present and no Slack case was selected.",
-                flush=True,
-            )
-    if args.require_slack_live and needs_slack and slack_enabled and not slack_auth.get("ok"):
+    if args.require_slack_live and needs_slack and not slack_auth.get("ok"):
         raise LiveQaError(
             "selected cases require live Slack, but Slack auth.test failed: "
             f"{slack_auth.get('error') or 'unknown Slack auth error'}"
@@ -672,7 +648,6 @@ def prepare_reborn_home(
         env=process_env,
         preflight={
             "slack": {
-                "enabled_in_config": slack_enabled,
                 "env_present": _has_live_slack_env(process_env),
                 "requires_slack": needs_slack,
                 "requires_delivery_target": needs_slack_target,
@@ -706,7 +681,7 @@ def create_generated_reborn_home(path: Path, *, include_slack: bool = False) -> 
         os.environ.get("LIVE_OPENAI_COMPATIBLE_MODEL", "deepseek-ai/DeepSeek-V4-Flash"),
     )
     path.mkdir(parents=True, exist_ok=True)
-    _write_minimal_reborn_config(path / "config.toml", include_slack=include_slack)
+    _write_minimal_reborn_config(path / "config.toml")
     google_seed = _seed_generated_google_product_auth_if_configured(path, _auth_user_id())
     github_seed = _seed_generated_github_product_auth_if_configured(path, _auth_user_id())
     slack_seed = (
@@ -810,6 +785,113 @@ def validate_case_llm_trace(output_dir: Path, case_name: str) -> Path:
     if not payload["steps"]:
         raise LiveQaError(f"expected LLM trace for {case_name} contains no steps")
     return trace_path
+
+
+def parse_case_llm_trace_metrics(trace_path: Path) -> dict[str, object]:
+    """Extract privacy-safe scalar metrics from one complete per-case trace.
+
+    Model calls are response-bearing ``text``/``tool_calls`` steps; user-input
+    markers are deliberately excluded. Tool calls are counted from every item
+    in each response's full ``tool_calls`` list, so the count is not bounded by
+    any checkpoint diagnostic ring. Legacy traces predate aggregate provider
+    usage: their call counts and step token totals remain exact, while cache and
+    cost fields stay unknown instead of being reported as zero.
+    """
+    try:
+        payload = json.loads(trace_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LiveQaError(f"LLM trace metrics are missing or invalid: {exc}") from exc
+    steps = payload.get("steps") if isinstance(payload, dict) else None
+    if not isinstance(steps, list):
+        raise LiveQaError("LLM trace metrics require a steps list")
+
+    model_call_count = 0
+    tool_call_count = 0
+    step_input_tokens = 0
+    step_output_tokens = 0
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        response = step.get("response")
+        if not isinstance(response, dict):
+            continue
+        response_type = response.get("type")
+        if response_type not in {"text", "tool_calls"}:
+            continue
+        model_call_count += 1
+        input_tokens = response.get("input_tokens")
+        output_tokens = response.get("output_tokens")
+        if isinstance(input_tokens, int) and not isinstance(input_tokens, bool):
+            step_input_tokens += max(0, input_tokens)
+        if isinstance(output_tokens, int) and not isinstance(output_tokens, bool):
+            step_output_tokens += max(0, output_tokens)
+        if response_type == "tool_calls" and isinstance(response.get("tool_calls"), list):
+            tool_call_count += len(response["tool_calls"])
+
+    usage = payload.get("usage")
+    has_provider_usage = isinstance(usage, dict)
+
+    def usage_int(name: str) -> int | None:
+        if not isinstance(usage, dict):
+            return None
+        value = usage.get(name)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return None
+        return value
+
+    input_tokens = usage_int("input_tokens") if has_provider_usage else None
+    output_tokens = usage_int("output_tokens") if has_provider_usage else None
+    cache_read_tokens = (
+        usage_int("cache_read_input_tokens") if has_provider_usage else None
+    )
+    if input_tokens is None:
+        input_tokens = step_input_tokens
+    if output_tokens is None:
+        output_tokens = step_output_tokens
+    uncached_input_tokens = (
+        max(0, input_tokens - cache_read_tokens)
+        if cache_read_tokens is not None
+        else None
+    )
+    cost_usd = usage.get("total_cost_usd") if isinstance(usage, dict) else None
+    if not isinstance(cost_usd, str) or not cost_usd.strip():
+        cost_usd = None
+
+    return {
+        "model_call_count": model_call_count,
+        "tool_call_count": tool_call_count,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "uncached_input_tokens": uncached_input_tokens,
+        "cost_usd": cost_usd,
+    }
+
+
+def _zero_case_metrics() -> dict[str, object]:
+    """Metrics for a case known not to have invoked the model."""
+    return {
+        "model_call_count": 0,
+        "tool_call_count": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "uncached_input_tokens": 0,
+        "cost_usd": "0",
+    }
+
+
+def _unavailable_case_metrics() -> dict[str, object]:
+    """Honest shape for an interrupted model case with no complete trace."""
+    return {
+        "model_call_count": None,
+        "tool_call_count": None,
+        "input_tokens": None,
+        "output_tokens": None,
+        "cache_read_tokens": None,
+        "uncached_input_tokens": None,
+        "cost_usd": None,
+    }
 
 
 async def start_reborn_server(
@@ -1193,8 +1275,6 @@ async def _apply_slack_setup_api_after_start(
     prepared_home: PreparedRebornHome,
 ) -> dict[str, object]:
     config_text = _config_text(prepared_home.path / "config.toml")
-    if not _slack_enabled(config_text):
-        return {"applied": False, "reason": "slack_disabled"}
     slack_preflight = prepared_home.preflight.get("slack")
     auth_test = (
         slack_preflight.get("auth_test")
@@ -3921,8 +4001,8 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
             else None
         )
         setup_readiness = _extension_setup_secret_readiness(setup_status)
-        if not slack.get("enabled_in_config") or not slack.get("env_present"):
-            raise AssertionError(f"Slack was not enabled with env in preflight: {slack!r}")
+        if not slack.get("env_present"):
+            raise AssertionError(f"Slack env was not present in preflight: {slack!r}")
         if setup_readiness.get("ready") is not True:
             raise AssertionError(
                 "Slack generic setup projection is not ready; missing required secrets: "
@@ -8704,6 +8784,7 @@ async def run_cases(args: argparse.Namespace) -> int:
             f"ironclaw binary missing at {binary}; rerun without --skip-build"
         )
     results: list[ProbeResult] = []
+    invoked_cases: set[str] = set()
     trace_exports: list[dict[str, object]] = []
     first_base_url = ""
     for case_index, name in enumerate(selected_cases):
@@ -8834,16 +8915,9 @@ async def run_cases(args: argparse.Namespace) -> int:
         if case_spec.requires_slack and isinstance(slack_preflight, dict):
             slack_auth = slack_preflight.get("auth_test")
             slack_auth_ok = isinstance(slack_auth, dict) and bool(slack_auth.get("ok"))
-            if (
-                not slack_preflight.get("enabled_in_config")
-                or not slack_preflight.get("env_present")
-                or not slack_auth_ok
-            ):
+            if not slack_preflight.get("env_present") or not slack_auth_ok:
                 started = time.monotonic()
-                if not slack_preflight.get("enabled_in_config"):
-                    error = "live Slack is not enabled in the prepared Reborn config"
-                    blocked = "missing_slack_enabled"
-                elif not slack_preflight.get("env_present"):
+                if not slack_preflight.get("env_present"):
                     error = "live Slack bot/signing-secret env is not configured"
                     blocked = "missing_slack_env"
                 else:
@@ -9023,6 +9097,7 @@ async def run_cases(args: argparse.Namespace) -> int:
                 write_preflight(args.output_dir, prepared_home)
                 shutil.copyfile(preflight_path, case_preflight_path)
             print(f"[reborn-webui-v2-live-qa] running case={name}", flush=True)
+            invoked_cases.add(name)
             result = await _run_case_with_retries(
                 CASES[name].fn,
                 ctx,
@@ -9079,30 +9154,33 @@ async def run_cases(args: argparse.Namespace) -> int:
                 break
         finally:
             stop_process(proc)
-            if (
-                completed_result is not None
-                and completed_result.success
-                and case_spec.expects_llm_trace
-            ):
+            if completed_result is not None and case_spec.expects_llm_trace:
                 try:
                     trace_path = validate_case_llm_trace(args.output_dir, name)
                     completed_result.details["llm_trace_path"] = str(trace_path)
+                    completed_result.details["metrics"] = parse_case_llm_trace_metrics(
+                        trace_path
+                    )
                 except LiveQaError as exc:
-                    completed_result.success = False
-                    completed_result.details.update(
-                        {
-                            "blocking": True,
-                            "failure_class": "infrastructure",
-                            "failure_category": "trace_harvest",
-                            "failure_status": "failed",
-                            "error": str(exc),
-                        }
-                    )
-                    print(
-                        f"[reborn-webui-v2-live-qa] case={name} success=False "
-                        "blocked=trace_harvest",
-                        flush=True,
-                    )
+                    if completed_result.success:
+                        completed_result.success = False
+                        completed_result.details.update(
+                            {
+                                "blocking": True,
+                                "failure_class": "infrastructure",
+                                "failure_category": "trace_harvest",
+                                "failure_status": "failed",
+                                "error": str(exc),
+                            }
+                        )
+                        print(
+                            f"[reborn-webui-v2-live-qa] case={name} success=False "
+                            "blocked=trace_harvest",
+                            flush=True,
+                        )
+                    # Preserve an existing case failure. A failed model run can
+                    # terminate before the recorder publishes a complete step,
+                    # so missing metrics are honest rather than trace_harvest.
             trace_export = export_case_trace(args.output_dir, name, prepared_home.path)
             trace_exports.append(trace_export)
             print(
@@ -9110,6 +9188,19 @@ async def run_cases(args: argparse.Namespace) -> int:
                 f"entries={trace_export['entry_count']}",
                 flush=True,
             )
+    for result in results:
+        if "metrics" in result.details:
+            continue
+        result_case = str(result.details.get("case") or "")
+        result_spec = CASES.get(result_case)
+        model_was_not_invoked = (
+            result_spec is not None and not result_spec.expects_llm_trace
+        ) or result_case not in invoked_cases
+        result.details["metrics"] = (
+            _zero_case_metrics()
+            if model_was_not_invoked
+            else _unavailable_case_metrics()
+        )
     results_path = write_results(args.output_dir, results, first_base_url)
     trace_index_path = write_trace_index(args.output_dir, trace_exports)
     green_explanation_path = write_green_run_explanation(args.output_dir, results)

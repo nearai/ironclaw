@@ -6,7 +6,7 @@
 //! retry, crash recovery — identical for every channel, owned here,
 //! once) and **vendor mechanics** (rendering, splitting, API selection,
 //! error mapping — owned by each extension's
-//! [`ChannelAdapter::deliver`](crate::ChannelAdapter)).
+//! [`ChannelAdapter::deliver`](ironclaw_extension_contracts::channel_adapter::ChannelAdapter)).
 //!
 //! Rules this module owns:
 //! - Every user-visible channel output is a semantic [`DeliveryIntent`];
@@ -25,17 +25,21 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::{
-    ChannelAdapter, ExternalConversationRef, OutboundEnvelope, OutboundPart, OutboundTarget,
-    PartDeliveryOutcome,
+    ExternalConversationRef, OutboundEnvelope, OutboundPart, OutboundTarget, PartDeliveryOutcome,
 };
 use async_trait::async_trait;
 use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
-use ironclaw_host_api::{path::ScopedPath, tool_adapter::RestrictedEgress};
+use ironclaw_host_api::ids::ExtensionId;
+use ironclaw_host_api::path::ScopedPath;
+use ironclaw_host_api::product_adapter::AdapterInstallationId;
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveryFailureKind, OutboundDeliveryAttempt,
     OutboundDeliveryDecision, OutboundDeliveryStatus, OutboundPolicyService, OutboundPushCandidate,
     OutboundPushKind, OutboundStateStorePort, PrepareCommunicationDeliveryRequest,
     ReplyAttachmentIntent, UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
+};
+use ironclaw_product_contracts::delivery::{
+    ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
 };
 use ironclaw_threads::{AttachmentRef, ThreadScope};
 use ironclaw_turns::{TurnRunId, TurnScope};
@@ -109,44 +113,17 @@ impl DeliveryIntent {
     }
 }
 
-/// One channel's delivery half, resolved from a single active-snapshot read
-/// (generation-pinned: an in-flight delivery keeps these `Arc`s across an
-/// upgrade).
-#[derive(Clone)]
-pub struct ResolvedChannelDelivery {
-    pub extension_id: String,
-    pub installation_id: String,
-    pub adapter: Arc<dyn ChannelAdapter>,
-    /// Policy-enforced egress built from the same snapshot read.
-    pub egress: Arc<dyn RestrictedEgress>,
-}
-
-/// Resolver port: the coordinator's view of the active extension set.
-/// Defined here (the coordinator is the consumer); implemented over the
-/// extension host's snapshot by composition.
-pub trait ChannelDeliveryResolver: Send + Sync {
-    fn resolve_channel_delivery(&self, extension_id: &str) -> Option<ResolvedChannelDelivery>;
-}
-
-/// Read half of the host-side `reply_context` storage (ING-11): the opaque
-/// vendor context an adapter attached to the originating inbound message,
-/// handed back at delivery time.
-#[async_trait]
-pub trait DeliveryReplyContextSource: Send + Sync {
-    async fn reply_context(
-        &self,
-        extension_id: &str,
-        installation_id: &str,
-        conversation_fingerprint: &str,
-    ) -> Option<Vec<u8>>;
-}
-
 /// A no-context source for channels/tests without stored contexts.
 pub struct NoReplyContext;
 
 #[async_trait]
 impl DeliveryReplyContextSource for NoReplyContext {
-    async fn reply_context(&self, _: &str, _: &str, _: &str) -> Option<Vec<u8>> {
+    async fn reply_context(
+        &self,
+        _: &ExtensionId,
+        _: &AdapterInstallationId,
+        _: &str,
+    ) -> Option<Vec<u8>> {
         None
     }
 }
@@ -646,8 +623,8 @@ impl DeliveryCoordinator {
         reply_context: Option<Vec<u8>>,
     ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
         let envelope = OutboundEnvelope {
-            extension_id: channel.extension_id.clone(),
-            installation_id: channel.installation_id.clone(),
+            extension_id: channel.extension_id.as_str().to_string(),
+            installation_id: channel.installation_id.as_str().to_string(),
             delivery_attempt_id: attempt.delivery_id.to_string(),
             target: OutboundTarget {
                 conversation: conversation.clone(),

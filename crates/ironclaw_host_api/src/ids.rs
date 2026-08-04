@@ -259,7 +259,7 @@ impl GateRef {
     /// This is the typed GateRecord key — a uuid, per this ref family's
     /// no-caller-composed-string contract above — and is deliberately distinct
     /// from the loop-facing `gate:approval-{id}` routing ref
-    /// (`ironclaw_turns::GateRef`), which stays string-encoded so the
+    /// ([`TurnGateRef`](crate::turn::TurnGateRef)), which stays string-encoded so the
     /// `is_approval_gate_ref` prefix predicate keeps routing approvals vs auth.
     pub fn for_approval_request(approval_request_id: ApprovalRequestId) -> Self {
         Self::from_uuid(approval_request_id.as_uuid())

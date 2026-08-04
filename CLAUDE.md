@@ -213,6 +213,7 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | `crates/ironclaw_webui/` | `crates/ironclaw_webui/CLAUDE.md` |
 | `crates/ironclaw_reborn_composition/` | `crates/ironclaw_reborn_composition/CLAUDE.md` |
 | `crates/ironclaw_reborn_identity/` | `crates/ironclaw_reborn_identity/CONTRACT.md` |
+| `tests/` (scenario coverage map) | `tests/CLAUDE.md` |
 | `tests/integration/` | `tests/integration/CLAUDE.md` |
 | `tests/support/reborn_parity_qa/` | `tests/support/reborn_parity_qa/CLAUDE.md` |
 | `tests/e2e/` | `tests/e2e/CLAUDE.md` |
@@ -251,7 +252,7 @@ activate / cleanup. Binaries supply adapters through
 generic ingress router, pairing seam, identity bindings, and the host-owned
 delivery coordinator — never per-channel host code. Start from the
 `reborn-extension-surfaces` skill; the worked example is the Slack package
-(`crates/ironclaw_first_party_extensions/assets/slack/`).
+(`crates/extensions/packages/slack/`).
 
 ## Capability dispatch
 

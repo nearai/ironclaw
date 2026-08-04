@@ -14,16 +14,13 @@
 //! is updated with a justification; removing one — moving a projection onto the
 //! resolved record — fails the stale entry. The list can only shrink.
 
+#[allow(dead_code)]
+mod ratchet_support;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("architecture crate under crates/")
-        .to_path_buf()
-}
+use ratchet_support::workspace_root;
 
 /// Why a reparse site is *not* a projection reparse. Every allowlisted entry
 /// names one of these.
@@ -45,42 +42,6 @@ const ALLOWLIST: &[(&str, usize, ReparseCategory, &str)] = &[
         1,
         ReparseCategory::Compiler,
         "the canonical manifest-file loader/parser in the manifest-owning crate (load_package_entry)",
-    ),
-    (
-        "crates/ironclaw_extensions/src/installations.rs",
-        1,
-        ReparseCategory::Compiler,
-        "one-time CAS migration compiles pre-resolved filesystem rows before the store opens",
-    ),
-    (
-        "crates/ironclaw_product/src/adapter_registry.rs",
-        1,
-        ReparseCategory::Compiler,
-        "parse_product_adapter_manifest_record — the registry manifest compiler entry",
-    ),
-    (
-        "crates/ironclaw_extension_host/src/available_extensions.rs",
-        3,
-        ReparseCategory::BundledAsset,
-        "bundled first-party package + filesystem-root catalog compile",
-    ),
-    (
-        "crates/ironclaw_extension_host/src/available_extension_import.rs",
-        1,
-        ReparseCategory::Compiler,
-        "install-time compile of an imported (zip-uploaded) manifest into its resolved record",
-    ),
-    (
-        "crates/ironclaw_extension_host/src/lifecycle_restore.rs",
-        2,
-        ReparseCategory::Compiler,
-        "install/restore-time compile of the installed manifest into its resolved record",
-    ),
-    (
-        "crates/ironclaw_extension_host/src/product_lifecycle.rs",
-        1,
-        ReparseCategory::Compiler,
-        "activation-time compile of the installed manifest into its resolved record",
     ),
     (
         "crates/ironclaw_host_runtime/src/memory_native_extension.rs",
@@ -166,11 +127,19 @@ fn count_reparse_calls(source: &str) -> usize {
         .sum()
 }
 
-fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+/// Walk `dir` for `.rs` files, skipping build output, `.git`, and vendored
+/// frontend packages.
+///
+/// An unreadable directory or entry is an error, not a silently skipped
+/// subtree: the `files.len() >= 500` floor only detects a scan that went almost
+/// entirely dark, so one unreadable crate tree would leave the count healthy
+/// while the gate reported zero reparse sites for files it never opened
+/// (CHECKLIST WS0, #6963).
+fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|error| read_failure(dir, error))?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| format!("failed to read an entry in {}: {error}", dir.display()))?;
         let path = entry.path();
         if path.is_dir() {
             let name = path.file_name().map(|n| n.to_string_lossy().to_string());
@@ -180,20 +149,79 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
             ) {
                 continue;
             }
-            collect_rust_files(&path, out);
+            collect_rust_files(&path, out)?;
         } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
             out.push(path);
         }
     }
+    Ok(())
+}
+
+fn read_failure(path: &Path, error: std::io::Error) -> String {
+    format!(
+        "failed to read {} — an unreadable path must fail this gate, not vanish from the \
+         scan: {error}",
+        path.display()
+    )
+}
+
+/// The walk refuses an unreadable path rather than shrinking around it. The
+/// floor cannot cover this: one unreadable crate tree leaves the file count far
+/// above 500 while the reparse census silently loses everything under it.
+#[test]
+fn an_unreadable_path_fails_the_walk_rather_than_disappearing_from_it() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let not_a_directory = temp.path().join("regular-file");
+    std::fs::write(&not_a_directory, "// fixture\n").expect("fixture file");
+
+    let mut files = Vec::new();
+    let error = collect_rust_files(&not_a_directory, &mut files)
+        .expect_err("an unreadable directory must refuse");
+    assert!(
+        error.contains("must fail this gate, not vanish from the scan"),
+        "expected an I/O refusal naming the path, got: {error}"
+    );
+
+    // Generated trees stay excluded, so a `pnpm install` cannot inflate the
+    // scan with vendored sources.
+    for generated in ["target", "node_modules", ".git"] {
+        let vendored = temp.path().join(format!("tree/{generated}/pkg"));
+        std::fs::create_dir_all(&vendored).expect("vendored tree");
+        std::fs::write(vendored.join("lib.rs"), "// vendored\n").expect("vendored source");
+    }
+    std::fs::write(temp.path().join("tree/real.rs"), "// real\n").expect("real source");
+    let mut files = Vec::new();
+    collect_rust_files(&temp.path().join("tree"), &mut files).expect("a readable tree walks");
+    assert_eq!(
+        files,
+        vec![temp.path().join("tree/real.rs")],
+        "the walk must skip generated trees and keep everything else"
+    );
 }
 
 #[test]
 fn manifest_reparse_stays_within_the_compiler_and_bundled_paths() {
     let root = workspace_root();
     let mut files = Vec::new();
-    for subtree in ["crates", "src"] {
-        collect_rust_files(&root.join(subtree), &mut files);
-    }
+    // The scan used to cover `["crates", "src"]`; `src` was the v1 monolith and
+    // is long gone. `collect_rust_files` skips a missing directory silently, so
+    // the dead entry was invisible — and the same silence is what a wrong root
+    // produces. The scan root must exist (CHECKLIST WS0, #6963).
+    let crates_dir = root.join("crates");
+    assert!(
+        crates_dir.is_dir(),
+        "manifest-reparse scan root {} does not exist — repoint it rather than \
+         scanning nothing",
+        crates_dir.display()
+    );
+    collect_rust_files(&crates_dir, &mut files)
+        .expect("the manifest-reparse walk must not hit an I/O error");
+    assert!(
+        files.len() >= 500,
+        "manifest-reparse scan collected only {} file(s) — the walk is broken, not the \
+         workspace; an empty scan reports zero reparse sites and passes.",
+        files.len()
+    );
 
     // Production (test-stripped) reparse counts, keyed by workspace-relative path.
     let mut found: BTreeMap<String, usize> = BTreeMap::new();
@@ -201,9 +229,8 @@ fn manifest_reparse_stays_within_the_compiler_and_bundled_paths() {
         if is_test_source_path(path) {
             continue;
         }
-        let Ok(source) = std::fs::read_to_string(path) else {
-            continue;
-        };
+        let source = std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("{}", read_failure(path, error)));
         let count = count_reparse_calls(&source);
         if count > 0 {
             let rel = path

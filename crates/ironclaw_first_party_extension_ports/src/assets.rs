@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use ironclaw_loop_contracts::LoopRunContext;
 use ironclaw_loop_host::{SkillBundleId, SkillBundleSource, SkillBundleSourceError, SkillFilePath};
-use ironclaw_turns::run_profile::LoopRunContext;
 use thiserror::Error;
 
 use super::SkillActivationRequest;
@@ -162,14 +162,11 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
-    use ironclaw_loop_host::{SkillFilePath, SkillSourceKind};
-    use ironclaw_turns::{
-        TurnId, TurnRunId, TurnScope,
-        run_profile::{
-            InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest,
-            RunProfileResolver,
-        },
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest, RunProfileResolver,
     };
+    use ironclaw_loop_host::{SkillFilePath, SkillSourceKind};
+    use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
     use super::*;
 

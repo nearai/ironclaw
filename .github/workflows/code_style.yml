@@ -41,6 +41,8 @@ jobs:
     outputs:
       has_code: ${{ steps.non_pr.outputs.has_code || steps.diff.outputs.has_code }}
       has_reborn_cli: ${{ steps.non_pr.outputs.has_reborn_cli || steps.diff.outputs.has_reborn_cli }}
+      has_clippy: ${{ steps.non_pr.outputs.has_clippy || steps.diff.outputs.has_clippy }}
+      clippy_packages: ${{ steps.non_pr.outputs.clippy_packages || steps.diff.outputs.clippy_packages }}
       clippy_matrix: ${{ steps.non_pr.outputs.clippy_matrix || steps.diff.outputs.clippy_matrix }}
     steps:
       - id: non_pr
@@ -48,6 +50,8 @@ jobs:
         run: |
           echo "has_code=true" >> "$GITHUB_OUTPUT"
           echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
+          echo "has_clippy=true" >> "$GITHUB_OUTPUT"
+          echo 'clippy_packages=[]' >> "$GITHUB_OUTPUT"
           echo 'clippy_matrix=[{"name":"all-features","flags":"--all-features"},{"name":"default","flags":""}]' >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
@@ -61,15 +65,40 @@ jobs:
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
           CHANGED_FILES="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
+          printf '%s\n' "$CHANGED_FILES" > "${RUNNER_TEMP}/changed-files.txt"
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|scripts/check_no_panics\.py$|scripts/no_panics_reborn_baseline\.txt$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/code_style\.yml$)'; then
+          clippy_packages="$(
+            python3 scripts/ci/changed_workspace_packages.py \
+              --changed-files "${RUNNER_TEMP}/changed-files.txt"
+          )"
+          echo "clippy_packages=${clippy_packages}" >> "$GITHUB_OUTPUT"
+          if jq -e 'length > 0' <<< "${clippy_packages}" > /dev/null; then
+            echo "has_clippy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_clippy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|scripts/check_no_panics\.py$|scripts/no_panics_reborn_baseline\.txt$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/(code_style|main-ci-slack-alerts)\.yml$)'; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
             echo "No code changes — style checks will be skipped"
           fi
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_runner/|crates/ironclaw_reborn_cli/|crates/ironclaw_reborn_config/|crates/ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|scripts/ci/smoke-release-binary\.py$|tests/test_smoke_release_binary\.py$|Cargo\.toml$|Cargo\.lock$|\.github/dist-build-setup\.yml$|\.github/workflows/(code_style|ironclaw-release|docker|reborn-release-compile)\.yml$)'; then
+          # Crate scopes are matched by NAME at any depth: `crates/([^/]+/)*<name>/`
+          # keeps matching once crates move into family directories
+          # (crates/<family>/ironclaw_*, PROPOSAL §5). A flat `crates/<name>/`
+          # prefix stops matching there, `has_reborn_cli` goes false, and the
+          # dist-build lane silently skips — the WS10 failure mode (#6963).
+          # scripts/ci/ws12_workflow_contracts.py pins this regex against the
+          # real crate inventory, so a renamed or moved crate fails loudly here
+          # instead of quietly falling out of scope.
+          # `ironclaw_loop_host` joined the list with the WS3 runner sheds: the
+          # model gateway and the tool-disclosure decorator moved there out of
+          # `ironclaw_runner`, so without it a PR touching only the new home
+          # would no longer light this lane — the move would have narrowed CI
+          # scope as a side effect.
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/([^/]+/)*ironclaw_runner/|crates/([^/]+/)*ironclaw_loop_host/|crates/([^/]+/)*ironclaw_reborn_cli/|crates/([^/]+/)*ironclaw_reborn_config/|crates/([^/]+/)*ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|scripts/ci/smoke-release-binary\.py$|tests/test_smoke_release_binary\.py$|Cargo\.toml$|Cargo\.lock$|\.github/dist-build-setup\.yml$|\.github/workflows/(code_style|ironclaw-release|docker|reborn-release-compile)\.yml$)'; then
             echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_reborn_cli=false" >> "$GITHUB_OUTPUT"
@@ -124,9 +153,14 @@ jobs:
         run: |
           scripts/ci/test-check-include-str-paths.sh
           scripts/ci/test-check-hermetic-env.sh
+          scripts/ci/test-ci-comm-locale-pin.sh
           scripts/ci/test-classify-test-scope.sh
+          scripts/ci/test-build-wasm-extensions.sh
+          scripts/ci/test-check-wasm-artifact-freshness.sh
           scripts/ci/test-package-feature-flags.sh
+          python3 scripts/ci/test_changed_workspace_packages.py
           scripts/ci/test-reborn-crate-test-buckets.sh
+          scripts/ci/test-main-ci-slack-alerts.sh
           python3 scripts/ci/test_ws12_suite_shards.py
           python3 scripts/ci/test_ws12_workflow_contracts.py
           scripts/ci/test-hermetic-test-process.sh
@@ -142,12 +176,24 @@ jobs:
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: python3 scripts/check_no_panics.py --base "$BASE_SHA" --head HEAD
+      # A committed `.wasm` whose `wasm-src/` moved on without it ships stale
+      # behaviour: the rebuild job overwrites the artifact in the working tree
+      # before testing it, so it never compares against what is committed.
+      - name: Check committed WASM artifacts are not stale
+        run: python3 scripts/ci/check-wasm-artifact-freshness.py
       - name: Check composition mass budget
         run: bash scripts/ci/check-composition-budget.sh
       - name: Self-test the composition budget gate
         run: bash scripts/ci/test-check-composition-budget.sh
       - name: Unit-test the dev-metrics tool
         run: python3 scripts/test_dev_metrics.py
+      - name: Validate changed-coverage policy
+        run: >-
+          python3 scripts/ci/reborn_changed_coverage.py
+          --manifest tests/integration/changed-coverage-exemptions.toml
+          --validate-manifest-only
+      - name: Self-test exact release-binary smoke gate
+        run: python3 -m unittest tests/test_smoke_release_binary.py
 
   webui-v2-js-lint:
     name: WebUI v2 JS lint (no-undef)
@@ -198,7 +244,9 @@ jobs:
   clippy:
     name: Clippy (${{ matrix.name }})
     needs: changes
-    if: needs.changes.outputs.has_code == 'true'
+    if: >-
+      needs.changes.outputs.has_code == 'true' &&
+      (github.event_name != 'pull_request' || needs.changes.outputs.has_clippy == 'true')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -248,7 +296,19 @@ jobs:
           cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
           cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
-      - name: Check lints
+      - name: Check production-target lints
+        if: github.event_name == 'pull_request'
+        env:
+          CLIPPY_PACKAGES: ${{ needs.changes.outputs.clippy_packages }}
+        run: |
+          package_args=()
+          while IFS= read -r package; do
+            package_args+=(-p "${package}")
+          done < <(jq -r '.[]' <<< "${CLIPPY_PACKAGES}")
+          cargo clippy "${package_args[@]}" --lib --bins \
+            ${{ matrix.flags }} -- -D warnings
+      - name: Check all-target lints
+        if: github.event_name != 'pull_request'
         run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings
 
   clippy-windows:
@@ -297,7 +357,7 @@ jobs:
   reborn-cli-smoke:
     name: Reborn CLI smoke tests
     needs: changes
-    if: needs.changes.outputs.has_reborn_cli == 'true'
+    if: needs.changes.outputs.has_reborn_cli == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -329,8 +389,6 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Test Reborn boot config crate
         run: cargo test -p ironclaw_reborn_config
-      - name: Self-test exact release-binary smoke gate
-        run: python3 -m unittest tests/test_smoke_release_binary.py
       - name: Test Reborn CLI binary crate
         run: cargo test -p ironclaw
       - name: Test Reborn libSQL restart integration
@@ -375,7 +433,6 @@ jobs:
 
           for job_result in \
             "fast-checks=${{ needs.fast-checks.result }}" \
-            "clippy=${{ needs.clippy.result }}" \
             "webui-v2-js-lint=${{ needs.webui-v2-js-lint.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"
@@ -384,6 +441,17 @@ jobs:
               exit 1
             fi
           done
+
+          clippy_may_skip=false
+          if [[ "${{ github.event_name }}" == "pull_request" && \
+                "${{ needs.changes.outputs.has_clippy }}" != "true" ]]; then
+            clippy_may_skip=true
+          fi
+          if ! job_result_ok \
+            "clippy" "${{ needs.clippy.result }}" "${clippy_may_skip}" "allow"; then
+            echo "clippy failed: ${{ needs.clippy.result }}"
+            exit 1
+          fi
 
           for job_result in \
             "reborn-cli-smoke=${{ needs.reborn-cli-smoke.result }}" \

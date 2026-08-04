@@ -5,9 +5,7 @@ use ironclaw_host_api::{
     ids::{CapabilityId, ProviderToolName},
     runtime::RuntimeKind,
 };
-use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, ProviderToolDefinition,
-};
+use ironclaw_loop_contracts::{AgentLoopHostError, AgentLoopHostErrorKind, ProviderToolDefinition};
 
 pub(crate) const TOOL_NAME: &str = "capability_info";
 pub(crate) const CAPABILITY_ID: &str = "ironclaw.loop.capability_info";
@@ -97,6 +95,7 @@ pub(super) fn tool_definition() -> Result<ProviderToolDefinition, AgentLoopHostE
         name: provider_tool_name()?,
         description: "Get names, summary, or schema details for a currently visible capability."
             .to_string(),
+        description_trust: Default::default(),
         parameters: schema(),
     })
 }

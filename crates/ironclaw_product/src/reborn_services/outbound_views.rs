@@ -1,9 +1,10 @@
 //! Descriptor-backed outbound delivery read projections.
 
+use ironclaw_product_contracts::views::RebornViewProvider;
+
 use super::{
     ProductCapabilityInvoker, ProductSurfaceCaller, ProductSurfaceError, ProductView,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse, RebornServices,
-    RebornViewProvider,
 };
 
 pub const OUTBOUND_PREFERENCES_VIEW: ProductView<

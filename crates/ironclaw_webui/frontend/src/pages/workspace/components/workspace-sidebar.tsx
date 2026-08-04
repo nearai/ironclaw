@@ -10,6 +10,8 @@ export function WorkspaceSidebar({
   selectedPath,
   expandedPaths,
   filter,
+  scopeKey,
+  listDirectory,
   onFilterChange,
   isLoadingTree,
   onToggleDirectory,
@@ -34,6 +36,8 @@ export function WorkspaceSidebar({
           selectedPath={selectedPath}
           expandedPaths={expandedPaths}
           filter={filter}
+          scopeKey={scopeKey}
+          listDirectory={listDirectory}
           onToggleDirectory={onToggleDirectory}
           onSelectFile={onSelectFile}
           isLoading={isLoadingTree}

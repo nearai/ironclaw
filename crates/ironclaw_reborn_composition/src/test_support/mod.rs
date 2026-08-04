@@ -149,6 +149,7 @@ pub use projection::build_product_event_stream_for_test;
 pub use refreshing_capability_port::{
     ExtensionManagementTestHandle, RefreshingCapabilityPortTestParts,
     build_extension_management_for_test, create_refreshing_capability_port_for_test,
+    scoped_workspace_mount_view_for_test,
 };
 #[cfg(feature = "test-support")]
 pub use result_read::{RESULT_READ_CAPABILITY_ID, wrap_result_read_capability_for_test};

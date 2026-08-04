@@ -22,9 +22,9 @@ use ironclaw_host_api::{
     ids::{CorrelationId, InvocationId, TenantId, UserId},
     resource::ResourceScope,
 };
+use ironclaw_loop_contracts::{Locale, LoopRunContext, UserProfileContext};
 use ironclaw_memory::{MemoryInvocation, MemoryService};
 use ironclaw_memory_native::NativeMemoryService;
-use ironclaw_turns::run_profile::{Locale, LoopRunContext, UserProfileContext};
 use serde::Deserialize;
 use tokio::sync::Notify;
 
@@ -345,13 +345,13 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_host_api::ids::{TenantId, ThreadId, UserId};
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest, RunProfileResolver,
+    };
     use ironclaw_memory::{
         MemoryInvocation, MemoryService, MemoryServiceError, MemoryServiceProfileReadResponse,
     };
-    use ironclaw_turns::{
-        RunProfileResolver, TurnActor, TurnId, TurnRunId, TurnScope,
-        run_profile::{InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest},
-    };
+    use ironclaw_turns::{TurnActor, TurnId, TurnRunId, TurnScope};
 
     use super::*;
 

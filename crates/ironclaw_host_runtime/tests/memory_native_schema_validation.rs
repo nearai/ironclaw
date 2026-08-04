@@ -18,7 +18,7 @@ use ironclaw_host_runtime::memory_native_extension::native_memory_manifest;
 use serde_json::{Value, json};
 
 fn assets_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/memory_native")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../extensions/packages/memory-native")
 }
 
 fn load_schema(relative_ref: &str) -> Value {
