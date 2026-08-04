@@ -466,8 +466,12 @@ fn skill_info(skill: ironclaw_skills::SkillSummary) -> RebornSkillInfo {
         setup_hint: None,
         bundle_path: None,
         install_source_url: None,
-        has_requirements: false,
-        has_scripts: false,
+        // Both were hardcoded `false`, so the Skills page could not show what a skill contains --
+        // the WebUI has rendered `requirements`/`scripts/` chips since #6194 and the wire fields have
+        // existed since #7002, but nothing ever set them. This PR makes agent-authored skills with
+        // scripts possible, so the page has to reflect it.
+        has_requirements: !skill.requires_skills.is_empty(),
+        has_scripts: skill.has_scripts,
         can_edit: can_manage,
         can_delete: can_manage,
         auto_activate: skill.auto_activate,
