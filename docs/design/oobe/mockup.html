@@ -221,6 +221,12 @@ h1,h2,h3,p{margin:0}
 .tcard .acts button svg{width:13px;height:13px}
 .tcard .acts .revert{color:var(--v2-danger-text);border-color:color-mix(in srgb,var(--v2-danger-text) 26%,var(--v2-panel-border))}
 .tcard .acts button:hover{border-color:var(--v2-accent)}
+.tcard .acts .approve{color:#fff;border-color:rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
+.tcard .acts .approve:hover{background:radial-gradient(ellipse 200% 220% at 50% 110%,#5BBAF5 0%,#2882c8 60%)}
+.tcard .acts .cancel{color:var(--v2-text-muted)}
+.tcard.term{opacity:.65}
+.tcard .termrow{margin-top:9px;display:flex;align-items:center;gap:6px;font-size:11px;color:var(--v2-text-muted)}
+.tcard .termrow svg{width:13px;height:13px;flex:none}
 .tcard.reveal{animation:card-in .42s cubic-bezier(.2,.7,.2,1) both}
 @keyframes card-in{from{opacity:0;transform:translateY(10px) scale(.98)}to{opacity:1;transform:none}}
 .tcard.first{position:relative}
@@ -659,18 +665,49 @@ h1,h2,h3,p{margin:0}
     {app:'calendar',label:'Calendar',icon:'calendar',accent:'#4285f4',title:'Accepted 3 invites',when:'just now',metrics:[['3','accepted'],['1','conflicts']]},
     {app:'file',label:'Google Docs',icon:'file',accent:'#3b82f6',title:'Doc insights ready',when:'just now',metrics:[['5','insights'],['2','docs']]}
   ];
-  function cardHTML(c,cls){
-    var m=c.metrics.map(function(x){return '<span><b>'+x[0]+'</b> '+x[1]+'</span>';}).join('');
-    return '<div class="tcard '+(cls||'')+'">'
-      +'<div class="thd"><span class="appchip" style="'+chipStyle(c.accent)+'">'+svg(c.icon)+'</span>'
-      +'<span class="alab">'+c.label+'</span><span class="when">'+c.when+'</span>'
-      +'<span class="badge success"><span class="bdot"></span>Automated</span></div>'
-      +'<div class="ttl2"><b>'+c.title+'</b>'+svg('external')+'</div>'
-      +'<div class="metrics">'+m+'</div>'
-      +'<div class="acts"><button>'+svg('edit')+'Modify</button>'
-      +'<button class="revert">'+svg('undo')+'Revert</button></div></div>';
+  function badgeFor(state){
+    if(state==='suggested') return '<span class="badge accent">Suggested</span>';
+    if(state==='completed') return '<span class="badge success"><span class="bdot"></span>Completed</span>';
+    return '<span class="badge muted">'+(state==='dismissed'?'Dismissed':'Reverted')+'</span>';
   }
-  document.getElementById('ghostStrip').innerHTML=CARDS.map(function(c){return cardHTML(c,'ghost');}).join('');
+  function cardHTML(c,idx,state,opts){
+    opts=opts||{};
+    var term=(state==='dismissed'||state==='reverted');
+    var m=c.metrics.map(function(x){return '<span><b>'+x[0]+'</b> '+x[1]+'</span>';}).join('');
+    var head='<div class="thd"><span class="appchip" style="'+chipStyle(c.accent)+'">'+svg(c.icon)+'</span>'
+      +'<span class="alab">'+c.label+'</span><span class="when">'+c.when+'</span>'+badgeFor(state)+'</div>';
+    var ttl='<div class="ttl2"><b>'+c.title+'</b>'+(term?'':svg('external'))+'</div>';
+    var acts;
+    if(term){
+      acts='<div class="termrow">'+svg('undo')+(state==='dismissed'?'Dismissed — nothing was done.':'Reverted — the change was undone.')+'</div>';
+    } else if(state==='suggested'){
+      acts='<div class="acts"><button class="approve" data-act="approve" data-i="'+idx+'">Approve</button>'
+        +'<button data-act="modify" data-i="'+idx+'">Modify</button>'
+        +'<button class="cancel" data-act="cancel" data-i="'+idx+'">Cancel</button></div>';
+    } else {
+      acts='<div class="acts"><button data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button>'
+        +'<button class="revert" data-act="revert" data-i="'+idx+'">'+svg('undo')+'Revert</button></div>';
+    }
+    var cls='tcard'+(opts.ghost?' ghost':'')+(opts.first?' first':'')+(term?' term':'');
+    return '<div class="'+cls+'" data-i="'+idx+'">'+head+ttl+(term?'':'<div class="metrics">'+m+'</div>')+acts+'</div>';
+  }
+  var agentMode='Suggest';
+  function modeProposed(){ return agentMode==='Suggest'||agentMode==='Plan'; }
+  var cardStates=CARDS.map(function(){ return 'suggested'; });
+  function resetCardStates(){ cardStates=CARDS.map(function(){ return modeProposed()?'suggested':'completed'; }); }
+  function bindCarouselCards(){
+    realStrip.querySelectorAll('[data-act]').forEach(function(b){
+      b.onclick=function(){
+        var i=+b.getAttribute('data-i'),a=b.getAttribute('data-act');
+        if(a==='approve') cardStates[i]='completed';
+        else if(a==='cancel') cardStates[i]='dismissed';
+        else if(a==='revert') cardStates[i]='reverted';
+        else return;
+        render();
+      };
+    });
+  }
+  document.getElementById('ghostStrip').innerHTML=CARDS.map(function(c,i){return cardHTML(c,i,'completed',{ghost:true});}).join('');
 
   var connectBlock=document.getElementById('connectBlock'),ghostBlock=document.getElementById('ghostBlock'),
       carouselBlock=document.getElementById('carouselBlock'),realStrip=document.getElementById('realStrip'),
@@ -685,7 +722,7 @@ h1,h2,h3,p{margin:0}
     'The <b>cold start</b>. Zero automations, nothing connected — the screen has to earn the first connect and the first prompt.',
     '<b>Connect all</b> wires up your tools in one tap; the pills condense into a compact stack and the agent can start.',
     'A brief <b>anticipatory</b> beat — the branded indicator + skeleton tiles say "I\'m on it" instead of showing an empty strip.',
-    'The <b>first automation appears</b> — the "Done for you" strip is born and the first card reveals. The aha moment.',
+    'The <b>first automation appears</b> — the strip is born and the first card reveals. The aha moment.',
     'The strip <b>fills in</b>. Now it matches the populated carousel from PR #6994 — review, modify, or undo any of it.'
   ];
   var HERO=[
@@ -695,6 +732,11 @@ h1,h2,h3,p{margin:0}
     ['Here’s what I did while you got settled.',"I handled a first one on my own. Everything's reversible — take a look."],
     ['Here’s what I did while you got settled.',"A few things are already done. Review, tweak, or undo anything — and tell me what else to take on."]
   ];
+  // mode-aware hero for the card beats (Suggest / Plan): agent proposes rather than auto-runs
+  var HERO_PROP={
+    3:['Here’s the first thing I’d do.',"Approve it, tweak it, or skip — you're in control."],
+    4:['Here’s what I’d take off your plate.',"A few suggestions are ready — approve, tweak, or skip any, and tell me what else to take on."]
+  };
   var nearStart=0,elTimer=null;
   function fmt(ms){var s=Math.floor(ms/1000);return Math.floor(s/60)+':'+String(s%60).padStart(2,'0');}
   function tickEl(){carMeta.textContent=fmt(Date.now()-nearStart);}
@@ -702,7 +744,9 @@ h1,h2,h3,p{margin:0}
 
   function render(){
     step=Math.max(0,Math.min(step,MAX));
-    heroTitle.textContent=HERO[step][0];heroSub.textContent=HERO[step][1];
+    var prop=modeProposed();
+    var h=(step>=3&&prop&&HERO_PROP[step])?HERO_PROP[step]:HERO[step];
+    heroTitle.textContent=h[0];heroSub.textContent=h[1];
     capN.textContent='Beat '+step+' / '+MAX; capC.innerHTML=CAP[step];
     var coach=(dir==='coach'),empty=(step<=1),working=(step===2);
     show(connectBlock, empty);
@@ -712,20 +756,21 @@ h1,h2,h3,p{margin:0}
     else if(step===1){ connSet=APPS.map(function(a){return a.key;}); condensed=true; renderConnect(); }
     if(step>=2){
       if(working){
-        carTtl.textContent='Working on your first automations';
-        carSub.textContent='I’ll drop them here the moment they’re done';
+        carTtl.textContent = prop ? 'Looking for things to suggest' : 'Working on your first automations';
+        carSub.textContent = prop ? 'I’ll surface them here in a moment' : 'I’ll drop them here the moment they’re done';
         realStrip.innerHTML='<div class="sk"><div class="ln w40"></div><div class="ln w70"></div><div class="ln w55"></div></div>'.repeat(3);
         carNear.classList.add('busy');carNear.classList.remove('done');
         if(!nearStart)nearStart=Date.now(); if(!elTimer){elTimer=setInterval(tickEl,250);} tickEl();
       } else {
-        carTtl.textContent='Done for you';
-        carSub.textContent='Completed automatically — review or undo anytime';
+        carTtl.textContent = prop ? 'Suggested for you' : 'Done for you';
+        carSub.textContent = prop ? 'Approve to run, or tweak first' : 'Completed automatically — review or undo anytime';
         var n=(step===3)?1:CARDS.length,html='';
-        for(var i=0;i<n;i++){ html+=cardHTML(CARDS[i], 'reveal'+(i===0&&step===3?' first':'')); }
+        for(var i=0;i<n;i++){ html+=cardHTML(CARDS[i], i, cardStates[i], {first:(i===0&&step===3)}); }
         realStrip.innerHTML=html;
+        bindCarouselCards();
         carNear.classList.remove('busy');carNear.classList.add('done');
         if(elTimer){clearInterval(elTimer);elTimer=null;}
-        carMeta.textContent=(step===3?'worked for 8s':'worked for 14s');
+        carMeta.textContent = prop ? '' : (step===3?'worked for 8s':'worked for 14s');
       }
     } else {
       realStrip.innerHTML='';
@@ -739,7 +784,7 @@ h1,h2,h3,p{margin:0}
   function advance(){ if(step>=MAX){stop();return;} step++; render(); if(playing){ timer=setTimeout(advance, WAIT[step]?1700:1500); } }
   function play(){ if(step>=MAX){step=0;render();} playing=true; setPlay(true); timer=setTimeout(advance, 700); }
   function stop(){ playing=false; setPlay(false); if(timer){clearTimeout(timer);timer=null;} }
-  function resetFirst(){ stop(); step=0; nearStart=0; render(); }
+  function resetFirst(){ stop(); step=0; nearStart=0; resetCardStates(); render(); }
   function setPlay(on){ document.getElementById('playTxt').textContent=on?'Pause':'Play the first run';
     document.getElementById('playIco').innerHTML=on?'<rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/>':'<path d="M8 5v14l11-7z"/>'; }
   document.getElementById('playBtn').onclick=function(){ playing?stop():play(); };
@@ -755,7 +800,7 @@ h1,h2,h3,p{margin:0}
   var modeBtn=document.getElementById('modeBtn'),modeMenu=document.getElementById('modeMenu'),modeLabel=document.getElementById('modeLabel');
   function closeMode(){modeMenu.hidden=true;modeBtn.setAttribute('aria-expanded','false');}
   modeBtn.onclick=function(e){e.stopPropagation();var willOpen=modeMenu.hidden;modeMenu.hidden=!willOpen;modeBtn.setAttribute('aria-expanded',willOpen?'true':'false');};
-  document.querySelectorAll('#modeMenu .modeopt').forEach(function(o){o.onclick=function(){document.querySelectorAll('#modeMenu .modeopt').forEach(function(x){x.classList.remove('is-sel');});o.classList.add('is-sel');modeLabel.textContent=o.getAttribute('data-mode');closeMode();};});
+  document.querySelectorAll('#modeMenu .modeopt').forEach(function(o){o.onclick=function(){document.querySelectorAll('#modeMenu .modeopt').forEach(function(x){x.classList.remove('is-sel');});o.classList.add('is-sel');agentMode=o.getAttribute('data-mode');modeLabel.textContent=agentMode;resetCardStates();closeMode();render();};});
   document.addEventListener('click',function(e){if(!modeMenu.hidden && !modeMenu.contains(e.target) && !modeBtn.contains(e.target)) closeMode();});
   var field=document.getElementById('composerField'),runBtn=document.getElementById('runBtn');
   function syncRun(){runBtn.disabled=!(field.value.trim());}
@@ -776,7 +821,7 @@ h1,h2,h3,p{margin:0}
         +'<span class="badge muted">'+(o.state==='dismissed'?'Dismissed':'Reverted')+'</span></div>'
         +'<div class="cfoot"><span class="termnote">'+svg('undo')+note+'</span></div></div>';
     }
-    var badge = automated ? '<span class="badge success"><span class="bdot"></span>Automated</span>' : '<span class="badge accent">Suggested</span>';
+    var badge = automated ? '<span class="badge success"><span class="bdot"></span>Completed</span>' : '<span class="badge accent">Suggested</span>';
     var pline = automated
       ? 'Moved <b>“Design sync”</b> so it no longer overlaps your <b>“Board prep”</b>.'
       : '<b>“Design sync”</b> overlaps your <b>“Board prep”</b>. I can move it to a slot that works for everyone.';
