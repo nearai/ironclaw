@@ -8195,6 +8195,50 @@ async fn browse_fs_dir_rejects_parent_traversal_under_scoped_projection() {
     );
 }
 
+/// `stat_fs_path` and `read_fs_file` run the identical
+/// `workspace_projection_for` / `workspace_served_path` sequence as
+/// `browse_fs_dir`; the `..` guard must hold on every route that prepends the
+/// caller prefix, not just the listing.
+#[tokio::test]
+async fn stat_and_read_fs_routes_reject_parent_traversal_under_scoped_projection() {
+    for uri in [
+        "/api/webchat/v2/fs/stat?mount=workspace&path=../tenant-b/users/bob/secret",
+        "/api/webchat/v2/fs/content?mount=workspace&path=../tenant-b/users/bob/secret",
+    ] {
+        let services = Arc::new(StubServices::default());
+        let caller = caller_for_user("user-alpha");
+        let router = webui_v2_router(
+            WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+                .with_workspace_requires_scoped_projection(true),
+        )
+        .layer(axum::Extension(caller))
+        .layer(axum::Extension(WebUiV2Capabilities {
+            operator_webui_config: false,
+        }));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "parent-directory traversal must be rejected on {uri}"
+        );
+        assert!(
+            services.surface_calls.lock().expect("lock").is_empty(),
+            "traversal request on {uri} must not reach the product layer"
+        );
+    }
+}
+
 #[tokio::test]
 async fn browse_fs_dir_strips_prefixed_entry_paths_under_scoped_projection() {
     // The stub now echoes entry paths under the served (prefixed) root, as the

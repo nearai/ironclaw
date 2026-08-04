@@ -2272,6 +2272,31 @@ async fn agent_workspace_writes_are_visible_to_their_owner_and_hidden_from_other
         "user B must not see user A's workspace artifacts, got: {other_body}"
     );
 
+    // A slash-only path names the same projected root and must get the same
+    // empty listing, not a NotFound.
+    let slash_listing = router
+        .clone()
+        .oneshot(bearer_get_with_token(
+            "/api/webchat/v2/fs/list?mount=workspace&path=/",
+            USER_B_TOKEN,
+        ))
+        .await
+        .expect("user B slash-root workspace list oneshot");
+    let slash_status = slash_listing.status();
+    let slash_body = String::from_utf8_lossy(&read_body_bytes(slash_listing).await).to_string();
+    assert_eq!(
+        slash_status,
+        StatusCode::OK,
+        "a slash-only path lists the projected root, got {slash_status}: {slash_body}"
+    );
+    let slash_json: serde_json::Value =
+        serde_json::from_str(&slash_body).expect("user B slash-root listing is JSON");
+    assert_eq!(
+        slash_json["entries"].as_array().map(Vec::len),
+        Some(0),
+        "a slash-only path on a fresh workspace lists as empty, got: {slash_body}"
+    );
+
     let leaked = router
         .clone()
         .oneshot(bearer_get_with_token(

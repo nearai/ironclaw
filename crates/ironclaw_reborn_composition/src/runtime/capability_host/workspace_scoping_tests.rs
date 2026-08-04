@@ -142,11 +142,11 @@ async fn invoke_workspace_tool_as(
         .expect("capability invocation"); // safety: test-only assertion in #[cfg(test)] module.
 
     let output = match &resolution {
-        Resolution::Done(outcome) => outcome.refs.origin.as_ref().and_then(|result_ref| {
+        Resolution::Done(outcome) => outcome.refs.origin.as_ref().map(|result_ref| {
             capability_io
                 .result_output(result_ref.as_str())
-                .ok()
-                .flatten()
+                .expect("result store read") // safety: test-only assertion in #[cfg(test)] module.
+                .expect("completed tool result is stored") // safety: test-only assertion in #[cfg(test)] module.
         }),
         _ => None,
     };
@@ -375,6 +375,12 @@ async fn fresh_caller_reads_an_empty_workspace_then_writes_into_it() {
     )
     .await;
     assert_tool_succeeded(&globbed, "glob on a fresh caller's workspace");
+    let globbed_output = globbed.output.expect("glob returns output"); // safety: test-only assertion in #[cfg(test)] module.
+    assert_eq!(
+        globbed_output["files"].as_array().map(Vec::len),
+        Some(0),
+        "a fresh caller's glob matches nothing, got {globbed_output}"
+    );
 
     let grepped = invoke_workspace_tool_as(
         &services,
@@ -385,6 +391,12 @@ async fn fresh_caller_reads_an_empty_workspace_then_writes_into_it() {
     )
     .await;
     assert_tool_succeeded(&grepped, "grep on a fresh caller's workspace");
+    let grepped_output = grepped.output.expect("grep returns output"); // safety: test-only assertion in #[cfg(test)] module.
+    assert_eq!(
+        grepped_output["files"].as_array().map(Vec::len),
+        Some(0),
+        "a fresh caller's grep matches nothing, got {grepped_output}"
+    );
 
     // The first write from that same fresh caller must succeed and become
     // visible to the very next read, including into a nested path whose parent

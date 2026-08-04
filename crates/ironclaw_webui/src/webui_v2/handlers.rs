@@ -802,7 +802,7 @@ pub async fn browse_fs_dir(
         Err(error)
             if error.code == ProductSurfaceErrorCode::NotFound
                 && scoped_prefix.is_some()
-                && requested_path.is_empty() =>
+                && requested_path.trim_matches('/').is_empty() =>
         {
             RebornFsListResponse {
                 mount,
