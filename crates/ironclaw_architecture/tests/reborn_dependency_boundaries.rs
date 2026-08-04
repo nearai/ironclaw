@@ -1121,8 +1121,16 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     let scripts_manifest =
         std::fs::read_to_string(crate_path(&root, "crates/ironclaw_sandbox/Cargo.toml"))
             .expect("sandbox lane Cargo.toml must be readable");
-    let mcp = std::fs::read_to_string(crate_path(&root, "crates/ironclaw_mcp/src/lib.rs"))
-        .expect("MCP runtime lib.rs must be readable");
+    // WS6 module charters: the MCP lane is no longer one file. Scanning the
+    // whole crate source tree keeps the rule non-vacuous across the §6.6.3
+    // split (and the family `git mv` still to come) — reading `lib.rs` alone
+    // would now see only the re-export list and go silently green.
+    let mcp = concatenated_crate_sources(&crate_path(&root, "crates/ironclaw_mcp/src"));
+    assert!(
+        mcp.contains("pub struct McpRuntime<C>"),
+        "MCP lane scan is vacuous: it found no MCP runtime source under \
+         crates/ironclaw_mcp/src (did the lane move again?)"
+    );
     let mcp_manifest = std::fs::read_to_string(crate_path(&root, "crates/ironclaw_mcp/Cargo.toml"))
         .expect("MCP runtime Cargo.toml must be readable");
 
