@@ -18,6 +18,7 @@ use ironclaw_host_api::capability::EffectKind;
 mod github;
 mod gmail;
 mod gsuite;
+pub mod nearai;
 mod notion;
 mod slack;
 mod telegram;
