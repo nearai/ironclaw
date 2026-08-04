@@ -77,7 +77,7 @@
 ///
 /// Extensions declaring a `wit_version` in their capabilities file are checked
 /// against this at load time: same major, not greater than host.
-pub const WIT_TOOL_VERSION: &str = "0.3.0";
+pub const WIT_TOOL_VERSION: &str = "0.4.0";
 
 /// Host WIT version for channel extensions.
 pub const WIT_CHANNEL_VERSION: &str = "0.3.0";
@@ -123,7 +123,7 @@ pub use credential_injector::{
 #[cfg(test)]
 pub(crate) use http_security::is_private_ip;
 pub(crate) use http_security::{
-    reject_private_ip, ssrf_safe_client_builder, ssrf_safe_client_builder_for_target,
+    reject_private_ip, reject_ws_relay_url, ssrf_safe_client_builder, ssrf_safe_client_builder_for_target,
     validate_and_resolve_http_target,
 };
 pub use rate_limiter::{LimitType, RateLimitError, RateLimitResult, RateLimiter};

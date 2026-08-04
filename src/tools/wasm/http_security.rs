@@ -173,6 +173,45 @@ pub(crate) fn is_private_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// SSRF guard for WebSocket relay URLs. Reuses the same private-IP detection
+/// that `reject_private_ip` uses for HTTP targets.
+pub(crate) fn reject_ws_relay_url(url: &str) -> Result<(), String> {
+    let parsed: url::Url = url::Url::parse(url)
+        .map_err(|e| format!("Invalid relay URL: {e}"))?;
+
+    if parsed.scheme() != "ws" && parsed.scheme() != "wss" {
+        return Err(format!("Relay URL must use ws:// or wss://, got {}", parsed.scheme()));
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "Relay URL must have a host".to_string())?;
+
+    // Reject bare IP addresses that are private
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_private_ip(ip) {
+            return Err(format!("Relay URL points to private/reserved IP: {ip}"));
+        }
+        return Ok(());
+    }
+
+    // For domain names, attempt DNS resolution to catch DNS-rebinding to private IPs
+    let port = parsed.port().unwrap_or(80);
+    if let Ok(addrs) = format!("{}:{}", host, port).to_socket_addrs() {
+        for addr in addrs {
+            if is_private_ip(addr.ip()) {
+                return Err(format!(
+                    "Relay URL hostname resolves to private/reserved IP: {} -> {}",
+                    host,
+                    addr.ip()
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;

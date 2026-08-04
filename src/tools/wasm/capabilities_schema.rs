@@ -582,7 +582,7 @@ impl WebhookCapabilitySchema {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NostrCapabilitySchema {
     /// Name of the secret containing the Nostr private key (nsec or hex).
-    #[serde(default)]
+    /// Must be non-empty — an empty value creates an invalid capability.
     pub secret_name: String,
 }
 

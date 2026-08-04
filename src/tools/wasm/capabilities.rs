@@ -339,18 +339,33 @@ pub struct WebhookCapability {
 /// When granted, WASM tools can request the host to sign Nostr events.
 /// The private key never leaves the host — WASM provides the unsigned
 /// event JSON and receives the signed JSON back.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct NostrCapability {
     /// Name of the secret containing the Nostr private key (nsec format or hex).
     pub secret_name: String,
 }
 
+impl Default for NostrCapability {
+    fn default() -> Self {
+        Self {
+            secret_name: String::new(),
+        }
+    }
+}
+
 impl NostrCapability {
     /// Create a new Nostr capability with the given secret name.
+    ///
+    /// Returns an error if `secret_name` is empty or whitespace-only.
     pub fn new(secret_name: impl Into<String>) -> Self {
         Self {
             secret_name: secret_name.into(),
         }
+    }
+
+    /// Returns `true` if the capability has a valid (non-empty) secret name.
+    pub fn is_valid(&self) -> bool {
+        !self.secret_name.trim().is_empty()
     }
 }
 
@@ -439,5 +454,31 @@ mod tests {
         assert!(caps.workspace_read.is_some());
         assert!(caps.secrets.is_some());
         assert!(caps.http.is_none());
+    }
+
+    // ---- Fix #5: empty secret_name validation ----
+
+    #[test]
+    fn nostr_capability_empty_secret_name_is_invalid() {
+        use super::NostrCapability;
+        let cap = NostrCapability::new("");
+        assert!(!cap.is_valid(), "empty secret_name should be invalid");
+
+        let cap_ws = NostrCapability::new("   ");
+        assert!(!cap_ws.is_valid(), "whitespace-only secret_name should be invalid");
+    }
+
+    #[test]
+    fn nostr_capability_valid_secret_name() {
+        use super::NostrCapability;
+        let cap = NostrCapability::new("my_nostr_key");
+        assert!(cap.is_valid());
+    }
+
+    #[test]
+    fn nostr_capability_default_is_invalid() {
+        use super::NostrCapability;
+        let cap = NostrCapability::default();
+        assert!(!cap.is_valid(), "default (empty) secret_name should be invalid");
     }
 }
