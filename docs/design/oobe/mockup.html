@@ -165,19 +165,16 @@ h1,h2,h3,p{margin:0}
 .cpill .cstate svg{width:12px;height:12px}
 .cpill.on{border-color:color-mix(in srgb,var(--v2-positive-text) 45%,var(--v2-panel-border));background:color-mix(in srgb,var(--v2-positive-soft) 55%,var(--v2-surface))}
 .cpill.on .cstate{background:var(--v2-positive-text);border-color:var(--v2-positive-text);color:#fff}
-.collapsebtn{margin-left:auto;display:inline-grid;place-items:center;width:38px;height:38px;flex:none;border-radius:11px;border:1px solid var(--v2-panel-border);background:var(--v2-surface);color:var(--v2-text-muted);cursor:pointer}
-.collapsebtn:hover{color:var(--v2-text-strong);border-color:color-mix(in srgb,var(--v2-accent) 42%,var(--v2-panel-border))}
-.collapsebtn svg{width:16px;height:16px}
-.cstack{display:inline-flex;align-items:center;border:0;background:transparent;padding:4px 2px;cursor:pointer;font:inherit;animation:card-in .34s ease both}
-.cstack:focus-visible{outline:2px solid color-mix(in srgb,var(--v2-accent) 45%,transparent);outline-offset:3px;border-radius:999px}
-.cstack .stackicons{display:inline-flex;align-items:center}
-.cstack .stackicons .appchip{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;border:0;margin-left:-13px;box-shadow:0 0 0 3px var(--v2-surface),0 2px 5px rgba(0,0,0,.2)}
-.cstack .stackicons .appchip:first-child{margin-left:0}
-.cstack .stackicons .appchip svg{width:17px;height:17px}
-.cstack .addmore{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;margin-left:-13px;background:var(--v2-surface);color:var(--v2-text-muted);box-shadow:0 0 0 3px var(--v2-surface),0 2px 5px rgba(0,0,0,.2);transition:transform .16s}
-.cstack .addmore svg{width:15px;height:15px}
-.cstack:hover .addmore{transform:translateX(2px)}
-@media (prefers-reduced-motion:reduce){.cstack{animation:none}.cstack:hover .addmore{transform:none}}
+.connclose{display:inline-grid;place-items:center;width:26px;height:26px;flex:none;border-radius:8px;border:0;background:transparent;color:var(--v2-text-faint);cursor:pointer;margin-left:8px}
+.connclose:hover{background:var(--v2-surface-muted);color:var(--v2-text-strong)}
+.connclose svg{width:14px;height:14px}
+/* composer pill shown when the connect panel is dismissed */
+.connpill{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 5px 0 10px;margin-right:6px;border-radius:999px;border:1px solid color-mix(in srgb,var(--v2-accent) 32%,var(--v2-panel-border));background:var(--v2-accent-soft);color:var(--v2-accent-text);font:inherit;font-size:12.5px;font-weight:560;cursor:pointer;white-space:nowrap}
+.connpill:hover{border-color:color-mix(in srgb,var(--v2-accent) 52%,var(--v2-panel-border))}
+.connpill svg{width:14px;height:14px}
+.connpill .px{display:inline-grid;place-items:center;width:19px;height:19px;border-radius:999px;color:var(--v2-accent-text);opacity:.7}
+.connpill .px:hover{background:color-mix(in srgb,var(--v2-accent) 22%,transparent);opacity:1}
+.connpill .px svg{width:11px;height:11px}
 
 /* ---------- carousel strip (Done for you) ---------- */
 .carousel{width:100%}
@@ -462,7 +459,7 @@ h1,h2,h3,p{margin:0}
           <div class="rev flagwrap" id="connectBlock">
             <span class="flag"><span class="tag ship">Shipped</span></span>
             <div class="connect">
-              <div class="ch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg><span class="t">Connect your tools</span><span class="s" id="connectSub">one tap each · add more anytime</span><button class="connectall" id="connectAllBtn" type="button">Connect all</button></div>
+              <div class="ch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg><span class="t">Connect your tools</span><span class="s" id="connectSub">one tap each · add more anytime</span><button class="connectall" id="connectAllBtn" type="button">Connect all</button><button class="connclose" id="connCloseBtn" type="button" aria-label="Dismiss connect panel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
               <div class="apps" id="appRow"></div>
             </div>
           </div>
@@ -494,6 +491,7 @@ h1,h2,h3,p{margin:0}
             <textarea class="field" id="composerField" rows="1" placeholder="Ask me anything, or tell me what to take off your plate…"></textarea>
           </div>
           <div class="actions">
+            <button class="connpill" id="connPill" type="button" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg><span class="pt">Connect your tools</span><span class="px" id="connPillX" role="button" aria-label="Dismiss"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span></button>
             <div class="modewrap">
               <button class="modebtn" id="modeBtn" type="button" aria-expanded="false"><span class="dot"></span><span id="modeLabel">Suggest</span><svg class="mode-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></button>
               <div class="modemenu" id="modeMenu" hidden>
@@ -616,44 +614,36 @@ h1,h2,h3,p{margin:0}
     {key:'slack',label:'Slack',icon:'chat',accent:'#e01e5a'}
   ];
   var appRow=document.getElementById('appRow'),connectAllBtn=document.getElementById('connectAllBtn'),connectSub=document.getElementById('connectSub');
-  var connSet=[], condensed=false;
+  var connSet=[], connectState='open'; // 'open' | 'pill' | 'gone'
   function isConn(k){return connSet.indexOf(k)>=0;}
   function appChip(a){return '<span class="appchip" style="'+chipStyle(a.accent)+'">'+svg(a.icon)+'</span>';}
-  function appChipSolid(a){return '<span class="appchip" style="color:'+a.accent+';background:color-mix(in srgb,'+a.accent+' 16%,var(--v2-surface))">'+svg(a.icon)+'</span>';}
   function advanceFromConnect(){ if(step<1){ step=1; render(); if(playing){clearTimeout(timer);timer=setTimeout(advance,1100);} } }
   function renderConnect(){
     var all=APPS.length,n=connSet.length;
-    if(condensed && n>0){
-      connectAllBtn.style.display='none';
-      connectSub.textContent=n+' connected — tap to manage';
-      appRow.innerHTML='<button class="cstack" id="cstackBtn" type="button" aria-label="'+n+' connected — tap to manage or add another tool">'
-        +'<span class="stackicons">'
-        +APPS.filter(function(a){return isConn(a.key);}).map(function(a){return appChipSolid(a);}).join('')
-        +'<span class="addmore">'+svg('arrow',2.2)+'</span>'
-        +'</span></button>';
-      document.getElementById('cstackBtn').onclick=function(){ condensed=false; renderConnect(); };
-    } else {
-      connectAllBtn.style.display=(n>=all)?'none':'';
-      connectSub.textContent='one tap each · add more anytime';
-      appRow.innerHTML=APPS.map(function(a){
-        var on=isConn(a.key);
-        return '<button class="cpill'+(on?' on':'')+'" data-app="'+a.key+'" type="button" aria-pressed="'+on+'">'
-          +appChip(a)+'<span class="an">'+a.label+'</span>'
-          +'<span class="cstate">'+svg('check',3)+'</span></button>';
-      }).join('')
-        + (n>0 ? '<button class="collapsebtn" id="collapseBtn" type="button" aria-label="Collapse connected tools into a stack">'+svg('arrowLeft',2.2)+'</button>' : '');
-      var cbtn=document.getElementById('collapseBtn'); if(cbtn) cbtn.onclick=function(){ condensed=true; renderConnect(); };
-      appRow.querySelectorAll('.cpill').forEach(function(b){
-        b.onclick=function(){
-          var k=b.getAttribute('data-app'),i=connSet.indexOf(k);
-          if(i>=0) connSet.splice(i,1); else connSet.push(k);
-          renderConnect();
-          if(connSet.length===all){ setTimeout(function(){ condensed=true; renderConnect(); advanceFromConnect(); },600); }
-        };
-      });
-    }
+    connectAllBtn.style.display=(n>=all)?'none':'';
+    connectSub.textContent='one tap each · add more anytime';
+    appRow.innerHTML=APPS.map(function(a){
+      var on=isConn(a.key);
+      return '<button class="cpill'+(on?' on':'')+'" data-app="'+a.key+'" type="button" aria-pressed="'+on+'">'
+        +appChip(a)+'<span class="an">'+a.label+'</span>'
+        +'<span class="cstate">'+svg('check',3)+'</span></button>';
+    }).join('');
+    appRow.querySelectorAll('.cpill').forEach(function(b){
+      b.onclick=function(){
+        var k=b.getAttribute('data-app'),i=connSet.indexOf(k);
+        if(i>=0) connSet.splice(i,1); else connSet.push(k);
+        renderConnect();
+        if(connSet.length===all){ setTimeout(advanceFromConnect,600); }
+      };
+    });
   }
-  connectAllBtn.onclick=function(){ connSet=APPS.map(function(a){return a.key;}); condensed=true; renderConnect(); advanceFromConnect(); };
+  connectAllBtn.onclick=function(){ connSet=APPS.map(function(a){return a.key;}); renderConnect(); advanceFromConnect(); };
+  // dismiss the connect panel ↔ show a "Connect your tools" pill in the composer
+  var connCloseBtn=document.getElementById('connCloseBtn'),connPill=document.getElementById('connPill'),connPillX=document.getElementById('connPillX');
+  function setConnectState(s){ connectState=s; render(); }
+  connCloseBtn.onclick=function(){ setConnectState('pill'); };
+  connPill.onclick=function(){ setConnectState('open'); };
+  connPillX.onclick=function(e){ e.stopPropagation(); setConnectState('gone'); };
   var CARDS=[
     {app:'gmail',label:'Gmail',icon:'mail',accent:'#ea4335',title:'Triaged your inbox',when:'2m ago',metrics:[['12','replied'],['40','archived']]},
     {app:'calendar',label:'Calendar',icon:'calendar',accent:'#4285f4',title:'Accepted 3 invites',when:'just now',metrics:[['3','accepted'],['1','conflicts']]},
@@ -743,11 +733,12 @@ h1,h2,h3,p{margin:0}
     heroTitle.textContent=h[0];heroSub.textContent=h[1];
     capN.textContent='Beat '+step+' / '+MAX; capC.innerHTML=CAP[step];
     var coach=(dir==='coach'),empty=(step<=1),working=(step===2);
-    show(connectBlock, empty);
+    show(connectBlock, empty && connectState==='open');
     show(ghostBlock, empty && coach);
     show(carouselBlock, step>=2);
-    if(step===0){ connSet=[]; condensed=false; renderConnect(); }
-    else if(step===1){ connSet=APPS.map(function(a){return a.key;}); condensed=true; renderConnect(); }
+    connPill.style.display = (empty && connectState==='pill') ? '' : 'none';
+    if(step===0){ connSet=[]; renderConnect(); }
+    else if(step===1){ connSet=APPS.map(function(a){return a.key;}); renderConnect(); }
     if(step>=2){
       if(working){
         carTtl.textContent = prop ? 'Looking for things to suggest' : 'Working on your first automations';
@@ -778,7 +769,7 @@ h1,h2,h3,p{margin:0}
   function advance(){ if(step>=MAX){stop();return;} step++; render(); if(playing){ timer=setTimeout(advance, WAIT[step]?1700:1500); } }
   function play(){ if(step>=MAX){step=0;render();} playing=true; setPlay(true); timer=setTimeout(advance, 700); }
   function stop(){ playing=false; setPlay(false); if(timer){clearTimeout(timer);timer=null;} }
-  function resetFirst(){ stop(); step=0; nearStart=0; resetCardStates(); render(); }
+  function resetFirst(){ stop(); step=0; nearStart=0; resetCardStates(); connectState='open'; render(); }
   function setPlay(on){ document.getElementById('playTxt').textContent=on?'Pause':'Play the first run';
     document.getElementById('playIco').innerHTML=on?'<rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/>':'<path d="M8 5v14l11-7z"/>'; }
   document.getElementById('playBtn').onclick=function(){ playing?stop():play(); };

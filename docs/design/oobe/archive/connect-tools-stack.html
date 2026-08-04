@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IronClaw · OOBE — Connect-tools stack (archived design)</title>
+<style>
+/* IronClaw webui_v2 tokens (verbatim from styles/app.css) */
+:root{
+  --font-sans:"Geist","Inter","SF Pro Display","Helvetica Neue",ui-sans-serif,system-ui,sans-serif;
+  --font-serif:"Newsreader","Lyon Text","Instrument Serif",georgia,serif;
+  --font-mono:"Geist Mono","SF Mono","JetBrains Mono",ui-monospace,monospace;
+  --near-blue:#0091fd;
+  --v2-canvas:#f4f7fb; --v2-canvas-strong:#ffffff;
+  --v2-surface:#ffffff; --v2-surface-soft:#eef4fa; --v2-surface-muted:#e4edf5;
+  --v2-card-bg:rgba(255,255,255,0.92); --v2-card-shadow:0 1px 2px rgba(19,45,68,0.06),0 12px 32px rgba(19,45,68,0.06);
+  --v2-panel-border:rgba(19,45,68,0.12);
+  --v2-text:#243244; --v2-text-strong:#0f1720; --v2-text-muted:#5f7183; --v2-text-faint:#8a9aab;
+  --v2-accent:#2e9de2; --v2-accent-soft:rgba(76,167,230,0.12); --v2-accent-text:#10649e;
+  --v2-positive-soft:rgba(32,210,154,0.13); --v2-positive-text:#087a5d;
+}
+@media (prefers-color-scheme:dark){:root{
+  --v2-canvas:#111114; --v2-canvas-strong:#0d0d10;
+  --v2-surface:#1b1b1f; --v2-surface-soft:rgba(255,255,255,0.03); --v2-surface-muted:rgba(255,255,255,0.07);
+  --v2-card-bg:#1b1b1f; --v2-card-shadow:0 10px 30px rgba(0,0,0,0.18);
+  --v2-panel-border:rgba(255,255,255,0.1);
+  --v2-text:rgba(255,255,255,0.82); --v2-text-strong:#ffffff; --v2-text-muted:rgba(255,255,255,0.6); --v2-text-faint:rgba(255,255,255,0.45);
+  --v2-accent:#4ca7e6; --v2-accent-soft:rgba(76,167,230,0.14); --v2-accent-text:#8fc8f2;
+  --v2-positive-text:#20d29a;
+}}
+:root[data-theme="dark"]{
+  --v2-canvas:#111114; --v2-canvas-strong:#0d0d10;
+  --v2-surface:#1b1b1f; --v2-surface-soft:rgba(255,255,255,0.03); --v2-surface-muted:rgba(255,255,255,0.07);
+  --v2-card-bg:#1b1b1f; --v2-card-shadow:0 10px 30px rgba(0,0,0,0.18);
+  --v2-panel-border:rgba(255,255,255,0.1);
+  --v2-text:rgba(255,255,255,0.82); --v2-text-strong:#ffffff; --v2-text-muted:rgba(255,255,255,0.6); --v2-text-faint:rgba(255,255,255,0.45);
+  --v2-accent:#4ca7e6; --v2-accent-soft:rgba(76,167,230,0.14); --v2-accent-text:#8fc8f2;
+  --v2-positive-text:#20d29a;
+}
+:root[data-theme="light"]{
+  --v2-canvas:#f4f7fb; --v2-canvas-strong:#ffffff;
+  --v2-surface:#ffffff; --v2-surface-soft:#eef4fa; --v2-surface-muted:#e4edf5;
+  --v2-card-bg:rgba(255,255,255,0.92); --v2-card-shadow:0 1px 2px rgba(19,45,68,0.06),0 12px 32px rgba(19,45,68,0.06);
+  --v2-panel-border:rgba(19,45,68,0.12);
+  --v2-text:#243244; --v2-text-strong:#0f1720; --v2-text-muted:#5f7183; --v2-text-faint:#8a9aab;
+  --v2-accent:#2e9de2; --v2-accent-soft:rgba(76,167,230,0.12); --v2-accent-text:#10649e;
+  --v2-positive-text:#087a5d;
+}
+
+*{box-sizing:border-box}
+html,body{margin:0}
+body{font-family:var(--font-sans);background:var(--v2-canvas);color:var(--v2-text);line-height:1.5;-webkit-font-smoothing:antialiased;padding:clamp(16px,4vw,40px)}
+.wrap{max-width:920px;margin:0 auto}
+.eyebrow{font-family:var(--font-mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--v2-accent-text);margin-bottom:10px}
+h1{font-family:var(--font-serif);font-weight:560;font-size:clamp(26px,4vw,40px);line-height:1.05;letter-spacing:-.01em;color:var(--v2-text-strong);margin:0}
+.lede{margin:12px 0 4px;max-width:70ch;color:var(--v2-text-muted);font-size:15px;line-height:1.6}
+.lede code{font-family:var(--font-mono);font-size:13px}
+.grid{display:grid;grid-template-columns:1fr;gap:22px;margin-top:28px}
+@media (min-width:760px){.grid{grid-template-columns:1fr 1fr}}
+.state{border:1px solid var(--v2-panel-border);border-radius:20px;background:var(--v2-canvas-strong);overflow:hidden;box-shadow:var(--v2-card-shadow)}
+.state .lbl{display:flex;align-items:center;gap:9px;padding:12px 16px;border-bottom:1px solid var(--v2-panel-border);background:var(--v2-surface)}
+.state .lbl b{font-size:13.5px;font-weight:600;color:var(--v2-text-strong)}
+.state .lbl .tag{font-family:var(--font-mono);font-size:10px;letter-spacing:.09em;text-transform:uppercase;font-weight:600;padding:3px 8px;border-radius:999px;margin-left:auto;color:var(--v2-accent-text);background:var(--v2-accent-soft)}
+.state .lbl .desc{font-size:12px;color:var(--v2-text-muted)}
+.stage{padding:22px 18px;background:var(--v2-canvas);display:grid;place-items:center;min-height:150px}
+
+/* ============================================================
+   Connect-tools panel — archived collapse/expand design
+   (extracted verbatim from docs/design/oobe/mockup.html)
+   ============================================================ */
+.connect{width:100%;max-width:520px;border:1px dashed var(--v2-panel-border);border-radius:16px;background:var(--v2-surface-soft);padding:14px 15px}
+.connect .ch{display:flex;align-items:center;gap:8px;margin-bottom:11px}
+.connect .ch svg{width:15px;height:15px;color:var(--v2-accent-text)}
+.connect .ch .t{font-size:13px;font-weight:600;color:var(--v2-text-strong)}
+.connect .ch .s{font-size:12px;color:var(--v2-text-muted)}
+.connect .apps{display:flex;flex-wrap:wrap;gap:9px;align-items:center}
+.connectall{margin-left:auto;display:inline-flex;align-items:center;gap:5px;padding:3px 4px;border:0;background:transparent;color:var(--v2-accent-text);font:inherit;font-size:12.5px;font-weight:560;cursor:pointer;border-radius:6px}
+.connectall:hover{text-decoration:underline;text-underline-offset:2px}
+
+/* expanded pills (with checkbox state) */
+.cpill{display:inline-flex;align-items:center;gap:9px;border:1px solid var(--v2-panel-border);background:var(--v2-surface);border-radius:12px;padding:7px 11px 7px 8px;cursor:pointer;font:inherit}
+.cpill .appchip{width:24px;height:24px;border-radius:7px;display:grid;place-items:center;border:1px solid;flex:none}
+.cpill .appchip svg{width:14px;height:14px}
+.cpill .an{font-size:13px;font-weight:560;color:var(--v2-text-strong)}
+.cpill .cstate{width:18px;height:18px;border-radius:6px;border:1.5px solid var(--v2-text-faint);display:grid;place-items:center;flex:none;color:transparent}
+.cpill .cstate svg{width:12px;height:12px}
+.cpill.on{border-color:color-mix(in srgb,var(--v2-positive-text) 45%,var(--v2-panel-border));background:color-mix(in srgb,var(--v2-positive-soft) 55%,var(--v2-surface))}
+.cpill.on .cstate{background:var(--v2-positive-text);border-color:var(--v2-positive-text);color:#fff}
+
+/* collapse control (expanded → stack) */
+.collapsebtn{margin-left:auto;display:inline-grid;place-items:center;width:38px;height:38px;flex:none;border-radius:11px;border:1px solid var(--v2-panel-border);background:var(--v2-surface);color:var(--v2-text-muted);cursor:pointer}
+.collapsebtn svg{width:16px;height:16px}
+
+/* collapsed avatar stack (stack → expand) */
+.cstack{display:inline-flex;align-items:center;border:0;background:transparent;padding:4px 2px;cursor:pointer;font:inherit}
+.cstack .stackicons{display:inline-flex;align-items:center}
+.cstack .stackicons .appchip{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;border:0;margin-left:-13px;box-shadow:0 0 0 3px var(--v2-surface),0 2px 5px rgba(0,0,0,.2)}
+.cstack .stackicons .appchip:first-child{margin-left:0}
+.cstack .stackicons .appchip svg{width:17px;height:17px}
+.cstack .addmore{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;margin-left:-13px;background:var(--v2-surface);color:var(--v2-text-muted);box-shadow:0 0 0 3px var(--v2-surface),0 2px 5px rgba(0,0,0,.2)}
+.cstack .addmore svg{width:15px;height:15px}
+
+.note{margin-top:26px;padding-top:18px;border-top:1px solid var(--v2-panel-border);color:var(--v2-text-muted);font-size:13px;line-height:1.65;max-width:80ch}
+.note b{color:var(--v2-text)}
+.note code{font-family:var(--font-mono);font-size:12px;background:var(--v2-surface-soft);padding:1px 6px;border-radius:5px;color:var(--v2-accent-text)}
+</style>
+
+<div class="wrap">
+  <div class="eyebrow">IronClaw · webui_v2 · OOBE · Design archive</div>
+  <h1>Connect-tools · collapse / expand</h1>
+  <p class="lede">Archived record of the <b>collapse / expand</b> control for the cold-start "Connect your tools" panel, captured before it was retired from <code>mockup.html</code>. Two states: the <b>expanded</b> pills (each with a checkbox state + a collapse control) and the <b>collapsed</b> overlapping icon stack (with an expand chevron). Built on the real <code>--v2-*</code> tokens; renders in light and dark.</p>
+
+  <div class="grid">
+    <div class="state">
+      <div class="lbl"><b>Expanded</b><span class="desc">pills · checkbox state · collapse ‹</span><span class="tag">state A</span></div>
+      <div class="stage">
+        <div class="connect">
+          <div class="ch">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg>
+            <span class="t">Connect your tools</span><span class="s">one tap each · add more anytime</span>
+          </div>
+          <div class="apps">
+            <button class="cpill on" type="button"><span class="appchip" style="color:#ea4335;background:color-mix(in srgb,#ea4335 16%,transparent);border-color:color-mix(in srgb,#ea4335 38%,transparent)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v14H4z"/><path d="M4 7l8 6 8-6"/></svg></span><span class="an">Gmail</span><span class="cstate"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-11"/></svg></span></button>
+            <button class="cpill on" type="button"><span class="appchip" style="color:#4285f4;background:color-mix(in srgb,#4285f4 16%,transparent);border-color:color-mix(in srgb,#4285f4 38%,transparent)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg></span><span class="an">Calendar</span><span class="cstate"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-11"/></svg></span></button>
+            <button class="cpill on" type="button"><span class="appchip" style="color:#e01e5a;background:color-mix(in srgb,#e01e5a 16%,transparent);border-color:color-mix(in srgb,#e01e5a 38%,transparent)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v12H7l-3 3z"/></svg></span><span class="an">Slack</span><span class="cstate"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-11"/></svg></span></button>
+            <button class="collapsebtn" type="button" aria-label="Collapse into a stack"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="state">
+      <div class="lbl"><b>Collapsed</b><span class="desc">overlapping stack · expand ›</span><span class="tag">state B</span></div>
+      <div class="stage">
+        <div class="connect">
+          <div class="ch">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg>
+            <span class="t">Connect your tools</span><span class="s">3 connected — tap to manage</span>
+          </div>
+          <div class="apps">
+            <button class="cstack" type="button" aria-label="3 connected — tap to manage or add another tool">
+              <span class="stackicons">
+                <span class="appchip" style="color:#ea4335;background:color-mix(in srgb,#ea4335 16%,var(--v2-surface))"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v14H4z"/><path d="M4 7l8 6 8-6"/></svg></span>
+                <span class="appchip" style="color:#4285f4;background:color-mix(in srgb,#4285f4 16%,var(--v2-surface))"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg></span>
+                <span class="appchip" style="color:#e01e5a;background:color-mix(in srgb,#e01e5a 16%,var(--v2-surface))"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v12H7l-3 3z"/></svg></span>
+                <span class="addmore"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></span>
+              </span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note">
+    <p><b>Interaction (as designed).</b> Connecting a tool checked its pill; once all were connected the pills <b>collapsed</b> into the overlapping icon stack ("N connected — tap to manage"). Tapping the stack (or its <code>›</code> chevron) re-expanded to the pills; the expanded row carried a <code>‹</code> collapse control to fold them back. Retired in favor of a dismiss-to-composer-pill pattern — this file preserves the stack design for reference.</p>
+  </div>
+</div>
