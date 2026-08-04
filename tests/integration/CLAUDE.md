@@ -1,5 +1,10 @@
 # Reborn Integration Tests
 
+> **Adding, removing, renaming, or materially re-scoping a test here? Update
+> `tests/CLAUDE.md`** — the repo-wide scenario coverage map (what each scenario
+> proves, in plain English, and where the gaps are). Its maintenance rule is
+> binding: the row changes in the same commit.
+
 In-process tests that run a **whole Reborn turn** with the real internal stack —
 product workflow, turn coordinator, scheduler, the agent loop, the real
 `LlmProviderModelGateway` + the real `ironclaw_llm` decorator chain, and real

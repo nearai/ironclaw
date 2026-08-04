@@ -27,6 +27,10 @@ FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "sch
 # not a policy anyone chose. Classifying it is the fix; loosening the
 # fail-closed arm is not.
 IGNORED_PREFIXES = ("docs/", ".claude/", ".github/ISSUE_TEMPLATE/")
+IGNORED_GUIDANCE_PATHS = {
+    "tests/CLAUDE.md",
+    "tests/integration/CLAUDE.md",
+}
 DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
 QA_HARNESS_PREFIXES = (
     "scripts/live-canary/",
@@ -370,8 +374,10 @@ def build_plan(
         if path == CHANGED_COVERAGE_MANIFEST:
             reasons.append("changed-coverage policy is statically validated")
             continue
-        if path.startswith(IGNORED_PREFIXES) or (
-            path.endswith(".md") and "/" not in path
+        if (
+            path in IGNORED_GUIDANCE_PATHS
+            or path.startswith(IGNORED_PREFIXES)
+            or (path.endswith(".md") and "/" not in path)
         ):
             continue
         if path.startswith("crates/ironclaw_webui/frontend/"):
