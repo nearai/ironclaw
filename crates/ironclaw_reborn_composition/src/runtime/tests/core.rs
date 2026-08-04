@@ -5300,11 +5300,47 @@ async fn production_channel_host_lands_attachment_with_read_write_mount() {
         .expect("production channel-host attachment lander has write authority");
 
     assert_eq!(refs.len(), 1);
+    // A single-user deployment keeps the shared workspace root, so an inbound
+    // attachment stays where its host aliases and browser look for it.
+    assert_landed_under(
+        &runtime,
+        &refs[0],
+        "/projects/workspace",
+        "standalone channel attachment",
+    )
+    .await;
     lander
         .rollback(&thread_scope, &refs)
         .await
         .expect("production channel-host attachment lander has batch rollback authority");
     runtime.shutdown().await.expect("runtime shutdown");
+}
+
+/// Assert the landed attachment's bytes are physically readable under
+/// `expected_root` on the composed filesystem — the placement claim the
+/// scoped-view read ports cannot make, because they resolve through the very
+/// mount view under test.
+async fn assert_landed_under(
+    runtime: &crate::RebornRuntime,
+    landed: &ironclaw_common::AttachmentRef,
+    expected_root: &str,
+    label: &str,
+) {
+    use ironclaw_filesystem::RootFilesystem;
+
+    let storage_key = landed
+        .storage_key
+        .as_deref()
+        .expect("landed attachment carries a storage_key");
+    let relative = storage_key
+        .strip_prefix("/workspace/")
+        .expect("attachment storage keys are workspace-scoped");
+    let path = ironclaw_host_api::path::VirtualPath::new(format!("{expected_root}/{relative}"))
+        .expect("composed attachment path");
+    assert!(
+        runtime.extension_filesystem.read_file(&path).await.is_ok(),
+        "{label} should be readable at {path:?}"
+    );
 }
 
 async fn query_webui_extension_setup(

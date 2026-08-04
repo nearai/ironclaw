@@ -348,7 +348,9 @@ pub(crate) struct RebornRuntimeStores {
     /// Lifecycle hooks declared by the bound memory provider. Host-initiated
     /// retrieval, recording, and profile reads are wired only when declared.
     pub(crate) memory_lifecycle: ironclaw_extension_contracts::memory::MemoryDescriptor,
-    pub(crate) workspace_mounts: MountView,
+    /// The deployment's single workspace scoping decision, read by every
+    /// workspace write lane (grants, approval leases, attachment handles).
+    pub(crate) workspace_mounts: crate::runtime_mounts::WorkspaceMountPolicy,
     pub(crate) standalone_storage_root: Option<PathBuf>,
     pub(crate) default_system_prompt_path: Option<PathBuf>,
     #[cfg(any(test, feature = "test-support"))]

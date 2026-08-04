@@ -14,13 +14,16 @@ use crate::builtin_capability_policy::{
     builtin_one_shot_lease_approval,
 };
 use crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID;
+use crate::runtime_mounts::WorkspaceMountPolicy;
 
 use ironclaw_extension_host::capability_surface::ExtensionCapabilitySurfaceSource;
 
 pub(super) struct PolicyApprovalLeaseTermsProvider {
     policy: Arc<BuiltinCapabilityPolicy>,
     registry: Arc<ExtensionRegistry>,
-    workspace_mounts: MountView,
+    /// Resolved per gate from the gate's own `ResourceScope`, so a lease minted
+    /// for one caller can never grant another caller's workspace subtree.
+    workspace_mounts: WorkspaceMountPolicy,
     skill_mounts: MountView,
     memory_mounts: MountView,
     system_extensions_lifecycle_mounts: MountView,
@@ -31,7 +34,7 @@ impl PolicyApprovalLeaseTermsProvider {
     pub(super) fn new(
         policy: Arc<BuiltinCapabilityPolicy>,
         registry: Arc<ExtensionRegistry>,
-        workspace_mounts: MountView,
+        workspace_mounts: WorkspaceMountPolicy,
         skill_mounts: MountView,
         memory_mounts: MountView,
         system_extensions_lifecycle_mounts: MountView,
@@ -46,6 +49,22 @@ impl PolicyApprovalLeaseTermsProvider {
             system_extensions_lifecycle_mounts,
             extension_surface_source,
         }
+    }
+
+    /// The workspace view this gate's lease terms are minted from.
+    ///
+    /// Fails closed: a per-caller deployment whose gate scope cannot key a
+    /// subtree yields no lease rather than the shared workspace root.
+    fn workspace_mounts_for(
+        &self,
+        gate: &ApprovalGateRecord,
+    ) -> Result<MountView, ProductSurfaceFailure> {
+        self.workspace_mounts
+            .capability_grant_view(gate.resource_scope())
+            .map_err(|error| {
+                tracing::error!(%error, "approval lease workspace mounts could not be scoped");
+                lease_terms_unavailable()
+            })
     }
 
     async fn extension_lease_terms_for(
@@ -146,9 +165,10 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
         {
             return Ok(approval);
         }
+        let workspace_mounts = self.workspace_mounts_for(gate)?;
         match self.policy.lease_approval_for(
             action,
-            &self.workspace_mounts,
+            &workspace_mounts,
             &self.skill_mounts,
             &self.memory_mounts,
             &self.system_extensions_lifecycle_mounts,
@@ -181,9 +201,10 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
             });
         }
         if action.capability_id().as_str() == OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID {
+            let workspace_mounts = self.workspace_mounts_for(gate)?;
             match self.policy.lease_approval_for(
                 action,
-                &self.workspace_mounts,
+                &workspace_mounts,
                 &self.skill_mounts,
                 &self.memory_mounts,
                 &self.system_extensions_lifecycle_mounts,
@@ -263,7 +284,7 @@ mod tests {
         let terms_provider = PolicyApprovalLeaseTermsProvider::new(
             Arc::new(builtin_capability_policy().expect("policy parses")),
             Arc::new(ExtensionRegistry::new()),
-            MountView::default(),
+            WorkspaceMountPolicy::Shared(MountView::default()),
             MountView::default(),
             MountView::default(),
             MountView::default(),
@@ -336,7 +357,7 @@ mod tests {
         let terms_provider = PolicyApprovalLeaseTermsProvider::new(
             Arc::new(builtin_capability_policy().expect("policy parses")),
             Arc::new(ExtensionRegistry::new()),
-            MountView::default(),
+            WorkspaceMountPolicy::Shared(MountView::default()),
             MountView::default(),
             MountView::default(),
             MountView::default(),
@@ -390,7 +411,7 @@ mod tests {
         let terms_provider = PolicyApprovalLeaseTermsProvider::new(
             Arc::new(builtin_capability_policy().expect("policy parses")),
             Arc::new(ExtensionRegistry::new()),
-            MountView::default(),
+            WorkspaceMountPolicy::Shared(MountView::default()),
             MountView::default(),
             MountView::default(),
             MountView::default(),
@@ -431,7 +452,7 @@ mod tests {
         let terms_provider = PolicyApprovalLeaseTermsProvider::new(
             Arc::new(builtin_capability_policy().expect("policy parses")),
             Arc::new(ExtensionRegistry::new()),
-            MountView::default(),
+            WorkspaceMountPolicy::Shared(MountView::default()),
             MountView::default(),
             MountView::default(),
             MountView::default(),
@@ -460,7 +481,7 @@ mod tests {
         let terms_provider = PolicyApprovalLeaseTermsProvider::new(
             Arc::new(builtin_capability_policy().expect("policy parses")),
             Arc::new(ExtensionRegistry::new()),
-            MountView::default(),
+            WorkspaceMountPolicy::Shared(MountView::default()),
             MountView::default(),
             MountView::default(),
             MountView::default(),
@@ -501,7 +522,7 @@ mod tests {
         let terms_provider = PolicyApprovalLeaseTermsProvider::new(
             Arc::new(builtin_capability_policy().expect("policy parses")),
             Arc::new(ExtensionRegistry::new()),
-            MountView::default(),
+            WorkspaceMountPolicy::Shared(MountView::default()),
             MountView::default(),
             MountView::default(),
             MountView::default(),
@@ -529,14 +550,78 @@ mod tests {
         ));
     }
 
+    /// A resolved approval hands the caller a lease whose mounts the tool then
+    /// writes through. Under a per-caller workspace policy that lease must key
+    /// the gate's own subtree, or approving one user's write would grant the
+    /// shared workspace root to everyone.
+    #[tokio::test]
+    async fn per_caller_workspace_policy_leases_only_the_gates_own_subtree() {
+        let terms_provider = PolicyApprovalLeaseTermsProvider::new(
+            Arc::new(builtin_capability_policy().expect("policy parses")),
+            Arc::new(ExtensionRegistry::new()),
+            WorkspaceMountPolicy::PerCaller,
+            MountView::default(),
+            MountView::default(),
+            MountView::default(),
+            ExtensionCapabilitySurfaceSource::default(),
+        );
+        let capability =
+            CapabilityId::new(ironclaw_host_runtime::WRITE_FILE_CAPABILITY_ID).expect("id");
+
+        let mut targets = Vec::new();
+        for user in ["alice", "bob"] {
+            let gate = approval_gate_record_for_user(
+                ApprovalRequestId::new(),
+                Principal::Extension(ExtensionId::new("loop-driver").expect("caller id")),
+                Action::Dispatch {
+                    capability: capability.clone(),
+                    estimated_resources: ResourceEstimate::default(),
+                },
+                user,
+            );
+
+            let approval = terms_provider
+                .lease_terms_for(&gate)
+                .await
+                .expect("workspace lease terms");
+            let mount = approval
+                .constraints
+                .mounts
+                .mounts
+                .iter()
+                .find(|mount| mount.alias.as_str() == "/workspace")
+                .expect("workspace mount in lease");
+            assert_eq!(
+                mount.target.as_str(),
+                format!("/projects/workspace/tenants/tenant/users/{user}"),
+                "lease for {user} must key {user}'s own subtree"
+            );
+            targets.push(mount.target.as_str().to_string());
+        }
+
+        assert_ne!(
+            targets[0], targets[1],
+            "two callers must not share one leased workspace target"
+        );
+    }
+
     fn approval_gate_record(
         request_id: ApprovalRequestId,
         requested_by: Principal,
         action: Action,
     ) -> ApprovalGateRecord {
+        approval_gate_record_for_user(request_id, requested_by, action, "user")
+    }
+
+    fn approval_gate_record_for_user(
+        request_id: ApprovalRequestId,
+        requested_by: Principal,
+        action: Action,
+        user_id: &str,
+    ) -> ApprovalGateRecord {
         let resource_scope = ResourceScope {
             tenant_id: TenantId::new("tenant").expect("tenant id"),
-            user_id: UserId::new("user").expect("user id"),
+            user_id: UserId::new(user_id).expect("user id"),
             agent_id: None,
             project_id: None,
             mission_id: None,

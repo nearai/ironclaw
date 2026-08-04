@@ -283,8 +283,10 @@ async fn build_local_storage_production_shaped(
         }
     };
     let filesystem = filesystem_bundle.filesystem;
-    context.workspace_filesystems =
-        Some(host_access.build_workspace_filesystems(Arc::clone(&filesystem))?);
+    context.workspace_filesystems = Some(host_access.build_workspace_filesystems(
+        Arc::clone(&filesystem),
+        context.profile.workspace_scoped_per_caller(),
+    )?);
     context.local_process_port = host_access.process_port;
     context.standalone_storage_root = Some(root.clone());
     context.default_system_prompt_path = Some(default_system_prompt_path);

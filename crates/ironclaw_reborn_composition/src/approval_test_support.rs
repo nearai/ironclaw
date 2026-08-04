@@ -28,6 +28,8 @@ pub(crate) trait ApprovalHarness {
     fn capability_policy(
         &self,
     ) -> Option<&Arc<crate::builtin_capability_policy::BuiltinCapabilityPolicy>>;
+    /// `None` under a per-caller workspace policy: this harness mints lease
+    /// terms from a fixed view, which only a shared-workspace deployment has.
     fn workspace_mounts(&self) -> Option<&MountView>;
     fn skill_mounts(&self) -> Option<&MountView>;
     fn memory_mounts(&self) -> Option<&MountView>;
@@ -55,7 +57,7 @@ impl ApprovalHarness for RebornRuntimeStores {
     }
 
     fn workspace_mounts(&self) -> Option<&MountView> {
-        Some(&self.workspace_mounts)
+        crate::factory::test_support::shared_workspace_view(&self.workspace_mounts)
     }
 
     fn skill_mounts(&self) -> Option<&MountView> {

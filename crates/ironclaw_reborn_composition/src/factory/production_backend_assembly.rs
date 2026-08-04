@@ -399,11 +399,16 @@ pub(super) async fn build_backend_production(
                             reason: error.to_string(),
                         }
                     })?;
-                let runtime_workspace_mounts =
-                    ambient_workspace_mount_view(MountPermissions::read_write(), &[], &[])
-                        .map_err(|error| RebornBuildError::InvalidConfig {
-                            reason: error.to_string(),
-                        })?;
+                let runtime_workspace_mounts = if profile.workspace_scoped_per_caller() {
+                    crate::runtime_mounts::WorkspaceMountPolicy::PerCaller
+                } else {
+                    crate::runtime_mounts::WorkspaceMountPolicy::Shared(
+                        ambient_workspace_mount_view(MountPermissions::read_write(), &[], &[])
+                            .map_err(|error| RebornBuildError::InvalidConfig {
+                                reason: error.to_string(),
+                            })?,
+                    )
+                };
                 (
                     Arc::new(ScopedFilesystem::new(
                         Arc::clone(&stores.filesystem),

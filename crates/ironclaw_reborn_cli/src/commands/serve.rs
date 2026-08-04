@@ -659,11 +659,13 @@ impl ServeCommand {
     }
 }
 
+/// Whether the WebUI workspace browser projects the caller's own subtree.
+///
+/// Delegates to composition's deployment policy so the browser reads exactly
+/// the subtree the agent's tool grants, approval leases, and attachment
+/// handles write to. One predicate, no view/write drift.
 fn profile_requires_scoped_workspace_projection(profile: RebornProfile) -> bool {
-    !matches!(
-        profile,
-        RebornProfile::Standalone | RebornProfile::StandaloneUnrestricted
-    )
+    crate::runtime::composition_profile(profile).workspace_scoped_per_caller()
 }
 
 struct StartupServe {
@@ -1768,6 +1770,30 @@ slack_user_id = "U123"
         );
 
         clear_webui_env();
+    }
+
+    /// The WebUI workspace browser and the agent's workspace writes must agree
+    /// per profile. They read one predicate now, so this pins the values that
+    /// predicate produces -- flipping a profile here changes where a deployment's
+    /// files live and must be a deliberate edit.
+    #[test]
+    fn workspace_projection_matches_composition_write_policy_for_every_profile() {
+        for profile in RebornProfile::all() {
+            let expected = !matches!(
+                profile,
+                RebornProfile::Standalone | RebornProfile::StandaloneUnrestricted
+            );
+            assert_eq!(
+                profile_requires_scoped_workspace_projection(*profile),
+                expected,
+                "unexpected workspace projection policy for profile {profile}"
+            );
+            assert_eq!(
+                profile_requires_scoped_workspace_projection(*profile),
+                crate::runtime::composition_profile(*profile).workspace_scoped_per_caller(),
+                "browser projection and composition write policy disagree for {profile}"
+            );
+        }
     }
 }
 // arch-exempt: large_file, serve composition remains centralized during assembly cleanup, plan #6175
