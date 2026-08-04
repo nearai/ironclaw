@@ -4,7 +4,7 @@ use std::sync::Arc;
 use ironclaw_attachments::InboundAttachmentLander;
 use ironclaw_extension_contracts::extension::ExtensionHostAssemblyConfig;
 use ironclaw_extensions::ExtensionInstallationStorePort;
-use ironclaw_filesystem::{CompositeRootFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{CompositeRootFilesystem, RootFilesystem};
 use ironclaw_host_api::{
     ids::{CapabilityId, UserId},
     resource::ResourceScope,
@@ -385,21 +385,21 @@ pub(crate) struct ChannelHostAssemblySource {
 }
 
 fn channel_host_source(services: &RebornRuntimeStores) -> Option<ChannelHostAssemblySource> {
-    let inbound_mounts = crate::runtime_mounts::workspace_mount_view(
-        ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
-        &[],
-    )
-    .ok()?;
-    let inbound_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
-        Arc::clone(&services.extension_filesystem),
-        inbound_mounts,
-    ));
+    // Lander and reader share ONE handle so an inbound attachment is read back
+    // from the subtree it landed in. Under a per-caller workspace policy that
+    // subtree is the caller's own; the shared read-only `workspace_filesystem`
+    // would address the root instead. Mirrors the test-support wiring in
+    // `RebornRuntime::start_channel_host_assembly_for_test`.
+    let inbound_filesystem = crate::runtime_mounts::read_write_workspace_filesystem(
+        &services.extension_filesystem,
+        &services.workspace_mounts,
+    )?;
     let inbound_attachments: Arc<dyn InboundAttachmentLander> = Arc::new(
-        ironclaw_attachments::ProjectScopedAttachmentLander::new(inbound_filesystem),
+        ironclaw_attachments::ProjectScopedAttachmentLander::new(Arc::clone(&inbound_filesystem)),
     );
     let project_filesystem: Arc<dyn ProjectFilesystemReader> = Arc::new(
         ironclaw_product::ProjectScopedFilesystemReader::with_max_read_bytes(
-            Arc::clone(&services.workspace_filesystem),
+            inbound_filesystem,
             ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64,
         ),
     );

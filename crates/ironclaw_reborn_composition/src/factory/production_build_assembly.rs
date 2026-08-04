@@ -64,8 +64,10 @@ pub(super) async fn build_production_shaped(
             &first_party_bundles,
         )?)),
     };
+    let workspace_scoped_per_caller = deployment.workspace_scoped_per_caller();
     let build_context = |production_wiring, scheduler_wake_wiring| RebornProductionBuildContext {
         profile,
+        workspace_scoped_per_caller,
         wiring_config,
         production_wiring,
         local_process_port: None,
@@ -283,8 +285,10 @@ async fn build_local_storage_production_shaped(
         }
     };
     let filesystem = filesystem_bundle.filesystem;
-    context.workspace_filesystems =
-        Some(host_access.build_workspace_filesystems(Arc::clone(&filesystem))?);
+    context.workspace_filesystems = Some(host_access.build_workspace_filesystems(
+        Arc::clone(&filesystem),
+        context.workspace_scoped_per_caller,
+    )?);
     context.local_process_port = host_access.process_port;
     context.standalone_storage_root = Some(root.clone());
     context.default_system_prompt_path = Some(default_system_prompt_path);
@@ -328,6 +332,11 @@ pub(super) struct RebornProductionWiring {
 
 pub(super) struct RebornProductionBuildContext {
     pub(super) profile: RebornCompositionProfile,
+    /// The deployment's resolved workspace scoping decision. Carried, not
+    /// re-derived from `profile`: the assembling host may raise it (SSO on a
+    /// standalone-composed deployment), and a second derivation here would
+    /// silently drop that.
+    pub(super) workspace_scoped_per_caller: bool,
     pub(super) wiring_config: ironclaw_host_runtime::ProductionWiringConfig,
     pub(super) production_wiring: RebornProductionWiring,
     pub(super) local_process_port: Option<HostProcessPort>,

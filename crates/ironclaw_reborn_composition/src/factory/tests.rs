@@ -1327,7 +1327,7 @@ async fn standalone_gsuite_installs_activates_and_dispatches_through_host_runtim
                 BuiltinApprovalPolicyAction::Dispatch {
                     capability: &gmail_capability,
                 },
-                runtime_surfaces.workspace_mounts_for_test(),
+                crate::factory::test_support::workspace_mounts_for_test(runtime_surfaces),
                 runtime_surfaces.skill_mounts_for_test(),
                 runtime_surfaces.memory_mounts_for_test(),
                 runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),

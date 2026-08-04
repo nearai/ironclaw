@@ -53,7 +53,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Triggers / automations / routines | 10 | 2 | ✓ | ✓ |
 | Memory & workspace | 5 | 2 | — | ✓ |
 | Skills | 1 | 1 | — | ✓ |
-| Multi-user / scope isolation | 4 | 2 | 9 | ✓ |
+| Multi-user / scope isolation | 5 | 2 | 9 | ✓ |
 | Tools & tool dispatch | — | 10 | ✓ | ✓ |
 | Turn lifecycle (cancel/steer/retry/restart) | — | 8 | ✓ | ✓ |
 | WebUI surfaces & APIs | 2 | 2 | — | ✓ (largest) |
@@ -62,13 +62,13 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **50** group scenarios · **54** flat integration bins (48 in
+Totals: **51** group scenarios · **54** flat integration bins (48 in
 `tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
 **102** Python scenario files (**867** test functions).
 
 ---
 
-## 3. Group scenarios — `tests/integration/group_*/` (50)
+## 3. Group scenarios — `tests/integration/group_*/` (51)
 
 Multi-thread journeys over ONE shared runtime and ONE shared set of stores. These are
 the canonical "a user does X in one conversation and sees the effect in another" tests.
@@ -126,7 +126,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Run a build with memory disabled and have the assistant not even see memory tools | `scenario_disabled_binding_offers_no_memory_tools.rs` |
 | Trust that only the memory hooks the provider declares actually fire | `scenario_lifecycle_gates_host_memory_calls.rs` |
 
-### 3.5 Multi-user — `group_multiuser/` (4)
+### 3.5 Multi-user — `group_multiuser/` (5)
 
 | The user can… | Evidence |
 |---|---|
@@ -134,6 +134,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Not read another user's memories (and still read their own) | `scenario_memory_isolation_across_actors.rs` |
 | Not have another user's "always allow" apply to them | `scenario_auto_approve_isolation_across_actors.rs` |
 | Not see another user's run/turn state | `scenario_turn_state_isolation_across_actors.rs` |
+| On a per-caller-scoped (served) deployment: read their brand-new workspace as empty instead of an error, approve a gated write that lands in their own `tenants/{tenant}/users/{user}` subtree (never the shared root), and read it back — while a missing sub-path stays a hard error | `scenario_scoped_workspace_isolation.rs` |
 
 ### 3.6 Skills — `group_skills/` (1)
 

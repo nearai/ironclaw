@@ -17,13 +17,14 @@ use super::{
     diff_preview::{file_diff_preview, will_use_large_diff_path},
     input_error,
     inputs::{optional_usize, required_str},
-    operation_error_with_summary,
+    operation_error, operation_error_with_summary,
     patch::{parse_apply_patch_input, replacement_error},
     paths::{
-        create_parent_dir_unless_sensitive, deny_sensitive_existing_path, filesystem_error,
-        filesystem_error_with_summary, is_excluded_name, is_sensitive_scoped_path,
-        is_workspace_path, operation_allowed, resolve_optional_path, resolve_required_path,
-        safe_summary_path, scoped_child_path, stat_optional, virtual_to_relative,
+        create_parent_dir_unless_sensitive, filesystem_error, filesystem_error_with_summary,
+        is_excluded_name, is_sensitive_scoped_path, is_workspace_path,
+        list_dir_empty_if_missing_root, operation_allowed, resolve_optional_path,
+        resolve_required_path, safe_summary_path, scoped_child_path, stat_optional,
+        virtual_to_relative,
     },
     state::{
         CodingReadScopeKey, ReadRepresentation, SharedCodingEditLocks, SharedCodingReadStates,
@@ -468,6 +469,14 @@ async fn verify_read_before_edit(
             resolved.scoped_path.as_str(),
         ));
     }
+    if is_opaque_binary_document_path(resolved.scoped_path.as_str())
+        || is_pdf_document_path(resolved.scoped_path.as_str())
+    {
+        return Err(binary_document_write_error(
+            operation,
+            resolved.scoped_path.as_str(),
+        ));
+    }
     // A file grown past what read_file can return cannot match any recorded
     // read; report it as changed instead of fingerprinting unbounded bytes.
     if stat.len > MAX_READ_SIZE {
@@ -528,7 +537,19 @@ pub(super) async fn list_dir(
     request: &CodingCapabilityRequest<'_>,
 ) -> Result<Value, CodingCapabilityError> {
     let resolved = resolve_optional_path(request, FilesystemOperation::ListDir)?;
-    deny_sensitive_existing_path(request, &resolved.virtual_path).await?;
+    // A missing mount ROOT lists as empty (the grant names it; nothing has
+    // been written under it yet), so the sensitive-stat guard tolerates its
+    // absence. Any other missing path stays an error, as before.
+    match stat_optional(request, &resolved.virtual_path).await? {
+        Some(stat) if stat.sensitive => {
+            return Err(CodingCapabilityError::new(
+                RuntimeDispatchErrorKind::FilesystemDenied,
+            ));
+        }
+        Some(_) => {}
+        None if resolved.is_mount_root() => {}
+        None => return Err(operation_error()),
+    }
     let recursive = request
         .input
         .get("recursive")
@@ -558,11 +579,7 @@ async fn collect_list_entries(
     let mut stack = vec![(root.virtual_path.clone(), 0usize)];
     let mut visited = 0usize;
     while let Some((dir, depth)) = stack.pop() {
-        let entries = request
-            .filesystem
-            .list_dir(&dir)
-            .await
-            .map_err(filesystem_error)?;
+        let entries = list_dir_empty_if_missing_root(request, root, &dir).await?;
         for entry in entries {
             visited += 1;
             if visited > MAX_VISITED_ENTRIES {

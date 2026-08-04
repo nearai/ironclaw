@@ -692,6 +692,7 @@ impl HostRuntimeCapabilityHarness {
             channel_extension_bindings,
             recording_network_egress,
             google_oauth_backend_for_test,
+            workspace_scoped_per_caller,
         } = options;
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
@@ -768,6 +769,12 @@ impl HostRuntimeCapabilityHarness {
                 input.with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_client);
         }
         let mut runtime_input = RebornRuntimeInput::from_build_input(input);
+        if workspace_scoped_per_caller {
+            // The same raise `serve` applies unconditionally: agent tool
+            // grants, approval leases, and attachment handles resolve the
+            // caller's own `tenants/{tenant}/users/{user}` subtree.
+            runtime_input = runtime_input.with_workspace_scoped_per_caller_services(true);
+        }
         if let Some((tenant_id, agent_id)) = local_runtime_identity {
             runtime_input =
                 runtime_input.with_identity(ironclaw_reborn_composition::RebornRuntimeIdentity {

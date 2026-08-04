@@ -323,6 +323,7 @@ pub(super) async fn build_backend_production(
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     let RebornProductionBuildContext {
         profile,
+        workspace_scoped_per_caller,
         wiring_config,
         production_wiring,
         local_process_port,
@@ -400,10 +401,14 @@ pub(super) async fn build_backend_production(
                         }
                     })?;
                 let runtime_workspace_mounts =
-                    ambient_workspace_mount_view(MountPermissions::read_write(), &[], &[])
-                        .map_err(|error| RebornBuildError::InvalidConfig {
-                            reason: error.to_string(),
-                        })?;
+                    crate::runtime_mounts::WorkspaceMountPolicy::resolve(
+                        workspace_scoped_per_caller,
+                        &[],
+                        &[],
+                    )
+                    .map_err(|error| RebornBuildError::InvalidConfig {
+                        reason: error.to_string(),
+                    })?;
                 (
                     Arc::new(ScopedFilesystem::new(
                         Arc::clone(&stores.filesystem),

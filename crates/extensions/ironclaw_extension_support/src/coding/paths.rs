@@ -1,4 +1,4 @@
-use ironclaw_filesystem::{FileStat, FilesystemError, FilesystemOperation};
+use ironclaw_filesystem::{DirEntry, FileStat, FilesystemError, FilesystemOperation};
 use ironclaw_host_api::{
     dispatch::RuntimeDispatchErrorKind,
     path::{ScopedPath, VirtualPath},
@@ -184,6 +184,25 @@ pub(super) fn operation_allowed(
     }
 }
 
+/// List a directory during a walk rooted at `root`, reading an
+/// authorized-but-never-written mount ROOT as empty.
+///
+/// The caller's grant names the root, so "the backend has nothing under it
+/// yet" means an empty directory, not an error — without this, every read
+/// tool on a brand-new per-caller workspace failed before its first write.
+/// Only the grant's own target gets this treatment; any deeper directory
+/// keeps reporting `NotFound`.
+pub(super) async fn list_dir_empty_if_missing_root(
+    request: &CodingCapabilityRequest<'_>,
+    root: &ResolvedPath,
+    dir: &VirtualPath,
+) -> Result<Vec<DirEntry>, CodingCapabilityError> {
+    match request.filesystem.list_dir(dir).await {
+        Err(FilesystemError::NotFound { .. }) if dir == &root.grant.target => Ok(Vec::new()),
+        other => other.map_err(filesystem_error),
+    }
+}
+
 pub(super) async fn stat_optional(
     request: &CodingCapabilityRequest<'_>,
     path: &VirtualPath,
@@ -208,23 +227,6 @@ pub(super) async fn create_parent_dir_unless_sensitive(
         .create_dir_all(&parent)
         .await
         .map_err(filesystem_denied_if_not_found)
-}
-
-pub(super) async fn deny_sensitive_existing_path(
-    request: &CodingCapabilityRequest<'_>,
-    path: &VirtualPath,
-) -> Result<(), CodingCapabilityError> {
-    let stat = request
-        .filesystem
-        .stat(path)
-        .await
-        .map_err(filesystem_error)?;
-    if stat.sensitive {
-        return Err(CodingCapabilityError::new(
-            RuntimeDispatchErrorKind::FilesystemDenied,
-        ));
-    }
-    Ok(())
 }
 
 /// Walk up the directory tree, denying if any existing parent is sensitive.

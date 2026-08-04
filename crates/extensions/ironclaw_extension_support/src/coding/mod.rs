@@ -949,6 +949,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_patch_rejects_probe_clean_document_path_after_full_read() {
+        let fixture = CodingFixture::new("pdf-patch-user");
+        let file = fixture.workspace_dir.join("review.pdf");
+        let original = b"alpha beta\n";
+        std::fs::write(&file, original).expect("seed probe-clean PDF path");
+
+        fixture
+            .dispatch(
+                super::CodingCapabilityKind::ReadFile,
+                json!({"path": "/workspace/review.pdf"}),
+            )
+            .await
+            .expect("read probe-clean PDF path as raw text");
+
+        let err = fixture
+            .dispatch(
+                super::CodingCapabilityKind::ApplyPatch,
+                json!({"path": "/workspace/review.pdf", "old_string": "alpha", "new_string": "gamma"}),
+            )
+            .await
+            .expect_err("text patch to a PDF path must be rejected");
+
+        assert_binary_document_rejection(&err, "review.pdf");
+        assert_eq!(
+            std::fs::read(file).expect("PDF after rejected patch"),
+            original
+        );
+    }
+
+    #[tokio::test]
     async fn read_file_falls_back_to_legacy_document_extraction() {
         let fixture = CodingFixture::new("legacy-document-user");
         let file = fixture.workspace_dir.join("legacy.doc");
