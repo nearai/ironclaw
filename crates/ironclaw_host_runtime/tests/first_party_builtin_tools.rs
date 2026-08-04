@@ -48,13 +48,14 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
     CapabilitySurfacePolicy, CapabilitySurfaceVersion, CommandExecutionOutput,
-    CommandExecutionRequest, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID,
-    HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime, HostRuntimeServices,
-    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
-    MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
-    PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeProcessError, RuntimeProcessPort, SHELL_CAPABILITY_ID,
+    CommandExecutionRequest, DOCUMENT_EDIT_CAPABILITY_ID, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
+    GREP_CAPABILITY_ID, HTML_TO_PDF_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID,
+    HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
+    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
+    MEMORY_WRITE_CAPABILITY_ID, NATIVE_MEMORY_FIRST_PARTY_PROVIDER,
+    OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
+    READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
+    RuntimeProcessError, RuntimeProcessPort, SHELL_CAPABILITY_ID,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
     SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
@@ -9667,6 +9668,8 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         GLOB_CAPABILITY_ID,
         GREP_CAPABILITY_ID,
         APPLY_PATCH_CAPABILITY_ID,
+        DOCUMENT_EDIT_CAPABILITY_ID,
+        HTML_TO_PDF_CAPABILITY_ID,
         SKILL_LIST_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
         SKILL_UPDATE_CAPABILITY_ID,
@@ -10356,4 +10359,403 @@ fn trust_decision() -> TrustDecision {
         provenance: TrustProvenance::Default,
         evaluated_at: chrono::Utc::now(),
     }
+}
+#[tokio::test]
+async fn builtin_write_file_rejects_extracted_read_representation_at_unlisted_extension() {
+    // The extension guard names the OOXML/PDF containers, but `read_file` also
+    // extracts .rtf — which the guard deliberately does not list. This is the
+    // only live surface of the second defense (the recorded READ REPRESENTATION),
+    // and it is what stops an extracted-text read from authorizing a raw
+    // overwrite for any format the extension list does not enumerate.
+    let temp = tempfile::tempdir().unwrap();
+    let original = br"{\rtf1\ansi Original clause text.\par}".to_vec();
+    let document_path = temp.path().join("contract.rtf");
+    std::fs::write(&document_path, &original).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/contract.rtf"}),
+        context.clone(),
+    )
+    .await
+    .expect("rtf reads as extracted text");
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/contract.rtf", "content": "Revised clause text."}),
+        context,
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("binary documents cannot be edited with text tools")
+    );
+    assert_eq!(std::fs::read(document_path).unwrap(), original);
+}
+
+#[tokio::test]
+async fn builtin_write_file_still_overwrites_text_log_with_stray_nul() {
+    // The binary backstop on the write path must use the SAME leniency as the
+    // read path (`read_file_tolerates_stray_nul_and_invalid_utf8_in_text_logs`).
+    // A strict any-NUL probe here makes a syslog the model just read
+    // unwritable — and reports it as a "binary document", which it is not.
+    let temp = tempfile::tempdir().unwrap();
+    let mut original = b"Jan  1 00:00:00 host sshd[1]: Failed password for root\n".to_vec();
+    original.push(0u8); // one stray NUL: tolerated on read, must stay writable
+    original.extend_from_slice(b"Jan  1 00:00:01 host sshd[1]: more log line\n");
+    let log_path = temp.path().join("syslog.log");
+    std::fs::write(&log_path, &original).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/syslog.log"}),
+        context.clone(),
+    )
+    .await
+    .expect("text log with a stray NUL must read");
+
+    invoke_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/syslog.log", "content": "redacted log\n"}),
+        context,
+    )
+    .await
+    .expect("a text log the model could read must stay writable");
+    assert_eq!(std::fs::read(&log_path).unwrap(), b"redacted log\n");
+}
+
+#[tokio::test]
+async fn builtin_apply_patch_rejects_a_binary_document_with_an_actionable_reason() {
+    // #6898 named this as the sibling defect: apply_patch already refused a
+    // docx, but via the bare binary probe, so the model saw an opaque failure
+    // and could not tell why. It must now fail for the SAME stated reason
+    // write_file does, and leave the bytes alone.
+    let temp = tempfile::tempdir().unwrap();
+    let original = skill_bundle_zip(&[(
+        "word/document.xml",
+        br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Original text</w:t></w:r></w:p></w:body></w:document>"#,
+    )]);
+    let document_path = temp.path().join("review.docx");
+    std::fs::write(&document_path, &original).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/review.docx"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/review.docx",
+            "old_string": "Original text",
+            "new_string": "Revised text",
+        }),
+        context,
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("binary documents cannot be edited with text tools"),
+        "apply_patch must explain itself like write_file does, got {:?}",
+        failure.message
+    );
+    assert_eq!(std::fs::read(document_path).unwrap(), original);
+}
+
+// --- document capabilities (#6898 item 3) ----------------------------------
+
+/// A `.docx` carrying a real redline: "sixty" struck out, "thirty" proposed.
+fn redlined_contract_docx() -> Vec<u8> {
+    let body = concat!(
+        r#"<w:p><w:r><w:t>Master Services Agreement</w:t></w:r></w:p>"#,
+        r#"<w:p><w:r><w:t xml:space="preserve">Clause 4: the review period is </w:t></w:r>"#,
+        r#"<w:del w:id="1" w:author="Reviewer"><w:r><w:delText>sixty</w:delText></w:r></w:del>"#,
+        r#"<w:ins w:id="2" w:author="Reviewer"><w:r><w:t>thirty</w:t></w:r></w:ins>"#,
+        r#"<w:r><w:t xml:space="preserve"> days.</w:t></w:r></w:p>"#,
+    );
+    let document = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#
+    );
+    skill_bundle_zip(&[
+        ("[Content_Types].xml", br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"#),
+        ("word/styles.xml", br#"<?xml version="1.0"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#),
+        ("word/document.xml", document.as_bytes()),
+    ])
+}
+
+#[tokio::test]
+async fn read_file_surfaces_docx_tracked_changes_instead_of_flattened_text() {
+    // The read half of #6898 item 3, folded into read_file. Flat extraction
+    // showed the struck-out "sixty" as if it were still in the contract; the
+    // structured view separates it as a Deleted revision and keeps it out of
+    // the paragraph's final text.
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("contract.docx"), redlined_contract_docx()).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/contract.docx"}),
+        context,
+    )
+    .await
+    .unwrap();
+    let content = read["content"].as_str().unwrap();
+    assert!(content.contains("\"format\": \"docx\""), "{content}");
+    assert!(content.contains("\"kind\": \"deleted\""), "{content}");
+    assert!(content.contains("\"author\": \"Reviewer\""), "{content}");
+    // Paragraph ids are what document_edit addresses, so the read must expose them.
+    assert!(content.contains("\"id\": \"p2\""), "{content}");
+}
+
+#[tokio::test]
+async fn document_edit_accepts_redlines_into_a_new_file_leaving_the_original_intact() {
+    // The user-facing journey: a redlined contract in, a clean contract out,
+    // and the original still exactly as it was uploaded.
+    let temp = tempfile::tempdir().unwrap();
+    let original = redlined_contract_docx();
+    let source = temp.path().join("contract.docx");
+    std::fs::write(&source, &original).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/contract.docx"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let edited = invoke_with_context(
+        &runtime,
+        DOCUMENT_EDIT_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/contract.docx",
+            "output_path": "/workspace/contract-final.docx",
+            "edits": [{"op": "resolve_all_revisions", "disposition": "accept"}],
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(edited["success"], json!(true));
+
+    assert_eq!(
+        std::fs::read(&source).unwrap(),
+        original,
+        "document_edit must never modify its source"
+    );
+
+    let reread = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/contract-final.docx"}),
+        context,
+    )
+    .await
+    .unwrap();
+    let content = reread["content"].as_str().unwrap();
+    assert!(
+        content.contains("thirty"),
+        "accepted insertion survives: {content}"
+    );
+    assert!(
+        !content.contains("sixty"),
+        "accepted deletion is gone: {content}"
+    );
+    assert!(
+        !content.contains("\"kind\":"),
+        "the result must carry no unresolved revisions: {content}"
+    );
+}
+
+#[tokio::test]
+async fn document_edit_requires_a_prior_structured_read() {
+    // Same read-before-edit guarantee write_file has, on the representation
+    // whose addresses the edits name.
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("contract.docx"), redlined_contract_docx()).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        DOCUMENT_EDIT_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/contract.docx",
+            "output_path": "/workspace/out.docx",
+            "edits": [{"op": "resolve_all_revisions", "disposition": "accept"}],
+        }),
+        context,
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("read it in full with read_file"),
+        "got {:?}",
+        failure.message
+    );
+}
+
+#[tokio::test]
+async fn document_edit_refuses_to_write_over_its_own_source() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("contract.docx"), redlined_contract_docx()).unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        DOCUMENT_EDIT_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/contract.docx",
+            "output_path": "/workspace/contract.docx",
+            "edits": [{"op": "resolve_all_revisions", "disposition": "accept"}],
+        }),
+        context,
+    )
+    .await;
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("must differ from path"),
+        "got {:?}",
+        failure.message
+    );
+}
+
+#[tokio::test]
+async fn html_to_pdf_writes_a_pdf_and_refuses_to_overwrite_an_existing_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let rendered = invoke_with_context(
+        &runtime,
+        HTML_TO_PDF_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/report.pdf",
+            "html": "<h1>Quarterly Report</h1><p>Revenue up <strong>12%</strong>.</p>",
+            "title": "Quarterly Report",
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rendered["success"], json!(true));
+    let bytes = std::fs::read(temp.path().join("report.pdf")).unwrap();
+    assert!(bytes.starts_with(b"%PDF-"), "must be a real PDF");
+
+    // A rendered PDF is derived; silently replacing one the user uploaded is
+    // the same class of loss the binary-write guard prevents.
+    let failure = invoke_failure_with_context(
+        &runtime,
+        HTML_TO_PDF_CAPABILITY_ID,
+        json!({"path": "/workspace/report.pdf", "html": "<p>again</p>"}),
+        context,
+    )
+    .await;
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("will not overwrite"),
+        "got {:?}",
+        failure.message
+    );
+    assert_eq!(
+        std::fs::read(temp.path().join("report.pdf")).unwrap(),
+        bytes,
+        "the refused render must leave the existing file untouched"
+    );
+}
+
+#[tokio::test]
+async fn a_structured_read_still_does_not_authorize_a_raw_write_file_overwrite() {
+    // The #6898 guard and the new structured path must not cancel each other:
+    // reading a docx structurally gives document_edit authority, never
+    // write_file authority.
+    let temp = tempfile::tempdir().unwrap();
+    let original = redlined_contract_docx();
+    let path = temp.path().join("contract.docx");
+    std::fs::write(&path, &original).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/contract.docx"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/contract.docx", "content": "Clause 4: thirty days."}),
+        context,
+    )
+    .await;
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("binary documents cannot be edited with text tools"),
+        "got {:?}",
+        failure.message
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), original);
 }

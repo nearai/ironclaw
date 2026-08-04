@@ -132,6 +132,8 @@ pub const LIST_DIR_CAPABILITY_ID: &str = "builtin.list_dir";
 pub const GLOB_CAPABILITY_ID: &str = "builtin.glob";
 pub const GREP_CAPABILITY_ID: &str = "builtin.grep";
 pub const APPLY_PATCH_CAPABILITY_ID: &str = "builtin.apply_patch";
+pub const DOCUMENT_EDIT_CAPABILITY_ID: &str = "builtin.document_edit";
+pub const HTML_TO_PDF_CAPABILITY_ID: &str = "builtin.html_to_pdf";
 
 // `builtin.shell` is the only built-in first-party handler that directly
 // requires a RuntimeProcessPort. `builtin.spawn_subagent` declares
@@ -197,6 +199,20 @@ const CODING_CAPABILITIES: &[CodingCapabilityMetadata] = &[
         kind: CodingCapabilityKind::ApplyPatch,
         description: "Apply exact/fuzzy search-replace edits through scoped mounts",
         effects: &[EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+        max_input_bytes: MAX_APPLY_PATCH_INPUT_BYTES,
+    },
+    CodingCapabilityMetadata {
+        id: DOCUMENT_EDIT_CAPABILITY_ID,
+        kind: CodingCapabilityKind::DocumentEdit,
+        description: "Apply structural edits to a .docx/.xlsx/.pptx (accept or reject tracked changes, set a cell formula, clone a slide) and write the result to a new file, preserving every part the edit does not touch",
+        effects: &[EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+        max_input_bytes: MAX_APPLY_PATCH_INPUT_BYTES,
+    },
+    CodingCapabilityMetadata {
+        id: HTML_TO_PDF_CAPABILITY_ID,
+        kind: CodingCapabilityKind::HtmlToPdf,
+        description: "Render HTML (headings, paragraphs, lists, emphasis) to a new PDF file; existing PDFs are never edited in place",
+        effects: &[EffectKind::WriteFilesystem],
         max_input_bytes: MAX_APPLY_PATCH_INPUT_BYTES,
     },
 ];

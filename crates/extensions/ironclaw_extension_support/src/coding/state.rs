@@ -58,8 +58,16 @@ type ReadStateKey = (CodingReadScopeKey, String);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReadRepresentation {
+    /// The bytes on disk decoded as text. The only representation that may
+    /// authorize a raw `write_file` overwrite.
     RawText,
+    /// Text derived from a binary document by extraction. Lossy and not
+    /// byte-addressable, so it authorizes no write at all.
     ExtractedText,
+    /// The addressable structural view of an OOXML document (paragraph ids,
+    /// cell references, slide indexes). Authorizes `document_edit`, whose
+    /// typed operations name exactly those addresses.
+    Structured,
 }
 
 #[derive(Debug, Clone, Copy)]

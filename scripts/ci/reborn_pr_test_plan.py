@@ -434,6 +434,14 @@ def build_plan(
             qa_evidence_changed = True
             reasons.append("recorded QA evidence changed")
             continue
+        if path.startswith("tests/fixtures/"):
+            # Document/binary fixtures (docx, xlsx, pptx, pdf) are consumed by
+            # integration tests through `include_bytes!`, so changing one
+            # changes what those tests assert. Recorded LLM traces are handled
+            # by the QA-evidence arm above and never reach here.
+            integration_lanes.add(0)
+            reasons.append(f"integration fixture changed: {path}")
+            continue
         if path.startswith(("tests/reborn_", "tests/e2e/reborn_", "scripts/ci/reborn-")):
             raise ValueError(f"unmapped Reborn test path: {path}")
         if path.startswith("tests/e2e/"):
