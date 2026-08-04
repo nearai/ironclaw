@@ -143,10 +143,11 @@ use ironclaw_product_contracts::surface::{
 };
 use uuid::Uuid;
 
+use crate::webui_rate_limit::mark_rate_limit_refundable;
 use crate::webui_v2::error::WebUiV2HttpError;
 use crate::webui_v2::router::{WebUiV2Capabilities, WebUiV2State};
 use crate::webui_v2::schema::{WebChatV2Event, WebChatV2EventFrame};
-use crate::webui_v2::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
+use crate::webui_v2::sse_capacity::{SSE_MAX_LIFETIME, SseAcquireResult, SseSlot};
 use ironclaw_product_contracts::admin_users::AdminUserSecretMeta;
 
 // Session bootstrap must stay cheap and non-blocking: this flag only tunes
@@ -1216,8 +1217,8 @@ pub async fn stream_events(
         connection_id.and(query.connection_generation),
     ) {
         crate::webui_v2::sse_capacity::SseAcquireResult::Acquired(slot) => slot,
-        crate::webui_v2::sse_capacity::SseAcquireResult::AtCapacity => {
-            return Err(sse_concurrency_exhausted());
+        crate::webui_v2::sse_capacity::SseAcquireResult::AtCapacity { refundable } => {
+            return Ok(sse_capacity_rejected(refundable));
         }
         crate::webui_v2::sse_capacity::SseAcquireResult::StaleGeneration => {
             return Ok(StatusCode::NO_CONTENT.into_response());
@@ -1247,7 +1248,26 @@ pub async fn stream_events(
     Ok(response)
 }
 
-/// Build the 429 response for SSE openings that exceed the per-caller
+/// Build the 429 response for SSE openings (both [`stream_events`] and
+/// [`stream_events_ws`]) that exceed the per-caller concurrency cap.
+///
+/// `refundable` — decided by `SseCapacity::try_acquire_ordered`'s per-caller
+/// rejection streak — marks the response so it doesn't also drain
+/// `enforce_rate_limit`'s separate request-volume budget, *up to* a short
+/// burst of consecutive rejections; see that middleware's module doc for
+/// why refunding differs from e.g. turn-submission admission-control 429s,
+/// and `sse_capacity::REJECTION_REFUND_LIMIT` for why refunding stops once
+/// a caller hammers a saturated cap.
+fn sse_capacity_rejected(refundable: bool) -> Response {
+    let response = sse_concurrency_exhausted().into_response();
+    if refundable {
+        mark_rate_limit_refundable(response)
+    } else {
+        response
+    }
+}
+
+/// Build the 429 error for SSE openings that exceed the per-caller
 /// concurrency cap. `retryable: true` because the slot will free as soon
 /// as one of the caller's existing streams closes.
 fn sse_concurrency_exhausted() -> WebUiV2HttpError {
@@ -4045,14 +4065,24 @@ pub async fn stream_events_ws(
     Query(query): Query<StreamEventsQuery>,
     upgrade: axum::extract::ws::WebSocketUpgrade,
 ) -> Result<axum::response::Response, WebUiV2HttpError> {
-    let slot = state
-        .sse_capacity()
-        .try_acquire(
-            &caller.tenant_id,
-            &caller.user_id,
-            stream_connection_id(query.connection_id.as_deref()),
-        )
-        .ok_or_else(sse_concurrency_exhausted)?;
+    let slot = match state.sse_capacity().try_acquire(
+        &caller.tenant_id,
+        &caller.user_id,
+        stream_connection_id(query.connection_id.as_deref()),
+    ) {
+        SseAcquireResult::Acquired(slot) => slot,
+        SseAcquireResult::AtCapacity { refundable } => {
+            return Ok(sse_capacity_rejected(refundable));
+        }
+        // A stale generation on the upgrade path means a newer stream for
+        // the same connection id already holds the slot. Treat it as the
+        // ordinary capacity rejection this handler has always returned, but
+        // never refund it: it is not the saturation signal the refund
+        // budget exists to absorb.
+        SseAcquireResult::StaleGeneration => {
+            return Ok(sse_capacity_rejected(false));
+        }
+    };
     let services = state.services().clone();
     let initial_cursor = headers
         .get(LAST_EVENT_ID_HEADER)
