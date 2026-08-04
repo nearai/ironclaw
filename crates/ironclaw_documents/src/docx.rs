@@ -108,9 +108,13 @@ struct RevisionState {
 }
 
 fn parse_paragraphs(xml: &str) -> Result<Vec<Paragraph>, DocumentError> {
-    let mut paragraphs = Vec::new();
-    let mut depth = 0usize;
-    let mut current: Option<Paragraph> = None;
+    // Word nests `w:p` inside `w:p` (a text box lives in a run of its parent
+    // paragraph), so a single `current` slot loses the outer paragraph. Ids are
+    // assigned in Start order and shared with the write path, which counts the
+    // same way — that agreement is what makes an id safe to edit against.
+    let mut paragraphs: Vec<Paragraph> = Vec::new();
+    let mut open: Vec<Paragraph> = Vec::new();
+    let mut paragraph_count = 0usize;
     let mut state = RevisionState::default();
     // Word splits one sentence across many runs (spellcheck state, rsid churn,
     // formatting). Consecutive events of the same revision status are merged so
@@ -132,9 +136,12 @@ fn parse_paragraphs(xml: &str) -> Result<Vec<Paragraph>, DocumentError> {
             Event::Eof => break,
             Event::Start(tag) => match local_name(tag.name().as_ref()) {
                 b"p" => {
-                    depth += 1;
-                    current = Some(Paragraph {
-                        id: format!("p{}", paragraphs.len() + 1),
+                    if let Some(parent) = open.last_mut() {
+                        flush_pending(&mut pending, parent);
+                    }
+                    paragraph_count += 1;
+                    open.push(Paragraph {
+                        id: format!("p{paragraph_count}"),
                         text: String::new(),
                         revisions: Vec::new(),
                     });
@@ -145,39 +152,46 @@ fn parse_paragraphs(xml: &str) -> Result<Vec<Paragraph>, DocumentError> {
             },
             Event::End(tag) => match local_name(tag.name().as_ref()) {
                 b"p" => {
-                    depth = depth.saturating_sub(1);
-                    if let Some(mut paragraph) = current.take() {
+                    if let Some(mut paragraph) = open.pop() {
                         flush_pending(&mut pending, &mut paragraph);
                         paragraphs.push(paragraph);
                     }
                 }
                 b"ins" => {
-                    if let Some(paragraph) = current.as_mut() {
+                    if let Some(paragraph) = open.last_mut() {
                         flush_pending(&mut pending, paragraph);
                     }
                     state.in_insert = None;
                 }
                 b"del" => {
-                    if let Some(paragraph) = current.as_mut() {
+                    if let Some(paragraph) = open.last_mut() {
                         flush_pending(&mut pending, paragraph);
                     }
                     state.in_delete = None;
                 }
                 _ => {}
             },
-            Event::Text(text) if current.is_some() => {
+            Event::Text(text) if !open.is_empty() => {
                 let decoded = text
                     .decode()
                     .map_err(|error| DocumentError::MalformedPart {
                         part: DOCUMENT_PART.to_string(),
                         detail: error.to_string(),
                     })?;
-                absorb_text(&decoded, &state, &mut pending, current.as_mut());
+                absorb_text(&decoded, &state, &mut pending, open.last_mut());
             }
             _ => {}
         }
     }
-    let _ = depth;
+    // Completion order puts an inner paragraph before its parent; sort by the
+    // Start-order id so callers see document order.
+    paragraphs.sort_by_key(|paragraph| {
+        paragraph
+            .id
+            .trim_start_matches('p')
+            .parse::<usize>()
+            .unwrap_or(usize::MAX)
+    });
     Ok(paragraphs)
 }
 
@@ -264,6 +278,9 @@ fn resolve_revisions(
     disposition: RevisionDisposition,
 ) -> Result<String, DocumentError> {
     let mut paragraph_index = 0usize;
+    // A stack, not a flag: a nested `w:p` closing must restore the ENCLOSING
+    // paragraph's target state rather than clearing it.
+    let mut target_stack: Vec<bool> = Vec::new();
     let mut in_target = only.is_none();
     // Depth of the run subtree being discarded, so nested elements inside a
     // dropped run go with it instead of leaking through.
@@ -287,18 +304,27 @@ fn resolve_revisions(
             Event::Start(tag) => match local_name(tag.name().as_ref()) {
                 b"p" => {
                     paragraph_index += 1;
+                    target_stack.push(in_target);
                     if let Some(target) = only {
                         in_target = format!("p{paragraph_index}") == target;
                     }
                     Ok(EventAction::Keep)
                 }
                 b"ins" if in_target => {
-                    in_insert = true;
                     resolved_any = true;
                     match disposition {
-                        // Accept an insertion: keep its runs, drop the marker.
-                        RevisionDisposition::Accept => Ok(EventAction::Drop),
+                        // Accept an insertion: unwrap it. The marker's End must
+                        // also be dropped, so the flag records that we are
+                        // inside an unwrapped element.
+                        RevisionDisposition::Accept => {
+                            in_insert = true;
+                            Ok(EventAction::Drop)
+                        }
                         // Reject an insertion: the proposed text never existed.
+                        // The whole subtree goes, INCLUDING its End, which the
+                        // dropping branch consumes — so the flag must stay
+                        // false or it would survive to eat a later element's
+                        // closing tag and emit unbalanced XML.
                         RevisionDisposition::Reject => {
                             dropping = 1;
                             Ok(EventAction::Drop)
@@ -306,18 +332,22 @@ fn resolve_revisions(
                     }
                 }
                 b"del" if in_target => {
-                    in_delete = true;
                     resolved_any = true;
                     match disposition {
-                        // Accept a deletion: the text goes away with it.
+                        // Accept a deletion: the text goes away with it. The
+                        // dropping branch consumes the End, so no flag (see the
+                        // `ins` reject arm above).
                         RevisionDisposition::Accept => {
                             dropping = 1;
                             Ok(EventAction::Drop)
                         }
-                        // Reject a deletion: keep the runs, drop the marker.
+                        // Reject a deletion: unwrap it, keeping the runs.
                         // `w:delText` must become `w:t` again or Word shows
                         // nothing — the trap this branch exists to avoid.
-                        RevisionDisposition::Reject => Ok(EventAction::Drop),
+                        RevisionDisposition::Reject => {
+                            in_delete = true;
+                            Ok(EventAction::Drop)
+                        }
                     }
                 }
                 b"delText" if in_delete && disposition == RevisionDisposition::Reject => Ok(
@@ -326,6 +356,10 @@ fn resolve_revisions(
                 _ => Ok(EventAction::Keep),
             },
             Event::End(tag) => match local_name(tag.name().as_ref()) {
+                b"p" => {
+                    in_target = target_stack.pop().unwrap_or(only.is_none());
+                    Ok(EventAction::Keep)
+                }
                 b"ins" if in_insert => {
                     in_insert = false;
                     Ok(EventAction::Drop)
@@ -361,6 +395,7 @@ fn replace_paragraph_text(
     replacement: &str,
 ) -> Result<String, DocumentError> {
     let mut paragraph_index = 0usize;
+    let mut target_stack: Vec<bool> = Vec::new();
     let mut in_target = false;
     let mut wrote_replacement = false;
     let mut found = false;
@@ -385,6 +420,7 @@ fn replace_paragraph_text(
                 let name = local_name(qname.as_ref());
                 if name == b"p" {
                     paragraph_index += 1;
+                    target_stack.push(in_target);
                     in_target = format!("p{paragraph_index}") == paragraph;
                     if in_target {
                         found = true;
@@ -414,7 +450,7 @@ fn replace_paragraph_text(
             }
             Event::End(tag) => {
                 if local_name(tag.name().as_ref()) == b"p" {
-                    in_target = false;
+                    in_target = target_stack.pop().unwrap_or(false);
                 }
                 Ok(EventAction::Keep)
             }
@@ -631,6 +667,151 @@ mod tests {
             OoxmlPackage::read(&original).unwrap().write().unwrap(),
             untouched,
             "a no-op edit must be byte-stable"
+        );
+    }
+}
+
+#[cfg(test)]
+mod review_regressions {
+    use super::*;
+    use crate::test_fixtures::docx_with_body;
+
+    /// Word nests `w:p` inside table cells and text boxes. If the reader loses
+    /// the outer paragraph while the writer counts every `w:p`, the ids the
+    /// caller reads no longer address the paragraphs the writer edits — so an
+    /// edit silently lands on the wrong paragraph.
+    #[test]
+    fn nested_paragraphs_keep_read_and_write_ids_in_agreement() {
+        let body = concat!(
+            r#"<w:p><w:r><w:t>first</w:t></w:r></w:p>"#,
+            r#"<w:tbl><w:tr><w:tc><w:p><w:r><w:t>in cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+            r#"<w:p><w:r><w:t>last</w:t></w:r></w:p>"#,
+        );
+        let docx = docx_with_body(body);
+        let paragraphs = read_docx(&docx).unwrap();
+        let texts: Vec<_> = paragraphs.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["first", "in cell", "last"],
+            "every paragraph, nested or not, must be readable"
+        );
+
+        // Whatever ids the read hands out, editing one must change exactly that
+        // paragraph's text and nothing else.
+        for target in &paragraphs {
+            let edited = edit_docx(
+                &docx,
+                &[DocxEdit::ReplaceParagraphText {
+                    paragraph: target.id.clone(),
+                    text: "REPLACED".to_string(),
+                }],
+            )
+            .unwrap();
+            let after = read_docx(&edited).unwrap();
+            let changed: Vec<_> = after
+                .iter()
+                .filter(|p| p.text == "REPLACED")
+                .map(|p| p.id.as_str())
+                .collect();
+            assert_eq!(
+                changed,
+                vec![target.id.as_str()],
+                "editing {} must change only {}; got {:?}",
+                target.id,
+                target.id,
+                after
+            );
+        }
+    }
+
+    /// A text box genuinely nests `w:p` INSIDE `w:p` (unlike a table, whose
+    /// cell paragraphs are siblings in document order). The reader must not
+    /// lose the outer paragraph, and the ids it hands out must address the same
+    /// paragraphs the writer counts — otherwise an edit lands on the wrong one.
+    #[test]
+    fn a_text_box_nests_paragraphs_without_desynchronising_read_and_write_ids() {
+        let body = concat!(
+            r#"<w:p><w:r><w:t>outer start</w:t></w:r>"#,
+            r#"<w:r><w:txbxContent><w:p><w:r><w:t>inside box</w:t></w:r></w:p></w:txbxContent></w:r>"#,
+            r#"<w:r><w:t> outer end</w:t></w:r></w:p>"#,
+            r#"<w:p><w:r><w:t>after</w:t></w:r></w:p>"#,
+        );
+        let docx = docx_with_body(body);
+        let paragraphs = read_docx(&docx).unwrap();
+        assert!(
+            paragraphs.iter().any(|p| p.text.contains("outer start")),
+            "the outer paragraph must survive a nested one: {paragraphs:?}"
+        );
+        assert!(
+            paragraphs.iter().any(|p| p.text.contains("after")),
+            "the paragraph after the nest must still be read: {paragraphs:?}"
+        );
+
+        for target in &paragraphs {
+            let edited = edit_docx(
+                &docx,
+                &[DocxEdit::ReplaceParagraphText {
+                    paragraph: target.id.clone(),
+                    text: "REPLACED".to_string(),
+                }],
+            )
+            .unwrap();
+            let changed: Vec<String> = read_docx(&edited)
+                .unwrap()
+                .into_iter()
+                .filter(|p| p.text.contains("REPLACED"))
+                .map(|p| p.id)
+                .collect();
+            assert_eq!(
+                changed,
+                vec![target.id.clone()],
+                "editing {} must change only {}",
+                target.id,
+                target.id
+            );
+        }
+    }
+
+    /// Resolving revisions in ONE paragraph must not disturb another's markup.
+    /// The dropped-subtree branch swallows the matching `End`, so an
+    /// `in_insert`/`in_delete` flag can stay set for the rest of the document
+    /// and delete a later paragraph's closing tag — emitting XML Word rejects.
+    #[test]
+    fn resolving_one_paragraph_leaves_later_revision_markup_balanced() {
+        let body = concat!(
+            r#"<w:p><w:ins w:id="1" w:author="R"><w:r><w:t>alpha</w:t></w:r></w:ins></w:p>"#,
+            r#"<w:p><w:ins w:id="2" w:author="R"><w:r><w:t>beta</w:t></w:r></w:ins></w:p>"#,
+        );
+        let edited = edit_docx(
+            &docx_with_body(body),
+            &[DocxEdit::ResolveRevisions {
+                paragraph: "p1".to_string(),
+                disposition: RevisionDisposition::Reject,
+            }],
+        )
+        .unwrap();
+
+        let xml = OoxmlPackage::read(&edited)
+            .unwrap()
+            .part_str(DOCUMENT_PART)
+            .unwrap();
+        assert_eq!(
+            xml.matches("<w:ins").count(),
+            xml.matches("</w:ins>").count(),
+            "every remaining w:ins must still be closed: {xml}"
+        );
+
+        let after = read_docx(&edited).unwrap();
+        assert_eq!(after[0].text, "", "p1's rejected insertion is gone");
+        assert_eq!(
+            after[1].text, "beta",
+            "p2 must be untouched, got {:?}",
+            after[1]
+        );
+        assert_eq!(
+            after[1].revisions.len(),
+            1,
+            "p2 keeps its unresolved revision"
         );
     }
 }
