@@ -186,11 +186,17 @@ h1,h2,h3,p{margin:0}
 .carousel .chd .chmeta:not(:empty)::before{content:"·";margin:0 6px 0 4px;color:var(--v2-text-faint)}
 :root:not(.flags-off) .carousel .chd{padding-right:160px}
 /* relocated agent status line (branded indicator + activity string) — sits above the drawer */
-.drawertop{display:flex;align-items:center;gap:8px;padding:0 2px 8px}
-.drawertop.hide{display:none}
-.drawertop .dt-ttl{font-size:13px;font-weight:600;color:var(--v2-text-strong);white-space:nowrap;flex:none}
-.drawertop .chmeta{font-family:var(--font-mono);font-size:11px;color:var(--v2-text-faint);font-variant-numeric:tabular-nums;white-space:nowrap;flex:none}
-.drawertop .chmeta:not(:empty)::before{content:"·";margin:0 6px 0 4px;color:var(--v2-text-faint)}
+/* drawer header: agent activity string (title) + subtitle, stacked upper-left */
+#carouselBlock .chd{flex-direction:column;align-items:flex-start;gap:1px}
+#carouselBlock .chd .sub{flex:none;max-width:100%}
+.chd .dtrow{display:inline-flex;align-items:center}
+.chd .dtitle{font-size:13px;font-weight:600;color:var(--v2-text-strong);white-space:nowrap}
+/* expand/collapse toggle — pinned top-right of the drawer, floats above pills on overflow */
+#drawerToggle{position:absolute;top:11px;right:11px;z-index:4;width:26px;height:26px;display:none;place-items:center;border:0;border-radius:8px;background:var(--v2-surface);box-shadow:-12px 0 12px 5px var(--v2-surface);color:var(--v2-text-muted);cursor:pointer}
+.v-vision #drawerToggle{display:grid}
+#drawerToggle:hover{color:var(--v2-text-strong)}
+#drawerToggle svg{width:16px;height:16px;transition:transform .18s ease}
+#carouselBlock.collapsed #drawerToggle svg{transform:rotate(180deg)}
 .nearmark{display:inline-flex;flex:none;color:var(--near-blue)}
 .nearmark .near{width:16px;height:16px;overflow:visible;transform-box:fill-box;transform-origin:center}
 .nearmark.busy .near{animation:near-beat 2s ease-in-out infinite}
@@ -199,42 +205,42 @@ h1,h2,h3,p{margin:0}
 @media (prefers-reduced-motion:reduce){.nearmark.busy .near{animation:none}.nearmark .near-comet{display:none!important}}
 .strip{display:flex;gap:10px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none}
 .strip::-webkit-scrollbar{display:none}
-/* collapsed task drawer: full cards condense to a scrollable pill row when the composer has input */
+/* collapsed task drawer: cards condense to a scrollable pill row */
 .taskdrawer{display:none;gap:8px;overflow-x:auto;padding:2px 2px 6px;scrollbar-width:none}
 .taskdrawer::-webkit-scrollbar{display:none}
-/* foundational collapse hides the whole carousel (pills only); vision keeps the header + its controls */
-.v-foundational #carouselBlock.collapsed .carousel{display:none}
-.v-vision #carouselBlock.collapsed .carousel .strip{display:none}
-#carouselBlock.collapsed .taskdrawer{display:flex}
-#carouselBlock.dismissed{display:none}
-/* Vision: the drawer is a bordered frame that docks onto the composer, cards inset within it */
+#carouselBlock.collapsed .carousel{display:none}
+#carouselBlock.collapsed .taskdrawer{display:flex;padding-right:38px}
+/* Vision: the drawer is a bordered frame that docks onto the composer, cards inset */
 .drawer-on #carouselBlock{border:1px solid var(--v2-panel-border);border-bottom:0;border-radius:15px 15px 0 0;background:var(--v2-surface);padding:12px 12px 8px;margin-bottom:0;box-shadow:var(--v2-card-shadow)}
 .drawer-on #carouselBlock .carousel{margin:0}
 .drawer-on .composer.flagwrap{margin-top:0;border-top-left-radius:0;border-top-right-radius:0;box-shadow:none}
-/* drawer header controls (collapse / dismiss) — Vision only */
-.dctl{width:26px;height:26px;flex:none;border-radius:8px;display:none;place-items:center;border:1px solid transparent;background:transparent;color:var(--v2-text-muted);cursor:pointer}
-.dctl:hover{background:var(--v2-surface-soft);color:var(--v2-text-strong)}
-.dctl svg{width:16px;height:16px;transition:transform .18s ease}
-.v-vision .carousel .chd .dctl{display:grid}
-#carouselBlock.collapsed .dctl.toggle svg{transform:rotate(180deg)}
-/* restore bar after the drawer is dismissed */
-.drawerrestore{display:none;margin:2px 0 0}
-.v-vision .drawerrestore:not([hidden]){display:block}
-.drawerrestore button{display:inline-flex;align-items:center;gap:8px;font:inherit;font-size:12.5px;font-weight:560;color:var(--v2-text-muted);background:var(--v2-surface);border:1px solid var(--v2-panel-border);border-radius:11px;padding:8px 13px;cursor:pointer;box-shadow:var(--v2-card-shadow)}
-.drawerrestore button:hover{border-color:color-mix(in srgb,var(--v2-accent) 40%,var(--v2-panel-border));color:var(--v2-text-strong)}
-.drawerrestore .rcount{font-weight:700;color:var(--v2-text-strong)}
-.drawerrestore svg{width:14px;height:14px}
-.tpill{flex:none;display:inline-flex;align-items:center;gap:8px;max-width:200px;border:1px solid var(--v2-panel-border);border-radius:11px;background:var(--v2-card-bg);box-shadow:0 1px 2px rgba(15,18,25,.04);padding:7px 12px;cursor:pointer;font:inherit;text-align:left}
+/* condensed pills (logo + title + dismiss X) */
+.tpill{flex:none;display:inline-flex;align-items:center;gap:8px;max-width:230px;border:1px solid var(--v2-panel-border);border-radius:11px;background:var(--v2-card-bg);box-shadow:0 1px 2px rgba(15,18,25,.04);padding:6px 8px 6px 12px;cursor:pointer;font:inherit;text-align:left}
 .tpill:hover{border-color:color-mix(in srgb,var(--v2-accent) 40%,var(--v2-panel-border))}
-.tpill.term{opacity:.5}
 .tpill .tplogo{width:18px;height:18px;flex:none;display:grid;place-items:center;color:var(--v2-text-strong)}
 .tpill .tplogo svg{width:100%;height:100%;display:block}
 .tpill .tpt{font-size:12.5px;font-weight:560;color:var(--v2-text-strong);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tpill .pillx{flex:none;width:18px;height:18px;display:grid;place-items:center;border:0;background:transparent;color:var(--v2-text-faint);cursor:pointer;border-radius:5px;line-height:0}
+.tpill .pillx:hover{background:var(--v2-surface-soft);color:var(--v2-text-strong)}
+.tpill .pillx svg{width:12px;height:12px}
+/* empty-state fallback (all suggestions dismissed) */
+.tcard.fallback{flex-direction:row;align-items:center;justify-content:center;gap:10px;min-height:96px;border-style:dashed;box-shadow:none;background:transparent;cursor:pointer;font:inherit;color:var(--v2-text-muted)}
+.tcard.fallback:hover{border-color:var(--v2-accent);color:var(--v2-text-strong)}
+.tcard.fallback .fbico{width:22px;height:22px;flex:none;color:var(--v2-text-faint)}
+.tcard.fallback .fbico svg{width:100%;height:100%}
+.tcard.fallback .fbtxt{font-size:13px;font-weight:560}
+.tpill.fallback{border-style:dashed;color:var(--v2-text-muted)}
+.tpill.fallback .tplogo{color:var(--v2-text-faint)}
+.tcard.fallback.gen .fbico,.tpill.fallback.gen .tplogo{animation:fbpulse 1.6s ease-in-out infinite}
+@keyframes fbpulse{0%,100%{opacity:.45}50%{opacity:1}}
 
 /* automation task card (faithful to automation-task-card.tsx) */
-.tcard{flex:none;width:258px;display:flex;flex-direction:column;border:1px solid var(--v2-panel-border);border-radius:16px;background:var(--v2-card-bg);padding:12px;text-align:left;box-shadow:0 1px 2px rgba(15,18,25,.04),0 12px 26px -12px rgba(15,18,25,.12)}
+.tcard{flex:none;width:258px;position:relative;display:flex;flex-direction:column;border:1px solid var(--v2-panel-border);border-radius:16px;background:var(--v2-card-bg);padding:12px;text-align:left;box-shadow:0 1px 2px rgba(15,18,25,.04),0 12px 26px -12px rgba(15,18,25,.12)}
+.tcard .cardx{position:absolute;top:8px;right:8px;z-index:3;width:22px;height:22px;display:grid;place-items:center;border:0;background:transparent;color:var(--v2-text-faint);cursor:pointer;border-radius:6px;line-height:0}
+.tcard .cardx:hover{background:var(--v2-surface-soft);color:var(--v2-text-strong)}
+.tcard .cardx svg{width:14px;height:14px}
 .tcard:hover{border-color:color-mix(in srgb,var(--v2-accent) 32%,var(--v2-panel-border))}
-.tcard .thd{display:flex;align-items:center;gap:9px;margin-bottom:7px}
+.tcard .thd{display:flex;align-items:center;gap:9px;margin-bottom:7px;padding-right:20px}
 .tcard .appchip{width:24px;height:24px;display:grid;place-items:center;flex:none;color:var(--v2-text-strong)}
 .tcard .appchip svg{width:100%;height:100%;display:block}
 .tcard .ttl{flex:1;min-width:0;font-size:14px;font-weight:650;line-height:1.25;color:var(--v2-text-strong);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
@@ -528,11 +534,11 @@ h1,h2,h3,p{margin:0}
             <div class="ghostveil"><span class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg>Connect to turn these on</span></div>
           </div>
 
-          <div class="drawertop hide" id="drawerTop"><span class="nearmark" id="carNear"><svg class="near" viewBox="0 0 24 24" aria-hidden="true"><defs><clipPath id="carNearClip"><path d="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z"/></clipPath></defs><path class="near-base" d="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z"/><g clip-path="url(#carNearClip)"><path class="near-comet" d="M2.6 22.2 L2.6 2.4 L21.4 21.6 L21.4 1.8"/></g></svg></span><span class="dt-ttl" id="carTtl">Suggested for you</span><span class="chmeta" id="carMeta"></span></div>
           <div class="rev flagwrap" id="carouselBlock">
             <span class="flag"><span class="tag native">New UX</span><span class="tag newevt">New Feature</span></span>
+            <button class="dctl toggle" id="drawerToggle" type="button" title="Collapse" aria-label="Collapse suggestions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
             <div class="carousel">
-              <div class="chd"><span class="sub" id="carSub">Approve to run, or tweak first</span><button class="dctl toggle" id="drawerToggle" type="button" title="Collapse" aria-label="Collapse suggestions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button><button class="dctl" id="drawerClose" type="button" title="Dismiss suggestions" aria-label="Dismiss suggestions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+              <div class="chd"><span class="dtrow"><b class="dtitle" id="carTtl">Suggested for you</b><span class="chmeta" id="carMeta"></span></span><span class="sub" id="carSub">Approve to run, or tweak first</span></div>
               <div class="strip" id="realStrip"></div>
             </div>
             <div class="taskdrawer" id="taskDrawer" aria-label="Suggested tasks"></div>
@@ -542,9 +548,6 @@ h1,h2,h3,p{margin:0}
         <!-- live NEAR indicator relocated into the carousel header (#carNear) -->
 
 
-        <div class="drawerrestore" id="drawerRestore" hidden>
-          <button id="drawerRestoreBtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Show suggestions <span class="rcount">3</span></button>
-        </div>
         <div class="composer flagwrap">
           <span class="flag"><span class="tag recompose">Redesign</span></span>
           <div class="inputrow">
@@ -734,71 +737,78 @@ h1,h2,h3,p{margin:0}
     if(state==='completed') return '<span class="badge success"><span class="bdot"></span>Completed</span>';
     return '<span class="badge muted">'+(state==='dismissed'?'Dismissed':'Reverted')+'</span>';
   }
+  var ICO_SPARK='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 4.7L18 9l-4 2.7L15.5 17 12 14.4 8.5 17l1.5-5.3L6 9l4.1-1.3z"/></svg>';
+  var ICO_REFRESH='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>';
+  var CARD_X='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
   function cardHTML(c,idx,state,opts){
     opts=opts||{};
-    var term=(state==='dismissed'||state==='reverted');
     var m=c.metrics.map(function(x){return '<span><b>'+x[0]+'</b> '+x[1]+'</span>';}).join('');
-    var head='<div class="thd"><span class="appchip">'+brandLogo(c.brand)+'</span>'
-      +'<b class="ttl">'+c.title+'</b></div>';
-    var body=term?'':'<div class="metrics">'+m+'</div><div class="tprov">From '+c.label+' · '+c.when+'</div>';
-    var acts;
-    if(term){
-      acts='<div class="termrow">'+svg('undo')+(state==='dismissed'?'Dismissed — nothing was done.':'Reverted — the change was undone.')+'</div>';
-    } else if(state==='suggested'){
-      acts='<div class="acts"><button class="approve" data-act="approve" data-i="'+idx+'">Approve</button>'
-        +'<button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button>'
-        +'<button class="txt" data-act="cancel" data-i="'+idx+'">'+svg('close',2)+'Dismiss</button></div>';
-    } else {
-      acts='<div class="acts"><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button>'
-        +'<button class="txt revert" data-act="revert" data-i="'+idx+'">'+svg('undo')+'Revert</button></div>';
-    }
-    var cls='tcard'+(opts.ghost?' ghost':'')+(opts.first?' first':'')+(term?' term':'');
+    var head='<div class="thd"><span class="appchip">'+brandLogo(c.brand)+'</span><b class="ttl">'+c.title+'</b></div>';
+    var body='<div class="metrics">'+m+'</div><div class="tprov">From '+c.label+' · '+c.when+'</div>';
+    var acts = (state==='completed')
+      ? '<div class="acts"><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button><button class="txt revert" data-act="revert" data-i="'+idx+'">'+svg('undo')+'Revert</button></div>'
+      : '<div class="acts"><button class="approve" data-act="approve" data-i="'+idx+'">Approve</button><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button></div>';
+    var xbtn='<button class="cardx" data-act="cancel" data-i="'+idx+'" type="button" title="Dismiss" aria-label="Dismiss">'+CARD_X+'</button>';
+    var cls='tcard'+(opts.ghost?' ghost':'')+(opts.first?' first':'');
     var spark=opts.first?'<div class="aispark" aria-hidden="true"><div class="aispin"></div></div>':'';
-    return '<div class="'+cls+'" data-i="'+idx+'">'+head+body+acts+spark+'</div>';
+    return '<div class="'+cls+'" data-i="'+idx+'">'+xbtn+head+body+acts+spark+'</div>';
   }
+  // fallback shown when every suggestion has been dismissed
+  function fallbackCardHTML(){ var v=(version==='vision');
+    return '<button class="tcard fallback'+(v?' gen':'')+'" type="button" data-act="refresh"><span class="fbico">'+(v?ICO_SPARK:ICO_REFRESH)+'</span><span class="fbtxt">'+(v?'Coming up with new suggestions':'Find new suggestions')+'</span></button>'; }
+  function fallbackPillHTML(){ var v=(version==='vision');
+    return '<button class="tpill fallback'+(v?' gen':'')+'" type="button" data-act="refresh"><span class="tplogo">'+(v?ICO_SPARK:ICO_REFRESH)+'</span><span class="tpt">'+(v?'Coming up with new suggestions':'Find new suggestions')+'</span></button>'; }
   var agentMode='Suggest';
   function modeProposed(){ return agentMode==='Suggest'||agentMode==='Plan'; }
   var cardStates=CARDS.map(function(){ return 'suggested'; });
   function resetCardStates(){ cardStates=CARDS.map(function(){ return modeProposed()?'suggested':'completed'; }); }
+  function visibleIdx(){ var v=[]; for(var i=0;i<CARDS.length;i++){ if(cardStates[i]!=='dismissed') v.push(i); } return v; }
+  function renderCards(revealFirstOnly){
+    var vis=visibleIdx(),html='',dhtml='';
+    if(!vis.length){ html=fallbackCardHTML(); dhtml=fallbackPillHTML(); }
+    else { var list=revealFirstOnly?vis.slice(0,1):vis; for(var k=0;k<list.length;k++){ var idx=list[k]; html+=cardHTML(CARDS[idx],idx,cardStates[idx],{first:(revealFirstOnly&&k===0)}); dhtml+=pillHTML(CARDS[idx],idx,cardStates[idx]); } }
+    realStrip.innerHTML=html; taskDrawer.innerHTML=dhtml; bindCarouselCards(); bindDrawer();
+  }
   function bindCarouselCards(){
     realStrip.querySelectorAll('[data-act]').forEach(function(b){
-      b.onclick=function(){
-        var i=+b.getAttribute('data-i'),a=b.getAttribute('data-act');
+      b.onclick=function(e){
+        e.stopPropagation();
+        var a=b.getAttribute('data-act');
+        if(a==='refresh'){ resetCardStates(); render(); return; }
+        var i=+b.getAttribute('data-i');
         if(a==='approve') cardStates[i]='completed';
         else if(a==='cancel') cardStates[i]='dismissed';
-        else if(a==='revert') cardStates[i]='reverted';
+        else if(a==='revert') cardStates[i]='suggested';
         else return;
         render();
       };
     });
   }
-  // condensed pill for the collapsed task drawer (composer has input / returning user)
+  // condensed pill for the collapsed drawer (typing / returning user); each pill carries an X to dismiss
   function pillHTML(c,i,state){
-    var term=(state==='dismissed'||state==='reverted');
-    return '<button class="tpill'+(term?' term':'')+'" data-i="'+i+'" type="button"><span class="tplogo">'+brandLogo(c.brand)+'</span><span class="tpt">'+c.title+'</span></button>';
+    return '<div class="tpill" data-i="'+i+'"><span class="tplogo">'+brandLogo(c.brand)+'</span><span class="tpt">'+c.title+'</span><button class="pillx" data-act="cancel" data-i="'+i+'" type="button" title="Dismiss" aria-label="Dismiss">'+CARD_X+'</button></div>';
   }
   function bindDrawer(){
-    taskDrawer.querySelectorAll('.tpill').forEach(function(p){ p.onclick=function(){ carouselBlock.classList.remove('collapsed'); }; });
+    taskDrawer.querySelectorAll('.pillx,.tpill.fallback').forEach(function(b){
+      b.onclick=function(e){ e.stopPropagation(); var a=b.getAttribute('data-act'); if(a==='refresh'){ resetCardStates(); render(); return; } cardStates[+b.getAttribute('data-i')]='dismissed'; render(); };
+    });
+    taskDrawer.querySelectorAll('.tpill:not(.fallback)').forEach(function(p){ p.onclick=function(){ if(version==='vision'){ drawerState='open'; applyDrawer(); } }; });
   }
   function applyDrawer(){
     if(!carouselBlock||!taskDrawer) return;
     var isVision=(version==='vision');
     var active=(scene==='first') && (isVision ? step>=2 : true);
     var typing=!!(field&&field.value.trim())&&taskDrawer.children.length>0;
-    var dismissed=isVision && active && drawerState==='dismissed';
-    var collapsed=active && !dismissed && ((isVision&&drawerState==='collapsed') || (typing && (!isVision || drawerState==='open')));
-    carouselBlock.classList.toggle('dismissed',dismissed);
+    var collapsed=active && ((isVision&&drawerState==='collapsed') || (typing && (!isVision || drawerState==='open')));
     carouselBlock.classList.toggle('collapsed',collapsed);
-    root.classList.toggle('drawer-on', isVision && active && !dismissed);
-    if(drawerTop) show(drawerTop, active && !dismissed);
-    if(drawerRestore) drawerRestore.hidden=!dismissed;
+    root.classList.toggle('drawer-on', isVision && active);
     if(drawerToggle){ drawerToggle.title=collapsed?'Expand':'Collapse'; drawerToggle.setAttribute('aria-label',collapsed?'Expand suggestions':'Collapse suggestions'); }
   }
   document.getElementById('ghostStrip').innerHTML=CARDS.map(function(c,i){return cardHTML(c,i,'completed',{ghost:true});}).join('');
 
   var connectBlock=document.getElementById('connectBlock'),ghostBlock=document.getElementById('ghostBlock'),
       carouselBlock=document.getElementById('carouselBlock'),realStrip=document.getElementById('realStrip'),taskDrawer=document.getElementById('taskDrawer'),
-      carNear=document.getElementById('carNear'),carMeta=document.getElementById('carMeta'),drawerTop=document.getElementById('drawerTop'),
+      carMeta=document.getElementById('carMeta'),
       heroTitle=document.getElementById('heroTitle'),heroSub=document.getElementById('heroSub'),
       carTtl=document.getElementById('carTtl'),carSub=document.getElementById('carSub'),
       capN=document.getElementById('capN'),capC=document.getElementById('capC'),
@@ -850,60 +860,38 @@ h1,h2,h3,p{margin:0}
     step=Math.max(0,Math.min(step,MAX));
     var prop=modeProposed();
     var isVision=(version==='vision');
-    if(!isVision){
-      // ===== Foundational: enterprise single-state first run — suggested cards from the first step =====
-      heroTitle.textContent='Welcome to IronClaw.';
-      heroSub.textContent = prop
-        ? "Your tools are connected — here's what I'd take off your plate. Approve, tweak, or dismiss any, or just tell me what else."
-        : "Your tools are connected — here's what I've already handled. Review or undo anything, or tell me what else to take on.";
-      capN.textContent='First run';
-      capC.innerHTML='<b>Foundational</b> — enterprise. Tools are admin-preconnected, so the first screen already surfaces suggested tasks. Approve, tweak, dismiss, or type your own. Modes: Suggest / Plan / Auto Approve.';
-      show(connectBlock,false); show(ghostBlock,false); show(carouselBlock,true);
-      connPill.style.display='none';
-      carTtl.textContent = prop ? 'Suggested for you' : 'Done for you';
-      carSub.textContent = prop ? 'Approve to run, or tweak first' : 'Review or undo anytime';
-      var fh='',fd='';
-      for(var fi=0;fi<CARDS.length;fi++){ fh+=cardHTML(CARDS[fi], fi, cardStates[fi], {}); fd+=pillHTML(CARDS[fi], fi, cardStates[fi]); }
-      realStrip.innerHTML=fh; taskDrawer.innerHTML=fd;
-      bindCarouselCards(); bindDrawer();
-      carNear.classList.remove('busy');carNear.classList.add('done');
-      if(elTimer){clearInterval(elTimer);elTimer=null;} carMeta.textContent='';
-      trackFill.style.width='100%'; beatLbl.textContent='—';
-      applyDrawer();
-      return;
-    }
-    var h=(step>=3&&prop&&HERO_PROP[step])?HERO_PROP[step]:HERO[step];
+    var h;
+    if(!isVision) h = prop
+      ? ['Welcome to IronClaw.',"Your tools are connected — here's what I'd take off your plate. Approve, tweak, or dismiss any, or just tell me what else."]
+      : ['Welcome to IronClaw.',"Your tools are connected — here's what I've already handled. Review or undo anything, or tell me what else to take on."];
+    else if(step>=3 && prop && HERO_PROP[step]) h=HERO_PROP[step];
+    else h=HERO[step];
     heroTitle.textContent=h[0];heroSub.textContent=h[1];
-    capN.textContent='Beat '+step+' / '+MAX; capC.innerHTML=CAP[step];
-    var coach=(dir==='coach'),empty=(step<=1),working=(step===2);
-    show(connectBlock, empty && connectState==='open');
-    show(ghostBlock, empty && coach);
-    show(carouselBlock, step>=2);
-    connPill.style.display = (empty && connectState==='pill') ? '' : 'none';
-    if(step===0){ connSet=[]; renderConnect(); } else if(step===1){ connSet=APPS.map(function(a){return a.key;}); renderConnect(); }
-    if(step>=2){
+    capN.textContent='Beat '+step+' / '+MAX;
+    capC.innerHTML = isVision ? CAP[step] : '<b>Foundational</b> — enterprise. Tools are admin-preconnected, so suggested tasks are here from the first step. Approve, tweak, dismiss (×), or type your own. Modes: Suggest / Plan / Auto Approve.';
+    var coach=(dir==='coach'),empty=(step<=1),working=(isVision&&step===2);
+    show(connectBlock, empty && connectState==='open' && isVision);
+    show(ghostBlock, empty && coach && isVision);
+    var carouselActive = isVision ? (step>=2) : true;
+    show(carouselBlock, carouselActive);
+    connPill.style.display = (empty && connectState==='pill' && isVision) ? '' : 'none';
+    if(isVision){ if(step===0){ connSet=[]; renderConnect(); } else if(step===1){ connSet=APPS.map(function(a){return a.key;}); renderConnect(); } }
+    if(carouselActive){
       if(working){
         carTtl.textContent = prop ? 'Looking for things to suggest' : 'Working on your first automations';
         carSub.textContent = '';
         realStrip.innerHTML='<div class="sk"><div class="ln w40"></div><div class="ln w70"></div><div class="ln w55"></div></div>'.repeat(3);
-        carNear.classList.add('busy');carNear.classList.remove('done');
+        taskDrawer.innerHTML='';
         if(!nearStart)nearStart=Date.now(); if(!elTimer){elTimer=setInterval(tickEl,250);} tickEl();
       } else {
         carTtl.textContent = prop ? 'Suggested for you' : 'Done for you';
         carSub.textContent = prop ? 'Approve to run, or tweak first' : 'Review or undo anytime';
-        var n=(step===3)?1:CARDS.length,html='',dhtml='';
-        for(var i=0;i<n;i++){ html+=cardHTML(CARDS[i], i, cardStates[i], {first:(i===0&&step===3)}); dhtml+=pillHTML(CARDS[i], i, cardStates[i]); }
-        realStrip.innerHTML=html;
-        taskDrawer.innerHTML=dhtml;
-        bindCarouselCards();
-        bindDrawer();
-        carNear.classList.remove('busy');carNear.classList.add('done');
+        renderCards(isVision && step===3);
         if(elTimer){clearInterval(elTimer);elTimer=null;}
-        carMeta.textContent = prop ? '' : (step===3?'worked for 8s':'worked for 14s');
+        carMeta.textContent = prop ? '' : (isVision ? (step===3?'worked for 8s':'worked for 14s') : '');
       }
     } else {
       realStrip.innerHTML='';taskDrawer.innerHTML='';carouselBlock.classList.remove('collapsed');
-      carNear.classList.remove('busy','done');
       if(elTimer){clearInterval(elTimer);elTimer=null;} nearStart=0; carMeta.textContent='';
     }
     trackFill.style.width=(step/MAX*100)+'%'; beatLbl.textContent=step+' / '+MAX;
@@ -936,13 +924,8 @@ h1,h2,h3,p{margin:0}
   function syncRun(){runBtn.disabled=!(field.value.trim());}
   field.addEventListener('input',function(){field.style.height='auto';field.style.height=Math.min(field.scrollHeight,120)+'px';syncRun();applyDrawer();});
   // Vision drawer controls: collapse/expand + dismiss (with a restore bar)
-  var drawerToggle=document.getElementById('drawerToggle'),drawerClose=document.getElementById('drawerClose'),
-      drawerRestore=document.getElementById('drawerRestore'),drawerRestoreBtn=document.getElementById('drawerRestoreBtn');
+  var drawerToggle=document.getElementById('drawerToggle');
   if(drawerToggle) drawerToggle.onclick=function(){ drawerState=(drawerState==='collapsed')?'open':'collapsed'; applyDrawer(); };
-  if(drawerClose) drawerClose.onclick=function(){ drawerState='dismissed'; applyDrawer(); };
-  if(drawerRestoreBtn) drawerRestoreBtn.onclick=function(){ drawerState='open'; applyDrawer(); };
-  var ncomet=document.querySelector('#carNear .near-comet');
-  if(ncomet&&ncomet.getTotalLength){var nlen=ncomet.getTotalLength();var nseg=nlen*0.15;ncomet.style.strokeDasharray=nseg.toFixed(1)+' '+(nlen-nseg).toFixed(1);ncomet.style.setProperty('--nearlen',nlen.toFixed(1)+'px');}
 
   // ================= THREAD scene (calendar reschedule) =================
   var CAL_ACCENT='#4285f4', TIMES=['4:15 – 4:45 PM','5:00 – 5:30 PM'];
@@ -1064,7 +1047,7 @@ h1,h2,h3,p{margin:0}
   function setScene(s){
     scene=s;
     sFirst.setAttribute('aria-pressed',s==='first');sThread.setAttribute('aria-pressed',s==='thread');sPlan.setAttribute('aria-pressed',s==='plan');
-    frControls.classList.toggle('hide', s!=='first' || version==='foundational');
+    frControls.classList.toggle('hide', s!=='first');
     document.getElementById('sceneFirstRun').classList.toggle('on', s==='first');
     document.getElementById('sceneThread').classList.toggle('on', s==='thread');
     document.getElementById('scenePlan').classList.toggle('on', s==='plan');
@@ -1088,7 +1071,7 @@ h1,h2,h3,p{margin:0}
     agentMode='Suggest';modeLabel.textContent='Suggest';renderModeMenu();
     if(whoName) whoName.textContent=(v==='vision')?'Ada':'';
     drawerState='open';
-    frControls.classList.toggle('hide', scene!=='first' || v==='foundational');
+    frControls.classList.toggle('hide', scene!=='first');
     if(scene==='first') resetFirst(); else render();
   }
   vVision.onclick=function(){setVersion('vision');};
