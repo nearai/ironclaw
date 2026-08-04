@@ -193,6 +193,17 @@ h1,h2,h3,p{margin:0}
 @media (prefers-reduced-motion:reduce){.nearmark.busy .near{animation:none}.nearmark .near-comet{display:none!important}}
 .strip{display:flex;gap:10px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none}
 .strip::-webkit-scrollbar{display:none}
+/* collapsed task drawer: full cards condense to a scrollable pill row when the composer has input */
+.taskdrawer{display:none;gap:8px;overflow-x:auto;padding:2px 2px 6px;scrollbar-width:none}
+.taskdrawer::-webkit-scrollbar{display:none}
+#carouselBlock.collapsed .carousel{display:none}
+#carouselBlock.collapsed .taskdrawer{display:flex}
+.tpill{flex:none;display:inline-flex;align-items:center;gap:8px;max-width:200px;border:1px solid var(--v2-panel-border);border-radius:11px;background:var(--v2-card-bg);box-shadow:0 1px 2px rgba(15,18,25,.04);padding:7px 12px;cursor:pointer;font:inherit;text-align:left}
+.tpill:hover{border-color:color-mix(in srgb,var(--v2-accent) 40%,var(--v2-panel-border))}
+.tpill.term{opacity:.5}
+.tpill .tplogo{width:18px;height:18px;flex:none;display:grid;place-items:center;color:var(--v2-text-strong)}
+.tpill .tplogo svg{width:100%;height:100%;display:block}
+.tpill .tpt{font-size:12.5px;font-weight:560;color:var(--v2-text-strong);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
 /* automation task card (faithful to automation-task-card.tsx) */
 .tcard{flex:none;width:258px;display:flex;flex-direction:column;border:1px solid var(--v2-panel-border);border-radius:16px;background:var(--v2-card-bg);padding:12px;text-align:left;box-shadow:0 1px 2px rgba(15,18,25,.04),0 12px 26px -12px rgba(15,18,25,.12)}
@@ -492,6 +503,7 @@ h1,h2,h3,p{margin:0}
               <div class="chd"><span class="nearmark" id="carNear"><svg class="near" viewBox="0 0 24 24" aria-hidden="true"><defs><clipPath id="carNearClip"><path d="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z"/></clipPath></defs><path class="near-base" d="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z"/><g clip-path="url(#carNearClip)"><path class="near-comet" d="M2.6 22.2 L2.6 2.4 L21.4 21.6 L21.4 1.8"/></g></svg></span><span class="ttl" id="carTtl">Done for you</span><span class="chmeta" id="carMeta"></span><span class="sub" id="carSub">Completed automatically — review or undo anytime</span></div>
               <div class="strip" id="realStrip"></div>
             </div>
+            <div class="taskdrawer" id="taskDrawer" aria-label="Suggested tasks"></div>
           </div>
         </div>
 
@@ -628,7 +640,7 @@ h1,h2,h3,p{margin:0}
     docs:'<svg viewBox="0 0 48 48" fill="none"><path fill="#2196f3" d="M37 45H11c-1.657 0-3-1.343-3-3V6c0-1.657 1.343-3 3-3h19l10 10v29c0 1.657-1.343 3-3 3z"/><path fill="#bbdefb" d="M40 13H30V3z"/><path fill="#1565c0" d="M30 13l10 10V13z"/><path fill="#e3f2fd" d="M15 23h18v2H15zm0 4h18v2H15zm0 4h18v2H15zm0 4h10v2H15z"/></svg>',
     drive:'<svg viewBox="0 0 48 48" fill="none"><path fill="#FFC107" d="M17 6h14l14 24H31z"/><path fill="#1976D2" d="M9.875 42L16.938 30H45l-7 12z"/><path fill="#4CAF50" d="M3 30.125L9.875 42 24 18 17 6z"/></svg>',
     slack:'<svg viewBox="0 0 48 48" fill="none"><path fill="#33d375" d="M33 8c0-2.209-1.791-4-4-4s-4 1.791-4 4v11c0 2.209 1.791 4 4 4s4-1.791 4-4z"/><path fill="#33d375" d="M43 19c0 2.209-1.791 4-4 4h-4v-4c0-2.209 1.791-4 4-4s4 1.791 4 4z"/><path fill="#40c4ff" d="M8 14c-2.209 0-4 1.791-4 4s1.791 4 4 4h11c2.209 0 4-1.791 4-4s-1.791-4-4-4z"/><path fill="#40c4ff" d="M19 4c2.209 0 4 1.791 4 4v4h-4c-2.209 0-4-1.791-4-4s1.791-4 4-4z"/><path fill="#e91e63" d="M14 40c0 2.209 1.791 4 4 4s4-1.791 4-4V29c0-2.209-1.791-4-4-4s-4 1.791-4 4z"/><path fill="#e91e63" d="M4 29c0-2.209 1.791-4 4-4h4v4c0 2.209-1.791 4-4 4s-4-1.791-4-4z"/><path fill="#ffc107" d="M40 34c2.209 0 4-1.791 4-4s-1.791-4-4-4H29c-2.209 0-4 1.791-4 4s1.791 4 4 4z"/><path fill="#ffc107" d="M29 44c-2.209 0-4-1.791-4-4v-4h4c2.209 0 4 1.791 4 4s-1.791 4-4 4z"/></svg>',
-    notion:'<svg viewBox="0 0 32 32" fill="currentColor"><path d="M8 26V6h4.2l11.6 14.2V6H28v20h-4.2L12.2 11.8V26z"/></svg>',
+    notion:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M4.459 4.208c.746.606 1.026.56 2.428.466l13.215-.793c.28 0 .047-.28-.046-.326L17.86 1.968c-.42-.326-.981-.7-2.055-.607L3.01 2.295c-.466.046-.56.28-.374.466zm.793 3.08v13.904c0 .747.373 1.027 1.214.98l14.523-.84c.841-.046.935-.56.935-1.167V6.354c0-.606-.233-.933-.748-.887l-15.177.887c-.56.047-.747.327-.747.933zm14.337.745c.093.42 0 .84-.42.888l-.7.14v10.264c-.608.327-1.168.514-1.635.514-.748 0-.935-.234-1.495-.933l-4.577-7.186v6.952l1.448.327s0 .84-1.168.84l-3.222.186c-.093-.186 0-.653.327-.746l.84-.233V9.854L7.822 9.76c-.094-.42.14-1.026.793-1.073l3.456-.233 4.764 7.279v-6.44l-1.215-.139c-.093-.514.28-.887.747-.933zM3.01 1.336l13.31-.98c1.634-.14 2.055-.047 3.082.7l4.249 2.986c.7.513.934.653.934 1.213v16.378c0 1.026-.373 1.634-1.68 1.726l-15.458.933c-.98.047-1.448-.093-1.962-.746l-3.129-4.06c-.56-.747-.793-1.306-.793-1.96V3.354c0-.839.374-1.54 1.447-1.632z"/></svg>',
     github:'<svg viewBox="0 0 98 96" fill="none"><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M41.4395 69.3848C28.8066 67.8535 19.9062 58.7617 19.9062 46.9902C19.9062 42.2051 21.6289 37.0371 24.5 33.5918C23.2559 30.4336 23.4473 23.7344 24.8828 20.959C28.7109 20.4805 33.8789 22.4902 36.9414 25.2656C40.5781 24.1172 44.4062 23.543 49.0957 23.543C53.7852 23.543 57.6133 24.1172 61.0586 25.1699C64.0254 22.4902 69.2891 20.4805 73.1172 20.959C74.457 23.543 74.6484 30.2422 73.4043 33.4961C76.4668 37.1328 78.0937 42.0137 78.0937 46.9902C78.0937 58.7617 69.1934 67.6621 56.3691 69.2891C59.623 71.3945 61.8242 75.9883 61.8242 81.252V91.2051C61.8242 94.0762 64.2168 95.7031 67.0879 94.5547C84.4102 87.9512 98 70.6289 98 49.1914C98 22.1074 75.9883 0 48.9043 0C21.8203 0 0 22.1074 0 49.1914C0 70.4375 13.4941 88.0469 31.6777 94.6504C34.2617 95.6074 36.75 93.8848 36.75 91.3008V83.6445C35.4102 84.2188 33.6875 84.6016 32.1562 84.6016C25.8398 84.6016 22.1074 81.1563 19.4277 74.7441C18.375 72.1602 17.2266 70.6289 15.0254 70.3418C13.877 70.2461 13.4941 69.7676 13.4941 69.1934C13.4941 68.0449 15.4082 67.1836 17.3223 67.1836C20.0977 67.1836 22.4902 68.9063 24.9785 72.4473C26.8926 75.2227 28.9023 76.4668 31.2949 76.4668C33.6875 76.4668 35.2187 75.6055 37.4199 73.4043C39.0469 71.7773 40.291 70.3418 41.4395 69.3848Z"/></svg>'
   };
   function brandLogo(k){return BRAND[k]||'';}
@@ -699,8 +711,8 @@ h1,h2,h3,p{margin:0}
       acts='<div class="termrow">'+svg('undo')+(state==='dismissed'?'Dismissed — nothing was done.':'Reverted — the change was undone.')+'</div>';
     } else if(state==='suggested'){
       acts='<div class="acts"><button class="approve" data-act="approve" data-i="'+idx+'">Approve</button>'
-        +'<button class="txt" data-act="modify" data-i="'+idx+'">Modify</button>'
-        +'<button class="txt" data-act="cancel" data-i="'+idx+'">Dismiss</button></div>';
+        +'<button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button>'
+        +'<button class="txt" data-act="cancel" data-i="'+idx+'">'+svg('close',2)+'Dismiss</button></div>';
     } else {
       acts='<div class="acts"><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button>'
         +'<button class="txt revert" data-act="revert" data-i="'+idx+'">'+svg('undo')+'Revert</button></div>';
@@ -725,10 +737,19 @@ h1,h2,h3,p{margin:0}
       };
     });
   }
+  // condensed pill for the collapsed task drawer (composer has input / returning user)
+  function pillHTML(c,i,state){
+    var term=(state==='dismissed'||state==='reverted');
+    return '<button class="tpill'+(term?' term':'')+'" data-i="'+i+'" type="button"><span class="tplogo">'+brandLogo(c.brand)+'</span><span class="tpt">'+c.title+'</span></button>';
+  }
+  function bindDrawer(){
+    taskDrawer.querySelectorAll('.tpill').forEach(function(p){ p.onclick=function(){ carouselBlock.classList.remove('collapsed'); }; });
+  }
+  function updateCollapse(){ if(!carouselBlock||!taskDrawer) return; var has=!!(field&&field.value.trim())&&taskDrawer.children.length>0; carouselBlock.classList.toggle('collapsed',has); }
   document.getElementById('ghostStrip').innerHTML=CARDS.map(function(c,i){return cardHTML(c,i,'completed',{ghost:true});}).join('');
 
   var connectBlock=document.getElementById('connectBlock'),ghostBlock=document.getElementById('ghostBlock'),
-      carouselBlock=document.getElementById('carouselBlock'),realStrip=document.getElementById('realStrip'),
+      carouselBlock=document.getElementById('carouselBlock'),realStrip=document.getElementById('realStrip'),taskDrawer=document.getElementById('taskDrawer'),
       carNear=document.getElementById('carNear'),carMeta=document.getElementById('carMeta'),
       heroTitle=document.getElementById('heroTitle'),heroSub=document.getElementById('heroSub'),
       carTtl=document.getElementById('carTtl'),carSub=document.getElementById('carSub'),
@@ -783,16 +804,19 @@ h1,h2,h3,p{margin:0}
       } else {
         carTtl.textContent = prop ? 'Suggested for you' : 'Done for you';
         carSub.textContent = prop ? 'Approve to run, or tweak first' : 'Review or undo anytime';
-        var n=(step===3)?1:CARDS.length,html='';
-        for(var i=0;i<n;i++){ html+=cardHTML(CARDS[i], i, cardStates[i], {first:(i===0&&step===3)}); }
+        var n=(step===3)?1:CARDS.length,html='',dhtml='';
+        for(var i=0;i<n;i++){ html+=cardHTML(CARDS[i], i, cardStates[i], {first:(i===0&&step===3)}); dhtml+=pillHTML(CARDS[i], i, cardStates[i]); }
         realStrip.innerHTML=html;
+        taskDrawer.innerHTML=dhtml;
         bindCarouselCards();
+        bindDrawer();
+        updateCollapse();
         carNear.classList.remove('busy');carNear.classList.add('done');
         if(elTimer){clearInterval(elTimer);elTimer=null;}
         carMeta.textContent = prop ? '' : (step===3?'worked for 8s':'worked for 14s');
       }
     } else {
-      realStrip.innerHTML='';
+      realStrip.innerHTML='';taskDrawer.innerHTML='';carouselBlock.classList.remove('collapsed');
       carNear.classList.remove('busy','done');
       if(elTimer){clearInterval(elTimer);elTimer=null;} nearStart=0; carMeta.textContent='';
     }
@@ -820,7 +844,7 @@ h1,h2,h3,p{margin:0}
   document.addEventListener('click',function(e){if(!modeMenu.hidden && !modeMenu.contains(e.target) && !modeBtn.contains(e.target)) closeMode();});
   var field=document.getElementById('composerField'),runBtn=document.getElementById('runBtn');
   function syncRun(){runBtn.disabled=!(field.value.trim());}
-  field.addEventListener('input',function(){field.style.height='auto';field.style.height=Math.min(field.scrollHeight,120)+'px';syncRun();});
+  field.addEventListener('input',function(){field.style.height='auto';field.style.height=Math.min(field.scrollHeight,120)+'px';syncRun();updateCollapse();});
   var ncomet=document.querySelector('#carNear .near-comet');
   if(ncomet&&ncomet.getTotalLength){var nlen=ncomet.getTotalLength();var nseg=nlen*0.15;ncomet.style.strokeDasharray=nseg.toFixed(1)+' '+(nlen-nseg).toFixed(1);ncomet.style.setProperty('--nearlen',nlen.toFixed(1)+'px');}
 
