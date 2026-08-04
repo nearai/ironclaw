@@ -402,7 +402,13 @@ and submit-result bookkeeping:
 - `ironclaw_triggers::ClearActiveFireRequest` plus
   `TriggerRepository::clear_active_fire` clears only the exact matching
   `(tenant_id, trigger_id, active_fire_slot, active_run_ref)` after the caller
-  has observed a terminal turn outcome.
+  has observed a terminal turn outcome;
+- after an accepted run is durably cleared with `TriggerRunHistoryStatus::Error`,
+  `TriggerFireSettlementObserver::on_failed_fire_settled` receives the exact
+  tenant, trigger, fire-slot, and run identities. Successful terminal runs and
+  clear races do not emit this failure settlement. The observer is an
+  automation-health signal only; it does not mint a replacement turn or bypass
+  the normal triggered-run delivery watcher.
 
 The poller treats per-record due-fire processing and active-run terminal lookup
 errors as structured tick report outcomes so one bad record does not block other

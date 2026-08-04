@@ -779,7 +779,6 @@ async fn tick_surfaces_failed_terminal_active_fire_to_settlement_observer() {
     assert_eq!(failed[0].trigger_id, trigger_id);
     assert_eq!(failed[0].fire_slot, fire_slot);
     assert_eq!(failed[0].run_id, run_id);
-    assert_eq!(failed[0].status, TriggerRunHistoryStatus::Error);
     assert!(
         observer.events().is_empty(),
         "a failed terminal fire never fires on_accepted_fire_settled"
@@ -1204,6 +1203,41 @@ async fn tick_reports_terminal_active_clear_race() {
     assert_eq!(
         report.results.last().map(|result| &result.outcome),
         Some(&TriggerPollerFireOutcome::SkippedAlreadyCleared { run_id })
+    );
+}
+
+#[tokio::test]
+async fn tick_does_not_surface_failed_terminal_fire_when_clear_loses_race() {
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZV").expect("ulid");
+    let fire_slot = ts(1_704_067_200);
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f50").expect("run id");
+    let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_260));
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    let observer = Arc::new(RecordingSettlementObserver::default());
+    let worker = worker_with_observer(
+        Arc::new(ActiveClearRaceRepository {
+            active_record: record,
+        }),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Error,
+            },
+        )),
+        Arc::clone(&observer),
+    );
+
+    let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert_eq!(
+        report.results.last().map(|result| &result.outcome),
+        Some(&TriggerPollerFireOutcome::SkippedAlreadyCleared { run_id })
+    );
+    assert!(
+        observer.failed_events().is_empty(),
+        "a lost clear race must not emit duplicate failure telemetry"
     );
 }
 

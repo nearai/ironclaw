@@ -174,7 +174,6 @@ impl TriggerPollerWorker {
                                 trigger_id: record.trigger_id,
                                 fire_slot,
                                 run_id,
-                                status,
                             })
                             .await;
                     }

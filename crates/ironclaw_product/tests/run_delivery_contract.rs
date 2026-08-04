@@ -85,12 +85,11 @@ fn scripted_state(status: TurnStatus, gate_ref: Option<&str>) -> ScriptedRunStat
     }
 }
 
-/// Scripted `Failed`/`RecoveryRequired` state carrying a sanitized failure
-/// category, so tests can assert the per-category failure summary reaches the
-/// channel instead of silence (#6896).
-fn scripted_failed_state(category: &str) -> ScriptedRunState {
+/// Scripted terminal state carrying a sanitized failure category so tests can
+/// assert the per-category summary reaches the channel instead of silence.
+fn scripted_failed_state(status: TurnStatus, category: &str) -> ScriptedRunState {
     ScriptedRunState {
-        status: TurnStatus::Failed,
+        status,
         gate_ref: None,
         failure: Some(SanitizedFailure::new(category.to_string()).expect("valid failure category")),
     }
@@ -2143,7 +2142,11 @@ async fn triggered_oauth_prompt_to_non_dm_target_cancels_and_notifies() {
 
 #[tokio::test]
 async fn triggered_failed_run_delivers_failure_summary_to_preference_target() {
-    let harness = build_triggered_harness(vec![scripted_failed_state("model_error")], None, true);
+    let harness = build_triggered_harness(
+        vec![scripted_failed_state(TurnStatus::Failed, "model_error")],
+        None,
+        true,
+    );
     seed_preference(&harness.store).await;
     let run_id = TurnRunId::new();
 
@@ -2170,6 +2173,40 @@ async fn triggered_failed_run_delivers_failure_summary_to_preference_target() {
         envelopes[0].target.conversation.conversation_id(),
         "dm-creator",
         "failure notice routed to the decoded preference target"
+    );
+}
+
+#[tokio::test]
+async fn triggered_recovery_required_run_delivers_failure_summary_to_preference_target() {
+    let harness = build_triggered_harness(
+        vec![scripted_failed_state(
+            TurnStatus::RecoveryRequired,
+            "model_error",
+        )],
+        None,
+        true,
+    );
+    seed_preference(&harness.store).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Delivered
+    );
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1);
+    assert!(texts[0].contains("The run failed while calling the model"));
+    assert!(texts[0].contains("From a triggered event:"));
+    let envelopes = harness.adapter.envelopes();
+    assert_eq!(
+        envelopes[0].target.conversation.conversation_id(),
+        "dm-creator",
+        "recovery notice routed to the decoded preference target"
     );
 }
 
@@ -2228,6 +2265,38 @@ async fn triggered_cancelled_run_delivers_cancellation_notice() {
 }
 
 #[tokio::test]
+async fn triggered_cancelled_run_with_failure_category_delivers_category_summary() {
+    let harness = build_triggered_harness(
+        vec![scripted_failed_state(TurnStatus::Cancelled, "model_error")],
+        None,
+        true,
+    );
+    seed_preference(&harness.store).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Delivered
+    );
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1);
+    assert!(texts[0].contains("The run failed while calling the model"));
+    assert!(!texts[0].contains("canceled before it could finish"));
+    assert!(texts[0].contains("From a triggered event:"));
+    let envelopes = harness.adapter.envelopes();
+    assert_eq!(
+        envelopes[0].target.conversation.conversation_id(),
+        "dm-creator",
+        "categorized cancellation routed to the decoded preference target"
+    );
+}
+
+#[tokio::test]
 async fn triggered_run_that_times_out_before_actionable_delivers_timeout_notice() {
     // A run that never reaches an actionable state before `max_wait` used to
     // only log a warn and record `Failed` — hiding the hang from the creator.
@@ -2254,5 +2323,26 @@ async fn triggered_run_that_times_out_before_actionable_delivers_timeout_notice(
         texts[0].contains("From a triggered event:"),
         "triggered footer present: {}",
         texts[0]
+    );
+}
+
+#[tokio::test]
+async fn triggered_timeout_notice_without_preference_records_no_default_configured() {
+    let harness =
+        build_triggered_harness(vec![scripted_state(TurnStatus::Running, None)], None, true);
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+    );
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "timeout notice cannot be delivered without a target"
     );
 }
