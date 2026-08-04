@@ -119,7 +119,7 @@ h1,h2,h3,p{margin:0}
 /* ============================================================
    Landing device (faithful to webui_v2 chat)
    ============================================================ */
-.device{border:1px solid var(--v2-panel-border);border-radius:22px;background:var(--v2-canvas-strong);overflow:hidden;box-shadow:var(--v2-card-shadow);display:flex;flex-direction:column;min-height:0}
+.device{position:relative;border:1px solid var(--v2-panel-border);border-radius:22px;background:var(--v2-canvas-strong);overflow:hidden;box-shadow:var(--v2-card-shadow);display:flex;flex-direction:column;min-height:0}
 .topbar{display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--v2-panel-border);background:var(--v2-surface)}
 .topbar .brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13.5px;color:var(--v2-text-strong)}
 .topbar .brand .logo{width:20px;height:20px;color:var(--near-blue)}
@@ -233,6 +233,40 @@ h1,h2,h3,p{margin:0}
 .tpill.fallback .tplogo{color:var(--v2-text-faint)}
 .tcard.fallback.gen .fbico,.tpill.fallback.gen .tplogo{animation:fbpulse 1.6s ease-in-out infinite}
 @keyframes fbpulse{0%,100%{opacity:.45}50%{opacity:1}}
+/* card automating (running) state */
+.acts.runrow{min-height:28px;align-items:center}
+.runstat{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:600;color:var(--v2-accent-text)}
+.runstat .spin{display:inline-flex;animation:spin .9s linear infinite}
+.runstat .spin svg{width:13px;height:13px}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.runstat .spin{animation:none}}
+/* composer attachment chip */
+.attachrow{padding:0 2px 8px}
+.attachrow[hidden]{display:none}
+.attchip{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:540;color:var(--v2-text-strong);background:var(--v2-surface-soft);border:1px solid var(--v2-panel-border);border-radius:9px;padding:5px 6px 5px 10px}
+.attchip>svg{width:14px;height:14px;flex:none;color:var(--v2-text-muted)}
+.attchip .attx{width:18px;height:18px;flex:none;display:grid;place-items:center;border:0;background:transparent;color:var(--v2-text-faint);cursor:pointer;border-radius:5px}
+.attchip .attx:hover{background:var(--v2-surface);color:var(--v2-text-strong)}
+.attchip .attx svg{width:11px;height:11px}
+/* modify modal */
+.modal{position:absolute;inset:0;z-index:60;display:none;align-items:center;justify-content:center;padding:24px}
+.modal.on{display:flex}
+.modalback{position:absolute;inset:0;background:color-mix(in srgb,var(--v2-canvas-strong) 55%,transparent);backdrop-filter:blur(2px)}
+.modalcard{position:relative;width:min(420px,100%);background:var(--v2-surface);border:1px solid var(--v2-panel-border);border-radius:16px;box-shadow:0 24px 60px -20px rgba(15,18,25,.5);overflow:hidden}
+.modalcard .mh{display:flex;align-items:center;gap:8px;padding:14px 16px;border-bottom:1px solid var(--v2-panel-border)}
+.modalcard .mh b{font-size:14px;font-weight:640;color:var(--v2-text-strong);flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.modalcard .mx{width:28px;height:28px;flex:none;display:grid;place-items:center;border:0;background:transparent;color:var(--v2-text-muted);cursor:pointer;border-radius:7px}
+.modalcard .mx:hover{background:var(--v2-surface-soft);color:var(--v2-text-strong)}
+.modalcard .mx svg{width:16px;height:16px}
+.modalcard .mb{padding:16px}
+.modalcard .ml{display:block;font-size:12px;font-weight:560;color:var(--v2-text-muted);margin-bottom:7px}
+.modalcard .mfield{width:100%;font:inherit;font-size:13.5px;line-height:1.5;color:var(--v2-text);background:var(--v2-canvas-strong);border:1px solid var(--v2-panel-border);border-radius:10px;padding:10px 12px;resize:none;outline:none}
+.modalcard .mfield:focus{border-color:var(--v2-accent)}
+.modalcard .mf{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid var(--v2-panel-border)}
+.modalcard .mbtn{font:inherit;font-size:13px;font-weight:600;height:34px;padding:0 14px;border-radius:9px;cursor:pointer;border:1px solid transparent}
+.modalcard .mbtn.ghost{background:transparent;border-color:var(--v2-panel-border);color:var(--v2-text-strong)}
+.modalcard .mbtn.ghost:hover{border-color:var(--v2-accent)}
+.modalcard .mbtn.primary{color:#fff;border-color:rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
 
 /* automation task card (faithful to automation-task-card.tsx) */
 .tcard{flex:none;width:258px;position:relative;display:flex;flex-direction:column;border:1px solid var(--v2-panel-border);border-radius:16px;background:var(--v2-card-bg);padding:12px;text-align:left;box-shadow:0 1px 2px rgba(15,18,25,.04),0 12px 26px -12px rgba(15,18,25,.12)}
@@ -553,6 +587,7 @@ h1,h2,h3,p{margin:0}
           <div class="inputrow">
             <textarea class="field" id="composerField" rows="1" placeholder="Ask me anything, or tell me what to take off your plate…"></textarea>
           </div>
+          <div class="attachrow" id="attachRow" hidden><span class="attchip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3 3 0 0 1 4.24 4.24l-9.2 9.19a1 1 0 0 1-1.41-1.41l8.49-8.49"/></svg>Q3-report.pdf<button class="attx" id="attachX" type="button" aria-label="Remove attachment"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></span></div>
           <div class="actions">
             <div class="modewrap">
               <button class="modebtn" id="modeBtn" type="button" aria-expanded="false"><span class="dot"></span><span id="modeLabel">Suggest</span><svg class="mode-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></button>
@@ -566,7 +601,7 @@ h1,h2,h3,p{margin:0}
             <button class="connpill" id="connPill" type="button" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg><span class="pt">Connect your tools</span><span class="px" id="connPillX" role="button" aria-label="Dismiss"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span></button>
             <div class="rightcluster">
               <button class="iconbtn" title="Dictate" aria-label="Dictate"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg></button>
-              <button class="iconbtn" title="Attach" aria-label="Attach"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v16M4 12h16"/></svg></button>
+              <button class="iconbtn" id="attachBtn" title="Attach" aria-label="Attach"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v16M4 12h16"/></svg></button>
               <button class="runbtn" id="runBtn" disabled>Send <kbd>&#8984;</kbd><kbd>&#8629;</kbd></button>
             </div>
           </div>
@@ -620,6 +655,14 @@ h1,h2,h3,p{margin:0}
             <button class="runbtn" disabled>Send <kbd>&#8984;</kbd><kbd>&#8629;</kbd></button>
           </div>
         </div>
+      </div>
+    </div>
+    <div class="modal" id="modifyModal" aria-hidden="true">
+      <div class="modalback" id="modifyBack"></div>
+      <div class="modalcard" role="dialog" aria-modal="true">
+        <div class="mh"><b id="modifyTitle">Modify task</b><button class="mx" id="modifyCancel" type="button" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+        <div class="mb"><label class="ml" for="modifyField">Adjust before it runs</label><textarea class="mfield" id="modifyField" rows="3" placeholder="Tell me how to change this — e.g. only archive newsletters, keep anything from my team…"></textarea></div>
+        <div class="mf"><button class="mbtn ghost" id="modifyCancel2" type="button">Cancel</button><button class="mbtn primary" id="modifySave" type="button">Save changes</button></div>
       </div>
     </div>
   </section>
@@ -745,9 +788,10 @@ h1,h2,h3,p{margin:0}
     var m=c.metrics.map(function(x){return '<span><b>'+x[0]+'</b> '+x[1]+'</span>';}).join('');
     var head='<div class="thd"><span class="appchip">'+brandLogo(c.brand)+'</span><b class="ttl">'+c.title+'</b></div>';
     var body='<div class="metrics">'+m+'</div><div class="tprov">From '+c.label+' · '+c.when+'</div>';
-    var acts = (state==='completed')
-      ? '<div class="acts"><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button><button class="txt revert" data-act="revert" data-i="'+idx+'">'+svg('undo')+'Revert</button></div>'
-      : '<div class="acts"><button class="approve" data-act="approve" data-i="'+idx+'">Approve</button><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button></div>';
+    var acts;
+    if(state==='running') acts='<div class="acts runrow"><span class="runstat"><span class="spin">'+ICO_REFRESH+'</span>Automating…</span></div>';
+    else if(state==='completed') acts='<div class="acts"><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button><button class="txt revert" data-act="revert" data-i="'+idx+'">'+svg('undo')+'Revert</button></div>';
+    else acts='<div class="acts"><button class="approve" data-act="approve" data-i="'+idx+'">Approve</button><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button></div>';
     var xbtn='<button class="cardx" data-act="cancel" data-i="'+idx+'" type="button" title="Dismiss" aria-label="Dismiss">'+CARD_X+'</button>';
     var cls='tcard'+(opts.ghost?' ghost':'')+(opts.first?' first':'');
     var spark=opts.first?'<div class="aispark" aria-hidden="true"><div class="aispin"></div></div>':'';
@@ -776,8 +820,9 @@ h1,h2,h3,p{margin:0}
         var a=b.getAttribute('data-act');
         if(a==='refresh'){ resetCardStates(); render(); return; }
         var i=+b.getAttribute('data-i');
-        if(a==='approve') cardStates[i]='completed';
-        else if(a==='cancel') cardStates[i]='dismissed';
+        if(a==='modify'){ openModify(CARDS[i].title); return; }
+        if(a==='approve'){ cardStates[i]='running'; render(); setTimeout(function(){ if(cardStates[i]==='running'){ cardStates[i]='completed'; render(); } },950); return; }
+        if(a==='cancel') cardStates[i]='dismissed';
         else if(a==='revert') cardStates[i]='suggested';
         else return;
         render();
@@ -798,7 +843,7 @@ h1,h2,h3,p{margin:0}
     if(!carouselBlock||!taskDrawer) return;
     var isVision=(version==='vision');
     var active=(scene==='first') && (isVision ? step>=2 : true);
-    var typing=!!(field&&field.value.trim())&&taskDrawer.children.length>0;
+    var typing=(!!(field&&field.value.trim())||composerAttach)&&taskDrawer.children.length>0;
     var collapsed=active && ((isVision&&drawerState==='collapsed') || (typing && (!isVision || drawerState==='open')));
     carouselBlock.classList.toggle('collapsed',collapsed);
     root.classList.toggle('drawer-on', isVision && active);
@@ -836,7 +881,8 @@ h1,h2,h3,p{margin:0}
   };
   // Foundational: enterprise deploy — tools pre-connected by an admin, no name unless derivable
   var version='vision';
-  var drawerState='open'; // Vision drawer: 'open' (cards) | 'collapsed' (pills) | 'dismissed'
+  var drawerState='open'; // Vision drawer: 'open' (cards) | 'collapsed' (pills)
+  var lastFoundStep=-1, composerAttach=false;
   var HERO_FOUND=[
     ['Welcome to IronClaw.',"Your workspace tools are connected. Tell me what to take off your plate — or I'll start with a few suggestions."],
     ['Welcome to IronClaw.',"Your workspace tools are connected. Tell me what to take off your plate — or I'll start with a few suggestions."],
@@ -851,6 +897,21 @@ h1,h2,h3,p{margin:0}
     vision:[['Suggest','Always ask before taking any action.'],['Plan','Draft a plan of tasks and wait for approval.'],['Auto','Auto-run approved task types without asking.'],['Bypass','Full automation — act without approvals. Use with care.']],
     foundational:[['Suggest','Always ask for approval before performing a task or automation.'],['Plan','Describe the activity and the steps needed, then wait for approval.'],['Auto Approve','Auto-approve task types you\'ve already approved, plus any task you request.']]
   };
+  // Foundational first-run journey (Suggest/Plan): approve -> automate -> complete, across the beats
+  var FOUND_BEATS=[
+    ['suggested','suggested','suggested'],
+    ['running','suggested','suggested'],
+    ['completed','suggested','suggested'],
+    ['completed','running','suggested'],
+    ['completed','completed','completed']
+  ];
+  var FOUND_CAP=[
+    '<b>Foundational</b> — the first screen. Tools are admin-preconnected, so suggested tasks are here immediately. Approve, tweak, dismiss (×), or type your own.',
+    'You <b>approve</b> the top task — it moves to <b>Automating…</b> while the agent runs it.',
+    'The task <b>completes</b>; its card flips to the done state (Modify / Revert).',
+    'Approve the next one — it automates while the first stays done.',
+    'All suggestions <b>handled</b>. Dismiss any (×), or type to ask for more.'
+  ];
   var nearStart=0,elTimer=null;
   function fmt(ms){var s=Math.floor(ms/1000);return Math.floor(s/60)+':'+String(s%60).padStart(2,'0');}
   function tickEl(){carMeta.textContent=fmt(Date.now()-nearStart);}
@@ -860,6 +921,7 @@ h1,h2,h3,p{margin:0}
     step=Math.max(0,Math.min(step,MAX));
     var prop=modeProposed();
     var isVision=(version==='vision');
+    if(!isVision && prop){ if(step!==lastFoundStep){ cardStates=FOUND_BEATS[step].slice(); lastFoundStep=step; } } else lastFoundStep=-1;
     var h;
     if(!isVision) h = prop
       ? ['Welcome to IronClaw.',"Your tools are connected — here's what I'd take off your plate. Approve, tweak, or dismiss any, or just tell me what else."]
@@ -868,7 +930,7 @@ h1,h2,h3,p{margin:0}
     else h=HERO[step];
     heroTitle.textContent=h[0];heroSub.textContent=h[1];
     capN.textContent='Beat '+step+' / '+MAX;
-    capC.innerHTML = isVision ? CAP[step] : '<b>Foundational</b> — enterprise. Tools are admin-preconnected, so suggested tasks are here from the first step. Approve, tweak, dismiss (×), or type your own. Modes: Suggest / Plan / Auto Approve.';
+    capC.innerHTML = isVision ? CAP[step] : (prop ? FOUND_CAP[step] : '<b>Foundational · Auto Approve</b> — approved task types run automatically; these are already done. Dismiss (×) or type to ask for more.');
     var coach=(dir==='coach'),empty=(step<=1),working=(isVision&&step===2);
     show(connectBlock, empty && connectState==='open' && isVision);
     show(ghostBlock, empty && coach && isVision);
@@ -884,8 +946,10 @@ h1,h2,h3,p{margin:0}
         taskDrawer.innerHTML='';
         if(!nearStart)nearStart=Date.now(); if(!elTimer){elTimer=setInterval(tickEl,250);} tickEl();
       } else {
-        carTtl.textContent = prop ? 'Suggested for you' : 'Done for you';
-        carSub.textContent = prop ? 'Approve to run, or tweak first' : 'Review or undo anytime';
+        var allDone = cardStates.length && cardStates.every(function(s){return s==='completed'||s==='dismissed';}) && cardStates.some(function(s){return s==='completed';});
+        var anyRun = cardStates.some(function(s){return s==='running';});
+        carTtl.textContent = (!prop||allDone) ? 'Done for you' : (anyRun ? 'Automating…' : 'Suggested for you');
+        carSub.textContent = (!prop||allDone) ? 'Review or undo anytime' : 'Approve to run, or tweak first';
         renderCards(isVision && step===3);
         if(elTimer){clearInterval(elTimer);elTimer=null;}
         carMeta.textContent = prop ? '' : (isVision ? (step===3?'worked for 8s':'worked for 14s') : '');
@@ -902,7 +966,7 @@ h1,h2,h3,p{margin:0}
   function advance(){ if(step>=MAX){stop();return;} step++; render(); if(playing){ timer=setTimeout(advance, WAIT[step]?1700:1500); } }
   function play(){ if(step>=MAX){step=0;render();} playing=true; setPlay(true); timer=setTimeout(advance, 700); }
   function stop(){ playing=false; setPlay(false); if(timer){clearTimeout(timer);timer=null;} }
-  function resetFirst(){ stop(); step=0; nearStart=0; resetCardStates(); connectState='open'; drawerState='open'; render(); }
+  function resetFirst(){ stop(); step=0; nearStart=0; lastFoundStep=-1; resetCardStates(); connectState='open'; drawerState='open'; render(); }
   function setPlay(on){ document.getElementById('playTxt').textContent=on?'Pause':'Play the first run';
     document.getElementById('playIco').innerHTML=on?'<rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/>':'<path d="M8 5v14l11-7z"/>'; }
   document.getElementById('playBtn').onclick=function(){ playing?stop():play(); };
@@ -921,8 +985,17 @@ h1,h2,h3,p{margin:0}
   modeMenu.addEventListener('click',function(e){var o=e.target.closest('.modeopt');if(!o)return;modeMenu.querySelectorAll('.modeopt').forEach(function(x){x.classList.remove('is-sel');});o.classList.add('is-sel');agentMode=o.getAttribute('data-mode');modeLabel.textContent=agentMode;resetCardStates();closeMode();render();});
   document.addEventListener('click',function(e){if(!modeMenu.hidden && !modeMenu.contains(e.target) && !modeBtn.contains(e.target)) closeMode();});
   var field=document.getElementById('composerField'),runBtn=document.getElementById('runBtn');
-  function syncRun(){runBtn.disabled=!(field.value.trim());}
+  var attachBtn=document.getElementById('attachBtn'),attachRow=document.getElementById('attachRow'),attachX=document.getElementById('attachX');
+  function syncRun(){runBtn.disabled=!(field.value.trim()||composerAttach);}
+  function setAttach(on){ composerAttach=on; if(attachRow) attachRow.hidden=!on; syncRun(); applyDrawer(); }
   field.addEventListener('input',function(){field.style.height='auto';field.style.height=Math.min(field.scrollHeight,120)+'px';syncRun();applyDrawer();});
+  if(attachBtn) attachBtn.onclick=function(){ setAttach(true); };
+  if(attachX) attachX.onclick=function(){ setAttach(false); };
+  // Modify opens a modification modal (both versions)
+  var modifyModal=document.getElementById('modifyModal'),modifyTitle=document.getElementById('modifyTitle'),modifyField=document.getElementById('modifyField');
+  function openModify(t){ if(!modifyModal)return; modifyTitle.textContent='Modify — '+t; modifyField.value=''; modifyModal.classList.add('on'); }
+  function closeModify(){ if(modifyModal) modifyModal.classList.remove('on'); }
+  ['modifyBack','modifyCancel','modifyCancel2','modifySave'].forEach(function(id){ var el=document.getElementById(id); if(el) el.onclick=closeModify; });
   // Vision drawer controls: collapse/expand + dismiss (with a restore bar)
   var drawerToggle=document.getElementById('drawerToggle');
   if(drawerToggle) drawerToggle.onclick=function(){ drawerState=(drawerState==='collapsed')?'open':'collapsed'; applyDrawer(); };
