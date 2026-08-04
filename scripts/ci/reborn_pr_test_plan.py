@@ -73,6 +73,16 @@ PR_STATIC_CONTROL_PATHS = {
     #     invoke the script.
     "scripts/no_panics_reborn_baseline.txt",
     "scripts/reborn-e2e-rust.sh",
+    # `.gitignore` is decided the same way, and belongs here rather than with
+    # the repo-root prose above precisely because something *does* read it:
+    # Code Style's `Reject tracked files that match .gitignore` guard
+    # (`git ls-files -ci --exclude-standard`) owns that check outright. It runs
+    # whenever `has_code` is true, and `has_code` names `.gitignore` itself, so
+    # it runs on every PR that edits one. No Reborn lane reads the file, so no
+    # lane here can exercise a change to it. It was unclassified until
+    # 2026-08-04 (#6965), so the fail-closed arm failed the whole
+    # `Tests (Reborn)` roll-up on any PR that added an ignore rule.
+    ".gitignore",
 }
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/")
 BUCKET_WEIGHTS = {

@@ -305,7 +305,16 @@ jobs:
           while IFS= read -r package; do
             package_args+=(-p "${package}")
           done < <(jq -r '.[]' <<< "${CLIPPY_PACKAGES}")
-          cargo clippy "${package_args[@]}" --lib --bins \
+          # No explicit target filter. `--lib` is a hard error on a bin-only
+          # package ("no library targets found in package `ironclaw`"), which
+          # is exactly what a PR touching only crates/ironclaw_reborn_cli
+          # selects, and `--bins` alone degrades to "no targets matched; this
+          # is a no-op" on a lib-only package — the lane would report green
+          # having linted nothing. Cargo's default target set for a package is
+          # already lib + bins, with tests, examples, and benches excluded, so
+          # omitting both keeps this the production-target lane for every
+          # package shape. scripts/ci/ws12_workflow_contracts.py pins this.
+          cargo clippy "${package_args[@]}" \
             ${{ matrix.flags }} -- -D warnings
       - name: Check all-target lints
         if: github.event_name != 'pull_request'

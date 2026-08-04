@@ -19,8 +19,10 @@ from ws12_workflow_contracts import (
     STRESS_WORKFLOW,
     github_glob_to_regex,
     load_workflows,
+    step_body,
     validate_crate_scope_filters,
     validate_e2e_scope_filters,
+    validate_production_lint_targets,
     validate_workflow_texts,
 )
 
@@ -132,6 +134,128 @@ class WorkflowContractSabotageTests(unittest.TestCase):
             any("could not find the `changes` job scope regex" in e for e in errors),
             errors,
         )
+
+    def test_production_lint_passes_as_checked_in_without_reading_its_neighbour(
+        self,
+    ) -> None:
+        """Passing here is itself the proof that the scan stays in its step.
+
+        `Check all-target lints` sits directly below and legitimately passes
+        the flags this contract forbids, so a scan that overran its own step
+        would fail on the checked-in workflow. The first assertion keeps that
+        proof honest: if the neighbour ever stops passing `--tests`, this test
+        would still pass while having stopped testing anything.
+        """
+        neighbour = step_body(
+            self.workflows[CODE_STYLE_WORKFLOW], "Check all-target lints"
+        )
+        self.assertIsNotNone(neighbour)
+        self.assertIn("--tests", neighbour or "")
+
+        self.assertEqual(
+            validate_production_lint_targets(self.workflows[CODE_STYLE_WORKFLOW]), []
+        )
+
+    def test_target_filters_on_the_production_lint_fail_loudly(self) -> None:
+        """Every explicit target selector, in bare and value-bearing form.
+
+        Regression for PR #6965: the lane ran `cargo clippy -p <pkg> --lib
+        --bins`, and the first PR whose only changed package was the bin-only
+        `ironclaw` died on `no library targets found in package` — exit 101,
+        no lint ever run. `--bins` alone is the quieter half of the same bug:
+        on a lib-only package cargo warns "no targets matched; this is a
+        no-op" and the lane reports green having linted nothing. The rest swap
+        the package's default production targets for a hand-picked set.
+
+        Exact-count, so `--bins` is never also reported as `--bin` — a
+        substring match would do exactly that.
+        """
+        for injected, flag in (
+            ("--lib", "--lib"),
+            ("--bins", "--bins"),
+            ("--bin ironclaw", "--bin"),
+            ("--all-targets", "--all-targets"),
+            ("--tests", "--tests"),
+            ("--test smoke", "--test"),
+            ("--examples", "--examples"),
+            ("--example demo", "--example"),
+            ("--benches", "--benches"),
+            ("--bench=throughput", "--bench"),
+        ):
+            with self.subTest(injected=injected):
+                sabotaged = self.workflows[CODE_STYLE_WORKFLOW].replace(
+                    'cargo clippy "${package_args[@]}" \\',
+                    f'cargo clippy "${{package_args[@]}}" {injected} \\',
+                )
+                self.assertNotEqual(sabotaged, self.workflows[CODE_STYLE_WORKFLOW])
+
+                errors = validate_production_lint_targets(sabotaged)
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(f"must not pass {flag} ", errors[0])
+
+    def test_widening_the_clippy_matrix_flags_fails_loudly(self) -> None:
+        """`${{ matrix.flags }}` is the lane's other flag channel."""
+        sabotaged = self.workflows[CODE_STYLE_WORKFLOW].replace(
+            '"flags":"--all-features"', '"flags":"--all-features --all-targets"'
+        )
+        self.assertNotEqual(sabotaged, self.workflows[CODE_STYLE_WORKFLOW])
+
+        errors = validate_production_lint_targets(sabotaged)
+        self.assertTrue(
+            any("clippy_matrix flags" in e and "--all-targets" in e for e in errors),
+            errors,
+        )
+
+        # …and only that matrix. Some other matrix in this workflow may
+        # legitimately carry `--tests`; reading it as widening *this* lane
+        # would be a false failure on an unrelated change.
+        unrelated = self.workflows[CODE_STYLE_WORKFLOW] + (
+            '\n          echo \'doc_matrix=[{"name":"docs","flags":"--tests"}]\''
+            ' >> "$GITHUB_OUTPUT"\n'
+        )
+        self.assertEqual(validate_production_lint_targets(unrelated), [])
+
+    def test_losing_the_step_or_its_command_fails_loudly(self) -> None:
+        """A contract that cannot see the command must say so, not pass."""
+        renamed = self.workflows[CODE_STYLE_WORKFLOW].replace(
+            "name: Check production-target lints", "name: Check nothing at all"
+        )
+        self.assertTrue(
+            any(
+                "could not find the 'Check production-target lints' step" in e
+                for e in validate_production_lint_targets(renamed)
+            )
+        )
+
+        moved = self.workflows[CODE_STYLE_WORKFLOW].replace(
+            'cargo clippy "${package_args[@]}" \\\n            ${{ matrix.flags }} -- -D warnings',
+            "bash scripts/ci/production-clippy.sh",
+        )
+        self.assertNotEqual(moved, self.workflows[CODE_STYLE_WORKFLOW])
+        self.assertTrue(
+            any(
+                "no longer runs `cargo clippy`" in e
+                for e in validate_production_lint_targets(moved)
+            )
+        )
+
+    def test_production_lint_failures_reach_the_top_level_contract(self) -> None:
+        """The validator must stay wired into `validate_workflow_texts`.
+
+        Every assertion above calls it directly, so without this the guard
+        could be unhooked from the entry point CI runs and stay green.
+        """
+        sabotaged = dict(self.workflows)
+        sabotaged[CODE_STYLE_WORKFLOW] = self.workflows[CODE_STYLE_WORKFLOW].replace(
+            'cargo clippy "${package_args[@]}" \\',
+            'cargo clippy "${package_args[@]}" --lib \\',
+        )
+        self.assertNotEqual(
+            sabotaged[CODE_STYLE_WORKFLOW], self.workflows[CODE_STYLE_WORKFLOW]
+        )
+
+        errors = validate_workflow_texts(sabotaged)
+        self.assertTrue(any("must not pass --lib" in e for e in errors), errors)
 
     def test_code_style_runs_workflow_and_shard_sabotage_tests(self) -> None:
         workflow = (ROOT / ".github/workflows/code_style.yml").read_text(

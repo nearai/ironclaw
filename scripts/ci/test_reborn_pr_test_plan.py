@@ -519,25 +519,45 @@ class RebornPrTestPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
             self.plan("pull_request", [".env.local"])
 
-    def test_decided_repo_root_script_paths_are_owned_by_other_workflows(self) -> None:
-        """Repo-root `scripts/` files that another workflow owns.
+    def test_decided_repo_root_paths_are_owned_by_other_workflows(self) -> None:
+        """Repo-root files another workflow owns outright.
 
         The `unmapped test or CI path` arm deliberately refuses `scripts/**`
         outside `scripts/ci/` so each file gets a decision rather than a
-        blanket prefix. These two have one, recorded beside the constant: the
-        panic baseline belongs to Code Style, and the E2E selector script
-        belongs to the `Reborn E2E` workflow's own scope detector. Neither
+        blanket prefix. These have one, recorded beside the constant: the
+        panic baseline belongs to Code Style, the E2E selector script belongs
+        to the `Reborn E2E` workflow's own scope detector, and `.gitignore` is
+        read by Code Style's `Reject tracked files that match .gitignore`
+        guard (#6965 — unclassified until 2026-08-04, which failed the whole
+        `Tests (Reborn)` roll-up on any PR that added an ignore rule). None
         selects a lane in *this* planner — but the sibling that has no
         decision must still refuse, which the second half asserts.
         """
         for path in (
             "scripts/no_panics_reborn_baseline.txt",
             "scripts/reborn-e2e-rust.sh",
+            ".gitignore",
         ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])
                 self.assertEqual(plan["mode"], "none", path)
                 self.assertEqual(plan["crate_buckets"], [], path)
+                # The plan must say *why*, so a future reader sees the
+                # decision rather than a silent "nothing to run".
+                self.assertTrue(
+                    any(
+                        reason.startswith("static CI or workspace-policy checks own")
+                        and path in reason
+                        for reason in plan["reasons"]
+                    ),
+                    plan["reasons"],
+                )
+
+                # The decision is per-path, not per-PR: a real change riding
+                # along still selects its lane.
+                paired = self.plan("pull_request", [path, "crates/alpha/src/lib.rs"])
+                self.assertEqual(paired["mode"], "selected", path)
+                self.assertNotEqual(paired["crate_buckets"], [], path)
 
         with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
             self.plan("pull_request", ["scripts/some-undecided-helper.sh"])
