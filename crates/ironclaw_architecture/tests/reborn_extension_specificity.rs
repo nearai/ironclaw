@@ -1239,10 +1239,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_extension_host/src/lib.rs", "nearai_mcp"),
     ("crates/ironclaw_extension_host/src/lib.rs", "nearaimcp"),
     (
-        "crates/ironclaw_extension_host/src/lifecycle_restore.rs",
-        "slack",
-    ),
-    (
         "crates/ironclaw_extension_host/src/nearai_mcp.rs",
         "nearai_mcp",
     ),
