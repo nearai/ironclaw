@@ -440,6 +440,11 @@ SEL_V2 = {
         "[data-testid='llm-provider-card'][data-provider-id='{provider_id}']"
     ),
     "llm_provider_disclosure": "llm-provider-disclosure",
+    "onboarding_provider_card_for": (
+        "[data-testid='onboarding-provider-card']"
+        "[data-provider-id='{provider_id}']"
+    ),
+    "onboarding_provider_setup": "[data-testid='onboarding-provider-setup']",
     "automation_row_for": (
         "[data-testid='automation-row'][data-automation-id='{id}']"
     ),
