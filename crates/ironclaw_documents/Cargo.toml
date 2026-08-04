@@ -1,0 +1,34 @@
+[package]
+name = "ironclaw_documents"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Structure-preserving document editing for IronClaw: read OOXML (docx/xlsx/pptx) as addressable segments and apply typed edits that rewrite only the touched parts, plus HTML-subset PDF generation."
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "substrates"
+
+[dependencies]
+# Event-level XML reader/writer. Chosen over a DOM crate deliberately: the
+# editor copies every event through untouched except the ones it targets, so
+# attribute order, namespace prefixes, and whitespace survive a round trip.
+# A DOM re-serializer normalizes all three and would churn parts nobody edited.
+quick-xml = "0.41"
+# Pure-Rust PDF writer for the HTML-subset renderer. Uses the PDF standard-14
+# fonts, so no font files are vendored and no system fonts are read — the
+# renderer stays hermetic.
+printpdf = { version = "0.12", default-features = false }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+zip = { version = "8", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true
