@@ -51,14 +51,11 @@ fn recipe_callback_state_round_trips_and_rejects_foreign_prefixes() {
     let scope = auth_scope();
     let label = account_label("acct");
     let flow_id = AuthFlowId::new();
-    let scopes = provider_scopes(&["items:read"]);
-
     let encoded = OAuthCallbackState::new(
         OAuthCallbackStateKind::RECIPE,
         flow_id,
         scope,
         label.clone(),
-        scopes.clone(),
     )
     .unwrap()
     .encode()
@@ -69,7 +66,6 @@ fn recipe_callback_state_round_trips_and_rejects_foreign_prefixes() {
         OAuthCallbackState::decode(OAuthCallbackStateKind::RECIPE, encoded.as_str()).unwrap();
     assert_eq!(decoded.flow_id(), flow_id);
     assert_eq!(decoded.account_label(), &label);
-    assert_eq!(decoded.requested_scopes(), scopes.as_slice());
 
     // Values without the recipe prefix must not decode.
     let error = OAuthCallbackState::decode(OAuthCallbackStateKind::RECIPE, "icg1.someoldstate")

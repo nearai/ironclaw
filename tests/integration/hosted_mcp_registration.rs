@@ -403,6 +403,7 @@ async fn complete_fixture_oauth_callback(
     let flow = services
         .product_auth
         .start_setup_oauth_flow(RebornOAuthStartFlowRequest {
+            requested_scopes: Vec::new(),
             flow_id: None,
             scope: auth_scope.clone(),
             provider: provider.clone(),

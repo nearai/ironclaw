@@ -1801,6 +1801,7 @@ fn auth_flow(
 ) -> AuthFlowRecord {
     let now = Utc::now();
     AuthFlowRecord {
+        requested_scopes: Vec::new(),
         id: AuthFlowId::new(),
         scope: auth_scope(scope, actor),
         kind: AuthFlowKind::IntegrationCredential,

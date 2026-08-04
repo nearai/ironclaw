@@ -1374,6 +1374,7 @@ async fn product_auth_oauth_flow_status_hides_cross_scope_flow_as_not_found() {
     );
     let flow = shared
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: Some(AuthFlowId::new()),
             scope: other_scope,
             kind: AuthFlowKind::IntegrationCredential,

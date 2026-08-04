@@ -435,7 +435,6 @@ impl AuthEngine {
             request.flow_id,
             request.scope.clone(),
             request.account_label.clone(),
-            requested_scopes.clone(),
         )?
         .encode()?;
         let opaque_state_hash = opaque_state_hash(state.as_str())?;

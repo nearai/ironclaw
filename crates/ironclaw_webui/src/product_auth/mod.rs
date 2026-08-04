@@ -1826,6 +1826,7 @@ mod tests {
         let verifier_hash = pkce_verifier_hash(&format!("verifier-{tag}")).expect("PKCE hash");
         let flow = services
             .create_flow(NewAuthFlow {
+                requested_scopes: Vec::new(),
                 id: None,
                 scope: scope.clone(),
                 kind: AuthFlowKind::IntegrationCredential,
@@ -1959,6 +1960,7 @@ mod tests {
             .expect("fence flow");
         let terminal = shared
             .create_flow(NewAuthFlow {
+                requested_scopes: Vec::new(),
                 id: None,
                 scope: scope.clone(),
                 kind: AuthFlowKind::IntegrationCredential,

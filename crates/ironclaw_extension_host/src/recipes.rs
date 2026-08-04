@@ -159,7 +159,7 @@ impl AuthRecipeResolver for InstalledManifestAuthRecipeResolver {
         //
         // silent-ok: installation/manifest reads for recipe resolution; AuthRecipeResolver is Option-valued, so a store failure must fail closed (no recipe) rather than resolve to none.
         let installations = self.store.list_installations().await.ok()?;
-        let installed_for_caller: BTreeSet<ExtensionId> = installations
+        let mut installed_for_caller: BTreeSet<ExtensionId> = installations
             .into_iter()
             .filter(|installation| match caller {
                 Some(caller) => installation.owner().visible_to(caller),
@@ -169,6 +169,17 @@ impl AuthRecipeResolver for InstalledManifestAuthRecipeResolver {
             })
             .map(|installation| installation.extension_id().clone())
             .collect();
+        // The requester's OWN manifest is always in its own ceiling, whether or
+        // not its installation row is currently listable. `list_installations`
+        // hides rows that are removed or hold a mutation lease, so an install
+        // still converging (WASM packages take a preparation lease) would
+        // otherwise resolve a ceiling that omits the requesting extension's own
+        // scopes — and the flow it is starting for itself would be rejected as
+        // exceeding that ceiling. Callers reach this only for an extension the
+        // route already authorized as installed for them.
+        if let Some(requester_extension) = requester_extension {
+            installed_for_caller.insert(requester_extension.clone());
+        }
         let records = self.store.list_manifests().await.ok()?;
         let manifests: Vec<&ResolvedExtensionManifest> = records
             .iter()

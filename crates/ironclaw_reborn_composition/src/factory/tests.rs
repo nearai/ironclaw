@@ -3111,6 +3111,7 @@ async fn completed_lifecycle_activation_continuation_installs_the_extension() {
     let flow = product_auth
         .flow_manager()
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,

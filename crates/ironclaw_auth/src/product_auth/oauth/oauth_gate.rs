@@ -151,6 +151,7 @@ impl OAuthGateFlowDriver {
         let flow = match request
             .flow_manager
             .create_flow(NewAuthFlow {
+                requested_scopes: prepared.requested_scopes.clone(),
                 id: Some(flow_id),
                 scope: auth_scope.clone(),
                 kind: AuthFlowKind::IntegrationCredential,
@@ -641,6 +642,7 @@ mod tests {
         fixture
             .flow_manager
             .create_flow(NewAuthFlow {
+                requested_scopes: Vec::new(),
                 id: Some(expired_flow_id),
                 scope: expired_scope.clone(),
                 kind: AuthFlowKind::IntegrationCredential,
@@ -718,6 +720,7 @@ mod tests {
         let mismatched = fixture
             .flow_manager
             .create_flow(NewAuthFlow {
+                requested_scopes: Vec::new(),
                 id: Some(AuthFlowId::new()),
                 scope: auth_scope,
                 kind: AuthFlowKind::IntegrationCredential,
@@ -778,6 +781,7 @@ mod tests {
         let other_extension = fixture
             .flow_manager
             .create_flow(NewAuthFlow {
+                requested_scopes: Vec::new(),
                 id: Some(other_extension_flow_id),
                 scope: auth_scope,
                 kind: AuthFlowKind::IntegrationCredential,

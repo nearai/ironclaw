@@ -1738,6 +1738,7 @@ fn new_flow(
 ) -> NewAuthFlow {
     let expires_at = Utc::now() + Duration::minutes(5);
     NewAuthFlow {
+        requested_scopes: Vec::new(),
         id: None,
         scope: scope.clone(),
         kind: AuthFlowKind::IntegrationCredential,

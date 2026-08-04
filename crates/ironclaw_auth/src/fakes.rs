@@ -259,6 +259,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         }
         let now = Utc::now();
         let record = AuthFlowRecord {
+            requested_scopes: request.requested_scopes.clone(),
             id,
             scope: request.scope,
             kind: request.kind,
