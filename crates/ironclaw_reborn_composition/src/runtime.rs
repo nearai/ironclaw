@@ -150,8 +150,6 @@ use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagement
 use ironclaw_extension_manager::admin_configuration::{
     ComposedAdminConfigurationService, ComposedExtensionAdminConfigurationResolver,
 };
-pub(crate) use ironclaw_product::blocked_auth_flow_canceller;
-pub use ironclaw_product::product_auth_challenge_provider;
 use ironclaw_product::projection::{RebornProjectionServices, build_reborn_projection_services};
 use ironclaw_product::{current_turn_gate_runs, first_turn_run_for_gate};
 use ironclaw_secrets::SecretStorePort;
