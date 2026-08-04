@@ -153,8 +153,7 @@ h1,h2,h3,p{margin:0}
 .connect .ch .t{font-size:13px;font-weight:600;color:var(--v2-text-strong)}
 .connect .ch .s{font-size:12px;color:var(--v2-text-muted)}
 .connect .apps{display:flex;flex-wrap:wrap;gap:9px;align-items:center}
-.connectfoot{display:flex;justify-content:flex-end;margin-top:13px}
-.connectbtn{display:inline-flex;align-items:center;gap:7px;height:34px;padding:0 15px;border-radius:10px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;color:#fff;border:1px solid rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
+.connectbtn{margin-left:auto;display:inline-flex;align-items:center;gap:7px;height:38px;padding:0 16px;border-radius:11px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;color:#fff;border:1px solid rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
 .connectbtn:hover{background:radial-gradient(ellipse 200% 220% at 50% 110%,#5BBAF5 0%,#2882c8 60%)}
 .connectbtn:focus-visible{outline:2px solid color-mix(in srgb,var(--v2-accent) 45%,transparent);outline-offset:2px}
 .cpill{display:inline-flex;align-items:center;gap:9px;border:1px solid var(--v2-panel-border);background:var(--v2-surface);border-radius:12px;padding:7px 11px 7px 8px;cursor:pointer;font:inherit;transition:border-color .15s,background .15s}
@@ -462,7 +461,6 @@ h1,h2,h3,p{margin:0}
             <div class="connect">
               <div class="ch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg><span class="t">Connect your tools</span><span class="s" id="connectSub">one tap each · add more anytime</span><button class="connclose" id="connCloseBtn" type="button" aria-label="Dismiss connect panel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
               <div class="apps" id="appRow"></div>
-              <div class="connectfoot"><button class="connectbtn" id="connectAllBtn" type="button">Connect all</button></div>
             </div>
           </div>
 
@@ -621,22 +619,24 @@ h1,h2,h3,p{margin:0}
     {key:'drive',label:'Drive',icon:'triangle',accent:'#0f9d58'},
     {key:'github',label:'GitHub',icon:'code',accent:'#7d5bed'}
   ];
-  var appRow=document.getElementById('appRow'),connectAllBtn=document.getElementById('connectAllBtn'),connectSub=document.getElementById('connectSub');
+  var appRow=document.getElementById('appRow'),connectSub=document.getElementById('connectSub');
   var connSet=[], connectState='open'; // 'open' | 'pill' | 'gone'
   function isConn(k){return connSet.indexOf(k)>=0;}
   function appChip(a){return '<span class="appchip" style="'+chipStyle(a.accent)+'">'+svg(a.icon)+'</span>';}
   function advanceFromConnect(){ if(step<1){ step=1; render(); if(playing){clearTimeout(timer);timer=setTimeout(advance,1100);} } }
+  function connectAll(){ connSet=APPS.map(function(a){return a.key;}); renderConnect(); advanceFromConnect(); }
   function renderConnect(){
     var all=APPS.length,n=connSet.length;
-    connectAllBtn.style.display=(n>=all)?'none':'';
-    connectAllBtn.textContent=(n>=1)?'Connect':'Connect all';
     connectSub.textContent='one tap each · add more anytime';
-    appRow.innerHTML=APPS.map(function(a){
+    var html=APPS.map(function(a){
       var on=isConn(a.key);
       return '<button class="cpill'+(on?' on':'')+'" data-app="'+a.key+'" type="button" aria-pressed="'+on+'">'
         +appChip(a)+'<span class="an">'+a.label+'</span>'
         +'<span class="cstate">'+svg('check',3)+'</span></button>';
     }).join('');
+    // connect action rides the end of the pill flow (right-aligned) — no wasted footer row
+    if(n<all) html+='<button class="connectbtn" id="connectAllBtn" type="button">'+(n>=1?'Connect':'Connect all')+'</button>';
+    appRow.innerHTML=html;
     appRow.querySelectorAll('.cpill').forEach(function(b){
       b.onclick=function(){
         var k=b.getAttribute('data-app'),i=connSet.indexOf(k);
@@ -645,8 +645,8 @@ h1,h2,h3,p{margin:0}
         if(connSet.length===all){ setTimeout(advanceFromConnect,600); }
       };
     });
+    var cbtn=document.getElementById('connectAllBtn'); if(cbtn) cbtn.onclick=connectAll;
   }
-  connectAllBtn.onclick=function(){ connSet=APPS.map(function(a){return a.key;}); renderConnect(); advanceFromConnect(); };
   // dismiss the connect panel ↔ show a "Connect your tools" pill in the composer
   var connCloseBtn=document.getElementById('connCloseBtn'),connPill=document.getElementById('connPill'),connPillX=document.getElementById('connPillX');
   function setConnectState(s){ connectState=s; render(); }
