@@ -474,7 +474,11 @@ async fn verify_read_before_edit(
 
 fn is_binary_document_path(scoped_path: &str) -> bool {
     matches!(
-        scoped_path.rsplit('.').next().map(str::to_ascii_lowercase).as_deref(),
+        scoped_path
+            .rsplit('.')
+            .next()
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
         Some("doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "pdf")
     )
 }
