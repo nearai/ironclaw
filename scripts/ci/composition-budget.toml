@@ -102,7 +102,20 @@ observed_date = "2026-07-16"
 # NUDGE once observed sits more than loc_nudge_slack below the ceiling, so the
 # obligation is visible in CI output rather than remembered. Raising it is
 # allowed but must carry a one-line PR rationale, same rule as ceiling_bp.
-loc_ceiling = 42938
+#
+# Re-ratcheted 45127 -> 42688 on 2026-08-04 by the WS6 policy evictions
+# (approval gate -> ironclaw_approvals, fire-time trigger access ->
+# ironclaw_triggers): -2,439 production LOC. This is the "RE-RATCHET AT EVERY
+# WAVE CLOSE" rule below being executed, not headroom being claimed — measured
+# with `bash scripts/ci/check-composition-budget.sh --print` on the post-
+# eviction tree. Sibling WS6 branches are shrinking composition too, so a
+# numeric conflict here is expected and trivial: take the LOWER number, then
+# re-measure on the merged tree rather than trusting either side's figure.
+#
+# Union re-seed on the waves-0-4 batch, 2026-08-04: the WS6 service-cluster
+# eviction (-2,189) and the WS6 policy eviction (-2,439) are disjoint; on the
+# merged tree the deltas add exactly: 45,127 - 2,189 - 2,439 = 40,499.
+loc_ceiling = 40499
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -113,7 +126,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 42938
+loc_observed = 40499
 loc_observed_date = "2026-08-04"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------

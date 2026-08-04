@@ -193,15 +193,13 @@ use crate::runtime_input::{
     PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessChecker,
     TriggerFireAccessGrant,
 };
-use crate::trigger_fire_access::{
-    CompositeTriggerFireChecker, IdentityMembershipTriggerFireChecker,
-    StaticOwnerTriggerFireChecker,
-};
+use crate::trigger_fire_access::IdentityMembershipTriggerFireChecker;
 use crate::trigger_poller_assembly::{
     build_trigger_active_run_lookup, build_trigger_poller_services, poller_user_directory,
     validate_trigger_poller_authorization,
 };
 use crate::{RebornBuildError, RebornReadiness};
+use ironclaw_triggers::{CompositeTriggerFireChecker, StaticOwnerTriggerFireChecker};
 use production::{
     EmptyCapabilitySurfaceResolver, EmptyIdentityContextSource,
     UnavailableApprovalInteractionService, UnavailableCapabilityIo,

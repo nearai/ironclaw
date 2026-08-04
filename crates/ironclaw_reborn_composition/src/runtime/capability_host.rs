@@ -47,9 +47,9 @@ use ironclaw_turns::{ExternalToolCatalog, LoopResultRef};
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::capability_authorization::{StoreApprovalSettingsProvider, effects_require_approval};
 use crate::factory::RebornRuntimeStores;
-use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::runtime::ComposedSelectableSkillContextSource;
 use crate::runtime_mounts::{WorkspaceMountPolicy, scoped_skill_management_mount_view};
+use ironclaw_approvals::ApprovalSettingsProvider;
 use ironclaw_product::projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
 
 mod outbound_delivery;

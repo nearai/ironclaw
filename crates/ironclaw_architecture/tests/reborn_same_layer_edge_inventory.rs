@@ -191,6 +191,20 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         decided_in: "WS3",
     },
     SameLayerEdge {
+        crate_name: "ironclaw_approvals",
+        dependency_name: "ironclaw_runtime_policy",
+        layer: "kernel",
+        owner: "kernel/",
+        decided_in: "WS6 (the profile approval gate evicted from the composition root consumes `MinimalApprovalBypass`, the classification `runtime_policy` owns per §4.4)",
+    },
+    SameLayerEdge {
+        crate_name: "ironclaw_approvals",
+        dependency_name: "ironclaw_trust",
+        layer: "kernel",
+        owner: "kernel/",
+        decided_in: "WS6 (same eviction: the gate implements `authorization`'s `TrustAwareCapabilityDispatchAuthorizer`, whose signature names `ironclaw_trust::TrustDecision`)",
+    },
+    SameLayerEdge {
         crate_name: "ironclaw_capabilities",
         dependency_name: "ironclaw_processes",
         layer: "kernel",
@@ -668,10 +682,26 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 /// so the improvement is banked as a floor rather than left as headroom.
 /// Recounted on the merged tree, not derived by subtracting three.
 ///
+/// ✎ **72 → 74 (WS6, the composition policy eviction).** Two edges are *added*
+/// — the only growth this number has taken — and both are the same kernel crate
+/// paying for a module that left the app layer: `approvals → trust` and
+/// `approvals → runtime_policy`, both arriving with the profile approval gate
+/// (`profile_gate.rs` / `profile_gate_policy.rs`) evicted from
+/// `ironclaw_reborn_composition`. Neither is avoidable at the destination: the
+/// gate *implements* `ironclaw_authorization`'s
+/// `TrustAwareCapabilityDispatchAuthorizer`, whose method signature names
+/// `ironclaw_trust::TrustDecision`, and it consumes `MinimalApprovalBypass`,
+/// which §4.4 pins to `ironclaw_runtime_policy` as "the one place that
+/// classification lives". The trade is deliberate and stated rather than
+/// hidden: 2,178 lines of authorization semantics stop living in the assembly
+/// root, at the cost of two edges inside a kernel family that already carries
+/// twelve (`capabilities` and `host_runtime` hold six each). Growth here is a
+/// reviewed decision, not drift — see PROPOSAL §6.5.2/§6.10.1.
+///
 /// The target is fewer, and every wave that deletes one must lower this number
 /// in the same PR — the equality below refuses both growth *and* slack, so a
 /// forgotten decrement is red rather than banked as headroom.
-const SAME_LAYER_EDGE_BASELINE: usize = 72;
+const SAME_LAYER_EDGE_BASELINE: usize = 74;
 
 /// Sanity floors for the metadata walk. A gate that scans nothing must never
 /// read as success; these are deliberately far below the live values (67

@@ -26,9 +26,9 @@ use ironclaw_turns::ExternalToolCatalog;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
-use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::runtime::ComposedSelectableSkillContextSource;
 use crate::runtime::capability_host::outbound_delivery::outbound_delivery_capabilities;
+use ironclaw_approvals::ApprovalSettingsProvider;
 use ironclaw_extension_host::capability_surface::ExtensionCapabilitySurfaceSource;
 use ironclaw_first_party_extension_ports::skill_activation_capability;
 use ironclaw_loop_host::result_read_capability;
