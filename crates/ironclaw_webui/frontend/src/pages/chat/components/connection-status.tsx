@@ -26,10 +26,17 @@ const STATUS_DOT_STYLES: Partial<Record<ConnectionStatus, string>> = {
 
 const DEFAULT_DOT_STYLE = "text-[var(--v2-text-muted)]";
 
+// `RECONNECTING` is kept as an internal connection state (it still feeds
+// run-failure attribution via `isConnectionLostStatus`) but is intentionally
+// not rendered: a proxy that closes the SSE body between streamed frames
+// makes the transport retry on every chunk, and surfacing "Reconnecting" for
+// those routine in-flight reconnects only produces a misleading blinking
+// badge. Sustained loss still escalates to `DISCONNECTED`, which is shown.
 const HIDDEN_STATUSES: ReadonlySet<ConnectionStatus> = new Set([
   CONNECTION_STATUS.IDLE,
   CONNECTION_STATUS.CONNECTING,
   CONNECTION_STATUS.CONNECTED,
+  CONNECTION_STATUS.RECONNECTING,
 ]);
 
 export function ConnectionStatus({ status }: ConnectionStatusProps) {
