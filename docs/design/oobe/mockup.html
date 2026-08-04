@@ -401,7 +401,7 @@ h1,h2,h3,p{margin:0}
     <div>
       <div class="eyebrow">IronClaw · webui_v2 · OOBE design session</div>
       <h1 class="title">The first five minutes</h1>
-      <p class="lede">A working mockup of the OOBE — from the <b>first-run</b> onboarding (cold start → first automation) through the two in-thread concepts: the inline <b>calendar reschedule</b> rich-preview and the batched <b>Plan</b> approval. Built on the real <code>--v2-*</code> tokens. Switch scenes below; on First run, press play and toggle <b>Invite</b> vs <b>Coach</b>.</p>
+      <p class="lede">A working mockup of the OOBE — from the <b>first-run</b> onboarding (cold start → first automation) through the two in-thread concepts: the inline <b>calendar reschedule</b> rich-preview and the batched <b>Plan</b> approval. Built on the real <code>--v2-*</code> tokens. Switch scenes below; on First run, press play to watch the journey.</p>
     </div>
     <button class="btn" id="themeBtn" title="Toggle theme" aria-label="Toggle theme">
       <svg id="themeIco" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
@@ -417,11 +417,6 @@ h1,h2,h3,p{margin:0}
       <button id="sPlan" aria-pressed="false">Plan</button>
     </div>
     <span class="frcontrols" id="firstRunControls">
-      <div class="seg" role="tablist" aria-label="Cold-start direction">
-        <span class="seglbl">Cold start</span>
-        <button id="dInvite" aria-pressed="true">Invite</button>
-        <button id="dCoach" aria-pressed="false">Coach</button>
-      </div>
       <button class="btn primary" id="playBtn">
         <svg id="playIco" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
         <span id="playTxt">Play the first run</span>
@@ -569,9 +564,9 @@ h1,h2,h3,p{margin:0}
   </section>
 
   <div class="foot">
-    <p><b>What this explores.</b> The whole OOBE arc in one place. <b>First run</b> fills the two moments the PR #6994 prototype skips — the cold-start (nothing yet) and the first "Done for you" card appearing — with an Invite vs Coach toggle. <b>Thread</b> and <b>Plan</b> are the two in-thread concepts already prototyped in code: the inline calendar-reschedule rich-preview and the batched-approval Plan card. All three run on the real <code>--v2-*</code> tokens.</p>
+    <p><b>What this explores.</b> The whole OOBE arc in one place. <b>First run</b> fills the two moments the PR #6994 prototype skips — the cold-start (nothing yet) and the first "Done for you" card appearing. <b>Thread</b> and <b>Plan</b> are the two in-thread concepts already prototyped in code: the inline calendar-reschedule rich-preview and the batched-approval Plan card. All three run on the real <code>--v2-*</code> tokens.</p>
     <p><b>Built in PR #6994</b> (presentational, mock data — not yet merged to main): the <code>AutomationCarousel</code> + <code>AutomationTaskCard</code>, <code>CalendarRescheduleCard</code>, <code>PlanCard</code>, the shared <code>TaskActionBar</code> (Approve/Modify/Cancel · Modify/Revert), and the agent-mode pill. Genuinely <b>Shipped on main</b>: the branded <code>NearProcessIndicator</code> (#6901) and the <code>AuthRequired</code> connector the connect row reuses.</p>
-    <p><b>Needs a new payload</b> (issue #6993): the empty / anticipatory / reveal states and the durable task lifecycle behind Thread and Plan — the <code>AutomationTaskAutomated</code> / <code>PlanUpdate</code> projection events (see <code>AUTOMATION-TASKS-CONTRACT.md</code> §§2–7). The Coach ghost strip is a net-new onboarding surface.</p>
+    <p><b>Needs a new payload</b> (issue #6993): the empty / anticipatory / reveal states and the durable task lifecycle behind Thread and Plan — the <code>AutomationTaskAutomated</code> / <code>PlanUpdate</code> projection events (see <code>AUTOMATION-TASKS-CONTRACT.md</code> §§2–7).</p>
   </div>
 </div>
 
@@ -790,10 +785,7 @@ h1,h2,h3,p{margin:0}
   document.getElementById('nextBtn').onclick=function(){ stop(); if(step<MAX){step++;render();} };
   document.getElementById('prevBtn').onclick=function(){ stop(); if(step>0){step--;render();} };
   document.getElementById('restartBtn').onclick=function(){ resetFirst(); };
-  var dInvite=document.getElementById('dInvite'),dCoach=document.getElementById('dCoach');
-  function setDir(d){ dir=d; dInvite.setAttribute('aria-pressed',d==='invite'); dCoach.setAttribute('aria-pressed',d==='coach'); render(); }
-  dInvite.onclick=function(){setDir('invite');};
-  dCoach.onclick=function(){setDir('coach');};
+  // cold-start direction switcher (Invite/Coach) removed — first run uses the minimal "Invite" cold start
 
   // mode selector (first-run composer)
   var modeBtn=document.getElementById('modeBtn'),modeMenu=document.getElementById('modeMenu'),modeLabel=document.getElementById('modeLabel');
