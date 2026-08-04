@@ -139,6 +139,10 @@ fn trace_queue_envelope_fixture(
             residual_pii_risk: ResidualPiiRisk::Low,
             redaction_hash: "sha256:test".to_string(),
             warnings: Vec::new(),
+            // #7144 replaced the prose-substring quarantine check with this
+            // typed flag. `false` is what this fixture already meant: its risk
+            // is `Low`, and `quarantines_trace` only quarantines `High`.
+            quarantined: false,
         },
         events: Vec::new(),
         outcome: OutcomeMetadata::default(),
