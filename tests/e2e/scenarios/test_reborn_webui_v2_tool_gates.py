@@ -310,8 +310,8 @@ async def reborn_v2_yolo_server(
         log_prefix="reborn-v2-tool-gates-yolo",
         extra_env={"IRONCLAW_REBORN_REGRESSION_ARTIFACT_EXPORT": "true"},
     )
-    await enable_reborn_global_auto_approve(base_url)
     try:
+        await enable_reborn_global_auto_approve(base_url)
         yield base_url
     finally:
         await close_reborn_server(proc)
