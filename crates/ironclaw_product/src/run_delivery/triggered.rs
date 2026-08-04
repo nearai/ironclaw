@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::OutboundPart;
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_host_api::failure::summary::reborn_failure_summary_for_category;
 use ironclaw_host_api::ids::{AgentId, UserId};
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
@@ -322,6 +323,10 @@ async fn deliver_triggered_run(
 
     let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
     let mut messages_to_delete_after_final: Vec<DeliveredChannelMessage> = Vec::new();
+    // The trigger label is stable for the whole run; compute it once so the
+    // timeout-with-no-marker arm can build a terminal notice without waiting
+    // for a state it will never reach.
+    let trigger_label = prompts::triggered_label_from_prompt(&prompt);
 
     loop {
         let state = match wait_for_actionable_state(
@@ -348,6 +353,58 @@ async fn deliver_triggered_run(
                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
                 return outcome;
             }
+            Err(RunDeliveryError::RunWaitTimedOut { .. }) => {
+                // The run never reached an actionable state before `max_wait`.
+                // A scheduled/triggered fire has no user watching the channel,
+                // so silence here is the exact gap #6896 closes: deliver the
+                // timeout notice as a terminal reply so the creator sees the
+                // run is hung, then record `Delivered` (the notice reached
+                // the channel) rather than `Failed` (which would hide it).
+                tracing::warn!(
+                    target = "ironclaw::reborn::run_delivery",
+                    %run_id,
+                    "triggered run timed out before reaching an actionable state; delivering timeout notice"
+                );
+                let notification_context = TriggeredNotificationContext {
+                    scope: &scope,
+                    thread_scope: &thread_scope,
+                    actor: &actor,
+                    run_id,
+                    trigger_context: &trigger_context,
+                    delivery_target: delivery_target.as_ref(),
+                    authority: &authority,
+                };
+                let notice = TriggeredNotification {
+                    event_kind: RunNotificationEventKind::FinalReplyReady,
+                    intent: DeliveryIntent::TriggeredDelivery,
+                    text: format!(
+                        "{}{}",
+                        prompts::DELIVERY_TIMEOUT_MESSAGE,
+                        prompts::triggered_update_footer(&trigger_label)
+                    ),
+                    attachments: Vec::new(),
+                    gate_ref_for_routing: None,
+                    require_direct_message_target: false,
+                };
+                let outcome =
+                    match deliver_triggered_notification(services, &notification_context, notice)
+                        .await
+                    {
+                        Ok(_) => TriggeredRunDeliveryOutcomeKind::Delivered,
+                        Err(TriggeredNotificationFailure::NoDefaultConfigured) => {
+                            TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+                        }
+                        Err(TriggeredNotificationFailure::Denied) => {
+                            TriggeredRunDeliveryOutcomeKind::Denied
+                        }
+                        Err(TriggeredNotificationFailure::OAuthTargetNotDm)
+                        | Err(TriggeredNotificationFailure::Other(_)) => {
+                            TriggeredRunDeliveryOutcomeKind::Failed
+                        }
+                    };
+                record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+                return outcome;
+            }
             Err(err) => {
                 tracing::warn!(
                     target = "ironclaw::reborn::run_delivery",
@@ -361,7 +418,6 @@ async fn deliver_triggered_run(
             }
         };
 
-        let trigger_label = prompts::triggered_label_from_prompt(&prompt);
         let notification = match triggered_notification_for_state(
             services,
             &scope,
@@ -561,10 +617,16 @@ async fn deliver_triggered_run(
 /// - `BlockedAuth`     → auth prompt (OAuth link) or, for non-OAuth, a
 ///   cancel + final-reply carrying the auth-unavailable notice
 /// - `Completed`       → final reply
+/// - `Failed` / `RecoveryRequired` → final reply carrying the per-category
+///   failure summary (`reborn_failure_summary_for_category`) so a scheduled
+///   run that died is not delivered as silence (#6896).
+/// - `Cancelled`       → final reply carrying a fixed cancellation notice.
 ///
-/// Anything else yields `None` — triggered delivery deliberately does not
-/// stream progress; that belongs to the live WebUI surface. Preserve that
-/// boundary when extending this function.
+/// Non-actionable in-channel states (in flight, or parked on a gate this
+/// surface does not drive: resource / dependent-run / external tool) yield
+/// `None` — triggered delivery deliberately does not stream progress, which
+/// belongs to the live WebUI surface. Preserve that boundary when extending
+/// this function.
 async fn triggered_notification_for_state(
     services: &RunDeliveryServices,
     scope: &TurnScope,
@@ -717,7 +779,65 @@ async fn triggered_notification_for_state(
                 }
             }
         }
-        _ => Ok(None),
+        TurnStatus::Failed | TurnStatus::RecoveryRequired => {
+            // Terminal failure: deliver the per-category failure summary so
+            // the creator sees *why* the scheduled run died, not silence.
+            // The category comes from the sanitized failure on the run
+            // state; a missing category falls back to the generic summary.
+            let category = state.failure.as_ref().map(|failure| failure.category());
+            let summary = reborn_failure_summary_for_category(category);
+            Ok(Some(TriggeredNotification {
+                event_kind: RunNotificationEventKind::FinalReplyReady,
+                intent: DeliveryIntent::TriggeredDelivery,
+                text: format!(
+                    "{}{}",
+                    summary,
+                    prompts::triggered_update_footer(trigger_label)
+                ),
+                attachments: Vec::new(),
+                gate_ref_for_routing: None,
+                require_direct_message_target: false,
+            }))
+        }
+        TurnStatus::Cancelled => {
+            // A scheduled run the host cancelled (auth-auto-deny, policy,
+            // supersession, or an operator action). If the run carries a
+            // sanitized failure category, surface that summary instead of
+            // the generic cancellation notice — a categorized cancel (e.g.
+            // an interrupted run reported as a failure category) should not
+            // be hidden behind generic copy. Falls back to the fixed
+            // cancellation notice when no category is present.
+            let category = state.failure.as_ref().map(|failure| failure.category());
+            let text = match category {
+                Some(category) => reborn_failure_summary_for_category(Some(category)),
+                None => prompts::TRIGGERED_RUN_CANCELED_MESSAGE,
+            };
+            Ok(Some(TriggeredNotification {
+                event_kind: RunNotificationEventKind::FinalReplyReady,
+                intent: DeliveryIntent::TriggeredDelivery,
+                text: format!(
+                    "{}{}",
+                    text,
+                    prompts::triggered_update_footer(trigger_label)
+                ),
+                attachments: Vec::new(),
+                gate_ref_for_routing: None,
+                require_direct_message_target: false,
+            }))
+        }
+        // Non-actionable in-channel: still in flight, or parked on a gate
+        // this surface does not drive (resource / dependent-run / external
+        // tool). The triggered surface is output-only plus approval/auth
+        // gate-resolution; other blocked states stay silent here and are
+        // surfaced through the WebUI. Returning `None` records `Skipped`,
+        // which is correct for these non-terminal states — the run has not
+        // reached a terminal outcome to deliver.
+        TurnStatus::Queued
+        | TurnStatus::Running
+        | TurnStatus::CancelRequested
+        | TurnStatus::BlockedResource
+        | TurnStatus::BlockedDependentRun
+        | TurnStatus::BlockedExternalTool => Ok(None),
     }
 }
 

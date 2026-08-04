@@ -19,7 +19,7 @@ use ironclaw_extension_contracts::preference_target::{
 };
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
-    SourceBindingRef, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
+    SanitizedFailure, SourceBindingRef, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     attachment::WorkspaceFile,
@@ -71,12 +71,30 @@ use ironclaw_turns::{
 struct ScriptedRunState {
     status: TurnStatus,
     gate_ref: Option<TurnGateRef>,
+    /// Sanitized failure category carried on the run state. Populated for
+    // `Failed`/`RecoveryRequired` so the triggered failure-summary arm has a
+    // category to render; `None` otherwise.
+    failure: Option<SanitizedFailure>,
 }
 
 fn scripted_state(status: TurnStatus, gate_ref: Option<&str>) -> ScriptedRunState {
     ScriptedRunState {
         status,
         gate_ref: gate_ref.map(|s| TurnGateRef::new(s).expect("gate ref")),
+        failure: None,
+    }
+}
+
+/// Scripted `Failed`/`RecoveryRequired` state carrying a sanitized failure
+/// category, so tests can assert the per-category failure summary reaches the
+/// channel instead of silence (#6896).
+fn scripted_failed_state(category: &str) -> ScriptedRunState {
+    ScriptedRunState {
+        status: TurnStatus::Failed,
+        gate_ref: None,
+        failure: Some(
+            SanitizedFailure::new(category.to_string()).expect("valid failure category"),
+        ),
     }
 }
 
@@ -162,7 +180,7 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
             gate_ref: scripted.gate_ref,
             blocked_activity_id: None,
             credential_requirements: Vec::new(),
-            failure: None,
+            failure: scripted.failure.clone(),
             event_cursor: EventCursor(1),
             product_context: None,
             resume_disposition: None,
@@ -2117,4 +2135,136 @@ async fn triggered_oauth_prompt_to_non_dm_target_cancels_and_notifies() {
     assert_eq!(texts.len(), 1, "only the auth-unavailable notice");
     assert!(!texts[0].contains("Setup link:"), "{}", texts[0]);
     assert!(texts[0].contains("Ironclaw web app"), "{}", texts[0]);
+}
+
+// ── Triggered failure delivery (#6896) ─────────────────────────────────────
+//
+// A scheduled/triggered run that ends in Failed / Cancelled / RecoveryRequired
+// must still deliver a terminal notice to the creator's preference target,
+// carrying the per-category failure summary — not silence (Skipped).
+
+#[tokio::test]
+async fn triggered_failed_run_delivers_failure_summary_to_preference_target() {
+    let harness = build_triggered_harness(
+        vec![scripted_failed_state("model_error")],
+        None,
+        true,
+    );
+    seed_preference(&harness.store).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1, "failure notice delivered once");
+    assert!(
+        texts[0].contains("The run failed while calling the model"),
+        "per-category failure summary reaches the channel: {}",
+        texts[0]
+    );
+    assert!(
+        texts[0].contains("From a triggered event:"),
+        "triggered footer present: {}",
+        texts[0]
+    );
+    let envelopes = harness.adapter.envelopes();
+    assert_eq!(
+        envelopes[0].target.conversation.conversation_id(),
+        "dm-creator",
+        "failure notice routed to the decoded preference target"
+    );
+}
+
+#[tokio::test]
+async fn triggered_failed_run_without_failure_category_falls_back_to_generic_summary() {
+    // A Failed run whose sanitized failure was lost (legacy/older row) still
+    // delivers the generic unknown-category summary rather than vanishing.
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::Failed, None)],
+        None,
+        true,
+    );
+    seed_preference(&harness.store).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1);
+    assert!(
+        texts[0].contains("The run failed before producing a reply"),
+        "generic fallback summary delivered: {}",
+        texts[0]
+    );
+}
+
+#[tokio::test]
+async fn triggered_cancelled_run_delivers_cancellation_notice() {
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::Cancelled, None)],
+        None,
+        true,
+    );
+    seed_preference(&harness.store).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1, "cancellation notice delivered once");
+    assert!(
+        texts[0].contains("canceled before it could finish"),
+        "cancellation notice text present: {}",
+        texts[0]
+    );
+    assert!(
+        texts[0].contains("From a triggered event:"),
+        "triggered footer present: {}",
+        texts[0]
+    );
+}
+
+#[tokio::test]
+async fn triggered_run_that_times_out_before_actionable_delivers_timeout_notice() {
+    // A run that never reaches an actionable state before `max_wait` used to
+    // only log a warn and record `Failed` — hiding the hang from the creator.
+    // It now delivers the timeout notice as a terminal reply (#6896).
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::Running, None)],
+        None,
+        true,
+    );
+    seed_preference(&harness.store).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1, "timeout notice delivered once");
+    assert!(
+        texts[0].contains("taking longer than expected"),
+        "timeout notice text present: {}",
+        texts[0]
+    );
+    assert!(
+        texts[0].contains("From a triggered event:"),
+        "triggered footer present: {}",
+        texts[0]
+    );
 }

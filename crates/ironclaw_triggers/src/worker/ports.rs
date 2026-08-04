@@ -113,9 +113,37 @@ pub struct TriggerAcceptedFireSettlement {
     pub turn_scope: TurnScope,
 }
 
+/// A previously-accepted fire whose run reached a terminal *failure* state
+/// observed by the active-cleanup sweep. Carries enough identity to let an
+/// observer correlate it back to the originating fire for automation-health
+/// telemetry or a redrive, without re-deriving it from display strings.
+///
+/// `status` is the [`TriggerRunHistoryStatus`] the active-cleanup sweep
+/// cleared the fire with; today the failure path always clears with
+/// [`TriggerRunHistoryStatus::Error`] (the run's terminal `Failed` /
+/// `Cancelled` / `RecoveryRequired` outcome). The field is typed rather than
+/// hardcoded so a future richer history status survives an additive change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerFailedFireSettlement {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub fire_slot: Timestamp,
+    pub run_id: TurnRunId,
+    pub status: TriggerRunHistoryStatus,
+}
+
 #[async_trait]
 pub trait TriggerFireSettlementObserver: Send + Sync {
     async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement);
+
+    /// A previously-accepted fire settled into a terminal failure state.
+    ///
+    /// Default no-op so existing implementors (notably
+    /// [`NoopTriggerFireSettlementObserver`] and test doubles) keep compiling
+    /// without change; production observers override this to surface
+    /// automation-health signal for failed triggered runs (#6896). This is
+    /// strictly observational — it must not mint runs or mutate trigger state.
+    async fn on_failed_fire_settled(&self, _event: TriggerFailedFireSettlement) {}
 }
 
 #[derive(Debug, Default)]
@@ -124,6 +152,8 @@ pub struct NoopTriggerFireSettlementObserver;
 #[async_trait]
 impl TriggerFireSettlementObserver for NoopTriggerFireSettlementObserver {
     async fn on_accepted_fire_settled(&self, _event: TriggerAcceptedFireSettlement) {}
+
+    async fn on_failed_fire_settled(&self, _event: TriggerFailedFireSettlement) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
