@@ -175,6 +175,18 @@ pub struct PrivacyMetadata {
     pub redaction_hash: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Set when scrubbing left secret-like content behind, i.e. this trace must
+    /// not reach a dataset until a human has reviewed it.
+    ///
+    /// Typed on purpose. Dataset eligibility used to be decided by scanning
+    /// `warnings` for the substring `"quarantined"`, whose sole producer is one
+    /// English sentence — so rewording, translating or localising that sentence
+    /// silently opened the gate, quietly and in the permissive direction
+    /// (#7144). `#[serde(default)]` keeps envelopes written before this field
+    /// existed loading; for those the typed `residual_pii_risk` check is what
+    /// closes the gate, exactly as it did before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quarantined: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -656,6 +668,26 @@ pub enum CanonicalRepresentationKind {
     Correction,
 }
 
+impl CanonicalRepresentationKind {
+    /// Discriminator segment for the durable `vector_key`.
+    ///
+    /// Frozen at the exact strings `format!("{:?}")` + `to_ascii_lowercase()`
+    /// produced, so no key already in a vector store moves. They deliberately
+    /// differ from the serde wire tags (`wholetrace` vs `whole_trace`): keeping
+    /// the existing keys addressable matters more than making the two spellings
+    /// agree, and the point of the change is that a variant rename can no longer
+    /// silently re-key anything (#7144).
+    pub fn vector_key_segment(self) -> &'static str {
+        match self {
+            Self::WholeTrace => "wholetrace",
+            Self::Turn => "turn",
+            Self::ToolSequence => "toolsequence",
+            Self::ErrorOutcome => "erroroutcome",
+            Self::Correction => "correction",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CanonicalTraceRepresentation {
     pub kind: CanonicalRepresentationKind,
@@ -707,6 +739,14 @@ impl HindsightRelabelingCandidate {
     }
 }
 
+/// Credit-event discriminator.
+///
+/// No `#[serde(rename_all = "snake_case")]`, unlike every sibling enum in this
+/// file — and it must stay that way. Its PascalCase tags are already written
+/// into `submissions.json`, which carries no schema version and has no
+/// migration, so flipping the wire form would make every existing file fail to
+/// deserialize (#7144). The inconsistency is load-bearing; [`Self::as_str`] is
+/// what decouples durable identity from `Debug`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TraceCreditEventKind {
     Accepted,
@@ -722,6 +762,30 @@ pub enum TraceCreditEventKind {
     UsedForTrainingOrRanking,
     ReviewerBonus,
     AbusePenalty,
+}
+
+impl TraceCreditEventKind {
+    /// Stable identity for persisted fingerprints. Frozen at the strings
+    /// `Debug` produced, so no `submissions.json` already on disk changes
+    /// meaning; a variant rename now moves this `match` instead of silently
+    /// re-fingerprinting every acknowledged notice.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accepted => "Accepted",
+            Self::RejectedPrivacy => "RejectedPrivacy",
+            Self::RejectedDuplicate => "RejectedDuplicate",
+            Self::CreditSynced => "CreditSynced",
+            Self::Replayable => "Replayable",
+            Self::NovelCluster => "NovelCluster",
+            Self::UnderrepresentedCoverage => "UnderrepresentedCoverage",
+            Self::UserCorrectionIncluded => "UserCorrectionIncluded",
+            Self::ConvertedToBenchmark => "ConvertedToBenchmark",
+            Self::CaughtRegression => "CaughtRegression",
+            Self::UsedForTrainingOrRanking => "UsedForTrainingOrRanking",
+            Self::ReviewerBonus => "ReviewerBonus",
+            Self::AbusePenalty => "AbusePenalty",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -762,7 +826,7 @@ pub enum TraceUploadAuthMode {
     /// Operator-minted workload token read from env (legacy/back-compat path).
     #[default]
     WorkloadTokenEnv,
-    /// Self-signed workload JWTs using the standaloneice key (agent onboarding path).
+    /// Self-signed workload JWTs using the standalone device key (agent onboarding path).
     DeviceKey,
 }
 
@@ -1148,7 +1212,12 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
         .as_ref()
         .and_then(|analysis| analysis.novelty_score)
         .unwrap_or_else(|| (event_count / 12.0).clamp(0.15, 0.6))
-        .min(0.85);
+        // `.clamp`, not `.min`: `novelty_score` is an unvalidated
+        // `Option<f32>` off `embedding_analysis`, which is re-scored from the
+        // on-disk queue, so a negative value from a downstream embedding job
+        // used to pass straight through while its sibling `duplicate_score` was
+        // clamped both ways (#7144).
+        .clamp(0.0, 0.85);
     let duplicate_penalty = envelope
         .embedding_analysis
         .as_ref()
@@ -1376,7 +1445,22 @@ pub fn capture_turns_from_conversation_messages(
 fn parse_capture_tool_calls(content: &str) -> Vec<RawTraceCaptureToolCall> {
     let value = match serde_json::from_str::<Value>(content) {
         Ok(value) => value,
-        Err(_) => return Vec::new(),
+        Err(error) => {
+            // Dropping every tool call with no trace left `required_tools`
+            // empty while `replayable` was computed independently — so the
+            // envelope shipped a positive false claim (replayable with no
+            // required tools), lost its coverage bonus, and omitted the
+            // "Tools used:" line from the embedding text, all silently (#7144).
+            // The empty result is still the right *value* here; what was missing
+            // is any way to know it happened.
+            tracing::debug!(
+                target: "ironclaw::reborn::traces::capture",
+                error = %error,
+                content_len = content.len(),
+                "tool_calls payload is not JSON; recording zero tool calls for this turn"
+            );
+            return Vec::new();
+        }
     };
     let calls = match value {
         Value::Array(calls) => calls,
@@ -2140,24 +2224,39 @@ impl PrivacyFilterAdapter for CommandPrivacyFilterAdapter {
                 reason: format!("failed to serialize privacy filter request: {error}"),
             }
         })?;
-        stdin.write_all(&request_body).await.map_err(|error| {
-            TraceContributionError::RedactionFailed {
-                reason: format!("failed to write privacy filter request: {error}"),
-            }
+        // The write must run *concurrently* with draining stdout, and the whole
+        // exchange must sit under the timeout.
+        //
+        // Before #7144 the parent wrote up to `max_input_bytes` (1 MiB by
+        // default) into stdin while nothing read stdout, and the timeout covered
+        // only `wait_with_output`. A sidecar that emits more than one pipe
+        // buffer (64 KiB) before draining its input deadlocks both ends, and the
+        // parked `write_all` is under no timeout at all — so the redaction task
+        // wedges forever, leaking a live child process per turn.
+        // `kill_on_drop` does not help: nothing cancels a future that is never
+        // polled to completion.
+        let write_request = async move {
+            stdin.write_all(&request_body).await?;
+            stdin.shutdown().await?;
+            drop(stdin);
+            Ok::<(), std::io::Error>(())
+        };
+        let (write_result, output) = tokio::time::timeout(self.timeout, async move {
+            tokio::join!(write_request, child.wait_with_output())
+        })
+        .await
+        .map_err(|_| TraceContributionError::RedactionFailed {
+            reason: format!(
+                "privacy filter sidecar timed out after {}ms",
+                self.timeout.as_millis()
+            ),
         })?;
-        drop(stdin);
-
-        let output = tokio::time::timeout(self.timeout, child.wait_with_output())
-            .await
-            .map_err(|_| TraceContributionError::RedactionFailed {
-                reason: format!(
-                    "privacy filter sidecar timed out after {}ms",
-                    self.timeout.as_millis()
-                ),
-            })?
-            .map_err(|error| TraceContributionError::RedactionFailed {
-                reason: format!("privacy filter sidecar failed: {error}"),
-            })?;
+        write_result.map_err(|error| TraceContributionError::RedactionFailed {
+            reason: format!("failed to write privacy filter request: {error}"),
+        })?;
+        let output = output.map_err(|error| TraceContributionError::RedactionFailed {
+            reason: format!("privacy filter sidecar failed: {error}"),
+        })?;
 
         if output.stdout.len() > self.max_stdout_bytes {
             return Err(TraceContributionError::RedactionFailed {
@@ -2539,7 +2638,7 @@ impl DeterministicTraceRedactor {
         }
 
         let residual_pii_risk = residual_risk(&trace.consent, &report);
-        let redaction_hash = redaction_hash(&events, &report.counts);
+        let redaction_hash = redaction_hash(&events, &report.counts)?;
         let mut warnings = privacy_warnings(residual_pii_risk);
         warnings.extend(report.warnings.clone());
         let privacy = PrivacyMetadata {
@@ -2552,6 +2651,7 @@ impl DeterministicTraceRedactor {
             residual_pii_risk,
             redaction_hash,
             warnings,
+            quarantined: quarantines_trace(residual_pii_risk),
         };
 
         let trace_card = build_trace_card(
@@ -2585,15 +2685,17 @@ impl DeterministicTraceRedactor {
     }
 }
 
-pub fn rescrub_trace_envelope(envelope: &mut TraceContributionEnvelope) {
+pub fn rescrub_trace_envelope(
+    envelope: &mut TraceContributionEnvelope,
+) -> Result<(), TraceContributionError> {
     let redactor = DeterministicTraceRedactor::default();
-    rescrub_trace_envelope_with(&redactor, envelope);
+    rescrub_trace_envelope_with(&redactor, envelope)
 }
 
 pub fn rescrub_trace_envelope_with(
     redactor: &DeterministicTraceRedactor,
     envelope: &mut TraceContributionEnvelope,
-) {
+) -> Result<(), TraceContributionError> {
     let mut report = RedactionReport::default();
     let mut state = RedactionState::default();
 
@@ -2663,8 +2765,12 @@ pub fn rescrub_trace_envelope_with(
         &mut envelope.privacy.warnings,
         vec!["Server-side trace re-scrub was applied before corpus storage.".to_string()],
     );
+    // `max_residual_risk` only ever raises the risk, so the quarantine flag
+    // follows it upward and is never cleared by a re-scrub.
+    envelope.privacy.quarantined |= quarantines_trace(envelope.privacy.residual_pii_risk);
     envelope.privacy.redaction_hash =
-        redaction_hash(&envelope.events, &envelope.privacy.redaction_counts);
+        redaction_hash(&envelope.events, &envelope.privacy.redaction_counts)?;
+    Ok(())
 }
 
 fn residual_risk(consent: &ConsentMetadata, report: &RedactionReport) -> ResidualPiiRisk {
@@ -2696,6 +2802,13 @@ fn merge_privacy_warnings(existing: &mut Vec<String>, new_warnings: Vec<String>)
     }
 }
 
+/// Whether `risk` means the trace must be held back from datasets pending
+/// review. Single source of truth for the quarantine decision, so the operator
+/// sentence in [`privacy_warnings`] stays prose an author may freely reword.
+fn quarantines_trace(risk: ResidualPiiRisk) -> bool {
+    matches!(risk, ResidualPiiRisk::High)
+}
+
 fn privacy_warnings(risk: ResidualPiiRisk) -> Vec<String> {
     match risk {
         ResidualPiiRisk::Low => Vec::new(),
@@ -2725,15 +2838,46 @@ fn build_trace_card(
         .into_iter()
         .collect();
 
+    // Derived from `allowed_uses`, not hardcoded. Retention was computed twice
+    // by different rules: this card stamped `private_corpus_revocable`
+    // unconditionally while `retention_policy_for_trace` ranked the allowed uses
+    // — and they disagree for three of the five consent scopes (a
+    // ModelTraining-scoped trace is `training_revocable`/1095d, not
+    // `private_corpus_revocable`/730d). The card is what crosses the wire, so
+    // the wrong value was the one that shipped (#7144).
+    let allowed_uses = allowed_uses_for_scopes(consent_scopes);
+    let retention_policy = strongest_retention_policy_for_allowed_uses(&allowed_uses);
+
     TraceCard {
         consent_scope,
         redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
         source_channel: channel_label(channel).to_string(),
         tool_categories,
-        allowed_uses: allowed_uses_for_scopes(consent_scopes),
-        retention_policy: "private_corpus_revocable".to_string(),
+        allowed_uses,
+        retention_policy: retention_policy.name,
         revocation_handle: revocation_handle.to_string(),
     }
+}
+
+/// The retention policy implied by the strongest allowed use. Single source of
+/// the ranking, shared by [`build_trace_card`] and [`retention_policy_for_trace`]
+/// so the card and the derivation can no longer drift.
+fn strongest_retention_policy_for_allowed_uses(
+    allowed_uses: &[TraceAllowedUse],
+) -> TraceRetentionPolicy {
+    let strongest = allowed_uses
+        .iter()
+        .copied()
+        .max_by_key(|allowed_use| match allowed_use {
+            TraceAllowedUse::ModelTraining => 5,
+            TraceAllowedUse::RankingModelTraining => 4,
+            TraceAllowedUse::BenchmarkGeneration => 3,
+            TraceAllowedUse::Evaluation => 2,
+            TraceAllowedUse::Debugging => 1,
+            TraceAllowedUse::AggregateAnalytics => 0,
+        })
+        .unwrap_or(TraceAllowedUse::Debugging);
+    retention_policy_for_allowed_use(strongest)
 }
 
 fn allowed_uses_for_scopes(scopes: &[ConsentScope]) -> Vec<TraceAllowedUse> {
@@ -2816,21 +2960,7 @@ pub fn retention_policy_for_allowed_use(allowed_use: TraceAllowedUse) -> TraceRe
 }
 
 pub fn retention_policy_for_trace(envelope: &TraceContributionEnvelope) -> TraceRetentionPolicy {
-    let strongest = envelope
-        .trace_card
-        .allowed_uses
-        .iter()
-        .copied()
-        .max_by_key(|allowed_use| match allowed_use {
-            TraceAllowedUse::ModelTraining => 5,
-            TraceAllowedUse::RankingModelTraining => 4,
-            TraceAllowedUse::BenchmarkGeneration => 3,
-            TraceAllowedUse::Evaluation => 2,
-            TraceAllowedUse::Debugging => 1,
-            TraceAllowedUse::AggregateAnalytics => 0,
-        })
-        .unwrap_or(TraceAllowedUse::Debugging);
-    let mut policy = retention_policy_for_allowed_use(strongest);
+    let mut policy = strongest_retention_policy_for_allowed_uses(&envelope.trace_card.allowed_uses);
     if !envelope.consent.revocable {
         policy.revocable = false;
     }
@@ -2902,13 +3032,11 @@ pub fn trace_dataset_eligibility(
             reasons.push("high residual privacy risk is not dataset eligible".to_string());
         }
     }
-    if envelope
-        .privacy
-        .warnings
-        .iter()
-        .any(|warning| warning.to_ascii_lowercase().contains("quarantined"))
-    {
-        reasons.push("trace is quarantined by privacy warning".to_string());
+    // Keyed on the typed flag, never on warning prose (#7144). The
+    // `residual_pii_risk` fallback covers envelopes persisted before the flag
+    // existed, whose `quarantined` deserializes to its `false` default.
+    if envelope.privacy.quarantined || quarantines_trace(envelope.privacy.residual_pii_risk) {
+        reasons.push("trace is quarantined pending privacy review".to_string());
     }
 
     TraceDatasetEligibility {
@@ -3068,9 +3196,19 @@ fn push_canonical_representation(
         .collect::<String>();
     representations.push(CanonicalTraceRepresentation {
         kind,
+        // `kind.vector_key_segment()`, never `{:?}`. This key is durable and
+        // cross-service — it addresses rows in a vector store — and deriving its
+        // discriminator from `Debug` meant renaming a variant silently re-keyed
+        // every future embedding and orphaned the indexed ones (#7144). The
+        // segments are frozen at the values `Debug` produced, so no existing key
+        // moves; `canonical_representation_kind_vector_key_segments_are_frozen`
+        // pins them.
         vector_key: format!(
-            "trace:{}:{:?}:{}:{}",
-            envelope.trace_id, kind, index, hash_fragment
+            "trace:{}:{}:{}:{}",
+            envelope.trace_id,
+            kind.vector_key_segment(),
+            index,
+            hash_fragment
         )
         .to_ascii_lowercase(),
         canonical_hash,
@@ -3275,11 +3413,30 @@ fn canonical_hash(content: &str) -> String {
     format!("sha256:{}", hex::encode(digest))
 }
 
-fn redaction_hash(events: &[TraceContributionEvent], counts: &BTreeMap<String, u32>) -> String {
+/// Integrity/dedupe digest over the redacted events and their counts.
+///
+/// Fallible on purpose. `serde_json::to_vec(...).unwrap_or_default()` hashed
+/// *zero bytes* on a serialization failure, so every failing trace produced the
+/// same well-formed `sha256:…` — a silent collision in the value used for
+/// dedupe and integrity, and one that still satisfies the `starts_with("sha256:")`
+/// dependability check downstream (#7144). Failing is the only honest answer;
+/// both callers can carry it.
+fn redaction_hash(
+    events: &[TraceContributionEvent],
+    counts: &BTreeMap<String, u32>,
+) -> Result<String, TraceContributionError> {
     let mut hasher = Sha256::new();
-    hasher.update(serde_json::to_vec(events).unwrap_or_default());
-    hasher.update(serde_json::to_vec(counts).unwrap_or_default());
-    format!("sha256:{}", hex::encode(hasher.finalize()))
+    hasher.update(serde_json::to_vec(events).map_err(|error| {
+        TraceContributionError::RedactionFailed {
+            reason: format!("redacted trace events could not be serialized for hashing: {error}"),
+        }
+    })?);
+    hasher.update(serde_json::to_vec(counts).map_err(|error| {
+        TraceContributionError::RedactionFailed {
+            reason: format!("redaction counts could not be serialized for hashing: {error}"),
+        }
+    })?);
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
 fn redact_tool_specific_payload(
@@ -4387,11 +4544,28 @@ fn trace_scope_mutation_lock(scope: Option<&str>) -> Arc<tokio::sync::Mutex<()>>
         Ok(locks) => locks,
         Err(poisoned) => poisoned.into_inner(),
     };
+    // Drop entries nobody holds or is waiting on. Without this the map grew one
+    // entry per distinct (tenant, user) for the lifetime of the process — on a
+    // hosted instance, the lifetime count of distinct users (#7144).
+    //
+    // NOT the wholesale `clear()` that bounds `CREDIT_VIEW_CACHE`: these `Arc`s
+    // *are* the mutual-exclusion identity. Evicting one while a guard is alive
+    // would hand the next caller a fresh, uncontended mutex and silently break
+    // the serialization `trace_scope_flushes_serialize_same_scope_...` pins. A
+    // strong count of 1 means the map is the only owner, so no guard exists and
+    // no waiter can be queued.
+    if locks.len() > TRACE_SCOPE_MUTATION_LOCK_HIGH_WATER {
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+    }
     locks
         .entry(key)
         .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
         .clone()
 }
+
+/// Size at which [`trace_scope_mutation_lock`] sweeps unheld entries. A sweep is
+/// O(len) under the map lock, so it is amortized rather than run per call.
+const TRACE_SCOPE_MUTATION_LOCK_HIGH_WATER: usize = 1024;
 
 async fn lock_trace_scope_for_mutation(scope: Option<&str>) -> OwnedMutexGuard<()> {
     trace_scope_mutation_lock(scope).lock_owned().await
@@ -5237,6 +5411,17 @@ impl TraceRemoteRequestFailure {
         }
     }
 
+    /// A 2xx whose body is not the expected receipt. `Submission` rather than
+    /// `HttpRejection`: the transport succeeded, the payload did not.
+    fn response_invalid(operation: &'static str, detail: &'static str) -> Self {
+        Self {
+            status: None,
+            kind: TraceQueueTelemetryFailureKind::Submission,
+            message: format!("{operation}: {detail}"),
+            source: None,
+        }
+    }
+
     fn auth_rejection(&self) -> bool {
         matches!(
             self.status,
@@ -5455,6 +5640,17 @@ async fn trace_upload_issuer_claim_bearer_token(
             Ok(cache) => cache,
             Err(poisoned) => poisoned.into_inner(),
         };
+        // Expired entries were filtered on read but never removed, so the map
+        // grew one live-or-stale *bearer token* per user subject for the
+        // lifetime of the process (#7144). Sweeping on write keeps the secret
+        // retention bounded by what is actually usable, and the hard cap bounds
+        // the rest the way `CREDIT_VIEW_CACHE_MAX_SCOPES` bounds its cache —
+        // these entries are pure memoization and re-mint on demand.
+        let now = Utc::now();
+        cache.retain(|_, cached| cached.refresh_after > now);
+        if cache.len() >= TRACE_UPLOAD_CLAIM_CACHE_MAX_ENTRIES && !cache.contains_key(&cache_key) {
+            cache.clear();
+        }
         cache.insert(
             cache_key,
             CachedTraceUploadClaim {
@@ -5465,6 +5661,9 @@ async fn trace_upload_issuer_claim_bearer_token(
     }
     Ok(claim.access_token)
 }
+
+/// Hard cap on the upload-claim cache, mirroring `CREDIT_VIEW_CACHE_MAX_SCOPES`.
+const TRACE_UPLOAD_CLAIM_CACHE_MAX_ENTRIES: usize = 4096;
 
 fn trace_upload_cached_claim(cache_key: &str, now: DateTime<Utc>) -> Option<String> {
     let cache = match TRACE_UPLOAD_CLAIM_CACHE.lock() {
@@ -5681,7 +5880,7 @@ fn build_trace_upload_claim_http_error(
 /// Returns the bearer credential to present to the upload-claim issuer.
 ///
 /// - `TraceUploadAuthMode::DeviceKey`: self-signs a short-lived workload JWT
-///   with the standaloneice keypair for the tenant.  The context must carry a
+///   with the standalone device keypair for the tenant.  The context must carry a
 ///   `scope_dir`.
 /// - `TraceUploadAuthMode::WorkloadTokenEnv`: reads the workload token from
 ///   the environment variable named in the policy (existing behavior, byte-for-byte
@@ -7574,14 +7773,20 @@ async fn submit_trace_envelope_to_endpoint_with_token(
         ));
     }
 
-    Ok(
-        parse_trace_submission_receipt(&body).unwrap_or_else(|| TraceSubmissionReceipt {
-            status: "submitted".to_string(),
-            credit_points_pending: Some(envelope.value.credit_points_pending),
-            credit_points_final: None,
-            explanation: envelope.value.explanation.clone(),
-        }),
-    )
+    // A 2xx whose body does not parse is not a receipt. Synthesizing
+    // `status: "submitted"` with a *locally estimated* credit told the user the
+    // server had accepted something it may never have seen — and the caller then
+    // recorded it as Submitted and deleted the queued envelope, destroying the
+    // only retryable copy (#7144). Every field of `TraceSubmissionReceipt` has a
+    // serde default, so `{}` already parses; reaching this branch means the body
+    // was not a JSON object at all (proxy HTML, a truncated read), which is
+    // exactly when inventing success is least defensible.
+    parse_trace_submission_receipt(&body).ok_or_else(|| {
+        TraceRemoteRequestFailure::response_invalid(
+            "trace submission",
+            "server returned success with a body that is not a submission receipt",
+        )
+    })
 }
 
 pub fn record_submitted_trace_envelope_for_scope(
@@ -9032,10 +9237,18 @@ fn trace_credit_notice_fingerprint(records: &[NodeTraceSubmissionRecord]) -> Opt
             .credit_events
             .iter()
             .map(|event| {
+                // `event.kind.as_str()`, never `{:?}`. This fingerprint is
+                // persisted in `submissions.json` and compared on every load to
+                // decide whether an acknowledged or snoozed credit notice stays
+                // suppressed — so deriving it from `Debug` meant a variant
+                // rename resurfaced every user's dismissed notice and pushed a
+                // duplicate outbox item (#7144). The record's own `status` two
+                // lines below already used a stable `as_str()`; the event kind
+                // simply had not.
                 format!(
-                    "{}:{:?}:{:.6}:{}",
+                    "{}:{}:{:.6}:{}",
                     event.event_id,
-                    event.kind,
+                    event.kind.as_str(),
                     event.points_delta,
                     event.created_at.timestamp_millis()
                 )
@@ -9351,9 +9564,18 @@ fn compact_trace_queue_for_scope_unlocked(
                 report.malformed_envelopes_quarantined.saturating_add(1);
             continue;
         };
+        // `?`, not `.ok().flatten()`. A hold is a consent/authorization
+        // artifact, and the reader is fail-loud precisely so an unreadable
+        // sidecar cannot be mistaken for "no hold" — which ranked the held
+        // envelope as unheld and let compaction delete it, silently, while
+        // every other IO failure in this function propagates (#7144).
         let hold = read_trace_queue_hold_sidecar_for_envelope(&path)
-            .ok()
-            .flatten()
+            .with_context(|| {
+                format!(
+                    "trace queue compaction could not read the hold sidecar for {}",
+                    path.display()
+                )
+            })?
             .and_then(|sidecar| {
                 trace_queue_submission_id_from_envelope_path(&path)
                     .map(|submission_id| trace_queue_hold_from_sidecar(submission_id, &sidecar))
@@ -10908,11 +11130,78 @@ mod tests {
         );
     }
 
+    /// The three sidecar tests below are the coverage for stderr suppression,
+    /// environment scrubbing and oversized-stdout rejection. They used to open
+    /// with `if !Path::new("/bin/sh").exists() { return; }` — so on a runner
+    /// without a POSIX shell they reported success while asserting nothing, the
+    /// "green gate enforcing nothing" shape this program has repeatedly paid for
+    /// (#7144).
+    ///
+    /// Fail-closed two ways now. `#[cfg(unix)]` means the tests do not exist on
+    /// Windows rather than silently passing there — and Windows never runs this
+    /// suite anyway (`windows-build` is `cargo check`, not `cargo test`). On
+    /// unix, where POSIX guarantees `/bin/sh`, a missing shell is a hard
+    /// failure.
+    ///
+    /// Deliberately not the `IRONCLAW_REQUIRE_DOCKER_TESTS` shape: that flag is
+    /// set nowhere in the repo, so the gate it guards is itself inert. A
+    /// precondition that CI must remember to opt into is a precondition that
+    /// will be forgotten.
+    #[cfg(unix)]
+    fn require_posix_shell() {
+        assert!(
+            Path::new("/bin/sh").exists(),
+            "/bin/sh is missing on a unix host — these sidecar security tests \
+             must fail rather than skip, or they prove nothing"
+        );
+    }
+
+    /// #7144: the parent wrote the whole request into the sidecar's stdin
+    /// before anything drained stdout, and the timeout covered only
+    /// `wait_with_output` — so a sidecar that emits more than one pipe buffer
+    /// before reading its input deadlocked both ends with no timeout over the
+    /// parked write. In the runtime path that wedges a spawned task and leaks a
+    /// live child process per turn, unbounded.
+    ///
+    /// Every pre-existing sidecar test opens with `cat >/dev/null`, i.e. drains
+    /// stdin first — structurally the one ordering that cannot deadlock — and
+    /// passes 5 bytes of input. This one inverts both: the sidecar writes
+    /// ~256 KiB of stdout *before* reading, against ~256 KiB of input.
+    ///
+    /// Wrapped in an outer timeout so a regression fails the suite in seconds
+    /// instead of hanging CI until the job limit.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_privacy_filter_does_not_deadlock_on_a_sidecar_that_writes_before_reading() {
+        require_posix_shell();
+        let adapter = CommandPrivacyFilterAdapter::new("/bin/sh")
+            .with_args([
+                "-c",
+                // Fill the stdout pipe well past its buffer, then read stdin.
+                "printf 'x%.0s' $(seq 1 262144); cat >/dev/null; \
+                 printf '{\"redacted_text\":\"ok\"}'",
+            ])
+            .with_output_limits(2 * 1024 * 1024, 64 * 1024);
+
+        let big_input = "y".repeat(256 * 1024);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            adapter.redact_text(&big_input),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "the sidecar exchange deadlocked: stdin must be written concurrently \
+             with draining stdout, and the whole exchange must sit under the \
+             adapter timeout"
+        );
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn command_privacy_filter_error_does_not_echo_stderr() {
-        if !Path::new("/bin/sh").exists() {
-            return;
-        }
+        require_posix_shell();
         let adapter = CommandPrivacyFilterAdapter::new("/bin/sh").with_args([
             "-c",
             "cat >/dev/null; printf '%s' 'raw-secret-from-stderr' >&2; exit 7",
@@ -10929,11 +11218,10 @@ mod tests {
         assert!(!error.contains("raw-secret-from-stderr"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn command_privacy_filter_adapter_does_not_inherit_trace_commons_tokens() {
-        if !Path::new("/bin/sh").exists() {
-            return;
-        }
+        require_posix_shell();
         let _env_guard =
             EnvVarRestore::set("TRACE_COMMONS_TENANT_TOKENS", "tenant-a:super-secret-token");
 
@@ -10950,11 +11238,10 @@ mod tests {
         assert_eq!(redaction.redacted_text, "unset");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn command_privacy_filter_rejects_oversized_stdout() {
-        if !Path::new("/bin/sh").exists() {
-            return;
-        }
+        require_posix_shell();
         let adapter = CommandPrivacyFilterAdapter::new("/bin/sh")
             .with_args([
                 "-c",
@@ -11287,6 +11574,260 @@ mod tests {
                 .reasons
                 .iter()
                 .any(|reason| reason.contains("high residual privacy risk"))
+        );
+    }
+
+    /// Durable identifiers must not be derived from `Debug` (#7144). Both of
+    /// these cross a persistence boundary — `vector_key` addresses rows in a
+    /// vector store, the credit fingerprint is written into `submissions.json`
+    /// and compared on every load to keep an acknowledged notice suppressed —
+    /// and a `{:?}` derivation meant a variant rename silently re-keyed the
+    /// first and resurfaced every dismissed notice for the second.
+    ///
+    /// Frozen at the values `Debug` produced, so nothing already persisted
+    /// moves. A rename now has to come here.
+    #[test]
+    fn durable_identifier_segments_are_frozen_against_variant_renames() {
+        assert_eq!(
+            [
+                CanonicalRepresentationKind::WholeTrace,
+                CanonicalRepresentationKind::Turn,
+                CanonicalRepresentationKind::ToolSequence,
+                CanonicalRepresentationKind::ErrorOutcome,
+                CanonicalRepresentationKind::Correction,
+            ]
+            .map(CanonicalRepresentationKind::vector_key_segment),
+            [
+                "wholetrace",
+                "turn",
+                "toolsequence",
+                "erroroutcome",
+                "correction"
+            ],
+            "vector keys are durable and cross-service; changing a segment \
+             orphans every embedding already indexed under the old key"
+        );
+
+        assert_eq!(
+            [
+                TraceCreditEventKind::Accepted,
+                TraceCreditEventKind::RejectedPrivacy,
+                TraceCreditEventKind::RejectedDuplicate,
+                TraceCreditEventKind::CreditSynced,
+                TraceCreditEventKind::Replayable,
+                TraceCreditEventKind::NovelCluster,
+                TraceCreditEventKind::UnderrepresentedCoverage,
+                TraceCreditEventKind::UserCorrectionIncluded,
+                TraceCreditEventKind::ConvertedToBenchmark,
+                TraceCreditEventKind::CaughtRegression,
+                TraceCreditEventKind::UsedForTrainingOrRanking,
+                TraceCreditEventKind::ReviewerBonus,
+                TraceCreditEventKind::AbusePenalty,
+            ]
+            .iter()
+            .map(TraceCreditEventKind::as_str)
+            .collect::<Vec<_>>(),
+            vec![
+                "Accepted",
+                "RejectedPrivacy",
+                "RejectedDuplicate",
+                "CreditSynced",
+                "Replayable",
+                "NovelCluster",
+                "UnderrepresentedCoverage",
+                "UserCorrectionIncluded",
+                "ConvertedToBenchmark",
+                "CaughtRegression",
+                "UsedForTrainingOrRanking",
+                "ReviewerBonus",
+                "AbusePenalty",
+            ],
+            "credit-notice fingerprints are persisted in submissions.json with \
+             no schema version and no migration; changing a spelling resurfaces \
+             every acknowledged notice and duplicates its outbox item"
+        );
+
+        // The serde wire tags are the *other* durable form and must also stay
+        // PascalCase: `submissions.json` already holds them, so adding
+        // `rename_all = "snake_case"` for consistency with the sibling enums
+        // would make every existing file fail to deserialize.
+        assert_eq!(
+            serde_json::to_string(&TraceCreditEventKind::RejectedPrivacy).expect("serializes"),
+            "\"RejectedPrivacy\""
+        );
+    }
+
+    /// #7144: the trace card stamped `private_corpus_revocable` unconditionally
+    /// while `retention_policy_for_trace` ranked `allowed_uses` — and they
+    /// disagree for three of the five consent scopes. The card is what crosses
+    /// the wire, so the wrong value was the one that shipped.
+    #[tokio::test]
+    async fn trace_card_retention_matches_the_ranked_derivation() {
+        for (scope, expected) in [
+            (
+                ConsentScope::DebuggingEvaluation,
+                "private_corpus_revocable",
+            ),
+            (ConsentScope::BenchmarkOnly, "benchmark_revocable"),
+            (ConsentScope::ModelTraining, "training_revocable"),
+        ] {
+            let raw = RawTraceContribution::from_recorded_trace(
+                &sample_trace(),
+                RecordedTraceContributionOptions::default().set_consent_scopes(vec![scope]),
+            );
+            let envelope = DeterministicTraceRedactor::default()
+                .redact_trace(raw)
+                .await
+                .expect("redaction should succeed");
+
+            assert_eq!(
+                envelope.trace_card.retention_policy, expected,
+                "the card must carry the policy the allowed uses imply for {scope:?}"
+            );
+            assert_eq!(
+                envelope.trace_card.retention_policy,
+                retention_policy_for_trace(&envelope).name,
+                "the card and the ranked derivation must not disagree for {scope:?}"
+            );
+        }
+    }
+
+    /// #7144: `novelty_score` is an unvalidated `Option<f32>` that is re-scored
+    /// off the on-disk queue, and only its upper bound was enforced — so a
+    /// negative value from a downstream embedding job passed straight through
+    /// while its sibling `duplicate_score` was clamped both ways.
+    #[tokio::test]
+    async fn novelty_score_is_clamped_at_both_ends() {
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let mut envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+
+        envelope.embedding_analysis = Some(EmbeddingAnalysisMetadata {
+            embedding_model: None,
+            canonical_summary_hash: String::new(),
+            trace_vector_id: None,
+            nearest_trace_ids: Vec::new(),
+            cluster_id: None,
+            nearest_cluster_id: None,
+            novelty_score: Some(-4.0),
+            duplicate_score: None,
+            coverage_tags: Vec::new(),
+        });
+        let low = compute_value_scorecard(&envelope);
+        assert!(
+            low.novelty >= 0.0,
+            "a negative novelty must be clamped, got {}",
+            low.novelty
+        );
+
+        envelope.embedding_analysis = Some(EmbeddingAnalysisMetadata {
+            embedding_model: None,
+            canonical_summary_hash: String::new(),
+            trace_vector_id: None,
+            nearest_trace_ids: Vec::new(),
+            cluster_id: None,
+            nearest_cluster_id: None,
+            novelty_score: Some(99.0),
+            duplicate_score: None,
+            coverage_tags: Vec::new(),
+        });
+        let high = compute_value_scorecard(&envelope);
+        assert_eq!(high.novelty, 0.85, "the upper cap must still hold");
+    }
+
+    /// #7144: dataset eligibility used to be decided by scanning `warnings` for
+    /// the substring `"quarantined"`, whose sole producer is one English
+    /// sentence in `privacy_warnings`. Rewording, translating or localising that
+    /// sentence silently opened the gate — quietly, and in the permissive
+    /// direction.
+    ///
+    /// The sabotage the old gate could not survive is the first case here: the
+    /// prose is replaced wholesale and the gate must still hold.
+    #[tokio::test]
+    async fn quarantine_gate_survives_rewording_the_operator_warning() {
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default()
+                .set_consent_scopes(vec![ConsentScope::ModelTraining]),
+        );
+        let mut envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+
+        // A high-risk trace carries the typed flag from the producer.
+        envelope.privacy.residual_pii_risk = ResidualPiiRisk::High;
+        envelope.privacy.quarantined = true;
+        envelope.privacy.warnings =
+            vec!["Sekretartige Inhalte gefunden; bitte zuruckhalten.".to_string()];
+        let localised = trace_dataset_eligibility(&envelope, TraceAllowedUse::ModelTraining, false);
+        assert!(!localised.eligible);
+        assert!(
+            localised
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("quarantined")),
+            "the gate must key on the typed flag, not the sentence: {:?}",
+            localised.reasons
+        );
+
+        // An envelope persisted before the flag existed deserializes it as
+        // `false`; the typed risk check is what has to close the gate there.
+        envelope.privacy.quarantined = false;
+        let legacy = trace_dataset_eligibility(&envelope, TraceAllowedUse::ModelTraining, false);
+        assert!(
+            !legacy.eligible,
+            "a pre-flag high-risk envelope must still be held: {:?}",
+            legacy.reasons
+        );
+
+        // And prose alone must not close it on a low-risk trace: the substring
+        // used to be sufficient, so an unrelated warning that happened to
+        // contain the word blocked an eligible trace.
+        envelope.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+        envelope.privacy.warnings = vec!["Downstream job quarantined a sibling trace.".to_string()];
+        let prose_only =
+            trace_dataset_eligibility(&envelope, TraceAllowedUse::ModelTraining, false);
+        assert!(
+            prose_only.eligible,
+            "warning prose must not decide eligibility either way: {:?}",
+            prose_only.reasons
+        );
+    }
+
+    /// The producer and the gate must agree, driven through `redact_trace`
+    /// rather than by setting the field by hand: an envelope has to arrive from
+    /// redaction already carrying the typed flag that matches its typed risk,
+    /// or the gate is reading a value nothing maintains.
+    #[tokio::test]
+    async fn redaction_flags_quarantine_on_the_envelope_it_produces() {
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default(),
+        );
+        let mut envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+        assert_eq!(
+            envelope.privacy.quarantined,
+            envelope.privacy.residual_pii_risk == ResidualPiiRisk::High,
+            "the typed flag must track the typed risk the producer computed"
+        );
+
+        // A server-side re-scrub raises risk monotonically, so it must be able
+        // to raise the flag — and must never clear one already set.
+        envelope.privacy.residual_pii_risk = ResidualPiiRisk::High;
+        envelope.privacy.quarantined = false;
+        rescrub_trace_envelope(&mut envelope).expect("re-scrub should succeed");
+        assert!(
+            envelope.privacy.quarantined,
+            "a re-scrub that sees High risk must raise the quarantine flag"
         );
     }
 
@@ -14679,7 +15220,16 @@ mod tests {
         let error = flush_trace_contribution_queue_for_scope(Some(&scope), 10)
             .await
             .expect_err("compaction hold removal failure should fail flush");
-        assert!(error.to_string().contains("duplicate queue hold"));
+        // #7144: the unreadable sidecar used to be swallowed by
+        // `.ok().flatten()`, so compaction ranked the held envelope as unheld
+        // and only tripped later, on the duplicate-hold removal. It now fails at
+        // the read — earlier, and naming the artifact that could not be read
+        // instead of a downstream symptom.
+        let message = error.to_string();
+        assert!(
+            message.contains("hold sidecar"),
+            "the failure must name the unreadable hold, got: {message}"
+        );
 
         let diagnostics = trace_queue_diagnostics_for_scope(Some(&scope)).expect("diagnostics");
         let failure = diagnostics
@@ -15091,7 +15641,8 @@ mod tests {
             "Authorization": "Bearer abcdefghijklmnopqrstuvwxyz123456",
             "path": "/tmp/ironclaw/private/token.txt"
         });
-        rescrub_trace_envelope_with(&DeterministicTraceRedactor::new(Vec::new()), &mut envelope);
+        rescrub_trace_envelope_with(&DeterministicTraceRedactor::new(Vec::new()), &mut envelope)
+            .expect("re-scrub should succeed");
 
         let json = serde_json::to_string(&envelope).expect("envelope serializes");
         assert!(json.contains("<PRIVATE_LOCAL_PATH_"));
