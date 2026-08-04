@@ -14,7 +14,8 @@
 
 - Host-controlled trust evaluation, currently:
 - Trust-decision vocabulary: `EffectiveTrustClass`, `TrustDecision`, `AuthorityCeiling`, `HostTrustAssignment`, `TrustProvenance` (`decision`). Privileged variants (FirstParty, System) are crate-internal to construct.
-- Trust policy and layered sources: `TrustPolicy`, `HostTrustPolicy`, `TrustPolicyInput` (`policy`); `PolicySource`, `AdminConfig`/`AdminEntry`, `BundledRegistry`/`BundledEntry` (`sources`).
+- Trust policy and layered sources: `TrustPolicy`, `HostTrustPolicy` (`policy`); `PolicySource`, `AdminConfig`/`AdminEntry`, `BundledRegistry`/`BundledEntry` (`sources`).
+- **`TrustPolicyInput` is not owned here** — it is requested-trust *vocabulary* and lives in `ironclaw_host_api::trust`, beside `PackageIdentity` and `RequestedTrustClass`, every one of which is one of its fields. It moved there so a manifest-bearing package producer (`ironclaw_extensions`, layer `substrates`) can describe its trust request without depending on the kernel-layer engine that judges it (PROPOSAL §6.8.1, WS2). Import it from `ironclaw_host_api::trust`; do not re-export it from this crate.
 - Synchronous fail-closed invalidation: `InvalidationBus`, `TrustChange`, `TrustChangeListener` (`invalidation`).
 - The `Clock` abstraction (`clock`), `TrustError` (`error`), and test fixtures (`fixtures`).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.

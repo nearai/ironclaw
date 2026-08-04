@@ -4026,7 +4026,7 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
     impl TrustPolicy for StaticTrustPolicy {
         fn evaluate(
             &self,
-            _input: &ironclaw_trust::TrustPolicyInput,
+            _input: &ironclaw_host_api::trust::TrustPolicyInput,
         ) -> Result<TrustDecision, ironclaw_trust::TrustError> {
             use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustProvenance};
             Ok(TrustDecision {

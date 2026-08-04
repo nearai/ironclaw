@@ -8,6 +8,7 @@ use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthor
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::result_meta::FailureKind;
+use ironclaw_host_api::trust::TrustPolicyInput;
 use ironclaw_host_api::{
     action::NetworkPolicy,
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
@@ -31,7 +32,6 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, InvalidationBus,
-    TrustPolicyInput,
 };
 use serde_json::json;
 
