@@ -671,6 +671,18 @@ impl RebornRuntimeInput {
         self
     }
 
+    /// Raise the deployment's per-caller workspace scoping decision after the
+    /// input has been built. `serve` uses this because whether the deployment
+    /// produces non-operator callers (SSO on) is only known after the auth
+    /// surface is resolved. Raise-only; no-op when the services input is
+    /// absent.
+    pub fn with_workspace_scoped_per_caller_services(mut self, required: bool) -> Self {
+        self.services = self
+            .services
+            .map(|services| services.with_workspace_scoped_per_caller(required));
+        self
+    }
+
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
         self

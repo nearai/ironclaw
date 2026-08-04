@@ -427,6 +427,18 @@ impl ServeCommand {
                     default_project_id.as_ref(),
                 ));
 
+            // ONE decision for both sides of the workspace. The browser
+            // confines every non-operator caller's Workspace reads to
+            // `tenants/{tenant}/users/{user}`; if the agent's writes were not
+            // scoped to the same subtree those users would see an empty
+            // workspace. SSO is what introduces non-operator callers, so a
+            // standalone-composed deployment that turns SSO on must scope its
+            // writes too --- the profile default alone would leave that
+            // combination mismatched.
+            let workspace_scoped_per_caller = workspace_scoped_per_caller(profile, sso_enabled);
+            runtime_input = runtime_input
+                .with_workspace_scoped_per_caller_services(workspace_scoped_per_caller);
+
             let runtime = build_reborn_runtime(runtime_input)
                 .await
                 .context("failed to assemble Reborn runtime for `serve`")?;
@@ -544,9 +556,7 @@ impl ServeCommand {
             let mut serve_config =
                 WebuiServeConfig::new(tenant_id.clone(), authenticator, allowed_origins)
                     .with_default_agent_id(default_agent_id.clone())
-                    .with_workspace_requires_scoped_projection(
-                        profile_requires_scoped_workspace_projection(profile),
-                    );
+                    .with_workspace_requires_scoped_projection(workspace_scoped_per_caller);
             if let Some(project_id) = default_project_id.clone() {
                 serve_config = serve_config.with_default_project_id(project_id);
             }
@@ -666,6 +676,18 @@ impl ServeCommand {
 /// handles write to. One predicate, no view/write drift.
 fn profile_requires_scoped_workspace_projection(profile: RebornProfile) -> bool {
     crate::runtime::composition_profile(profile).workspace_scoped_per_caller()
+}
+
+/// The deployment's effective workspace scoping decision: the profile default,
+/// raised when SSO is on.
+///
+/// Both sides of the workspace read it --- the composition write lanes
+/// (capability grants, approval leases, attachment landing) and the WebUI
+/// browser's `/fs/*` projection --- so a caller always reads the subtree the
+/// agent writes to. SSO is the condition because the browser scopes every
+/// non-operator caller, and SSO sessions are what produce them.
+fn workspace_scoped_per_caller(profile: RebornProfile, sso_enabled: bool) -> bool {
+    profile_requires_scoped_workspace_projection(profile) || sso_enabled
 }
 
 struct StartupServe {

@@ -718,6 +718,20 @@ impl RebornHostBindings {
         self
     }
 
+    /// Require per-caller workspace scoping regardless of profile.
+    ///
+    /// The profile default already scopes every hosted profile. A host raises
+    /// it here when its own wiring introduces callers the WebUI workspace
+    /// browser confines to a subtree --- notably a multi-user authenticator on
+    /// a standalone-composed deployment, where the browser would otherwise read
+    /// a per-user subtree the agent never writes to. Raise-only: passing
+    /// `false` leaves a scoped profile scoped.
+    pub fn with_workspace_scoped_per_caller(mut self, required: bool) -> Self {
+        self.deployment.workspace_scoped_per_caller =
+            self.deployment.workspace_scoped_per_caller || required;
+        self
+    }
+
     pub fn with_runtime_policy(mut self, policy: EffectiveRuntimePolicy) -> Self {
         self.deployment.runtime_policy = Some(policy);
         self

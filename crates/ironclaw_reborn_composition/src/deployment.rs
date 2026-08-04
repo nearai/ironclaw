@@ -241,7 +241,13 @@ pub struct DeploymentConfig {
     /// subtree the WebUI workspace browser reads. `false` keeps the ambient
     /// shared view, including the raw host aliases local coding profiles
     /// depend on.
-    workspace_scoped_per_caller: bool,
+    ///
+    /// Profile-derived by default; the assembling host raises it through
+    /// [`crate::input::RebornHostBindings::with_workspace_scoped_per_caller`]
+    /// when its own wiring introduces callers the WebUI browser confines to a
+    /// subtree — a multi-user authenticator on a standalone-composed
+    /// deployment, for instance. Raise-only: a hosted profile stays scoped.
+    pub(crate) workspace_scoped_per_caller: bool,
     storage_shape: StorageShape,
     /// Runtime backends the build must provision (extension-runtime): a
     /// declarative requirement carried on the deployment rather than injected

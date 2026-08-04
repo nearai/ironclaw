@@ -323,6 +323,7 @@ pub(super) async fn build_backend_production(
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
     let RebornProductionBuildContext {
         profile,
+        workspace_scoped_per_caller,
         wiring_config,
         production_wiring,
         local_process_port,
@@ -399,7 +400,7 @@ pub(super) async fn build_backend_production(
                             reason: error.to_string(),
                         }
                     })?;
-                let runtime_workspace_mounts = if profile.workspace_scoped_per_caller() {
+                let runtime_workspace_mounts = if workspace_scoped_per_caller {
                     crate::runtime_mounts::WorkspaceMountPolicy::PerCaller
                 } else {
                     crate::runtime_mounts::WorkspaceMountPolicy::Shared(

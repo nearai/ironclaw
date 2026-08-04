@@ -315,6 +315,53 @@ mod tests {
         );
     }
 
+    /// Under a per-caller workspace policy the `/workspace` grant target is a
+    /// nested path (`/projects/workspace/tenants/{t}/users/{u}`) rather than
+    /// the source root itself. The bind must resolve to that subdirectory,
+    /// create it when it does not exist yet, and stay inside the trusted
+    /// source --- otherwise `builtin.shell` breaks on every hosted deployment.
+    #[tokio::test]
+    async fn per_caller_workspace_grant_binds_the_callers_subdirectory() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_root = temp.path().join("source");
+        tokio::fs::create_dir_all(source_root.join("workspace"))
+            .await
+            .unwrap();
+        let default_workspace = temp.path().join("default-workspace");
+        tokio::fs::create_dir_all(&default_workspace).await.unwrap();
+        let sources = sources_with(VirtualPath::new("/projects").unwrap(), &source_root);
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").unwrap(),
+            VirtualPath::new("/projects/workspace/tenants/acme/users/alice").unwrap(),
+            process_read_write_permissions(),
+        )])
+        .unwrap();
+
+        let binds = sources
+            .prepare_container_binds(&default_workspace, Some(&mounts))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            binds.len(),
+            1,
+            "the /workspace grant replaces the default bind"
+        );
+        let bind = binds[0].clone().into_docker_bind();
+        let expected_host_dir = source_root
+            .join("workspace/tenants/acme/users/alice")
+            .canonicalize()
+            .expect("the read-write bind target is created on demand");
+        assert!(
+            bind.starts_with(expected_host_dir.to_str().unwrap()),
+            "bind should map the caller subdirectory, got {bind}"
+        );
+        assert!(
+            bind.ends_with(":/workspace:rw"),
+            "bind should mount it read-write at /workspace, got {bind}"
+        );
+    }
+
     #[tokio::test]
     async fn none_mounts_use_default_workspace_bind() {
         let temp = tempfile::tempdir().unwrap();
