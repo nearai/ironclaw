@@ -306,6 +306,55 @@ pub(crate) fn production_skill_management_mount_view(
     ])
 }
 
+/// Read-side skill mounts for the production path, targeting the DATABASE-backed tree.
+///
+/// Must mirror [`production_skill_management_mount_view`]'s targets exactly, because a reader and a
+/// writer pointed at different trees is not a degraded feature — it is a silent, permanent one.
+///
+/// That was the bug. The writer resolves `/skills` to `/tenants/{t}/users/{u}/skills`, and the
+/// composite routes `/tenants` to the database. The reader used `scoped_skill_context_mount_view`,
+/// which resolves `/skills` to `/projects/tenants/{t}/users/{u}/skills`, and `/projects` routes to
+/// the host disk. So `skill_install` wrote to the database, discovery listed the disk, and an
+/// agent-installed skill was never visible again: `installed: true`, present in `skill_list` within
+/// the session, absent from Settings → Skills and unactivatable in every later one. Reproduced by
+/// hand on the WebUI (nearai/ironclaw#7168).
+///
+/// Skills belong entirely in the virtual filesystem, database-backed. A host-disk path for tenant
+/// skill data is also wrong on its own terms under hosted multi-tenancy, where there is no
+/// meaningful host disk for a tenant.
+///
+/// `/system/skills` stays where the writer leaves it, so bundled skills keep resolving; moving that
+/// tree into the database as well is the remaining step toward skills being wholly DB-backed, and
+/// it needs bundled seeding to write into the database at boot rather than ship on disk.
+pub(crate) fn production_skill_context_mount_view(
+    scope: &ResourceScope,
+) -> Result<MountView, HostApiError> {
+    MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/skills")?,
+            VirtualPath::new(format!(
+                "/tenants/{}/users/{}/skills",
+                scope.tenant_id.as_str(),
+                scope.user_id.as_str()
+            ))?,
+            MountPermissions::read_only(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/tenant-shared/skills")?,
+            VirtualPath::new(format!(
+                "/tenants/{}/tenant-shared/skills",
+                scope.tenant_id.as_str()
+            ))?,
+            MountPermissions::read_only(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/system/skills")?,
+            VirtualPath::new("/system/skills")?,
+            MountPermissions::read_only(),
+        ),
+    ])
+}
+
 pub(crate) fn production_system_extensions_lifecycle_mount_view() -> Result<MountView, HostApiError>
 {
     MountView::new(vec![MountGrant::new(
@@ -412,7 +461,7 @@ pub(super) async fn build_backend_production(
                 (
                     Arc::new(ScopedFilesystem::new(
                         Arc::clone(&stores.filesystem),
-                        scoped_skill_context_mount_view,
+                        production_skill_context_mount_view,
                     )),
                     Arc::new(ScopedFilesystem::with_fixed_view(
                         Arc::clone(&stores.filesystem),

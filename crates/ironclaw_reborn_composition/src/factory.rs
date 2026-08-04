@@ -46,7 +46,7 @@ use crate::outbound::{
 use crate::outbound_store_assembly::build_outbound_stores;
 use crate::runtime_input::RebornRuntimeIdentity;
 use crate::runtime_mounts::{
-    memory_mount_view, scoped_skill_context_mount_view, skill_management_mount_view,
+    memory_mount_view, skill_management_mount_view,
     workspace_mount_view,
 };
 #[cfg(all(test, unix))]
@@ -217,7 +217,7 @@ pub(crate) use trigger_creation_assembly::{
 use trigger_creation_assembly::{
     pair_trigger_creator, validate_trigger_delivery_target_against_registry,
 };
-mod production_backend_assembly;
+pub(crate) mod production_backend_assembly;
 mod production_build_assembly;
 mod runtime_lane_assembly;
 use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;

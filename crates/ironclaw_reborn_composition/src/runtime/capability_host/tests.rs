@@ -2530,13 +2530,6 @@ mod tests {
             Some("string"),
             "the advertised input must be a single skill name, not an array"
         );
-        assert!(
-            descriptor
-                .parameters_schema
-                .get("properties")
-                .and_then(|properties| properties.get("names"))
-                .is_some()
-        );
         let tool_definition = port
             .tool_definitions()
             .expect("tool definitions")

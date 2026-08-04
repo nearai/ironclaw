@@ -170,3 +170,22 @@ pub use trace_capture::trace_capture_turn_event_sink_for_test;
 pub use trigger_materializer::materialize_trigger_prompt_for_test;
 #[cfg(feature = "test-support")]
 pub use user_profile::build_user_profile_source_for_test;
+
+/// Expose the production skill mount views so a test can compare the read and write sides.
+///
+/// They must resolve `/skills` to the same tree. When they did not, `skill_install` wrote to the
+/// database and discovery listed the host disk, and an agent-installed skill was invisible forever
+/// (nearai/ironclaw#7168). Comparing the views directly is the cheapest guard that names the
+/// divergence, and neither view is public outside this crate.
+pub fn production_skill_management_mount_view_for_test(
+    scope: &ironclaw_host_api::resource::ResourceScope,
+) -> Result<ironclaw_host_api::mount::MountView, ironclaw_host_api::error::HostApiError> {
+    crate::factory::production_backend_assembly::production_skill_management_mount_view(scope)
+}
+
+/// Read-side counterpart of [`production_skill_management_mount_view_for_test`].
+pub fn production_skill_context_mount_view_for_test(
+    scope: &ironclaw_host_api::resource::ResourceScope,
+) -> Result<ironclaw_host_api::mount::MountView, ironclaw_host_api::error::HostApiError> {
+    crate::factory::production_backend_assembly::production_skill_context_mount_view(scope)
+}

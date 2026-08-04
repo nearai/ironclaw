@@ -15,7 +15,7 @@
 //!
 //! The production composition builds, opens a conversation, and runs a skill-execution turn — so
 //! skills are wired on the production path. But a skill written to
-//! `tenants/<t>/users/<u>/skills/` **on disk is invisible to it**: production resolves the skill
+//! the DB-backed `/tenants/<t>/users/<u>/skills/` tree is what it reads: production resolves the skill
 //! store through the scoped-virtual filesystem (libSQL), not the host filesystem. Measured here:
 //! explicit `$name` activation returned an empty activation set for a disk-seeded skill.
 //!
@@ -140,7 +140,7 @@ async fn a_skill_in_the_production_virtual_filesystem_is_activatable_by_name() {
     let vfs = ironclaw_filesystem::LibSqlRootFilesystem::new(Arc::clone(&db))
         .expect("libsql root filesystem");
     let skill_path = ironclaw_host_api::path::VirtualPath::new(
-        "/projects/tenants/prod-skills-tenant/users/prod-skills-owner/skills/tenant-policy-helper/SKILL.md",
+        "/tenants/prod-skills-tenant/users/prod-skills-owner/skills/tenant-policy-helper/SKILL.md",
     )
     .expect("virtual path");
     ironclaw_filesystem::RootFilesystem::write_file(
@@ -262,7 +262,7 @@ async fn a_skill_in_the_production_store_is_activatable_after_restart() {
     let vfs = ironclaw_filesystem::LibSqlRootFilesystem::new(Arc::clone(&db))
         .expect("libsql root filesystem");
     let skill_path = ironclaw_host_api::path::VirtualPath::new(
-        "/projects/tenants/prod-restart-tenant/users/prod-restart-owner/skills/restart-policy-helper/SKILL.md",
+        "/tenants/prod-restart-tenant/users/prod-restart-owner/skills/restart-policy-helper/SKILL.md",
     )
     .expect("virtual path");
     ironclaw_filesystem::RootFilesystem::write_file(
@@ -309,4 +309,63 @@ async fn a_skill_in_the_production_store_is_activatable_after_restart() {
     );
 
     second.shutdown().await.expect("second shutdown");
+}
+
+/// The reader and the writer must resolve `/skills` to the SAME tree.
+///
+/// This is the guard for nearai/ironclaw#7168, and it is deliberately a pure mount-view comparison
+/// rather than a full install-then-list round trip: the two mount views are the entire bug surface,
+/// and comparing them fails in milliseconds with a message that names the divergence, where a round
+/// trip would need a capability port stood up and would report "skill not found" without saying why.
+///
+/// What went wrong: `production_skill_management_mount_view` resolves `/skills` to
+/// `/tenants/{t}/users/{u}/skills`, which the composite routes to the DATABASE, while the read side
+/// used `scoped_skill_context_mount_view` -> `/projects/tenants/{t}/users/{u}/skills`, which routes
+/// to the HOST DISK. `skill_install` wrote to one tree and discovery listed the other, so an
+/// agent-installed skill reported `installed: true`, appeared in `skill_list` for the rest of that
+/// session, and was then invisible forever.
+#[tokio::test]
+async fn production_skill_read_and_write_mounts_resolve_to_the_same_tree() {
+    use ironclaw_host_api::{
+        ids::{InvocationId, UserId},
+        resource::ResourceScope,
+    };
+
+    let scope = ResourceScope::local_default(
+        UserId::new("mount-parity-user").expect("user id"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+
+    let write =
+        ironclaw_reborn_composition::test_support::production_skill_management_mount_view_for_test(
+            &scope,
+        )
+        .expect("write mount view");
+    let read =
+        ironclaw_reborn_composition::test_support::production_skill_context_mount_view_for_test(
+            &scope,
+        )
+        .expect("read mount view");
+
+    // Resolve through the views rather than inspecting their internals: this is the exact call the
+    // runtime makes, so the test fails if resolution diverges for any reason, not just if the grant
+    // list looks different.
+    let probe = write
+        .scoped_path("/skills/example/SKILL.md")
+        .expect("scoped path");
+    let write_target = write.resolve(&probe).expect("write resolves").as_str().to_string();
+    let read_target = read.resolve(&probe).expect("read resolves").as_str().to_string();
+
+    assert_eq!(
+        read_target, write_target,
+        "skill discovery resolves to {read_target} while skill_install resolves to {write_target}. \
+         `/tenants` routes to the database and `/projects` routes to the host disk, so a mismatch \
+         means an installed skill is invisible forever -- installed: true, listed in-session, gone \
+         from every later one (nearai/ironclaw#7168)."
+    );
+    assert!(
+        write_target.starts_with("/tenants/"),
+        "skills must live in the DB-backed tree, not on host disk; got {write_target}"
+    );
 }
