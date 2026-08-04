@@ -9,17 +9,15 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{ids::ThreadId, path::ScopedPath};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    FilesystemSessionThreadService, SessionThreadError, SessionThreadRecord, SummaryArtifact,
-    ThreadMessageRecord, ThreadScope,
-};
+use crate::{FilesystemSessionThreadService, SessionThreadError, SessionThreadRecord, ThreadScope};
 
 use super::{
-    StoredThreadRecord, deserialize, invalid_path, is_not_found, map_cas_error, messages_root,
-    scope_axes_string, scoped_path, serialize_pretty, summaries_root,
+    IndexDeclarationPolicy, StoredThreadRecord, deserialize, invalid_path, is_not_found,
+    map_cas_error, scope_axes_string, scoped_path, serialize_pretty,
 };
 
 const THREAD_INDEX_KIND: &str = "thread_index";
+
 const THREAD_SCOPE_INDEX_KEY: &str = "scope_key";
 const THREAD_ACTIVITY_SORT_KEY: &str = "activity_sort";
 const THREAD_ID_INDEX_KEY: &str = "thread_id";
@@ -31,6 +29,13 @@ pub(super) struct ThreadIndexRecord {
     pub(super) record: SessionThreadRecord,
     pub(super) next_sequence: u64,
     flags: ThreadIndexFlags,
+    /// Sidebar label derived from the thread's first user message, written at
+    /// message-accept time (and healed lazily for rows that predate it).
+    /// Without it every list request re-derived titles with per-thread
+    /// transcript probes — an N+1 that dominates listing once a user has many
+    /// threads. `record.title` (user-set) always wins over this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) derived_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,29 +116,21 @@ where
                 return Ok(());
             }
         }
-        let root = thread_index_root(scope)?;
-        let spec = IndexSpec::new(
-            thread_index_name()?,
-            vec![
-                thread_index_key(THREAD_SCOPE_INDEX_KEY)?,
-                thread_index_key(THREAD_ACTIVITY_SORT_KEY)?,
-                thread_index_key(THREAD_ID_INDEX_KEY)?,
-            ],
-            IndexKind::Exact,
-        );
-        let result = self
-            .filesystem
-            .ensure_index(&scope.to_resource_scope(), &root, &spec)
-            .await;
-        if let Err(ironclaw_filesystem::FilesystemError::Unsupported { .. }) = result
-            && !required
-        {
-            return Ok(());
-        }
-        result.map_err(SessionThreadError::from)?;
+        // The listing projection is declared once per mount at the `/threads`
+        // alias root, not per scope. Ancestor-prefix resolution lets the
+        // per-scope `thread_index_root` query below still find it.
+        self.declare_root_indexes(
+            scope,
+            if required {
+                IndexDeclarationPolicy::Required
+            } else {
+                IndexDeclarationPolicy::Optional
+            },
+        )
+        .await?;
         if let Ok(mut ready) = self.ready_thread_index_scopes.lock() {
             ready.insert(scope_key.clone());
-            evict_hash_set_entry_over_limit(&mut ready, 128, &scope_key);
+            evict_entry_over_limit(&mut ready, 128, &scope_key);
         }
         if required {
             let marker = thread_index_migration_marker_path(scope)?;
@@ -176,6 +173,7 @@ where
         ThreadIndexRecord {
             record: stored.record.clone(),
             next_sequence: stored.next_sequence,
+            derived_title: None,
             flags: ThreadIndexFlags {
                 title_present: stored.record.title.is_some(),
                 metadata_present: stored.record.metadata_json.is_some(),
@@ -216,7 +214,7 @@ where
         if let Ok(mut known) = self.known_thread_index_rows.lock() {
             let key = thread_index_record_cache_key(scope, thread_id);
             known.insert(key.clone());
-            evict_hash_set_entry_over_limit(&mut known, THREAD_INDEX_KNOWN_ROW_MAX, &key);
+            evict_entry_over_limit(&mut known, THREAD_INDEX_KNOWN_ROW_MAX, &key);
         }
     }
 
@@ -313,6 +311,11 @@ where
             source.record.goal = existing.record.goal;
             source.flags.goal_present = true;
         }
+        // The derived sidebar label lives only on the index row; a rebuild
+        // from the source record must not erase it.
+        if same_source_generation && source.derived_title.is_none() {
+            source.derived_title = existing.derived_title;
+        }
         Ok(source)
     }
 
@@ -322,11 +325,27 @@ where
         thread_id: &ThreadId,
         updated_at: DateTime<Utc>,
     ) -> Result<(), SessionThreadError> {
+        self.touch_thread_index_updated_at_with_derived_title(scope, thread_id, updated_at, None)
+            .await
+    }
+
+    /// Activity touch that can also seed the derived sidebar label in the
+    /// same index-row CAS — zero extra round trips on the message-accept
+    /// path. The candidate only lands when the thread has neither a user-set
+    /// title nor a previously derived one.
+    pub(super) async fn touch_thread_index_updated_at_with_derived_title(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        updated_at: DateTime<Utc>,
+        derived_title: Option<String>,
+    ) -> Result<(), SessionThreadError> {
         self.ensure_thread_index_query(scope, false).await?;
         let path = thread_index_record_path(scope, thread_id)?;
         let resource_scope = scope.to_resource_scope();
         let scope_for_retry = scope.clone();
         let thread_id_for_retry = thread_id.clone();
+        let derived_title = &derived_title;
         let row_known = cas_update(
             self.filesystem.as_ref(),
             &resource_scope,
@@ -358,6 +377,9 @@ where
                         }
                     };
                     index.record.updated_at = Some(updated_at);
+                    if index.record.title.is_none() && index.derived_title.is_none() {
+                        index.derived_title = derived_title.as_ref().cloned();
+                    }
                     Ok(CasApply::new(index, true))
                 }
             },
@@ -367,6 +389,46 @@ where
         if row_known {
             self.mark_thread_index_known(scope, thread_id);
         }
+        Ok(())
+    }
+
+    /// Drop the cached sidebar label for a thread.
+    ///
+    /// The label is a copy of user message text, so whatever removes that text
+    /// must remove the copy: redaction clears the message content but the
+    /// listing serves the index row, which would otherwise keep showing the
+    /// redacted words. Clearing (rather than re-deriving here) keeps redaction
+    /// off the transcript-read path; the next list falls back to the probe,
+    /// which now sees the redacted message.
+    pub(super) async fn clear_derived_title(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), SessionThreadError> {
+        let path = thread_index_record_path(scope, thread_id)?;
+        let resource_scope = scope.to_resource_scope();
+        cas_update(
+            self.filesystem.as_ref(),
+            &resource_scope,
+            &path,
+            |bytes: &[u8]| deserialize::<ThreadIndexRecord>(bytes),
+            |record: &ThreadIndexRecord| Self::thread_index_entry(record),
+            |current: Option<ThreadIndexRecord>| async move {
+                let Some(mut index) = current else {
+                    return Ok(CasApply::no_op(
+                        no_op_thread_index_record(scope.clone(), thread_id.clone()),
+                        (),
+                    ));
+                };
+                if index.derived_title.is_none() {
+                    return Ok(CasApply::no_op(index, ()));
+                }
+                index.derived_title = None;
+                Ok(CasApply::new(index, ()))
+            },
+        )
+        .await
+        .map_err(map_cas_error)?;
         Ok(())
     }
 
@@ -483,10 +545,31 @@ where
             .filter(|entry| entry.file_type == FileType::Directory)
             .map(|entry| ThreadId::new(entry.name).map_err(invalid_path))
             .collect::<Result<Vec<_>, _>>()?;
+        // The title backfill below reads the transcript lookup projection, and
+        // on a scope upgraded from before that projection existed the rows are
+        // not there yet. Migrating first is what makes the backfill see legacy
+        // messages: skip it and every untitled thread derives `None`, the
+        // completion marker still lands, and each later sidebar request pays
+        // the per-thread transcript probe this migration exists to retire.
+        self.ensure_transcript_indexes_migrated(scope).await?;
         for thread_id in &thread_ids {
             if let Some((stored, _)) = self.read_thread_versioned(scope, thread_id).await? {
-                self.merge_thread_index_record_declared(Self::thread_index_record(&stored))
-                    .await?;
+                let mut index = Self::thread_index_record(&stored);
+                // Backfill the sidebar label here rather than from a list
+                // request: deriving it costs a transcript probe, and the
+                // listing projection must stay read-only (threads guardrail —
+                // projection backfill is explicit migration work).
+                if index.record.title.is_none() {
+                    // Propagate rather than `.ok()`: this migration writes a
+                    // completion marker, so swallowing a read failure records a
+                    // backfill that never happened and no later pass retries it.
+                    index.derived_title = self
+                        .first_user_message_for_title(scope, thread_id, stored.next_sequence)
+                        .await?
+                        .and_then(|message| message.content.as_deref().map(str::to_string))
+                        .and_then(|content| crate::title::derive_title_from_message(&content));
+                }
+                self.merge_thread_index_record_declared(index).await?;
             }
         }
         let source_ids = thread_ids
@@ -513,145 +596,6 @@ where
             }
         }
         Ok(thread_ids.len())
-    }
-
-    /// Idempotent rebuild for message, summary, and exact-lookup projections.
-    pub async fn migrate_transcript_indexes_for_scope(
-        &self,
-        scope: &ThreadScope,
-    ) -> Result<usize, SessionThreadError> {
-        let root = scoped_path(&format!("{}/threads", scope_axes_string(scope)))?;
-        let entries = match self
-            .filesystem
-            .list_dir(&scope.to_resource_scope(), &root)
-            .await
-        {
-            Ok(entries) => entries,
-            Err(error) if is_not_found(&error) => Vec::new(),
-            Err(error) => return Err(error.into()),
-        };
-        let thread_ids = entries
-            .into_iter()
-            .filter(|entry| entry.file_type == FileType::Directory)
-            .map(|entry| ThreadId::new(entry.name).map_err(invalid_path))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut migrated = 0usize;
-        for thread_id in thread_ids {
-            self.ensure_thread_record_indexes(scope, &thread_id).await?;
-            for (prefix, messages) in [
-                (messages_root(scope, &thread_id)?, true),
-                (summaries_root(scope, &thread_id)?, false),
-            ] {
-                let mut offset = 0u64;
-                loop {
-                    let rows = self
-                        .filesystem
-                        .query(
-                            &scope.to_resource_scope(),
-                            &prefix,
-                            &Filter::All,
-                            Page::new(offset, Page::MAX_LIMIT),
-                        )
-                        .await?;
-                    if rows.is_empty() {
-                        break;
-                    }
-                    let received = rows.len();
-                    let mut txn = self
-                        .filesystem
-                        .begin(
-                            &scope.to_resource_scope(),
-                            &scoped_path(crate::filesystem_service::THREADS_PREFIX)?,
-                        )
-                        .await?;
-                    for listed_row in rows {
-                        // The listing runs before BEGIN IMMEDIATE owns the
-                        // writer lock. Re-read inside the transaction so a
-                        // current-code message update in that window cannot
-                        // make this one-time migration fail with a stale CAS.
-                        let Some(row) = txn.get(&listed_row.path).await? else {
-                            continue;
-                        };
-                        let expected_kind = if messages {
-                            crate::filesystem_service::THREAD_MESSAGE_KIND
-                        } else {
-                            crate::filesystem_service::THREAD_SUMMARY_KIND
-                        };
-                        if row.entry.kind.as_ref().map(RecordKind::as_str) != Some(expected_kind) {
-                            continue;
-                        }
-                        let entry = if messages {
-                            let record = deserialize::<ThreadMessageRecord>(&row.entry.body)?;
-                            for (lookup_path, lookup_entry, expectation) in
-                                crate::filesystem_service::message_lookup_index::MessageLookupIndexStore::<F>::entries_for_message(
-                                    scope,
-                                    &thread_id,
-                                    &record,
-                                )?
-                            {
-                                let virtual_path = self
-                                    .filesystem
-                                    .resolve(&scope.to_resource_scope(), &lookup_path)?;
-                                if matches!(expectation, CasExpectation::Absent)
-                                    && txn.get(&virtual_path).await?.is_some()
-                                {
-                                    continue;
-                                }
-                                txn.put(&virtual_path, lookup_entry, expectation).await?;
-                            }
-                            Self::message_entry(&record)?
-                        } else {
-                            let record = deserialize::<SummaryArtifact>(&row.entry.body)?;
-                            Self::summary_entry(&record)?
-                        };
-                        txn.put(&row.path, entry, CasExpectation::Version(row.version))
-                            .await?;
-                    }
-                    txn.commit().await?;
-                    migrated = migrated.saturating_add(received);
-                    if received < Page::MAX_LIMIT as usize {
-                        break;
-                    }
-                    offset = offset.saturating_add(received as u64);
-                }
-            }
-        }
-        Ok(migrated)
-    }
-
-    pub(super) async fn ensure_transcript_indexes_migrated(
-        &self,
-        scope: &ThreadScope,
-    ) -> Result<(), SessionThreadError> {
-        let marker = transcript_index_migration_marker_path(scope)?;
-        if self
-            .filesystem
-            .get(&scope.to_resource_scope(), &marker)
-            .await?
-            .is_some()
-        {
-            return Ok(());
-        }
-        self.migrate_transcript_indexes_for_scope(scope).await?;
-        self.filesystem
-            .put(
-                &scope.to_resource_scope(),
-                &marker,
-                Entry::bytes(b"transcript-index-v1".to_vec()),
-                CasExpectation::Any,
-            )
-            .await?;
-        if self
-            .filesystem
-            .get(&scope.to_resource_scope(), &marker)
-            .await?
-            .is_none()
-        {
-            return Err(SessionThreadError::Backend(
-                "transcript index migration marker was not durable after write".to_string(),
-            ));
-        }
-        Ok(())
     }
 
     pub(super) async fn thread_record_with_index_overlay(
@@ -686,6 +630,20 @@ fn thread_index_name() -> Result<IndexName, SessionThreadError> {
         .map_err(|error| SessionThreadError::Backend(error.to_string()))
 }
 
+/// The thread-listing projection, declared once per mount at the `/threads`
+/// alias root alongside the transcript projections.
+pub(super) fn thread_activity_index_spec() -> Result<IndexSpec, SessionThreadError> {
+    Ok(IndexSpec::new(
+        thread_index_name()?,
+        vec![
+            thread_index_key(THREAD_SCOPE_INDEX_KEY)?,
+            thread_index_key(THREAD_ACTIVITY_SORT_KEY)?,
+            thread_index_key(THREAD_ID_INDEX_KEY)?,
+        ],
+        IndexKind::Exact,
+    ))
+}
+
 #[derive(Serialize, Deserialize)]
 struct ThreadIndexCursor {
     activity_sort: String,
@@ -710,15 +668,6 @@ fn thread_index_migration_marker_path(
 ) -> Result<ScopedPath, SessionThreadError> {
     scoped_path(&format!(
         "{}/index-migrations/thread-index-v1.complete",
-        scope_axes_string(scope)
-    ))
-}
-
-fn transcript_index_migration_marker_path(
-    scope: &ThreadScope,
-) -> Result<ScopedPath, SessionThreadError> {
-    scoped_path(&format!(
-        "{}/index-migrations/transcript-index-v1.complete",
         scope_axes_string(scope)
     ))
 }
@@ -755,13 +704,18 @@ fn thread_activity_sort_key(record: &SessionThreadRecord) -> String {
     format!("{descending_rank:020}")
 }
 
-fn evict_hash_set_entry_over_limit(set: &mut HashSet<String>, max_entries: usize, keep: &str) {
+/// Generic over the key so typed cache keys (a `(TenantId, UserId)` mount
+/// pair) do not have to be flattened into a string to be evicted.
+pub(super) fn evict_entry_over_limit<K>(set: &mut HashSet<K>, max_entries: usize, keep: &K)
+where
+    K: std::hash::Hash + Eq + Clone,
+{
     if set.len() <= max_entries {
         return;
     }
     let mut keys = set.iter();
     let victim = match keys.next() {
-        Some(first) if first.as_str() == keep => keys.next().cloned(),
+        Some(first) if first == keep => keys.next().cloned(),
         Some(first) => Some(first.clone()),
         None => None,
     };
@@ -772,6 +726,7 @@ fn evict_hash_set_entry_over_limit(set: &mut HashSet<String>, max_entries: usize
 
 fn no_op_thread_index_record(scope: ThreadScope, thread_id: ThreadId) -> ThreadIndexRecord {
     ThreadIndexRecord {
+        derived_title: None,
         record: SessionThreadRecord {
             scope,
             thread_id,
@@ -823,6 +778,7 @@ mod tests {
                 updated_at: Some(created_at),
             },
             next_sequence: 3,
+            derived_title: None,
             flags: ThreadIndexFlags {
                 title_present: true,
                 metadata_present: true,
@@ -841,6 +797,7 @@ mod tests {
                 updated_at: Some(created_at),
             },
             next_sequence: 7,
+            derived_title: None,
             flags: ThreadIndexFlags {
                 title_present: true,
                 metadata_present: true,

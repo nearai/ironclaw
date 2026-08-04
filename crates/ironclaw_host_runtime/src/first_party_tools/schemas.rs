@@ -408,6 +408,30 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             },
             "additionalProperties": false
         }),
+        "schemas/builtin/extension_register_hosted_mcp.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "desired_id": {
+                    "type": "string",
+                    "description": "Short stable id for this custom MCP server, without the reserved mcp- prefix."
+                },
+                "desired_name": {
+                    "type": "string",
+                    "description": "User-facing name for the custom MCP extension."
+                },
+                "endpoint": {
+                    "type": "string",
+                    "description": "HTTPS MCP server endpoint supplied by the user or provider documentation."
+                },
+                "auth_type": {
+                    "type": "string",
+                    "enum": ["no_auth", "bearer", "oauth"],
+                    "description": "Explicit authentication type from provider documentation or user context. Use no_auth only for a documented public endpoint, bearer for an API token or PAT, and oauth for a browser authorization-code flow. Ask the user when unclear; never infer automatically."
+                }
+            },
+            "required": ["desired_id", "desired_name", "endpoint", "auth_type"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/extension_install.input.v1.json"
         | "schemas/builtin/extension_remove.input.v1.json" => json!({
             "type": "object",
@@ -492,6 +516,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "phase",
                 "total_entries",
                 "returned_entries",
+                "catalog_total",
                 "truncated",
                 "entries"
             ],
@@ -1005,6 +1030,10 @@ mod tests {
                 .expect("IronHub search output schema is registered");
 
         assert!(input["properties"].get("acknowledge_unverified").is_none());
+        assert!(
+            input["properties"].get("private_manifest_url").is_none(),
+            "model-visible IronHub install must not choose a private manifest source"
+        );
         assert_eq!(input["additionalProperties"], false);
         assert_eq!(
             install_output["properties"]["phase"]["enum"],
@@ -1016,6 +1045,7 @@ mod tests {
                 "phase",
                 "total_entries",
                 "returned_entries",
+                "catalog_total",
                 "truncated",
                 "entries"
             ])
@@ -1028,8 +1058,30 @@ mod tests {
             search_output["properties"]["returned_entries"]["type"],
             "integer"
         );
+        assert_eq!(
+            search_output["properties"]["catalog_total"]["type"],
+            "integer"
+        );
         assert_eq!(search_output["properties"]["truncated"]["type"], "boolean");
         assert_eq!(search_output["additionalProperties"], false);
+    }
+
+    #[test]
+    fn hosted_mcp_registration_schema_requires_explicit_non_auto_auth() {
+        let input = resolve_builtin_input_schema_ref(
+            "schemas/builtin/extension_register_hosted_mcp.input.v1.json",
+        )
+        .expect("hosted MCP registration input schema is registered");
+
+        assert_eq!(
+            input["required"],
+            serde_json::json!(["desired_id", "desired_name", "endpoint", "auth_type"])
+        );
+        assert_eq!(
+            input["properties"]["auth_type"]["enum"],
+            serde_json::json!(["no_auth", "bearer", "oauth"])
+        );
+        assert_eq!(input["additionalProperties"], false);
     }
 
     #[test]

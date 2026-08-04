@@ -46,8 +46,8 @@ use crate::outbound::{
 use crate::outbound_store_assembly::build_outbound_stores;
 use crate::runtime_input::RebornRuntimeIdentity;
 use crate::runtime_mounts::{
-    ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
-    skill_management_mount_view, workspace_mount_view,
+    memory_mount_view, scoped_skill_context_mount_view, skill_management_mount_view,
+    workspace_mount_view,
 };
 #[cfg(all(test, unix))]
 use crate::standalone_bootstrap_assembly::LEGACY_SKILLS_BACKFILL_MARKER;
@@ -99,6 +99,10 @@ use ironclaw_extension_host::{
     product_extension_host_api_contract_registry, provider_instance_readiness_map,
     restore_extension_lifecycle_state,
 };
+use ironclaw_extension_manager::ironhub::{
+    extend_builtin_first_party_package as extend_builtin_ironhub_package,
+    insert_handlers as insert_ironhub_handlers,
+};
 use ironclaw_extension_manager::{
     admin_configuration::{
         ComposedAdminConfigurationService, ComposedExtensionAdminConfigurationResolver,
@@ -109,10 +113,6 @@ use ironclaw_extension_manager::{
     },
     extension_lifecycle_capabilities::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
-    },
-    ironhub::{
-        extend_builtin_first_party_package as extend_builtin_ironhub_package,
-        insert_handlers as insert_ironhub_handlers,
     },
     operator_config_capability::{
         extend_builtin_first_party_package as extend_builtin_operator_config_package,
@@ -332,7 +332,8 @@ pub(crate) struct RebornRuntimeStores {
         Arc<ironclaw_extension_host::FilesystemChannelDmTargetStore>,
     pub(crate) channel_disconnect_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>>,
-    pub(crate) host_runtime_http_egress: Option<ironclaw_host_runtime::HostRuntimeHttpEgressPort>,
+    pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    pub(crate) ironhub_link_state: Arc<ironclaw_extension_manager::ironhub::IronhubLinkStateStore>,
     pub(crate) skill_mounts: MountView,
     pub(crate) memory_mounts: MountView,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
@@ -347,7 +348,9 @@ pub(crate) struct RebornRuntimeStores {
     /// Lifecycle hooks declared by the bound memory provider. Host-initiated
     /// retrieval, recording, and profile reads are wired only when declared.
     pub(crate) memory_lifecycle: ironclaw_extension_contracts::memory::MemoryDescriptor,
-    pub(crate) workspace_mounts: MountView,
+    /// The deployment's single workspace scoping decision, read by every
+    /// workspace write lane (grants, approval leases, attachment handles).
+    pub(crate) workspace_mounts: crate::runtime_mounts::WorkspaceMountPolicy,
     pub(crate) standalone_storage_root: Option<PathBuf>,
     pub(crate) default_system_prompt_path: Option<PathBuf>,
     #[cfg(any(test, feature = "test-support"))]

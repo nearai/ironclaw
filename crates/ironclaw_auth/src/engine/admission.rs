@@ -10,9 +10,10 @@ use std::fmt;
 use async_trait::async_trait;
 use ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge;
 use ironclaw_extension_contracts::recipe::{
-    BoundedJsonPointer, HttpsEndpoint, OAuth2CodeRecipe, RecipeClientCredentials, TokenResponseMap,
-    VendorAuthRecipe,
+    BoundedJsonPointer, HttpsEndpoint, OAuth2CodeRecipe, RecipeClientCredentials,
+    RecipeValidationError, TokenResponseMap, VendorAuthRecipe,
 };
+use ironclaw_host_api::error::HostApiError;
 
 use crate::{AuthProductError, ResolvedVendorAuthRecipe};
 
@@ -134,15 +135,16 @@ where
             return Err(AuthProductError::MalformedConfig);
         }
         let canonical_resource = HttpsEndpoint::new(canonical_resource.to_string())
-            .map_err(|_| AuthProductError::MalformedConfig)?;
+            .map_err(|error| malformed_config_from_host_api_error("canonical_resource", error))?;
         let mut advertised = BTreeSet::new();
         for location in challenge
             .www_authenticate_metadata
             .iter()
             .chain(challenge.protected_resource_metadata.iter())
         {
-            let parsed = url::Url::parse(location.as_str())
-                .map_err(|_| AuthProductError::MalformedConfig)?;
+            let parsed = url::Url::parse(location.as_str()).map_err(|error| {
+                malformed_config_from_url_parse_error("metadata_location", error)
+            })?;
             if parsed.scheme() != "https"
                 || parsed.host_str().is_none()
                 || !parsed.username().is_empty()
@@ -151,8 +153,9 @@ where
             {
                 return Err(AuthProductError::MalformedConfig);
             }
-            let normalized = HttpsEndpoint::new(parsed.to_string())
-                .map_err(|_| AuthProductError::MalformedConfig)?;
+            let normalized = HttpsEndpoint::new(parsed.to_string()).map_err(|error| {
+                malformed_config_from_host_api_error("metadata_location", error)
+            })?;
             advertised.insert(normalized.as_str().to_string());
         }
         if advertised.len() != 1 {
@@ -164,11 +167,51 @@ where
                 .next()
                 .ok_or(AuthProductError::MalformedConfig)?,
         )
-        .map_err(|_| AuthProductError::MalformedConfig)?;
+        .map_err(|error| malformed_config_from_host_api_error("metadata_url", error))?;
         Ok(ProtectedResourceMetadataFetch {
             canonical_resource,
             metadata_url,
         })
+    }
+
+    /// Return the bounded RFC 9728 discovery sequence for one protected MCP
+    /// resource. An advertised location is authoritative. When the challenge
+    /// carries no safe location, MCP interoperability requires trying the
+    /// path-specific well-known URI and then the origin-root fallback.
+    pub fn preflight_protected_resource_candidates(
+        canonical_resource: &str,
+        challenge: &McpAuthChallenge,
+    ) -> Result<Vec<ProtectedResourceMetadataFetch>, AuthProductError> {
+        if !challenge.www_authenticate_metadata.is_empty()
+            || !challenge.protected_resource_metadata.is_empty()
+        {
+            return Self::preflight_protected_resource(canonical_resource, challenge)
+                .map(|fetch| vec![fetch]);
+        }
+        if !matches!(challenge.status, 401 | 403) {
+            return Err(AuthProductError::MalformedConfig);
+        }
+        let canonical_resource = HttpsEndpoint::new(canonical_resource.to_string())
+            .map_err(|error| malformed_config_from_host_api_error("canonical_resource", error))?;
+        let path_metadata_url = HttpsEndpoint::new(super::dcr::protected_resource_metadata_url(
+            canonical_resource.as_str(),
+        )?)
+        .map_err(|error| malformed_config_from_host_api_error("path_metadata_url", error))?;
+        let root_metadata_url = HttpsEndpoint::new(
+            super::dcr::protected_resource_metadata_root_url(canonical_resource.as_str())?,
+        )
+        .map_err(|error| malformed_config_from_host_api_error("root_metadata_url", error))?;
+        let mut candidates = vec![ProtectedResourceMetadataFetch {
+            canonical_resource: canonical_resource.clone(),
+            metadata_url: path_metadata_url.clone(),
+        }];
+        if root_metadata_url != path_metadata_url {
+            candidates.push(ProtectedResourceMetadataFetch {
+                canonical_resource,
+                metadata_url: root_metadata_url,
+            });
+        }
+        Ok(candidates)
     }
 
     /// Validate the fetched RFC 9728 document and produce the only issuer
@@ -186,7 +229,9 @@ where
         let metadata_url = HttpsEndpoint::new(super::dcr::authorization_server_metadata_url(
             issuer.as_str(),
         )?)
-        .map_err(|_| AuthProductError::MalformedConfig)?;
+        .map_err(|error| {
+            malformed_config_from_host_api_error("authorization_server_metadata_url", error)
+        })?;
         Ok(AuthorizationServerMetadataFetch {
             resource,
             issuer,
@@ -250,11 +295,13 @@ where
             authorization_endpoint: ironclaw_extension_contracts::recipe::HttpsEndpoint::new(
                 authorization_endpoint.to_string(),
             )
-            .map_err(|_| AuthProductError::MalformedConfig)?,
+            .map_err(|error| {
+                malformed_config_from_host_api_error("authorization_endpoint", error)
+            })?,
             token_endpoint: ironclaw_extension_contracts::recipe::HttpsEndpoint::new(
                 token_endpoint.to_string(),
             )
-            .map_err(|_| AuthProductError::MalformedConfig)?,
+            .map_err(|error| malformed_config_from_host_api_error("token_endpoint", error))?,
             scope_param: None,
             scope_join: Default::default(),
             pkce: Default::default(),
@@ -263,25 +310,26 @@ where
             client_credentials: credentials,
             exchange_auth: Default::default(),
             token_response: TokenResponseMap {
-                access_token: BoundedJsonPointer::new("/access_token")
-                    .map_err(|_| AuthProductError::MalformedConfig)?,
-                refresh_token: Some(
-                    BoundedJsonPointer::new("/refresh_token")
-                        .map_err(|_| AuthProductError::MalformedConfig)?,
-                ),
-                expires_in: Some(
-                    BoundedJsonPointer::new("/expires_in")
-                        .map_err(|_| AuthProductError::MalformedConfig)?,
-                ),
+                access_token: BoundedJsonPointer::new("/access_token").map_err(|error| {
+                    malformed_config_from_host_api_error("access_token_pointer", error)
+                })?,
+                refresh_token: Some(BoundedJsonPointer::new("/refresh_token").map_err(
+                    |error| malformed_config_from_host_api_error("refresh_token_pointer", error),
+                )?),
+                expires_in: Some(BoundedJsonPointer::new("/expires_in").map_err(|error| {
+                    malformed_config_from_host_api_error("expires_in_pointer", error)
+                })?),
                 scope: None,
             },
             identity: None,
             refresh: None,
             revoke: None,
+            instructions: None,
+            setup_url: None,
         };
         recipe
             .validate()
-            .map_err(|_| AuthProductError::MalformedConfig)?;
+            .map_err(malformed_config_from_recipe_validation_error)?;
         Ok(ResolvedVendorAuthRecipe {
             vendor: request.vendor,
             recipe: VendorAuthRecipe::Oauth2Code(Box::new(recipe)),
@@ -291,6 +339,74 @@ where
             ),
         })
     }
+}
+
+/// Record a fixed validation category while keeping the client-facing auth
+/// error free of provider endpoints, paths, and other untrusted metadata.
+fn malformed_config_from_host_api_error(
+    operation: &'static str,
+    error: HostApiError,
+) -> AuthProductError {
+    let (validation_kind, validation_reason) = match error {
+        HostApiError::InvalidId {
+            kind: "https_endpoint",
+            reason,
+            ..
+        } => ("https_endpoint", reason),
+        HostApiError::InvalidId {
+            kind: "json_pointer",
+            reason,
+            ..
+        } => ("json_pointer", reason),
+        _ => ("other", "unclassified validation failure".to_string()),
+    };
+    tracing::debug!(
+        operation,
+        validation_kind,
+        validation_reason,
+        "hosted MCP OAuth admission validation failed"
+    );
+    AuthProductError::MalformedConfig
+}
+
+/// Recipe validation variants can carry request-controlled values. Record only
+/// their fixed category, never the `Display` or `Debug` representation.
+fn malformed_config_from_recipe_validation_error(error: RecipeValidationError) -> AuthProductError {
+    let validation_kind = match error {
+        RecipeValidationError::EmptyDisplayName => "empty_display_name",
+        RecipeValidationError::EmptyScope => "empty_scope",
+        RecipeValidationError::EmptyScopeParam => "empty_scope_param",
+        RecipeValidationError::ReservedAuthorizeParam { .. } => "reserved_authorize_param",
+        RecipeValidationError::ApiKeyWithoutFields => "api_key_without_fields",
+        RecipeValidationError::ProbeWithoutSuccessStatus => "probe_without_success_status",
+        RecipeValidationError::ProbeInjectsUndeclaredHandle { .. } => {
+            "probe_injects_undeclared_handle"
+        }
+        RecipeValidationError::KeepaliveIdleOutOfRange { .. } => "keepalive_idle_out_of_range",
+        RecipeValidationError::EmptySignedPayload => "empty_signed_payload",
+        RecipeValidationError::SignedPayloadBodyFalse => "signed_payload_body_false",
+        RecipeValidationError::IncompleteTimestampRule => "incomplete_timestamp_rule",
+    };
+    tracing::debug!(
+        operation = "oauth_recipe",
+        validation_kind,
+        "hosted MCP OAuth admission validation failed"
+    );
+    AuthProductError::MalformedConfig
+}
+
+/// `url::ParseError` is a closed enum and carries no rejected URL value, so it
+/// is safe to retain as a server-side diagnostic without exposing host paths.
+fn malformed_config_from_url_parse_error(
+    operation: &'static str,
+    error: url::ParseError,
+) -> AuthProductError {
+    tracing::debug!(
+        operation,
+        url_parse_error = ?error,
+        "hosted MCP OAuth admission validation failed"
+    );
+    AuthProductError::MalformedConfig
 }
 
 #[cfg(test)]
@@ -405,6 +521,69 @@ mod tests {
                 &challenge
             )
             .is_err()
+        );
+    }
+    #[test]
+    fn missing_advertisement_derives_path_then_root_candidates() {
+        let challenge = McpAuthChallenge {
+            status: 401,
+            www_authenticate_metadata: vec![],
+            protected_resource_metadata: vec![],
+        };
+        let candidates = OAuthRecipeAdmission::<Profiles>::preflight_protected_resource_candidates(
+            "https://mcp.example.test/team/mcp?tenant=one",
+            &challenge,
+        )
+        .expect("RFC 9728 candidates");
+        assert_eq!(
+            candidates
+                .iter()
+                .map(ProtectedResourceMetadataFetch::metadata_url)
+                .collect::<Vec<_>>(),
+            vec![
+                "https://mcp.example.test/.well-known/oauth-protected-resource/team/mcp?tenant=one",
+                "https://mcp.example.test/.well-known/oauth-protected-resource",
+            ]
+        );
+    }
+
+    #[test]
+    fn root_resource_deduplicates_derived_candidates() {
+        let challenge = McpAuthChallenge {
+            status: 401,
+            www_authenticate_metadata: vec![],
+            protected_resource_metadata: vec![],
+        };
+        let candidates = OAuthRecipeAdmission::<Profiles>::preflight_protected_resource_candidates(
+            "https://mcp.example.test",
+            &challenge,
+        )
+        .expect("root RFC 9728 candidate");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].metadata_url(),
+            "https://mcp.example.test/.well-known/oauth-protected-resource"
+        );
+    }
+
+    #[test]
+    fn advertised_metadata_stays_authoritative() {
+        let challenge = McpAuthChallenge {
+            status: 401,
+            www_authenticate_metadata: vec![
+                McpAuthMetadataLocation::new("https://auth.example.test/resource").unwrap(),
+            ],
+            protected_resource_metadata: vec![],
+        };
+        let candidates = OAuthRecipeAdmission::<Profiles>::preflight_protected_resource_candidates(
+            "https://mcp.example.test/mcp",
+            &challenge,
+        )
+        .expect("advertised candidate");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].metadata_url(),
+            "https://auth.example.test/resource"
         );
     }
     #[tokio::test]
@@ -594,6 +773,146 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn endpoint_validation_mapping_keeps_client_error_sanitized() {
+        let raw_endpoint = "http://private.example.test/secret-path";
+        let source = HttpsEndpoint::new(raw_endpoint.to_string()).unwrap_err();
+        let error = malformed_config_from_host_api_error("test_endpoint", source);
+
+        assert_eq!(error, AuthProductError::MalformedConfig);
+        assert!(
+            !error.to_string().contains(raw_endpoint),
+            "client-facing error must not echo rejected endpoint data"
+        );
+    }
+
+    #[test]
+    fn host_api_validation_variants_map_to_sanitized_malformed_config() {
+        let rejected_input = "private.example.test/token=admission-secret";
+        let validation_reason = "fixed validation reason";
+        let cases = vec![
+            HostApiError::invalid_id("https_endpoint", rejected_input, validation_reason),
+            HostApiError::invalid_id("json_pointer", rejected_input, validation_reason),
+            HostApiError::InvalidPath {
+                value: rejected_input.to_string(),
+                reason: validation_reason.to_string(),
+            },
+            HostApiError::InvalidCapability {
+                value: rejected_input.to_string(),
+                reason: validation_reason.to_string(),
+            },
+            HostApiError::InvalidMount {
+                value: rejected_input.to_string(),
+                reason: validation_reason.to_string(),
+            },
+            HostApiError::InvalidNetworkTarget {
+                value: rejected_input.to_string(),
+                reason: validation_reason.to_string(),
+            },
+            HostApiError::InvalidRuntimeCredentialTarget {
+                value: rejected_input.to_string(),
+                reason: validation_reason.to_string(),
+            },
+            HostApiError::InvalidSafeSummary {
+                reason: validation_reason.to_string(),
+            },
+            HostApiError::InvalidModelDiagnostic {
+                reason: validation_reason.to_string(),
+            },
+            HostApiError::InvalidHostRemediation {
+                reason: validation_reason.to_string(),
+            },
+            HostApiError::InvariantViolation {
+                reason: validation_reason.to_string(),
+            },
+        ];
+
+        for source in cases {
+            let error = malformed_config_from_host_api_error("test", source);
+            assert_eq!(error, AuthProductError::MalformedConfig);
+            assert!(!error.to_string().contains(rejected_input));
+        }
+    }
+
+    #[test]
+    fn recipe_validation_variants_map_to_sanitized_malformed_config() {
+        let rejected_input = "token=admission-secret";
+        let cases = vec![
+            RecipeValidationError::EmptyDisplayName,
+            RecipeValidationError::EmptyScope,
+            RecipeValidationError::EmptyScopeParam,
+            RecipeValidationError::ReservedAuthorizeParam {
+                param: rejected_input.to_string(),
+            },
+            RecipeValidationError::ApiKeyWithoutFields,
+            RecipeValidationError::ProbeWithoutSuccessStatus,
+            RecipeValidationError::ProbeInjectsUndeclaredHandle {
+                handle: rejected_input.to_string(),
+            },
+            RecipeValidationError::KeepaliveIdleOutOfRange { seconds: 0 },
+            RecipeValidationError::EmptySignedPayload,
+            RecipeValidationError::SignedPayloadBodyFalse,
+            RecipeValidationError::IncompleteTimestampRule,
+        ];
+
+        for source in cases {
+            let error = malformed_config_from_recipe_validation_error(source);
+            assert_eq!(error, AuthProductError::MalformedConfig);
+            assert!(!error.to_string().contains(rejected_input));
+        }
+    }
+
+    #[test]
+    fn url_parse_errors_map_to_sanitized_malformed_config() {
+        let rejected_input = "https://private.example.test/token=admission-secret";
+        let cases = [
+            url::ParseError::EmptyHost,
+            url::ParseError::IdnaError,
+            url::ParseError::InvalidPort,
+            url::ParseError::InvalidIpv4Address,
+            url::ParseError::InvalidIpv6Address,
+            url::ParseError::InvalidDomainCharacter,
+            url::ParseError::RelativeUrlWithoutBase,
+            url::ParseError::RelativeUrlWithCannotBeABaseBase,
+            url::ParseError::SetHostOnCannotBeABaseUrl,
+            url::ParseError::Overflow,
+        ];
+
+        for source in cases {
+            let error = malformed_config_from_url_parse_error("test", source);
+            assert_eq!(error, AuthProductError::MalformedConfig);
+            assert!(!error.to_string().contains(rejected_input));
+        }
+    }
+
+    #[test]
+    fn malformed_metadata_location_parse_is_sanitized() {
+        let rejected_input = "https://[::1/token=admission-secret";
+        let challenge = McpAuthChallenge {
+            status: 401,
+            www_authenticate_metadata: vec![
+                McpAuthMetadataLocation::new(rejected_input).expect("bounded HTTP(S) location"),
+            ],
+            protected_resource_metadata: vec![],
+        };
+
+        let error = OAuthRecipeAdmission::<Profiles>::preflight_protected_resource(
+            "https://mcp.example.test/mcp",
+            &challenge,
+        )
+        .expect_err("malformed URL must not become a metadata fetch");
+        assert_eq!(error, AuthProductError::MalformedConfig);
+        assert!(!error.to_string().contains(rejected_input));
+    }
+
+    #[tokio::test]
+    async fn recipe_validation_failure_is_sanitized_at_admission() {
+        let mut invalid = request();
+        invalid.vendor = " \t ".to_string();
+
+        assert_eq!(admit(invalid).await, Err(AuthProductError::MalformedConfig));
     }
 
     #[tokio::test]

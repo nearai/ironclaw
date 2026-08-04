@@ -483,7 +483,7 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
-        path: "crates/ironclaw_runner/src/tool_disclosure.rs",
+        path: "crates/ironclaw_loop_host/src/tool_disclosure.rs",
         count: 1,
     },
     FrozenPathCount {

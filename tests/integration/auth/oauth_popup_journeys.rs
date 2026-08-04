@@ -332,6 +332,7 @@ app_id = "/app_id"
                 .services
                 .flow_manager()
                 .create_flow(NewAuthFlow {
+                    requested_scopes: Vec::new(),
                     id: None,
                     scope: scope.clone(),
                     kind: AuthFlowKind::IntegrationCredential,

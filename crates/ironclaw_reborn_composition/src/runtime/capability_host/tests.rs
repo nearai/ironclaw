@@ -71,8 +71,8 @@ mod tests {
     };
     use crate::runtime::filesystem_skill_context_source;
     use ironclaw_extension_manager::extension_lifecycle_capabilities::{
-        EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REMOVE_CAPABILITY_ID,
-        EXTENSION_SEARCH_CAPABILITY_ID,
+        EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
+        EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     };
 
     /// The §5.3 flip collapsed `CapabilityOutcome::Completed` into
@@ -1565,7 +1565,7 @@ mod tests {
             runtime,
             fallback_user_id: fallback_user_id.clone(),
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
-            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -1876,7 +1876,7 @@ mod tests {
             runtime,
             fallback_user_id: fallback_user_id.clone(),
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
-            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -2212,6 +2212,37 @@ mod tests {
             NetworkPolicy::default()
         );
 
+        let extension_register_grant = grant_for(EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID);
+        assert_eq!(
+            extension_register_grant.constraints.allowed_effects,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::Network
+            ]
+        );
+        assert_eq!(
+            extension_register_grant.constraints.mounts,
+            system_extensions_lifecycle_mounts
+        );
+        assert_eq!(
+            extension_register_grant
+                .constraints
+                .network
+                .allowed_targets
+                .iter()
+                .map(|target| target.host_pattern.as_str())
+                .collect::<Vec<_>>(),
+            vec!["*"]
+        );
+        assert!(
+            extension_register_grant
+                .constraints
+                .network
+                .deny_private_ip_ranges
+        );
+
         let extension_remove_grant = grant_for(EXTENSION_REMOVE_CAPABILITY_ID);
         assert_eq!(
             extension_remove_grant.constraints.allowed_effects,
@@ -2392,7 +2423,7 @@ mod tests {
             runtime,
             fallback_user_id: UserId::new("skill-activate-user").expect("user id"),
             policy,
-            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -2643,7 +2674,7 @@ mod tests {
             runtime,
             fallback_user_id: UserId::new("external-tool-provider-name-user").expect("user id"),
             policy,
-            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -2728,7 +2759,7 @@ mod tests {
             runtime,
             fallback_user_id: UserId::new("project-create-fallback-user").expect("user id"),
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
-            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -2931,7 +2962,7 @@ mod tests {
             runtime,
             fallback_user_id,
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
-            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -3269,7 +3300,7 @@ mod tests {
             runtime,
             fallback_user_id,
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
-            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -3700,7 +3731,7 @@ mod tests {
             runtime,
             fallback_user_id,
             policy: Arc::clone(runtime_surfaces.capability_policy_for_test()),
-            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -3858,7 +3889,7 @@ mod tests {
             runtime,
             fallback_user_id: fallback_user_id.clone(),
             policy,
-            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -4126,7 +4157,7 @@ mod tests {
                 crate::builtin_capability_policy::BuiltinApprovalPolicyAction::Dispatch {
                     capability: &set_capability_id,
                 },
-                runtime_surfaces.workspace_mounts_for_test(),
+                crate::factory::test_support::workspace_mounts_for_test(runtime_surfaces),
                 runtime_surfaces.skill_mounts_for_test(),
                 runtime_surfaces.memory_mounts_for_test(),
                 runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
@@ -4337,7 +4368,7 @@ mod tests {
                 crate::builtin_capability_policy::BuiltinApprovalPolicyAction::Dispatch {
                     capability: &set_capability_id,
                 },
-                runtime_surfaces.workspace_mounts_for_test(),
+                crate::factory::test_support::workspace_mounts_for_test(runtime_surfaces),
                 runtime_surfaces.skill_mounts_for_test(),
                 runtime_surfaces.memory_mounts_for_test(),
                 runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
@@ -4719,7 +4750,7 @@ mod tests {
             runtime,
             fallback_user_id: UserId::new("outbound-delivery-fallback-user").expect("user id"),
             policy,
-            workspace_mounts: runtime_surfaces.workspace_mounts_for_test().clone(),
+            workspace_mounts: runtime_surfaces.workspace_mount_policy_for_test().clone(),
             memory_mounts: runtime_surfaces.memory_mounts_for_test().clone(),
             system_extensions_lifecycle_mounts: runtime_surfaces
                 .system_extensions_lifecycle_mounts_for_test()
@@ -4825,7 +4856,7 @@ mod tests {
         let runtime_surfaces = services
             .local_runtime_for_test()
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
-        let workspace_mounts = runtime_surfaces.workspace_mounts_for_test().clone();
+        let workspace_mounts = runtime_surfaces.workspace_mount_policy_for_test().clone();
         let policy = Arc::new(
             crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
@@ -5075,7 +5106,7 @@ mod tests {
         let runtime_surfaces = services
             .local_runtime_for_test()
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
-        let workspace_mounts = runtime_surfaces.workspace_mounts_for_test().clone();
+        let workspace_mounts = runtime_surfaces.workspace_mount_policy_for_test().clone();
         let policy = Arc::new(
             crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
@@ -5197,7 +5228,7 @@ mod tests {
         let runtime_surfaces = services
             .local_runtime_for_test()
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
-        let workspace_mounts = runtime_surfaces.workspace_mounts_for_test().clone();
+        let workspace_mounts = runtime_surfaces.workspace_mount_policy_for_test().clone();
         let policy = Arc::new(
             crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );

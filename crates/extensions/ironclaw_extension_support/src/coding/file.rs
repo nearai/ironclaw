@@ -17,17 +17,18 @@ use super::{
     diff_preview::{file_diff_preview, will_use_large_diff_path},
     input_error,
     inputs::{optional_usize, required_str},
-    operation_error_with_summary,
+    operation_error, operation_error_with_summary,
     patch::{parse_apply_patch_input, replacement_error},
     paths::{
-        create_parent_dir_unless_sensitive, deny_sensitive_existing_path, filesystem_error,
-        is_excluded_name, is_sensitive_scoped_path, is_workspace_path, operation_allowed,
-        resolve_optional_path, resolve_required_path, scoped_child_path, stat_optional,
+        create_parent_dir_unless_sensitive, filesystem_error, filesystem_error_with_summary,
+        is_excluded_name, is_sensitive_scoped_path, is_workspace_path,
+        list_dir_empty_if_missing_root, operation_allowed, resolve_optional_path,
+        resolve_required_path, safe_summary_path, scoped_child_path, stat_optional,
         virtual_to_relative,
     },
     state::{
-        CodingReadScopeKey, SharedCodingEditLocks, SharedCodingReadStates, content_fingerprint,
-        read_scope_key,
+        CodingReadScopeKey, ReadRepresentation, SharedCodingEditLocks, SharedCodingReadStates,
+        content_fingerprint, read_scope_key,
     },
     text::{
         TextEdit, decode_text, decode_text_lossy, encode_text, previous_char_boundary,
@@ -74,22 +75,26 @@ pub(super) async fn read_file(
             filesystem_error_with_summary("read_file", resolved.scoped_path.as_str(), error)
         })?;
 
-    let content = if should_extract_document_before_text(&bytes, resolved.scoped_path.as_str()) {
-        match extract_document_text_for_read_file(&bytes, resolved.scoped_path.as_str())? {
-            Some(content) => content,
-            None => decode_read_file_text(&bytes)?,
-        }
-    } else {
-        match decode_read_file_text(&bytes) {
-            Ok(content) => content,
-            Err(text_error) => {
-                match extract_document_text_for_read_file(&bytes, resolved.scoped_path.as_str())? {
-                    Some(content) => content,
-                    None => return Err(text_error),
+    let (content, representation) =
+        if should_extract_document_before_text(&bytes, resolved.scoped_path.as_str()) {
+            match extract_document_text_for_read_file(&bytes, resolved.scoped_path.as_str())? {
+                Some(content) => (content, ReadRepresentation::ExtractedText),
+                None => (decode_read_file_text(&bytes)?, ReadRepresentation::RawText),
+            }
+        } else {
+            match decode_read_file_text(&bytes) {
+                Ok(content) => (content, ReadRepresentation::RawText),
+                Err(text_error) => {
+                    match extract_document_text_for_read_file(
+                        &bytes,
+                        resolved.scoped_path.as_str(),
+                    )? {
+                        Some(content) => (content, ReadRepresentation::ExtractedText),
+                        None => return Err(text_error),
+                    }
                 }
             }
-        }
-    };
+        };
 
     let output = read_file_text_output(
         &content,
@@ -108,6 +113,7 @@ pub(super) async fn read_file(
             &read_scope_key(request),
             resolved.virtual_path.as_str(),
             content_fingerprint(&bytes),
+            representation,
         );
     }
 
@@ -353,6 +359,12 @@ pub(super) async fn write_file(
         return Err(input_error());
     }
     let resolved = resolve_required_path(request, "path", FilesystemOperation::WriteFile)?;
+    if is_opaque_binary_document_path(resolved.scoped_path.as_str()) {
+        return Err(binary_document_write_error(
+            "write_file",
+            resolved.scoped_path.as_str(),
+        ));
+    }
     let content = required_str(request.input, "content")?;
     if content.len() > MAX_WRITE_SIZE {
         return Err(input_error());
@@ -367,6 +379,20 @@ pub(super) async fn write_file(
     {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
+        ));
+    }
+    // PDF is a text-authorable format (new-file creation is legitimate), but
+    // an existing PDF cannot be safely overwritten via text tools once it has
+    // been read as extracted text — the fingerprint bypass in issue #6898
+    // applies to overwrites only. Block existing-PDF overwrites explicitly;
+    // new PDF creation falls through to the normal write path.
+    if let Some(stat) = &existing_stat
+        && stat.file_type == FileType::File
+        && is_pdf_document_path(resolved.scoped_path.as_str())
+    {
+        return Err(binary_document_write_error(
+            "write_file",
+            resolved.scoped_path.as_str(),
         ));
     }
     let can_read = operation_allowed(&resolved.grant.permissions, FilesystemOperation::ReadFile);
@@ -405,6 +431,7 @@ pub(super) async fn write_file(
         &scope,
         resolved.virtual_path.as_str(),
         content_fingerprint(content.as_bytes()),
+        ReadRepresentation::RawText,
     );
     let output = json!({
         "path": resolved.scoped_path.as_str(),
@@ -436,6 +463,20 @@ async fn verify_read_before_edit(
             resolved.scoped_path.as_str(),
         ));
     };
+    if recorded.representation != ReadRepresentation::RawText {
+        return Err(binary_document_write_error(
+            operation,
+            resolved.scoped_path.as_str(),
+        ));
+    }
+    if is_opaque_binary_document_path(resolved.scoped_path.as_str())
+        || is_pdf_document_path(resolved.scoped_path.as_str())
+    {
+        return Err(binary_document_write_error(
+            operation,
+            resolved.scoped_path.as_str(),
+        ));
+    }
     // A file grown past what read_file can return cannot match any recorded
     // read; report it as changed instead of fingerprinting unbounded bytes.
     if stat.len > MAX_READ_SIZE {
@@ -448,10 +489,34 @@ async fn verify_read_before_edit(
         .map_err(|error| {
             filesystem_error_with_summary(operation, resolved.scoped_path.as_str(), error)
         })?;
-    if content_fingerprint(&bytes) != recorded {
+    if content_fingerprint(&bytes) != recorded.fingerprint {
         return Err(stale_read_error(operation, resolved.scoped_path.as_str()));
     }
+    reject_binary_probe(&bytes)
+        .map_err(|_| binary_document_write_error(operation, resolved.scoped_path.as_str()))?;
     Ok(bytes)
+}
+
+fn lower_path_extension(scoped_path: &str) -> Option<String> {
+    scoped_path.rsplit('.').next().map(str::to_ascii_lowercase)
+}
+
+fn is_opaque_binary_document_path(scoped_path: &str) -> bool {
+    matches!(
+        lower_path_extension(scoped_path).as_deref(),
+        Some("doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx")
+    )
+}
+
+fn is_pdf_document_path(scoped_path: &str) -> bool {
+    matches!(lower_path_extension(scoped_path).as_deref(), Some("pdf"))
+}
+
+fn binary_document_write_error(operation: &str, scoped_path: &str) -> CodingCapabilityError {
+    operation_error_with_summary(format!(
+        "{operation} failed for {}: binary documents cannot be edited with text tools; use a document editing capability that preserves the original format",
+        safe_summary_path(scoped_path)
+    ))
 }
 
 fn read_before_edit_error(operation: &str, scoped_path: &str) -> CodingCapabilityError {
@@ -472,7 +537,19 @@ pub(super) async fn list_dir(
     request: &CodingCapabilityRequest<'_>,
 ) -> Result<Value, CodingCapabilityError> {
     let resolved = resolve_optional_path(request, FilesystemOperation::ListDir)?;
-    deny_sensitive_existing_path(request, &resolved.virtual_path).await?;
+    // A missing mount ROOT lists as empty (the grant names it; nothing has
+    // been written under it yet), so the sensitive-stat guard tolerates its
+    // absence. Any other missing path stays an error, as before.
+    match stat_optional(request, &resolved.virtual_path).await? {
+        Some(stat) if stat.sensitive => {
+            return Err(CodingCapabilityError::new(
+                RuntimeDispatchErrorKind::FilesystemDenied,
+            ));
+        }
+        Some(_) => {}
+        None if resolved.is_mount_root() => {}
+        None => return Err(operation_error()),
+    }
     let recursive = request
         .input
         .get("recursive")
@@ -502,11 +579,7 @@ async fn collect_list_entries(
     let mut stack = vec![(root.virtual_path.clone(), 0usize)];
     let mut visited = 0usize;
     while let Some((dir, depth)) = stack.pop() {
-        let entries = request
-            .filesystem
-            .list_dir(&dir)
-            .await
-            .map_err(filesystem_error)?;
+        let entries = list_dir_empty_if_missing_root(request, root, &dir).await?;
         for entry in entries {
             visited += 1;
             if visited > MAX_VISITED_ENTRIES {
@@ -664,6 +737,7 @@ pub(super) async fn apply_patch(
         &scope,
         resolved.virtual_path.as_str(),
         content_fingerprint(&output),
+        ReadRepresentation::RawText,
     );
     let mut result = json!({
         "path": resolved.scoped_path.as_str(),
@@ -682,46 +756,6 @@ pub(super) async fn apply_patch(
         result,
         Some(display_preview),
     ))
-}
-
-fn filesystem_error_with_summary(
-    operation: &str,
-    scoped_path: &str,
-    error: ironclaw_filesystem::FilesystemError,
-) -> CodingCapabilityError {
-    let scoped_path = safe_summary_path(scoped_path);
-    let summary = match &error {
-        ironclaw_filesystem::FilesystemError::NotFound { .. } => {
-            format!("{operation} failed for {scoped_path}: file not found")
-        }
-        ironclaw_filesystem::FilesystemError::PermissionDenied { .. }
-        | ironclaw_filesystem::FilesystemError::MountNotFound { .. }
-        | ironclaw_filesystem::FilesystemError::PathOutsideMount { .. }
-        | ironclaw_filesystem::FilesystemError::SymlinkEscape { .. }
-        | ironclaw_filesystem::FilesystemError::MountConflict { .. }
-        | ironclaw_filesystem::FilesystemError::VersionMismatch { .. }
-        | ironclaw_filesystem::FilesystemError::Unsupported { .. }
-        | ironclaw_filesystem::FilesystemError::IndexConflict { .. } => {
-            format!("{operation} failed for {scoped_path}: permission denied or unsupported path")
-        }
-        ironclaw_filesystem::FilesystemError::Backend { .. }
-        | ironclaw_filesystem::FilesystemError::BackendInfrastructure { .. } => {
-            format!("{operation} failed for {scoped_path}: filesystem backend error")
-        }
-        ironclaw_filesystem::FilesystemError::Contract(_) => {
-            format!("{operation} failed for {scoped_path}: invalid path")
-        }
-        _ => format!("{operation} failed for {scoped_path}: filesystem error"),
-    };
-    let kind = filesystem_error(error).kind();
-    CodingCapabilityError::with_safe_summary(kind, summary)
-}
-
-fn safe_summary_path(scoped_path: &str) -> String {
-    let path_hint = scoped_path
-        .trim_start_matches('/')
-        .replace(['/', '\\'], " ");
-    format!("path {path_hint}")
 }
 
 fn existing_text_for_preview(stat: &ironclaw_filesystem::FileStat, bytes: &[u8]) -> Option<String> {

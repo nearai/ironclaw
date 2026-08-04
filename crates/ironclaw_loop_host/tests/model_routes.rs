@@ -1,4 +1,4 @@
-use ironclaw_runner::model_routes::{
+use ironclaw_loop_host::{
     ActiveModelRouteSettings, ModelRoute, ModelRoutePolicy, ModelRouteProviderKey,
     ModelRouteResolver, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
 };

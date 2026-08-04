@@ -193,7 +193,7 @@ pub async fn auth_prompt_view_for_blocked_auth(
                 scope,
                 owner_user_id,
                 run_id,
-                gate_ref,
+                gate_ref.as_str(),
                 credential_requirements,
             )
             .await
@@ -211,7 +211,7 @@ pub async fn auth_prompt_view_for_blocked_auth(
     };
     let base_view = AuthPromptView {
         turn_run_id: run_id,
-        auth_request_ref: gate_ref.to_string(),
+        auth_request_ref: gate_ref.as_str().to_string(),
         invocation_id,
         headline: "Authentication required".to_string(),
         body,

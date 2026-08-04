@@ -35,7 +35,7 @@ use ironclaw_loop_host::{
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, RunCancellationFactory,
     loop_driver_execution_extension_id,
 };
-use ironclaw_runner::model_routes::{
+use ironclaw_loop_host::{
     ModelRoute, ModelRouteError, ModelRoutePolicy, ModelRouteResolver, ModelSelectionMode,
     ModelSlot, StaticModelRouteResolver,
 };

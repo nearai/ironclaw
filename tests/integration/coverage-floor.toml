@@ -60,23 +60,89 @@ enforce = true
 # source mapping that enforces this file. Retain the stable 85.11% ratchet
 # from #6696 (effective floor 84.61%) rather than weakening to the observed
 # value or comparing against #6886's incompatible current-toolchain mapping.
-floor_percent = 85.11
+#
+# RECAPTURED 2026-08-04 (#7083) — the denominator above never described the
+# tree it was enforcing. #7037 colocated packages under `crates/extensions/`
+# on 2026-08-03, and the aggregator keyed on a literal `crates/ironclaw_*`
+# shape, so four crate directories silently left BOTH the numerator and the
+# denominator (the same `if match:` guards each). This entry then compared a
+# live, shrunken measurement against a denominator captured before the move,
+# under `enforce = true`. Recapturing was the point of the fix; holding the
+# old pair would have baked the hole in.
+#
+# Both fields come from this PR's own dispatch run 30865483401 at
+# 4c841a4321dd2d62b695120c60e6fe6bd4ac5ebf, read off the `RATCHET PASS:
+# global` line of the same `reborn-coverage-ratchet.sh` invocation that
+# enforces this file, so the mapping is the enforcing mapping by construction
+# (the caution in the paragraph above is about comparing across toolchains,
+# which this does not do): 336439 / 386885 = 86.96%. The denominator moved
+# +11788 lines (+3.14%) — the restored crates minus the two package `lib.rs`
+# files `coverage-exemptions.toml` already named and can now actually exempt.
+floor_percent = 86.96
 tolerance_percent = 0.5
-captured_total_lines = 375097
-captured_date = "2026-07-30"
-captured_from = "dd9b9d961dc302fc50ac4b08b137997c092eefb7"
+captured_total_lines = 386885
+captured_date = "2026-08-04"
+captured_from = "4c841a4321dd2d62b695120c60e6fe6bd4ac5ebf"
 
 [[crate]]
 name = "ironclaw_runner"
-# LLVM 21 reports 14658 / 17133 = 85.55%; calibrate the absolute floor to
-# the same observed artifact rather than mixing source mappings.
-floor_percent = 85.55
-floor_covered_lines = 14658
+# WS3 runner sheds moved the model-gateway cluster (model_gateway,
+# model_routes, the driver-host port adapters) and the whole progressive
+# tool-disclosure cluster to `ironclaw_loop_host` — ~10.5k source lines out of
+# a 33.2k crate, plus the two integration test targets that covered them
+# (`llm_gateway`, `model_routes`). The pre-shed `floor_covered_lines = 14658`
+# numerator captured at 17,133 instrumented lines therefore no longer describes
+# this crate: it is structurally unreachable, not a regression.
+#
+# RECAPTURED — both fields, from this PR's own merged coverage artifact
+# (`reborn-integration-coverage-merged` from merge_group run 30855460733), read
+# through the same `scripts/ci/lib/reborn_coverage_lcov.py` aggregation that
+# enforces this file: 9,470 / 11,474 = 82.53%. Not estimated, not carried
+# forward. Applying the WS2.4 `ironclaw_extension_host` resolution below (both
+# numbers recaptured in the same PR) rather than the WS1.2 `ironclaw_turns` one
+# (percentage-only for a release), so no release runs on a half-captured entry.
+#
+# `floor_percent` FALLS 85.55 -> 82.53, and that is the honest number rather
+# than a weakening. An earlier draft of this entry held 85.55 on the assumption
+# that "the moved half is adapter code with roughly the crate's own coverage
+# profile, so the ratio is the invariant that survives a split". MEASURED, that
+# assumption is false and the merge queue is where it failed: the moved files
+# score 6,108 / 6,577 = 92.87% at their new home — 10.33pp ABOVE the 82.53% of
+# what stayed — so the shed removed the crate's better-covered half and
+# un-masked the weaker remainder. Proof this is composition and not lost tests:
+# adding the moved files back gives 15,578 / 18,051 = 86.30%, which CLEARS the
+# old 85.55% floor by 0.75pp; and the `#[test]`/`#[tokio::test]` roster across
+# the two crates goes 1,070 -> 1,072 (+2 added, zero names lost). A shed
+# re-captures the SOURCE crate's floor; it does not merely floor the
+# destination. See docs/reborn/target-architecture/ (WS3 landing note).
+floor_percent = 82.53
+floor_covered_lines = 9470
 tolerance_percent = 0.5
-tolerance_lines = 20
-captured_total_lines = 17133
-captured_date = "2026-07-30"
-rationale = "Protects generated lifecycle, restart, and double-submit runner orchestration while reconciling LLVM 21 source mapping."
+captured_total_lines = 11474
+captured_date = "2026-08-03"
+rationale = "Protects generated lifecycle, restart, and double-submit runner orchestration. Recaptured after the WS3 model-gateway/tool-disclosure sheds moved the better-covered half to ironclaw_loop_host."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+
+[[crate]]
+name = "ironclaw_loop_host"
+# Added by the WS3 runner sheds so the ~10.5k lines that left
+# `ironclaw_runner` (above) keep a ratchet instead of falling out of per-crate
+# enforcement entirely — the gap the WS1.2 `ironclaw_turns` split left open for
+# `ironclaw_loop_contracts`, not repeated here.
+#
+# CAPTURED from the same merged artifact as the entry above (merge_group run
+# 30855460733): 24,598 / 27,063 = 90.89%. `floor_percent` is RAISED to the
+# observed value rather than inherited from the source crate — an earlier draft
+# carried 85.55 across from `ironclaw_runner`, which would have left the
+# absorbed code 5.34pp of unratcheted slack on arrival, i.e. room to lose ~1.4k
+# covered lines silently. The destination is floored at what it actually
+# measures, on arrival, in the same PR.
+floor_percent = 90.89
+floor_covered_lines = 24598
+tolerance_percent = 0.5
+captured_total_lines = 27063
+captured_date = "2026-08-03"
+rationale = "Protects the model-gateway adapter, model-route policy, driver-host port adapters, and the progressive tool-disclosure decorator this crate absorbed in WS3."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
@@ -237,11 +303,47 @@ name = "ironclaw_extension_host"
 # 9.7k, and are not expected to: LLVM emits coverage regions per executable
 # line, so a file's instrumented count tracks neither its source lines nor its
 # share of a move.
-floor_percent = 84.83
-floor_covered_lines = 19907
-captured_total_lines = 23467
-captured_date = "2026-08-01"
-rationale = "Channel ingress deduplication and outbound delivery routing are production-composed. Recaptured after the WS2.4 extension_manager split moved the product face out."
+#
+# RECAPTURED AGAIN 2026-08-04 (WS2 closeout). This crate is the SOURCE side of a
+# move — the NEAR AI package's manifest and asset embeds left for the package
+# inventory in `ironclaw_extension_support` — and a source floor is the one that
+# silently stops describing its crate when code leaves it. Recaptured on that
+# rule even though the change is small and the direction is up: the denominator
+# moved only +4.63% (23,467 -> 24,554), below this file's 5% materiality
+# threshold, and BOTH fields rose (19,907 -> 21,605 covered; 84.83% -> 87.99%),
+# partly because this PR also adds the retired-`slack_user` migration test this
+# crate had been missing since #6616. So this is a ratchet tightening, not a
+# repair, and it is recorded as such. From the same dispatch run as the entries
+# at the end of this file: 30865483401 at
+# 4c841a4321dd2d62b695120c60e6fe6bd4ac5ebf, 21605 / 24554 = 87.99%.
+#
+# DELETION ADJUSTMENT 2026-08-04 (#7143), and it is an adjustment, NOT a
+# recapture — the distinction matters, so it is stated rather than implied.
+# The entry directly above was captured on a tree that still contained the
+# retired-identity boot migration, and its own rationale says the figure rose
+# "partly because this PR also adds the retired-`slack_user` migration test".
+# #7143 deletes that branch by owner ruling (PROPOSAL §12.11 D-I): 29
+# production lines go, and they were FULLY COVERED by exactly the test being
+# deleted with them — so this is the shrinkage direction this file's same-PR
+# workflow names ("a legitimate code+test deletion lowering covered lines, even
+# when the denominator barely moves"). Both fields must move or the next
+# dispatch reds on a floor that no longer describes the crate.
+#
+# Arithmetic, deliberately conservative and shown so it can be checked: 29
+# removed production lines, of which the `const` and the four signature lines
+# emit no LLVM region, so ~24 instrumented regions leave both numerator and
+# denominator together. Deducted 25 from each (21605 -> 21580, 24554 -> 24529),
+# one more than measured so a rounding difference cannot red the lane.
+# 21580 / 24529 = 87.98%, so `floor_percent` moves 87.99 -> 87.97 — a hair,
+# because removing fully-covered lines barely moves a ratio. No PR-triggered
+# lane produces a coverage verdict (#7036), so these numbers could not be read
+# off this PR's own run; **the next dispatch should recapture this entry and
+# replace this block with a real capture.**
+floor_percent = 87.97
+floor_covered_lines = 21580
+captured_total_lines = 24529
+captured_date = "2026-08-04"
+rationale = "Channel ingress deduplication and outbound delivery routing are production-composed. Recaptured after the WS2.4 extension_manager split moved the product face out, then again on the WS2 closeout as the source side of the NEAR AI embed move; adjusted (not recaptured) for the retired-identity branch deletion in #7143 — see the block above."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
@@ -288,3 +390,63 @@ captured_total_lines = 23277
 captured_date = "2026-07-30"
 rationale = "Host mediation enforces credentials, network policy, resources, and redaction before execution."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
+
+# ---------------------------------------------------------------------------
+# The `crates/extensions/` family (#7083).
+#
+# These four had NO floor because they were invisible to the gate, not because
+# anyone judged them unworthy of one: `reborn_coverage_lcov.py` required
+# `ironclaw_*` directly under `crates/`, and #7037 moved them a level down. All
+# four were compiled, instrumented and present in the merged tracefile the
+# whole time — only the aggregator was blind.
+#
+# Captured from this PR's own dispatch run 30865483401 at
+# 4c841a4321dd2d62b695120c60e6fe6bd4ac5ebf, AFTER the aggregator fix. Capturing
+# them beforehand would have recorded zeros and pinned the hole shut.
+#
+# The keys are crate DIRECTORY basenames, which is what the aggregator keys on
+# and what every pre-existing entry in this file already is (they coincide with
+# package names only for flat `crates/ironclaw_*` crates). PROPOSAL §5.1 names
+# package directories by extension identity, so `slack` here is the package
+# whose cargo name is `ironclaw_slack_extension`.
+#
+# `mem0` (`ironclaw_memory_mem0`) is deliberately absent: it is compiled only
+# behind the `memory-mem0` cargo feature, which no coverage lane enables, so it
+# contributes no instrumented lines and a floor would enforce nothing. Give it
+# one when a lane builds it.
+
+[[crate]]
+name = "ironclaw_extension_support"
+floor_percent = 82.64
+floor_covered_lines = 6826
+captured_total_lines = 8260
+captured_date = "2026-08-04"
+rationale = "The package inventory and the shared native tool executors: what every first-party package ships as, and the code that runs its tools."
+issue = "https://github.com/nearai/ironclaw/issues/7083"
+
+[[crate]]
+name = "slack"
+floor_percent = 93.95
+floor_covered_lines = 3697
+captured_total_lines = 3935
+captured_date = "2026-08-04"
+rationale = "Channel adapter on the ingress trust membrane: payload parsing and normalization of untrusted vendor input."
+issue = "https://github.com/nearai/ironclaw/issues/7083"
+
+[[crate]]
+name = "telegram"
+floor_percent = 90.31
+floor_covered_lines = 1435
+captured_total_lines = 1589
+captured_date = "2026-08-04"
+rationale = "Channel adapter on the ingress trust membrane: payload parsing and normalization of untrusted vendor input."
+issue = "https://github.com/nearai/ironclaw/issues/7083"
+
+[[crate]]
+name = "memory-native"
+floor_percent = 82.85
+floor_covered_lines = 2850
+captured_total_lines = 3440
+captured_date = "2026-08-04"
+rationale = "The default memory provider: durable user memory, always installed, and the only backend a deployment has unless it opts into mem0."
+issue = "https://github.com/nearai/ironclaw/issues/7083"

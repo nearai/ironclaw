@@ -32,11 +32,11 @@ use ironclaw_loop_host::{
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelRouteSnapshot,
     HostManagedModelStreamSink, HostManagedToolResultContent, ThreadBackedLoopContextPort,
 };
-use ironclaw_runner::model_gateway::{
+use ironclaw_loop_host::{
     LlmModelProfilePolicy, LlmProviderModelGateway, RoutedLlmProviderModelGateway,
     StaticModelRouteProviderPool, ThreadBackedLoopModelGateway,
 };
-use ironclaw_runner::model_routes::{
+use ironclaw_loop_host::{
     ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
 };
 use ironclaw_threads::{
@@ -3485,7 +3485,7 @@ async fn routed_gateway_uses_provider_pool_route_not_request_model_override() {
 async fn provider_pool_rejects_wrong_provider_identity_with_same_model() {
     let route = ModelRoute::new("rig-openai", "gpt-4.1").unwrap();
     let provider = Arc::new(RecordingLlmProvider::reply_for_model("gpt-4.1", "unused"));
-    let key = ironclaw_runner::model_routes::ModelRouteProviderKey::for_route(route);
+    let key = ironclaw_loop_host::ModelRouteProviderKey::for_route(route);
 
     let error =
         match StaticModelRouteProviderPool::new().with_provider_identity("nearai", key, provider) {
@@ -4686,6 +4686,7 @@ impl GatewayCapabilityPort {
             capability_id: CapabilityId::new("demo.echo").unwrap(),
             name: provider_name("demo__echo"),
             description: "Echo input".to_string(),
+            description_trust: Default::default(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -4709,6 +4710,7 @@ impl GatewayCapabilityPort {
             capability_id: CapabilityId::new("builtin.spawn_subagent").unwrap(),
             name: provider_name("builtin__spawn_subagent"),
             description: "Spawn a subagent".to_string(),
+            description_trust: Default::default(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -4736,6 +4738,7 @@ impl GatewayCapabilityPort {
             capability_id: CapabilityId::new("demo.extra").unwrap(),
             name: provider_name("demo__extra"),
             description: "Extra input".to_string(),
+            description_trust: Default::default(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -4753,6 +4756,7 @@ impl GatewayCapabilityPort {
             capability_id: CapabilityId::new("demo.hidden").unwrap(),
             name: provider_name("demo__hidden"),
             description: "Hidden input".to_string(),
+            description_trust: Default::default(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -4768,6 +4772,7 @@ impl GatewayCapabilityPort {
             capability_id: CapabilityId::new("builtin.shell").unwrap(),
             name: provider_name("builtin_shell"),
             description: "Run shell commands".to_string(),
+            description_trust: Default::default(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

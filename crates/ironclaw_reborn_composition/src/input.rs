@@ -178,6 +178,7 @@ pub struct RebornHostBindings {
     /// is the one that does.
     pub(crate) deployment: DeploymentConfig,
     pub(crate) storage: RebornStorageInput,
+    pub(crate) ironhub_manifest_url: ironclaw_extension_manager::ironhub::IronhubManifestUrl,
     pub(crate) production_trust_policy: Option<Arc<HostTrustPolicy>>,
     pub(crate) turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
     pub(crate) runtime_process_binding: RebornRuntimeProcessBinding,
@@ -360,6 +361,14 @@ impl RebornHostBindings {
     /// wrote to.
     pub fn with_owner_id(mut self, owner_id: impl Into<String>) -> Self {
         self.deployment.owner_id = owner_id.into();
+        self
+    }
+
+    pub(crate) fn with_ironhub_manifest_url(
+        mut self,
+        manifest_url: ironclaw_extension_manager::ironhub::IronhubManifestUrl,
+    ) -> Self {
+        self.ironhub_manifest_url = manifest_url;
         self
     }
 
@@ -709,6 +718,20 @@ impl RebornHostBindings {
         self
     }
 
+    /// Require per-caller workspace scoping regardless of profile.
+    ///
+    /// The profile default already scopes every hosted profile. A host raises
+    /// it here when its own wiring introduces callers the WebUI workspace
+    /// browser confines to a subtree --- notably a multi-user authenticator on
+    /// a standalone-composed deployment, where the browser would otherwise read
+    /// a per-user subtree the agent never writes to. Raise-only: passing
+    /// `false` leaves a scoped profile scoped.
+    pub fn with_workspace_scoped_per_caller(mut self, required: bool) -> Self {
+        self.deployment.workspace_scoped_per_caller =
+            self.deployment.workspace_scoped_per_caller || required;
+        self
+    }
+
     pub fn with_runtime_policy(mut self, policy: EffectiveRuntimePolicy) -> Self {
         self.deployment.runtime_policy = Some(policy);
         self
@@ -892,6 +915,8 @@ impl RebornHostBindings {
         Self {
             deployment,
             storage,
+            ironhub_manifest_url: ironclaw_extension_manager::ironhub::IronhubManifestUrl::default(
+            ),
             production_trust_policy: None,
             turn_run_wake_notifier: None,
             runtime_process_binding: RebornRuntimeProcessBinding::default(),

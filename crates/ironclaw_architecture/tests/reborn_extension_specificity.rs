@@ -230,6 +230,12 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "skill-install tool description names GitHub as a skill source",
     ),
     (
+        "crates/ironclaw_extension_manager/src/ironhub/artifact_hosts.rs",
+        "github",
+        "IronHub's signed-package downloader pins GitHub release infrastructure as a code \
+         artifact source, independent of the github extension",
+    ),
+    (
         "crates/ironclaw_host_runtime/src/first_party_tools/schemas.rs",
         "github",
         "skill-install input schema names GitHub as a skill source",
@@ -1175,21 +1181,21 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     ("crates/ironclaw_runner/src/loop_driver_host.rs", "slack"),
-    ("crates/ironclaw_runner/src/tool_disclosure.rs", "google"),
+    ("crates/ironclaw_loop_host/src/tool_disclosure.rs", "google"),
     (
-        "crates/ironclaw_runner/src/tool_disclosure.rs",
+        "crates/ironclaw_loop_host/src/tool_disclosure.rs",
         "google-calendar",
     ),
     (
-        "crates/ironclaw_runner/src/tool_disclosure.rs",
+        "crates/ironclaw_loop_host/src/tool_disclosure.rs",
         "web-access",
     ),
     (
-        "crates/ironclaw_runner/src/tool_disclosure_port.rs",
+        "crates/ironclaw_loop_host/src/tool_disclosure_port.rs",
         "google",
     ),
     (
-        "crates/ironclaw_runner/src/tool_disclosure_port.rs",
+        "crates/ironclaw_loop_host/src/tool_disclosure_port.rs",
         "google-calendar",
     ),
     (
@@ -1214,10 +1220,14 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // lane-4: nearai-slice — the last catalog package (nearai_mcp) is still
     // patched from LLM-admin bootstrap config; it now lives with the generic
     // available-extension catalog in ironclaw_extension_host.
-    (
-        "crates/ironclaw_extension_host/src/available_extensions.rs",
-        "nearai-mcp",
-    ),
+    //
+    // The `nearai-mcp` *asset-directory* carve-out for this file is gone (WS2
+    // include_str kills): the package's embeds moved to the inventory module
+    // `ironclaw_extension_support::packages::nearai`, which is a sanctioned
+    // scan-exempt crate, so this file no longer names the directory. The
+    // `nearai_mcp` / `nearaimcp` entries below stay — the endpoint patch and
+    // the `nearai_mcp` module it reads are still here, by §6.8.2 (the fork is
+    // what prevents an `extension_host -> operator` upward edge).
     (
         "crates/ironclaw_extension_host/src/available_extensions.rs",
         "nearai_mcp",
@@ -1228,10 +1238,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     ("crates/ironclaw_extension_host/src/lib.rs", "nearai_mcp"),
     ("crates/ironclaw_extension_host/src/lib.rs", "nearaimcp"),
-    (
-        "crates/ironclaw_extension_host/src/lifecycle_restore.rs",
-        "slack",
-    ),
     (
         "crates/ironclaw_extension_host/src/nearai_mcp.rs",
         "nearai_mcp",
@@ -1486,7 +1492,28 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// the gate above (an entry that no longer matches fails); this ceiling is the
 /// other half — the list cannot *grow* untracked either. Lower it in the same
 /// PR that deletes entries so the new floor is locked in.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 129;
+///
+/// ✎ **129 → 125 (2026-08-04, #7143).** Two separate things, both owed by the
+/// sentence directly above and neither done until now:
+///
+/// - **This PR deleted an entry** — `("…/lifecycle_restore.rs", "slack")`, made
+///   stale by the retired-identity branch deletion — and lowering the ceiling
+///   in the same PR is exactly what that sentence requires. Shipping without it
+///   would have banked the deletion as slack rather than as a floor.
+/// - **The ceiling was already carrying 3 entries of slack before this PR.**
+///   Recounted on `origin/main`: the list holds **126** pairs against a
+///   constant of 129, so three earlier deletions lowered the list without
+///   lowering the ceiling. That slack is silent — the ratchet only refuses
+///   *growth*, so three new vendor carve-outs could have been added without
+///   any gate objecting. Setting the constant to the live count (**125** on
+///   this branch) closes the pre-existing gap as well as this PR's.
+///
+/// Counted with a script over the entries between `const ALLOWLIST` and its
+/// closing `];`, ignoring comment lines, on the **pushed ref** — not by eye and
+/// not with `grep`, which also matches prose. Tracked as #7147; whichever of
+/// the concurrent branches touching this list merges last must recount the
+/// union rather than trusting any single branch's number.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 125;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 #[test]

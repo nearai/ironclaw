@@ -77,7 +77,7 @@ run_architecture_boundaries() {
     tool_result_transcript_failure_stops_without_duplicate_model_or_tool_side_effect
   # Keep protocol/recovery selectors with the targets already compiled by this
   # lane instead of rebuilding them in the host-runtime lane.
-  run_test_exact ironclaw_runner llm_gateway \
+  run_test_exact ironclaw_loop_host llm_gateway \
     gateway_maps_deterministic_provider_response_errors_to_invalid_output
   run_test_exact ironclaw_reborn_integration_tests reborn_integration_model_recovery \
     deterministic_provider_response_errors_use_bounded_invalid_output_recovery

@@ -43,7 +43,9 @@ use ironclaw_host_api::{
 
 use crate::decision::{EffectiveTrustClass, HostTrustAssignment, TrustProvenance};
 use crate::error::TrustError;
-use crate::policy::{SourceMatch, TrustPolicyInput};
+use ironclaw_host_api::trust::TrustPolicyInput;
+
+use crate::policy::SourceMatch;
 
 /// Contract for a single policy source.
 ///
@@ -742,10 +744,10 @@ mod tests {
         trust::{PackageIdentity, PackageSource, RequestedTrustClass},
     };
 
+    use ironclaw_host_api::trust::TrustPolicyInput;
+
     use super::{AdminConfig, AdminEntry};
-    use crate::{
-        HostTrustAssignment, HostTrustPolicy, TrustPolicy, TrustPolicyInput, TrustProvenance,
-    };
+    use crate::{HostTrustAssignment, HostTrustPolicy, TrustPolicy, TrustProvenance};
 
     #[test]
     fn direct_remote_entry_requires_the_exact_endpoint_and_digest() {

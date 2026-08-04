@@ -23,9 +23,10 @@ use crate::error::LlmError;
 use crate::github_copilot_auth::CopilotTokenManager;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmProvider,
-    Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
     strip_unsupported_completion_params, strip_unsupported_tool_params,
 };
+use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 use ironclaw_common::llm_costs as costs;
 
 /// Map an HTTP error status + response body to a context-length error when it
@@ -303,18 +304,7 @@ impl LlmProvider for GithubCopilotProvider {
         self.strip_unsupported_tool_params(&mut req);
         let messages = convert_messages(req.messages);
 
-        let tools: Vec<OpenAiTool> = req
-            .tools
-            .into_iter()
-            .map(|t| OpenAiTool {
-                tool_type: "function".to_string(),
-                function: OpenAiFunction {
-                    name: t.name,
-                    description: t.description,
-                    parameters: t.parameters,
-                },
-            })
-            .collect();
+        let tools: Vec<OpenAiTool> = req.tools.into_iter().map(convert_tool_definition).collect();
 
         let tool_choice = req.tool_choice.map(|tc| match tc.as_str() {
             "auto" | "required" | "none" => serde_json::Value::String(tc),
@@ -490,6 +480,27 @@ struct OpenAiFunction {
     name: String,
     description: String,
     parameters: serde_json::Value,
+}
+
+/// Convert a canonical tool definition to Copilot's OpenAI-compatible wire
+/// shape. The runtime keeps the original schema for argument validation; only
+/// this transient provider request flattens unsupported top-level combinators.
+fn convert_tool_definition(tool: ToolDefinition) -> OpenAiTool {
+    let mut description = tool.description;
+    let parameters = shape_tool_schema(
+        ToolSchemaPolicy::FlattenOnly,
+        &tool.parameters,
+        &mut description,
+    );
+
+    OpenAiTool {
+        tool_type: "function".to_string(),
+        function: OpenAiFunction {
+            name: tool.name,
+            description,
+            parameters,
+        },
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -756,6 +767,53 @@ mod tests {
             let content = serde_json::to_value(&converted[0].content).expect("serialize content");
             assert_eq!(content[1]["image_url"]["detail"], expected);
         }
+    }
+
+    #[test]
+    fn copilot_flattens_top_level_oneof_at_the_provider_boundary() {
+        let tool = convert_tool_definition(ToolDefinition {
+            name: "evm-rpc.invoke".to_string(),
+            description: "Invoke an EVM RPC operation.".to_string(),
+            parameters: serde_json::json!({
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {"const": "get_balance"},
+                            "address": {"type": "string"}
+                        },
+                        "required": ["action", "address"]
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {"const": "get_block"},
+                            "block": {"type": "string"}
+                        },
+                        "required": ["action", "block"]
+                    }
+                ]
+            }),
+        });
+
+        assert_eq!(tool.function.parameters["type"], "object");
+        assert!(tool.function.parameters.get("oneOf").is_none());
+        assert!(
+            tool.function.parameters["properties"]
+                .get("action")
+                .is_some()
+        );
+        assert!(
+            tool.function.parameters["properties"]
+                .get("address")
+                .is_some()
+        );
+        assert!(
+            tool.function.parameters["properties"]
+                .get("block")
+                .is_some()
+        );
+        assert!(tool.function.description.contains("Upstream JSON schema"));
     }
 
     #[test]

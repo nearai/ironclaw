@@ -393,8 +393,13 @@ Rules — kept short on purpose:
   PKCE-hash / TTL validation stays in the durable `AuthFlowManager`
   (`crates/ironclaw_auth/src/product_auth/durable/tests.rs`).
 - [x] AUTH-4 Requested scopes intersect the recipe ceiling; widening is
-  rejected before the vendor call. —
-  `scope_widening_is_rejected_before_any_vendor_call` (`auth_engine_contract.rs`).
+  rejected before the vendor call. A host flow's explicit scopes are then
+  honored verbatim; an extension-scoped flow's scopes are validated as a
+  lower bound and the full ceiling is requested instead, since the vendor
+  account is shared across that vendor's installed extensions (#7069). —
+  `scope_widening_is_rejected_before_any_vendor_call`,
+  `extension_scoped_flow_requests_the_shared_vendor_ceiling`
+  (`auth_engine_contract.rs`).
 - [x] AUTH-5 Token exchange supports `post_body` and `basic`; response fields
   extract via bounded JSON pointers, including `fallback_to_requested` scope. —
   `token_exchange_supports_post_body_and_basic_client_auth`,

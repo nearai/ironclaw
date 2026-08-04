@@ -29,7 +29,9 @@ use crate::{
 };
 use async_trait::async_trait;
 use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
+use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_host_api::path::ScopedPath;
+use ironclaw_host_api::product_adapter::AdapterInstallationId;
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveryFailureKind, OutboundDeliveryAttempt,
     OutboundDeliveryDecision, OutboundDeliveryStatus, OutboundPolicyService, OutboundPushCandidate,
@@ -116,7 +118,12 @@ pub struct NoReplyContext;
 
 #[async_trait]
 impl DeliveryReplyContextSource for NoReplyContext {
-    async fn reply_context(&self, _: &str, _: &str, _: &str) -> Option<Vec<u8>> {
+    async fn reply_context(
+        &self,
+        _: &ExtensionId,
+        _: &AdapterInstallationId,
+        _: &str,
+    ) -> Option<Vec<u8>> {
         None
     }
 }
@@ -616,8 +623,8 @@ impl DeliveryCoordinator {
         reply_context: Option<Vec<u8>>,
     ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
         let envelope = OutboundEnvelope {
-            extension_id: channel.extension_id.clone(),
-            installation_id: channel.installation_id.clone(),
+            extension_id: channel.extension_id.as_str().to_string(),
+            installation_id: channel.installation_id.as_str().to_string(),
             delivery_attempt_id: attempt.delivery_id.to_string(),
             target: OutboundTarget {
                 conversation: conversation.clone(),

@@ -21,6 +21,7 @@ import {
   removeExtension,
   fetchExtensionSetup,
   submitExtensionSetup,
+  selectHostedMcpAuth,
   startExtensionOauth,
   fetchOauthFlowStatus,
   importExtension,
@@ -28,6 +29,8 @@ import {
 
 const OAUTH_SETUP_REFRESH_MS = 2000;
 const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
+const HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF =
+  "hosted_mcp_auth_selection_required";
 const OAUTH_STATUS_ERROR_KEYS = Object.freeze({
   failed: "extensions.oauthFailed",
   canceled: "extensions.oauthCanceled",
@@ -194,7 +197,11 @@ export function useExtensions() {
       setActionResult({ type: "success", message: res.message || t("extensions.customMcpRegistered", { name: desiredName }) });
       if (typeof onRegistered === "function") onRegistered();
     },
-    onError: (err, { onRegistrationError }) => {
+    onError: (err, { onAuthSelectionRequired, onRegistrationError }) => {
+      if (err?.payload?.validation_code === "auth_selection_required") {
+        if (typeof onAuthSelectionRequired === "function") onAuthSelectionRequired();
+        return;
+      }
       setActionResult({ type: "error", message: err.message });
       if (typeof onRegistrationError === "function") onRegistrationError(err.message);
     },
@@ -328,6 +335,12 @@ export function useExtensionSetup(packageRef) {
   return {
     secrets: query.data?.secrets || [],
     onboarding: query.data?.onboarding || null,
+    hostedMcpAuthSelectionRequired:
+      query.data?.blockers?.some(
+        (blocker) =>
+          blocker?.kind === "setup" &&
+          blocker?.ref_id === HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF,
+      ) === true,
     isLoading: query.isLoading,
     error: query.error,
   };
@@ -615,4 +628,44 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
     },
   });
   return { ...mutation, isAuthorizing, authError };
+}
+
+export function useHostedMcpAuthSelection(packageRef, onSuccess) {
+  const t = useT();
+  const queryClient = useQueryClient();
+  const packageKey = packageRef?.id || packageRef;
+
+  const mutation = useMutation({
+    mutationFn: ({ authSelection, clientActionId: actionId }) =>
+      selectHostedMcpAuth(packageRef, authSelection, {
+        clientActionId: actionId,
+      }).then((res) => {
+        if (res.success === false) {
+          throw new Error(res.message || t("extensions.setupFailed"));
+        }
+        if (
+          res.blockers?.some(
+            (blocker) =>
+              blocker?.kind === "setup" &&
+              blocker?.ref_id === HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF,
+          )
+        ) {
+          throw new Error(res.message || t("extensions.customMcpAuthHint"));
+        }
+        return res;
+      }),
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ["extensions"] });
+      queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
+      if (onSuccess) onSuccess(res);
+    },
+  });
+
+  return {
+    ...mutation,
+    mutate: (payload, options = undefined) =>
+      mutation.mutate(withClientActionId(payload), options),
+    mutateAsync: (payload, options = undefined) =>
+      mutation.mutateAsync(withClientActionId(payload), options),
+  };
 }

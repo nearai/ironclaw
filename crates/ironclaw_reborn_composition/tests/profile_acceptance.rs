@@ -723,3 +723,35 @@ fn production_blocker(
     RebornReadinessDiagnostic::production_blocker(profile, component, reason)
         .expect("test uses a production-shaped profile")
 }
+
+/// The per-profile workspace-scoping DEFAULT that `serve`'s unconditional
+/// raise starts from (PR #7062): local profiles keep the raw shared root so
+/// existing standalone workspaces stay reachable; every served profile
+/// defaults to per-caller subtrees. Flipping a row here changes where a
+/// deployment's files live and must be a deliberate edit.
+#[test]
+fn workspace_scoping_default_per_profile() {
+    use ironclaw_reborn_composition::RebornCompositionProfile;
+
+    for profile in [
+        RebornCompositionProfile::Standalone,
+        RebornCompositionProfile::StandaloneUnrestricted,
+    ] {
+        assert!(
+            !profile.workspace_scoped_per_caller(),
+            "local profile {profile:?} defaults to the raw workspace root"
+        );
+    }
+    for profile in [
+        RebornCompositionProfile::HostedSingleTenant,
+        RebornCompositionProfile::HostedSingleTenantVolume,
+        RebornCompositionProfile::Production,
+        RebornCompositionProfile::MigrationDryRun,
+        RebornCompositionProfile::Disabled,
+    ] {
+        assert!(
+            profile.workspace_scoped_per_caller(),
+            "served profile {profile:?} defaults to caller-scoped workspace"
+        );
+    }
+}

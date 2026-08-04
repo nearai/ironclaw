@@ -1327,7 +1327,7 @@ async fn standalone_gsuite_installs_activates_and_dispatches_through_host_runtim
                 BuiltinApprovalPolicyAction::Dispatch {
                     capability: &gmail_capability,
                 },
-                runtime_surfaces.workspace_mounts_for_test(),
+                crate::factory::test_support::workspace_mounts_for_test(runtime_surfaces),
                 runtime_surfaces.skill_mounts_for_test(),
                 runtime_surfaces.memory_mounts_for_test(),
                 runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
@@ -2938,7 +2938,7 @@ fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
 
     let matching = ironclaw_trust::TrustPolicy::evaluate(
         &policy,
-        &ironclaw_trust::TrustPolicyInput {
+        &ironclaw_host_api::trust::TrustPolicyInput {
             identity: slack_identity(
                 "/system/extensions/slack/manifest.toml",
                 Some(expected_digest.clone()),
@@ -2957,7 +2957,7 @@ fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
 
     let wrong_digest = ironclaw_trust::TrustPolicy::evaluate(
         &policy,
-        &ironclaw_trust::TrustPolicyInput {
+        &ironclaw_host_api::trust::TrustPolicyInput {
             identity: slack_identity(
                 "/system/extensions/slack/manifest.toml",
                 Some(
@@ -2979,7 +2979,7 @@ fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
 
     let wrong_path = ironclaw_trust::TrustPolicy::evaluate(
         &policy,
-        &ironclaw_trust::TrustPolicyInput {
+        &ironclaw_host_api::trust::TrustPolicyInput {
             identity: slack_identity(
                 "/system/extensions/slack/other-manifest.toml",
                 Some(expected_digest),
@@ -3025,7 +3025,7 @@ fn builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory() {
 
     let matching = ironclaw_trust::TrustPolicy::evaluate(
         &policy,
-        &ironclaw_trust::TrustPolicyInput {
+        &ironclaw_host_api::trust::TrustPolicyInput {
             identity: gmail_identity(Some(expected_digest.clone())),
             requested_trust: ironclaw_host_api::trust::RequestedTrustClass::FirstPartyRequested,
             requested_authority: Default::default(),
@@ -3040,7 +3040,7 @@ fn builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory() {
 
     let wrong_digest = ironclaw_trust::TrustPolicy::evaluate(
         &policy,
-        &ironclaw_trust::TrustPolicyInput {
+        &ironclaw_host_api::trust::TrustPolicyInput {
             identity: gmail_identity(Some(
                 "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
                     .to_string(),
@@ -3111,6 +3111,7 @@ async fn completed_lifecycle_activation_continuation_installs_the_extension() {
     let flow = product_auth
         .flow_manager()
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,

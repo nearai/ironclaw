@@ -6,6 +6,7 @@ import React from "react";
 import { useT } from "../../../lib/i18n";
 import {
   useExtensionSetup,
+  useHostedMcpAuthSelection,
   useOauthSetup,
   useSetupSubmit,
 } from "../hooks/useExtensions";
@@ -32,9 +33,16 @@ import { PairingWebCodePanel } from "../../../components/pairing-web-code-panel"
 export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
   const t = useT();
   const extensionName = extension?.displayName || extension?.packageRef?.id || t("extensions.defaultName");
-  const { secrets = [], onboarding, isLoading, error } =
+  const {
+    secrets = [],
+    onboarding,
+    hostedMcpAuthSelectionRequired,
+    isLoading,
+    error,
+  } =
     useExtensionSetup(extension?.packageRef);
   const [values, setValues] = React.useState({});
+  const [hostedMcpAuthSelection, setHostedMcpAuthSelection] = React.useState(null);
   const queryClient = useQueryClient();
   const packageId =
     typeof extension?.packageRef === "string"
@@ -62,6 +70,18 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
       onClose();
     }
   });
+  const hostedMcpAuthMutation = useHostedMcpAuthSelection(
+    extension?.packageRef,
+    (res) => {
+      // Bearer selection can successfully resolve the authentication strategy
+      // while leaving a credential blocker for the token itself. The mutation
+      // refreshes setup state, so keep this modal mounted until that form is
+      // available instead of forcing the user to rediscover Configure.
+      if (res.blockers?.length > 0) return;
+      if (onSaved) onSaved(res);
+      onClose();
+    },
+  );
 
   const handleSubmit = React.useCallback(() => {
     const secretPayload = {};
@@ -71,6 +91,12 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
     }
     submitMutation.mutate({ secrets: secretPayload });
   }, [values, submitMutation]);
+  const handleHostedMcpAuthSelection = React.useCallback(() => {
+    if (!hostedMcpAuthSelection) return;
+    hostedMcpAuthMutation.mutate({
+      authSelection: { kind: hostedMcpAuthSelection },
+    });
+  }, [hostedMcpAuthMutation, hostedMcpAuthSelection]);
   const [popupBlockedError, setPopupBlockedError] = React.useState("");
   const handleOauth = React.useCallback(
     (secret) => {
@@ -104,7 +130,7 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
   const isActive = extensionIsActive(extension);
   const oauthBusy = oauthMutation.isPending || oauthMutation.isAuthorizing;
   const setupUrl = httpsUrl(onboarding?.setup_url);
-  if (isWebCodeChannel) {
+  if (isWebCodeChannel && !hostedMcpAuthSelectionRequired) {
     // The panel is self-contained (mints/rotates codes, polls status,
     // broadcasts channel-connected on pairing), so the modal only hosts it.
     return (
@@ -153,6 +179,53 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
         <p className="text-sm text-red-200">
           {t("extensions.loadFailed")} {error.message}
         </p>
+      </ModalShell>
+    );
+  }
+
+  if (hostedMcpAuthSelectionRequired) {
+    const authChoices = ["bearer", "oauth", "no_auth"];
+    return (
+      <ModalShell
+        onClose={onClose}
+        returnFocusTo={returnFocusTo}
+        title={t("extensions.configureName").replace("{name}", extensionName)}
+      >
+        <fieldset className="space-y-2" aria-label={t("extensions.customMcpAuthHint")}>
+          {authChoices.map((kind) => (
+            <label
+              key={kind}
+              className="flex cursor-pointer items-center gap-3 rounded-md border border-white/12 bg-white/[0.04] px-3 py-2 text-sm text-iron-200"
+            >
+              <input
+                type="radio"
+                name={`hosted-mcp-auth-${packageId}`}
+                value={kind}
+                checked={hostedMcpAuthSelection === kind}
+                onChange={() => setHostedMcpAuthSelection(kind)}
+                data-testid={`hosted-mcp-auth-${kind}`}
+                className="h-4 w-4 accent-signal"
+              />
+              {t(`extensions.customMcpAuth.${kind}`)}
+            </label>
+          ))}
+        </fieldset>
+        {hostedMcpAuthMutation.error && (
+          <div className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+            {hostedMcpAuthMutation.error.message}
+          </div>
+        )}
+        <div className="mt-6 flex items-center justify-end gap-3">
+          <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
+          <Button
+            variant="primary"
+            onClick={handleHostedMcpAuthSelection}
+            loading={hostedMcpAuthMutation.isPending}
+            disabled={!hostedMcpAuthSelection}
+          >
+            {hostedMcpAuthMutation.isPending ? t("common.saving") : t("common.save")}
+          </Button>
+        </div>
       </ModalShell>
     );
   }

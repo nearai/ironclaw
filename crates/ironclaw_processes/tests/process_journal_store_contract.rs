@@ -66,6 +66,48 @@ impl ProcessJournalCommitObserver for RecordingProcessObserver {
     }
 }
 
+/// Recording observer whose callback suspends before it records.
+///
+/// Delivery therefore cannot complete within the flusher's own scheduling slot,
+/// so a store that answered its callers before delivery finished would let them
+/// observe a commit the observer has not seen yet.
+#[derive(Default)]
+struct SuspendingProcessObserver {
+    commits: Mutex<Vec<ProcessJournalCommit>>,
+    /// Size of every batch this observer was handed, in delivery order.
+    batch_sizes: Mutex<Vec<usize>>,
+}
+
+#[async_trait]
+impl ProcessJournalCommitObserver for SuspendingProcessObserver {
+    fn process_observer_id(&self) -> &'static str {
+        "suspending-process-observer"
+    }
+
+    async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
+        tokio::task::yield_now().await;
+        self.commits
+            .lock()
+            .map_err(|_| "observer mutex poisoned".to_string())?
+            .push(commit);
+        Ok(())
+    }
+
+    async fn observe_process_commits(
+        &self,
+        commits: Vec<ProcessJournalCommit>,
+    ) -> Result<(), String> {
+        self.batch_sizes
+            .lock()
+            .map_err(|_| "observer mutex poisoned".to_string())?
+            .push(commits.len());
+        for commit in commits {
+            self.observe_process_commit(commit).await?;
+        }
+        Ok(())
+    }
+}
+
 struct FailingProcessObserver;
 
 #[async_trait]
@@ -210,6 +252,149 @@ async fn process_journal_rows_serialize_concurrent_store_handles() {
         second.submit_process(exclusive_request(ProcessId::new())),
     );
     assert_ne!(first_result.is_ok(), second_result.is_ok());
+}
+
+/// A one-shot backend write fault must be observed by a caller.
+///
+/// Group commit made this a durability question: when the batch transaction
+/// fails non-retryably, replaying its commands individually re-runs their
+/// externally observable semantics against a backend whose fault the aborted
+/// batch already consumed. The command whose write was supposed to fail then
+/// succeeds on the replay, and its caller is told a durable state was reached
+/// that never was. The batch therefore fails as a whole instead of replaying.
+#[tokio::test]
+async fn group_commit_does_not_replay_a_consumed_one_shot_write_fault() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("process alias"),
+            VirtualPath::new("/engine/processes").expect("process target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("process mount"),
+    ));
+    let store = ProcessJournalStore::new(filesystem);
+    let resource_scope = scope();
+    // Materialize the store and its funnel before arming, so the fault lands
+    // on a batch of real submissions rather than on startup bookkeeping.
+    submit_internal_process(&store, &resource_scope, ProcessId::new()).await;
+
+    // A non-retryable write failure somewhere inside the next batch.
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .nth(1)
+            .backend("one-shot journal write failure"),
+    );
+
+    let process_ids = (0..16).map(|_| ProcessId::new()).collect::<Vec<_>>();
+    let submissions = process_ids.iter().map(|process_id| {
+        let store = &store;
+        let scope = resource_scope.clone();
+        let process_id = *process_id;
+        async move {
+            store
+                .submit_process(SubmitProcessRequest {
+                    process_id,
+                    process_kind: ProcessKind::Internal,
+                    scope,
+                    exclusive_within_scope: false,
+                    operation_id: None,
+                    owner_user_id: None,
+                    concurrency_class: None,
+                    parent_process_id: None,
+                    root_process_id: None,
+                    spawn_tree_descendant_cap: None,
+                    dependency: None,
+                    checkpoint_ref: None,
+                    input: None,
+                    created_at: Utc::now(),
+                    metadata: serde_json::Value::Null,
+                })
+                .await
+        }
+    });
+    let outcomes = futures::future::join_all(submissions).await;
+
+    assert!(
+        outcomes.iter().any(|outcome| outcome.is_err()),
+        "an armed one-shot write fault must surface to a caller; replaying the \
+         batch would consume it silently and report durable state that was \
+         never committed"
+    );
+    // Re-submitting a failed command is the caller's own decision and must
+    // still work: the batch rolled back, so nothing conflicts.
+    let failed = process_ids
+        .iter()
+        .zip(outcomes.iter())
+        .filter_map(|(process_id, outcome)| outcome.as_ref().err().map(|_| *process_id))
+        .collect::<Vec<_>>();
+    for process_id in failed {
+        submit_internal_process(&store, &resource_scope, process_id).await;
+    }
+}
+
+/// Contention is retried, but not forever. When the backend stays busy past
+/// the retry bound the batch has to give the caller a definite answer rather
+/// than hang or claim success — every command in it observes the exhaustion.
+#[tokio::test]
+async fn group_commit_surfaces_retry_exhaustion_to_every_caller() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("process alias"),
+            VirtualPath::new("/engine/processes").expect("process target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("process mount"),
+    ));
+    let store = ProcessJournalStore::new(filesystem);
+    let resource_scope = scope();
+    // Materialize the store first so the fault lands on real submissions.
+    submit_internal_process(&store, &resource_scope, ProcessId::new()).await;
+
+    // The writer never becomes available again.
+    backend.add_fault(Fault::on(FilesystemOperation::BeginTxn).returning(FaultKind::BackendBusy));
+
+    let process_ids = (0..4).map(|_| ProcessId::new()).collect::<Vec<_>>();
+    let submissions = process_ids.iter().map(|process_id| {
+        let store = &store;
+        let scope = resource_scope.clone();
+        let process_id = *process_id;
+        async move {
+            store
+                .submit_process(SubmitProcessRequest {
+                    process_id,
+                    process_kind: ProcessKind::Internal,
+                    scope,
+                    exclusive_within_scope: false,
+                    operation_id: None,
+                    owner_user_id: None,
+                    concurrency_class: None,
+                    parent_process_id: None,
+                    root_process_id: None,
+                    spawn_tree_descendant_cap: None,
+                    dependency: None,
+                    checkpoint_ref: None,
+                    input: None,
+                    created_at: Utc::now(),
+                    metadata: serde_json::Value::Null,
+                })
+                .await
+        }
+    });
+    let outcomes = tokio::time::timeout(
+        Duration::from_secs(30),
+        futures::future::join_all(submissions),
+    )
+    .await
+    .expect("retry exhaustion must terminate rather than hang");
+
+    assert!(
+        outcomes.iter().all(|outcome| outcome.is_err()),
+        "a permanently busy backend must fail every command in the batch"
+    );
 }
 
 #[tokio::test]
@@ -1571,6 +1756,368 @@ async fn observer_registration_replays_commits_durably_after_restart() {
     .expect("durable observer replay");
 }
 
+/// Two store instances can share one observer id across a rolling restart, and
+/// each caches its own view of the shared cursor row. The instance holding the
+/// older view must never overwrite the newer durable cursor: rewinding it
+/// silently redelivers the difference after the next restart, and the persisted
+/// acknowledgement stops representing real progress.
+///
+/// The newer position is written directly here so the stale-cache window is
+/// deterministic — the contiguity check hides it whenever the other instance's
+/// entries also land in this instance's journal view.
+/// Delivery fans out across observers so one slow observer does not add its
+/// latency to every other observer's foreground response. Every other contract
+/// test registers a single observer, so a regression back to sequential
+/// delivery would stay correct and pass the suite while restoring the
+/// write-amplified latency this change targets. Two observers rendezvous on a
+/// barrier: if delivery were sequential, neither could pass it.
+#[tokio::test]
+async fn observer_delivery_runs_registered_observers_concurrently() {
+    struct BarrierObserver {
+        id: &'static str,
+        barrier: Arc<tokio::sync::Barrier>,
+    }
+
+    #[async_trait]
+    impl ProcessJournalCommitObserver for BarrierObserver {
+        fn process_observer_id(&self) -> &'static str {
+            self.id
+        }
+
+        async fn observe_process_commit(
+            &self,
+            _commit: ProcessJournalCommit,
+        ) -> Result<(), String> {
+            self.barrier.wait().await;
+            Ok(())
+        }
+    }
+
+    let filesystem = in_memory_backed_processes_filesystem();
+    let store = ProcessJournalStore::new(filesystem);
+    let resource_scope = scope();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    for id in ["barrier-observer-a", "barrier-observer-b"] {
+        store
+            .subscribe_process_observer(Arc::new(BarrierObserver {
+                id,
+                barrier: Arc::clone(&barrier),
+            }))
+            .expect("subscribe barrier observer");
+    }
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        submit_internal_process(&store, &resource_scope, ProcessId::new()),
+    )
+    .await
+    .expect("observers must be delivered concurrently; serial delivery cannot clear the barrier");
+}
+
+/// Observer callbacks legitimately re-enter the store: the sub-agent
+/// await-edge resolver settles dependencies and resumes the parent from inside
+/// `observe_process_commit`. The task-local marker is the only thing stopping
+/// such a nested command from waiting on the very delivery it is running
+/// inside, and nothing else in the suite invokes the store from a callback —
+/// so removing or mis-scoping the marker would restore the documented
+/// self-deadlock silently.
+#[tokio::test]
+async fn observer_callback_can_reenter_store_without_deadlock() {
+    struct ReenteringObserver {
+        store: Mutex<Option<Arc<ProcessJournalStore<InMemoryBackend>>>>,
+        scope: ResourceScope,
+        nested: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ProcessJournalCommitObserver for ReenteringObserver {
+        fn process_observer_id(&self) -> &'static str {
+            "reentering-process-observer"
+        }
+
+        async fn observe_process_commit(
+            &self,
+            _commit: ProcessJournalCommit,
+        ) -> Result<(), String> {
+            // Only the first delivery re-enters; the nested command's own
+            // delivery must not recurse forever.
+            if self.nested.fetch_add(1, Ordering::SeqCst) > 0 {
+                return Ok(());
+            }
+            let store = self
+                .store
+                .lock()
+                .map_err(|_| "observer store mutex poisoned".to_string())?
+                .clone()
+                .ok_or_else(|| "observer store not wired".to_string())?;
+            store
+                .submit_process(SubmitProcessRequest {
+                    process_id: ProcessId::new(),
+                    process_kind: ProcessKind::Internal,
+                    scope: self.scope.clone(),
+                    exclusive_within_scope: false,
+                    operation_id: None,
+                    owner_user_id: None,
+                    concurrency_class: None,
+                    parent_process_id: None,
+                    root_process_id: None,
+                    spawn_tree_descendant_cap: None,
+                    dependency: None,
+                    checkpoint_ref: None,
+                    input: None,
+                    created_at: Utc::now(),
+                    metadata: serde_json::Value::Null,
+                })
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }
+    }
+
+    let filesystem = in_memory_backed_processes_filesystem();
+    let store = Arc::new(ProcessJournalStore::new(filesystem));
+    let resource_scope = scope();
+    let observer = Arc::new(ReenteringObserver {
+        store: Mutex::new(Some(Arc::clone(&store))),
+        scope: resource_scope.clone(),
+        nested: Arc::new(AtomicUsize::new(0)),
+    });
+    store
+        .subscribe_process_observer(observer.clone())
+        .expect("subscribe re-entering observer");
+
+    // Both the outer command and the one its delivery issues must complete.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        submit_internal_process(&store, &resource_scope, ProcessId::new()),
+    )
+    .await
+    .expect("a command whose delivery re-enters the store must not deadlock");
+    assert!(
+        observer.nested.load(Ordering::SeqCst) >= 1,
+        "the observer callback must actually have re-entered the store"
+    );
+}
+
+#[tokio::test]
+async fn observer_cursor_never_rewinds_from_a_stale_cache() {
+    let filesystem = in_memory_backed_processes_filesystem();
+    let store = ProcessJournalStore::new(Arc::clone(&filesystem));
+    let scope = scope();
+    let submit = async |store: &ProcessJournalStore<_>| {
+        store
+            .submit_process(SubmitProcessRequest {
+                process_id: ProcessId::new(),
+                process_kind: ProcessKind::Internal,
+                scope: scope.clone(),
+                exclusive_within_scope: false,
+                operation_id: None,
+                owner_user_id: Some(scope.user_id.clone()),
+                concurrency_class: None,
+                parent_process_id: None,
+                root_process_id: None,
+                spawn_tree_descendant_cap: None,
+                dependency: None,
+                checkpoint_ref: None,
+                input: None,
+                created_at: Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .expect("submit");
+    };
+    let observer = Arc::new(RecordingProcessObserver::default());
+    store
+        .subscribe_process_observer(observer.clone())
+        .expect("subscribe observer");
+
+    // Deliver once so this instance caches the cursor row it just wrote.
+    submit(&store).await;
+    let cursor_path = observer_cursor_path();
+    await_observer_cursor(&filesystem, &cursor_path).await;
+
+    // A second instance races ahead of this one's cached view.
+    const AHEAD: u64 = 9_999;
+    filesystem
+        .put(
+            &ResourceScope::system(),
+            &cursor_path,
+            Entry::bytes(serde_json::to_vec(&AHEAD).expect("cursor body")),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("simulate a second instance advancing the shared cursor");
+
+    // This instance commits again on its stale cache. Its next entry is
+    // contiguous with what it cached, so it takes the in-memory delivery path.
+    submit(&store).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if read_observer_cursor(&filesystem, &cursor_path).await != Some(AHEAD) {
+                tokio::task::yield_now().await;
+                continue;
+            }
+            // Give a rewind a chance to appear before declaring success.
+            tokio::task::yield_now().await;
+            if read_observer_cursor(&filesystem, &cursor_path).await == Some(AHEAD) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap_or(());
+    let observed = read_observer_cursor(&filesystem, &cursor_path).await;
+    assert_eq!(
+        observed,
+        Some(AHEAD),
+        "a stale cache must never rewind the durable observer cursor"
+    );
+}
+
+/// Another writer's entries push this observer onto the authoritative replay.
+///
+/// The in-memory delivery path may only hand a batch straight to an observer
+/// when the batch starts exactly one past what this process acknowledged.
+/// A second instance committing in between leaves a gap, and delivering across
+/// it would skip that instance's entries entirely — the observer would never
+/// see them, because the fast path carries only what this process committed.
+///
+/// This case exists to pin that fallback deterministically. Registration primes
+/// the cursor from a *spawned* task, so a freshly subscribed observer reaches
+/// the gap branch only when the first commit beats that task — a race that
+/// silently stops covering the branch whenever the scheduler goes the other
+/// way. Driving the gap through a real second writer does not depend on
+/// scheduling at all.
+#[tokio::test]
+async fn observer_replays_when_a_second_writer_leaves_a_cursor_gap() {
+    let filesystem = in_memory_backed_processes_filesystem();
+    let store = ProcessJournalStore::new(Arc::clone(&filesystem));
+    let other_writer = ProcessJournalStore::new(Arc::clone(&filesystem));
+    let scope = scope();
+    let submit = async |store: &ProcessJournalStore<_>| {
+        let process_id = ProcessId::new();
+        store
+            .submit_process(SubmitProcessRequest {
+                process_id,
+                process_kind: ProcessKind::Internal,
+                scope: scope.clone(),
+                exclusive_within_scope: false,
+                operation_id: None,
+                owner_user_id: Some(scope.user_id.clone()),
+                concurrency_class: None,
+                parent_process_id: None,
+                root_process_id: None,
+                spawn_tree_descendant_cap: None,
+                dependency: None,
+                checkpoint_ref: None,
+                input: None,
+                created_at: Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .expect("submit");
+        process_id
+    };
+
+    let observer = Arc::new(RecordingProcessObserver::default());
+    store
+        .subscribe_process_observer(observer.clone())
+        .expect("subscribe observer");
+
+    // Let this instance acknowledge a cursor of its own first, so the gap below
+    // is a genuine discontinuity rather than the cold-cache case.
+    let before_the_gap = submit(&store).await;
+    let cursor_path = observer_cursor_path();
+    await_observer_cursor(&filesystem, &cursor_path).await;
+
+    // The gap: entries this observer's instance never committed and so can
+    // never deliver from memory.
+    let unseen_by_the_fast_path = submit(&other_writer).await;
+
+    // Committing again now starts past the gap, forcing the replay.
+    let after_the_gap = submit(&store).await;
+
+    // Nothing either side of the gap may be lost: the entry before it arrived
+    // on the fast path, the entry after it through the replay, and the replay
+    // must not skip past what it was catching up on.
+    //
+    // Waiting for all three rather than just the other writer's, because the
+    // replay records the entries it catches up on one at a time -- seeing that
+    // one has landed says nothing about the next.
+    //
+    // Deliberately a subset rather than an exact count. Redelivery is permitted
+    // here by design -- `deliver_committed_batch` says the entries above a gap
+    // "may be delivered twice, which every replay path already permits" -- and
+    // registration primes the cursor from a spawned task, so a slow enough
+    // runner can legitimately replay the first entry on top of its live
+    // delivery. Asserting an exact count would pin scheduling, not the contract.
+    let expected = [before_the_gap, unseen_by_the_fast_path, after_the_gap];
+    let delivered = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let delivered = observer
+                .commits
+                .lock()
+                .expect("observer mutex")
+                .iter()
+                .map(|commit| commit.state.process_id)
+                .collect::<std::collections::HashSet<_>>();
+            if expected
+                .iter()
+                .all(|process_id| delivered.contains(process_id))
+            {
+                return delivered;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_default();
+
+    for (label, process_id) in [
+        ("before the gap", before_the_gap),
+        ("the other writer's", unseen_by_the_fast_path),
+        ("after the gap", after_the_gap),
+    ] {
+        assert!(
+            delivered.contains(&process_id),
+            "{label} commit never reached the observer; crossing the fast path \
+             and the durable replay must lose nothing. The other writer's entry \
+             is the one the in-memory path cannot carry, so a delivery that \
+             skipped the gap drops it"
+        );
+    }
+}
+
+fn observer_cursor_path() -> ScopedPath {
+    let digest = blake3::hash(b"recording-process-observer").to_hex();
+    ScopedPath::new(format!("/processes/materialized/observer-cursor/{digest}"))
+        .expect("cursor path")
+}
+
+async fn read_observer_cursor(
+    filesystem: &Arc<ScopedFilesystem<InMemoryBackend>>,
+    path: &ScopedPath,
+) -> Option<u64> {
+    filesystem
+        .get(&ResourceScope::system(), path)
+        .await
+        .expect("read cursor")
+        .map(|versioned| serde_json::from_slice::<u64>(&versioned.entry.body).expect("cursor body"))
+}
+
+async fn await_observer_cursor(
+    filesystem: &Arc<ScopedFilesystem<InMemoryBackend>>,
+    path: &ScopedPath,
+) -> u64 {
+    for _ in 0..2_000 {
+        if let Some(cursor) = read_observer_cursor(filesystem, path).await {
+            return cursor;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("observer cursor row was never written");
+}
+
 #[tokio::test]
 async fn observer_failure_retries_until_durable_cursor_is_acknowledged() {
     let filesystem = in_memory_backed_processes_filesystem();
@@ -1625,6 +2172,237 @@ async fn observer_failure_retries_until_durable_cursor_is_acknowledged() {
         .expect("subscribe after acknowledged replay");
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert_eq!(after_restart.attempts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn group_committed_submissions_deliver_every_entry_once_before_returning() {
+    let store = Arc::new(ProcessJournalStore::new(
+        in_memory_backed_processes_filesystem(),
+    ));
+    let observer = Arc::new(SuspendingProcessObserver::default());
+    store
+        .subscribe_process_observer(observer.clone())
+        .expect("subscribe observer");
+    let scope = scope();
+    // Materialize the store and start the group-commit funnel so the
+    // submissions below are all queued before the flusher drains them.
+    let warmup = submit_internal_process(store.as_ref(), &scope, ProcessId::new()).await;
+
+    let process_ids = (0..32).map(|_| ProcessId::new()).collect::<Vec<_>>();
+    let submissions = process_ids.iter().copied().map(|process_id| {
+        let store = Arc::clone(&store);
+        let observer = Arc::clone(&observer);
+        let scope = scope.clone();
+        async move {
+            let snapshot = submit_internal_process(store.as_ref(), &scope, process_id).await;
+            // Read-your-writes: a caller that reads projections right after
+            // this call returns must never miss its own commit.
+            let delivered = observer
+                .commits
+                .lock()
+                .expect("observer commits")
+                .iter()
+                .any(|commit| commit.state.process_id == process_id);
+            assert!(
+                delivered,
+                "observer must have seen {process_id} before its submission returned"
+            );
+            snapshot
+        }
+    });
+    let snapshots = futures::future::join_all(submissions).await;
+    assert_eq!(snapshots.len(), process_ids.len());
+
+    // The group-committed submissions reach the observer batched, not one call
+    // per entry: delivery sits between the commit and the caller's response, so
+    // a per-entry hand-off there costs a round trip per entry. Asserted as a
+    // property rather than an exact batch size, which depends on how far the
+    // runtime lets submissions queue before the flusher drains them.
+    let batch_sizes = observer.batch_sizes.lock().expect("observer batch sizes");
+    let largest = batch_sizes.iter().copied().max().unwrap_or_default();
+    assert!(
+        largest > 1,
+        "expected batched delivery, saw only per-entry calls {batch_sizes:?}"
+    );
+    assert!(
+        batch_sizes.len() < process_ids.len(),
+        "expected fewer deliveries than commits, saw batches {batch_sizes:?}"
+    );
+    drop(batch_sizes);
+
+    let commits = observer.commits.lock().expect("observer commits");
+    assert_eq!(
+        commits.len(),
+        process_ids.len() + 1,
+        "every committed entry is delivered exactly once"
+    );
+    let mut previous = 0;
+    for commit in commits.iter() {
+        assert!(
+            commit.state.journal_cursor.0 > previous,
+            "observer deliveries must be strictly ordered by cursor"
+        );
+        previous = commit.state.journal_cursor.0;
+    }
+    let delivered = commits
+        .iter()
+        .map(|commit| commit.state.process_id)
+        .collect::<Vec<_>>();
+    for process_id in process_ids.iter() {
+        assert_eq!(
+            delivered
+                .iter()
+                .filter(|delivered| *delivered == process_id)
+                .count(),
+            1,
+            "{process_id} must be delivered exactly once"
+        );
+    }
+    // The warm-up is held to at-least-once, not exactly-once. Registration
+    // primes the cursor from a spawned task, so if this entry commits before
+    // that task runs, `deliver_committed_batch` sees no acknowledged cursor,
+    // takes the non-contiguous fallback, and the registration replay can then
+    // deliver the same entry again. That redelivery is permitted -- the fast
+    // path documents that entries above a gap "may be delivered twice, which
+    // every replay path already permits" -- so asserting a count of one here
+    // would pin scheduling rather than the contract. The 32 submissions above
+    // are strict: by then the cursor is primed and they arrive through the
+    // funnel in order.
+    assert!(
+        delivered.contains(&warmup.process_id),
+        "the warm-up commit must reach the observer at least once"
+    );
+}
+
+/// Concurrent claims in one group commit each get work.
+///
+/// A group commit materializes one shared state for the whole batch, so the
+/// candidate window has to cover the batch's total demand. Sized for a single
+/// request it does not: the first claim consumes the window and the rest come
+/// back empty while eligible work is still queued. Before batching each claim
+/// ran its own transaction and re-queried after the previous one advanced
+/// state, so the window was always fresh.
+///
+/// Deliberately more queued work than any one claim asks for, and enough
+/// concurrent claimants that they batch.
+#[tokio::test]
+async fn concurrent_claims_in_one_batch_each_receive_queued_work() {
+    // Demand must exceed one request's window, which is `max_processes` plus
+    // the 64-row quota-skip allowance; below that the allowance already covers
+    // the batch and the defect is invisible.
+    const CLAIMANTS: usize = 40;
+    const PER_CLAIM: usize = 4;
+
+    let store = Arc::new(ProcessJournalStore::new(
+        in_memory_backed_processes_filesystem(),
+    ));
+    let scope = scope();
+    for _ in 0..(CLAIMANTS * PER_CLAIM) {
+        submit_internal_process(store.as_ref(), &scope, ProcessId::new()).await;
+    }
+
+    let claims = (0..CLAIMANTS).map(|worker| {
+        let store = Arc::clone(&store);
+        async move {
+            store
+                .claim_next_processes(ClaimProcessesRequest {
+                    worker_id: ProcessWorkerId::from_trusted(format!("worker-{worker}")),
+                    scope_filter: None,
+                    process_id_filter: None,
+                    process_kind_filter: None,
+                    max_processes: PER_CLAIM,
+                })
+                .await
+                .expect("claim")
+        }
+    });
+    let claimed = futures::future::join_all(claims).await;
+
+    let empty = claimed.iter().filter(|batch| batch.is_empty()).count();
+    let total = claimed.iter().map(Vec::len).sum::<usize>();
+    assert_eq!(
+        empty,
+        0,
+        "every claimant must receive work when the queue holds \
+         {} processes and the batch asks for {}; got per-claimant counts {:?}",
+        CLAIMANTS * PER_CLAIM,
+        CLAIMANTS * PER_CLAIM,
+        claimed.iter().map(Vec::len).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        total,
+        CLAIMANTS * PER_CLAIM,
+        "claims must not overlap or drop work"
+    );
+}
+
+#[tokio::test]
+async fn group_commit_isolates_a_rejected_command_from_its_batch() {
+    let store = Arc::new(ProcessJournalStore::new(
+        in_memory_backed_processes_filesystem(),
+    ));
+    let scope = scope();
+    let leased_process_id = ProcessId::new();
+    submit_internal_process(store.as_ref(), &scope, leased_process_id).await;
+    let claim = store
+        .claim_next_processes(ClaimProcessesRequest {
+            worker_id: ProcessWorkerId::from_trusted(ProcessId::new().as_uuid().to_string()),
+            scope_filter: Some(scope.clone()),
+            process_id_filter: None,
+            process_kind_filter: None,
+            max_processes: 1,
+        })
+        .await
+        .expect("claim process")
+        .pop()
+        .expect("claimed process");
+
+    let rejected = {
+        let store = Arc::clone(&store);
+        async move {
+            store
+                .complete_process(ProcessStateTransitionRequest {
+                    lease: ProcessLeaseRequest {
+                        process_id: leased_process_id,
+                        worker_id: claim.worker_id,
+                        lease_token: ProcessLeaseToken::from_trusted(
+                            ProcessId::new().as_uuid().to_string(),
+                        ),
+                    },
+                    metadata: None,
+                })
+                .await
+        }
+    };
+    let accepted_ids = (0..8).map(|_| ProcessId::new()).collect::<Vec<_>>();
+    let accepted = futures::future::join_all(accepted_ids.iter().copied().map(|process_id| {
+        let store = Arc::clone(&store);
+        let scope = scope.clone();
+        async move { submit_internal_process(store.as_ref(), &scope, process_id).await }
+    }));
+    // Both futures are queued before the flusher runs, so the rejected command
+    // and the valid submissions share one group-commit transaction.
+    let (rejected, accepted) = tokio::join!(rejected, accepted);
+
+    let error = rejected.expect_err("wrong lease must fail");
+    assert!(error.to_string().contains("lease is invalid"));
+    for (process_id, snapshot) in accepted_ids.iter().zip(accepted.iter()) {
+        assert_eq!(&snapshot.process_id, process_id);
+        assert_eq!(snapshot.status, ProcessLifecycleStatus::Queued);
+    }
+    let persisted = store
+        .process_snapshots(&scope)
+        .await
+        .expect("read persisted process snapshots")
+        .into_iter()
+        .map(|snapshot| snapshot.process_id)
+        .collect::<Vec<_>>();
+    for process_id in &accepted_ids {
+        assert!(
+            persisted.contains(process_id),
+            "a batch member rejected for an invalid lease must not drop {process_id}"
+        );
+    }
 }
 
 #[tokio::test]

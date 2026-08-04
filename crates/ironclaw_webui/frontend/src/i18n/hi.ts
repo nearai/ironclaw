@@ -118,6 +118,7 @@ registerPack("hi", {
   "chat.identityUser": "आप",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "नवीनतम पर जाएं",
+  "chat.queued": "कतार में",
   "shortcuts.title": "कीबोर्ड शॉर्टकट",
   "shortcuts.send": "संदेश भेजें",
   "shortcuts.newline": "नई लाइन",

@@ -191,6 +191,63 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["crate_buckets"], [])
 
+    def test_reborn_e2e_scenario_change_is_owned_by_e2e_workflow(self) -> None:
+        plan = self.plan(
+            "pull_request",
+            ["tests/e2e/scenarios/test_reborn_webui_v2_legacy_extensions.py"],
+        )
+        # E2E scenarios live in the dedicated reborn-e2e.yml workflow, not
+        # the crate-bucket / root-partition / integration-lane plan emitted
+        # here. A scenario-only change must not fail closed as an unmapped
+        # path, and must not schedule crate buckets or integration lanes.
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["crate_buckets"], [])
+        self.assertEqual(plan["integration_lanes"], [])
+        self.assertEqual(plan["root_partitions"], [])
+        self.assertTrue(plan["run_qa_replay"])
+        self.assertTrue(
+            any("Reborn E2E workflow owns" in reason for reason in plan["reasons"]),
+            plan["reasons"],
+        )
+
+    def test_shared_e2e_harness_is_owned_by_e2e_workflow(self) -> None:
+        plan = self.plan("pull_request", ["tests/e2e/reborn_webui_harness.py"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["integration_lanes"], [])
+
+    def test_reborn_e2e_and_crate_changes_keep_both_owners(self) -> None:
+        plan = self.plan(
+            "pull_request",
+            [
+                "tests/e2e/scenarios/test_reborn_webui_v2_legacy_extensions.py",
+                "crates/alpha/src/lib.rs",
+            ],
+        )
+        # The E2E scenario path is skipped (owned by reborn-e2e.yml) while
+        # the changed crate is still scheduled in the affected crate buckets.
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["alpha"])
+        self.assertTrue(plan["crate_buckets"])
+        self.assertTrue(plan["run_qa_replay"])
+        self.assertTrue(
+            any("Reborn E2E workflow owns" in reason for reason in plan["reasons"]),
+            plan["reasons"],
+        )
+
+    def test_live_qa_harness_changes_run_only_qa_replay(self) -> None:
+        for path in (
+            "scripts/live-canary/README.md",
+            "scripts/live-canary/notify_slack.py",
+            "scripts/reborn_webui_v2_live_qa/run_live_qa.py",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "selected")
+                self.assertTrue(plan["run_qa_replay"])
+                self.assertEqual(plan["crate_buckets"], [])
+                self.assertEqual(plan["root_partitions"], [])
+                self.assertEqual(plan["integration_lanes"], [])
+
     def test_unrelated_workflow_change_runs_only_baseline_qa_replay(self) -> None:
         plan = self.plan("pull_request", [".github/workflows/code_style.yml"])
         self.assertEqual(plan["mode"], "none")
@@ -325,18 +382,26 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["integration_lanes"], [])
 
-    def test_reborn_e2e_paths_are_owned_by_dedicated_workflow(self) -> None:
-        plan = self.plan(
-            "pull_request",
-            [
-                "tests/e2e/reborn_coverage_tests.txt",
-                "tests/e2e/scenarios/test_reborn_webui_v2_projects_api.py",
-            ],
-        )
-        self.assertEqual(plan["mode"], "none")
-        self.assertTrue(plan["run_qa_replay"])
-        self.assertEqual(plan["integration_lanes"], [])
-        self.assertEqual(plan["coverage_mode"], "none")
+    def test_e2e_paths_are_owned_by_dedicated_workflows(self) -> None:
+        for path in (
+            "tests/e2e/helpers.py",
+            "tests/e2e/reborn_webui_harness.py",
+            "tests/e2e/reborn_coverage_tests.txt",
+            "tests/e2e/scenarios/test_reborn_webui_v2_projects_api.py",
+            "tests/e2e/scenarios/test_reborn_webui_v2_smoke.py",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none")
+                self.assertTrue(plan["run_qa_replay"])
+                self.assertEqual(plan["integration_lanes"], [])
+                self.assertEqual(plan["coverage_mode"], "none")
+                self.assertTrue(
+                    any(
+                        reason.startswith("dedicated Reborn E2E workflow owns")
+                        for reason in plan["reasons"]
+                    )
+                )
 
     def test_changed_coverage_manifest_does_not_launch_integration_lanes(self) -> None:
         plan = self.plan(
@@ -367,6 +432,21 @@ class RebornPrTestPlanTests(unittest.TestCase):
             ROOT / "scripts/ci/reborn-coverage-lane-run.sh"
         ).read_text(encoding="utf-8")
         self.assertIn("reborn_(integration_|generated_)", lane_runner)
+        self.assertIn(
+            'cargo test -p ironclaw_reborn_integration_tests "${test_args[@]}" '
+            "\\\n      --ignore-rust-version",
+            lane_runner,
+        )
+
+    def test_selected_integration_lane_keeps_msrv_override(self) -> None:
+        lane_runner = (
+            ROOT / "scripts/ci/reborn-coverage-lane-run.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'cargo test -p ironclaw_reborn_integration_tests "${test_args[@]}" '
+            "\\\n      --ignore-rust-version -- --nocapture",
+            lane_runner,
+        )
 
     def test_unmapped_crate_path_fails_fast(self) -> None:
         with self.assertRaisesRegex(ValueError, "unmapped crate path"):
@@ -375,6 +455,74 @@ class RebornPrTestPlanTests(unittest.TestCase):
     def test_unclassified_build_input_fails_fast(self) -> None:
         with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
             self.plan("pull_request", ["Dockerfile"])
+
+    def test_agent_guidance_is_classified_and_selects_no_rust_lane(self) -> None:
+        """`.claude/**` is prose, like `docs/**`.
+
+        Regression for the gap #7064 hit: the planner had no rule for
+        `.claude/`, so its fail-closed arm rejected any PR editing a skill, a
+        command, or a rule — failing the whole `Tests (Reborn)` roll-up on a
+        documentation-only change. The assertion is deliberately paired: the
+        path must be *accepted* AND must select no Rust lane, so a future
+        "classification" that quietly turns guidance edits into a full matrix
+        fails here too.
+        """
+        for path in (
+            ".claude/commands/trace.md",
+            ".claude/rules/testing.md",
+            ".claude/skills/reborn-feature/SKILL.md",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none", path)
+                self.assertEqual(plan["crate_buckets"], [], path)
+                self.assertEqual(plan["root_partitions"], [], path)
+                self.assertEqual(plan["integration_lanes"], [], path)
+
+    def test_repo_wide_test_guidance_selects_no_rust_lane(self) -> None:
+        for path in ("tests/CLAUDE.md", "tests/integration/CLAUDE.md"):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none")
+                self.assertEqual(plan["crate_buckets"], [])
+                self.assertEqual(plan["root_partitions"], [])
+                self.assertEqual(plan["integration_lanes"], [])
+
+    def test_decided_repo_root_script_paths_are_owned_by_other_workflows(self) -> None:
+        """Repo-root `scripts/` files that another workflow owns.
+
+        The `unmapped test or CI path` arm deliberately refuses `scripts/**`
+        outside `scripts/ci/` so each file gets a decision rather than a
+        blanket prefix. These two have one, recorded beside the constant: the
+        panic baseline belongs to Code Style, and the E2E selector script
+        belongs to the `Reborn E2E` workflow's own scope detector. Neither
+        selects a lane in *this* planner — but the sibling that has no
+        decision must still refuse, which the second half asserts.
+        """
+        for path in (
+            "scripts/no_panics_reborn_baseline.txt",
+            "scripts/reborn-e2e-rust.sh",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none", path)
+                self.assertEqual(plan["crate_buckets"], [], path)
+
+        with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
+            self.plan("pull_request", ["scripts/some-undecided-helper.sh"])
+
+    def test_agent_guidance_does_not_mask_a_real_lane_in_the_same_pr(self) -> None:
+        """Classifying `.claude/` must not swallow its neighbours.
+
+        A guidance edit riding along with a crate change still selects that
+        crate's lane — the ignore is per-path, not per-PR.
+        """
+        plan = self.plan(
+            "pull_request",
+            [".claude/commands/trace.md", "crates/alpha/src/lib.rs"],
+        )
+        self.assertEqual(plan["mode"], "selected")
+        self.assertNotEqual(plan["crate_buckets"], [])
 
     def test_changed_integration_binary_selects_its_exact_lane(self) -> None:
         path, lane = next(iter(planner._integration_test_lanes().items()))
@@ -391,6 +539,18 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
         self.assertEqual(root_plan["root_partitions"], [0])
         self.assertEqual(integration_plan["integration_lanes"], [0])
+
+    def test_hosted_mcp_support_selects_its_owning_integration_lane(self) -> None:
+        owner = planner.INTEGRATION_SUPPORT_OWNERS[
+            "tests/support/hosted_mcp_registration_server.rs"
+        ]
+        expected_lane = planner._integration_test_lanes()[owner]
+
+        plan = self.plan(
+            "pull_request", ["tests/support/hosted_mcp_registration_server.rs"]
+        )
+
+        self.assertEqual(plan["integration_lanes"], [expected_lane])
 
     def test_workspace_topology_change_defers_exhaustive_matrix_to_queue(self) -> None:
         plan = self.plan("pull_request", ["Cargo.toml"])

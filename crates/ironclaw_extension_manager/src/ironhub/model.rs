@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::package_lifecycle::LifecycleProductResponse;
@@ -18,10 +18,7 @@ pub(crate) const MAX_WASM_BYTES: u64 = 16 * 1024 * 1024;
 pub(crate) const MANIFEST_CACHE_TTL: Duration = Duration::from_secs(60);
 pub(crate) const MANIFEST_CACHE_MAX_ENTRIES: usize = 64;
 pub(crate) const MAX_SEARCH_RESPONSE_BYTES: usize = 20 * 1024;
-pub(crate) const GENERIC_TOOL_INPUT_SCHEMA: &[u8] =
-    br#"{"type":"object","additionalProperties":true}"#;
-pub(crate) const GENERIC_TOOL_OUTPUT_SCHEMA: &[u8] =
-    br#"{"description":"Raw JSON output from the installed IronHub tool"}"#;
+pub(crate) const MAX_TOOL_SCHEMA_ARTIFACTS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -46,6 +43,7 @@ pub enum IronHubProvenance {
     Official,
     Trusted,
     Verified,
+    Private,
     #[default]
     #[serde(alias = "community")]
     New,
@@ -57,6 +55,7 @@ impl IronHubProvenance {
             Self::Official => "official",
             Self::Trusted => "trusted",
             Self::Verified => "verified",
+            Self::Private => "private",
             Self::New => "new",
         }
     }
@@ -91,7 +90,6 @@ impl IronHubManifest {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct IronHubToolEntry {
     pub(crate) name: String,
-    pub(crate) crate_name: String,
     pub(crate) version: String,
     #[serde(default)]
     pub(crate) description: String,
@@ -99,6 +97,21 @@ pub(crate) struct IronHubToolEntry {
     pub(crate) provenance: IronHubProvenance,
     pub(crate) wasm: IronHubArtifact,
     pub(crate) capabilities: IronHubArtifact,
+    /// The extension manifest the registry published for this tool.
+    ///
+    /// Optional so a catalog predating published manifests still deserializes
+    /// and still lists every tool; installing one of those tools is what fails,
+    /// with a message naming the cause. Making it required would turn one stale
+    /// catalog into zero visible tools.
+    #[serde(default)]
+    pub(crate) manifest: Option<IronHubArtifact>,
+    /// Manifest asset path to digest-pinned schema artifact.
+    ///
+    /// Kept optional at catalog-deserialization time so stale catalogs remain
+    /// searchable. Installation fails closed when the published manifest
+    /// references a schema that is absent here.
+    #[serde(default)]
+    pub(crate) schemas: BTreeMap<String, IronHubArtifact>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -122,13 +135,31 @@ pub(crate) struct IronHubArtifact {
     pub(crate) sha256: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct IronHubInstallOptions {
     pub kind: Option<IronHubEntryKind>,
     pub force: bool,
     pub acknowledge_unverified: bool,
     pub expected_version: Option<String>,
     pub expected_artifact_digest: Option<String>,
+    pub private_manifest_url: Option<String>,
+}
+
+impl std::fmt::Debug for IronHubInstallOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IronHubInstallOptions")
+            .field("kind", &self.kind)
+            .field("force", &self.force)
+            .field("acknowledge_unverified", &self.acknowledge_unverified)
+            .field("expected_version", &self.expected_version)
+            .field("expected_artifact_digest", &self.expected_artifact_digest)
+            .field(
+                "private_manifest_url",
+                &self.private_manifest_url.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

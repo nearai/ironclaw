@@ -19,8 +19,6 @@ use crate::{
 // One classifier for `ExtensionError` — see the note in `active_publication.rs`.
 use crate::product_lifecycle::map_extension_error;
 
-const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
-
 pub async fn restore_extension_lifecycle_state(
     catalog: &mut AvailableExtensionCatalog,
     filesystem: &Arc<dyn RootFilesystem>,
@@ -44,9 +42,6 @@ pub async fn restore_extension_lifecycle_state(
             catalog.extend(AvailableExtensionCatalog::from_packages(vec![available]));
             catalog_registered_user_extension_ids
                 .insert(installation.extension_id().as_str().to_string());
-        }
-        if remove_retired_internal_installation(installation_store, &installation).await? {
-            continue;
         }
         let package_ref = LifecyclePackageRef::new(
             LifecyclePackageKind::Extension,
@@ -209,33 +204,6 @@ async fn canonicalize_persisted_installation_rows(
     }
 
     Ok(canonical)
-}
-
-async fn remove_retired_internal_installation(
-    installation_store: &Arc<dyn ExtensionInstallationStorePort>,
-    installation: &ExtensionInstallation,
-) -> Result<bool, ProductOperationFailure> {
-    if installation.extension_id().as_str() != RETIRED_SLACK_USER_EXTENSION_ID {
-        return Ok(false);
-    }
-
-    tracing::info!(
-        extension_id = installation.extension_id().as_str(),
-        installation_id = installation.installation_id().as_str(),
-        "removing retired internal extension installation during lifecycle restore"
-    );
-    installation_store
-        .delete_installation(installation.installation_id())
-        .await
-        .map_err(map_extension_installation_error)?;
-    match installation_store
-        .delete_manifest(installation.extension_id())
-        .await
-    {
-        Ok(()) | Err(ExtensionInstallationError::ManifestNotFound { .. }) => {}
-        Err(error) => return Err(map_extension_installation_error(error)),
-    }
-    Ok(true)
 }
 
 pub struct ExtensionInstallPlan {
@@ -441,16 +409,9 @@ fn map_extension_installation_error(error: ExtensionInstallationError) -> Produc
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        RETIRED_SLACK_USER_EXTENSION_ID, map_extension_error, map_extension_installation_error,
-    };
+    use super::{map_extension_error, map_extension_installation_error};
     use ironclaw_extensions::{ExtensionError, ExtensionInstallationError, InstallationOwner};
     use ironclaw_product_contracts::error::ProductOperationFailure;
-
-    #[test]
-    fn retired_slack_user_id_remains_stable() {
-        assert_eq!(RETIRED_SLACK_USER_EXTENSION_ID, "slack_user");
-    }
 
     /// Restore runs at boot over every persisted installation. Misclassifying
     /// an infrastructure failure as a malformed request would make restore

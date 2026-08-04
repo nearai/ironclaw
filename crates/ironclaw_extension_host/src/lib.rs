@@ -39,7 +39,6 @@ pub mod channel_identity_store;
 pub mod channel_lifecycle;
 pub mod channel_outbound_targets;
 pub mod channel_pairing;
-pub mod channel_pairing_serve;
 pub mod channel_subject_routes;
 pub mod channel_triggered_delivery;
 pub mod deployment_channels;
@@ -126,7 +125,7 @@ pub use admin_configuration_store::{
 };
 pub use available_extension_import::{
     extension_asset_path, imported_extension_package, inline_extension_dir_assets,
-    materialize_available_extension, registry_extension_package,
+    materialize_available_extension, parse_imported_manifest, registry_extension_package,
 };
 pub use available_extensions::{
     AdminConfigurationCatalogUse, AvailableExtensionAsset, AvailableExtensionAssetContent,
@@ -234,8 +233,7 @@ pub use provider_instance_readiness::{
     ProviderInstanceReadinessInput, provider_instance_readiness_map,
 };
 pub use recipes::{
-    InstalledManifestAuthRecipeResolver, SnapshotAuthRecipeResolver, VendorRecipeConflict,
-    unified_vendor_recipes,
+    InstalledManifestAuthRecipeResolver, VendorRecipeConflict, unified_vendor_recipes,
 };
 pub use removal_cleanup::{
     ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapter, ExtensionRemovalCleanupAdapterId,

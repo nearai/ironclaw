@@ -319,7 +319,11 @@ pub async fn sweep_once(
         };
         let Some(resolved) = deps
             .recipes
-            .resolve(requester_extension.as_ref(), account.provider.as_str())
+            .resolve(
+                requester_extension.as_ref(),
+                Some(&account.scope.resource.user_id),
+                account.provider.as_str(),
+            )
             .await
         else {
             continue;
@@ -640,6 +644,7 @@ mod tests {
             async fn resolve(
                 &self,
                 requester_extension: Option<&ExtensionId>,
+                _caller: Option<&ironclaw_host_api::ids::UserId>,
                 vendor: &str,
             ) -> Option<crate::engine::ResolvedVendorAuthRecipe> {
                 if requester_extension == Some(&self.extension) && vendor == self.recipe.vendor {

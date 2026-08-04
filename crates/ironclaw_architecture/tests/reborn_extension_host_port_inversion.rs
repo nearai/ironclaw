@@ -36,6 +36,10 @@ mod ratchet_support;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::OnceLock;
+
+use serde_json::Value;
 
 use ratchet_support::{
     TypeDefOccurrence, cfg_test_only_files, collect_type_defs, names_crate, out_of_line_mod_decls,
@@ -150,8 +154,155 @@ const PRODUCT_DEFINED_TRAITS_EXTENSION_MANAGER_STILL_IMPLEMENTS: &[(&str, &str)]
      is narrowed out (the same blocker as the host's AuthChallengeProvider row)",
 )];
 
-fn crate_src(root: &Path, name: &str) -> PathBuf {
-    root.join("crates").join(name).join("src")
+/// **The full `ironclaw_product` reference ledger** — every production file in
+/// `ironclaw_extension_host` whose code names `ironclaw_product` at all, with
+/// the reason it still does. Exact-match in both directions and shrink-only.
+///
+/// Why this exists when the trait residue above already does: the trait list is
+/// **trait-shaped** — it sees `impl <product trait> for …` headers and nothing
+/// else. A dependency can also be a constant (`adapter_registry::
+/// PRODUCT_ADAPTER_HOST_API_ID`), a free function (`auth_prompt_view_for_
+/// blocked_auth`), or an inline construction of a concrete product type
+/// (`ProductConversationBindingService::new`), and none of those register
+/// there. The manifest biconditional below catches the *sum* loudly, but as a
+/// boolean: it cannot say what remains. The `products → loops` re-layer was
+/// sized five times from proxies of this set and was wrong five times
+/// (PROPOSAL §12.11 D-A and its 2026-08-03 amendment; #7092; #7143; #7145) —
+/// this ledger makes the remaining scope a file-list diff instead of an
+/// estimate.
+///
+/// **Update rule:** removing a reference deletes its row in the same change
+/// (the stale direction fails otherwise); a new production file naming product
+/// fails the gate and is not to be allowlisted here — implement against
+/// `ironclaw_product_contracts` instead (§6.1.3). The row's reason names the
+/// blocker class so the flip's remaining work stays enumerable: `port` (the
+/// trait residue above), `adapter-registry` (manifest projection, owned by
+/// CHECKLIST WS5's `product` narrows row), `product-fn` (a free function that
+/// moves with its vocabulary), or `assembly` (the D-A factory-port scope).
+const EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT: &[(&str, &str)] = &[
+    (
+        "available_extensions.rs",
+        "adapter-registry: product_adapter_sections manifest projection \
+         (owned by CHECKLIST WS5's product-narrows row; the strategy-alias \
+         half of this row fell to #7143's import repoint)",
+    ),
+    (
+        "channel_connection.rs",
+        "port: implements ChannelConnectionService and returns \
+         ChannelAuthAccountState — the ironclaw_auth vocabulary residue row",
+    ),
+    (
+        "channel_host.rs",
+        "port: implements ConversationBindingService and ProductActorUserResolver \
+         (their DTOs are product-declared) + assembly: inline-constructs product's \
+         concrete stack — the §12.11 D-A factory-port scope",
+    ),
+    (
+        "channel_lifecycle.rs",
+        "adapter-registry: PRODUCT_ADAPTER_HOST_API_ID section filter (the \
+         strategy-alias half fell to #7143's import repoint)",
+    ),
+    (
+        "channel_triggered_delivery.rs",
+        "assembly: drives product's TriggeredRunDeliveryDriver/Request and \
+         triggered_run_delivery_settings — covered by the §12.11 D-A ruling \
+         alongside channel_host.rs",
+    ),
+    (
+        "host_api_contracts.rs",
+        "adapter-registry: registers product's \
+         register_product_adapter_host_api_contract into the manifest contract \
+         registry (owned by CHECKLIST WS5's product-narrows row)",
+    ),
+    (
+        "product_lifecycle.rs",
+        "port vocabulary (ChannelConnectionService) + \
+         ExtensionAccountSetupRegistry (the strategy alias fell to #7143)",
+    ),
+    (
+        "provider_identity.rs",
+        "port: implements ProductActorUserResolver, whose response carries \
+         ironclaw_conversations::ExternalActorBindingEpoch — the conversations \
+         vocabulary residue row",
+    ),
+    (
+        "run_delivery_ports.rs",
+        "port: implements AuthChallengeProvider (ironclaw_auth vocabulary residue) \
+         + product-fn: calls auth_prompt_view_for_blocked_auth and \
+         projection::approval_prompt_context_view, free functions that move with \
+         the auth-prompt vocabulary",
+    ),
+];
+
+/// Ceiling on the reference ledger. Only ever moves down — growing the frozen
+/// list past it needs this constant raised in the same PR, which is the
+/// deliberate two-edit speed bump against re-widening the edge.
+const EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE: usize = 9;
+
+/// Workspace package metadata, resolved once per test binary.
+///
+/// The move-order proof (CHECKLIST WS2's last row) turns on this: every path
+/// this gate reads is derived from `cargo metadata`'s `manifest_path`, never
+/// assembled as `crates/<name>`. WS7 moves these crates into family
+/// directories, and a literal path would then resolve to nothing — which for
+/// a scan means walking an empty tree, and for a manifest guard means an
+/// `exists()` check that quietly stops guarding. Resolved through cargo, a
+/// crate that is not a workspace member is a **panic**, and one that moved is
+/// simply followed.
+fn workspace_metadata() -> &'static Value {
+    static METADATA: OnceLock<Value> = OnceLock::new();
+    METADATA.get_or_init(|| {
+        let manifest_path = workspace_root().join("Cargo.toml");
+        let output = Command::new("cargo")
+            .args([
+                "metadata",
+                "--format-version",
+                "1",
+                "--no-deps",
+                "--manifest-path",
+            ])
+            .arg(&manifest_path)
+            .output()
+            .unwrap_or_else(|error| panic!("failed to run cargo metadata: {error}"));
+        assert!(
+            output.status.success(),
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("cargo metadata output must be JSON")
+    })
+}
+
+/// The `cargo metadata` package entry for a workspace crate. Absence is fatal
+/// on purpose — see [`workspace_metadata`].
+fn package(name: &str) -> &'static Value {
+    workspace_metadata()["packages"]
+        .as_array()
+        .expect("cargo metadata packages")
+        .iter()
+        .find(|package| package["name"].as_str() == Some(name))
+        .unwrap_or_else(|| {
+            panic!(
+                "{name} is not a workspace member; this gate resolves every path through \
+                 cargo metadata, so an unregistered crate must fail loudly rather than \
+                 leave the scans walking a directory that is not there"
+            )
+        })
+}
+
+/// A workspace crate's directory, taken from its manifest's real location.
+fn crate_dir(name: &str) -> PathBuf {
+    let manifest = package(name)["manifest_path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{name} has no manifest_path in cargo metadata"));
+    Path::new(manifest)
+        .parent()
+        .unwrap_or_else(|| panic!("{name}'s manifest_path has no parent directory"))
+        .to_path_buf()
+}
+
+fn crate_src(name: &str) -> PathBuf {
+    crate_dir(name).join("src")
 }
 
 fn is_rust_identifier(ident: &str) -> bool {
@@ -163,10 +314,10 @@ fn is_rust_identifier(ident: &str) -> bool {
     chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-fn traits_defined_in(root: &Path, crate_name: &str) -> BTreeSet<String> {
+fn traits_defined_in(crate_name: &str) -> BTreeSet<String> {
     let mut found: BTreeMap<String, Vec<TypeDefOccurrence>> = BTreeMap::new();
     collect_type_defs(
-        &crate_src(root, crate_name),
+        &crate_src(crate_name),
         &["trait "],
         &is_rust_identifier,
         &[],
@@ -325,12 +476,11 @@ fn implemented_trait_names(source: &str) -> BTreeSet<String> {
 /// front: they are test code wearing a production filename, and a test double
 /// in one of them must satisfy nothing (see `cfg_test_only_files`).
 fn traits_implemented_by(
-    root: &Path,
     crate_name: &str,
     referenced_crate: &str,
     minimum_files: usize,
 ) -> BTreeSet<String> {
-    let src = crate_src(root, crate_name);
+    let src = crate_src(crate_name);
     let files = production_rust_files(&src);
     assert!(
         files.len() >= minimum_files,
@@ -360,9 +510,8 @@ fn assert_product_trait_residue_is_exact(
     residue: &[(&str, &str)],
     baseline: usize,
 ) {
-    let root = workspace_root();
-    let product_traits = traits_defined_in(&root, PRODUCT);
-    let implemented = traits_implemented_by(&root, crate_name, PRODUCT, minimum_files);
+    let product_traits = traits_defined_in(PRODUCT);
+    let implemented = traits_implemented_by(crate_name, PRODUCT, minimum_files);
 
     let found: BTreeSet<String> = implemented.intersection(&product_traits).cloned().collect();
     let frozen: BTreeSet<String> = residue
@@ -420,11 +569,10 @@ fn extension_manager_implements_only_the_frozen_residue_of_product_defined_trait
 
 #[test]
 fn inverted_ports_are_declared_in_contracts_and_implemented_below_product() {
-    let root = workspace_root();
-    let contract_traits = traits_defined_in(&root, PRODUCT_CONTRACTS);
-    let product_traits = traits_defined_in(&root, PRODUCT);
-    let host_impls = traits_implemented_by(&root, EXTENSION_HOST, PRODUCT_CONTRACTS, 21);
-    let manager_impls = traits_implemented_by(&root, EXTENSION_MANAGER, PRODUCT_CONTRACTS, 10);
+    let contract_traits = traits_defined_in(PRODUCT_CONTRACTS);
+    let product_traits = traits_defined_in(PRODUCT);
+    let host_impls = traits_implemented_by(EXTENSION_HOST, PRODUCT_CONTRACTS, 21);
+    let manager_impls = traits_implemented_by(EXTENSION_MANAGER, PRODUCT_CONTRACTS, 10);
 
     let mut violations = Vec::new();
     for (port, implementor) in INVERTED_PORT_IMPLEMENTORS {
@@ -514,12 +662,11 @@ const EXTENSION_HOST_FILES_STILL_NAMING_THE_WORKFLOW_ERROR: &[(&str, &str)] = &[
 /// An unreadable file is fatal, not skipped — a silent skip is how this scan
 /// would go quietly vacuous.
 fn production_files_naming(
-    root: &Path,
     crate_name: &str,
     type_name: &str,
     minimum_files: usize,
 ) -> BTreeSet<String> {
-    let src = crate_src(root, crate_name);
+    let src = crate_src(crate_name);
     let files = production_rust_files(&src);
     assert!(
         files.len() >= minimum_files,
@@ -541,10 +688,51 @@ fn production_files_naming(
     named
 }
 
+/// Production files in `crate_name` whose *code* names `referenced_crate` as a
+/// whole token, as paths relative to the crate's `src/`.
+///
+/// The sibling of [`production_files_naming`] for crate names rather than type
+/// names. The difference is load-bearing, not stylistic: that helper matches by
+/// substring, and `ironclaw_product` is a substring of
+/// `ironclaw_product_contracts` — a raw `contains` here would count every file
+/// that (correctly) imports the contracts crate and the ledger would freeze
+/// files that never touch product. `names_crate` is the same whole-token
+/// matcher the impl scan uses, so the two scans cannot disagree about what
+/// "names the crate" means. Stripping order and the fatal-I/O rule are
+/// identical to the sibling, for the reasons documented there.
+fn production_files_naming_crate(
+    crate_name: &str,
+    referenced_crate: &str,
+    minimum_files: usize,
+) -> BTreeSet<String> {
+    let src = crate_src(crate_name);
+    let files = production_rust_files(&src);
+    assert!(
+        files.len() >= minimum_files,
+        "expected to walk {crate_name}'s source tree; found {} files (floor {minimum_files}) — \
+         a broken path must fail loudly rather than report an empty, vacuously passing set",
+        files.len()
+    );
+    let mut named = BTreeSet::new();
+    for file in files {
+        let source = std::fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", file.display()));
+        if names_crate(
+            &strip_cfg_test_blocks(&strip_comments_and_strings(&source)),
+            referenced_crate,
+        ) {
+            let relative = file.strip_prefix(&src).unwrap_or_else(|error| {
+                panic!("{} is not under {}: {error}", file.display(), src.display())
+            });
+            named.insert(relative.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    named
+}
+
 #[test]
 fn extension_host_speaks_the_contract_error_everywhere_but_the_frozen_residue_files() {
-    let root = workspace_root();
-    let found = production_files_naming(&root, EXTENSION_HOST, "ProductSurfaceFailure", 21);
+    let found = production_files_naming(EXTENSION_HOST, "ProductSurfaceFailure", 21);
     let frozen: BTreeSet<String> = EXTENSION_HOST_FILES_STILL_NAMING_THE_WORKFLOW_ERROR
         .iter()
         .map(|(file, _)| (*file).to_string())
@@ -581,9 +769,8 @@ fn extension_host_speaks_the_contract_error_everywhere_but_the_frozen_residue_fi
     // claim exactly: the boundary error is still the vocabulary of the whole
     // lifecycle surface, wherever that surface now lives. Each half is also
     // held above zero so the sum cannot be satisfied by one crate alone.
-    let host_users = production_files_naming(&root, EXTENSION_HOST, "ProductOperationFailure", 21);
-    let manager_users =
-        production_files_naming(&root, EXTENSION_MANAGER, "ProductOperationFailure", 10);
+    let host_users = production_files_naming(EXTENSION_HOST, "ProductOperationFailure", 21);
+    let manager_users = production_files_naming(EXTENSION_MANAGER, "ProductOperationFailure", 10);
     assert!(
         !host_users.is_empty() && !manager_users.is_empty(),
         "both halves of the lifecycle surface must speak the contract error; \
@@ -598,10 +785,161 @@ fn extension_host_speaks_the_contract_error_everywhere_but_the_frozen_residue_fi
     );
 }
 
+/// The reference ledger's enforcement: `ironclaw_extension_host`'s production
+/// tree names `ironclaw_product` in exactly the frozen files, no more (a new
+/// reference, or a proxy-sized estimate about to be wrong again) and no fewer
+/// (a stale row that must fall with the change that removed the reference).
+///
+/// Vacuity guards, in order: the walk floor inside
+/// [`production_files_naming_crate`] (an empty tree cannot read as success);
+/// the exact two-way diff (an empty found-set fails against a non-empty frozen
+/// list); and the ledger⇄manifest consistency assert at the bottom (the ledger
+/// cannot read empty while the manifest still carries the dependency — the
+/// itemization and the biconditional in
+/// [`the_extension_host_manifest_names_product_only_while_a_residue_needs_it`]
+/// must agree about whether the edge exists).
+#[test]
+fn extension_host_production_files_naming_product_are_exactly_the_frozen_ledger() {
+    let found = production_files_naming_crate(EXTENSION_HOST, PRODUCT, 21);
+    let frozen: BTreeSet<String> = EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT
+        .iter()
+        .map(|(file, _)| (*file).to_string())
+        .collect();
+    assert_eq!(
+        frozen.len(),
+        EXTENSION_HOST_PRODUCTION_FILES_STILL_NAMING_PRODUCT.len(),
+        "the reference ledger lists a file twice — every row must be a distinct file"
+    );
+
+    let mut violations = Vec::new();
+    for file in found.difference(&frozen) {
+        violations.push(format!(
+            "{EXTENSION_HOST}/src/{file} names {PRODUCT} but has no ledger row. Do not add \
+             one: implement against {PRODUCT_CONTRACTS} (PROPOSAL §6.1.3) — the ledger only \
+             shrinks on the way to the products -> loops re-layer (#7145)"
+        ));
+    }
+    for file in frozen.difference(&found) {
+        violations.push(format!(
+            "{file} is in the reference ledger but no longer names {PRODUCT} — delete its \
+             row in the same change so the ledger stays the exact remaining scope"
+        ));
+    }
+    assert!(
+        violations.is_empty(),
+        "WS2 product-reference ledger violated (the residue itemization, #7145):\n{}",
+        violations.join("\n")
+    );
+    assert!(
+        found.len() <= EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE,
+        "the product-reference ledger is shrink-only: {} files > baseline {}",
+        found.len(),
+        EXTENSION_HOST_PRODUCT_REFERENCE_FILE_BASELINE
+    );
+
+    // The itemization and the manifest biconditional must tell one story: a
+    // ledger that reads empty while the manifest still lists the dependency
+    // means this scan went blind (or a reference hides somewhere no file-level
+    // scan sees), and an occupied ledger without the manifest edge means the
+    // rows are stale. Either way the fix is in this file, loudly.
+    let host = package(EXTENSION_HOST);
+    let has_normal_dep = host["dependencies"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|dependency| {
+            dependency["name"].as_str() == Some(PRODUCT)
+                && dependency["kind"].as_str().unwrap_or("normal") == "normal"
+        });
+    assert_eq!(
+        !found.is_empty(),
+        has_normal_dep,
+        "ledger occupancy ({} files) disagrees with the manifest edge (present: \
+         {has_normal_dep}) — the itemization has gone vacuous or stale",
+        found.len()
+    );
+}
+
+/// CHECKLIST WS2's closing row — the **move-order proof**, stated as the
+/// property it is rather than as a one-off audit: `ironclaw_extension_host`'s
+/// manifest lists no `ironclaw_product` dependency *under any name* once the
+/// residue is gone, and the manifest is found through `cargo metadata` rather
+/// than at `crates/ironclaw_extension_host/Cargo.toml`.
+///
+/// Two failure modes it closes, both of which are silent today:
+///
+/// - **A rename blinds the source scans.** Every residue list in this file and
+///   in `reborn_extension_manager_split.rs` matches the literal crate name, so
+///   `p = { package = "ironclaw_product" }` would let the edge grow with every
+///   list still passing. (Same rule the manager half already carries; the host
+///   half had none.)
+/// - **A directory move blinds the manifest guard.** The literal-path idiom
+///   used elsewhere in this suite is `if manifest.exists() { assert!(…) }`,
+///   which after WS7 moves the crate stops asserting instead of failing.
+///   Resolved through cargo, an unregistered crate panics in [`package`] and a
+///   relocated one is simply followed.
+///
+/// The dependency is asserted to exist **exactly while** the residue is
+/// non-empty, so the last residue row and the manifest edge have to go in the
+/// same change — in either direction.
+#[test]
+fn the_extension_host_manifest_names_product_only_while_a_residue_needs_it() {
+    let host = package(EXTENSION_HOST);
+
+    // The resolution is live, not vacuous: whatever cargo reported is the
+    // directory the scans in this file actually walk.
+    let lib = crate_src(EXTENSION_HOST).join("lib.rs");
+    assert!(
+        lib.is_file(),
+        "cargo metadata put {EXTENSION_HOST} at {}, which holds no src/lib.rs — the \
+         manifest_path resolution is wrong, and every scan in this file reads from it",
+        crate_dir(EXTENSION_HOST).display()
+    );
+
+    let product_deps: Vec<&Value> = host["dependencies"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|dependency| dependency["name"].as_str() == Some(PRODUCT))
+        .collect();
+    for dependency in &product_deps {
+        assert!(
+            dependency["rename"].is_null(),
+            "{EXTENSION_HOST} renames its {PRODUCT} dependency to {:?}. Every residue list \
+             in this suite matches the real crate name, so a rename lets the edge grow with \
+             all of them still green",
+            dependency["rename"]
+        );
+    }
+
+    let has_normal_dep = product_deps
+        .iter()
+        .any(|dependency| dependency["kind"].as_str().unwrap_or("normal") == "normal");
+    let residue_is_open = !PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS.is_empty();
+    assert_eq!(
+        has_normal_dep, residue_is_open,
+        "{EXTENSION_HOST}'s normal dependency on {PRODUCT} must exist exactly while its \
+         port residue is non-empty. Residue open: {residue_is_open}; manifest edge present: \
+         {has_normal_dep}. When the last residue row goes, delete the manifest edge in the \
+         same change (and vice versa) — that pairing IS the move-order proof"
+    );
+}
+
+/// The other half of the move-order proof: the resolution itself is loud.
+///
+/// A name cargo does not know must **panic**, not hand back a path that
+/// happens not to exist — because a non-existent path is exactly what a
+/// literal `crates/<name>` produces after WS7 moves a crate, and every scan
+/// in this file would then walk nothing and pass.
+#[test]
+#[should_panic(expected = "is not a workspace member")]
+fn a_crate_cargo_does_not_know_fails_loudly_rather_than_resolving_to_a_dead_path() {
+    let _ = crate_dir("ironclaw_extension_host_relocated_by_ws7");
+}
+
 #[test]
 fn the_boundary_error_names_no_type_the_contracts_crate_may_not_depend_on() {
-    let root = workspace_root();
-    let path = crate_src(&root, PRODUCT_CONTRACTS).join("error.rs");
+    let path = crate_src(PRODUCT_CONTRACTS).join("error.rs");
     let source = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     let code = strip_comments_and_strings(&source);
@@ -794,8 +1132,7 @@ fn mod_decl_scanner_reads_gating_and_declaration_shapes() {
 /// update or delete this pin in the same change.)
 #[test]
 fn files_reachable_only_through_cfg_test_modules_are_not_production() {
-    let root = workspace_root();
-    let src = crate_src(&root, EXTENSION_HOST);
+    let src = crate_src(EXTENSION_HOST);
     let test_only = cfg_test_only_files(&src);
     let evader = src.join("channel_host").join("e2e_auth_challenge.rs");
     assert!(

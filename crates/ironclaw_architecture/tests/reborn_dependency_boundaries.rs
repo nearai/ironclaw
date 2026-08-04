@@ -450,6 +450,35 @@ fn reborn_crate_dependency_boundaries_hold() {
             .collect::<Vec<_>>(),
     );
 
+    // Carrier purity — `ironclaw_host_ingress` (WS2 re-layer, #7092).
+    //
+    // This crate exists for one reason: to keep `axum` out of the contracts
+    // tier while still letting a crate hand a prebuilt router plus its
+    // `ironclaw_host_api` ingress descriptors to whoever binds the listener.
+    // That is the whole charter, and it is why WS2 moved it from `products` to
+    // `substrates` — at `products` it blocked `ironclaw_extension_host`'s
+    // `products -> loops` flip while depending on nothing above `contracts`.
+    //
+    // The layer matrix alone will not hold it there. `substrates -> substrates`
+    // is legal, so the matrix would happily let this crate acquire
+    // `ironclaw_filesystem`, `ironclaw_secrets`, or any other domain — none of
+    // which it may have, because every consumer that wants only the carrier
+    // shapes would then compile that cone. An allowlist, not a blocklist, for
+    // the same reason as the three contracts tiers above: a list of today's
+    // offenders cannot stop tomorrow's. `families/product.md` states the same
+    // rule in prose ("Never depends on: anything else, without exception").
+    //
+    // **Every dependency kind, not just `normal`** — unlike every other rule in
+    // this function. The layer matrix checks normal deps only, and rightly so:
+    // a dev-dependency on a higher layer is legal and used (`extension_host`
+    // dev-depends on `ironclaw_product`). But this crate's charter is absolute
+    // ("without exception"), and the property it protects — that a consumer
+    // wanting only the carrier shapes compiles nothing else — is defeated just
+    // as thoroughly by a dev- or build-dependency, which still has to resolve
+    // and build. The crate has zero dev- and build-dependencies today, so this
+    // costs nothing and closes the hole rather than documenting it.
+    assert_host_ingress_names_no_other_workspace_crate(packages);
+
     for rule in boundary_rules() {
         assert_no_normal_workspace_deps(&dependencies, rule.crate_name, rule.forbidden);
     }
@@ -1197,7 +1226,12 @@ fn reborn_turns_public_surface_keeps_runner_api_explicit() {
 fn reborn_runner_llm_wiring_is_isolated() {
     let root = workspace_root();
 
-    let reborn_gateway = root.join("crates/ironclaw_runner/src/model_gateway.rs");
+    // WS3 runner sheds: the gateway is a host-port adapter, so it lives with the
+    // other host-port adapters (PROPOSAL §6.7.2 "gains: runner's model-gateway
+    // adapter"). The pin moved with it, and gained its other half: the adapter
+    // must be at the new home AND absent from the old one, so a half-finished
+    // move fails here instead of leaving two gateways.
+    let reborn_gateway = root.join("crates/ironclaw_loop_host/src/model_gateway.rs");
     assert!(
         reborn_gateway.exists(),
         "expected Reborn LLM gateway wiring at {}",
@@ -1207,7 +1241,15 @@ fn reborn_runner_llm_wiring_is_isolated() {
         .expect("Reborn model gateway source must be readable");
     assert!(
         reborn_gateway_source.contains("LlmProviderModelGateway"),
-        "Reborn LLM gateway wiring should expose LlmProviderModelGateway from crates/ironclaw_runner"
+        "Reborn LLM gateway wiring should expose LlmProviderModelGateway from \
+         crates/ironclaw_loop_host"
+    );
+    assert!(
+        !root
+            .join("crates/ironclaw_runner/src/model_gateway.rs")
+            .exists(),
+        "the model gateway moved to ironclaw_loop_host (WS3 runner sheds); a file back at \
+         crates/ironclaw_runner/src/model_gateway.rs is a re-import, not a fix"
     );
 
     // Reborn crates may reuse the extracted LLM crate, but never on its default
@@ -1216,7 +1258,10 @@ fn reborn_runner_llm_wiring_is_isolated() {
     // edge is the durable invariant, keeping the Reborn stack's dependency
     // footprint minimal and explicit.
     for manifest_path in [
-        "crates/ironclaw_runner/Cargo.toml",
+        // `ironclaw_runner` left this list with WS3: shedding the model gateway
+        // took its whole `ironclaw_llm` edge, and the rule below asserts a
+        // manifest line that is no longer there.
+        "crates/ironclaw_loop_host/Cargo.toml",
         "crates/ironclaw_reborn_composition/Cargo.toml",
     ] {
         let manifest = std::fs::read_to_string(root.join(manifest_path))
@@ -1262,14 +1307,14 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         "crates/ironclaw_loop_host/src/subagent_spawn_port.rs",
         // The model gateway is the LLM wire boundary. Executor helpers may
         // rebuild provider calls only from stored replay metadata.
-        "crates/ironclaw_runner/src/model_gateway.rs",
+        "crates/ironclaw_loop_host/src/model_gateway.rs",
         "crates/ironclaw_agent_loop/src/executor/capability_helpers.rs",
         // Progressive tool disclosure is itself a model-protocol boundary: the
         // catalog/selector and the bridging decorator map provider tool names
         // (advertised, deferred, and synthetic bridge names) to/from capability
         // ids and rebuild provider calls for the resolved target.
-        "crates/ironclaw_runner/src/tool_disclosure.rs",
-        "crates/ironclaw_runner/src/tool_disclosure_port.rs",
+        "crates/ironclaw_loop_host/src/tool_disclosure.rs",
+        "crates/ironclaw_loop_host/src/tool_disclosure_port.rs",
         // Composition-local protocol surfaces that reconstruct provider-shaped
         // output or synthetic provider tools.
         "crates/ironclaw_reborn_composition/src/llm_admin/openai_compat_serve.rs",
@@ -1325,8 +1370,6 @@ fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
         "pub use ironclaw_loop_host::",
         "pub use loop_driver_host::",
         "pub use milestone_events::",
-        "pub use model_gateway::",
-        "pub use model_routes::",
         "pub use planned_driver::",
         "pub use planned_driver_factory::",
         "pub use text_loop_driver::",
@@ -2778,7 +2821,7 @@ fn strip_process_projection_reexport_block(contents: &str) -> String {
             .trim_start()
             .starts_with("pub use process_projection::{")
         {
-            skipping = true;
+            skipping = !line.trim_end().ends_with("};");
             continue;
         }
         if skipping {
@@ -2791,6 +2834,21 @@ fn strip_process_projection_reexport_block(contents: &str) -> String {
         stripped.push('\n');
     }
     stripped
+}
+
+#[test]
+fn process_projection_reexport_stripping_preserves_following_source() {
+    for source in [
+        "pub use process_projection::{InvocationId};\npub struct InvocationIdLeak;\n",
+        "pub use process_projection::{\n    InvocationId,\n};\npub struct InvocationIdLeak;\n",
+    ] {
+        let stripped = strip_process_projection_reexport_block(source);
+        assert!(!stripped.contains("pub use process_projection"));
+        assert!(
+            stripped.contains("pub struct InvocationIdLeak"),
+            "source following a re-export must remain scannable: {stripped:?}"
+        );
+    }
 }
 
 fn collect_forbidden_string_uses(
@@ -4138,21 +4196,37 @@ struct LayerMatrixException {
 /// live tree it is turn *admission* (a `TurnCoordinator` handle and
 /// `submit_turn` call), not vocabulary, so `loop_contracts` cannot dissolve it
 /// — its entry now records that and points at WS5.
-const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 13;
+///
+/// **10 → 6 (WS2, `ironclaw_extensions` re-layered `loops` → `substrates`).**
+/// Four entries — `host_runtime`, `capabilities`, `mcp` and `scripts` reaching
+/// `ironclaw_extensions` — were all the same edge under four names: a
+/// kernel/runtimes-tier crate consuming the registry's manifest DTOs. None was
+/// waived and none of those edges was deleted; the *registry* moved down to
+/// `substrates`, where every layer above may legally reach it (PROPOSAL §6.8.1:
+/// "Layer substrates legalizes `capabilities → extensions` and
+/// `host_runtime → extensions`" — it legalizes `mcp` and `scripts` too, which
+/// that entry undercounts). The one edge that blocked the move,
+/// `extensions → trust` (kernel), is also gone rather than waived:
+/// `TrustPolicyInput` is requested-trust *vocabulary* and now lives beside
+/// `PackageIdentity` in `ironclaw_host_api::trust`, which is §6.8.1's own
+/// prescription ("`trust`-vocabulary via `host_api`").
+///
+/// **Label semantics (recorded 2026-08-04).** `removes_in: "W7"` on the
+/// original entries is the retired **July-train** wave label (the tags were
+/// written when this gate was armed — every one carries `introduced:
+/// 2026-07-09`, predating the target-architecture program), **not** the
+/// program's Wave 5 or its WS7 physical-move workstream: PROPOSAL §8.3
+/// resolves every W7-tagged edge through WS2/WS3/WS4 work. Surviving entries
+/// carry a workstream-or-issue key; do not read any remaining `W7` as a
+/// schedule.
+const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 6;
 
 const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
     LayerMatrixException {
         crate_name: "ironclaw_host_runtime",
-        dependency_name: "ironclaw_extensions",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "host_runtime still owns extension-hosting wiring until kernel consolidation moves only the execution perimeter into kernel",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_host_runtime",
         dependency_name: "ironclaw_extension_support",
         introduced: "2026-07-09",
-        removes_in: "W7",
+        removes_in: "WS3 (first-party activation wiring; ex-July-train label W7)",
         reason: "host_runtime still owns first-party extension activation wiring until kernel consolidation separates host policy from loop/product concerns",
     },
     LayerMatrixException {
@@ -4161,13 +4235,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "W7",
         reason: "host_runtime still owns first-party skill management tools and skill URL install limits; remove when kernel consolidation or a dedicated skill-host extraction moves that execution surface out of host_runtime",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_capabilities",
-        dependency_name: "ironclaw_extensions",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "capability hosting still reaches the extension surface until the kernel perimeter is consolidated",
     },
     LayerMatrixException {
         crate_name: "ironclaw_processes",
@@ -4180,22 +4247,8 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         crate_name: "ironclaw_conversations",
         dependency_name: "ironclaw_turns",
         introduced: "2026-07-09",
-        removes_in: "WS5",
+        removes_in: "WS5 conversations->turns slice row (CHECKLIST, added 2026-08-04)",
         reason: "re-verified during WS1.2: this is NOT turn-DTO naming and loop_contracts does not dissolve it. InboundTurnService holds Arc<dyn TurnCoordinator> and calls submit_turn(SubmitTurnRequest), and trusted_trigger classifies TurnError/AdmissionRejectionReason - turn ADMISSION authority, not vocabulary. It clears when the inbound submit orchestration moves to the product tier (PROPOSAL 6.4.2 lists conversations deps as filesystem/host_api/safety/triggers with turn vocabulary via host_api)",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_hooks",
-        dependency_name: "ironclaw_wasm_limiter",
-        introduced: "2026-07-09",
-        removes_in: "W6",
-        reason: "hooks still reuse the WASM limiter crate before the directory re-layout verifies runtime/substrate placement",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_mcp",
-        dependency_name: "ironclaw_extensions",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "MCP runtime still consumes ExtensionPackage and ExtensionRuntime manifest DTOs; remove when extension runtime descriptors move to a neutral contract or runtime lanes are folded behind the extension-host boundary",
     },
     LayerMatrixException {
         crate_name: "ironclaw_mcp",
@@ -4206,31 +4259,10 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
     },
     LayerMatrixException {
         crate_name: "ironclaw_scripts",
-        dependency_name: "ironclaw_extensions",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "script runtime still consumes ExtensionPackage and ExtensionRuntime manifest DTOs; remove when extension runtime descriptors move to a neutral contract or runtime lanes are folded behind the extension-host boundary",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_scripts",
         dependency_name: "ironclaw_resources",
         introduced: "2026-07-09",
         removes_in: "W7",
         reason: "script runtime support still depends on resource contracts currently classed with kernel behavior",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_runner",
-        dependency_name: "ironclaw_agent_loop",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "the runner intentionally bridges loop-userland contracts until kernel consolidation introduces a neutral dispatch boundary",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_runner",
-        dependency_name: "ironclaw_loop_host",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "the runner intentionally composes loop-host adapters until kernel consolidation introduces a neutral dispatch boundary",
     },
 ];
 
@@ -4519,6 +4551,57 @@ fn workspace_dependency_names(package: &Value) -> impl Iterator<Item = &Value> {
                 .as_str()
                 .is_some_and(|name| name == "ironclaw" || name.starts_with("ironclaw_"))
         })
+}
+
+/// `ironclaw_host_ingress` names no workspace crate but `ironclaw_host_api`, in
+/// **any** dependency kind (`normal`, `dev`, `build`).
+///
+/// Separate from `assert_no_normal_workspace_deps` on purpose: that helper
+/// filters to normal dependencies, which is correct for the layer matrix (a
+/// dev-dependency on a higher layer is legal and used) and wrong for this
+/// crate, whose charter is "Never depends on: anything else, without
+/// exception" (`families/product.md`). A dev- or build-dependency still
+/// resolves and builds, so it defeats the one property this crate exists to
+/// provide just as thoroughly as a normal one would.
+///
+/// An allowlist, not a blocklist: the forbidden set is *every* workspace
+/// `ironclaw_*` crate except the one permitted name, so a dependency nobody
+/// anticipated still fails. The package must be present — a silent `return`
+/// here would make the whole check vacuous the day the crate is renamed.
+fn assert_host_ingress_names_no_other_workspace_crate(packages: &[Value]) {
+    const CRATE: &str = "ironclaw_host_ingress";
+    const ALLOWED: &str = "ironclaw_host_api";
+
+    let package = packages
+        .iter()
+        .find(|package| package["name"].as_str() == Some(CRATE))
+        .unwrap_or_else(|| {
+            panic!("{CRATE} must be a workspace member; without it this check is vacuous")
+        });
+
+    let mut violations = Vec::new();
+    for dependency in package["dependencies"].as_array().into_iter().flatten() {
+        let Some(name) = dependency["name"].as_str() else {
+            continue;
+        };
+        if !is_ironclaw_workspace_package(name) || name == ALLOWED {
+            continue;
+        }
+        let kind = dependency
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("normal");
+        violations.push(format!("{name} ({kind} dependency)"));
+    }
+
+    assert!(
+        violations.is_empty(),
+        "{CRATE} must not depend on any workspace crate but {ALLOWED}, in any dependency \
+         kind — it exists so a consumer needing only the route-mount carrier shapes never \
+         compiles a listener's dependency cone, and a dev/build dependency defeats that as \
+         surely as a normal one. Offenders: {}",
+        violations.join(", ")
+    );
 }
 
 fn is_normal_dependency(dependency: &Value) -> bool {

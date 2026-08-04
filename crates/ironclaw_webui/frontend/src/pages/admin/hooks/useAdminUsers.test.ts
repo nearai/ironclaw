@@ -191,4 +191,86 @@ test("admin user hook loads the next cursor once and disables polling after the 
   rejectPage(pageError);
   assert.equal(await firstRequest, null);
   assert.ok(stateUpdates.includes(pageError));
+  // The cursor load retries once on a transient failure before surfacing
+  // the structured load-more error, so a single rejection produces two
+  // cursor fetches (the original attempt plus one retry).
+  assert.equal(
+    fetchCalls.filter((call) => call?.cursor === "cursor-1").length,
+    2,
+    `expected two cursor fetches after transient rejection; got: ${JSON.stringify(fetchCalls)}`,
+  );
+});
+
+test("admin user hook load-more fails fast on a non-retryable 4xx without retrying", async () => {
+  let queryOptions;
+  const fetchCalls = [];
+  const forbiddenError = Object.assign(new Error("forbidden"), {
+    status: 403,
+    payload: { kind: "forbidden", retryable: false },
+  });
+  const stateUpdates = [];
+  const mutationState = {
+    data: null,
+    error: null,
+    isPending: false,
+    mutateAsync: () => {},
+    reset: () => {},
+    variables: null,
+  };
+
+  const exports = runVmModuleForTest(
+    "./useAdminUsers.ts",
+    ["useAdminUsers"],
+    {
+      React: {
+        useCallback: (callback) => callback,
+        useEffect: () => {},
+        useMemo: (factory) => factory(),
+        useRef: (initial) => ({ current: initial }),
+        useState: (initial) => [initial, (value) => stateUpdates.push(value)],
+      },
+      useQuery: (options) => {
+        queryOptions = options;
+        return {
+          data: {
+            users: [],
+            nextCursor: "cursor-1",
+          },
+          dataUpdatedAt: 1,
+          error: null,
+        };
+      },
+      useMutation: () => mutationState,
+      useQueryClient: () => ({
+        invalidateQueries: () => Promise.resolve(),
+        setQueryData: () => {},
+      }),
+      fetchAdminUsers: async (params) => {
+        fetchCalls.push(params);
+        if (params.cursor) throw forbiddenError;
+        return { users: [], nextCursor: null };
+      },
+      fetchAdminUser: () => {},
+      createAdminUser: () => {},
+      updateAdminUser: () => {},
+      deleteAdminUser: () => {},
+      suspendAdminUser: () => {},
+      activateAdminUser: () => {},
+      fetchUserSecrets: () => {},
+      putUserSecret: () => {},
+      deleteUserSecret: () => {},
+    },
+    import.meta.url,
+  );
+
+  const state = exports.useAdminUsers();
+  const result = await state.loadMore();
+  assert.equal(result, null);
+  assert.ok(stateUpdates.includes(forbiddenError));
+  // A non-retryable 403 must not trigger a second cursor fetch.
+  assert.equal(
+    fetchCalls.filter((call) => call?.cursor === "cursor-1").length,
+    1,
+    `expected one cursor fetch for a non-retryable 403; got: ${JSON.stringify(fetchCalls)}`,
+  );
 });

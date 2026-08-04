@@ -334,7 +334,7 @@ would over-revoke on benign upgrades.
 All capability-authority surfaces are typed as
 `BTreeSet<CapabilityId>`, not `Vec` or `&[CapabilityId]`:
 
-- `TrustPolicyInput::requested_authority`
+- `TrustPolicyInput::requested_authority` (the type lives in `ironclaw_host_api::trust`)
 - `mutate_with`'s `requested_authority` parameter
 - `authority_changed` / `grant_retention_eligible`
 

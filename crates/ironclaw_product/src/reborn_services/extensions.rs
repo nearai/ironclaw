@@ -183,7 +183,7 @@ async fn lifecycle_extension_infos(
     caller: ProductSurfaceCaller,
     connections: HashMap<String, bool>,
     account_states: HashMap<String, ChannelAuthAccountState>,
-    activation_errors: HashMap<String, String>,
+    activation_errors: HashMap<ExtensionId, String>,
 ) -> Result<Vec<RebornExtensionInfo>, ProductSurfaceError> {
     let resolved = stream::iter(installed)
         .map(|installed| {
@@ -257,7 +257,7 @@ fn extension_info(
     readiness: ExtensionCredentialReadiness,
     connections: &HashMap<String, bool>,
     account_states: &HashMap<String, ChannelAuthAccountState>,
-    activation_errors: &HashMap<String, String>,
+    activation_errors: &HashMap<ExtensionId, String>,
 ) -> RebornExtensionInfo {
     let phase = installed.phase;
     let onboarding =
@@ -275,9 +275,12 @@ fn extension_info(
     // Redacted activation error for this extension (host installation record's
     // typed `last_error`), threaded onto the card slot the frontend already
     // renders. `None` when the service surfaces no failure for this extension.
-    let activation_error = activation_errors
-        .get(summary.package_ref.id.as_str())
-        .cloned();
+    // The map is keyed by `ExtensionId`; a package id that is not valid
+    // extension vocabulary cannot be a key, so it reports no error rather
+    // than being looked up as a string that could never have matched.
+    let activation_error = ExtensionId::new(summary.package_ref.id.as_str())
+        .ok()
+        .and_then(|extension_id| activation_errors.get(&extension_id).cloned());
     // A channel extension the calling user has not personally connected — via
     // the vendor's OAuth or a pairing/proof-code binding — is not ready for
     // that caller, whatever the host record says. Absence of a connection

@@ -30,8 +30,10 @@ run_probe() {
     AMBIENT_MULTILINE=$'first line\nPATH=/developer/injected' \
     LLM_BACKEND="ambient-provider" \
     REBORN_TOOL_DISCLOSURE="Bridged" \
+    REBORN_COV_COLLECT="false" \
     COREPACK_HOME="${probe_dir}/corepack" \
     PLAYWRIGHT_BROWSERS_PATH="${probe_dir}/playwright-browsers" \
+    REBORN_COV_COLLECT="false" \
     IRONCLAW_E2E_EMULATE_SLACK_CHANNEL_BEARER="emulate-slack-channel-token" \
     IRONCLAW_HERMETIC_SABOTAGE="${sabotage}" \
     "${runner}" -- bash -c '
@@ -105,9 +107,17 @@ run_probe() {
         echo "explicit Playwright browser toolchain path was not preserved" >&2
         exit 35
       fi
+      if [[ "${REBORN_COV_COLLECT:-}" != "false" ]]; then
+        echo "explicit Reborn coverage mode was not preserved" >&2
+        exit 41
+      fi
       if [[ "${IRONCLAW_E2E_EMULATE_SLACK_CHANNEL_BEARER:-}" != "emulate-slack-channel-token" ]]; then
         echo "explicit Emulate Slack fixture bearer was not preserved" >&2
         exit 37
+      fi
+      if [[ "${REBORN_COV_COLLECT:-}" != "false" ]]; then
+        echo "explicit coverage collection mode was not preserved" >&2
+        exit 41
       fi
       if [[ "${PYTHONHASHSEED:-}" != "0" ]]; then
         echo "deterministic Python hash seed is not injected" >&2
