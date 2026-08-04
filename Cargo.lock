@@ -3947,6 +3947,7 @@ dependencies = [
  "futures-util",
  "glob",
  "ironclaw_auth",
+ "ironclaw_documents",
  "ironclaw_extractors",
  "ironclaw_filesystem",
  "ironclaw_host_api",

@@ -329,6 +329,10 @@ fn set_cell_formula(xml: &str, target: &str, formula: &str) -> Result<String, Do
 
     let mut in_target_row = false;
     let mut wrote = false;
+    // Whether the target row exists at all. A totals row is normally the first
+    // row BELOW the data, so "the row is not there yet" is the common case, not
+    // an edge case — without this the most ordinary spreadsheet edit fails.
+    let mut row_seen = false;
     // Depth of the existing `<c>` subtree being replaced, so its stale `<v>`
     // goes with it (trap 2 in the module docs).
     let mut dropping: usize = 0;
@@ -347,9 +351,23 @@ fn set_cell_formula(xml: &str, target: &str, formula: &str) -> Result<String, Do
                 let qname = tag.name();
                 match local_name(qname.as_ref()) {
                     b"row" => {
-                        in_target_row = attribute(tag, b"r")
-                            .and_then(|r| r.parse::<u32>().ok())
-                            .is_some_and(|r| r == target_row);
+                        let row_number = attribute(tag, b"r").and_then(|r| r.parse::<u32>().ok());
+                        in_target_row = row_number == Some(target_row);
+                        if in_target_row {
+                            row_seen = true;
+                        }
+                        // Rows, like cells, must stay in ascending order: insert
+                        // the new row before the first row that sorts after it.
+                        if !row_seen
+                            && !wrote
+                            && row_number.is_some_and(|number| number > target_row)
+                        {
+                            row_seen = true;
+                            wrote = true;
+                            let mut events = new_row(target_row, target, formula);
+                            events.push(clone_event(event));
+                            return Ok(EventAction::Replace(events));
+                        }
                         Ok(EventAction::Keep)
                     }
                     b"c" if in_target_row && !wrote => {
@@ -380,6 +398,14 @@ fn set_cell_formula(xml: &str, target: &str, formula: &str) -> Result<String, Do
                 }
             }
             Event::End(tag) => {
+                // Target row sorts after every existing row: append it at the
+                // end of the sheet data.
+                if local_name(tag.name().as_ref()) == b"sheetData" && !wrote {
+                    wrote = true;
+                    let mut events = new_row(target_row, target, formula);
+                    events.push(Event::End(BytesEnd::new("sheetData")));
+                    return Ok(EventAction::Replace(events));
+                }
                 if local_name(tag.name().as_ref()) == b"row" && in_target_row {
                     in_target_row = false;
                     if !wrote {
@@ -402,6 +428,17 @@ fn set_cell_formula(xml: &str, target: &str, formula: &str) -> Result<String, Do
         });
     }
     Ok(out)
+}
+
+/// A whole `<row>` containing just the formula cell, for a row that does not
+/// exist yet.
+fn new_row(row: u32, reference: &str, formula: &str) -> Vec<Event<'static>> {
+    let mut row_tag = BytesStart::new("row");
+    row_tag.push_attribute(("r", row.to_string().as_str()));
+    let mut events = vec![Event::Start(row_tag.into_owned())];
+    events.extend(formula_cell(reference, formula));
+    events.push(Event::End(BytesEnd::new("row")));
+    events
 }
 
 /// A `<c>` element carrying only a formula — no `t` (a formula result is not a
@@ -635,6 +672,64 @@ mod tests {
                 .iter()
                 .any(|cell| cell.reference == "E5" && cell.formula.as_deref() == Some("C5*2"))
         );
+    }
+
+    #[test]
+    fn a_formula_in_a_row_that_does_not_exist_yet_creates_that_row() {
+        // A totals row sits just below the data, so the row is normally absent.
+        // The integration journey caught this: without row creation the most
+        // ordinary spreadsheet edit there is fails outright.
+        let edited = edit_xlsx(
+            &expenses_xlsx(),
+            &[XlsxEdit::SetCellFormula {
+                sheet: "Expenses".to_string(),
+                cell: "C9".to_string(),
+                formula: "SUM(C2:C4)".to_string(),
+            }],
+        )
+        .unwrap();
+        let sheets = read_xlsx(&edited).unwrap();
+        assert!(
+            sheets[0]
+                .cells
+                .iter()
+                .any(|cell| cell.reference == "C9" && cell.formula.is_some()),
+            "the new row must carry the formula: {:?}",
+            sheets[0].cells
+        );
+    }
+
+    #[test]
+    fn a_created_row_is_inserted_in_ascending_row_order() {
+        // Excel repairs a sheet whose rows are out of order, exactly as it does
+        // for out-of-order cells.
+        let mut with_gap = expenses_xlsx();
+        with_gap = edit_xlsx(
+            &with_gap,
+            &[XlsxEdit::SetCellFormula {
+                sheet: "Expenses".to_string(),
+                cell: "C9".to_string(),
+                formula: "1".to_string(),
+            }],
+        )
+        .unwrap();
+        // Row 6 must land BEFORE the row 9 created above.
+        let edited = edit_xlsx(
+            &with_gap,
+            &[XlsxEdit::SetCellFormula {
+                sheet: "Expenses".to_string(),
+                cell: "C6".to_string(),
+                formula: "2".to_string(),
+            }],
+        )
+        .unwrap();
+        let xml = OoxmlPackage::read(&edited)
+            .unwrap()
+            .part_str("xl/worksheets/sheet1.xml")
+            .unwrap();
+        let six = xml.find(r#"<row r="6""#).expect("row 6 written");
+        let nine = xml.find(r#"<row r="9""#).expect("row 9 still present");
+        assert!(six < nine, "rows must stay ordered: {xml}");
     }
 
     #[test]

@@ -313,6 +313,32 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["pattern"],
             "additionalProperties": false
         }),
+        "schemas/builtin/document_edit.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Scoped path of the .docx/.xlsx/.pptx to edit. Read it with read_file first: the paragraph ids, cell references and slide indexes the edits name come from that read." },
+                "output_path": { "type": "string", "description": "Scoped path for the edited copy. Must differ from path and carry the same extension — the original is never modified." },
+                "edits": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 256,
+                    "description": "Structural edits, applied in order. The accepted shapes depend on the document format.\n\n.docx:\n- {\"op\": \"resolve_all_revisions\", \"disposition\": \"accept\"|\"reject\"} — resolve every tracked change\n- {\"op\": \"resolve_revisions\", \"paragraph\": \"p3\", \"disposition\": \"accept\"|\"reject\"} — resolve one paragraph's tracked changes\n- {\"op\": \"replace_paragraph_text\", \"paragraph\": \"p3\", \"text\": \"...\"} — replace a paragraph's text, keeping its style\n\n.xlsx:\n- {\"op\": \"set_cell_formula\", \"sheet\": \"Sheet1\", \"cell\": \"C5\", \"formula\": \"SUM(C2:C4)\"}\n\n.pptx:\n- {\"op\": \"clone_slide\", \"source\": 1, \"text\": [\"Title\", \"Body\"]} — append a copy of slide `source` (1-based) with its text replaced, inheriting the source's layout and style",
+                    "items": { "type": "object" }
+                }
+            },
+            "required": ["path", "output_path", "edits"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/html_to_pdf.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Scoped path for the new .pdf. Must not already exist — existing PDFs are never overwritten." },
+                "html": { "type": "string", "description": "HTML to render. Supported: h1-h3, p, ul/ol with li, hr, blockquote, strong/b, em/i, code, br, and HTML entities. Other tags are ignored but their text still renders. CSS is not supported." },
+                "title": { "type": "string", "description": "Document title recorded in the PDF metadata" }
+            },
+            "required": ["path", "html"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/apply_patch.input.v1.json" => json!({
             "type": "object",
             "properties": {

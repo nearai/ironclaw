@@ -342,7 +342,7 @@ impl RebornIntegrationGroupBuilder {
 
     /// Build a document-edit group. See [`RebornIntegrationGroup::document_edit_tools`].
     pub async fn document_edit_tools(self) -> HarnessResult<RebornIntegrationGroup> {
-        let host_runtime = super::super::harness::profiles::file::file_tools().await?;
+        let host_runtime = super::super::harness::profiles::file::document_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }
