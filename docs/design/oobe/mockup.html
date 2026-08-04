@@ -225,7 +225,12 @@ h1,h2,h3,p{margin:0}
 .tcard .termrow svg{width:13px;height:13px;flex:none}
 .tcard.reveal{animation:card-in .42s cubic-bezier(.2,.7,.2,1) both}
 @keyframes card-in{from{opacity:0;transform:translateY(10px) scale(.98)}to{opacity:1;transform:none}}
-.tcard.first{position:relative}
+/* first card is conjured into being: it materializes as the spark traces its border */
+.tcard.first{position:relative;animation:conjure .5s cubic-bezier(.2,.8,.2,1.03) both}
+@keyframes conjure{0%{opacity:0;transform:scale(.84);filter:blur(7px)}45%{opacity:1}72%{transform:scale(1.02);filter:blur(0)}100%{transform:scale(1);opacity:1;filter:blur(0)}}
+/* spell lands: a quick glow pulse around the card as the spark completes its loop */
+.tcard.first::after{content:"";position:absolute;inset:-2px;border-radius:14px;pointer-events:none;z-index:1;opacity:0;box-shadow:0 0 24px 3px var(--ais-glow);animation:spell-land .5s ease-out forwards}
+@keyframes spell-land{0%,52%{opacity:0}76%{opacity:.85}100%{opacity:0}}
 /* Gemini-style ai-spark: a gradient spark chases the border path once, then dissipates.
    SVG stroke-dashoffset (always repaints) — avoids the conic/@property paint bug. */
 /* ai-spark colors — deeper/saturated on light, brighter on dark */
@@ -236,9 +241,9 @@ h1,h2,h3,p{margin:0}
 .aispark{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none;z-index:2}
 .aispark .ais0{stop-color:var(--ais-1)}.aispark .ais1{stop-color:var(--ais-2)}.aispark .ais2{stop-color:var(--ais-3)}
 /* tapered comet: a solid head fading to sparser dashes for the tail; the glow blurs it smooth */
-.aispark .asrect{stroke-dasharray:7,1.2,3,1.6,2,2.2,1.4,3,0.9,4,0.6,73.1;filter:drop-shadow(0 0 3px var(--ais-glow)) drop-shadow(0 0 7px var(--ais-glow));animation:ai-chase .7s linear forwards}
+.aispark .asrect{stroke-dasharray:7,1.2,3,1.6,2,2.2,1.4,3,0.9,4,0.6,73.1;filter:drop-shadow(0 0 3px var(--ais-glow)) drop-shadow(0 0 8px var(--ais-glow));animation:ai-chase .5s linear forwards}
 @keyframes ai-chase{0%{stroke-dashoffset:0;opacity:0}10%{opacity:1}80%{opacity:1}100%{stroke-dashoffset:-100;opacity:0}}
-@media (prefers-reduced-motion:reduce){.tcard.reveal{animation:none}.aispark{display:none}}
+@media (prefers-reduced-motion:reduce){.tcard.reveal{animation:none}.tcard.first{animation:none}.tcard.first::after{display:none}.aispark{display:none}}
 
 /* ghost / preview cards (Coach direction) */
 .tcard.ghost{opacity:.5;filter:saturate(.5)}
