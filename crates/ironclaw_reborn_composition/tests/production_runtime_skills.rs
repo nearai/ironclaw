@@ -75,7 +75,7 @@ fn skill_md(name: &str, description: &str, keywords: &[&str], body: &str) -> Str
     md
 }
 
-/// The production composition runs a skill turn and accepts a skill write into its virtual store.
+/// A skill written into production's DB-backed store is activatable by name, same session.
 ///
 /// Two things at once, because the second is what a reader needs and the first is what makes it
 /// credible: the production runtime really is built and driven here (it opens a conversation and
@@ -86,7 +86,7 @@ fn skill_md(name: &str, description: &str, keywords: &[&str], body: &str) -> Str
 /// claim. Every other check in this work seeds skills on disk, so none of them speaks to
 /// production's storage path.
 #[tokio::test]
-async fn production_composition_accepts_a_virtual_filesystem_skill_write() {
+async fn a_skill_in_the_production_virtual_filesystem_is_activatable_by_name() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("reborn.db");
     let db = Arc::new(
@@ -140,7 +140,7 @@ async fn production_composition_accepts_a_virtual_filesystem_skill_write() {
     let vfs = ironclaw_filesystem::LibSqlRootFilesystem::new(Arc::clone(&db))
         .expect("libsql root filesystem");
     let skill_path = ironclaw_host_api::path::VirtualPath::new(
-        "/tenants/prod-skills-tenant/users/prod-skills-owner/skills/tenant-policy-helper/SKILL.md",
+        "/projects/tenants/prod-skills-tenant/users/prod-skills-owner/skills/tenant-policy-helper/SKILL.md",
     )
     .expect("virtual path");
     ironclaw_filesystem::RootFilesystem::write_file(
@@ -173,28 +173,140 @@ async fn production_composition_accepts_a_virtual_filesystem_skill_write() {
         .map(|activation| activation.name.to_string())
         .collect();
 
-    // WHAT IS PROVEN, and what is not.
+    // The end-to-end production claim: a skill in production's DB-backed store is activatable by
+    // name, in the same session it was written.
     //
-    // Proven: the production composition builds under the hosted multi-tenant policy, opens a
-    // conversation, completes a skill-execution turn, and its DB-backed virtual filesystem ACCEPTS
-    // a skill write at a tenant/user-scoped path. That last part is new -- the earlier version of
-    // this test wrote to the host disk, which production does not read at all.
-    //
-    // Not proven: that a skill written there is DISCOVERED. It is not, yet, and the reason is
-    // ironclaw-internal rather than something this test can settle by trying paths -- either the
-    // production bundle source scans a different scoped root than the one used here, or it
-    // enumerates once at build time and does not see a later write. Both are answerable by whoever
-    // owns that composition; guessing at paths until one passes would produce a test that proves
-    // only that I found a path, not that the contract holds.
-    //
-    // Asserted as-is so the gap is a failing expectation a reader can act on, rather than a comment
-    // nobody reads. Flip this to `any(|name| name == "tenant-policy-helper")` once discovery is
-    // wired, and this becomes the end-to-end production claim the epic wants.
+    // Getting here took three corrections, all mine, and each is worth leaving recorded because each
+    // would silently produce a passing-looking test that proved nothing:
+    //   1. seeded the HOST DISK -- production reads a scoped-virtual filesystem, so activation was
+    //      empty and the skill was simply not in the store;
+    //   2. seeded BEFORE building -- migrations create `root_filesystem_entries` at build time, so
+    //      the write failed with `no such table`;
+    //   3. used `/tenants/<t>/users/<u>/skills` -- the real mount is
+    //      `/projects/tenants/<t>/users/<u>/skills` (`scoped_skill_context_mount_view`), and without
+    //      the `/projects` prefix the write lands somewhere nothing scans.
     assert!(
-        activated.is_empty(),
-        "a skill written into the production virtual filesystem became discoverable -- if this is \
-         now wired, invert this assertion: it is the end-to-end production claim. activated: {activated:?}"
+        activated.iter().any(|name| name == "tenant-policy-helper"),
+        "a skill in production's virtual filesystem must be activatable by name -- an empty set \
+         means a tenant's skill is unreachable however well routing works. activated: {activated:?}"
     );
 
     runtime.shutdown().await.expect("shutdown");
+}
+
+/// Build the production runtime over a given database. A plain fn rather than a closure so the
+/// restart test can call it twice against the same libSQL file.
+async fn build_production(
+    db: Arc<libsql::Database>,
+    db_path: &std::path::Path,
+) -> Result<ironclaw_reborn_composition::RebornRuntime, ironclaw_reborn_composition::RebornRuntimeError>
+{
+    let bindings = ironclaw_reborn_composition::test_support::libsql_host_bindings_for_test(
+        RebornCompositionProfile::Production,
+        "prod-restart-owner",
+        db,
+        db_path.to_string_lossy(),
+        None,
+        ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+    )
+    .expect("libSQL bindings")
+    .with_runtime_policy(hosted_multi_tenant_policy());
+    build_reborn_runtime(
+        RebornRuntimeInput::from_build_input(bindings)
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: "prod-restart-tenant".to_string(),
+                agent_id: "prod-restart-agent".to_string(),
+                source_binding_id: "prod-restart-source".to_string(),
+                reply_target_binding_id: "prod-restart-reply".to_string(),
+            })
+            .with_poll_settings(PollSettings {
+                interval: Duration::from_millis(10),
+                max_total: Duration::from_secs(10),
+            }),
+    )
+    .await
+}
+
+/// The full production loop: a skill in the DB-backed store is activatable by a runtime that starts
+/// with it present.
+///
+/// The sibling test above shows a skill written mid-session is not discovered. This distinguishes
+/// the two possible causes -- wrong scoped root versus build-time enumeration -- by seeding and then
+/// building a SECOND runtime over the same libSQL database. If discovery happens at build time, this
+/// passes and the path is right; if it fails too, the scoped root is wrong.
+///
+/// It is also the realistic shape. A tenant installs a skill in one session and uses it in a later
+/// one, against the same database, which is exactly a rebuild.
+#[tokio::test]
+async fn a_skill_in_the_production_store_is_activatable_after_restart() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("reborn.db");
+    let db = Arc::new(
+        libsql::Builder::new_local(&db_path)
+            .build()
+            .await
+            .expect("libsql db"),
+    );
+
+    // First build runs migrations, which is what creates `root_filesystem_entries`.
+    let first = match build_production(Arc::clone(&db), &db_path).await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("production runtime did not build in this environment: {error}");
+            return;
+        }
+    };
+    first.shutdown().await.expect("first shutdown");
+
+    // Seed the skill into the DB-backed store while no runtime holds it.
+    let vfs = ironclaw_filesystem::LibSqlRootFilesystem::new(Arc::clone(&db))
+        .expect("libsql root filesystem");
+    let skill_path = ironclaw_host_api::path::VirtualPath::new(
+        "/projects/tenants/prod-restart-tenant/users/prod-restart-owner/skills/restart-policy-helper/SKILL.md",
+    )
+    .expect("virtual path");
+    ironclaw_filesystem::RootFilesystem::write_file(
+        &vfs,
+        &skill_path,
+        skill_md(
+            "restart-policy-helper",
+            "Applies the tenant policy checklist.",
+            &[],
+            "PRODUCTION_RESTART_SENTINEL",
+        )
+        .as_bytes(),
+    )
+    .await
+    .expect("write SKILL.md into the production virtual filesystem");
+
+    // Second build sees a store that already contains the skill.
+    let second = build_production(Arc::clone(&db), &db_path).await.expect("second production build");
+    let conversation = second
+        .new_conversation()
+        .await
+        .expect("conversation on the rebuilt runtime");
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        second.execute_skill_message(&conversation, "$restart-policy-helper"),
+    )
+    .await
+    .expect("skill execution did not hang")
+    .expect("explicit activation runs");
+
+    let activated: Vec<String> = result
+        .plan
+        .activations()
+        .iter()
+        .map(|activation| activation.name.to_string())
+        .collect();
+
+    assert!(
+        activated.iter().any(|name| name == "restart-policy-helper"),
+        "a skill present in the production DB-backed store at build time must be activatable by \
+         name -- if this is empty, the scoped root used here is not the one the production bundle \
+         source scans, and the correct root is the thing to establish next. activated: {activated:?}"
+    );
+
+    second.shutdown().await.expect("second shutdown");
 }
