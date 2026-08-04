@@ -25,7 +25,7 @@ use super::{
     input_error,
     inputs::{optional_usize, optional_usize_allow_zero, required_str},
     paths::{
-        filesystem_error, is_excluded_name, is_sensitive_scoped_path,
+        filesystem_error_with_summary, is_excluded_name, is_sensitive_scoped_path,
         list_dir_empty_if_missing_root, operation_allowed, resolve_optional_path,
         scoped_child_path, type_filter_matches, validate_relative_pattern, virtual_to_relative,
     },
@@ -44,7 +44,8 @@ pub(super) async fn grep(
     }
     // A missing mount ROOT behaves as an existing empty directory: the grant
     // names it, nothing has been written under it yet. The walk below then
-    // lists it as empty via `list_dir_empty_if_missing_root`.
+    // lists it as empty via `list_dir_empty_if_missing_root`. Any other stat
+    // failure keeps the path-carrying diagnostic summary.
     let root_stat = match request.filesystem.stat(&resolved.virtual_path).await {
         Err(FilesystemError::NotFound { .. }) if resolved.is_mount_root() => FileStat {
             path: resolved.virtual_path.clone(),
@@ -53,7 +54,9 @@ pub(super) async fn grep(
             modified: None,
             sensitive: false,
         },
-        other => other.map_err(filesystem_error)?,
+        other => other.map_err(|error| {
+            filesystem_error_with_summary("grep", resolved.scoped_path.as_str(), error)
+        })?,
     };
     if root_stat.sensitive {
         return Err(CodingCapabilityError::new(
@@ -183,10 +186,32 @@ pub(super) async fn grep(
     ))
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+const MAX_REPORTED_SKIPPED_FILES: usize = 20;
+
+#[derive(Debug, Default)]
 struct WalkFilesResult {
     scan_limit: Option<ScanLimit>,
     bytes_scanned: u64,
+    skipped_file_count: usize,
+    skipped_files: Vec<SkippedFile>,
+}
+
+impl WalkFilesResult {
+    fn record_skipped_file(&mut self, relative: &str, operation: FilesystemOperation) {
+        self.skipped_file_count = self.skipped_file_count.saturating_add(1);
+        if self.skipped_files.len() < MAX_REPORTED_SKIPPED_FILES {
+            self.skipped_files.push(SkippedFile {
+                relative: relative.to_string(),
+                operation,
+            });
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SkippedFile {
+    relative: String,
+    operation: FilesystemOperation,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -208,12 +233,16 @@ async fn walk_files(
         if include(&relative)
             && !visit_file(
                 request,
-                &root.virtual_path,
-                &relative,
-                root_stat,
+                FileVisit {
+                    path: &root.virtual_path,
+                    relative: &relative,
+                    stat: root_stat,
+                },
                 &mut walk_result,
                 &mut visit,
-                false,
+                FileVisitMode::ExplicitFile {
+                    scoped_path: root.scoped_path.as_str(),
+                },
             )
             .await?
         {
@@ -250,12 +279,12 @@ async fn walk_files(
                     if !include(&relative) {
                         continue;
                     }
-                    // silent-ok: grep directory search skips entries that disappear or fail stat.
                     let Ok(stat) = request.filesystem.stat(&entry.path).await else {
                         tracing::debug!(
                             path = entry.path.as_str(),
                             "skipping grep file after stat failed"
                         );
+                        walk_result.record_skipped_file(&relative, FilesystemOperation::Stat);
                         continue;
                     };
                     if stat.sensitive {
@@ -263,12 +292,14 @@ async fn walk_files(
                     }
                     if !visit_file(
                         request,
-                        &entry.path,
-                        &relative,
-                        stat,
+                        FileVisit {
+                            path: &entry.path,
+                            relative: &relative,
+                            stat,
+                        },
                         &mut walk_result,
                         &mut visit,
-                        true,
+                        FileVisitMode::DirectoryScan,
                     )
                     .await?
                     {
@@ -285,36 +316,46 @@ async fn walk_files(
     Ok(walk_result)
 }
 
+struct FileVisit<'a> {
+    path: &'a VirtualPath,
+    relative: &'a str,
+    stat: FileStat,
+}
+
+#[derive(Clone, Copy)]
+enum FileVisitMode<'a> {
+    ExplicitFile { scoped_path: &'a str },
+    DirectoryScan,
+}
+
 async fn visit_file(
     request: &CodingCapabilityRequest<'_>,
-    path: &VirtualPath,
-    relative: &str,
-    stat: FileStat,
+    target: FileVisit<'_>,
     walk_result: &mut WalkFilesResult,
     visit: &mut impl FnMut(&str, &[u8], Option<SystemTime>) -> Result<bool, CodingCapabilityError>,
-    skip_read_errors: bool,
+    mode: FileVisitMode<'_>,
 ) -> Result<bool, CodingCapabilityError> {
-    if stat.len > MAX_READ_SIZE {
+    if target.stat.len > MAX_READ_SIZE {
         tracing::debug!(
-            path = path.as_str(),
-            len = stat.len,
+            path = target.path.as_str(),
+            len = target.stat.len,
             max_read_size = MAX_READ_SIZE,
             "skipping oversized grep file"
         );
-        if !skip_read_errors {
+        if matches!(mode, FileVisitMode::ExplicitFile { .. }) {
             walk_result.scan_limit = Some(ScanLimit::FileBytes {
-                file_bytes: stat.len,
+                file_bytes: target.stat.len,
             });
             return Ok(false);
         }
         return Ok(true);
     }
-    let next_total = walk_result.bytes_scanned.saturating_add(stat.len);
+    let next_total = walk_result.bytes_scanned.saturating_add(target.stat.len);
     if next_total > GREP_MAX_TOTAL_BYTES {
         tracing::debug!(
-            path = path.as_str(),
+            path = target.path.as_str(),
             total_bytes = walk_result.bytes_scanned,
-            next_file_bytes = stat.len,
+            next_file_bytes = target.stat.len,
             max_total_bytes = GREP_MAX_TOTAL_BYTES,
             "stopping grep after aggregate scan budget"
         );
@@ -322,16 +363,23 @@ async fn visit_file(
         return Ok(false);
     }
     walk_result.bytes_scanned = next_total;
-    let bytes = match request.filesystem.read_file(path).await {
+    let bytes = match request.filesystem.read_file(target.path).await {
         Ok(bytes) => bytes,
-        Err(_error) if skip_read_errors => {
-            // silent-ok: grep directory search skips files that disappear or fail read.
-            tracing::debug!(path = path.as_str(), "skipping grep file after read failed");
-            return Ok(true);
-        }
-        Err(error) => return Err(filesystem_error(error)),
+        Err(error) => match mode {
+            FileVisitMode::ExplicitFile { scoped_path } => {
+                return Err(filesystem_error_with_summary("grep", scoped_path, error));
+            }
+            FileVisitMode::DirectoryScan => {
+                tracing::debug!(
+                    path = target.path.as_str(),
+                    "skipping grep file after read failed"
+                );
+                walk_result.record_skipped_file(target.relative, FilesystemOperation::ReadFile);
+                return Ok(true);
+            }
+        },
     };
-    visit(relative, &bytes, stat.modified)
+    visit(target.relative, &bytes, target.stat.modified)
 }
 
 fn root_file_relative(path: &ScopedPath) -> String {
@@ -371,7 +419,7 @@ fn build_grep_output(
                 "truncated": walk_result.scan_limit.is_some()
                     || total > offset.saturating_add(effective_limit)
             });
-            add_scan_limit_metadata(&mut output, walk_result);
+            add_walk_metadata(&mut output, walk_result);
             output
         }
         "count" => {
@@ -391,7 +439,7 @@ fn build_grep_output(
                 "truncated": walk_result.scan_limit.is_some()
                     || total_count > offset.saturating_add(effective_limit)
             });
-            add_scan_limit_metadata(&mut output, walk_result);
+            add_walk_metadata(&mut output, walk_result);
             output
         }
         _ => {
@@ -425,13 +473,27 @@ fn build_grep_output(
                 truncated = true;
             }
             let mut output = json!({ "content": content, "truncated": truncated });
-            add_scan_limit_metadata(&mut output, walk_result);
+            add_walk_metadata(&mut output, walk_result);
             output
         }
     }
 }
 
-fn add_scan_limit_metadata(output: &mut Value, walk_result: WalkFilesResult) {
+fn add_walk_metadata(output: &mut Value, walk_result: WalkFilesResult) {
+    if walk_result.skipped_file_count > 0 {
+        output["incomplete"] = json!(true);
+        output["skipped_file_count"] = json!(walk_result.skipped_file_count);
+        output["skipped_files"] = json!(
+            walk_result
+                .skipped_files
+                .into_iter()
+                .map(|skipped| json!({
+                    "file": skipped.relative,
+                    "operation": skipped.operation.to_string(),
+                }))
+                .collect::<Vec<_>>()
+        );
+    }
     match walk_result.scan_limit {
         Some(ScanLimit::AggregateBytes) => {
             output["limit_reason"] = json!("aggregate_scan_bytes");
