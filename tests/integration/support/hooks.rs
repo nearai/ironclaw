@@ -108,6 +108,39 @@ impl PrivilegedBeforeCapabilityHook for DenyBeforeCapabilityHook {
     }
 }
 
+/// Records its fire against `poison_target` and then returns **without minting
+/// a decision** — the gate-sink protocol violation that
+/// `HookDispatcher::run_before_capability_hook` classifies as
+/// `FailureCategory::Malformed`, which (a) fails closed into a `Deny` for the
+/// dispatched capability and (b) poisons the hook's registry slot for the
+/// remaining life of that dispatcher.
+///
+/// Protocol violation rather than `panic!` on purpose: it reaches the identical
+/// `Err(failure)` arm (`classify_failure` poisons the slot either way) without
+/// spraying an unwind backtrace across the test log. #6945 names both routes.
+///
+/// Poisoning is what makes cross-run dispatcher isolation *observable*: a
+/// dispatcher that survives into the next run has already skipped this slot, so
+/// the hook goes quiet and its fail-closed deny silently stops being applied.
+struct PoisoningBeforeCapabilityHook {
+    log: RecordingHookLog,
+    poison_target: String,
+}
+
+#[async_trait]
+impl PrivilegedBeforeCapabilityHook for PoisoningBeforeCapabilityHook {
+    async fn evaluate(&self, ctx: &BeforeCapabilityHookContext, sink: &mut dyn PrivilegedGateSink) {
+        if ctx.capability_name == self.poison_target {
+            self.log
+                .record(format!("before_capability_poison:{}", ctx.capability_name));
+            // Deliberately mint nothing: `GateSinkState::Unset` is the
+            // malformed-hook path that fails closed and poisons the slot.
+            return;
+        }
+        sink.pass();
+    }
+}
+
 fn hook_install_err(context: &str, error: impl std::fmt::Display) -> RebornLoopDriverHostError {
     RebornLoopDriverHostError::InvalidRequest {
         reason: format!("failed to install {context} recording hook: {error}"),
@@ -137,6 +170,35 @@ pub fn recording_hook_factory(log: RecordingHookLog) -> HookDispatcherBuilderFac
                 Box::new(RecordingBeforeCapabilityHook { log }),
             )
             .map_err(|error| hook_install_err("before_capability", error))
+    })
+}
+
+/// Installs a `BeforeCapability` hook that poisons its own slot on first fire
+/// against `poison_target` (see [`PoisoningBeforeCapabilityHook`]).
+///
+/// Like the other factories here it mints a **fresh** `HookRegistry` per call,
+/// so the poison a run leaves behind can only reach the next run if the *host
+/// factory* reuses one dispatcher across builds. That makes the returned
+/// factory the probe for #6945's cross-run isolation semantic: the hook fires
+/// once per run under the per-build seam, and exactly once ever under the
+/// legacy shared-dispatcher adapter.
+pub fn poisoning_hook_factory(
+    log: RecordingHookLog,
+    poison_target: impl Into<String>,
+) -> HookDispatcherBuilderFactory {
+    let poison_target = poison_target.into();
+    Arc::new(move || {
+        let log = log.clone();
+        let poison_target = poison_target.clone();
+        let before_capability_id =
+            HookId::for_builtin(RECORDING_BEFORE_CAPABILITY_PATH, HookVersion::ONE);
+        HookDispatcherBuilder::new(HookRegistry::new())
+            .install_builtin_before_capability(
+                before_capability_id,
+                HookPhase::Policy,
+                Box::new(PoisoningBeforeCapabilityHook { log, poison_target }),
+            )
+            .map_err(|error| hook_install_err("poisoning before_capability", error))
     })
 }
 
