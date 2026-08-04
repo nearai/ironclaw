@@ -281,7 +281,9 @@ async fn build_local_storage_production_shaped(
             }
         }
         DurableBackend::Postgres(pool) => {
-            ironclaw_reborn_event_store::RebornEventStoreConfig::PostgresPool { pool: pool.clone() }
+            ironclaw_reborn_event_store::RebornEventStoreConfig::PostgresPool {
+                pool: ironclaw_filesystem::PostgresConnectionPool::new(pool.clone()),
+            }
         }
     };
     let filesystem = filesystem_bundle.filesystem;

@@ -329,6 +329,15 @@ fn extract_document_text_for_read_file(
     let Some(text) =
         ironclaw_extractors::extract_document_text_by_filename(bytes, Some(scoped_path)).map_err(
             |error| {
+                // The safe summary is model-facing, so only `Display` may go in
+                // it — `ExtractionError`'s `Display` is the classification and
+                // nothing else, which is what makes this interpolation safe.
+                // The parser diagnostic goes to the log via `Debug`.
+                tracing::debug!(
+                    path = %safe_summary_path(scoped_path),
+                    ?error,
+                    "read_file document text extraction failed"
+                );
                 operation_error_with_summary(format!(
                     "read_file failed for {}: document text extraction failed: {error}",
                     safe_summary_path(scoped_path)
@@ -766,4 +775,57 @@ fn existing_text_for_preview(stat: &ironclaw_filesystem::FileStat, bytes: &[u8])
     reject_binary_probe(bytes).ok()?;
     let (content, _encoding, _line_ending) = decode_text(bytes).ok()?;
     Some(content)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: `read_file`'s extraction failure builds a **model-facing**
+    /// safe summary, and before `ExtractionError` existed it interpolated the
+    /// extractor's raw diagnostic string into it — the same string the
+    /// extractor's own docs said callers must never render. This drives the
+    /// call site, not `Display`: the wrapper is what composes the summary, so
+    /// a unit test on the error type alone would not have caught it.
+    #[test]
+    fn read_file_extraction_failure_summary_carries_no_parser_detail() {
+        // Bytes that look like a ZIP container but are not a valid DOCX, so
+        // the private `extract_docx` produces a `zip`-crate diagnostic.
+        let corrupt = b"PK\x03\x04not-a-real-docx";
+        let error = extract_document_text_for_read_file(corrupt, "/notes/quarterly.docx")
+            .expect_err("a corrupt DOCX must fail read_file");
+
+        let summary = error
+            .safe_summary()
+            .expect("extraction failure must carry a safe summary");
+
+        assert!(
+            summary.contains("document text extraction failed"),
+            "the model still needs to be told what went wrong, got {summary:?}"
+        );
+        assert!(
+            summary.contains("path notes quarterly.docx"),
+            "the redacted path hint is deliberate and must survive, got {summary:?}"
+        );
+        // The parser's own words must not be in it. `zip` reports invalid
+        // archives as "invalid Zip archive: …"; the extractor wraps that as
+        // "invalid Office XML archive: …". Neither may reach the model.
+        for leaked in ["archive", "Zip", "zip", "invalid"] {
+            assert!(
+                !summary.contains(leaked),
+                "parser diagnostic leaked into the model-facing summary \
+                 ({leaked:?} in {summary:?})"
+            );
+        }
+    }
+
+    /// The other half of the same seam: a filename with no document extension
+    /// is not a failure, it is "not my job" — `Ok(None)` so the caller falls
+    /// through to its normal text read.
+    #[test]
+    fn read_file_extraction_returns_none_for_a_non_document_extension() {
+        let result = extract_document_text_for_read_file(b"plain text", "/notes/todo.txt")
+            .expect("a non-document extension is not an error");
+        assert_eq!(result, None);
+    }
 }

@@ -715,12 +715,18 @@ fn open_postgres_pool_from_source(
 ) -> Result<deadpool_postgres::Pool, RebornBuildError> {
     match source {
         PostgresPoolSource::Prebuilt(pool) => Ok(pool),
+        // The event store hands back the workspace's `PostgresConnectionPool`
+        // carrier; composition is the one app-layer crate chartered to hold the
+        // driver itself (PROPOSAL §11.2.6), and it needs the driver pool to
+        // build `PostgresRootFilesystem` and the auth refresh lock. Unwrap once,
+        // here, rather than letting the driver type back into a signature.
         PostgresPoolSource::Config(connection) => Ok(
             ironclaw_reborn_event_store::open_postgres_pool_with_tls_options(
                 connection.url,
                 connection.pool_max_size,
                 connection.tls_options,
-            )?,
+            )?
+            .into_driver(),
         ),
     }
 }

@@ -407,6 +407,12 @@ pub use skills::{
 use skills::skill_asset_error;
 
 use ironclaw_operator::ResolvedRebornLlm;
+// Named only by `#[cfg(any(test, feature = "test-support"))]` accessors
+// below, so the imports carry the same gate. Without it, any build that
+// compiles this crate as a *dependency* without `test-support` — e.g. the
+// PR clippy lane when the changed-package set is `{ironclaw,
+// ironclaw_reborn_config}` — sees three unused imports and fails `-D
+// warnings`. See #7119.
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
 #[cfg(any(test, feature = "test-support"))]

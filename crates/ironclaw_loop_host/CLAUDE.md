@@ -21,6 +21,13 @@ Owns reusable host-side adapters for neutral loop ports.
 - `tool_disclosure*.rs` is progressive tool disclosure: the catalog/selector,
   the `LoopCapabilityPort` decorator that defers wide tool surfaces behind three
   synthetic bridges, and the `REBORN_TOOL_DISCLOSURE` mode that gates it.
+- `system_prompt_assets.rs` exports the system-prompt content this crate owns:
+  `DEFAULT_SYSTEM_PROMPT` (the seed text written once into the user-editable
+  `SYSTEM.md`) and the three protocols appended in memory at resolve time —
+  `SELF_KNOWLEDGE_PROTOCOL_PROMPT` (unconditional),
+  `TOOL_DISCLOSURE_PROTOCOL_PROMPT` (bridged mode only) and
+  `BENCHMARKING_MODE_PROTOCOL_PROMPT`. The text lives in `prompts/*.md`, never
+  inline in Rust.
 
 ## Boundaries
 
@@ -37,6 +44,11 @@ Owns reusable host-side adapters for neutral loop ports.
   may reach a provider client.
 - Prompt context builders may produce safe summaries and refs; full prompt
   materialization is still owned by the prompt port contract.
+- Prompt **content** for the loop tier lives here, in `prompts/*.md`. The
+  composition root owns assembly and the boot-time seeding of the on-disk
+  `SYSTEM.md` (`std::fs` on a real host path — this crate performs no such
+  I/O); it must not own the text. `reborn_composition_boundaries.rs`'s
+  `composition_root_embeds_no_prompt_content` enforces that direction.
 
 ## Adding code
 

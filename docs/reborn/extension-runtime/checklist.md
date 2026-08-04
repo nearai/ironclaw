@@ -821,6 +821,22 @@ Rules — kept short on purpose:
   gone; a stale `[slack]` section hard-fails config parse (accepted beta
   posture, pinned by `rejects_retired_slack_section`); the secrets guard
   keeps the `xoxb-`/`xoxp-`/`xapp-` prefixes.
+  > ✎ **Corrected 2026-08-04 — two of these three claims stopped being true
+  > after this box was ticked, and the citation is a phantom.** `SlackSection`
+  > and `SlackChannelRouteSection` came *back* as a parse-only shim (with
+  > `TelegramSection` beside them) and lived on `main` until the WS6 config
+  > narrowing; `rejects_retired_slack_section` was added by `4c8195a3ca` and
+  > removed with them, so this line has cited a nonexistent test since.
+  > A stale `[slack]` section also never hard-failed **parse** on the shipped
+  > code — the refusal was at `serve`, and only for *setup* fields. Current
+  > state: the types are gone again, and deliberately so is the parse-time
+  > refusal — an operator with a stale section must still be able to run
+  > `config list`/`config set` to fix it. `serve` fails closed on a retired
+  > setup key; an inert section boots with a deprecation notice. Pinned by
+  > `retired_setup_key_fails_closed_with_migration_guidance` and
+  > `inert_retired_section_boots_with_a_notice`
+  > (`crates/ironclaw_reborn_config/src/config_file.rs`). See PROPOSAL
+  > §6.10.3.
 - [x] DEL-4 Slack cleanup constants in product workflow and Slack connection
   copy in lifecycle are deleted (standard pipeline + manifest display data).
   — no non-test slack constant remains in `ironclaw_product`

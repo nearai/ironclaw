@@ -476,27 +476,38 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
     // weaken redaction. Not extension routing (the classifier has only the
     // tool-name string at trace-analysis time). Pinned by
     // `tool_payload_redaction_profile_is_a_safety_denylist_not_inventory_routing`.
+    //
+    // Scoped to two files since the `contribution.rs` split (WS6): the rule
+    // tables live in `tool_payloads.rs` and only the external-write detector
+    // (`classify_tool_side_effect`, `slack` alone) is in `classification.rs`.
+    // Both carve-outs are narrower than the single whole-file one they
+    // replace, so the gate now polices the rest of the module.
     (
-        "crates/ironclaw_reborn_traces/src/contribution.rs",
+        "crates/ironclaw_reborn_traces/src/contribution/tool_payloads.rs",
         "slack",
-        "trace payload-redaction/side-effect safety classifier keyed off tool-name \
-         keywords (messaging profile + external-write detection); a safety denylist, \
-         not extension routing",
+        "trace payload-redaction safety classifier keyed off tool-name keywords \
+         (messaging profile); a safety denylist, not extension routing",
     ),
     (
-        "crates/ironclaw_reborn_traces/src/contribution.rs",
+        "crates/ironclaw_reborn_traces/src/contribution/classification.rs",
+        "slack",
+        "trace external-write side-effect detection keyed off tool-name keywords \
+         (`classify_tool_side_effect`); a safety denylist, not extension routing",
+    ),
+    (
+        "crates/ironclaw_reborn_traces/src/contribution/tool_payloads.rs",
         "telegram",
         "trace payload-redaction safety classifier keyed off tool-name keywords \
          (messaging profile); a safety denylist, not extension routing",
     ),
     (
-        "crates/ironclaw_reborn_traces/src/contribution.rs",
+        "crates/ironclaw_reborn_traces/src/contribution/tool_payloads.rs",
         "gmail",
         "trace payload-redaction safety classifier keyed off tool-name keywords \
          (email profile); a safety denylist, not extension routing",
     ),
     (
-        "crates/ironclaw_reborn_traces/src/contribution.rs",
+        "crates/ironclaw_reborn_traces/src/contribution/tool_payloads.rs",
         "github",
         "trace payload-redaction safety classifier keyed off tool-name keywords \
          (issue-tracker profile); a safety denylist, not extension routing",
@@ -1400,14 +1411,17 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     ("crates/ironclaw_reborn_config/src/config_file.rs", "gmail"),
     ("crates/ironclaw_reborn_config/src/config_file.rs", "google"),
-    ("crates/ironclaw_reborn_config/src/config_file.rs", "slack"),
+    // The retired-section gravestones: the only place this crate still
+    // names a vendor, and only as the TOML table name an operator typed.
     (
-        "crates/ironclaw_reborn_config/src/config_file.rs",
+        "crates/ironclaw_reborn_config/src/retired_sections.rs",
+        "slack",
+    ),
+    (
+        "crates/ironclaw_reborn_config/src/retired_sections.rs",
         "telegram",
     ),
     ("crates/ironclaw_reborn_config/src/lib.rs", "google"),
-    ("crates/ironclaw_reborn_config/src/lib.rs", "slack"),
-    ("crates/ironclaw_reborn_config/src/lib.rs", "telegram"),
     // lane-4: dev-deps — sanctioned DEL-7 linkage of concrete channel crates
     // for the production-shaped channel-host E2E suite; the scanner sees the
     // crate names in Cargo.toml even though Rust test sources are excluded.
@@ -1487,6 +1501,15 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// entries of `ALLOWLIST` above (`ALLOWLIST.len()`, printed by the ratchet
 /// below on failure).
 ///
+/// Re-measured 2026-08-04 during the Wave 4 consolidation, and **lowered
+/// 125 → 124**. The vendor-config retirement removes two net entries, which
+/// against the `origin/main` this branch was first cut from (`1e2a294083`,
+/// `ALLOWLIST` = 127) gave 125. #7094 then deleted a further entry on `main`
+/// (127 → 126), so the same two removals now land on **124**. The count is
+/// read off the ratchet's own failure message with this constant temporarily
+/// set to `0`, never counted by eye — a plain paren count over the literal
+/// answers 142, because the entries' comments contain parentheses too.
+///
 /// PROPOSAL §11.2.8 shrinks this list to the §8.1 rule-4 set and CHECKLIST
 /// WS12 wants it empty. The staleness half of that discipline already lives in
 /// the gate above (an entry that no longer matches fails); this ceiling is the
@@ -1513,7 +1536,24 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// not with `grep`, which also matches prose. Tracked as #7147; whichever of
 /// the concurrent branches touching this list merges last must recount the
 /// union rather than trusting any single branch's number.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 125;
+///
+/// ✎ **125 → 123 (2026-08-04, #7139 — the Wave 4 consolidation).** Neither
+/// side of this merge was right for the union, so it was recounted rather than
+/// picked. #7143 set **125** measuring its own branch; this branch had **124**
+/// measuring its own. #7143 additionally *deleted* an entry
+/// (`lifecycle_restore.rs`/`slack`) that this branch never saw, so the merged
+/// list is lower than either: 126 on `main` after #7094, minus this branch's
+/// two net vendor-config removals, minus #7143's one, is **123**.
+///
+/// Read off the ratchet's own failure message with this constant temporarily
+/// set to `0` (`ALLOWLIST grew to 123 entries`) — never counted by eye, and
+/// never with `grep`, which also matches prose (a paren count over the literal
+/// once answered 142 because the entries' comments contain parentheses).
+///
+/// ⚠ **#7141 and #7152 are still open and both touch this list** (#7147).
+/// Whichever merges last must recount the union the same way rather than
+/// inheriting 123, 124 or 125 from any single branch.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 123;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 #[test]

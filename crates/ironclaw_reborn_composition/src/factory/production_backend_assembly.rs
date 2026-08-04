@@ -1388,7 +1388,9 @@ pub(super) async fn build_postgres_production(
         filesystem,
         trigger_repository,
         secret_master_key,
-        ironclaw_reborn_event_store::RebornEventStoreConfig::PostgresPool { pool },
+        ironclaw_reborn_event_store::RebornEventStoreConfig::PostgresPool {
+            pool: ironclaw_filesystem::PostgresConnectionPool::new(pool),
+        },
         ironclaw_auth::CredentialRefreshLeaderLock::for_postgres(pool_for_refresh_lock),
     )
     .await

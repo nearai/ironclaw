@@ -14,5 +14,7 @@ publish = false
 layer = "substrates"
 
 [dependencies]
-serde_json = "1"
+# One dependency, deliberately. The macros expand to `tracing`; anything that
+# would add a second dependency here is a measurement that belongs to its
+# producer, not to this crate. See AGENTS.md.
 tracing = "0.1"

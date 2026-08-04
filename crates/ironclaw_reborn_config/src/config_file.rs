@@ -43,6 +43,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::RebornProfile;
+use crate::retired_sections::{RetiredSectionError, RetiredSections};
 use crate::secrets_guard::{InlineSecretError, reject_inline_secret};
 
 /// API version stamp this crate understands. Mirrors
@@ -85,10 +86,6 @@ pub struct RebornConfigFile {
     /// `serve` subcommand is invoked. Optional — sparse configs
     /// fall back to compiled defaults documented on each field.
     pub webui: Option<WebuiSection>,
-    /// Legacy-compatible Slack host enablement and rejected setup fields.
-    pub slack: Option<SlackSection>,
-    /// Telegram host enablement. Runtime setup remains extension-owned.
-    pub telegram: Option<TelegramSection>,
     /// Google OAuth client identity for Gmail/Calendar/Drive extensions.
     /// Public identifiers only; the client secret stays in the secret store.
     pub google: Option<GoogleSection>,
@@ -108,6 +105,16 @@ pub struct RebornConfigFile {
     /// host-runtime binding resolver, which owns the profile catalog; this
     /// config layer only does deployment-agnostic structural validation.
     pub memory: Option<MemorySection>,
+    /// Sections this crate's schema used to define and no longer does,
+    /// captured verbatim so an existing operator file still parses and can be
+    /// answered with migration guidance. `serde(skip)` in both directions: it
+    /// is never read from a file ([`RebornConfigFile::parse_text`] splits
+    /// these off the raw document before the typed parse runs, which is what
+    /// lets the typed schema stay `deny_unknown_fields` without naming a
+    /// retired section) and never written to one (`config list` must not
+    /// advertise a retired key as settable).
+    #[serde(skip)]
+    pub retired_sections: RetiredSections,
 }
 
 /// `[memory]` config section (issue #3537).
@@ -392,57 +399,6 @@ pub struct GoogleSection {
     pub client_id: Option<String>,
     pub redirect_uri: Option<String>,
     pub hosted_domain_hint: Option<String>,
-}
-
-/// Slack listener enablement. The additional fields remain parseable so old
-/// files receive a precise startup migration error rather than an unknown-key
-/// parse failure; new setup belongs to the extension lifecycle.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SlackSection {
-    pub enabled: Option<bool>,
-    pub installation_id: Option<String>,
-    pub team_id: Option<String>,
-    pub api_app_id: Option<String>,
-    pub slack_user_id: Option<String>,
-    pub user_id: Option<String>,
-    pub shared_subject_user_id: Option<String>,
-    #[serde(default)]
-    pub channel_routes: Vec<SlackChannelRouteSection>,
-    pub signing_secret_env: Option<String>,
-    pub bot_token_env: Option<String>,
-}
-
-impl SlackSection {
-    pub fn set_enabled(mut self, enabled: bool) -> Self {
-        self.enabled = Some(enabled);
-        self
-    }
-
-    pub fn set_user_id(mut self, value: impl Into<String>) -> Self {
-        self.user_id = Some(value.into());
-        self
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SlackChannelRouteSection {
-    pub channel_id: Option<String>,
-    pub subject_user_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct TelegramSection {
-    pub enabled: Option<bool>,
-}
-
-impl TelegramSection {
-    pub fn set_enabled(mut self, enabled: bool) -> Self {
-        self.enabled = Some(enabled);
-        self
-    }
 }
 
 /// `[budget]` section. All limits in USD. **0 = unlimited.**
@@ -820,22 +776,6 @@ fn ensure_google_table(doc: &mut toml_edit::DocumentMut) {
     }
 }
 
-/// Set `[slack].enabled` while preserving unrelated TOML — the one Slack
-/// field `config set` may still write (see `SlackSection`'s doc: every
-/// other Slack field is boot-rejected). Deliberately a plain function
-/// rather than a full update-session type like the LLM/Google ones: a
-/// single bool field has no `Keep`/`Remove` distinction worth modeling.
-pub fn update_slack_enabled(path: &Path, enabled: bool) -> Result<(), RebornConfigFileUpdateError> {
-    let _lock_file = acquire_update_lock(path)?;
-    let mut doc = load_edit_document(path)?;
-    let root = doc.as_table_mut();
-    if root.get("slack").is_none_or(|item| !item.is_table()) {
-        root.insert("slack", toml_edit::Item::Table(toml_edit::Table::new()));
-    }
-    doc["slack"]["enabled"] = toml_edit::value(enabled);
-    write_edit_document(path, &doc)
-}
-
 // ─── Errors ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
@@ -934,13 +874,52 @@ impl RebornConfigFile {
     /// Parse + validate a TOML string. Public so callers can drive the
     /// parser without going through the filesystem (e.g. CLI flag
     /// `--config-string`, tests).
+    /// Retired sections (see [`crate::retired_sections`]) are split off the
+    /// raw document before the typed parse, so the typed schema never names
+    /// one and can stay `deny_unknown_fields`.
+    ///
+    /// The split costs a second parse only for files that actually carry a
+    /// retired section. That ordering is deliberate: `toml::from_str::<Self>`
+    /// on the original text yields `unknown field` errors carrying a line,
+    /// column, and caret, while the same error routed through a `toml::Table`
+    /// loses the span (measured, not assumed — see
+    /// `unknown_field_errors_keep_their_span_when_no_section_is_retired`).
+    /// Files with no retired section — every new deployment, and every old
+    /// one once it migrates — therefore keep the better diagnostics, and the
+    /// degraded span is confined to files already being told to remove a
+    /// section.
     pub fn parse_text(text: &str, attributed_path: &Path) -> Result<Self, RebornConfigFileError> {
-        let parsed: Self = toml::from_str(text).map_err(|source| RebornConfigFileError::Toml {
+        let to_error = |source: toml::de::Error| RebornConfigFileError::Toml {
             path: attributed_path.display().to_string(),
             source,
-        })?;
+        };
+        let mut raw: toml::Table = toml::from_str(text).map_err(to_error)?;
+        let retired_sections = RetiredSections::split_from(&mut raw);
+
+        let mut parsed: Self = if retired_sections.is_empty() {
+            toml::from_str(text).map_err(to_error)?
+        } else {
+            raw.try_into().map_err(to_error)?
+        };
+        parsed.retired_sections = retired_sections;
         parsed.validate(attributed_path)?;
         Ok(parsed)
+    }
+
+    /// Fail closed when the file carries a retired *setup* key.
+    ///
+    /// Separate from `parse_text` on purpose: every command loads the config,
+    /// but only a command that is about to act on it should refuse to run. An
+    /// operator with a stale section still needs `config list` and `config
+    /// set` to work in order to fix it.
+    pub fn retired_section_migration(&self, config_path: &Path) -> Result<(), RetiredSectionError> {
+        self.retired_sections.migration_error(config_path)
+    }
+
+    /// One notice per inert retired section still present, for a caller that
+    /// is about to serve. Empty for a clean file.
+    pub fn retired_section_notices(&self, config_path: &Path) -> Vec<String> {
+        self.retired_sections.deprecation_notices(config_path)
     }
 
     fn validate(&self, attributed_path: &Path) -> Result<(), RebornConfigFileError> {
@@ -1107,57 +1086,13 @@ impl RebornConfigFile {
                 check(Cow::Borrowed("webui.canonical_host"), host)?;
             }
         }
-        if let Some(slack) = &self.slack {
-            if let Some(installation_id) = &slack.installation_id {
-                check(Cow::Borrowed("slack.installation_id"), installation_id)?;
-            }
-            if let Some(team_id) = &slack.team_id {
-                check(Cow::Borrowed("slack.team_id"), team_id)?;
-            }
-            if let Some(api_app_id) = &slack.api_app_id {
-                check(Cow::Borrowed("slack.api_app_id"), api_app_id)?;
-            }
-            if let Some(slack_user_id) = &slack.slack_user_id {
-                check(Cow::Borrowed("slack.slack_user_id"), slack_user_id)?;
-            }
-            if let Some(user_id) = &slack.user_id {
-                check(Cow::Borrowed("slack.user_id"), user_id)?;
-            }
-            if let Some(shared_subject_user_id) = &slack.shared_subject_user_id {
-                check(
-                    Cow::Borrowed("slack.shared_subject_user_id"),
-                    shared_subject_user_id,
-                )?;
-            }
-            for (index, route) in slack.channel_routes.iter().enumerate() {
-                if let Some(channel_id) = &route.channel_id {
-                    check_non_empty_trimmed(
-                        Cow::Owned(format!("slack.channel_routes[{index}].channel_id")),
-                        channel_id,
-                    )?;
-                }
-                if let Some(subject_user_id) = &route.subject_user_id {
-                    check_non_empty_trimmed(
-                        Cow::Owned(format!("slack.channel_routes[{index}].subject_user_id")),
-                        subject_user_id,
-                    )?;
-                }
-            }
-            if let Some(signing_secret_env) = &slack.signing_secret_env {
-                check_non_empty_trimmed(
-                    Cow::Borrowed("slack.signing_secret_env"),
-                    signing_secret_env,
-                )?;
-                validate_env_var_reference(
-                    "slack.signing_secret_env",
-                    signing_secret_env,
-                    attributed_path,
-                )?;
-            }
-            if let Some(bot_token_env) = &slack.bot_token_env {
-                check_non_empty_trimmed(Cow::Borrowed("slack.bot_token_env"), bot_token_env)?;
-                validate_env_var_reference("slack.bot_token_env", bot_token_env, attributed_path)?;
-            }
+        // Retired sections skip the typed schema, so they would also skip the
+        // inline-secret guard above. Walk them explicitly: this is a wider net
+        // than the per-field checks it replaces (which knew only the nine
+        // hardcoded keys of the one section that had them), because a retired
+        // section accepts any key.
+        for (label, value) in self.retired_sections.string_values() {
+            check(Cow::Owned(label), value)?;
         }
         if let Some(google) = &self.google {
             if let Some(client_id) = &google.client_id {
@@ -1895,55 +1830,198 @@ redirect_uri = "http://127.0.0.1:3000/oauth/google/callback"
         );
     }
 
+    // ─── Retired sections (the compatibility window) ────────────────────
+
+    /// The whole point of the window: a file written against the retired
+    /// schema still parses, so the operator can run `config list` / `config
+    /// set` to fix it rather than being locked out by a parse failure.
     #[test]
-    fn update_slack_enabled_writes_new_section() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("config.toml");
+    fn retired_sections_still_parse_and_do_not_reach_the_typed_schema() {
+        let toml = "[identity]\ntenant = \"acme\"\n\n[slack]\nenabled = true\n\n\
+                    [telegram]\nenabled = true\n";
+        let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("retired file parses");
 
-        update_slack_enabled(&path, true).expect("update config");
-
-        let cfg = RebornConfigFile::load(&path)
-            .expect("valid config")
-            .expect("config present");
         assert_eq!(
-            cfg.slack.expect("slack section present").enabled,
-            Some(true)
+            cfg.identity.expect("identity").tenant.as_deref(),
+            Some("acme")
+        );
+        let names: Vec<_> = cfg.retired_sections.section_names().collect();
+        assert_eq!(names, vec!["slack", "telegram"]);
+    }
+
+    /// An inert retired section must not block a boot that used to work, but
+    /// must not be silent either — the failure this replaces is an operator
+    /// setting a documented flag and believing it took effect.
+    #[test]
+    fn inert_retired_section_boots_with_a_notice() {
+        let cfg = RebornConfigFile::parse_text("[slack]\nenabled = true\n", &attributed())
+            .expect("inert section parses");
+
+        cfg.retired_section_migration(&attributed())
+            .expect("an inert retired section must not fail the boot");
+
+        let notices = cfg.retired_section_notices(&attributed());
+        assert_eq!(notices.len(), 1, "notices: {notices:?}");
+        assert!(notices[0].contains("[slack]"), "notices: {notices:?}");
+        assert!(notices[0].contains("/extensions"), "notices: {notices:?}");
+    }
+
+    /// A retired *setup* key fails closed, naming the key and the path.
+    #[test]
+    fn retired_setup_key_fails_closed_with_migration_guidance() {
+        let cfg = RebornConfigFile::parse_text(
+            "[slack]\nenabled = true\nslack_user_id = \"U123\"\n",
+            &attributed(),
+        )
+        .expect("retired setup key still parses");
+
+        let error = cfg
+            .retired_section_migration(&attributed())
+            .expect_err("a retired setup key must fail closed");
+        let message = error.to_string();
+        assert!(
+            message.contains("[slack].slack_user_id"),
+            "message: {message}"
+        );
+        assert!(message.contains("/extensions"), "message: {message}");
+    }
+
+    /// Every rejected key must actually be reachable through the public
+    /// entry point. A table-driven guard is exactly the shape that rots into
+    /// a list nothing consults, so drive each row rather than trusting one
+    /// representative key.
+    ///
+    /// **Scope, stated rather than implied:** this proves *reachability* —
+    /// every declared row reaches the fail-closed path through `parse_text`
+    /// — not *fidelity*. It builds its input from the same table it checks,
+    /// so renaming a row (`installation_id` -> `installation_idX`) keeps it
+    /// green; only deleting a row changes behaviour it can see. Whether the
+    /// list still matches the schema that shipped is a history question no
+    /// self-referential test can answer; `git log` on the deleted
+    /// `SlackSection` is the record.
+    #[test]
+    fn every_declared_rejected_key_fails_the_boot_closed() {
+        for policy in crate::retired_sections::RETIRED_SECTIONS {
+            for key in policy.rejected_keys {
+                // `channel_routes` was an array of tables; the rest were
+                // strings. Give each the shape an operator would have written.
+                let value = if *key == "channel_routes" {
+                    "[]".to_string()
+                } else {
+                    "\"x\"".to_string()
+                };
+                let text = format!("[{}]\n{key} = {value}\n", policy.section);
+                let cfg = RebornConfigFile::parse_text(&text, &attributed())
+                    .unwrap_or_else(|error| panic!("`{key}` must still parse: {error}"));
+                let message = cfg
+                    .retired_section_migration(&attributed())
+                    .expect_err(&format!(
+                        "`[{}].{key}` is declared rejected but did not fail the boot",
+                        policy.section
+                    ))
+                    .to_string();
+                assert!(
+                    message.contains(&format!("[{}].{key}", policy.section)),
+                    "message must name the offending key: {message}"
+                );
+            }
+        }
+    }
+
+    /// Telegram never had a setup key, so it is inert in both tiers — but it
+    /// is no longer *silently* inert, which it was before retirement.
+    #[test]
+    fn retired_telegram_section_is_inert_but_announced() {
+        let cfg = RebornConfigFile::parse_text("[telegram]\nenabled = true\n", &attributed())
+            .expect("telegram section parses");
+
+        cfg.retired_section_migration(&attributed())
+            .expect("telegram has no setup key to reject");
+        let notices = cfg.retired_section_notices(&attributed());
+        assert_eq!(notices.len(), 1, "notices: {notices:?}");
+        assert!(notices[0].contains("[telegram]"), "notices: {notices:?}");
+    }
+
+    /// A retired section takes any key, so it would bypass the typed
+    /// schema's inline-secret guard unless walked explicitly.
+    ///
+    /// The fixture is deliberately *not* a Slack-shaped token: the guard is
+    /// prefix-based over every known vendor, not keyed to the section it
+    /// appears in, and a real Slack token shape here would trip GitHub push
+    /// protection on every future contributor's branch.
+    #[test]
+    fn retired_section_values_are_still_inline_secret_checked() {
+        let err = RebornConfigFile::parse_text(
+            "[slack]\nbot_token = \"sk-proj-1234567890abcdef1234567890\"\n",
+            &attributed(),
+        )
+        .expect_err("a secret pasted into a retired section must still be rejected");
+        assert!(
+            matches!(err, RebornConfigFileError::InlineSecret { .. }),
+            "err: {err:?}"
         );
     }
 
+    /// Nested shapes (the retired `channel_routes` array of tables) are
+    /// walked too — a one-level scan would have missed them.
     #[test]
-    fn update_slack_enabled_preserves_unrelated_config_and_flips_value() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("config.toml");
-        fs::write(
-            &path,
-            "[identity]\ntenant = \"acme\"\n\n[slack]\nenabled = true\n",
+    fn retired_section_inline_secret_walk_reaches_nested_tables() {
+        let err = RebornConfigFile::parse_text(
+            "[[slack.channel_routes]]\ntoken = \"sk-proj-1234567890abcdef1234567890\"\n",
+            &attributed(),
         )
-        .expect("write config");
+        .expect_err("a secret nested in a retired section must still be rejected");
+        assert!(
+            matches!(err, RebornConfigFileError::InlineSecret { .. }),
+            "err: {err:?}"
+        );
+    }
 
-        update_slack_enabled(&path, false).expect("update config");
-
-        let text = fs::read_to_string(&path).expect("read config");
-        assert!(text.contains("[identity]"), "config: {text}");
-        assert!(text.contains("tenant = \"acme\""), "config: {text}");
-        let cfg = RebornConfigFile::load(&path)
-            .expect("valid config")
-            .expect("config present");
-        assert_eq!(
-            cfg.slack.expect("slack section present").enabled,
-            Some(false)
+    /// `slack = 1` is not a retired *section*; it must still be reported as
+    /// the unknown top-level key it is, not swallowed by the splitter.
+    ///
+    /// The second case is the one that actually exercises the splitter's
+    /// re-insert. Alone, the scalar leaves `retired_sections` empty, so the
+    /// fast path re-parses the original text and would catch it regardless —
+    /// a guard that passes without testing anything. Only when a *genuine*
+    /// retired section forces the slow path does dropping the re-insert
+    /// silently bypass `deny_unknown_fields`. Verified by sabotage: removing
+    /// the re-insert turns the second assertion red and leaves the first
+    /// green.
+    #[test]
+    fn retired_section_name_used_as_a_scalar_is_still_an_unknown_key() {
+        let err = RebornConfigFile::parse_text("slack = 1\n", &attributed())
+            .expect_err("a scalar under a retired name must not be captured as a section");
+        assert!(
+            matches!(err, RebornConfigFileError::Toml { .. }),
+            "err: {err:?}"
         );
 
-        // Idempotence: re-setting the same key with the same value must
-        // edit the existing `[slack]` section in place, not append a
-        // second one.
-        update_slack_enabled(&path, false).expect("update config again with the same value");
-        let text_after_repeat = fs::read_to_string(&path).expect("read config");
-        assert_eq!(
-            text_after_repeat.matches("[slack]").count(),
-            1,
-            "re-setting the same key must not duplicate the [slack] section header: \
-             {text_after_repeat}"
+        let err = RebornConfigFile::parse_text(
+            "slack = 1\n\n[telegram]\nenabled = true\n",
+            &attributed(),
+        )
+        .expect_err(
+            "a scalar under a retired name must stay visible to the typed parse even \
+                     when another retired section routes the file through the splitter",
+        );
+        assert!(
+            matches!(err, RebornConfigFileError::Toml { .. }),
+            "err: {err:?}"
+        );
+    }
+
+    /// The split must not cost span quality for files that carry no retired
+    /// section — that is why the fast path re-parses the original text
+    /// instead of always routing through a `toml::Table`.
+    #[test]
+    fn unknown_field_errors_keep_their_span_when_no_section_is_retired() {
+        let err = RebornConfigFile::parse_text("[boot]\nbogus_key = 1\n", &attributed())
+            .expect_err("unknown field must fail parse");
+        let message = err.to_string();
+        assert!(
+            message.contains("line 2"),
+            "an unknown-field error must still carry its line/column span: {message}"
         );
     }
 

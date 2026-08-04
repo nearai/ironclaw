@@ -23,6 +23,57 @@ use crate::{
     IndexName, IndexSpec, IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo,
     TxnCapability, VersionedEntry, root::validate_atomic_subtree_entries,
 };
+/// An opened PostgreSQL connection pool, as a type this workspace owns.
+///
+/// This crate is the Postgres substrate — it is where `deadpool_postgres` is a
+/// chartered dependency rather than a leak (PROPOSAL §11.2.6). Crates *above*
+/// it that only need to pass a pool along should name this type instead of the
+/// driver's, so a third-party type stops appearing in their public APIs
+/// (PROPOSAL §6.3.2, "stop leaking `deadpool_postgres::Pool` in the public API
+/// (wrap)").
+///
+/// It is a carrier, not an abstraction: [`driver`](Self::driver) hands back the
+/// pool for the crates that genuinely execute SQL on it. Deliberately **not**
+/// `Deref` — an implicit unwrap would let the driver type back into a signature
+/// without anyone noticing, which is the thing being fixed.
+#[derive(Clone)]
+pub struct PostgresConnectionPool {
+    pool: deadpool_postgres::Pool,
+}
+
+impl PostgresConnectionPool {
+    /// Adopt an already-opened driver pool.
+    pub fn new(pool: deadpool_postgres::Pool) -> Self {
+        Self { pool }
+    }
+
+    /// The underlying driver pool, for a caller that runs SQL against it.
+    pub fn driver(&self) -> &deadpool_postgres::Pool {
+        &self.pool
+    }
+
+    /// Consume the carrier and yield the driver pool.
+    pub fn into_driver(self) -> deadpool_postgres::Pool {
+        self.pool
+    }
+}
+
+impl std::fmt::Debug for PostgresConnectionPool {
+    /// Never renders the pool. `deadpool_postgres::Pool`'s `Debug` prints its
+    /// `Manager` (`deadpool-postgres-0.14.1/src/lib.rs:134`), which prints its
+    /// `tokio_postgres::Config`. That config **does** redact the password
+    /// (`tokio-postgres-0.7.16/src/config.rs:766-776` substitutes `_`), but it
+    /// still prints `user`, `dbname`, `host`, `hostaddr`, `port` and
+    /// `ssl_mode`. That is deployment topology, and anything holding this
+    /// carrier would inherit it through a `#[derive(Debug)]` nobody reviewed —
+    /// so the carrier declines to be that vector.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PostgresConnectionPool")
+            .finish_non_exhaustive()
+    }
+}
+
 /// PostgreSQL-backed [`RootFilesystem`] storing file contents by virtual path.
 pub struct PostgresRootFilesystem {
     pool: deadpool_postgres::Pool,

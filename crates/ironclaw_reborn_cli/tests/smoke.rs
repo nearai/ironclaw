@@ -1880,13 +1880,19 @@ fn config_set_google_client_id_writes_config_toml() {
     );
 }
 
-/// PR-C round-2 fix: `slack_remediation_text` used to embed its own
-/// trailing "run `service restart`" sentence on top of `print_apply_step`'s
-/// canonical line, double-printing the restart instruction. Pin the
-/// exactly-once invariant the same way the google.client_id test above
-/// does.
+/// `slack.enabled` was settable until the `[slack]` section was retired,
+/// and the value it wrote had no runtime reader — `config set` reported
+/// "saved" for a setting that did nothing. Pinned at the binary tier
+/// because that is where an operator following an old runbook meets it, and
+/// because the refusal happens before key classification, which an
+/// in-process `ConfigKey` fixture cannot reach.
+///
+/// (The "restart printed exactly once" invariant this test used to carry is
+/// not lost with it: `config_set_google_client_id_writes_config_toml` above
+/// asserts the same `matches("service restart").count() == 1` on a key that
+/// still exists.)
 #[test]
-fn config_set_slack_enabled_prints_restart_exactly_once() {
+fn config_set_retired_slack_key_is_refused_with_migration_guidance() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
 
@@ -1898,21 +1904,24 @@ fn config_set_slack_enabled_prints_restart_exactly_once() {
         .expect("ironclaw config set slack.enabled should run");
 
     assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "a retired key must be refused, not silently written; stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("slack.enabled: saved"), "stdout: {stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("slack.enabled"), "stderr: {stderr}");
+    assert!(stderr.contains("retired"), "stderr: {stderr}");
+    assert!(stderr.contains("/extensions"), "stderr: {stderr}");
     assert!(
-        stdout.contains("to apply: ironclaw service restart"),
-        "config set must never auto-restart; it must print the explicit apply step: {stdout}"
+        !stderr.contains("unknown config key"),
+        "a retired key must not be reported as a typo: {stderr}"
     );
-    assert_eq!(
-        stdout.matches("service restart").count(),
-        1,
-        "the restart instruction must appear exactly once (remediation text plus the \
-         apply-step line must not both print it): {stdout}"
+
+    let config_path = reborn_home.join("config.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap_or_default();
+    assert!(
+        !config.contains("[slack]"),
+        "a refused key must not write a `[slack]` section: {config}"
     );
 }
 

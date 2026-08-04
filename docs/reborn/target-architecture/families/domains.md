@@ -212,10 +212,10 @@ Memory *providers* are not domains crates. Each provider — the bundled native 
 - **Never contains:**
   - Attachment landing or storage.
   - Any async or I/O.
-- **Public surface:** a single typed extraction function returning structured errors on failure, not a string.
+- **Public surface:** a single typed extraction function returning structured errors on failure, not a string. ✎ *2026-08-03 (WS6): true as of the §6.4.10 slice, and it is **five** items, not one — a MIME-driven entry point, a filename-driven one, the canonical truncation helper, the outcome classification, and the error type. Everything else went private, including two items that were `pub` with zero external callers.*
 - **Depends on:** `ironclaw_common`.
 - **Never depends on:** anything else internal — this crate exists specifically to keep heavy document-parsing dependencies out of every consumer's build.
-- **Security & authority role:** none — a pure transform; the bomb-safety caps are hardening, not an authorization decision.
+- **Security & authority role:** ✎ **2026-08-03 (WS6): not "none".** The bomb-safety caps are hardening, and the *transform* is pure — but the failure type is a redaction boundary. Extraction diagnostics can echo document content (parser messages, ZIP entry names), and three consumers put extraction outcomes in front of a model. So `ExtractionError`'s `Display` renders the classification and nothing else, and its `Debug` is the logging shape; a variant whose `#[error(…)]` interpolates a field re-opens the leak this replaced. The crate decides nothing about authority, but it does decide what a failure is allowed to say.
 - **Why a separate crate:** a pure leaf with heavy document-parsing dependencies kept out of its consumers — the attachment landing routine, the kernel's tool-output mediation, and the first-party file tools all extract text without inheriting each other's surfaces or the parser cone.
 
 ### `ironclaw_identity`
