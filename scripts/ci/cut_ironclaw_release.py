@@ -11,8 +11,16 @@ from pathlib import Path
 
 import tomllib
 
-VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?")
+NUMERIC_IDENTIFIER = r"(?:0|[1-9][0-9]*)"
+PRERELEASE_IDENTIFIER = r"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+# This intentionally excludes Cargo build metadata: the same release publishes a
+# Docker image, whose tag grammar does not permit '+'.
+VERSION_PATTERN = re.compile(
+    rf"{NUMERIC_IDENTIFIER}\.{NUMERIC_IDENTIFIER}\.{NUMERIC_IDENTIFIER}"
+    rf"(?:-{PRERELEASE_IDENTIFIER}(?:\.{PRERELEASE_IDENTIFIER})*)?"
+)
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
+MAX_ANNOTATED_TAG_DEPTH = 8
 
 
 class ReleaseTagError(RuntimeError):
@@ -74,11 +82,39 @@ class GitHubTags:
             capture_output=True,
             text=True,
         )
-        if result.returncode == 0:
-            return str(json.loads(result.stdout)["object"]["sha"])
-        if "HTTP 404" in result.stderr:
-            return None
-        raise ReleaseTagError(f"failed to read {tag}: {result.stderr.strip()}")
+        if result.returncode != 0:
+            if "HTTP 404" in result.stderr:
+                return None
+            raise ReleaseTagError(f"failed to read {tag}: {result.stderr.strip()}")
+        target = json.loads(result.stdout)["object"]
+
+        for _ in range(MAX_ANNOTATED_TAG_DEPTH):
+            object_type = str(target["type"])
+            object_sha = str(target["sha"])
+            if object_type == "commit":
+                return object_sha
+            if object_type != "tag":
+                raise ReleaseTagError(
+                    f"{tag} resolves to unsupported Git object type {object_type!r}"
+                )
+
+            result = subprocess.run(
+                [
+                    "gh",
+                    "api",
+                    f"repos/{self.repository}/git/tags/{object_sha}",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                raise ReleaseTagError(
+                    f"failed to resolve annotated {tag}: {result.stderr.strip()}"
+                )
+            target = json.loads(result.stdout)["object"]
+
+        raise ReleaseTagError(f"{tag} exceeds the annotated-tag resolution depth limit")
 
     def create(self, tag: str, commit_sha: str) -> None:
         result = subprocess.run(

@@ -69,13 +69,14 @@ class ReleaseTagTests(unittest.TestCase):
             ("checked_out_sha", "b" * 40, "checked out"),
             ("manifest_version", "1.1.0-rc.2", "declares version"),
         ):
+            created: list[tuple[str, str]] = []
             arguments = {
                 "requested_version": VERSION,
                 "requested_sha": SHA,
                 "manifest_version": VERSION,
                 "checked_out_sha": SHA,
                 "get_tag_target": lambda _tag: None,
-                "create_tag": lambda _tag, _sha: None,
+                "create_tag": lambda tag, sha, calls=created: calls.append((tag, sha)),
             }
             arguments[field] = value
             with (
@@ -83,27 +84,88 @@ class ReleaseTagTests(unittest.TestCase):
                 self.assertRaisesRegex(release.ReleaseTagError, message),
             ):
                 release.ensure_release_tag(**arguments)
+            self.assertEqual(created, [])
 
     def test_rejects_ambiguous_release_identity(self) -> None:
         cases = (
             {"requested_version": "v1.1.0", "requested_sha": SHA},
+            {"requested_version": "01.1.0", "requested_sha": SHA},
+            {"requested_version": "1.01.0", "requested_sha": SHA},
+            {"requested_version": "1.1.01", "requested_sha": SHA},
+            {"requested_version": "1.1.0-01", "requested_sha": SHA},
+            {"requested_version": "1.1.0-rc..1", "requested_sha": SHA},
+            # Docker release tags cannot contain Cargo build metadata.
+            {"requested_version": "1.1.0+build.7", "requested_sha": SHA},
             {"requested_version": VERSION, "requested_sha": "abc123"},
         )
         for overrides in cases:
+            created: list[tuple[str, str]] = []
             arguments = {
                 "requested_version": VERSION,
                 "requested_sha": SHA,
                 "manifest_version": VERSION,
                 "checked_out_sha": SHA,
                 "get_tag_target": lambda _tag: None,
-                "create_tag": lambda _tag, _sha: None,
+                "create_tag": lambda tag, sha, calls=created: calls.append((tag, sha)),
             }
             arguments.update(overrides)
+            if "requested_version" in overrides:
+                arguments["manifest_version"] = overrides["requested_version"]
             with (
                 self.subTest(overrides=overrides),
-                self.assertRaises(release.ReleaseTagError),
+                self.assertRaisesRegex(release.ReleaseTagError, "invalid|commit_sha"),
             ):
                 release.ensure_release_tag(**arguments)
+            self.assertEqual(created, [])
+
+    def test_accepts_valid_semver_prerelease_identifiers(self) -> None:
+        for version in ("1.1.0-0", "1.1.0-rc.1", "1.1.0-01a"):
+            with self.subTest(version=version):
+                created: list[tuple[str, str]] = []
+                release.ensure_release_tag(
+                    requested_version=version,
+                    requested_sha=SHA,
+                    manifest_version=version,
+                    checked_out_sha=SHA,
+                    get_tag_target=lambda _tag: None,
+                    create_tag=lambda tag, sha, calls=created: calls.append((tag, sha)),
+                )
+                self.assertEqual(created, [(f"ironclaw-v{version}", SHA)])
+
+    def test_annotated_tag_is_resolved_to_its_commit(self) -> None:
+        tag_object_sha = "b" * 40
+        responses = (
+            mock.Mock(
+                returncode=0,
+                stdout=(f'{{"object":{{"type":"tag","sha":"{tag_object_sha}"}}}}'),
+                stderr="",
+            ),
+            mock.Mock(
+                returncode=0,
+                stdout=(f'{{"object":{{"type":"commit","sha":"{SHA}"}}}}'),
+                stderr="",
+            ),
+        )
+        with mock.patch.object(release.subprocess, "run", side_effect=responses) as run:
+            target = release.GitHubTags("nearai/ironclaw").get_target("ironclaw-v1.0.0")
+
+        self.assertEqual(target, SHA)
+        self.assertIn(f"git/tags/{tag_object_sha}", run.call_args_list[1].args[0][2])
+
+    def test_release_tooling_is_pinned_to_default_branch_dispatch(self) -> None:
+        workflow = (ROOT / ".github/workflows/cut-ironclaw-release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "if: github.ref == format('refs/heads/{0}', "
+            "github.event.repository.default_branch)",
+            workflow,
+        )
+        self.assertIn("ref: ${{ github.sha }}", workflow)
+        self.assertIn(
+            "python3 release-tools/scripts/ci/cut_ironclaw_release.py", workflow
+        )
+        self.assertNotIn("candidate/scripts/ci/cut_ironclaw_release.py", workflow)
 
     def test_candidate_metadata_comes_from_supplied_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
