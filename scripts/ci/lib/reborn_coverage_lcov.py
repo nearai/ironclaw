@@ -71,6 +71,7 @@ def crate_pattern(repo_root=None):
 
     root = _default_repo_root() if repo_root is None else repo_root
     directories = crate_directories(root)
+    _reject_ambiguous_crate_keys(directories)
     # Longest-first so the outermost/nearest owner wins even if the inventory
     # ever stops pruning manifests nested inside a crate.
     alternation = "|".join(
@@ -78,6 +79,40 @@ def crate_pattern(repo_root=None):
         for directory in sorted(directories, key=lambda d: (-len(d), d))
     )
     return re.compile(f"(?:^|/)({alternation})/")
+
+
+def _reject_ambiguous_crate_keys(directories):
+    """Refuse an inventory in which two crate directories share a basename.
+
+    `crate_key()` reduces a directory to its basename, so a collision silently
+    merges two crates into one coverage bucket and one ratchet floor — a
+    *quieter* version of exactly the bug this module was fixed for (#7083),
+    since the merged number looks plausible and nothing reports the merge.
+    `crate_tree.crate_directory()` already treats an ambiguous basename as
+    invalid rather than picking one; this is the same rule applied to the
+    aggregation key.
+
+    Unreachable on today's tree (all 65 basenames are distinct) and cheap to
+    keep that way. It becomes reachable the moment crates move under family
+    directories, which is the next wave.
+    """
+
+    seen: dict[str, str] = {}
+    collisions: list[str] = []
+    for directory in sorted(directories):
+        key = crate_key(directory)
+        if key in seen:
+            collisions.append(f"{key!r}: {seen[key]} and {directory}")
+        else:
+            seen[key] = directory
+    if collisions:
+        raise CrateTreeError(
+            "crate directories share a basename, which the coverage accounting key "
+            "cannot distinguish — two crates would merge into one bucket and one "
+            "floor:\n  " + "\n  ".join(collisions) + "\nRename one, or give this "
+            "gate a key that survives the collision. Refusing to report a merged "
+            "number (docs/reborn/target-architecture/CHECKLIST.md WS10)."
+        )
 
 
 def crate_key(crate_directory):

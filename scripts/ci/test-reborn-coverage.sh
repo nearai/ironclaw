@@ -555,6 +555,32 @@ assert_exit_code "A6e: summary refuses when the crate tree is missing" 1 "${CAP_
 assert_contains "A6e: names the missing crate tree" "${CAP_ERR}" \
   "crate discovery cannot run"
 
+# A6f (#7083, review): two crate directories sharing a basename must be a
+# refusal, not a silently merged bucket. `crate_key()` reduces a directory to
+# its basename, so a collision would fold two crates into one row and one
+# ratchet floor — a quieter version of the same bug, since the merged number
+# looks plausible. Unreachable on today's tree (all 65 basenames are distinct);
+# reachable the moment crates move under family directories.
+a6f_root="${tmp_root}/a6f_colliding_basenames"
+mkdir -p "${a6f_root}/crates"
+for i in $(seq 1 22); do
+  mkdir -p "${a6f_root}/crates/ironclaw_filler_${i}/src"
+  printf '[package]\nname = "ironclaw_filler_%s"\n' "${i}" \
+    > "${a6f_root}/crates/ironclaw_filler_${i}/Cargo.toml"
+done
+for family in domains substrates; do
+  mkdir -p "${a6f_root}/crates/${family}/ironclaw_threads/src"
+  printf '[package]\nname = "ironclaw_threads"\n' \
+    > "${a6f_root}/crates/${family}/ironclaw_threads/Cargo.toml"
+done
+capture env IRONCLAW_REPO_ROOT="${a6f_root}" \
+  "${summary_sh}" "${fixtures_dir}/a6b_nested.lcov" "${empty_exemptions}"
+assert_exit_code "A6f: colliding crate basenames are a refusal, not a merged bucket" 1 "${CAP_RC}"
+assert_contains "A6f: names both colliding directories" "${CAP_ERR}" \
+  "crates/domains/ironclaw_threads and crates/substrates/ironclaw_threads"
+assert_contains "A6f: says why a merged number is refused" "${CAP_ERR}" \
+  "one bucket and one floor"
+
 # A7: exemptions manifest excludes a file from the accounting entirely and
 # lists it in the report's own Exemptions section.
 cat > "${fixtures_dir}/a7_exemptions.toml" <<'TOML'

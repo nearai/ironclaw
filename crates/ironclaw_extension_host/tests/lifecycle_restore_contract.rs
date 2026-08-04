@@ -480,8 +480,12 @@ async fn restore_removes_the_retired_slack_user_installation_and_leaves_other_un
     let tombstone: serde_json::Value =
         serde_json::from_slice(&tombstone.entry.body).expect("v2 record is JSON");
     assert!(
-        tombstone.get("removed_at").is_some(),
-        "the v2 record must carry removed_at — the migration tombstones, it does not erase"
+        tombstone
+            .get("removed_at")
+            .is_some_and(|stamp| !stamp.is_null()),
+        "the v2 record must carry a removed_at timestamp — the migration tombstones, it \
+         does not erase. A present-but-null field would make this claim vacuous, so \
+         presence alone is not enough."
     );
     assert!(
         tombstone.get("manifest").is_some(),
