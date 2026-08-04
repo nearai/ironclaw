@@ -411,7 +411,7 @@ impl ProjectionStream for ProductRuntimeProjectionStream {
             .await?;
         }
 
-        self.append_turn_events(&mut batch, Some(&mut subscription), &request)
+        self.append_turn_events(&mut batch, Some(&mut subscription), &request, false)
             .await?;
         self.batch_into_outbound(batch, &request)
     }
@@ -476,29 +476,102 @@ impl ProductRuntimeProjectionStream {
         let mut cursor = origin_cursor;
         let is_resuming_runtime_payloads = cursor.runtime_payloads_delivered > 0;
         let mut turn_wakes = self.turn_event_wake_source.subscribe();
-        let first = tokio::select! {
-            _ = sender.closed() => return,
-            item = subscription.next() => {
-                let Some(item) = item else {
-                    return;
-                };
-                item
+        if !is_resuming_runtime_payloads {
+            let mut batch = ProductSurfaceProjectionBatch::new(cursor.clone());
+            if let Err(error) = self
+                .append_turn_events(&mut batch, Some(&mut subscription), &request, true)
+                .await
+            {
+                send_projection_subscription_error(&sender, error).await;
+                return;
+            }
+            if !self
+                .send_subscription_batch(batch, &request, &sender, &mut cursor)
+                .await
+            {
+                return;
+            }
+        }
+        let first = loop {
+            tokio::select! {
+                _ = sender.closed() => return,
+                item = subscription.next() => {
+                    let Some(item) = item else {
+                        return;
+                    };
+                    break item;
+                }
+                wake = turn_wakes.recv() => {
+                    match wake {
+                        Ok(wake) if !turn_wake_matches_request(&wake, &request) => {
+                            continue;
+                        }
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => {
+                            return;
+                        }
+                    }
+
+                    let mut batch = ProductSurfaceProjectionBatch::new(cursor.clone());
+                    let buffered_result =
+                        consume_buffered_runtime_items_preserving_initial_order(
+                            &mut subscription,
+                            &mut batch,
+                            &request.scope,
+                            self.display_previews.as_ref(),
+                        )
+                        .await;
+                    let keep_consuming = match buffered_result {
+                        Ok(keep_consuming) => keep_consuming,
+                        Err(error) => {
+                            send_projection_subscription_error(&sender, error).await;
+                            return;
+                        }
+                    };
+                    if let Err(error) = self
+                        .append_turn_events(&mut batch, Some(&mut subscription), &request, false)
+                        .await
+                    {
+                        send_projection_subscription_error(&sender, error).await;
+                        return;
+                    }
+                    if !self
+                        .send_subscription_batch(batch, &request, &sender, &mut cursor)
+                        .await
+                    {
+                        return;
+                    }
+                    if !keep_consuming {
+                        return;
+                    }
+                }
             }
         };
         let mut batch = ProductSurfaceProjectionBatch::new(cursor.clone());
-        let buffered = if is_resuming_runtime_payloads {
-            Vec::new()
-        } else {
+        let order_as_initial_runtime = batch.needs_initial_runtime_ordering();
+        let buffered = if order_as_initial_runtime {
             collect_buffered_runtime_items(&mut subscription)
+        } else {
+            Vec::new()
         };
-        let first_result = push_ordered_initial_runtime_items(
-            &mut batch,
-            first,
-            buffered,
-            &request.scope,
-            self.display_previews.as_ref(),
-        )
-        .await;
+        let first_result = if order_as_initial_runtime {
+            push_ordered_initial_runtime_items(
+                &mut batch,
+                first,
+                buffered,
+                &request.scope,
+                self.display_previews.as_ref(),
+            )
+            .await
+        } else {
+            push_runtime_item(
+                &mut batch,
+                first,
+                &request.scope,
+                self.display_previews.as_ref(),
+            )
+            .await
+        };
         let mut keep_consuming = match first_result {
             Ok(keep_consuming) => keep_consuming,
             Err(error) => {
@@ -506,21 +579,24 @@ impl ProductRuntimeProjectionStream {
                 return;
             }
         };
-        if keep_consuming
-            && !is_resuming_runtime_payloads
-            && let Err(error) = consume_buffered_runtime_items(
+        if keep_consuming && order_as_initial_runtime {
+            keep_consuming = match consume_buffered_runtime_items(
                 &mut subscription,
                 &mut batch,
                 &request.scope,
                 self.display_previews.as_ref(),
             )
             .await
-        {
-            send_projection_subscription_error(&sender, error).await;
-            return;
+            {
+                Ok(keep_consuming) => keep_consuming,
+                Err(error) => {
+                    send_projection_subscription_error(&sender, error).await;
+                    return;
+                }
+            };
         }
         if let Err(error) = self
-            .append_turn_events(&mut batch, Some(&mut subscription), &request)
+            .append_turn_events(&mut batch, Some(&mut subscription), &request, false)
             .await
         {
             send_projection_subscription_error(&sender, error).await;
@@ -561,7 +637,7 @@ impl ProductRuntimeProjectionStream {
                         }
                     };
                     if let Err(error) = self
-                        .append_turn_events(&mut batch, Some(&mut subscription), &request)
+                        .append_turn_events(&mut batch, Some(&mut subscription), &request, false)
                         .await
                     {
                         send_projection_subscription_error(&sender, error).await;
@@ -589,7 +665,7 @@ impl ProductRuntimeProjectionStream {
                     }
 
                     let mut batch = ProductSurfaceProjectionBatch::new(cursor.clone());
-                    if let Err(error) = consume_buffered_runtime_items(
+                    keep_consuming = match consume_buffered_runtime_items(
                         &mut subscription,
                         &mut batch,
                         &request.scope,
@@ -597,11 +673,14 @@ impl ProductRuntimeProjectionStream {
                     )
                     .await
                     {
-                        send_projection_subscription_error(&sender, error).await;
-                        return;
-                    }
+                        Ok(keep_consuming) => keep_consuming,
+                        Err(error) => {
+                            send_projection_subscription_error(&sender, error).await;
+                            return;
+                        }
+                    };
                     if let Err(error) = self
-                        .append_turn_events(&mut batch, Some(&mut subscription), &request)
+                        .append_turn_events(&mut batch, Some(&mut subscription), &request, false)
                         .await
                     {
                         send_projection_subscription_error(&sender, error).await;
@@ -611,6 +690,9 @@ impl ProductRuntimeProjectionStream {
                         .send_subscription_batch(batch, &request, &sender, &mut cursor)
                         .await
                     {
+                        return;
+                    }
+                    if !keep_consuming {
                         return;
                     }
                 }
@@ -623,6 +705,7 @@ impl ProductRuntimeProjectionStream {
         batch: &mut ProductSurfaceProjectionBatch,
         mut subscription: Option<&mut EventProjectionSubscription>,
         request: &ProjectionSubscriptionRequest,
+        defer_terminal: bool,
     ) -> Result<(), ProductAdapterError> {
         let turn_after = batch.cursor().turn.clone();
         let turn_drain = self
@@ -634,7 +717,8 @@ impl ProductRuntimeProjectionStream {
                 self.auth_challenges.as_deref(),
             )
             .await?;
-        if turn_drain_has_terminal_run_status(&turn_drain)
+        if !defer_terminal
+            && turn_drain_has_terminal_run_status(&turn_drain)
             && let Some(subscription) = subscription.as_mut()
         {
             drain_runtime_items_before_terminal_turn(
@@ -645,14 +729,20 @@ impl ProductRuntimeProjectionStream {
             )
             .await?;
         }
+        let mut deferred_terminal = false;
         for TurnEventPayload {
             cursor: turn_cursor,
             payload,
         } in turn_drain.payloads
         {
+            if defer_terminal && outbound_payload_has_terminal_run_status(&payload) {
+                deferred_terminal = true;
+                break;
+            }
             batch.push_turn(turn_cursor, payload);
         }
-        if let Some(next_cursor) = turn_drain.next_cursor
+        if !deferred_terminal
+            && let Some(next_cursor) = turn_drain.next_cursor
             && turn_cursor_advances(batch.cursor().turn.as_ref(), &next_cursor)
         {
             batch.push_turn(next_cursor, ProductOutboundPayload::KeepAlive);
@@ -728,13 +818,28 @@ async fn consume_buffered_runtime_items(
     batch: &mut ProductSurfaceProjectionBatch,
     scope: &TurnScope,
     display_previews: &dyn CapabilityDisplayPreviewSource,
-) -> Result<(), ProductAdapterError> {
-    for item in collect_buffered_runtime_items(subscription) {
+) -> Result<bool, ProductAdapterError> {
+    consume_runtime_items(
+        collect_buffered_runtime_items(subscription),
+        batch,
+        scope,
+        display_previews,
+    )
+    .await
+}
+
+async fn consume_runtime_items(
+    items: impl IntoIterator<Item = ProjectionStreamItem>,
+    batch: &mut ProductSurfaceProjectionBatch,
+    scope: &TurnScope,
+    display_previews: &dyn CapabilityDisplayPreviewSource,
+) -> Result<bool, ProductAdapterError> {
+    for item in items {
         if !push_runtime_item(batch, item, scope, display_previews).await? {
-            break;
+            return Ok(false);
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 fn collect_buffered_runtime_items(
@@ -756,7 +861,17 @@ async fn drain_runtime_items_before_terminal_turn(
     scope: &TurnScope,
     display_previews: &dyn CapabilityDisplayPreviewSource,
 ) -> Result<(), ProductAdapterError> {
-    consume_buffered_runtime_items(subscription, batch, scope, display_previews).await?;
+    if batch.needs_initial_runtime_ordering() {
+        consume_buffered_runtime_items_preserving_initial_order(
+            subscription,
+            batch,
+            scope,
+            display_previews,
+        )
+        .await?;
+    } else {
+        consume_buffered_runtime_items(subscription, batch, scope, display_previews).await?;
+    }
     if !batch.has_runtime_payload_capacity() {
         return Ok(());
     }
@@ -768,12 +883,40 @@ async fn drain_runtime_items_before_terminal_turn(
     .ok()
     .flatten();
     if let Some(item) = item {
-        let keep_consuming = push_runtime_item(batch, item, scope, display_previews).await?;
+        let keep_consuming = if batch.needs_initial_runtime_ordering() {
+            let buffered = collect_buffered_runtime_items(subscription);
+            push_ordered_initial_runtime_items(batch, item, buffered, scope, display_previews)
+                .await?
+        } else {
+            push_runtime_item(batch, item, scope, display_previews).await?
+        };
         if keep_consuming {
             consume_buffered_runtime_items(subscription, batch, scope, display_previews).await?;
         }
     }
     Ok(())
+}
+
+async fn consume_buffered_runtime_items_preserving_initial_order(
+    subscription: &mut EventProjectionSubscription,
+    batch: &mut ProductSurfaceProjectionBatch,
+    scope: &TurnScope,
+    display_previews: &dyn CapabilityDisplayPreviewSource,
+) -> Result<bool, ProductAdapterError> {
+    if !batch.needs_initial_runtime_ordering() {
+        return consume_buffered_runtime_items(subscription, batch, scope, display_previews).await;
+    }
+    let Some(first) = subscription.try_next_buffered() else {
+        return Ok(true);
+    };
+    let buffered = collect_buffered_runtime_items(subscription);
+    let keep_consuming =
+        push_ordered_initial_runtime_items(batch, first, buffered, scope, display_previews).await?;
+    if keep_consuming {
+        consume_buffered_runtime_items(subscription, batch, scope, display_previews).await
+    } else {
+        Ok(false)
+    }
 }
 
 async fn push_ordered_initial_runtime_items(
@@ -923,6 +1066,15 @@ impl ProductSurfaceProjectionBatch {
 
     fn cursor(&self) -> &ProductSurfaceProjectionCursor {
         &self.cursor
+    }
+
+    fn needs_initial_runtime_ordering(&self) -> bool {
+        self.runtime_payloads_pushed == 0
+            && self.pending_runtime_cursor_advance.is_none()
+            && self.cursor.runtime.is_none()
+            && self.cursor.live.is_none()
+            && self.cursor.runtime_item.is_none()
+            && self.cursor.runtime_payloads_delivered == 0
     }
 
     fn push_durable_runtime_payloads(
