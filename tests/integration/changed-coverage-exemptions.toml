@@ -1373,3 +1373,107 @@ owner = "@nearai/runtime"
 reason = "include_bytes! inside a macro_rules! body; the template line can never carry a DA record, and the only change is the WS2 asset-path repoint."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-11-30"
+
+# ---------------------------------------------------------------------------
+# PR #7062 per-caller workspace scoping. The behavior is covered at three
+# seams — the crate-tier unit suites (workspace_scoping_tests, serve.rs unit
+# tests), the integration scenario
+# tests/integration/group_multiuser/scenario_scoped_workspace_isolation.rs,
+# and the two-user webui_v2_e2e workspace test — but the lines below are ones
+# the integration-tier lcov structurally cannot observe. See #7142.
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/runtime/capability_host.rs"
+lines = [52, 59, 60, 217, 218, 219, 253, 254, 255, 256, 257, 258, 259, 260, 261, 267]
+owner = "@serrrfirat"
+reason = "create_capability_port is an async fn; llvm-cov attributes its body to the signature line (252 scored 114 hits in the same lcov) and emits no DA records for body lines, so the changed per-caller resolution lines read as 'contributed no instrumented lines'. Same counter-attribution class as #6963."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_cli/src/commands/serve.rs"
+lines = [442, 443, 444, 445, 569]
+owner = "@serrrfirat"
+reason = "ServeCommand body: the serve loop is not runnable in-process at the integration tier. The raise + effective-value read-back pair is pinned by the crate-tier unit test serve_scopes_workspace_writes_even_on_standalone_without_sso, which the integration lcov excludes (cfg(test) module)."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/ironclaw_webui/src/webui_serve.rs"
+lines = [357, 358, 359, 360]
+owner = "@serrrfirat"
+reason = "with_workspace_requires_scoped_projection builder: consumed by the serve command and by composition's webui_v2_serve tests; the inlined builder's counters attribute to the caller crate (same class as #6963), and the serve loop is not integration-runnable."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/ironclaw_host_runtime/src/invocation_services.rs"
+lines = [441, 442, 443, 444, 445, 446, 447]
+owner = "@serrrfirat"
+reason = "MountScopedRootFilesystem mount-root-reads-as-empty arm: only reachable on the ScopedVirtual filesystem backend, which no integration-tier composition selects; unit-covered in the owning crate."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/runtime_mounts.rs"
+lines = [171, 216]
+owner = "@serrrfirat"
+reason = "Defensive error arms of mount-view construction over validated newtypes (TenantId/UserId cannot produce an invalid mount target); unreachable without corrupting a validated input."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/factory/test_support.rs"
+lines = [1150]
+owner = "@serrrfirat"
+reason = "cfg(test)-gated shared_workspace_view helper arm: compiled only into the crate's own unit-test binary, which the integration-tier lcov excludes."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/extensions/ironclaw_extension_support/src/coding/file.rs"
+lines = [479, 480, 481, 482]
+owner = "@serrrfirat"
+reason = "Sensitive-stat denial arm of list_dir's root guard: requires a sensitive-flagged path fixture the integration workspace profiles do not stage; the sensitive-path denial contract is unit-covered in the owning crate."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/ironclaw_webui/src/webui_v2/handlers.rs"
+lines = [806, 812, 921, 922, 923]
+owner = "@serrrfirat"
+reason = "Match-arm/Err-construction counters inside browse_fs_dir's empty-root fallback and workspace_served_path's traversal rejection: the driving tests (webui_v2_handlers_contract traversal trio, webui_v2_e2e fresh-user listing) assert the 400/empty-listing behavior, but llvm-cov leaves the arm-construction lines uncounted (same class as #6524's synthetic counters)."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/factory/production_backend_assembly.rs"
+lines = [410, 411]
+owner = "@serrrfirat"
+reason = "workspace_filesystems: None fallback arm: every integration-tier composition passes Some via build_workspace_filesystems; the fallback serves non-host-access backends outside this tier."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/factory/production_build_assembly.rs"
+lines = [291]
+owner = "@serrrfirat"
+reason = "Carried-decision arm for a build context without host bindings; integration compositions always assemble bindings, unit-covered at crate tier."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/runtime_input.rs"
+lines = [685]
+owner = "@serrrfirat"
+reason = "Raise-on-services-None no-op arm: every integration composition constructs services before the raise; the drift this arm used to hide is closed by serve's read-back (crate-tier unit test)."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/extension_host_assembly.rs"
+lines = [396]
+owner = "@serrrfirat"
+reason = "Per-caller channel-lander arm: reached only when a scoped deployment assembles the channel host; the channel-host integration binaries compose unscoped deployments today."
+issue = "https://github.com/nearai/ironclaw/issues/7142"
+review_after = "2026-11-30"

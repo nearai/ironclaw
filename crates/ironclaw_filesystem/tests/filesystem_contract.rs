@@ -997,3 +997,73 @@ fn scoped_project_fs(
         .unwrap(),
     )
 }
+
+/// An authorized mount ROOT that has never been written reads as an EMPTY
+/// directory — `list_dir` returns no entries and `stat` reports an empty
+/// directory — while a missing SUB-path keeps reporting `NotFound`. This is
+/// the rule that gives a brand-new per-caller workspace
+/// (`tenants/{tenant}/users/{user}`, PR #7062) a usable first read instead of
+/// a hard error.
+#[tokio::test]
+async fn never_written_mount_root_reads_as_empty_but_subpaths_stay_not_found() {
+    let storage = tempdir().unwrap();
+    let mut root = DiskFilesystem::new();
+    root.mount_local(
+        VirtualPath::new("/projects").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+
+    // The grant names a subtree nothing has ever created on disk.
+    let scoped = ScopedFilesystem::with_fixed_view(
+        Arc::new(root),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").unwrap(),
+            VirtualPath::new("/projects/tenants/tenant-a/users/alice").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .unwrap(),
+    );
+    let scope = ResourceScope::system();
+
+    let entries = scoped
+        .list_dir(&scope, &ScopedPath::new("/workspace").unwrap())
+        .await
+        .expect("missing mount root lists as empty");
+    assert!(
+        entries.is_empty(),
+        "expected empty listing, got {entries:?}"
+    );
+
+    let bounded = scoped
+        .list_dir_bounded(&scope, &ScopedPath::new("/workspace").unwrap(), 10)
+        .await
+        .expect("missing mount root lists (bounded) as empty");
+    assert!(
+        bounded.is_empty(),
+        "expected empty listing, got {bounded:?}"
+    );
+
+    let stat = scoped
+        .stat(&scope, &ScopedPath::new("/workspace").unwrap())
+        .await
+        .expect("missing mount root stats as an empty directory");
+    assert_eq!(stat.file_type, FileType::Directory);
+    assert_eq!(stat.len, 0);
+
+    // Deeper paths under the missing root keep their hard NotFound.
+    let sub = scoped
+        .list_dir(&scope, &ScopedPath::new("/workspace/typo").unwrap())
+        .await;
+    assert!(
+        matches!(sub, Err(FilesystemError::NotFound { .. })),
+        "missing sub-path must stay NotFound, got {sub:?}"
+    );
+    let sub_stat = scoped
+        .stat(&scope, &ScopedPath::new("/workspace/typo").unwrap())
+        .await;
+    assert!(
+        matches!(sub_stat, Err(FilesystemError::NotFound { .. })),
+        "missing sub-path stat must stay NotFound, got {sub_stat:?}"
+    );
+}
