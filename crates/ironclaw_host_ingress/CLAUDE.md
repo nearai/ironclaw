@@ -6,11 +6,18 @@
 - Do not add product workflow, auth verification, listener binding, persistence,
   provider clients, runtime services, or WebUI-specific policy.
 - This crate may depend on Axum and `ironclaw_host_api`, and on nothing else in
-  the workspace. That is now **enforced as an allowlist**, not just stated here:
-  `reborn_crate_dependency_boundaries_hold` in
+  the workspace — **in any dependency kind**, `[dependencies]`,
+  `[dev-dependencies]`, and `[build-dependencies]` alike. That is now
+  **enforced as an allowlist**, not just stated here:
+  `assert_host_ingress_names_no_other_workspace_crate` in
   `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` derives
-  the forbidden set as "every workspace `ironclaw_*` crate except these two", so
-  a dependency nobody thought to blocklist still fails.
+  the forbidden set as "every workspace `ironclaw_*` crate except
+  `ironclaw_host_api`", so a dependency nobody thought to blocklist still fails,
+  and it reads every kind rather than only `normal`. The all-kinds scope is
+  deliberate and unlike the layer matrix beside it: a dev-dependency on a
+  higher layer is legal elsewhere in the workspace, but a dev- or
+  build-dependency here still resolves and builds, which defeats the one
+  property this crate exists to provide.
 - **Layer `substrates`** (WS2 re-layer, #7092 — it was `products` until then).
   The layer matrix will not hold the rule above on its own: `substrates →
   substrates` is legal, so the matrix would permit `ironclaw_filesystem` or
