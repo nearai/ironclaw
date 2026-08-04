@@ -225,6 +225,17 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Check compilation
         run: cargo check --all --benches --tests --examples ${{ matrix.flags }}
+      # Compilation alone never caught that DiskFilesystem could not complete a
+      # single write on Windows (the parent-directory fsync opened a directory
+      # as a file, which Windows refuses) — it took a tagged release to surface
+      # it. This is the one lane that actually EXECUTES Rust on Windows, so it
+      # owns the platform-behavior regression. Scoped to the local backend's own
+      # tests on a single matrix leg: `cargo check --tests` above already
+      # compiled them, so the marginal cost is linking and running one small
+      # test binary.
+      - name: Test local filesystem backend behavior on Windows
+        if: matrix.name == 'default'
+        run: cargo test -p ironclaw_filesystem --lib local::
 
   wasm-wit-compat:
     name: WASM WIT Compatibility

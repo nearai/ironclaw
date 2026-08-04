@@ -819,6 +819,20 @@ async fn sync_parent_dir(virtual_path: &VirtualPath, parent: &Path) -> Result<()
     sync_parent_dir_for_operation(virtual_path, parent, FilesystemOperation::WriteFile).await
 }
 
+/// Durability barrier for the rename/hard-link install in
+/// [`atomic_write_file`]: on POSIX the directory entry itself is only durable
+/// once the parent directory's own fsync returns, so the file's fsync is not
+/// sufficient.
+///
+/// Windows has no equivalent, and no way to fake one. `CreateFileW` refuses to
+/// return a handle to a directory unless the caller passes
+/// `FILE_FLAG_BACKUP_SEMANTICS`, which `std::fs::File::open` never sets — so
+/// this open failed with `ERROR_ACCESS_DENIED` on every single write. Adding
+/// the flag would not rescue it either: `FlushFileBuffers` requires write
+/// access, which a directory handle cannot carry, so the `sync_all` would fail
+/// next. NTFS journals the directory-entry metadata as part of the install
+/// operation, so the barrier POSIX needs here does not apply.
+#[cfg(not(windows))]
 async fn sync_parent_dir_for_operation(
     virtual_path: &VirtualPath,
     parent: &Path,
@@ -830,6 +844,15 @@ async fn sync_parent_dir_for_operation(
     dir.sync_all()
         .await
         .map_err(|error| io_error(virtual_path.clone(), operation, error))
+}
+
+#[cfg(windows)]
+async fn sync_parent_dir_for_operation(
+    _virtual_path: &VirtualPath,
+    _parent: &Path,
+    _operation: FilesystemOperation,
+) -> Result<(), FilesystemError> {
+    Ok(())
 }
 
 /// For a [`LocalMount::leaf_scoped`] mount, the shared `host_root` one level
@@ -1193,5 +1216,61 @@ mod tests {
             "expected SymlinkEscape, got: {error:?}"
         );
         assert!(!leaf_b.join("planted.txt").exists());
+    }
+
+    /// Every `atomic_write_file` install is followed by a parent-directory
+    /// fsync, which on Unix means opening the directory as a file. Windows'
+    /// `CreateFileW` refuses a directory handle unless the caller passes
+    /// `FILE_FLAG_BACKUP_SEMANTICS` — which `std` never does — so that open
+    /// returned `ERROR_ACCESS_DENIED`, surfaced as
+    /// `FilesystemError::Backend { reason: "permission denied" }` against the
+    /// *file's* path even though the file had already been written. Effect:
+    /// `DiskFilesystem` could not complete a single write on Windows, which
+    /// took down bundled-skill install and therefore every Reborn runtime
+    /// assembly on that platform (release run 30934516977).
+    ///
+    /// Both CAS shapes are covered because they take different install paths
+    /// (`rename` vs `hard_link`) into the same trailing fsync, and
+    /// `CasExpectation::Absent` is the one the bundled-skill install lock
+    /// uses.
+    #[tokio::test]
+    async fn writes_survive_the_parent_directory_sync_on_every_platform() {
+        let storage = tempdir().unwrap();
+        let mut root = DiskFilesystem::new();
+        root.mount_local(
+            VirtualPath::new("/projects").unwrap(),
+            HostPath::from_path_buf(storage.path().to_path_buf()),
+        )
+        .unwrap();
+
+        let lock = VirtualPath::new("/projects/system/skills/.install.lock").unwrap();
+        root.put(
+            &lock,
+            Entry::bytes(b"held".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("CAS-absent install must not fail on the parent-directory sync");
+        assert_eq!(root.read_file(&lock).await.unwrap(), b"held");
+
+        let plain = VirtualPath::new("/projects/system/skills/SKILL.md").unwrap();
+        root.write_file(&plain, b"bundled")
+            .await
+            .expect("plain write must not fail on the parent-directory sync");
+        assert_eq!(root.read_file(&plain).await.unwrap(), b"bundled");
+
+        // The lock is still held: a second CAS-absent install must lose.
+        let conflict = root
+            .put(
+                &lock,
+                Entry::bytes(b"stolen".to_vec()),
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(conflict, FilesystemError::VersionMismatch { .. }),
+            "expected VersionMismatch, got: {conflict:?}"
+        );
     }
 }
