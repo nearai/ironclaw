@@ -493,10 +493,6 @@ async def start_reborn_webui_v2_server(
             "IRONCLAW_REBORN_PROFILE": profile,
             "IRONCLAW_REBORN_WEBUI_TOKEN": REBORN_V2_AUTH_TOKEN,
             "IRONCLAW_REBORN_WEBUI_USER_ID": USER_ID,
-            # Served E2E scenarios assert the QA-only, caller-scoped run
-            # artifact contract. Production keeps this route disabled by
-            # default; the hermetic test launcher opts in explicitly.
-            "IRONCLAW_REBORN_REGRESSION_ARTIFACT_EXPORT": "true",
             "MOCK_LLM_API_KEY": "mock-api-key",
             "NO_PROXY": "127.0.0.1,localhost,::1",
             "no_proxy": "127.0.0.1,localhost,::1",

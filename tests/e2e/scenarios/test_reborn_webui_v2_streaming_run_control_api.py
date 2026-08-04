@@ -190,6 +190,58 @@ async def _collect_sse_until_projection_items(
     )
 
 
+class _ScriptedSseContent:
+    def __init__(self, events: list[dict]):
+        self._lines = []
+        for index, event in enumerate(events, start=1):
+            self._lines.extend(
+                [
+                    f"id: cursor-{index}\n".encode(),
+                    b"event: projection_update\n",
+                    f"data: {json.dumps(event)}\n".encode(),
+                    b"\n",
+                ]
+            )
+
+    async def readline(self) -> bytes:
+        return self._lines.pop(0) if self._lines else b""
+
+
+class _ScriptedSseResponse:
+    def __init__(self, events: list[dict]):
+        self.content = _ScriptedSseContent(events)
+
+
+async def test_collect_sse_until_projection_items_waits_past_early_terminal_status():
+    terminal = {
+        "state": {
+            "items": [
+                {"run_status": {"run_id": "run-1", "status": "completed"}}
+            ]
+        }
+    }
+    later_text = {
+        "state": {
+            "items": [{"text": {"id": "message-1", "content": "complete"}}]
+        }
+    }
+    expected_items = _latest_projection_items(
+        [
+            {"data": terminal},
+            {"data": later_text},
+        ]
+    )
+
+    events = await _collect_sse_until_projection_items(
+        _ScriptedSseResponse([terminal, later_text]),
+        expected_items,
+        timeout=1,
+    )
+
+    assert len(events) == 2
+    assert _latest_projection_items(events) == expected_items
+
+
 async def _submit_message(
     client: httpx.AsyncClient,
     base_url: str,

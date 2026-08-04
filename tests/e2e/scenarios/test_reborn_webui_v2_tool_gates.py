@@ -18,13 +18,16 @@ import pytest
 
 from helpers import REBORN_V2_AUTH_TOKEN, sse_stream, wait_for_sse_line
 from reborn_webui_harness import (
+    DEFAULT_PROFILE,
+    YOLO_PROFILE,
     client_action_id,
+    close_reborn_server,
     create_thread,
+    enable_reborn_global_auto_approve,
     fetch_timeline,
     reborn_bearer_headers,
-    reborn_v2_server,  # noqa: F401 - imported fixture
-    reborn_v2_yolo_server,  # noqa: F401 - imported fixture
     send_message,
+    start_reborn_webui_v2_server,
     wait_for_assistant_message,
 )
 
@@ -273,6 +276,45 @@ def _tool_result_references(timeline: dict) -> list[dict]:
         for message in timeline.get("messages", [])
         if message.get("kind") == "tool_result_reference"
     ]
+
+
+@pytest.fixture(scope="module")
+async def reborn_v2_server(ironclaw_reborn_binary, mock_llm_server, tmp_path_factory):
+    """Start the default profile with QA-only run artifacts enabled."""
+    home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-tool-gates-home")
+    proc, base_url = await start_reborn_webui_v2_server(
+        ironclaw_reborn_binary=ironclaw_reborn_binary,
+        mock_llm_server=mock_llm_server,
+        home_dir=home_dir,
+        profile=DEFAULT_PROFILE,
+        log_prefix="reborn-v2-tool-gates",
+        extra_env={"IRONCLAW_REBORN_REGRESSION_ARTIFACT_EXPORT": "true"},
+    )
+    try:
+        yield base_url
+    finally:
+        await close_reborn_server(proc)
+
+
+@pytest.fixture(scope="module")
+async def reborn_v2_yolo_server(
+    ironclaw_reborn_binary, mock_llm_server, tmp_path_factory
+):
+    """Start the yolo profile with QA-only run artifacts enabled."""
+    home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-tool-gates-yolo-home")
+    proc, base_url = await start_reborn_webui_v2_server(
+        ironclaw_reborn_binary=ironclaw_reborn_binary,
+        mock_llm_server=mock_llm_server,
+        home_dir=home_dir,
+        profile=YOLO_PROFILE,
+        log_prefix="reborn-v2-tool-gates-yolo",
+        extra_env={"IRONCLAW_REBORN_REGRESSION_ARTIFACT_EXPORT": "true"},
+    )
+    await enable_reborn_global_auto_approve(base_url)
+    try:
+        yield base_url
+    finally:
+        await close_reborn_server(proc)
 
 
 async def test_reborn_v2_tool_turn_records_result_and_final_reply(
