@@ -358,7 +358,7 @@ pub(super) async fn write_file(
         return Err(input_error());
     }
     let resolved = resolve_required_path(request, "path", FilesystemOperation::WriteFile)?;
-    if is_binary_document_path(resolved.scoped_path.as_str()) {
+    if is_opaque_binary_document_path(resolved.scoped_path.as_str()) {
         return Err(binary_document_write_error(
             "write_file",
             resolved.scoped_path.as_str(),
@@ -378,6 +378,20 @@ pub(super) async fn write_file(
     {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
+        ));
+    }
+    // PDF is a text-authorable format (new-file creation is legitimate), but
+    // an existing PDF cannot be safely overwritten via text tools once it has
+    // been read as extracted text — the fingerprint bypass in issue #6898
+    // applies to overwrites only. Block existing-PDF overwrites explicitly;
+    // new PDF creation falls through to the normal write path.
+    if let Some(stat) = &existing_stat
+        && stat.file_type == FileType::File
+        && is_pdf_document_path(resolved.scoped_path.as_str())
+    {
+        return Err(binary_document_write_error(
+            "write_file",
+            resolved.scoped_path.as_str(),
         ));
     }
     let can_read = operation_allowed(&resolved.grant.permissions, FilesystemOperation::ReadFile);
@@ -474,15 +488,19 @@ async fn verify_read_before_edit(
     Ok(bytes)
 }
 
-fn is_binary_document_path(scoped_path: &str) -> bool {
+fn lower_path_extension(scoped_path: &str) -> Option<String> {
+    scoped_path.rsplit('.').next().map(str::to_ascii_lowercase)
+}
+
+fn is_opaque_binary_document_path(scoped_path: &str) -> bool {
     matches!(
-        scoped_path
-            .rsplit('.')
-            .next()
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "pdf")
+        lower_path_extension(scoped_path).as_deref(),
+        Some("doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx")
     )
+}
+
+fn is_pdf_document_path(scoped_path: &str) -> bool {
+    matches!(lower_path_extension(scoped_path).as_deref(), Some("pdf"))
 }
 
 fn binary_document_write_error(operation: &str, scoped_path: &str) -> CodingCapabilityError {

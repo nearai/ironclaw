@@ -8364,6 +8364,58 @@ async fn builtin_write_file_rejects_docx_after_extracted_read_without_changing_b
 }
 
 #[tokio::test]
+async fn builtin_write_file_rejects_existing_pdf_overwrite_without_changing_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    // A minimal real PDF header so extraction/decode paths treat it as binary.
+    let original = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n";
+    let document_path = temp.path().join("report.pdf");
+    std::fs::write(&document_path, original).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/report.pdf", "content": "Replacement text"}),
+        context,
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("binary documents cannot be edited with text tools")
+    );
+    assert_eq!(std::fs::read(document_path).unwrap(), original.to_vec());
+}
+
+#[tokio::test]
+async fn builtin_write_file_allows_new_pdf_creation() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let output = invoke_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/fresh.pdf", "content": "%PDF-1.4 new file\n"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(output["success"].as_bool(), Some(true));
+    assert_eq!(
+        std::fs::read(temp.path().join("fresh.pdf")).unwrap(),
+        b"%PDF-1.4 new file\n".to_vec()
+    );
+}
+
+#[tokio::test]
 async fn builtin_apply_patch_rejects_when_old_string_is_no_longer_present() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("code.rs"), "old\n").unwrap();
