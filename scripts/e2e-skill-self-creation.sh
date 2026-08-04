@@ -251,6 +251,13 @@ echo "  model  : $MODEL"
 echo "  home   : $HOME_DIR (recreated)"
 echo "  logs   : $LOG_DIR"
 
+REPO_BEFORE="$WORK/repo-before.txt"
+git -C "$REPO_ROOT" status --porcelain > "$REPO_BEFORE" 2>/dev/null || : > "$REPO_BEFORE"
+
+pkill -f "ironclaw serve --port ${PORT}" 2>/dev/null
+sleep 2
+rm -rf "$HOME_DIR"
+
 if [ "$PROFILE" = "production" ]; then
   # A production build fails closed without durable Postgres storage and an explicit policy, so the
   # config file is part of the fixture rather than something the operator must remember.
@@ -285,12 +292,6 @@ CONFIG
   echo "  postgres  : $POSTGRES_URL (database recreated)"
 fi
 
-REPO_BEFORE="$WORK/repo-before.txt"
-git -C "$REPO_ROOT" status --porcelain > "$REPO_BEFORE" 2>/dev/null || : > "$REPO_BEFORE"
-
-pkill -f "ironclaw serve --port ${PORT}" 2>/dev/null
-sleep 2
-rm -rf "$HOME_DIR"
 if [ "$PROFILE" != "production" ]; then
   IRONCLAW_REBORN_HOME="$HOME_DIR" "$BIN" models set-provider openrouter --model "$MODEL" >/dev/null 2>&1
 fi
