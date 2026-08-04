@@ -3,9 +3,10 @@
 This guide is for the standalone `ironclaw serve` Slack host path,
 not the legacy v1 Slack WASM channel.
 
-Slack support ships in the binary. It has one gate: runtime config must set
-`[slack].enabled = true`, or the deployment env must set
-`IRONCLAW_REBORN_SLACK_ENABLED=true`.
+Slack support ships in the binary and has **no enablement gate**. Installing the
+Slack extension and completing workspace OAuth from the WebUI is what mounts the
+route. `[slack].enabled` and `IRONCLAW_REBORN_SLACK_ENABLED` are both inert —
+#6116 deleted the gate path they fed, and nothing has read either since.
 
 Slack bot token and signing secret are configured in WebUI Slack setup and
 stored in the Reborn secret store. Do not put OAuth client secrets or LLM keys
@@ -85,7 +86,6 @@ IRONCLAW_REBORN_HOME=/data/ironclaw-reborn
 IRONCLAW_REBORN_PROFILE=local-dev
 IRONCLAW_REBORN_WEBUI_TOKEN=<random-hex-32-bytes-or-longer>
 IRONCLAW_REBORN_WEBUI_USER_ID=reborn-cli
-IRONCLAW_REBORN_SLACK_ENABLED=true
 OPENAI_API_KEY=sk-...
 ```
 
@@ -94,19 +94,13 @@ OPENAI_API_KEY=sk-...
 Edit `$IRONCLAW_REBORN_HOME/config.toml`. If the file does not exist yet, run
 `ironclaw config init` or start the Docker image once to seed it.
 
-Minimal Slack config:
+No Slack config section is required, and none should be added. The retired
+`[slack]` setup keys (`installation_id`, `team_id`, `api_app_id`,
+`slack_user_id`, `user_id`, `shared_subject_user_id`, `channel_routes`,
+`signing_secret_env`, `bot_token_env`) make `ironclaw serve` **refuse to
+start**; `enabled` is accepted but inert, so pre-existing installs keep booting.
 
-```toml
-[slack]
-enabled = true
-```
-
-`enabled` is the only Slack boot setting. You can also set
-`IRONCLAW_REBORN_SLACK_ENABLED=true` instead of editing config. The env var
-overrides only the route enablement gate: `true`/`1` mounts Slack, while
-`false`/`0` acts as a deployment kill switch.
-
-Slack enablement mounts `POST /webhooks/extensions/slack/events`, exposes the
+Installing the Slack extension mounts `POST /webhooks/extensions/slack/events`, exposes the
 manifest-declared Slack deployment fields in Admin Configuration, and makes a
 personal Slack connection available through the Slack extension's user OAuth
 flow.
@@ -308,7 +302,7 @@ Verification checklist:
 
 ### Slack routes are not mounted
 
-Confirm the Reborn config sets [slack].enabled = true, or that the deployment env sets IRONCLAW_REBORN_SLACK_ENABLED=true, then restart `ironclaw`.
+Confirm the Slack extension is installed and workspace OAuth is complete. Neither `[slack].enabled` nor `IRONCLAW_REBORN_SLACK_ENABLED` affects this — both are inert since #6116, so setting them will not mount the route.
 
 ### Slack route never receives events
 

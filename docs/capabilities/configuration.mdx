@@ -275,13 +275,15 @@ See [Routines](/capabilities/routines/cron).
 <Accordion title="channels and providers" icon="message">
 
 ```toml
-[slack]
-enabled = false
+[google]
+oauth_client_id = "…"
 ```
 
-`slack.*` covers app ids, bot token and signing secret variable names, and channel routes.
-`telegram.enabled` turns the Telegram channel on. `google.*` carries the OAuth client id,
-redirect URI, and hosted-domain hint.
+`google.*` carries the OAuth client id, redirect URI, and hosted-domain hint.
+
+Slack and Telegram are **not** configured here. Install the extension and complete its
+setup from the web interface; the `[slack]` setup keys are retired and make `ironclaw
+serve` refuse to start.
 
 Configure these from the web interface rather than by hand — see
 [Channels](/channels/overview).

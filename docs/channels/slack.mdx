@@ -230,23 +230,16 @@ creating the app.
 
 ## Configuration
 
-Slack settings live under `[slack]` in your configuration file. Set them through the web
-interface rather than by hand — the tokens belong in the secret store, and the file only
-names the variables that hold them.
+Slack is configured entirely from the web interface — install the extension, complete
+workspace OAuth, and set the app ids and channel routing from Admin Configuration. The
+tokens live in the secret store.
 
-```toml
-[slack]
-enabled = true
-```
-
-| Key | Purpose |
-| --- | --- |
-| `slack.enabled` | Turn the Slack route on |
-| `slack.api_app_id` | Your Slack app id |
-| `slack.bot_token_env` | Name of the variable holding the bot token |
-| `slack.signing_secret_env` | Name of the variable holding the signing secret |
-| `slack.team_id` | Workspace the app is installed in |
-| `slack.channel_routes` | Which conversations map to which agent scope |
+Nothing goes in the configuration file. The `[slack]` setup keys are retired, and
+`ironclaw serve` **refuses to start** if it finds `installation_id`, `team_id`,
+`api_app_id`, `slack_user_id`, `user_id`, `shared_subject_user_id`, `channel_routes`,
+`signing_secret_env`, or `bot_token_env`. `[slack].enabled` is accepted but inert, so an
+older install keeps booting; there is no `IRONCLAW_REBORN_SLACK_ENABLED` env var either
+— the gate it fed was removed in #6116.
 
 Check what's currently set:
 

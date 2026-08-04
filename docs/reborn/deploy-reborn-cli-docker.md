@@ -191,27 +191,21 @@ IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI=https://<railway-domain>/api/reborn/pr
 
 ## Slack
 
-Slack routes are compiled into the image, but they are disabled by the default
-config. On Railway, prefer the env toggle so the seeded config can stay
-unchanged:
+Slack ships in the image and needs no deployment env var or config key. Install
+the Slack extension and complete workspace OAuth from the WebUI; that is what
+mounts the route and stores the credentials.
 
-```bash
-IRONCLAW_REBORN_SLACK_ENABLED=true
-```
+There is no `IRONCLAW_REBORN_SLACK_ENABLED` toggle — the enablement gate it fed
+was removed in #6116, and nothing has read the variable since. Do not add a
+`[slack]` section either: the retired setup keys (`signing_secret_env`,
+`bot_token_env`, `installation_id`, `team_id`, `api_app_id`, `channel_routes`,
+…) make `ironclaw serve` **refuse to start**.
 
-The env var overrides only the Slack route enablement gate. `true`/`1` enables
-Slack, while `false`/`0` forces Slack off for the deployment.
-
-You can also enable Slack by editing `$IRONCLAW_REBORN_HOME/config.toml` or
-mounting a config file with:
-
-```toml
-[slack]
-enabled = true
-```
-
-Then configure Slack app ids, the bot token, signing secret, and channel
-mappings from WebUI channel setup after the container starts.
+A volume seeded before #6116 may still carry a `[slack]` section. `enabled` on
+its own is inert and keeps booting; the entrypoint strips the retired setup keys
+from a `enabled = false` section on start. A section with `enabled = true` *and*
+retired keys is left alone deliberately and fails startup with a migration
+pointer, rather than a live channel config being rewritten underneath you.
 
 Set the WebUI identity environment variables as usual.
 
