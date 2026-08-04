@@ -1618,7 +1618,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// ⚠ **#7141 and #7152 are still open and both touch this list** (#7147).
 /// Whichever merges last must recount the union the same way rather than
 /// inheriting 123, 124 or 125 from any single branch.
-
+///
 /// ✎ **Union recount, 2026-08-04 (WS3/WS4 consolidation — the merge-last
 /// recount #7147 asks for): the answer is 125.** Both branches lowered this
 /// constant independently and each was right about its own tree — #7143

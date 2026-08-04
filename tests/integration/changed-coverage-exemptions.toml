@@ -2409,3 +2409,46 @@ owner = "@nearai/reborn"
 reason = "Generated wasmtime bindgen! macro file; the sole changed line is the wit path argument (#7084's wit move). The macro invocation emits no DA records, so the file trips the empty-denominator fail-closed rule; exempting the one changed line releases it. Generated output is not testable source."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
+
+# ---------------------------------------------------------------------------
+# Waves 0-4 batch (#7170) declaration-only port-slice edits. Three files from
+# the #7159/#7160 slices tripped the empty-denominator fail-closed rule on the
+# batch's full-mode run: their changed lines are declarations/arm-renames with
+# no measurable DA records. Lines already exempted by the #7141 move entries
+# above are not repeated. (The fourth file from the same failure,
+# conversations/error.rs, is released properly by the classifier extension in
+# the same commit — enum bodies now classify as mechanically uninstrumentable,
+# with red-verified fixtures.) These entries keep the MAIN-push enforcement
+# lane green after this batch merges (coverage is push-only per #7173).
+
+[[exemption]]
+path = "crates/ironclaw_conversations/src/conversation_state_store.rs"
+lines = [
+  42, 694, 695, 703, 704, 712, 721, 722,
+]
+owner = "@nearai/reborn"
+reason = "Ledger-contract declaration edits from the conversations->turns port inversion (#7159 in #7170): trait-signature and type lines with no DA records; the file tripped the empty-denominator fail-closed rule. Same-run per-crate floors passed."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_host_api/src/turn.rs"
+lines = [
+  1104, 1105, 1106, 1107, 1108, 1109, 1110, 1111, 1112, 1113, 1114, 1115,
+  1116, 1117, 1118, 1119, 1120, 1121, 1122, 1123, 1124, 1125, 1126, 1127,
+]
+owner = "@nearai/reborn"
+reason = "SubmitTurnResponse descent from ironclaw_turns (#7159 precondition): struct/field declarations with no DA records; empty-denominator fail-closed release. Verbatim move, unit coverage stayed with the consumers."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_host_runtime/src/services/runtime_adapters.rs"
+lines = [
+  20, 382, 383, 384, 390, 391, 392, 439, 445, 447, 448, 449,
+  986, 987, 988, 990, 991, 994, 995, 996, 997, 998, 999,
+]
+owner = "@nearai/reborn"
+reason = "Error-mapping arm renames from the lane governor port (#7160 in #7170): the adapter arms are not integration-instrumented on this path (zero measured lines among the candidates -> empty-denominator); behavior pinned by the lane-seam denial tests added in the same slice. Same-run floors passed."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
