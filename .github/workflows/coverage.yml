@@ -28,7 +28,7 @@
 name: Code Coverage
 on:
   push:
-    branches: [main]
+    branches: [main, main-ci-fix]
 
 permissions:
   contents: read
