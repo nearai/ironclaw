@@ -33,7 +33,14 @@ on:
   # PRs.
   pull_request:
     branches:
+      # Release branches get the same gate as main: a release-blocker fix
+      # opened against a frozen candidate must clear the E2E lanes before it
+      # can produce a new rc. `release-fix-*` is the 1.0.0-era name;
+      # `release/*` is the weekly cut named in
+      # docs/internal/weekly-release-strategy.md.
       - main
+      - "release-fix-*"
+      - "release/*"
   # The merge queue is the production gate: the deterministic Reborn contract
   # and smoke coverage must pass on the merged state before it reaches main.
   # merge_group does not support `paths:` filters, so scope is resolved by the
