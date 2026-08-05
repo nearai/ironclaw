@@ -618,7 +618,13 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
     const SIZE_CEILINGS: &[(&str, usize)] = &[
         ("ironclaw_common", 3_793),
         ("ironclaw_extension_contracts", 7_727),
-        ("ironclaw_host_api", 17_501),
+        // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
+        // the growth is the `messaging` vocabulary — the StandardMessagingOp
+        // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
+        // constants, and the test-support conformance module. Declarations
+        // only; executable validation stays in ironclaw_host_runtime. Rationale
+        // reviewed in the PR body's architecture-audit section.
+        ("ironclaw_host_api", 18_570),
         ("ironclaw_loop_contracts", 14_479),
         ("ironclaw_product_contracts", 14_471),
         ("ironclaw_prompt_envelope", 832),
