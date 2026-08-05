@@ -501,7 +501,10 @@ async fn verify_read_before_edit(
     if content_fingerprint(&bytes) != recorded.fingerprint {
         return Err(stale_read_error(operation, resolved.scoped_path.as_str()));
     }
-    reject_binary_probe(&bytes)
+    // Match the read path's classification: text logs with a few stray NULs
+    // are readable and must remain writable. apply_patch performs its own
+    // strict probe below because patching requires byte-fidelity.
+    reject_binary_probe_lenient(&bytes)
         .map_err(|_| binary_document_write_error(operation, resolved.scoped_path.as_str()))?;
     Ok(bytes)
 }
