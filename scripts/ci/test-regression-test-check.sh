@@ -441,6 +441,11 @@ test("does not accept tautological node:assert methods", () => {
   const result = runRegression();
   assert.equal(result, result);
   assert.deepEqual(result, result);
+  assert.equal(actualStatus(), actualStatus());
+  assert.deepEqual(
+    buildResult({ status: "fixed", count: 1 }),
+    buildResult({ status: "fixed", count: 1 }),
+  );
   assert.ok(true);
   assert.ok(1);
   assert.fail();

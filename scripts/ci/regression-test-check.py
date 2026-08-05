@@ -73,13 +73,12 @@ PLACEHOLDER_RE = re.compile(
     re.IGNORECASE,
 )
 
-_ASSERT_METHOD = re.compile(
+_ASSERT_METHOD_START = re.compile(
     r"\bassert\s*\.\s*"
     r"(strictEqual|deepStrictEqual|notStrictEqual|notDeepStrictEqual"
     r"|equal|deepEqual|notEqual|notDeepEqual"
     r"|ok|match|doesNotMatch|throws|rejects|doesNotThrow|doesNotReject|fail)"
-    r"\s*\((.*?)\)",
-    re.DOTALL,
+    r"\s*\(",
 )
 
 _ASSERT_COMPARISON_METHODS = {
@@ -92,6 +91,65 @@ _ASSERT_COMPARISON_METHODS = {
     "notEqual",
     "notDeepEqual",
 }
+
+
+def balanced_arguments(text: str, start: int) -> str | None:
+    """Return the contents of a call whose opening parenthesis is at start."""
+
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    stack = [")"]
+    quote: str | None = None
+    escaped = False
+    for index in range(start + 1, len(text)):
+        character = text[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in {"'", '"', "`"}:
+            quote = character
+        elif character in pairs:
+            stack.append(pairs[character])
+        elif character in ")]}" and character == stack[-1]:
+            stack.pop()
+            if not stack:
+                return text[start + 1 : index]
+    return None
+
+
+def top_level_operands(expression: str) -> list[str]:
+    """Split call arguments without treating nested commas as separators."""
+
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    stack: list[str] = []
+    quote: str | None = None
+    escaped = False
+    operands: list[str] = []
+    operand_start = 0
+    for index, character in enumerate(expression):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in {"'", '"', "`"}:
+            quote = character
+        elif character in pairs:
+            stack.append(pairs[character])
+        elif character in ")]}" and stack and character == stack[-1]:
+            stack.pop()
+        elif character == "," and not stack:
+            operands.append(expression[operand_start:index])
+            operand_start = index + 1
+    operands.append(expression[operand_start:])
+    return operands
 
 
 def git(repo: Path, *args: str) -> str:
@@ -349,9 +407,12 @@ def has_meaningful_typescript_assertion(text: str) -> bool:
         if normalized(match.group(1)) in {"true", "false", "1", "0", ""}:
             continue
         return True
-    for match in _ASSERT_METHOD.finditer(text):
-        method, expression = match.groups()
-        operands = expression.split(",", 2)
+    for match in _ASSERT_METHOD_START.finditer(text):
+        method = match.group(1)
+        expression = balanced_arguments(text, match.end() - 1)
+        if expression is None:
+            continue
+        operands = top_level_operands(expression)
         if method in _ASSERT_COMPARISON_METHODS:
             if len(operands) >= 2 and normalized(operands[0]) == normalized(
                 operands[1]
