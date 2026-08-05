@@ -59,7 +59,9 @@ Choose an LLM provider, enter its API key in the hidden prompt, and accept the
 default model or enter another one. IronClaw provisions its local configuration,
 encrypted credential store, and WebUI login token. On macOS and Linux it also
 installs and starts the background service, then prints a link that opens the
-WebUI.
+WebUI. On Linux, setup enables systemd user lingering so the service starts
+on boot and survives logout. If local policy denies that step, run
+`sudo loginctl enable-linger "$USER"`.
 
 Use `ironclaw status` to check the service and print the login link again.
 Windows users can start the WebUI in the foreground with `ironclaw serve`.

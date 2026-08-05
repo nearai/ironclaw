@@ -102,6 +102,26 @@ fn unit_content(invocation: &ServeInvocation, working_directory: &Path) -> Resul
     ))
 }
 
+/// Enables lingering for the invoking user, so the user's systemd manager
+/// starts at boot and survives logout. This is deliberately a best-effort
+/// operation: a distribution's polkit policy may require an administrator,
+/// but the unit remains useful for an active login session.
+fn enable_linger(runner: &mut dyn ServiceCommandRunner) {
+    if runner
+        .run_checked(
+            "loginctl enable-linger",
+            Command::new("loginctl").args(["enable-linger"]),
+        )
+        .is_err()
+    {
+        eprintln!(
+            "warning: could not enable systemd lingering; the service will stop after logout \
+             and will not start at boot until lingering is enabled.\n  Run: sudo \
+             loginctl enable-linger \"$USER\""
+        );
+    }
+}
+
 fn restore_previous_unit(path: &Path, previous: Option<&[u8]>) -> Result<()> {
     match previous {
         Some(contents) => super::write_atomic(path, contents),
@@ -283,6 +303,7 @@ pub(super) fn install_with_runner(
         }
         return Err(combined_failure(error, rollback_errors));
     }
+    enable_linger(runner);
     println!("Installed systemd user service: {}", file.display());
     if let Some(note) = super::replaced_existing_service_file_note(replaced_existing) {
         println!("{note}");
@@ -639,6 +660,7 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingRunner {
+        programs: Vec<String>,
         labels: Vec<String>,
         args: Vec<Vec<String>>,
         fail_args: Option<Vec<&'static str>>,
@@ -650,6 +672,8 @@ mod tests {
 
     impl ServiceCommandRunner for RecordingRunner {
         fn run_checked(&mut self, label: &str, command: &mut Command) -> Result<()> {
+            self.programs
+                .push(command.get_program().to_string_lossy().into_owned());
             self.labels.push(label.to_string());
             self.args.push(
                 command
@@ -685,6 +709,8 @@ mod tests {
         }
 
         fn run_capture_checked(&mut self, label: &str, command: &mut Command) -> Result<String> {
+            self.programs
+                .push(command.get_program().to_string_lossy().into_owned());
             self.labels.push(label.to_string());
             self.args.push(
                 command
@@ -1008,6 +1034,53 @@ mod tests {
                 "systemctl daemon-reload",
                 "systemctl rollback daemon-reload"
             ]
+        );
+    }
+
+    #[test]
+    fn install_enables_lingering_after_enabling_the_user_unit() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = TempHomeGuard::set(tmp.path());
+        let mut runner = RecordingRunner::default();
+
+        install_with_runner(&sample_context(), &sample_invocation(), &mut runner)
+            .expect("install succeeds");
+
+        assert_eq!(
+            runner.labels,
+            [
+                "systemctl show unit state",
+                "systemctl daemon-reload",
+                "systemctl enable",
+                "loginctl enable-linger",
+            ]
+        );
+        assert_eq!(runner.programs[3], "loginctl");
+        assert_eq!(runner.args[3], ["enable-linger"]);
+    }
+
+    #[test]
+    fn install_continues_when_lingering_requires_administrator_authorization() {
+        let _lock = crate::runtime::test_env::lock_runtime_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = TempHomeGuard::set(tmp.path());
+        let mut runner = RecordingRunner {
+            fail_args: Some(vec!["enable-linger"]),
+            ..RecordingRunner::default()
+        };
+
+        install_with_runner(&sample_context(), &sample_invocation(), &mut runner)
+            .expect("a linger authorization failure must not roll back the installed unit");
+
+        assert_eq!(
+            runner.labels.last(),
+            Some(&"loginctl enable-linger".to_string())
+        );
+        assert_eq!(runner.programs.last().map(String::as_str), Some("loginctl"));
+        assert_eq!(
+            runner.args.last().expect("loginctl args must be recorded"),
+            &["enable-linger"]
         );
     }
 
