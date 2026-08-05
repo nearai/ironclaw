@@ -113,7 +113,9 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// and was passing on tolerance alone. `[gate].loc_ceiling`/`loc_observed`
 /// move in the same commit, which is what the nudge assertion below exists to
 /// force.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_405;
+/// ✎ Union re-measure 2026-08-05 (tail batch): 40_405 + 1 — a WS8 consumer
+/// repoint added one line in composition; recorded at the measured figure.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 40_406;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

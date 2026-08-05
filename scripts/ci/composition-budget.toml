@@ -129,7 +129,7 @@ observed_date = "2026-07-16"
 # current, not padded. (The eviction itself removed 199 lines; 9 came back as
 # the module doc-comment that records what stayed behind and why, which is the
 # honest number to bank.)
-loc_ceiling = 40405
+loc_ceiling = 40406
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -140,7 +140,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 40405
+loc_observed = 40406
 loc_observed_date = "2026-08-05"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
