@@ -183,10 +183,19 @@ removing the `reborn-tests.yml` job must not orphan a required status check
 deleting `.claude/rules/*` immediately stops those rules auto-loading, which is
 the intended effect. Each phase is independently revertible in this way.
 
-**After any rollback, verify no dangling references remain** — grep the tree for
-mentions of the removed governance files (e.g. `rg -n 'DESIGN\.md|CRITICAL_FLOWS|docs/features|\.storybook'`)
-and strip pointers left in `CLAUDE.md`, other `.claude/rules/*`, and docs, so a
-deleted file is never still referenced as authoritative.
+**After any rollback, verify no dangling references remain** — use a
+**hidden-file-aware** search, because plain `rg` skips dotfiles/dirs and
+gitignored paths by default and would miss exactly the `.claude/` and `.github/`
+locations the rollback touches. Search for **every exact path in the rollback
+lists** (including the lower-case rule files and the workflow):
+
+```bash
+rg --hidden --glob '!.git' -n \
+  'DESIGN\.md|CRITICAL_FLOWS|docs/features|\.storybook|design\.md|feature-workflow\.md|critical-flows\.md|reborn-tests\.yml'
+```
+
+Then strip any pointer left in `CLAUDE.md`, other `.claude/rules/*`, the CI
+workflows, or docs, so a deleted file is never still referenced as authoritative.
 
 ## Open questions for reviewers
 
