@@ -341,19 +341,6 @@ impl<M: CompletionModel> RigAdapter<M> {
         self
     }
 
-    /// Enable rig-core streaming for a provider whose live request path has
-    /// been validated against its upstream API.
-    ///
-    /// This is test-only today: no production Rig-backed provider exposes an
-    /// authoritative terminal event, so production factories keep the buffered
-    /// fallback. The first factory validated against that contract owns removing
-    /// this gate when it enables native streaming.
-    #[cfg(test)]
-    pub(crate) fn with_native_streaming(mut self) -> Self {
-        self.native_streaming = true;
-        self
-    }
-
     fn max_tokens_or_default(&self, max_tokens: Option<u32>) -> Option<u32> {
         max_tokens.or(self.default_max_tokens)
     }
@@ -1577,6 +1564,11 @@ mod tests {
 
     const LOOPBACK_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
 
+    fn with_native_streaming<M: CompletionModel>(mut adapter: RigAdapter<M>) -> RigAdapter<M> {
+        adapter.native_streaming = true;
+        adapter
+    }
+
     async fn capture_one_http_request() -> (String, oneshot::Receiver<String>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -2417,13 +2409,12 @@ mod tests {
 
     #[tokio::test]
     async fn complete_streaming_preserves_reasoning_deltas() {
-        let adapter = RigAdapter::new(
+        let adapter = with_native_streaming(RigAdapter::new(
             StreamingOnlyCompletionModel {
                 expected_max_tokens: None,
             },
             "streaming-only",
-        )
-        .with_native_streaming();
+        ));
         let request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
         let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
         let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
@@ -2443,13 +2434,12 @@ mod tests {
 
     #[tokio::test]
     async fn complete_with_tools_streaming_uses_rig_stream_and_emits_deltas() {
-        let adapter = RigAdapter::new(
+        let adapter = with_native_streaming(RigAdapter::new(
             StreamingOnlyCompletionModel {
                 expected_max_tokens: None,
             },
             "streaming-only",
-        )
-        .with_native_streaming();
+        ));
         let request = ToolCompletionRequest::new(
             vec![ChatMessage::user("search")],
             vec![IronToolDefinition {
@@ -2484,13 +2474,12 @@ mod tests {
     async fn complete_with_tools_streaming_applies_provider_default_max_tokens() {
         const DEFAULT_MAX_TOKENS: u32 = 8192;
 
-        let adapter = RigAdapter::new(
+        let adapter = with_native_streaming(RigAdapter::new(
             StreamingOnlyCompletionModel {
                 expected_max_tokens: Some(u64::from(DEFAULT_MAX_TOKENS)),
             },
             "streaming-only",
-        )
-        .with_native_streaming()
+        ))
         .with_default_max_tokens(DEFAULT_MAX_TOKENS);
         let request = ToolCompletionRequest::new(
             vec![ChatMessage::user("search")],
@@ -2517,13 +2506,12 @@ mod tests {
 
     #[tokio::test]
     async fn complete_streaming_preserves_explicit_max_tokens_over_provider_default() {
-        let adapter = RigAdapter::new(
+        let adapter = with_native_streaming(RigAdapter::new(
             StreamingOnlyCompletionModel {
                 expected_max_tokens: Some(4096),
             },
             "streaming-only",
-        )
-        .with_native_streaming()
+        ))
         .with_default_max_tokens(8192);
         let request =
             CompletionRequest::new(vec![ChatMessage::user("hello")]).with_max_tokens(4096);
