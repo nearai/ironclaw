@@ -138,6 +138,7 @@ pub fn is_transient_io_error(error: &std::io::Error) -> bool {
 pub(crate) enum ProductionModelAdapter {
     Rig,
     NearAiChat,
+    AnthropicApiKey,
     AnthropicOauth,
     GeminiOauth,
     GithubCopilot,
@@ -148,9 +149,10 @@ pub(crate) enum ProductionModelAdapter {
 
 impl ProductionModelAdapter {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::Rig,
         Self::NearAiChat,
+        Self::AnthropicApiKey,
         Self::AnthropicOauth,
         Self::GeminiOauth,
         Self::GithubCopilot,
@@ -163,6 +165,7 @@ impl ProductionModelAdapter {
         match self {
             Self::Rig => "rig",
             Self::NearAiChat => "nearai_chat",
+            Self::AnthropicApiKey => "anthropic",
             Self::AnthropicOauth => "anthropic_oauth",
             Self::GeminiOauth => "gemini_oauth",
             Self::GithubCopilot => "github_copilot",

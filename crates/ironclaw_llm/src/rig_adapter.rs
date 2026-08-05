@@ -1,7 +1,7 @@
 // arch-exempt: large_file, Rig provider bridge keeps streaming and non-streaming conversions co-located until provider adapter decomposition, plan #6175
 //! Generic adapter that bridges rig-core's `CompletionModel` trait to IronClaw's `LlmProvider`.
 //!
-//! This lets us use any rig-core provider (OpenAI, Anthropic, Ollama, etc.) as an
+//! This lets us use rig-core providers (OpenAI-compatible, Ollama, etc.) as an
 //! `Arc<dyn LlmProvider>` without changing any of the agent, reasoning, or tool code.
 
 use crate::config::CacheRetention;
@@ -68,7 +68,7 @@ pub struct RigAdapter<M: CompletionModel> {
     /// Optional model-discovery endpoint. When set, [`LlmProvider::list_models`]
     /// issues a `GET` instead of returning the empty default. rig-core's
     /// `CompletionModel` does not expose model discovery, so this is wired
-    /// explicitly per protocol (OpenAI-compatible, Anthropic, Ollama).
+    /// explicitly per protocol (OpenAI-compatible, Ollama).
     models_endpoint: Option<ModelsEndpoint>,
 }
 
@@ -114,7 +114,7 @@ impl ModelsEndpoint {
     /// adapter-specific auth scheme, and parses the adapter-specific response
     /// shape. Network, auth, and parse failures map to `LlmError` so the caller
     /// can surface a real message instead of an empty list.
-    async fn fetch_models(&self) -> Result<Vec<String>, LlmError> {
+    pub(crate) async fn fetch_models(&self) -> Result<Vec<String>, LlmError> {
         let validated = crate::url_check::check_models_url(&self.provider_id, &self.url).await?;
 
         // `check_models_url` validates only the initial URL. Disable redirect
@@ -336,6 +336,7 @@ impl<M: CompletionModel> RigAdapter<M> {
     }
 
     /// Set a provider-required fallback for requests that omit `max_tokens`.
+    #[cfg(test)]
     pub(crate) fn with_default_max_tokens(mut self, max_tokens: u32) -> Self {
         self.default_max_tokens = Some(max_tokens);
         self

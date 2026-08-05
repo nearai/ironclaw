@@ -1,8 +1,9 @@
-//! Anthropic OAuth provider (direct HTTP, `Authorization: Bearer`).
+//! Anthropic direct HTTP provider for API-key and OAuth authentication.
 //!
-//! This provider exists because the `rig-core` Anthropic client hardcodes the
-//! `x-api-key` header, which is rejected by Anthropic's OAuth tokens from
-//! `claude login`. OAuth tokens require `Authorization: Bearer <token>` instead.
+//! API keys use `x-api-key`; OAuth tokens from `claude login` use
+//! `Authorization: Bearer <token>`. Keeping both modes on the same direct
+//! Messages API implementation ensures they share validated SSE terminal-event
+//! handling instead of relying on rig-core's EOF-synthesized completion.
 //!
 //! Pattern follows `nearai_chat.rs`: direct HTTP calls via `reqwest::Client`.
 
@@ -19,7 +20,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
 use crate::anthropic_thinking::{AnthropicThinking, thinking_for_request};
-use crate::config::RegistryProviderConfig;
+use crate::config::{CacheRetention, RegistryProviderConfig};
 use crate::error::LlmError;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
@@ -91,23 +92,32 @@ const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
 const DEFAULT_MAX_TOKENS: u32 = 8192;
 
-/// Anthropic provider using OAuth Bearer authentication.
-pub(crate) struct AnthropicOAuthProvider {
+enum AnthropicAuth {
+    ApiKey(SecretString),
+    OAuth(std::sync::RwLock<SecretString>),
+}
+
+/// Anthropic Messages API provider using API-key or OAuth authentication.
+pub(crate) struct AnthropicDirectProvider {
     client: Client,
     streaming_client: Client,
     stream_idle_timeout: Duration,
-    /// OAuth token, wrapped in RwLock so it can be updated after a successful
-    /// Keychain refresh (fixes #1136: stale token reuse after expiry).
-    token: std::sync::RwLock<SecretString>,
+    auth: AnthropicAuth,
+    provider_id: String,
     model: String,
     base_url: Option<String>,
     active_model: std::sync::RwLock<String>,
+    cache_retention: CacheRetention,
+    models_endpoint: Option<crate::rig_adapter::ModelsEndpoint>,
     /// Parameter names that this provider does not support.
     unsupported_params: HashSet<String>,
 }
 
-impl AnthropicOAuthProvider {
-    pub(crate) fn new(config: &RegistryProviderConfig) -> Result<Self, LlmError> {
+impl AnthropicDirectProvider {
+    pub(crate) fn new_oauth(
+        config: &RegistryProviderConfig,
+        request_timeout_secs: u64,
+    ) -> Result<Self, LlmError> {
         let token = config
             .oauth_token
             .clone()
@@ -115,19 +125,48 @@ impl AnthropicOAuthProvider {
                 provider: "anthropic_oauth".to_string(),
             })?;
 
-        let client =
-            crate::config::hardened_client_builder(crate::config::DEFAULT_REQUEST_TIMEOUT_SECS)
-                .build()
-                .map_err(|e| LlmError::RequestFailed {
-                    provider: "anthropic_oauth".to_string(),
-                    reason: format!("Failed to build HTTP client: {}", e),
-                })?;
-        let streaming_client = crate::config::hardened_streaming_client_builder()
-            .build()
-            .map_err(|e| LlmError::RequestFailed {
-                provider: "anthropic_oauth".to_string(),
-                reason: format!("Failed to build streaming HTTP client: {e}"),
-            })?;
+        Self::new_with_auth(
+            config,
+            AnthropicAuth::OAuth(std::sync::RwLock::new(token)),
+            request_timeout_secs,
+        )
+    }
+
+    pub(crate) fn new_api_key(
+        config: &RegistryProviderConfig,
+        request_timeout_secs: u64,
+    ) -> Result<Self, LlmError> {
+        let api_key = config.api_key.clone().ok_or_else(|| LlmError::AuthFailed {
+            provider: config.provider_id.clone(),
+        })?;
+        Self::new_with_auth(config, AnthropicAuth::ApiKey(api_key), request_timeout_secs)
+    }
+
+    fn new_with_auth(
+        config: &RegistryProviderConfig,
+        auth: AnthropicAuth,
+        request_timeout_secs: u64,
+    ) -> Result<Self, LlmError> {
+        let provider_id = if matches!(&auth, AnthropicAuth::OAuth(_)) {
+            "anthropic_oauth".to_string()
+        } else {
+            config.provider_id.clone()
+        };
+        let client_base_url = if config.base_url.is_empty() {
+            ANTHROPIC_API_URL
+        } else {
+            &config.base_url
+        };
+        let client = crate::url_check::build_http_client(
+            &provider_id,
+            client_base_url,
+            crate::config::hardened_client_builder(request_timeout_secs),
+        )?;
+        let streaming_client = crate::url_check::build_http_client(
+            &provider_id,
+            client_base_url,
+            crate::config::hardened_streaming_client_builder(),
+        )?;
 
         let active_model = std::sync::RwLock::new(config.model.clone());
         let base_url = if config.base_url.is_empty() {
@@ -138,15 +177,43 @@ impl AnthropicOAuthProvider {
 
         let unsupported_params: HashSet<String> =
             config.unsupported_params.iter().cloned().collect();
+        let models_endpoint = match &auth {
+            AnthropicAuth::ApiKey(api_key) => {
+                let base = if config.base_url.is_empty() {
+                    "https://api.anthropic.com".to_string()
+                } else {
+                    config.base_url.trim_end_matches('/').to_string()
+                };
+                let discovery_base = if base.ends_with("/v1") || base.contains("/v1/") {
+                    base
+                } else {
+                    format!("{base}/v1")
+                };
+                Some(crate::rig_adapter::ModelsEndpoint {
+                    provider_id: provider_id.clone(),
+                    url: format!("{discovery_base}/models"),
+                    auth: crate::rig_adapter::ModelsAuth::AnthropicKey {
+                        api_key: api_key.expose_secret().to_string(),
+                        version: ANTHROPIC_API_VERSION.to_string(),
+                    },
+                    shape: crate::rig_adapter::ModelsShape::OpenAiData,
+                    extra_headers: reqwest::header::HeaderMap::new(),
+                })
+            }
+            AnthropicAuth::OAuth(_) => None,
+        };
 
         Ok(Self {
             client,
             streaming_client,
-            stream_idle_timeout: Duration::from_secs(crate::config::DEFAULT_REQUEST_TIMEOUT_SECS),
-            token: std::sync::RwLock::new(token),
+            stream_idle_timeout: Duration::from_secs(request_timeout_secs),
+            auth,
+            provider_id,
             model: config.model.clone(),
             base_url,
             active_model,
+            cache_retention: config.cache_retention,
+            models_endpoint,
             unsupported_params,
         })
     }
@@ -164,26 +231,97 @@ impl AnthropicOAuthProvider {
     fn api_url(&self) -> String {
         if let Some(ref base) = self.base_url {
             let base = base.trim_end_matches('/');
-            format!("{}/v1/messages", base)
+            if base.ends_with("/v1") {
+                format!("{base}/messages")
+            } else {
+                format!("{base}/v1/messages")
+            }
         } else {
             ANTHROPIC_API_URL.to_string()
         }
     }
 
-    /// Read the current token from the RwLock.
-    fn current_token(&self) -> String {
-        match self.token.read() {
-            Ok(guard) => guard.expose_secret().to_string(),
-            Err(poisoned) => poisoned.into_inner().expose_secret().to_string(),
+    fn authenticated_request(&self, client: &Client, url: &str) -> reqwest::RequestBuilder {
+        self.apply_auth(
+            client
+                .post(url)
+                .header("anthropic-version", ANTHROPIC_API_VERSION)
+                .header("Content-Type", "application/json"),
+        )
+    }
+
+    fn apply_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.auth {
+            AnthropicAuth::ApiKey(api_key) => request.header("x-api-key", api_key.expose_secret()),
+            AnthropicAuth::OAuth(token) => {
+                let token = match token.read() {
+                    Ok(guard) => guard.expose_secret().to_string(),
+                    Err(poisoned) => poisoned.into_inner().expose_secret().to_string(),
+                };
+                request
+                    .bearer_auth(token)
+                    .header("anthropic-beta", ANTHROPIC_OAUTH_BETA)
+            }
         }
     }
 
     /// Update the stored token after a successful Keychain refresh.
-    fn update_token(&self, new_token: SecretString) {
-        match self.token.write() {
-            Ok(mut guard) => *guard = new_token,
-            Err(poisoned) => *poisoned.into_inner() = new_token,
+    fn update_oauth_token(&self, new_token: SecretString) {
+        if let AnthropicAuth::OAuth(token) = &self.auth {
+            match token.write() {
+                Ok(mut guard) => *guard = new_token,
+                Err(poisoned) => *poisoned.into_inner() = new_token,
+            }
         }
+    }
+
+    fn uses_oauth(&self) -> bool {
+        matches!(self.auth, AnthropicAuth::OAuth(_))
+    }
+
+    fn error_adapter(&self) -> crate::error::ProductionModelAdapter {
+        if self.uses_oauth() {
+            crate::error::ProductionModelAdapter::AnthropicOauth
+        } else {
+            crate::error::ProductionModelAdapter::AnthropicApiKey
+        }
+    }
+
+    fn cache_control(&self) -> Option<AnthropicCacheControl> {
+        match self.cache_retention {
+            CacheRetention::None => None,
+            CacheRetention::Short => Some(AnthropicCacheControl {
+                control_type: "ephemeral",
+                ttl: None,
+            }),
+            CacheRetention::Long => Some(AnthropicCacheControl {
+                control_type: "ephemeral",
+                ttl: Some("1h"),
+            }),
+        }
+    }
+
+    fn convert_tools(&self, tools: Vec<ToolDefinition>) -> Vec<AnthropicTool> {
+        tools
+            .into_iter()
+            .map(|tool| {
+                let mut description = tool.description;
+                let input_schema = if self.uses_oauth() {
+                    tool.parameters
+                } else {
+                    crate::tool_schema::shape_tool_schema(
+                        crate::tool_schema::ToolSchemaPolicy::StrictOpenAi,
+                        &tool.parameters,
+                        &mut description,
+                    )
+                };
+                AnthropicTool {
+                    name: tool.name,
+                    description,
+                    input_schema,
+                }
+            })
+            .collect()
     }
 
     async fn send_request<R: for<'de> Deserialize<'de>>(
@@ -192,20 +330,15 @@ impl AnthropicOAuthProvider {
     ) -> Result<R, LlmError> {
         let url = self.api_url();
 
-        tracing::debug!("Sending request to Anthropic OAuth: {}", url);
+        tracing::debug!(provider = %self.provider_id, "Sending request to Anthropic: {url}");
 
         let response = self
-            .client
-            .post(&url)
-            .bearer_auth(self.current_token())
-            .header("anthropic-version", ANTHROPIC_API_VERSION)
-            .header("anthropic-beta", ANTHROPIC_OAUTH_BETA)
-            .header("Content-Type", "application/json")
+            .authenticated_request(&self.client, &url)
             .json(body)
             .send()
             .await
             .map_err(|e| LlmError::RequestFailed {
-                provider: "anthropic_oauth".to_string(),
+                provider: self.provider_id.clone(),
                 reason: e.to_string(),
             })?;
 
@@ -218,12 +351,12 @@ impl AnthropicOAuthProvider {
                 response.headers().get("retry-after"),
             );
 
-            let response_text = response
-                .text()
+            let response_text = crate::error::read_bounded_provider_error_body(response)
                 .await
+                .map(|body| String::from_utf8_lossy(&body).into_owned())
                 .unwrap_or_else(|e| format!("(failed to read error body: {e})"));
 
-            if status.as_u16() == 401 {
+            if status.as_u16() == 401 && self.uses_oauth() {
                 // OAuth tokens from `claude login` expire in ~8-12h. Attempt
                 // to re-extract a fresh token from the OS credential store
                 // (macOS Keychain / Linux credentials file) before giving up.
@@ -246,24 +379,24 @@ impl AnthropicOAuthProvider {
                         .send()
                         .await
                         .map_err(|e| LlmError::RequestFailed {
-                            provider: "anthropic_oauth".to_string(),
+                            provider: self.provider_id.clone(),
                             reason: e.to_string(),
                         })?;
                     let retry_status = retry.status();
                     if retry_status.is_success() {
                         // Persist the refreshed token so subsequent requests
                         // don't hit 401 again (fixes #1136).
-                        self.update_token(fresh_token);
+                        self.update_oauth_token(fresh_token);
                         tracing::info!("Anthropic OAuth token refreshed from credential store");
 
                         let text = retry.text().await.map_err(|e| LlmError::RequestFailed {
-                            provider: "anthropic_oauth".to_string(),
+                            provider: self.provider_id.clone(),
                             reason: format!("Failed to read response body: {}", e),
                         })?;
                         return serde_json::from_str(&text).map_err(|e| {
                             let truncated = ironclaw_common::truncate_for_preview(&text, 512);
                             LlmError::InvalidResponse {
-                                provider: "anthropic_oauth".to_string(),
+                                provider: self.provider_id.clone(),
                                 reason: format!("JSON parse error: {}. Raw: {}", e, truncated),
                             }
                         });
@@ -272,9 +405,9 @@ impl AnthropicOAuthProvider {
                         retry_status.as_u16(),
                         retry.headers().get("retry-after"),
                     );
-                    let retry_text = retry
-                        .text()
+                    let retry_text = crate::error::read_bounded_provider_error_body(retry)
                         .await
+                        .map(|body| String::from_utf8_lossy(&body).into_owned())
                         .unwrap_or_else(|e| format!("(failed to read error body: {e})"));
                     tracing::warn!(
                         "Anthropic OAuth 401 retry with refreshed token also failed ({})",
@@ -282,7 +415,7 @@ impl AnthropicOAuthProvider {
                     );
                     return Err(crate::error::map_provider_http_error(
                         crate::error::ProviderHttpError {
-                            adapter: crate::error::ProductionModelAdapter::AnthropicOauth,
+                            adapter: self.error_adapter(),
                             model: &self.active_model_name(),
                             status: retry_status.as_u16(),
                             body: &retry_text,
@@ -291,12 +424,17 @@ impl AnthropicOAuthProvider {
                     ));
                 }
                 return Err(LlmError::AuthFailed {
-                    provider: "anthropic_oauth".to_string(),
+                    provider: self.provider_id.clone(),
+                });
+            }
+            if status.as_u16() == 401 {
+                return Err(LlmError::AuthFailed {
+                    provider: self.provider_id.clone(),
                 });
             }
             return Err(crate::error::map_provider_http_error(
                 crate::error::ProviderHttpError {
-                    adapter: crate::error::ProductionModelAdapter::AnthropicOauth,
+                    adapter: self.error_adapter(),
                     model: &self.active_model_name(),
                     status: status.as_u16(),
                     body: &response_text,
@@ -306,12 +444,12 @@ impl AnthropicOAuthProvider {
         }
 
         let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
-            provider: "anthropic_oauth".to_string(),
+            provider: self.provider_id.clone(),
             reason: format!("Failed to read response body: {}", e),
         })?;
 
         tracing::debug!(
-            "Anthropic OAuth response: status={}, bytes={}",
+            "Anthropic response: status={}, bytes={}",
             status,
             response_text.len()
         );
@@ -319,7 +457,7 @@ impl AnthropicOAuthProvider {
         serde_json::from_str(&response_text).map_err(|e| {
             let truncated = ironclaw_common::truncate_for_preview(&response_text, 512);
             LlmError::InvalidResponse {
-                provider: "anthropic_oauth".to_string(),
+                provider: self.provider_id.clone(),
                 reason: format!("JSON parse error: {}. Raw: {}", e, truncated),
             }
         })
@@ -331,12 +469,9 @@ impl AnthropicOAuthProvider {
         sink: Arc<dyn CompletionStreamSink>,
     ) -> Result<AnthropicStreamingResponse, LlmError> {
         let url = self.api_url();
-        let current_token = self.current_token();
-        let mut response = self
-            .send_streaming_http_request(&url, body, &current_token)
-            .await?;
+        let mut response = self.send_streaming_http_request(&url, body).await?;
 
-        if response.status().as_u16() == 401 {
+        if response.status().as_u16() == 401 && self.uses_oauth() {
             drop(response);
             // OAuth tokens from `claude login` expire in ~8-12h. Match the
             // buffered request path by allowing Claude Code's asynchronous
@@ -344,15 +479,15 @@ impl AnthropicOAuthProvider {
             tokio::time::sleep(Duration::from_millis(500)).await;
             let Some(fresh) = refresh_claude_oauth_token() else {
                 return Err(LlmError::AuthFailed {
-                    provider: "anthropic_oauth".to_string(),
+                    provider: self.provider_id.clone(),
                 });
             };
             let fresh_token = SecretString::from(fresh);
             response = self
-                .send_streaming_http_request(&url, body, fresh_token.expose_secret())
+                .send_streaming_oauth_http_request(&url, body, fresh_token.expose_secret())
                 .await?;
             if response.status().is_success() {
-                self.update_token(fresh_token);
+                self.update_oauth_token(fresh_token);
                 tracing::info!("Anthropic OAuth token refreshed from credential store");
             }
         }
@@ -365,7 +500,7 @@ impl AnthropicOAuthProvider {
             );
             if status.as_u16() == 401 {
                 return Err(LlmError::AuthFailed {
-                    provider: "anthropic_oauth".to_string(),
+                    provider: self.provider_id.clone(),
                 });
             }
             // silent-ok: the bounded provider error body is diagnostic only;
@@ -381,7 +516,7 @@ impl AnthropicOAuthProvider {
             let response_text = String::from_utf8_lossy(&response_body);
             return Err(crate::error::map_provider_http_error(
                 crate::error::ProviderHttpError {
-                    adapter: crate::error::ProductionModelAdapter::AnthropicOauth,
+                    adapter: self.error_adapter(),
                     model: &self.active_model_name(),
                     status: status.as_u16(),
                     body: response_text.as_ref(),
@@ -399,7 +534,7 @@ impl AnthropicOAuthProvider {
             let next = tokio::time::timeout(self.stream_idle_timeout, events.next())
                 .await
                 .map_err(|_| LlmError::StreamInterrupted {
-                    provider: "anthropic_oauth".to_string(),
+                    provider: self.provider_id.clone(),
                     reason: format!(
                         "SSE stream was idle for {} seconds",
                         self.stream_idle_timeout.as_secs()
@@ -409,24 +544,56 @@ impl AnthropicOAuthProvider {
                 break;
             };
             let event = event.map_err(|error| LlmError::StreamInterrupted {
-                provider: "anthropic_oauth".to_string(),
+                provider: self.provider_id.clone(),
                 reason: format!("Failed to read SSE stream: {error}"),
             })?;
-            ingest_anthropic_event(&mut streamed, &event.event, &event.data, sink.as_ref()).await?;
+            ingest_anthropic_event(
+                &mut streamed,
+                &event.event,
+                &event.data,
+                sink.as_ref(),
+                &self.provider_id,
+            )
+            .await?;
             if streamed.terminal {
                 break;
             }
         }
         if !streamed.terminal {
             return Err(LlmError::StreamInterrupted {
-                provider: "anthropic_oauth".to_string(),
+                provider: self.provider_id.clone(),
                 reason: "stream ended before message_stop or a stop reason".to_string(),
             });
         }
-        streamed.finish()
+        streamed.finish(&self.provider_id)
     }
 
     async fn send_streaming_http_request(
+        &self,
+        url: &str,
+        body: &AnthropicRequest,
+    ) -> Result<reqwest::Response, LlmError> {
+        tokio::time::timeout(
+            self.stream_idle_timeout,
+            self.authenticated_request(&self.streaming_client, url)
+                .json(body)
+                .send(),
+        )
+        .await
+        .map_err(|_| LlmError::RequestFailed {
+            provider: self.provider_id.clone(),
+            reason: format!(
+                "timed out waiting {}s for streaming response headers",
+                self.stream_idle_timeout.as_secs()
+            ),
+        })?
+        .map_err(|e| LlmError::RequestFailed {
+            provider: self.provider_id.clone(),
+            reason: e.to_string(),
+        })
+    }
+
+    async fn send_streaming_oauth_http_request(
         &self,
         url: &str,
         body: &AnthropicRequest,
@@ -445,23 +612,23 @@ impl AnthropicOAuthProvider {
         )
         .await
         .map_err(|_| LlmError::RequestFailed {
-            provider: "anthropic_oauth".to_string(),
+            provider: self.provider_id.clone(),
             reason: format!(
                 "timed out waiting {}s for streaming response headers",
                 self.stream_idle_timeout.as_secs()
             ),
         })?
         .map_err(|e| LlmError::RequestFailed {
-            provider: "anthropic_oauth".to_string(),
+            provider: self.provider_id.clone(),
             reason: e.to_string(),
         })
     }
 }
 
 #[async_trait]
-impl LlmProvider for AnthropicOAuthProvider {
+impl LlmProvider for AnthropicDirectProvider {
     fn provider_id(&self) -> String {
-        "anthropic_oauth".to_string()
+        self.provider_id.clone()
     }
 
     async fn complete(&self, mut req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
@@ -469,17 +636,21 @@ impl LlmProvider for AnthropicOAuthProvider {
             .take_model_override()
             .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_completion_params(&mut req);
-        let (system, messages) = convert_messages(req.messages);
+        let mut messages = req.messages;
+        crate::provider::sanitize_tool_messages(&mut messages);
+        let (system, messages) = convert_messages(messages);
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
         let request = AnthropicRequest {
             stream: false,
+            cache_control: self.cache_control(),
             thinking: thinking_for_request(&model, max_tokens, req.temperature, false),
             model,
             messages,
             system,
             max_tokens,
             temperature: req.temperature,
+            stop_sequences: req.stop_sequences,
             tools: None,
             tool_choice: None,
         };
@@ -514,16 +685,20 @@ impl LlmProvider for AnthropicOAuthProvider {
             .take_model_override()
             .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_completion_params(&mut req);
-        let (system, messages) = convert_messages(req.messages);
+        let mut messages = req.messages;
+        crate::provider::sanitize_tool_messages(&mut messages);
+        let (system, messages) = convert_messages(messages);
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
         let request = AnthropicRequest {
             stream: true,
+            cache_control: self.cache_control(),
             thinking: thinking_for_request(&model, max_tokens, req.temperature, false),
             model,
             messages,
             system,
             max_tokens,
             temperature: req.temperature,
+            stop_sequences: req.stop_sequences,
             tools: None,
             tool_choice: None,
         };
@@ -547,9 +722,11 @@ impl LlmProvider for AnthropicOAuthProvider {
             .take_model_override()
             .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_tool_params(&mut req);
-        let (system, messages) = convert_messages(req.messages);
+        let mut messages = req.messages;
+        crate::provider::sanitize_tool_messages(&mut messages);
+        let (system, messages) = convert_messages(messages);
 
-        let tools = convert_anthropic_tools(req.tools);
+        let tools = self.convert_tools(req.tools);
         let tool_choice = convert_anthropic_tool_choice(req.tool_choice);
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
@@ -562,6 +739,7 @@ impl LlmProvider for AnthropicOAuthProvider {
 
         let request = AnthropicRequest {
             stream: false,
+            cache_control: self.cache_control(),
             thinking: if has_tools {
                 None
             } else {
@@ -572,6 +750,7 @@ impl LlmProvider for AnthropicOAuthProvider {
             system,
             max_tokens,
             temperature: req.temperature,
+            stop_sequences: req.stop_sequences,
             tools: opt_tools,
             tool_choice,
         };
@@ -614,13 +793,16 @@ impl LlmProvider for AnthropicOAuthProvider {
             .take_model_override()
             .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_tool_params(&mut req);
-        let (system, messages) = convert_messages(req.messages);
-        let tools = convert_anthropic_tools(req.tools);
+        let mut messages = req.messages;
+        crate::provider::sanitize_tool_messages(&mut messages);
+        let (system, messages) = convert_messages(messages);
+        let tools = self.convert_tools(req.tools);
         let tool_choice = convert_anthropic_tool_choice(req.tool_choice);
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
         let has_tools = !tools.is_empty();
         let request = AnthropicRequest {
             stream: true,
+            cache_control: self.cache_control(),
             thinking: if has_tools {
                 None
             } else {
@@ -631,6 +813,7 @@ impl LlmProvider for AnthropicOAuthProvider {
             system,
             max_tokens,
             temperature: req.temperature,
+            stop_sequences: req.stop_sequences,
             tools: has_tools.then_some(tools),
             tool_choice,
         };
@@ -656,9 +839,32 @@ impl LlmProvider for AnthropicOAuthProvider {
         &self.model
     }
 
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        match &self.models_endpoint {
+            Some(endpoint) => endpoint.fetch_models().await,
+            None => Ok(Vec::new()),
+        }
+    }
+
     fn cost_per_token(&self) -> (Decimal, Decimal) {
         let model = self.active_model_name();
         costs::model_cost(&model).unwrap_or_else(costs::default_cost)
+    }
+
+    fn cache_write_multiplier(&self) -> Decimal {
+        match self.cache_retention {
+            CacheRetention::None => Decimal::ONE,
+            CacheRetention::Short => Decimal::new(125, 2),
+            CacheRetention::Long => Decimal::TWO,
+        }
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        if self.cache_retention == CacheRetention::None {
+            Decimal::ONE
+        } else {
+            Decimal::TEN
+        }
     }
 
     fn active_model_name(&self) -> String {
@@ -686,6 +892,8 @@ impl LlmProvider for AnthropicOAuthProvider {
 #[derive(Debug, Serialize)]
 struct AnthropicRequest {
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<AnthropicCacheControl>,
     model: String,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -694,11 +902,21 @@ struct AnthropicRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    stop_sequences: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<AnthropicThinking>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<AnthropicTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<AnthropicToolChoice>,
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicCacheControl {
+    #[serde(rename = "type")]
+    control_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -825,11 +1043,11 @@ struct AnthropicStreamingResponse {
 }
 
 impl AnthropicStreamingResponse {
-    fn finish(mut self) -> Result<Self, LlmError> {
+    fn finish(mut self, provider_id: &str) -> Result<Self, LlmError> {
         for state in self.tool_call_parts.values() {
             if state.id.is_empty() || state.name.is_empty() {
                 return Err(LlmError::InvalidResponse {
-                    provider: "anthropic_oauth".to_string(),
+                    provider: provider_id.to_string(),
                     reason: "streamed tool_use block is missing its id or name".to_string(),
                 });
             }
@@ -842,7 +1060,7 @@ impl AnthropicStreamingResponse {
                 } else {
                     serde_json::from_str(&state.input_json).map_err(|error| {
                         LlmError::InvalidResponse {
-                            provider: "anthropic_oauth".to_string(),
+                            provider: provider_id.to_string(),
                             reason: format!("streamed tool arguments are invalid JSON: {error}"),
                         }
                     })?
@@ -867,10 +1085,11 @@ async fn ingest_anthropic_event(
     event_name: &str,
     data: &str,
     sink: &dyn CompletionStreamSink,
+    provider_id: &str,
 ) -> Result<(), LlmError> {
     let body: serde_json::Value =
         serde_json::from_str(data).map_err(|error| LlmError::InvalidResponse {
-            provider: "anthropic_oauth".to_string(),
+            provider: provider_id.to_string(),
             reason: format!(
                 "stream JSON parse error: {error}. Raw: {}",
                 ironclaw_common::truncate_for_preview(data, 512)
@@ -980,7 +1199,7 @@ async fn ingest_anthropic_event(
                 .and_then(|value| value.as_str())
                 .unwrap_or("Anthropic streaming error");
             return Err(LlmError::RequestFailed {
-                provider: "anthropic_oauth".to_string(),
+                provider: provider_id.to_string(),
                 reason: reason.to_string(),
             });
         }
@@ -1039,17 +1258,6 @@ fn user_image_blocks(parts: &[ContentPart]) -> Vec<AnthropicContentBlock> {
                 })
             }
             ContentPart::Text { .. } => None,
-        })
-        .collect()
-}
-
-fn convert_anthropic_tools(tools: Vec<ToolDefinition>) -> Vec<AnthropicTool> {
-    tools
-        .into_iter()
-        .map(|tool| AnthropicTool {
-            name: tool.name,
-            description: tool.description,
-            input_schema: tool.parameters,
         })
         .collect()
 }
@@ -1272,6 +1480,7 @@ mod tests {
             "message_start",
             r#"{"type":"message_start","message":{"usage":{"input_tokens":11,"cache_read_input_tokens":3}}}"#,
             &sink,
+            "anthropic_oauth",
         )
         .await
         .expect("message start");
@@ -1280,6 +1489,7 @@ mod tests {
             "content_block_delta",
             r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello "}}"#,
             &sink,
+            "anthropic_oauth",
         )
         .await
         .expect("text delta");
@@ -1296,6 +1506,7 @@ mod tests {
             "content_block_start",
             r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call-1","name":"weather","input":{}}}"#,
             &sink,
+            "anthropic_oauth",
         )
         .await
         .expect("tool start");
@@ -1308,6 +1519,7 @@ mod tests {
                     serde_json::to_string(partial_json).expect("partial JSON string")
                 ),
                 &sink,
+                "anthropic_oauth",
             )
             .await
             .expect("tool delta");
@@ -1317,10 +1529,11 @@ mod tests {
             "message_delta",
             r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":7}}"#,
             &sink,
+            "anthropic_oauth",
         )
         .await
         .expect("terminal delta");
-        let response = response.finish().expect("complete stream");
+        let response = response.finish("anthropic_oauth").expect("complete stream");
         assert_eq!(response.content, "hello ");
         assert_eq!(response.stop_reason.as_deref(), Some("tool_use"));
         assert_eq!(response.usage.input_tokens, 11);
@@ -1348,7 +1561,7 @@ mod tests {
             );
 
             assert!(matches!(
-                response.finish(),
+                response.finish("anthropic_oauth"),
                 Err(LlmError::InvalidResponse { provider, reason })
                     if provider == "anthropic_oauth"
                         && reason == "streamed tool_use block is missing its id or name"
@@ -1368,7 +1581,7 @@ mod tests {
             },
         );
 
-        match response.finish() {
+        match response.finish("anthropic_oauth") {
             Err(LlmError::InvalidResponse { provider, reason }) => {
                 assert_eq!(provider, "anthropic_oauth");
                 assert!(reason.starts_with("streamed tool arguments are invalid JSON: "));
@@ -1413,7 +1626,7 @@ mod tests {
             "claude-test",
         );
         config.oauth_token = Some(SecretString::from("test-token".to_string()));
-        let provider = AnthropicOAuthProvider::new(&config).expect("provider");
+        let provider = AnthropicDirectProvider::new_oauth(&config, 5).expect("provider");
         let error = provider
             .complete(CompletionRequest::new(vec![ChatMessage::user("hello")]))
             .await
@@ -1428,6 +1641,91 @@ mod tests {
                 retry_after: None,
             } if provider == "anthropic_oauth"
         ));
+    }
+
+    #[tokio::test]
+    async fn api_key_provider_preserves_anthropic_model_discovery() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let base_url = format!(
+            "http://{}/v1",
+            listener.local_addr().expect("loopback address")
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = vec![0_u8; 4096];
+            let read = socket.read(&mut request).await.expect("read request");
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("GET /v1/models HTTP/1.1"));
+            let lowercase_request = request.to_ascii_lowercase();
+            assert!(lowercase_request.contains("x-api-key: test-api-key"));
+            assert!(lowercase_request.contains("anthropic-version: 2023-06-01"));
+            assert!(!lowercase_request.contains("authorization:"));
+
+            let body = r#"{"data":[{"id":"claude-one"},{"id":"claude-two"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write models response");
+        });
+
+        let config = RegistryProviderConfig::generic(
+            crate::registry::ProviderProtocol::Anthropic,
+            "anthropic",
+            Some(SecretString::from("test-api-key".to_string())),
+            base_url,
+            "claude-test",
+        );
+        let provider = AnthropicDirectProvider::new_api_key(&config, 5).expect("provider");
+        assert_eq!(
+            provider.list_models().await.expect("model discovery"),
+            ["claude-one", "claude-two"]
+        );
+        server.await.expect("loopback server");
+    }
+
+    #[test]
+    fn api_key_provider_preserves_rig_schema_and_cache_cost_contracts() {
+        let mut config = RegistryProviderConfig::generic(
+            crate::registry::ProviderProtocol::Anthropic,
+            "anthropic",
+            Some(SecretString::from("test-api-key".to_string())),
+            "https://api.anthropic.com",
+            "claude-test",
+        );
+        config.cache_retention = CacheRetention::Long;
+        let provider = AnthropicDirectProvider::new_api_key(&config, 5).expect("provider");
+        let tools = provider.convert_tools(vec![ToolDefinition {
+            name: "weather".to_string(),
+            description: "Read weather".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"}
+                }
+            }),
+        }]);
+
+        assert_eq!(tools[0].input_schema["additionalProperties"], false);
+        assert_eq!(
+            tools[0].input_schema["required"],
+            serde_json::json!(["city"])
+        );
+        assert_eq!(
+            tools[0].input_schema["properties"]["city"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+        assert_eq!(provider.cache_write_multiplier(), Decimal::TWO);
+        assert_eq!(provider.cache_read_discount(), Decimal::TEN);
     }
 
     #[tokio::test]
@@ -1471,7 +1769,7 @@ mod tests {
             "claude-test",
         );
         config.oauth_token = Some(SecretString::from("test-token".to_string()));
-        let provider = AnthropicOAuthProvider::new(&config).expect("provider");
+        let provider = AnthropicDirectProvider::new_oauth(&config, 5).expect("provider");
         let sink = Arc::new(RecordingSink::default());
         let error = provider
             .complete_streaming(

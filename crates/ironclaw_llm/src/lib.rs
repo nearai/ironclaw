@@ -453,11 +453,9 @@ fn create_anthropic_from_registry(
     config: &RegistryProviderConfig,
     request_timeout_secs: u64,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
-    const DEFAULT_MAX_TOKENS: u32 = 8192;
-
     // Route to OAuth provider when an OAuth token is present and no real API
     // key was provided. When both are set, the API key takes priority (standard
-    // x-api-key auth via rig-core).
+    // x-api-key auth through the direct Messages API provider).
     let api_key_is_placeholder = config
         .api_key
         .as_ref()
@@ -469,49 +467,15 @@ fn create_anthropic_from_registry(
             base_url = if config.base_url.is_empty() { "default" } else { &config.base_url },
             "Using Anthropic OAuth API"
         );
-        let provider = anthropic_oauth::AnthropicOAuthProvider::new(config)?;
+        let provider =
+            anthropic_oauth::AnthropicDirectProvider::new_oauth(config, request_timeout_secs)?;
         return Ok(Arc::new(provider));
     }
 
-    use crate::config::CacheRetention;
-    use rig::providers::anthropic;
-
-    let api_key = config
-        .api_key
-        .as_ref()
-        .map(|k| k.expose_secret().to_string())
-        .ok_or_else(|| LlmError::AuthFailed {
-            provider: config.provider_id.clone(),
-        })?;
-
-    // Build with the proxy-aware client (same as the OpenAI-compatible path) so
-    // a localhost/self-hosted Anthropic-compatible endpoint bypasses the system
-    // proxy for live chat too — not just model discovery. Remote hosts keep
-    // default proxy behavior.
-    let mut builder =
-        anthropic::Client::builder()
-            .api_key(&api_key)
-            .http_client(provider_http_client(
-                &config.provider_id,
-                &config.base_url,
-                request_timeout_secs,
-            )?);
-    if !config.base_url.is_empty() {
-        builder = builder.base_url(&config.base_url);
-    }
-    let client: anthropic::Client = builder.build().map_err(|e| LlmError::RequestFailed {
-        provider: config.provider_id.clone(),
-        reason: format!("Failed to create Anthropic client: {e}"),
-    })?;
-
-    let cache_retention = config.cache_retention;
-
-    let model = client.completion_model(&config.model);
-
-    if cache_retention != CacheRetention::None {
+    if config.cache_retention != crate::config::CacheRetention::None {
         tracing::debug!(
             model = %config.model,
-            retention = %cache_retention,
+            retention = %config.cache_retention,
             "Anthropic automatic prompt caching enabled"
         );
     }
@@ -523,38 +487,9 @@ fn create_anthropic_from_registry(
         "Using Anthropic provider"
     );
 
-    // Anthropic model discovery: `GET {base}/v1/models` with `x-api-key` +
-    // `anthropic-version` (the SDK appends `/v1` itself for completions, so we
-    // add it explicitly here only for the discovery URL).
-    let anthropic_base = if config.base_url.is_empty() {
-        "https://api.anthropic.com".to_string()
-    } else {
-        config.base_url.trim_end_matches('/').to_string()
-    };
-    let discovery_base = if anthropic_base.ends_with("/v1") || anthropic_base.contains("/v1/") {
-        anthropic_base
-    } else {
-        format!("{anthropic_base}/v1")
-    };
-    let models_endpoint = rig_adapter::ModelsEndpoint {
-        provider_id: config.provider_id.clone(),
-        url: format!("{discovery_base}/models"),
-        auth: rig_adapter::ModelsAuth::AnthropicKey {
-            api_key,
-            version: "2023-06-01".to_string(),
-        },
-        shape: rig_adapter::ModelsShape::OpenAiData,
-        extra_headers: reqwest::header::HeaderMap::new(),
-    };
-
-    Ok(Arc::new(
-        RigAdapter::new(model, &config.model)
-            .with_provider_id(config.provider_id.clone())
-            .with_cache_retention(cache_retention)
-            .with_default_max_tokens(DEFAULT_MAX_TOKENS)
-            .with_unsupported_params(config.unsupported_params.clone())
-            .with_model_listing(models_endpoint),
-    ))
+    let provider =
+        anthropic_oauth::AnthropicDirectProvider::new_api_key(config, request_timeout_secs)?;
+    Ok(Arc::new(provider))
 }
 
 fn create_ollama_from_registry(
@@ -1872,7 +1807,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rig_registry_factories_keep_streaming_on_the_buffered_fallback() {
+    async fn openai_rig_registry_factory_keeps_streaming_on_the_buffered_fallback() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -1920,10 +1855,7 @@ mod tests {
                 .expect("request body is UTF-8 JSON")
         }
 
-        for (protocol, provider_id) in [
-            (ProviderProtocol::OpenAiCompletions, "openai"),
-            (ProviderProtocol::Anthropic, "anthropic"),
-        ] {
+        for (protocol, provider_id) in [(ProviderProtocol::OpenAiCompletions, "openai")] {
             let listener = TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("bind loopback listener");
@@ -1961,6 +1893,139 @@ mod tests {
             );
             assert!(receiver.try_recv().is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn anthropic_api_key_factory_streams_before_the_terminal_event() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let address = listener.local_addr().expect("loopback address");
+        let (request_sender, request_receiver) = tokio::sync::oneshot::channel();
+        let (terminal_sender, terminal_receiver) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            let (body_start, content_length) = loop {
+                let read = socket.read(&mut buffer).await.expect("read request");
+                assert!(read > 0, "connection closed before request arrived");
+                request.extend_from_slice(&buffer[..read]);
+                if let Some(header_end) =
+                    request.windows(4).position(|window| window == b"\r\n\r\n")
+                {
+                    let body_start = header_end + 4;
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .expect("content-length header");
+                    break (body_start, content_length);
+                }
+            };
+            while request.len() < body_start + content_length {
+                let read = socket.read(&mut buffer).await.expect("read request body");
+                assert!(read > 0, "connection closed before request body completed");
+                request.extend_from_slice(&buffer[..read]);
+            }
+            request_sender
+                .send(String::from_utf8(request).expect("request is UTF-8"))
+                .expect("test receives request");
+
+            socket
+                .write_all(
+                    concat!(
+                        "HTTP/1.1 200 OK\r\n",
+                        "content-type: text/event-stream\r\n",
+                        "connection: close\r\n\r\n",
+                        "event: message_start\n",
+                        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":2}}}\n\n",
+                        "event: content_block_delta\n",
+                        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("write initial stream");
+            socket.flush().await.expect("flush initial stream");
+
+            terminal_receiver.await.expect("release terminal event");
+            socket
+                .write_all(
+                    concat!(
+                        "event: message_delta\n",
+                        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+                        "event: message_stop\n",
+                        "data: {\"type\":\"message_stop\"}\n\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("write terminal stream");
+        });
+
+        let mut config = RegistryProviderConfig::generic(
+            ProviderProtocol::Anthropic,
+            "anthropic",
+            Some(secrecy::SecretString::from("test-api-key".to_string())),
+            format!("http://{address}/v1"),
+            "claude-test",
+        );
+        config.cache_retention = crate::config::CacheRetention::Short;
+        let provider = create_registry_provider_inner(&config, 5)
+            .expect("Anthropic API-key provider construction succeeds");
+        let (delta_sender, mut delta_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut completion_request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        completion_request.stop_sequences = Some(vec!["STOP".to_string()]);
+        let completion = tokio::spawn(async move {
+            provider
+                .complete_streaming(completion_request, Arc::new(RecordingSink(delta_sender)))
+                .await
+        });
+
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), delta_receiver.recv())
+                .await
+                .expect("text delta arrives before terminal event"),
+            Some("hello".to_string())
+        );
+        assert!(
+            !completion.is_finished(),
+            "completion must remain pending until Anthropic sends a terminal event"
+        );
+
+        let request = request_receiver.await.expect("captured request");
+        let (headers, body) = request.split_once("\r\n\r\n").expect("HTTP request");
+        let lowercase_headers = headers.to_ascii_lowercase();
+        assert!(lowercase_headers.contains("x-api-key: test-api-key"));
+        assert!(lowercase_headers.contains("anthropic-version: 2023-06-01"));
+        assert!(!lowercase_headers.contains("authorization:"));
+        assert!(!lowercase_headers.contains("anthropic-beta:"));
+        assert!(headers.starts_with("POST /v1/messages HTTP/1.1"));
+        let body: serde_json::Value = serde_json::from_str(body).expect("request JSON");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["max_tokens"], 8192);
+        assert_eq!(body["stop_sequences"], serde_json::json!(["STOP"]));
+        assert_eq!(body["cache_control"]["type"], "ephemeral");
+
+        terminal_sender.send(()).expect("release terminal event");
+        let response = completion
+            .await
+            .expect("completion task")
+            .expect("completed Anthropic stream");
+        server.await.expect("loopback server");
+        assert_eq!(response.content, "hello");
+        assert_eq!(response.finish_reason, FinishReason::Stop);
+        assert_eq!(response.input_tokens, 2);
+        assert_eq!(response.output_tokens, 1);
     }
 
     #[test]

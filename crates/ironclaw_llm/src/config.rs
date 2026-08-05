@@ -16,8 +16,8 @@ use ironclaw_common::paths::ironclaw_base_dir;
 
 /// Sentinel value used as `api_key` when only an OAuth token is present.
 ///
-/// When we only have an OAuth token the provider factory in `llm/mod.rs`
-/// checks for this value and routes to `AnthropicOAuthProvider`, so this
+/// When we only have an OAuth token the provider factory in `lib.rs`
+/// checks for this value and routes to the direct Anthropic provider, so this
 /// placeholder is never sent over the wire.
 pub const OAUTH_PLACEHOLDER: &str = "oauth-placeholder";
 

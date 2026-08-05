@@ -24,11 +24,11 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `failover.rs` | `FailoverProvider` — tries providers in order with per-provider cooldown |
 | `response_cache.rs` | In-memory LLM response cache with TTL and LRU eviction (keyed by SHA-256) |
 | (cost table moved) | The per-model cost table + usage pricing now lives in `ironclaw_common::llm_costs` (shared by every surface that reports cost). Providers import it as `use ironclaw_common::llm_costs as costs;`. |
-| `rig_adapter.rs` | Adapter bridging rig-core `CompletionModel` → `LlmProvider`; used by OpenAI, Anthropic, Ollama, Tinfoil |
+| `rig_adapter.rs` | Adapter bridging rig-core `CompletionModel` → `LlmProvider`; used by OpenAI-compatible, Ollama, and Tinfoil providers |
 | `smart_routing.rs` | `SmartRoutingProvider` — 13-dimension complexity scorer routes cheap vs primary model |
 | `recording.rs` | `RecordingLlm` — trace capture for E2E replay testing (`IRONCLAW_RECORD_TRACE`) |
 | `bedrock.rs` | AWS Bedrock provider via native Converse API (feature-gated: `--features bedrock`) |
-| `anthropic_oauth.rs` | Anthropic OAuth provider (Claude.ai subscription / OAuth tokens, fallback when no API key) |
+| `anthropic_oauth.rs` | Direct Anthropic Messages API provider shared by API-key and Claude.ai OAuth authentication |
 | `gemini_oauth.rs` | Gemini OAuth provider (Cloud OAuth credentials → `generativelanguage.googleapis.com`) |
 | `github_copilot.rs` | GitHub Copilot Chat provider (uses dedicated reqwest client, not `RigAdapter`) |
 | `github_copilot_auth.rs` | Copilot session-token exchange and refresh (`CopilotTokenManager`) |
@@ -337,7 +337,7 @@ Providers in this crate import it as `use ironclaw_common::llm_costs as costs;`
 
 ## rig_adapter.rs Details
 
-`RigAdapter<M>` bridges any rig-core `CompletionModel` to `LlmProvider`. It is actively used in production for all non-NEAR AI providers (OpenAI, Anthropic, Ollama, Tinfoil, OpenAI-compatible). Key behaviors:
+`RigAdapter<M>` bridges rig-core `CompletionModel` implementations to `LlmProvider`. It is actively used in production for OpenAI-compatible, Ollama, Tinfoil, DeepSeek, Gemini, and OpenRouter providers. Anthropic uses the direct Messages API provider so API-key and OAuth authentication share authoritative SSE terminal handling. Key behaviors:
 - **Per-request model overrides** are forwarded through rig-core's typed request model field, preserving one serialized top-level `model` key.
 - **OpenAI strict-mode schema normalization** is applied to all tool definitions: `additionalProperties: false`, all properties added to `required`, optional fields made nullable via `"type": ["T", "null"]`. This happens transparently at the provider boundary.
 - **System messages** are extracted into the rig-core `preamble` field (concatenated with newlines if multiple).
@@ -347,7 +347,7 @@ Providers in this crate import it as `use ironclaw_common::llm_costs as costs;`
 
 ## Streaming Support
 
-`LlmProvider` exposes `complete_streaming()` and `complete_with_tools_streaming()` for provider text deltas. Native streaming is enabled only where IronClaw can observe an authoritative terminal event: NEAR AI, Anthropic OAuth, and Codex Responses. Rig-backed OpenAI Chat Completions and Anthropic API-key providers retain the buffered trait fallback because rig-core 0.33 synthesizes its final response after EOF, so IronClaw cannot distinguish completion from truncation. Other unvalidated providers also remain buffered, including custom OpenAI-compatible endpoints, Gemini OAuth, GitHub Copilot, Bedrock, and Rig-backed Ollama, DeepSeek, OpenRouter, and native Gemini.
+`LlmProvider` exposes `complete_streaming()` and `complete_with_tools_streaming()` for provider text deltas. Native streaming is enabled only where IronClaw can observe an authoritative terminal event: NEAR AI, direct Anthropic Messages API requests (API key and OAuth), and Codex Responses. Rig-backed OpenAI Chat Completions retains the buffered trait fallback because rig-core 0.33 synthesizes its final response after EOF, so IronClaw cannot distinguish completion from truncation. Other unvalidated providers also remain buffered, including custom OpenAI-compatible endpoints, Gemini OAuth, GitHub Copilot, Bedrock, and Rig-backed Ollama, DeepSeek, OpenRouter, and native Gemini.
 
 Text deltas are advisory UI progress; the returned response remains authoritative for text, tool calls, finish reason, reasoning artifacts, and usage. Provider decorators must forward both streaming methods. Retry or failover must not append a replacement after visible partial text unless the sink advertises atomic text-replacement support. The response cache bypasses lookup for streaming calls because a stored response cannot reproduce provider deltas honestly.
 
