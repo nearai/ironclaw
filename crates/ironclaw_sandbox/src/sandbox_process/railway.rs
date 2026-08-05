@@ -665,7 +665,8 @@ impl RailwayCli for SystemRailwayCli {
                 }
             };
             let (stdout, stderr, status) = tokio::join!(stdout, stderr, child.wait());
-            let status = status.map_err(|_| {
+            let status = status.map_err(|error| {
+                tracing::error!(?error, "trusted Railway CLI process wait failed");
                 RuntimeProcessError::ExecutionFailed(
                     "Railway preview CLI command did not complete".to_string(),
                 )
@@ -970,7 +971,11 @@ fn reject_nul(label: &str, value: &str) -> Result<(), RuntimeProcessError> {
 }
 
 fn parse_sandbox_id(stdout: &str) -> Result<String, RuntimeProcessError> {
-    let value: serde_json::Value = serde_json::from_str(stdout).map_err(|_| {
+    let value: serde_json::Value = serde_json::from_str(stdout).map_err(|error| {
+        tracing::error!(
+            ?error,
+            "Railway preview sandbox creation returned invalid JSON"
+        );
         RuntimeProcessError::ExecutionFailed(
             "Railway preview sandbox creation returned an invalid response".into(),
         )
@@ -994,7 +999,11 @@ fn parse_sandbox_id(stdout: &str) -> Result<String, RuntimeProcessError> {
 }
 
 fn checkpoint_exists(stdout: &str, checkpoint_name: &str) -> Result<bool, RuntimeProcessError> {
-    let value: serde_json::Value = serde_json::from_str(stdout).map_err(|_| {
+    let value: serde_json::Value = serde_json::from_str(stdout).map_err(|error| {
+        tracing::error!(
+            ?error,
+            "Railway preview checkpoint listing returned invalid JSON"
+        );
         RuntimeProcessError::ExecutionFailed(
             "Railway preview checkpoint listing returned an invalid response".into(),
         )
@@ -1021,7 +1030,11 @@ fn checkpoint_exists(stdout: &str, checkpoint_name: &str) -> Result<bool, Runtim
 }
 
 fn sandbox_exists(stdout: &str, sandbox_id: &str) -> Result<bool, RuntimeProcessError> {
-    let value: serde_json::Value = serde_json::from_str(stdout).map_err(|_| {
+    let value: serde_json::Value = serde_json::from_str(stdout).map_err(|error| {
+        tracing::error!(
+            ?error,
+            "Railway preview sandbox listing returned invalid JSON"
+        );
         RuntimeProcessError::ExecutionFailed(
             "Railway preview sandbox listing returned an invalid response".into(),
         )
@@ -1061,7 +1074,11 @@ fn parse_exit_sentinel(stdout: String) -> Result<(String, i32), RuntimeProcessEr
         .unwrap_or(stdout.len());
     let code = stdout[status_start..status_end]
         .parse::<i32>()
-        .map_err(|_| {
+        .map_err(|error| {
+            tracing::error!(
+                ?error,
+                "Railway preview command returned invalid exit status"
+            );
             RuntimeProcessError::ExecutionFailed(
                 "Railway preview command returned an invalid exit status".into(),
             )
@@ -1112,7 +1129,8 @@ where
     let mut truncated = false;
     let mut buffer = [0_u8; 8192];
     loop {
-        let read = stream.read(&mut buffer).await.map_err(|_| {
+        let read = stream.read(&mut buffer).await.map_err(|error| {
+            tracing::error!(?error, "trusted Railway CLI output read failed");
             RuntimeProcessError::ExecutionFailed(
                 "Railway preview could not read trusted CLI output".into(),
             )
