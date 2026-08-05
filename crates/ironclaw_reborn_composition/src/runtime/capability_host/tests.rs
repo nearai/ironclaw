@@ -2522,12 +2522,19 @@ mod tests {
             Some("string"),
             "the advertised input must be a single skill name, not an array"
         );
+        // `names` must NOT be advertised. `parse_skill_activate_names` still ACCEPTS a legacy
+        // `names` array so an in-flight caller or a recorded trace does not hard-fail, but
+        // advertising it is what invited the multi-skill calls the measurement above counted.
+        // This assertion previously required the opposite and contradicted the `skill`-is-a-string
+        // one directly above it -- a leftover from before the schema was narrowed.
         assert!(
             descriptor
                 .parameters_schema
                 .get("properties")
                 .and_then(|properties| properties.get("names"))
-                .is_some()
+                .is_none(),
+            "a legacy `names` array is accepted but must not be advertised, or the model is \
+             invited back into the shape that produced every wrong activation"
         );
         let tool_definition = port
             .tool_definitions()

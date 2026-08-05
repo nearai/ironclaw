@@ -635,16 +635,18 @@ where
         // Same rule on the active-plan path: only short-circuit to bodies when something is
         // actually active, otherwise fall through to the listing so the model can still see
         // what it could activate.
-        if self.config.injection_mode == SkillInjectionMode::Full
-            && plan
-                .as_ref()
-                .is_some_and(|plan| !plan.selection.activations.is_empty())
-        {
-            let plan = plan.expect("checked above");
+        // Bound by pattern rather than re-`expect`ed after an `is_some_and` guard: the two forms
+        // are equivalent today, and only one of them stays correct if the condition is ever
+        // edited. `check_no_panics.py` flags the other for exactly that reason.
+        let active_full_plan = plan.as_ref().filter(|plan| {
+            self.config.injection_mode == SkillInjectionMode::Full
+                && !plan.selection.activations.is_empty()
+        });
+        if let Some(plan) = active_full_plan {
             let candidate_set = self
-                .load_active_plan_candidate_set(run_context, &plan)
+                .load_active_plan_candidate_set(run_context, plan)
                 .await?;
-            return Ok(context_candidates_for_plan(&plan, candidate_set.candidates));
+            return Ok(context_candidates_for_plan(plan, candidate_set.candidates));
         }
         // Listing mode: full bodies only for explicitly-mentioned or
         // model-selected activations; every other visible skill contributes a
