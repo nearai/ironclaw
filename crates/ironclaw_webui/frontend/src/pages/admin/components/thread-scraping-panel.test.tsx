@@ -133,11 +133,12 @@ test("switching target users discards the previous user's pending artifact", asy
         </I18nProvider>,
       );
     });
-    await act(async () => {
-      container
-        .querySelector<HTMLButtonElement>('[data-testid="admin-thread-scraping-thread"]')
-        ?.click();
-    });
+    const threadButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="admin-thread-scraping-thread"]',
+    );
+    assert.ok(threadButton, "the first user's thread renders");
+    await act(async () => threadButton.click());
+    assert.deepEqual(requests.fetchArtifact.mock.calls, [["user-one", "thread-one"]]);
 
     await act(async () => {
       root.render(
