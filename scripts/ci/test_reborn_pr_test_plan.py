@@ -160,7 +160,7 @@ def real_owner_metadata() -> dict:
         ),
         package(
             "ironclaw_extension_host",
-            "crates/ironclaw_extension_host/Cargo.toml",
+            "crates/extensions/ironclaw_extension_host/Cargo.toml",
             ("ironclaw_extension_support",),
         ),
         package(

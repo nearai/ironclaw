@@ -22,7 +22,7 @@ branch_percent = 0.0
 # review_after = "2026-10-30"
 
 [[exemption]]
-path = "crates/ironclaw_host_api/src/capability.rs"
+path = "crates/contracts/ironclaw_host_api/src/capability.rs"
 lines = [256]
 owner = "@nearai/runtime"
 reason = "Serde-backed struct field declaration has no executable LLVM line record."
@@ -30,7 +30,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_host_runtime/src/capability_catalog.rs"
+path = "crates/kernel/ironclaw_host_runtime/src/capability_catalog.rs"
 lines = [145, 146, 147, 149, 154, 155, 156, 158, 161, 162, 163, 164]
 owner = "@nearai/runtime"
 reason = "Fail-closed guards cover impossible invalid host-compiled schema states behind the typed standard schema ref constructor."
@@ -38,7 +38,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_host_runtime/src/standard_op_output.rs"
+path = "crates/kernel/ironclaw_host_runtime/src/standard_op_output.rs"
 lines = [91]
 branch_lines = [86]
 owner = "@nearai/runtime"
@@ -47,7 +47,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_host_runtime/src/surface.rs"
+path = "crates/kernel/ironclaw_host_runtime/src/surface.rs"
 lines = [386, 387, 390]
 owner = "@nearai/runtime"
 reason = "Fail-closed JSON parse guard is unreachable because resolution returns only compile-checked host schema constants."

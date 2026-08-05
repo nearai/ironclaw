@@ -5,7 +5,7 @@
 //! leaks. The WASM tool never sees the actual token.
 //!
 //! Every op shapes its output into the standardized messaging framework's
-//! canonical envelopes (`crates/ironclaw_host_api/schemas/messaging/*.json`)
+//! canonical envelopes (`crates/contracts/ironclaw_host_api/schemas/messaging/*.json`)
 //! and maps every Slack failure onto the closed `messaging.*` error
 //! vocabulary — the host validates both post-dispatch, so a shape or code
 //! drift here becomes a model-visible tool failure.
@@ -17,7 +17,7 @@ const SLACK_API_BASE: &str = "https://slack.com/api";
 
 /// Emit the host runtime's structured guest-error contract
 /// (`StructuredWasmGuestError { code, kind }`, parsed in
-/// `crates/ironclaw_host_runtime/src/services/wasm_execution.rs`) so a Slack
+/// `crates/kernel/ironclaw_host_runtime/src/services/wasm_execution.rs`) so a Slack
 /// failure keeps its actionable error code instead of collapsing to a generic
 /// "the tool operation failed". `kind` must be one of the host parser's enum
 /// values: `auth_required` | `input` | `output_too_large` | `executor` |
@@ -85,7 +85,7 @@ fn slack_error_to_standard_code(code: &str) -> &'static str {
 /// The WASM structured-error `kind` for a standard messaging error code,
 /// chosen from the finite set the host actually parses
 /// (`StructuredWasmGuestErrorKind` in
-/// `crates/ironclaw_host_runtime/src/services/wasm_execution.rs:333-343`) —
+/// `crates/kernel/ironclaw_host_runtime/src/services/wasm_execution.rs:333-343`) —
 /// NOT the spec §8 class-column labels verbatim, which do not name real
 /// variants of that enum. `input` covers the invalid-input-class codes
 /// (immediately model-visible; the model can retry with different

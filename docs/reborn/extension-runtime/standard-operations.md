@@ -2,7 +2,7 @@
 
 **Status:** Current (standardized messaging framework).
 **Authority module:** `ironclaw_host_api::messaging`
-(`crates/ironclaw_host_api/src/messaging.rs`).
+(`crates/contracts/ironclaw_host_api/src/messaging.rs`).
 **Design source:** `docs/superpowers/specs/2026-07-27-standardized-messaging-framework-design.md`
 (§§4-8, Appendix A/B). This page condenses that spec into the durable
 reference for anyone binding, calling, or reviewing a standard messaging
@@ -71,7 +71,7 @@ its own op.
 
 `RawToolV3` and the shared `RawCapabilityV2`/`CapabilityDeclV2` carry
 `#[serde(default)] standard_op: Option<StandardMessagingOp>`
-(`crates/ironclaw_extensions/src/v3.rs`, `.../src/v2.rs`). A bound tool's
+(`crates/extensions/ironclaw_extension_registry/src/v3.rs`, `.../src/v2.rs`). A bound tool's
 `input_schema_ref`/`output_schema_ref` are **synthesized by the host at
 parse time**, never author-declared:
 
@@ -96,7 +96,7 @@ nothing re-resolves an existing binding to a newer schema version silently.
 ### The six binding validations (spec §6), fail-closed at manifest parse
 
 Enforced in `parse_v3`'s per-tool loop
-(`crates/ironclaw_extensions/src/v3.rs`); each violation is a
+(`crates/extensions/ironclaw_extension_registry/src/v3.rs`); each violation is a
 `ManifestV3Error::Invalid` (install-time, never a runtime surprise):
 
 1. **Reserved op** → `"standard_op '<name>' is reserved and not yet bindable"`.
@@ -113,7 +113,7 @@ Enforced in `parse_v3`'s per-tool loop
 6. **v2 manifests declaring `standard_op` fail parse** — the field threads
    through the shared raw types, but the v2 reader rejects it explicitly:
    `"standard_op requires manifest schema v3"`
-   (`crates/ironclaw_extensions/src/v2.rs`). `standard_op` is additive,
+   (`crates/extensions/ironclaw_extension_registry/src/v2.rs`). `standard_op` is additive,
    v3-only vocabulary; it does not require a v3 schema *version* bump beyond
    the field's own presence.
 
@@ -134,7 +134,7 @@ MCP tools have no `[[tools]]` entries to carry the field in the first place
 
 Bundled-package asset validation (`validate_bundled_package_assets` /
 `is_standard_op_schema_ref`,
-`crates/ironclaw_extension_host/src/available_extensions.rs:775-778`) checks
+`crates/extensions/ironclaw_extension_host/src/available_extensions.rs:775-778`) checks
 that every manifest-declared schema/prompt ref ships a matching package
 asset file, and exempts `standard:`-prefixed refs from that check by prefix.
 This is not itself a resolvability guarantee — it only means the asset
@@ -210,7 +210,7 @@ the evidence rule structural: a `send_message` that cannot produce a
 capabilities (`standard_op: None`) are never touched by this check. The
 enforcement sits at one choke point
 (`completed_or_output_violation_outcome` in
-`crates/ironclaw_host_runtime/src/production.rs`) shared by every path that
+`crates/kernel/ironclaw_host_runtime/src/production.rs`) shared by every path that
 can complete a capability — invoke, resume, and auth-resume — so it cannot be
 skipped on one entry path while covered on another.
 
@@ -238,7 +238,7 @@ violate the zero-vendor-mechanics scope of the initial rollout.
 The model-visible description of a standard-op tool is
 `<canonical core>\n<vendor addendum>`, composed at descriptor build. The core
 is host-owned static text (`include_str!`-compiled from
-`crates/ironclaw_host_api/prompts/messaging/<op>.core.md`), extension-neutral
+`crates/contracts/ironclaw_host_api/prompts/messaging/<op>.core.md`), extension-neutral
 phrasing ("this extension"); the addendum is the manifest's own `description`
 field on the bound tool, and may be empty. `send_message`'s core additionally
 carries the sibling-fence sentence: reaching other people and places is this
@@ -278,7 +278,7 @@ of the channel these codes actually ride:
 
 - **WASM guests** (Slack, and any future WASM channel extension) return a
   structured error over `StructuredWasmGuestError { code, kind }`
-  (`crates/ironclaw_host_runtime/src/services/wasm_execution.rs`) —
+  (`crates/kernel/ironclaw_host_runtime/src/services/wasm_execution.rs`) —
   **exactly two fields**, sanitized to a `[A-Za-z0-9_.-]{,64}` code and one
   of seven `kind` values (`AuthRequired | Input | OutputTooLarge | Executor |
   NetworkDenied | Client | OperationFailed`, matching
@@ -324,17 +324,17 @@ An extension binding standard ops runs its own protocol tests through these
 helpers. The framework itself is covered at every tier:
 
 - **`ironclaw_extensions` contract tests**
-  (`crates/ironclaw_extensions/tests/manifest_v3_contract.rs`): one rejection
+  (`crates/extensions/ironclaw_extension_registry/tests/manifest_v3_contract.rs`): one rejection
   test per binding validation in §3 (reserved, id mismatch, schema-ref
   present, effects floor, duplicate, v2-declares, MCP-incompatible,
   bespoke-declares-standard-namespace), plus threading and descriptor
   composition tests.
-- **`ironclaw_host_api` unit tests** (`crates/ironclaw_host_api/src/messaging.rs`):
+- **`ironclaw_host_api` unit tests** (`crates/contracts/ironclaw_host_api/src/messaging.rs`):
   wire-token round-trip, registry completeness (exactly 16 core ops carry
   parseable, compiling input+output schemas and a non-empty description
   core), reserved-op count (13), schema-ref resolution, and the 12-code
   error vocabulary.
-- **`ironclaw_host_runtime`** (`crates/ironclaw_host_runtime/src/standard_op_output.rs`):
+- **`ironclaw_host_runtime`** (`crates/kernel/ironclaw_host_runtime/src/standard_op_output.rs`):
   output-validator unit tests (valid output passes; a missing `message_ref`
   fails; the `vendor` key is admitted; a reserved op has nothing to enforce).
 - **Integration** (`tests/integration/extension_runtime.rs`): the full-stack

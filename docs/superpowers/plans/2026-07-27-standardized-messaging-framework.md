@@ -58,11 +58,11 @@ line has drifted, grep the named symbol.**
 ### Task 1: `ironclaw_host_api::messaging` — vocabulary, contracts, error codes
 
 **Files:**
-- Create: `crates/ironclaw_host_api/src/messaging.rs`
-- Create: `crates/ironclaw_host_api/schemas/messaging/<op>.input.v1.json` and
+- Create: `crates/contracts/ironclaw_host_api/src/messaging.rs`
+- Create: `crates/contracts/ironclaw_host_api/schemas/messaging/<op>.input.v1.json` and
   `<op>.output.v1.json` — 32 files, one pair per core op
-- Create: `crates/ironclaw_host_api/prompts/messaging/<op>.core.md` — 16 files
-- Modify: `crates/ironclaw_host_api/src/lib.rs` (module decl + re-exports beside the
+- Create: `crates/contracts/ironclaw_host_api/prompts/messaging/<op>.core.md` — 16 files
+- Modify: `crates/contracts/ironclaw_host_api/src/lib.rs` (module decl + re-exports beside the
   existing `capability`/`channel` modules)
 - Test: `#[cfg(test)]` in `messaging.rs`
 
@@ -321,11 +321,11 @@ fn write_output_schemas_require_evidence() {
 ### Task 2: Manifest v3 `standard_op` binding + parse-time validation
 
 **Files:**
-- Modify: `crates/ironclaw_extensions/src/v3.rs` (`RawToolV3` ~:126-158; per-tool
+- Modify: `crates/extensions/ironclaw_extension_registry/src/v3.rs` (`RawToolV3` ~:126-158; per-tool
   loop ~:440-523 where `RawCapabilityV2` is built ~:484-514)
-- Modify: `crates/ironclaw_extensions/src/v2.rs` (`RawCapabilityV2` ~:1757 area;
+- Modify: `crates/extensions/ironclaw_extension_registry/src/v2.rs` (`RawCapabilityV2` ~:1757 area;
   `CapabilityDeclV2` + `from_raw` ~:1052-1090; empty-description check ~:1073-1076)
-- Test: `crates/ironclaw_extensions/tests/manifest_v3_contract.rs` (helpers:
+- Test: `crates/extensions/ironclaw_extension_registry/tests/manifest_v3_contract.rs` (helpers:
   `ACME_MANIFEST` `:21`, `parse_v3` `:41-43`; mirror neighboring tests)
 
 **Interfaces:**
@@ -450,15 +450,15 @@ if let Some(op) = tool.standard_op {
 ### Task 3: Descriptor threading + description composition
 
 **Files:**
-- Modify: `crates/ironclaw_host_api/src/capability.rs` (`CapabilityDescriptor`
+- Modify: `crates/contracts/ironclaw_host_api/src/capability.rs` (`CapabilityDescriptor`
   ~:168-200 — add the field beside `origin_gate_matrix`)
 - Modify: the decl→descriptor projections — find every site with
-  `rg -n "origin_gate_matrix" crates/ironclaw_extensions/src/lib.rs crates/ironclaw_extension_host/src/active.rs crates/ironclaw_extensions/src/registry.rs crates/ironclaw_extensions/src/installations.rs`
+  `rg -n "origin_gate_matrix" crates/extensions/ironclaw_extension_registry/src/lib.rs crates/extensions/ironclaw_extension_host/src/active.rs crates/extensions/ironclaw_extension_registry/src/registry.rs crates/extensions/ironclaw_extension_registry/src/installations.rs`
   and mirror how `origin_gate_matrix` flows onto `CapabilityDescriptor`
   (known sites: `capability_descriptors_from_manifest`,
-  `crates/ironclaw_extensions/src/lib.rs:703-743`;
-  `crates/ironclaw_extension_host/src/active.rs:64-80`)
-- Test: extend `crates/ironclaw_extensions/tests/manifest_v3_contract.rs` + a
+  `crates/extensions/ironclaw_extension_registry/src/lib.rs:703-743`;
+  `crates/extensions/ironclaw_extension_host/src/active.rs:64-80`)
+- Test: extend `crates/extensions/ironclaw_extension_registry/tests/manifest_v3_contract.rs` + a
   descriptor-level assertion wherever the existing suite pins descriptor fields
 
 **Interfaces:**
@@ -532,12 +532,12 @@ let description = match decl.standard_op.and_then(|op| op.contract()) {
 ### Task 4: `standard:` schema-ref resolution in host_runtime
 
 **Files:**
-- Modify: `crates/ironclaw_host_runtime/src/surface.rs` (`surface_descriptor`
+- Modify: `crates/kernel/ironclaw_host_runtime/src/surface.rs` (`surface_descriptor`
   ~:289-350 — branch beside `resolve_builtin_input_schema_ref` ~:300-315)
-- Modify: `crates/ironclaw_host_runtime/src/capability_catalog.rs`
+- Modify: `crates/kernel/ironclaw_host_runtime/src/capability_catalog.rs`
   (`publish_hot_capability_catalog` schema reads ~:95-113 — same branch)
 - Test: the existing test homes for those files (find with
-  `rg -ln "resolve_builtin_input_schema_ref|publish_hot_capability_catalog" crates/ironclaw_host_runtime/`)
+  `rg -ln "resolve_builtin_input_schema_ref|publish_hot_capability_catalog" crates/kernel/ironclaw_host_runtime/`)
 
 **Interfaces:**
 - Consumes: `resolve_standard_schema_ref` + `STANDARD_SCHEMA_REF_PREFIX` (Task 1);
@@ -591,12 +591,12 @@ if schema_ref.starts_with(ironclaw_host_api::messaging::STANDARD_SCHEMA_REF_PREF
 ### Task 5: Post-dispatch output validation for standard ops
 
 **Files:**
-- Create: `crates/ironclaw_host_runtime/src/standard_op_output.rs`
-- Modify: `crates/ironclaw_host_runtime/src/lib.rs` (module decl)
-- Modify: `crates/ironclaw_host_runtime/src/production.rs` — every path in
+- Create: `crates/kernel/ironclaw_host_runtime/src/standard_op_output.rs`
+- Modify: `crates/kernel/ironclaw_host_runtime/src/lib.rs` (module decl)
+- Modify: `crates/kernel/ironclaw_host_runtime/src/production.rs` — every path in
   `DefaultHostRuntime` that turns a successful `CapabilityDispatchResult` into
   `RuntimeCapabilityOutcome::Completed` (`invoke_capability` ~:480-518 **and** any
-  resume path — enumerate with `rg -n "RuntimeCapabilityCompleted|CapabilityDispatchResult" crates/ironclaw_host_runtime/src/production.rs`;
+  resume path — enumerate with `rg -n "RuntimeCapabilityCompleted|CapabilityDispatchResult" crates/kernel/ironclaw_host_runtime/src/production.rs`;
   apply the check at every site, per the resume-path lesson in
   `.claude/rules/review-discipline.md`)
 - Test: `standard_op_output.rs` `#[cfg(test)]` + the production.rs test home
@@ -652,7 +652,7 @@ fn missing_message_ref_is_a_violation() {
   `RuntimeCapabilityOutcome::Failed` whose sanitized message contains
   `"standard op output failed validation"` and whose failure **kind matches the
   kind wasm `InvalidResult` dispatch errors produce** (locate with
-  `rg -n "InvalidResult" crates/ironclaw_host_runtime/src/production.rs` — this
+  `rg -n "InvalidResult" crates/kernel/ironclaw_host_runtime/src/production.rs` — this
   kind is proven model-visible by the existing loop mapping); a bespoke descriptor
   (`standard_op: None`) with the same output completes untouched.
 
@@ -668,7 +668,7 @@ fn missing_message_ref_is_a_violation() {
   runs the validator and maps the first 3 errors to
   `format!("{} at {}", error, error.instance_path)` strings passed through the same
   schema-path sanitizer the input path uses
-  (`rg -n "safe_schema_path_summary" crates/ironclaw_loop_host/` — if it is not
+  (`rg -n "safe_schema_path_summary" crates/loop/ironclaw_loop_host/` — if it is not
   reachable from host_runtime, replicate its bounded formatting locally: truncate
   each issue to 200 chars, strip values, keep paths).
   In `production.rs`, at each Completed-construction site:
@@ -694,9 +694,9 @@ if let Some(op) = descriptor_standard_op {   // looked up from the registry by c
 ### Task 6: Conformance test-support in `ironclaw_host_api`
 
 **Files:**
-- Create: `crates/ironclaw_host_api/src/test_support/messaging_conformance.rs`
+- Create: `crates/contracts/ironclaw_host_api/src/test_support/messaging_conformance.rs`
   (find the existing test-support home first:
-  `rg -n "test_support|test-support" crates/ironclaw_host_api/Cargo.toml crates/ironclaw_host_api/src/lib.rs`
+  `rg -n "test_support|test-support" crates/contracts/ironclaw_host_api/Cargo.toml crates/contracts/ironclaw_host_api/src/lib.rs`
   — put the module beside the existing tool-adapter conformance helpers and gate it
   exactly the way they are gated; if that gate is a `test-support` feature, add
   `jsonschema` as an optional dependency under it, mirroring how the existing
@@ -946,25 +946,25 @@ async fn bespoke_send_note_coexists_with_standard_ops() {
 ### Task 9: Slack re-badge (manifest + assets + WASM, atomic)
 
 **Files:**
-- Modify: `crates/ironclaw_first_party_extensions/assets/slack/manifest.toml`
+- Modify: `crates/extensions/packages/slack/manifest.toml`
   (all 8 `[[tools]]` entries)
-- Delete: `crates/ironclaw_first_party_extensions/assets/slack/schemas/slack/*.json`
+- Delete: `crates/extensions/packages/slack/schemas/slack/*.json`
   for the 8 ops' inputs + the output/raw files (keep nothing the manifest no longer
   references — verify each file's references first:
-  `rg -n "schemas/slack/" crates/ironclaw_first_party_extensions/`)
-- Modify: `crates/ironclaw_first_party_extensions/src/packages/slack.rs`
+  `rg -n "schemas/slack/" crates/extensions/`)
+- Modify: `crates/extensions/ironclaw_extension_support/src/packages/slack.rs`
   (`assets()` embed list ~:49-75 — remove deleted schema embeds; update the
   "one schema + prompt pair per entry" invariant comment: standard-op entries have
   host-canonical schemas and package prompt docs only)
-- Modify: `crates/ironclaw_first_party_extensions/assets/slack/wasm-src/src/types.rs`
+- Modify: `crates/extensions/packages/slack/wasm-src/src/types.rs`
   (canonical field names), `…/src/api.rs` (canonical outputs + error mapping),
   `…/src/lib.rs` (only if field names appear there)
-- Modify: `crates/ironclaw_first_party_extensions/assets/slack/prompts/slack/*.md`
+- Modify: `crates/extensions/packages/slack/prompts/slack/*.md`
   (trim content now covered by canonical cores; keep vendor-specific notes)
 - Rebuild: `bash scripts/build-wasm-extensions.sh` → commit the updated
   `assets/slack/wasm/slack_user_tool.wasm`
 - Test: `cargo test -p ironclaw_first_party_extensions`; lifecycle projection pins
-  (`rg -ln "send_message" crates/ironclaw_reborn_composition/tests/` — known pin in
+  (`rg -ln "send_message" crates/app/ironclaw_composition/tests/` — known pin in
   `extension_lifecycle.rs`); scripted slack tool inputs across tests
   (`rg -n '"channel"|thread_ts' tests/ crates/ --type rust -l | xargs rg -ln "slack"`)
 
@@ -1032,7 +1032,7 @@ async fn bespoke_send_note_coexists_with_standard_ops() {
 - [ ] **Step 5: Run + fix pins.**
   `cargo test -p ironclaw_first_party_extensions --no-fail-fast`;
   the lifecycle/projection suites found via
-  `rg -ln "send_message" crates/ironclaw_reborn_composition/tests/`;
+  `rg -ln "send_message" crates/app/ironclaw_composition/tests/`;
   `RUST_MIN_STACK=16777216 cargo test --test reborn_integration_extension_delivery`
   and any slack-driving integration targets
   (`rg -ln "slack.send_message\|slack__send_message" tests/integration/`); update
@@ -1104,7 +1104,7 @@ async fn bespoke_send_note_coexists_with_standard_ops() {
   `docs/reborn/extension-runtime/standard-operations.md`). Fix the three stale
   lines while present: `[channel.config]` → `[admin_configuration]` (operator
   fields; there is no `[channel.config]`); "5 `[[tools]]` entries" → 8;
-  `ChannelAdapter` home → `crates/ironclaw_host_api/src/product_adapter/channel_adapter.rs`
+  `ChannelAdapter` home → `crates/contracts/ironclaw_host_api/src/product_adapter/channel_adapter.rs`
   (with `crates/ironclaw_product_adapters` removed). Follow
   `ironclaw-reborn-skill-maintainer` discipline; verify each replacement target
   first with `rg -n "channel.config|product_adapters|5 .\[\[tools\]\]" .claude/skills/reborn-extension-surfaces/SKILL.md`.
@@ -1122,7 +1122,7 @@ async fn bespoke_send_note_coexists_with_standard_ops() {
   and the default lane `cargo clippy --all --tests --examples -- -D warnings`
 - [ ] **Step 3:** `cargo test -p ironclaw_host_api -p ironclaw_extensions -p
   ironclaw_extension_host -p ironclaw_host_runtime -p ironclaw_first_party_extensions
-  -p ironclaw_reborn_composition --no-fail-fast`
+  -p ironclaw_composition --no-fail-fast`
 - [ ] **Step 4:** `cargo test -p ironclaw_architecture`
 - [ ] **Step 5:** the touched integration targets with `RUST_MIN_STACK=16777216`
   (`reborn_integration_extension_runtime`, `…_extension_delivery`, exact names from

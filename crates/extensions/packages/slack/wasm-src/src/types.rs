@@ -2,7 +2,7 @@
 //!
 //! Field names and output shapes mirror the standardized messaging
 //! framework's canonical contracts
-//! (`crates/ironclaw_host_api/schemas/messaging/*.json`) exactly: the host
+//! (`crates/contracts/ironclaw_host_api/schemas/messaging/*.json`) exactly: the host
 //! validates every standard op's input pre-dispatch and its output
 //! post-dispatch against those schemas, so a shape drift here becomes a
 //! model-visible tool failure, not a silent mismatch.
@@ -187,7 +187,7 @@ pub struct ThreadRef {
 }
 
 /// One message, per the standard messaging framework's shared `message`
-/// shape (`crates/ironclaw_host_api/schemas/messaging/get_conversation_history.output.v1.json`
+/// shape (`crates/contracts/ironclaw_host_api/schemas/messaging/get_conversation_history.output.v1.json`
 /// and siblings). Used for history, thread replies, and search matches — the
 /// canonical schema is identical across all three.
 #[derive(Debug, Serialize)]

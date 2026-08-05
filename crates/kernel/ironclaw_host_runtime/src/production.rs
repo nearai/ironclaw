@@ -3071,7 +3071,7 @@ output_schema_ref = "schemas/w1fixture/bespoke.output.v1.json"
         // above) is v2-only; a manifest declaring `standard_op` on `[[tools]]`
         // needs the schema-version-dispatching entry point instead (mirrors
         // `registry_with_slack_user_package` in `github_wasm_runtime_contract.rs`).
-        let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
+        let record = ironclaw_extension_registry::ExtensionManifestRecord::from_toml(
             W1_STANDARD_OP_MIX_MANIFEST,
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),

@@ -77,38 +77,38 @@ own recipient field names, their own error strings. Consequences:
 
 ## 3. Current state (verified anchors)
 
-- **Manifest v3 raw shapes:** `crates/ironclaw_extensions/src/v3.rs` — `RawToolV3`
+- **Manifest v3 raw shapes:** `crates/extensions/ironclaw_extension_registry/src/v3.rs` — `RawToolV3`
   (`:126-158`, `deny_unknown_fields`), per-tool loop `:440-523` building
   `RawCapabilityV2` → `CapabilityDeclV2::from_raw`. Closed-enum precedent: invalid
   enum values fail install-time as `ManifestV3Error::Parse` (`:231-233`).
 - **Resolved record:** `ResolvedExtensionManifest`
-  (`crates/ironclaw_extensions/src/resolved.rs:34-71`) persisted via
+  (`crates/extensions/ironclaw_extension_registry/src/resolved.rs:34-71`) persisted via
   `WireManifestRecord` (`installations.rs:1484-1508`); production never reparses TOML;
   rehydration via `ExtensionManifestRecord::from_resolved` (`installations.rs:216-230`).
 - **Descriptors:** `capability_descriptors_from_manifest`
-  (`crates/ironclaw_extensions/src/lib.rs:703-743`); schema refs become
+  (`crates/extensions/ironclaw_extension_registry/src/lib.rs:703-743`); schema refs become
   `{"$ref": …}` and are dereferenced at
-  `crates/ironclaw_host_runtime/src/surface.rs:289-350`, where **builtin refs already
+  `crates/kernel/ironclaw_host_runtime/src/surface.rs:289-350`, where **builtin refs already
   resolve from compiled-in constants** (`resolve_builtin_input_schema_ref`,
   `:300-315`) — the precedent this design extends.
 - **Input validation exists; output validation does not.** Inputs: loop host
   validates against the resolved schema pre-dispatch
-  (`crates/ironclaw_loop_host/src/capability_port.rs:2611-2636`,
+  (`crates/loop/ironclaw_loop_host/src/capability_port.rs:2611-2636`,
   `capability_port/provider_input.rs`). Outputs: `output_schema_ref` is parsed and
   threaded but **has no consumer**; nothing validates tool output anywhere.
 - **Wire naming:** dotted capability id → `__` wire name
   (`capability_port.rs:3099-3115`); Slack's 8 ids are already exactly
   `slack.<op_name>` for 8 of the 16 core op names, so re-badging changes zero ids.
 - **Structured guest errors exist:** WASM guests may return `{code, kind}`
-  (`crates/ironclaw_host_runtime/src/services/wasm_execution.rs:333-349`), code
+  (`crates/kernel/ironclaw_host_runtime/src/services/wasm_execution.rs:333-349`), code
   sanitized to `[A-Za-z0-9_.-]{,64}` and surfaced on the model-visible cause channel
   — the transport for the standard error taxonomy.
 - **Slack WASM dispatches on capability id already:** single `execute(params,
   context)` entry; `context.capability_id` maps to an internal action
   (`assets/slack/wasm-src/src/lib.rs:171-188`) — the ABI needs no change.
 - **Origin gates, effects, permissions** are existing per-tool machinery
-  (`crates/ironclaw_host_api/src/capability.rs`;
-  `crates/ironclaw_reborn_composition/src/profile_approval_authorization.rs:279-414`)
+  (`crates/contracts/ironclaw_host_api/src/capability.rs`;
+  `crates/app/ironclaw_composition/src/profile_approval_authorization.rs:279-414`)
   and are untouched by this design.
 
 ## 4. The vocabulary
@@ -270,7 +270,7 @@ policy key off `descriptor.standard_op` — never off tool-name strings.
 
 ### 7.3 Resolution
 
-`surface_descriptor` (`crates/ironclaw_host_runtime/src/surface.rs:289-350`) and the
+`surface_descriptor` (`crates/kernel/ironclaw_host_runtime/src/surface.rs:289-350`) and the
 hot-catalog publisher gain one branch beside the builtin resolver: `standard:` refs
 resolve from the compiled-in registry. Description composition (core + addendum)
 happens at descriptor build. Everything downstream — visible-surface assembly, wire
@@ -285,7 +285,7 @@ safe summary naming the top schema issues ("standard op output failed validation
 …"), never a terminal host error — the model can retry or report. Scoped strictly to
 standard ops; bespoke tools keep today's behavior. Home: the host-runtime invoke
 path, beside the existing outcome translation (`DefaultHostRuntime::invoke_capability`
-in `crates/ironclaw_host_runtime/src/production.rs`); exact failure-kind mapping is
+in `crates/kernel/ironclaw_host_runtime/src/production.rs`); exact failure-kind mapping is
 pinned at plan time with a regression test asserting model-visibility.
 
 ## 8. Error taxonomy
@@ -414,7 +414,7 @@ No WebUI changes → no frontend/e2e gate triggered.
 - `.claude/skills/reborn-extension-surfaces`: new subsection on binding standard
   ops; while editing, fix the three known-stale lines (`[channel.config]` →
   `[admin_configuration]`; Slack has 8 tools; `ChannelAdapter` lives at
-  `crates/ironclaw_host_api/src/product_adapter/channel_adapter.rs`). The sibling
+  `crates/contracts/ironclaw_host_api/src/product_adapter/channel_adapter.rs`). The sibling
   project flagged the same lines; whoever lands second takes a trivial doc rebase.
 - This spec's Appendix A/B pin the canonical contracts; the durable normative copy
   lands in `docs/reborn/extension-runtime/` with the implementation.
@@ -435,7 +435,7 @@ No WebUI changes → no frontend/e2e gate triggered.
 ## Appendix A — canonical schemas (16 core ops)
 
 Shared shapes are written once here; each generated schema file
-(`crates/ironclaw_host_api/schemas/messaging/<op>.{input,output}.v1.json`,
+(`crates/contracts/ironclaw_host_api/schemas/messaging/<op>.{input,output}.v1.json`,
 draft-07) inlines them and is self-contained. All inputs
 `additionalProperties: false`. All outputs `additionalProperties: false` plus an
 optional `vendor: object`. `*` = required.

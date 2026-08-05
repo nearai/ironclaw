@@ -9,7 +9,7 @@ Retired 2026-07-28: the standardized messaging framework canonicalized Slack
 tool inputs (`channel`→`conversation`, `thread_ts`→`thread`, `user_id`→`user_ref`,
 `types`→`kinds`, `count`/`sort`→`limit`/`cursor`) and closed every messaging
 input schema (`additionalProperties: false`,
-`crates/ironclaw_host_api/schemas/messaging/*.input.v1.json`). Replayed as
+`crates/contracts/ironclaw_host_api/schemas/messaging/*.input.v1.json`). Replayed as
 recorded, these traces would fail pre-dispatch schema validation instead of
 reaching the provider, so they no longer describe an executable model/tool
 contract.

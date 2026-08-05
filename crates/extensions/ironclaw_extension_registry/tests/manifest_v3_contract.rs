@@ -1556,7 +1556,7 @@ fn bespoke_descriptor_description_is_untouched() {
 // ---------------------------------------------------------------------------
 
 /// Remove the `standard_op` key from every tool object in a serialized
-/// [`ironclaw_extensions::ResolvedExtensionManifest`], simulating a record
+/// [`ironclaw_extension_registry::ResolvedExtensionManifest`], simulating a record
 /// persisted before the field existed. Operates on the live serialized shape
 /// of a *current* record (via `serde_json::Value`) rather than a hand-typed
 /// JSON literal, so the fixture cannot silently drift out of sync as the
@@ -1602,7 +1602,7 @@ fn strip_standard_op_from_tools(resolved_json: &mut serde_json::Value) {
 fn legacy_resolved_record_without_standard_op_rehydrates_to_none() {
     // The zeta fixture (not acme-messenger) deliberately: acme-messenger
     // declares `[runtime] kind = "first_party"`, and `RuntimeKind::FirstParty`
-    // carries `#[serde(skip_deserializing)]` (`crates/ironclaw_host_api/src/runtime.rs`)
+    // carries `#[serde(skip_deserializing)]` (`crates/contracts/ironclaw_host_api/src/runtime.rs`)
     // as an unrelated fail-closed boundary — a descriptor composed from it can
     // never round-trip through raw JSON at all, which would make this pin fail
     // for a reason that has nothing to do with `standard_op`. zeta declares
@@ -1625,7 +1625,7 @@ fn legacy_resolved_record_without_standard_op_rehydrates_to_none() {
     let mut legacy_manifest =
         serde_json::to_value(resolved).expect("serialize current resolved manifest");
     strip_standard_op_from_tools(&mut legacy_manifest);
-    let rehydrated: ironclaw_extensions::ResolvedExtensionManifest =
+    let rehydrated: ironclaw_extension_registry::ResolvedExtensionManifest =
         serde_json::from_value(legacy_manifest)
             .expect("a resolved manifest without standard_op keys must still deserialize");
 

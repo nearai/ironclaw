@@ -46,7 +46,7 @@ zeroize = "1"
 # unconditional (rather than relying solely on the optional `dep:jsonschema`
 # above) so plain `cargo test -p ironclaw_host_api` — no `--features
 # test-support` — still runs this suite, matching
-# crates/ironclaw_host_runtime/Cargo.toml:55. Production output validation
+# crates/kernel/ironclaw_host_runtime/Cargo.toml:55. Production output validation
 # happens in ironclaw_host_runtime (Task 5), not here.
 jsonschema = { version = "0.46", default-features = false }
 rust_decimal_macros = "1"

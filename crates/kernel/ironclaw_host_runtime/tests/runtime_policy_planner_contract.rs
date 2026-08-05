@@ -16,7 +16,7 @@
 //! the planner is downstream and forwards faithfully.
 //!
 //! These tests are integration-tier: they live in
-//! `crates/ironclaw_host_runtime/tests/` so they exercise the
+//! `crates/kernel/ironclaw_host_runtime/tests/` so they exercise the
 //! planner's *public* API and survive private-module refactors.
 
 use ironclaw_host_api::runtime_policy::{

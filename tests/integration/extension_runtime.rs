@@ -274,7 +274,7 @@ async fn acme_standard_ops_group_with_vendor_script(
     // (`ApprovalPolicy::Minimal`), which suppresses BOTH the effect-based and
     // the origin-gate-matrix approval requirement outright (`Minimal => false`
     // in `ProfileApprovalGatePolicy::effects_require_approval`,
-    // `crates/ironclaw_reborn_composition/src/profile_approval_authorization.rs`)
+    // `crates/app/ironclaw_composition/src/profile_approval_authorization.rs`)
     // — an "ask" tool never gates under it regardless of the auto-approve
     // setting, which would make scenario (a)/(b)'s approve→resume proof
     // impossible to drive. Clearing the override falls through to
