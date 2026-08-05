@@ -908,4 +908,11 @@ mod tests {
             assert_eq!(parsed, au);
         }
     }
+
+    #[test]
+    fn legacy_tenant_sandbox_deserializes_to_canonical_user_sandbox() {
+        let parsed: ProcessBackendKind = serde_json::from_str(r#""tenant_sandbox""#).unwrap();
+        assert_eq!(parsed, ProcessBackendKind::UserSandbox);
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), r#""user_sandbox""#);
+    }
 }

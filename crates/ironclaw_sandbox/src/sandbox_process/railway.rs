@@ -45,6 +45,7 @@ const MAX_TRACKED_USERS: usize = 4_096;
 const WORKSPACE_ROOT: &str = "/workspace";
 const RAILWAY_WORKSPACES_ROOT: &str = "/workspace/ironclaw-users";
 const EXIT_SENTINEL: &str = "__IRONCLAW_RAILWAY_PRIVATE_EXIT_CODE__=";
+const CHECKPOINT_FAILURE_WARNING: &str = "[IronClaw warning: command completed, but the Railway workspace checkpoint failed; recent state may not survive sandbox restart.]";
 
 // The complete Docker command arrives as distinct argv values. In particular,
 // the model command is the final argv value and is never interpolated into
@@ -189,6 +190,7 @@ impl RailwayPreviewSandboxTransport {
             .execute_cli(
                 RailwayCliInvocation::new(
                     self.config.cli_path.clone(),
+                    RailwayCliOperation::ListCheckpoints,
                     checkpoint_list_argv(&self.config),
                     PROVIDER_LIST_OUTPUT_LIMIT,
                 ),
@@ -200,6 +202,7 @@ impl RailwayPreviewSandboxTransport {
             .execute_cli(
                 RailwayCliInvocation::new(
                     self.config.cli_path.clone(),
+                    RailwayCliOperation::CreateSandbox,
                     sandbox_create_argv(
                         &self.config,
                         restore_checkpoint.then_some(checkpoint_name.as_str()),
@@ -213,6 +216,7 @@ impl RailwayPreviewSandboxTransport {
         self.execute_cli(
             RailwayCliInvocation::new(
                 self.config.cli_path.clone(),
+                RailwayCliOperation::ExecuteSandboxCommand,
                 sandbox_exec_argv(
                     &self.config,
                     &sandbox_id,
@@ -236,6 +240,7 @@ impl RailwayPreviewSandboxTransport {
             .execute_cli(
                 RailwayCliInvocation::new(
                     self.config.cli_path.clone(),
+                    RailwayCliOperation::ListSandboxes,
                     sandbox_list_argv(&self.config),
                     PROVIDER_LIST_OUTPUT_LIMIT,
                 ),
@@ -261,6 +266,7 @@ impl RailwayPreviewSandboxTransport {
             .execute(
                 RailwayCliInvocation::new(
                     self.config.cli_path.clone(),
+                    RailwayCliOperation::CreateCheckpoint,
                     checkpoint_create_argv(&self.config, sandbox_id, &checkpoint_name(key)),
                     output_limit,
                 ),
@@ -290,6 +296,7 @@ impl RailwayPreviewSandboxTransport {
             .execute(
                 RailwayCliInvocation::new(
                     self.config.cli_path.clone(),
+                    RailwayCliOperation::DestroySandbox,
                     sandbox_destroy_argv(&self.config, sandbox_id),
                     output_limit,
                 ),
@@ -357,6 +364,7 @@ impl SandboxCommandTransport for RailwayPreviewSandboxTransport {
             .execute_cli(
                 RailwayCliInvocation::new(
                     self.config.cli_path.clone(),
+                    RailwayCliOperation::ExecuteSandboxCommand,
                     sandbox_exec_argv(
                         &self.config,
                         &sandbox_id,
@@ -387,8 +395,18 @@ impl SandboxCommandTransport for RailwayPreviewSandboxTransport {
             }
         };
         let (stdout, exit_code) = parse_exit_sentinel(output.stdout)?;
-        self.checkpoint(&key, &sandbox_id, output_limit).await?;
-        let raw_output = combine_output(stdout, output.stderr);
+        let checkpoint_failed = self
+            .checkpoint(&key, &sandbox_id, output_limit)
+            .await
+            .is_err();
+        let mut raw_output = combine_output(stdout, output.stderr);
+        if checkpoint_failed {
+            if !raw_output.is_empty() && !raw_output.ends_with('\n') {
+                raw_output.push('\n');
+            }
+            raw_output.push_str(CHECKPOINT_FAILURE_WARNING);
+            raw_output.push('\n');
+        }
         let output = redact_command_output(raw_output);
         Ok(CommandExecutionOutput {
             output,
@@ -441,6 +459,7 @@ struct UserSandboxState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RailwayCliInvocation {
     program: PathBuf,
+    operation: RailwayCliOperation,
     args: Vec<String>,
     output_limit: usize,
 }
@@ -453,36 +472,9 @@ enum RailwayCliOperation {
     ExecuteSandboxCommand,
     CreateCheckpoint,
     DestroySandbox,
-    Unknown,
 }
 
 impl RailwayCliOperation {
-    fn from_args(args: &[String]) -> Self {
-        match args {
-            [sandbox, checkpoint, list, ..]
-                if sandbox == "sandbox" && checkpoint == "checkpoint" && list == "list" =>
-            {
-                Self::ListCheckpoints
-            }
-            [sandbox, list, ..] if sandbox == "sandbox" && list == "list" => Self::ListSandboxes,
-            [sandbox, create, ..] if sandbox == "sandbox" && create == "create" => {
-                Self::CreateSandbox
-            }
-            [sandbox, exec, ..] if sandbox == "sandbox" && exec == "exec" => {
-                Self::ExecuteSandboxCommand
-            }
-            [sandbox, checkpoint, create, ..]
-                if sandbox == "sandbox" && checkpoint == "checkpoint" && create == "create" =>
-            {
-                Self::CreateCheckpoint
-            }
-            [sandbox, destroy, ..] if sandbox == "sandbox" && destroy == "destroy" => {
-                Self::DestroySandbox
-            }
-            _ => Self::Unknown,
-        }
-    }
-
     fn label(self) -> &'static str {
         match self {
             Self::ListCheckpoints => "list checkpoints",
@@ -491,17 +483,22 @@ impl RailwayCliOperation {
             Self::ExecuteSandboxCommand => "execute sandbox command",
             Self::CreateCheckpoint => "create checkpoint",
             Self::DestroySandbox => "destroy sandbox",
-            Self::Unknown => "run command",
         }
     }
 }
 
 impl RailwayCliInvocation {
-    fn new(program: PathBuf, args: Vec<String>, output_limit: usize) -> Self {
+    fn new(
+        program: PathBuf,
+        operation: RailwayCliOperation,
+        args: Vec<String>,
+        output_limit: usize,
+    ) -> Self {
         // Leave enough headroom for the fixed remote exit sentinel even when
         // the model command emits exactly its requested output cap.
         Self {
             program,
+            operation,
             args,
             output_limit: output_limit.saturating_add(EXIT_SENTINEL.len() + 32),
         }
@@ -528,11 +525,22 @@ struct SystemRailwayCli;
 
 #[derive(Debug)]
 struct PrivateRailwayCliHome {
-    path: PathBuf,
+    path: Option<PathBuf>,
 }
 
 impl PrivateRailwayCliHome {
-    fn create() -> Result<Self, RuntimeProcessError> {
+    async fn create() -> Result<Self, RuntimeProcessError> {
+        tokio::task::spawn_blocking(Self::create_blocking)
+            .await
+            .map_err(|error| {
+                tracing::error!(?error, "Railway CLI private state setup task failed");
+                RuntimeProcessError::ExecutionFailed(
+                    "Railway preview could not create private CLI state".to_string(),
+                )
+            })?
+    }
+
+    fn create_blocking() -> Result<Self, RuntimeProcessError> {
         let path =
             std::env::temp_dir().join(format!("ironclaw-railway-cli-{}", uuid::Uuid::new_v4()));
         #[cfg(unix)]
@@ -569,17 +577,41 @@ impl PrivateRailwayCliHome {
                 "Railway preview could not create private CLI state".to_string(),
             )
         })?;
-        Ok(Self { path })
+        Ok(Self { path: Some(path) })
     }
 
-    fn path(&self) -> &Path {
-        &self.path
+    fn path(&self) -> Result<&Path, RuntimeProcessError> {
+        self.path.as_deref().ok_or_else(|| {
+            RuntimeProcessError::ExecutionFailed(
+                "Railway preview private CLI state is unavailable".to_string(),
+            )
+        })
+    }
+
+    async fn cleanup(mut self) {
+        let Some(path) = self.path.take() else {
+            return;
+        };
+        match tokio::task::spawn_blocking(move || std::fs::remove_dir_all(path)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::debug!(
+                ?error,
+                "best-effort Railway CLI private state cleanup failed"
+            ),
+            Err(error) => tracing::debug!(
+                ?error,
+                "best-effort Railway CLI private state cleanup task failed"
+            ),
+        }
     }
 }
 
 impl Drop for PrivateRailwayCliHome {
     fn drop(&mut self) {
-        if let Err(error) = std::fs::remove_dir_all(&self.path) {
+        let Some(path) = self.path.take() else {
+            return;
+        };
+        if let Err(error) = std::fs::remove_dir_all(path) {
             tracing::debug!(
                 ?error,
                 "best-effort Railway CLI private state cleanup failed"
@@ -596,22 +628,27 @@ impl RailwayCli for SystemRailwayCli {
         timeout: Duration,
     ) -> Result<RailwayCliOutput, RuntimeProcessError> {
         let environment = railway_cli_environment()?;
-        let cli_home = PrivateRailwayCliHome::create()?;
-        let operation = RailwayCliOperation::from_args(&invocation.args);
+        let cli_home = PrivateRailwayCliHome::create().await?;
+        let operation = invocation.operation;
         let mut command = Command::new(&invocation.program);
         command
             .args(&invocation.args)
             .env_clear()
             .envs(&environment)
-            .env("HOME", cli_home.path())
+            .env("HOME", cli_home.path()?)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = command.spawn().map_err(|_| {
-            RuntimeProcessError::ExecutionFailed(
-                "Railway preview could not start the trusted Railway CLI".to_string(),
-            )
-        })?;
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                tracing::error!(?error, "trusted Railway CLI process could not be started");
+                cli_home.cleanup().await;
+                return Err(RuntimeProcessError::ExecutionFailed(
+                    "Railway preview could not start the trusted Railway CLI".to_string(),
+                ));
+            }
+        };
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let result = tokio::time::timeout(timeout, async {
@@ -647,7 +684,7 @@ impl RailwayCli for SystemRailwayCli {
             Ok(RailwayCliOutput { stdout, stderr })
         })
         .await;
-        match result {
+        let result = match result {
             Ok(result) => result,
             Err(_) => {
                 if let Err(error) = child.kill().await {
@@ -658,7 +695,9 @@ impl RailwayCli for SystemRailwayCli {
                 }
                 Err(RuntimeProcessError::Timeout(timeout))
             }
-        }
+        };
+        cli_home.cleanup().await;
+        result
     }
 }
 

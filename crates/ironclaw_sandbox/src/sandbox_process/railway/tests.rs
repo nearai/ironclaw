@@ -23,6 +23,8 @@ struct FakeRailwayCli {
     expired_liveness_checks: AtomicUsize,
     failed_liveness_lists: AtomicUsize,
     failed_worker_execs: AtomicUsize,
+    failed_checkpoint_creates: AtomicUsize,
+    failed_destroys: AtomicUsize,
     malformed_checkpoint_lists: AtomicUsize,
     next_worker_delay_ms: AtomicU64,
     checkpoint_timeouts: Mutex<Vec<Duration>>,
@@ -39,6 +41,8 @@ impl FakeRailwayCli {
             expired_liveness_checks: AtomicUsize::new(0),
             failed_liveness_lists: AtomicUsize::new(0),
             failed_worker_execs: AtomicUsize::new(0),
+            failed_checkpoint_creates: AtomicUsize::new(0),
+            failed_destroys: AtomicUsize::new(0),
             malformed_checkpoint_lists: AtomicUsize::new(0),
             next_worker_delay_ms: AtomicU64::new(0),
             checkpoint_timeouts: Mutex::new(Vec::new()),
@@ -67,6 +71,14 @@ impl FakeRailwayCli {
 
     fn fail_next_worker_exec(&self) {
         self.failed_worker_execs.store(1, Ordering::SeqCst);
+    }
+
+    fn fail_next_checkpoint_create(&self) {
+        self.failed_checkpoint_creates.store(1, Ordering::SeqCst);
+    }
+
+    fn fail_next_destroy(&self) {
+        self.failed_destroys.store(1, Ordering::SeqCst);
     }
 
     fn malform_next_checkpoint_list(&self) {
@@ -168,6 +180,11 @@ impl RailwayCli for FakeRailwayCli {
             .starts_with(&["sandbox".into(), "checkpoint".into(), "create".into()])
         {
             self.checkpoint_timeouts.lock().await.push(timeout);
+            if self.failed_checkpoint_creates.swap(0, Ordering::SeqCst) > 0 {
+                return Err(RuntimeProcessError::ExecutionFailed(
+                    "fake checkpoint create failed".into(),
+                ));
+            }
             let Some(name) = invocation.args.get(3) else {
                 return Err(RuntimeProcessError::ExecutionFailed(
                     "fake checkpoint create has no name".into(),
@@ -202,6 +219,11 @@ impl RailwayCli for FakeRailwayCli {
             && let Some(index) = invocation.args.iter().position(|arg| arg == "--id")
             && let Some(id) = invocation.args.get(index + 1)
         {
+            if self.failed_destroys.swap(0, Ordering::SeqCst) > 0 {
+                return Err(RuntimeProcessError::ExecutionFailed(
+                    "fake sandbox destroy failed".into(),
+                ));
+            }
             self.live_sandboxes.lock().await.remove(id);
         }
         Ok(RailwayCliOutput {
@@ -468,6 +490,19 @@ async fn rejects_request_environment_before_provisioning() {
 }
 
 #[tokio::test]
+async fn rejects_invalid_workdirs_before_provisioning() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
+
+    for workdir in ["/etc", "/workspace/../../etc", "/workspace/bad\0path"] {
+        let mut invalid = request("tenant", "user", "pwd");
+        invalid.workdir = Some(workdir.to_string());
+        assert_rejected(&transport, invalid).await;
+    }
+    assert!(cli.invocations().await.is_empty());
+}
+
+#[tokio::test]
 async fn accepts_production_shell_mount_metadata_without_materializing_it() {
     let cli = Arc::new(FakeRailwayCli::new());
     let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
@@ -572,6 +607,38 @@ async fn failed_remote_worker_is_destroyed_before_return_and_reprovisioned() {
 }
 
 #[tokio::test]
+async fn successful_command_returns_output_with_warning_when_checkpoint_fails() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    cli.fail_next_checkpoint_create();
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli);
+
+    let output = transport
+        .run_command(request("tenant", "user", "echo completed"))
+        .await
+        .expect("command result remains available");
+
+    assert_eq!(output.exit_code, 0);
+    assert!(output.output.contains("command output"));
+    assert!(output.output.contains(CHECKPOINT_FAILURE_WARNING));
+}
+
+#[tokio::test]
+async fn worker_and_cleanup_failure_reports_unconfirmed_remote_cleanup() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    cli.fail_next_worker_exec();
+    cli.fail_next_destroy();
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli);
+
+    assert!(matches!(
+        transport
+            .run_command(request("tenant", "user", "sleep 600"))
+            .await,
+        Err(RuntimeProcessError::ExecutionFailed(message))
+            if message.contains("remote cleanup could not be confirmed")
+    ));
+}
+
+#[tokio::test]
 async fn bounded_stdout_keeps_the_private_exit_sentinel_in_the_tail() {
     let mut stdout = vec![b'x'; 8 * 1024];
     stdout.extend_from_slice(format!("\n{EXIT_SENTINEL}17\n").as_bytes());
@@ -619,10 +686,12 @@ fn cli_child_environment_rejects_ambiguous_auth() {
     assert!(!error.to_string().contains("account-secret"));
 }
 
-#[test]
-fn cli_private_home_is_owner_only_and_removed_on_drop() {
-    let home = PrivateRailwayCliHome::create().expect("private Railway CLI home is created");
-    let path = home.path().to_path_buf();
+#[tokio::test]
+async fn cli_private_home_is_owner_only_and_removed_without_blocking_the_runtime() {
+    let home = PrivateRailwayCliHome::create()
+        .await
+        .expect("private Railway CLI home is created");
+    let path = home.path().unwrap().to_path_buf();
     assert!(path.is_dir());
     #[cfg(unix)]
     {
@@ -636,7 +705,7 @@ fn cli_private_home_is_owner_only_and_removed_on_drop() {
         assert_eq!(mode, 0o700);
     }
 
-    drop(home);
+    home.cleanup().await;
 
     assert!(!path.exists());
 }
@@ -682,6 +751,22 @@ fn sandbox_listing_is_structured_and_fail_closed() {
     );
     assert!(!sandbox_exists(r#"[{"id":"sandbox-2"}]"#, "sandbox-1").unwrap());
     assert!(sandbox_exists("truncated sandbox response", "sandbox-1").is_err());
+}
+
+#[test]
+fn sandbox_creation_response_requires_a_valid_identifier() {
+    assert_eq!(
+        parse_sandbox_id(r#"{"id":"sandbox-1"}"#).unwrap(),
+        "sandbox-1"
+    );
+    for response in [
+        "not-json",
+        r#"{}"#,
+        r#"{"id":""}"#,
+        "{\"id\":\"bad\\u0000id\"}",
+    ] {
+        assert!(parse_sandbox_id(response).is_err(), "response: {response}");
+    }
 }
 
 #[test]

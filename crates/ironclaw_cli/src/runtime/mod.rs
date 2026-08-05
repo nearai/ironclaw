@@ -2748,6 +2748,54 @@ regex_activation_enabled = false
         assert!(!error.to_string().contains("api-token"));
     }
 
+    #[test]
+    fn railway_sandbox_configuration_requires_a_token_through_startup() {
+        let _lock = super::test_env::lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _project = EnvGuard::set("IRONCLAW_REBORN_RAILWAY_PROJECT_ID", "project-test");
+        let _environment =
+            EnvGuard::set("IRONCLAW_REBORN_RAILWAY_ENVIRONMENT_ID", "environment-test");
+        let _project_token = EnvGuard::clear("RAILWAY_TOKEN");
+        let _api_token = EnvGuard::clear("RAILWAY_API_TOKEN");
+        let (_temp, config) =
+            boot_config_with_config_toml("hosted-single-tenant-volume-sandboxed-railway", "");
+
+        let error = match build_runtime_input(&config, RuntimeInputCaller::Run) {
+            Ok(_) => panic!("missing Railway auth must fail startup closed"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("RAILWAY_TOKEN or RAILWAY_API_TOKEN is required")
+        );
+    }
+
+    #[test]
+    fn railway_sandbox_idle_timeout_must_be_numeric() {
+        let _lock = super::test_env::lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _project = EnvGuard::set("IRONCLAW_REBORN_RAILWAY_PROJECT_ID", "project-test");
+        let _environment =
+            EnvGuard::set("IRONCLAW_REBORN_RAILWAY_ENVIRONMENT_ID", "environment-test");
+        let _project_token = EnvGuard::set("RAILWAY_TOKEN", "project-token");
+        let _api_token = EnvGuard::clear("RAILWAY_API_TOKEN");
+        let _timeout = EnvGuard::set(
+            "IRONCLAW_REBORN_RAILWAY_IDLE_TIMEOUT_MINUTES",
+            "not-a-number",
+        );
+        let (_temp, config) =
+            boot_config_with_config_toml("hosted-single-tenant-volume-sandboxed-railway", "");
+
+        let error = match build_runtime_input(&config, RuntimeInputCaller::Run) {
+            Ok(_) => panic!("malformed Railway idle timeout must fail startup closed"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains(
+            "IRONCLAW_REBORN_RAILWAY_IDLE_TIMEOUT_MINUTES must be an integer from 1 to 65535"
+        ));
+    }
+
     fn boot_config_with_config_toml(
         profile: &str,
         config_toml: &str,

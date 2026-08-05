@@ -805,6 +805,19 @@ mod tests {
     }
 
     #[test]
+    fn user_sandbox_policy_fails_closed_without_a_shell_grant() {
+        let mut policy = builtin_capability_policy().expect("policy parses");
+        policy.grants.retain(|grant| {
+            grant.capability.as_str() != ironclaw_host_runtime::SHELL_CAPABILITY_ID
+        });
+
+        assert!(matches!(
+            policy.for_process_backend(ProcessBackendKind::UserSandbox),
+            Err(BuiltinCapabilityPolicyError::MissingShellGrant)
+        ));
+    }
+
+    #[test]
     fn network_effect_grants_use_non_empty_network_policy() {
         let policy = builtin_capability_policy().expect("policy parses");
 

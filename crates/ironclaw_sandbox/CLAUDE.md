@@ -72,21 +72,16 @@ through `SandboxCommandTransport`; the script-runtime lane remains separate.
   spawning through the transport seam; the merge colocated the two halves that
   makes that possible but did **not** perform the rewiring, because that is a
   behavior change and this was a move.
-- **The Docker fail-closed switch is wired to nothing — issue #7081
-  (pre-existing, inherited with the move).** `tests/support/docker_gate.rs` says
+- **The Docker fail-closed switch is lane-specific — follow-up to issue #7081.**
+  `tests/support/docker_gate.rs` says
   `IRONCLAW_REQUIRE_DOCKER_TESTS=1` is what turns a missing daemon or image from
-  a silent skip into a hard failure, and that "CI sets this". **Nothing sets
-  it.** Stated as the search that checks it: no workflow, script, env file or
-  manifest mentions the name at all —
-  `git grep IRONCLAW_REQUIRE_DOCKER_TESTS -- '*.yml' '*.yaml' '*.sh' '*.toml' '*.py' '*.json' '.env*'`
-  is empty in this tree **and** on `main` — and the sole code reference is a
-  **read**, `std::env::var("IRONCLAW_REQUIRE_DOCKER_TESTS")` at
-  `docker_gate.rs:23`. Every other occurrence (here, `docker_security.rs`,
-  `attribution_tests.rs`, the rest of `docker_gate.rs`) is a doc comment or a
-  panic message. So every real-Docker test in this crate skips-and-
-  passes everywhere, which is the exact gap the gate's own comment says let
-  sandbox security bugs ship unnoticed. Guardrail-claim-vs-reality, the #6945
-  class. The fix has two halves and **only one of them is here**:
+  a visible skip into a hard failure. The `sandbox-docker-tests` CI job now sets
+  the switch and provisions the worker image, so that lane fails closed. Other
+  jobs and ad-hoc local runs leave the switch unset and continue to print a
+  visible skip when Docker or the worker image is unavailable. The wiring can
+  be audited with:
+  `git grep IRONCLAW_REQUIRE_DOCKER_TESTS -- '*.yml' '*.yaml' '*.sh' '*.toml' '*.py' '*.json' '.env*'`.
+  The implementation history has two parts:
   - ✅ **Done (2026-08-03, #7065):** `tests/docker_security.rs` used to bypass
     the gate entirely — it open-coded its own `docker version` check and three
     `return`s, so it would have stayed fail-open even once something set the
@@ -95,14 +90,10 @@ through `SandboxCommandTransport`; the script-runtime lane remains separate.
     `SKIP:` line. With the variable unset — i.e. everywhere today — this is a
     no-op: the daemon-down path already reached the image check and skipped
     there.
-  - ❌ **Open (#7081):** nothing sets `IRONCLAW_REQUIRE_DOCKER_TESTS=1`, so the
-    switch is still inert and the whole family still skips-and-passes. Arming it
-    is a CI-behavior change — it hard-fails any lane lacking a daemon or the
-    `ironclaw-worker` image — and needs a runner that is guaranteed to have
-    both. Deliberately not made inside a move PR. Note the required Rust e2e
-    lane (`scripts/reborn-e2e-rust.sh`) runs `docker_security` as of WS3, which
-    is strictly more coverage than before (it was in no lane); it will assert
-    rather than skip the moment #7081 lands.
+  - ✅ **Done in the sandbox PR1 lane:** `sandbox-docker-tests` sets
+    `IRONCLAW_REQUIRE_DOCKER_TESTS=1` and builds the exact worker image before
+    running the Docker-backed profile and full-turn tests. Tests outside that
+    lane remain intentionally optional unless an operator sets the switch.
 - **No budget authority (#7067, 2026-08-04).** The lane takes
   `ironclaw_host_api::resource::RuntimeResourceBudget` — reserve / reconcile /
   release, and nothing else — never `ResourceGovernor`. The kernel implements
