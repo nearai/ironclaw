@@ -276,6 +276,7 @@ async fn invoke_filtered_batch(
     let mut slots: Vec<Option<Resolution>> = Vec::with_capacity(request.invocations.len());
     let mut allowed = Vec::new();
     let mut allowed_idx = Vec::new();
+    let stop_on_first_suspension = request.stop_on_first_suspension;
 
     for (index, invocation) in request.invocations.iter().enumerate() {
         if permits(invocation)? {
@@ -303,6 +304,14 @@ async fn invoke_filtered_batch(
         return Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::Internal,
             "capability surface filter received too many inner outcomes",
+        ));
+    }
+    if stopped_on_suspension
+        && (!stop_on_first_suspension || !inner_outcomes.last().is_some_and(Resolution::parks))
+    {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            "capability surface filter received invalid inner suspension state",
         ));
     }
     if !stopped_on_suspension && inner_outcomes.len() < allowed_idx.len() {
@@ -1505,7 +1514,7 @@ mod tests {
         let inner = Arc::new(SpyPort::default());
         *inner.batch_outcome.lock().expect("batch outcome lock") =
             Some(ironclaw_host_api::resolution::ResolutionBatch {
-                resolutions: vec![completed("result:first"), completed("result:second")],
+                resolutions: vec![completed("result:first"), approval_required("gate:second")],
                 stopped_on_suspension: true,
             });
         let filter = CapabilitySurfacePolicyFilter::new(
@@ -1536,6 +1545,74 @@ mod tests {
             Some("surface_profile_denied")
         );
         assert!(outcome.stopped_on_suspension);
+    }
+
+    #[tokio::test]
+    async fn inner_suspension_without_requested_early_stop_is_rejected() {
+        let inner = Arc::new(SpyPort::default());
+        *inner.batch_outcome.lock().expect("batch outcome lock") =
+            Some(ironclaw_host_api::resolution::ResolutionBatch {
+                resolutions: vec![approval_required("gate:first")],
+                stopped_on_suspension: true,
+            });
+        let filter = CapabilitySurfacePolicyFilter::new(
+            inner,
+            Arc::new(CapabilitySurfacePolicy::allow_only([
+                capability_id("demo.first"),
+                capability_id("demo.second"),
+            ])),
+        );
+
+        let error = filter
+            .invoke_capability_batch(LoopRequestBatch {
+                invocations: vec![
+                    invocation("demo.first", "input:first"),
+                    invocation("demo.second", "input:second"),
+                ],
+                stop_on_first_suspension: false,
+            })
+            .await
+            .expect_err("inner suspension requires a caller-requested early stop");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
+        assert_eq!(
+            error.safe_summary,
+            "capability surface filter received invalid inner suspension state"
+        );
+    }
+
+    #[tokio::test]
+    async fn inner_suspension_requires_a_final_parking_resolution() {
+        let inner = Arc::new(SpyPort::default());
+        *inner.batch_outcome.lock().expect("batch outcome lock") =
+            Some(ironclaw_host_api::resolution::ResolutionBatch {
+                resolutions: vec![completed("result:first")],
+                stopped_on_suspension: true,
+            });
+        let filter = CapabilitySurfacePolicyFilter::new(
+            inner,
+            Arc::new(CapabilitySurfacePolicy::allow_only([
+                capability_id("demo.first"),
+                capability_id("demo.second"),
+            ])),
+        );
+
+        let error = filter
+            .invoke_capability_batch(LoopRequestBatch {
+                invocations: vec![
+                    invocation("demo.first", "input:first"),
+                    invocation("demo.second", "input:second"),
+                ],
+                stop_on_first_suspension: true,
+            })
+            .await
+            .expect_err("inner suspension must end with a parking resolution");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
+        assert_eq!(
+            error.safe_summary,
+            "capability surface filter received invalid inner suspension state"
+        );
     }
 
     #[tokio::test]
