@@ -824,7 +824,11 @@ test("canStealFocus takes focus from the control that navigated here", () => {
 
 test("ChatInput focuses restored drafts only when composer identity changes", () => {
   const { render, windowStub } = renderChatInputStateful({
-    getDraftByKey: { "thread-a": "first", "thread-b": "restored draft" },
+    getDraftByKey: {
+      "thread-a": "first",
+      "thread-b": "restored draft",
+      "thread-e": "history restored",
+    },
   });
   const focusCalls = [];
   const composer = {
@@ -859,11 +863,16 @@ test("ChatInput focuses restored drafts only when composer identity changes", ()
   render({ draftKey: "thread-d", resetKey: "route-d" });
   assert.deepStrictEqual(focusCalls, ["focus", [14, 14]]);
 
-  // Already typing in the composer (same-route id adoption after the first
-  // send): keep focus, but do not yank the caret out from under the user.
+  // Browser history can leave the mounted composer focused while restoring a
+  // different route's draft. Its stale selection still moves to the new end.
   windowStub.document.activeElement = composer;
   render({ draftKey: "thread-e", resetKey: "route-e" });
-  assert.deepStrictEqual(focusCalls, ["focus", [14, 14]]);
+  assert.deepStrictEqual(focusCalls, ["focus", [14, 14], [16, 16]]);
+
+  // The first reply can adopt its thread id without changing location. Keep
+  // the user's active selection in that same-route case.
+  render({ draftKey: "thread-e-adopted", resetKey: "route-e" });
+  assert.deepStrictEqual(focusCalls, ["focus", [14, 14], [16, 16]]);
 });
 
 test("ChatInput focuses a handed-off landing draft with the caret at its end", () => {

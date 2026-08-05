@@ -53,8 +53,8 @@ export function ChatInput({
   const [isCancelling, setIsCancelling] = React.useState(false);
   const [dragOver, setDragOver] = React.useState(false);
   const textRef = React.useRef(text);
-  const currentDraftKeyRef = React.useRef(draftKey);
-  currentDraftKeyRef.current = draftKey;
+  const currentDraftContextRef = React.useRef({ draftKey, resetKey });
+  currentDraftContextRef.current.draftKey = draftKey;
   const textareaRef = React.useRef(null);
   const fileInputRef = React.useRef(null);
   const sendBlockedRef = React.useRef(false);
@@ -214,6 +214,8 @@ export function ChatInput({
   // route remount) and on the landing-hero draft hand-off. The rAF defers past
   // the restore effects above, so the caret lands after restored text.
   React.useEffect(() => {
+    const locationChanged = currentDraftContextRef.current.resetKey !== resetKey;
+    currentDraftContextRef.current.resetKey = resetKey;
     if (disabled) return;
     if (!shouldAutoFocusComposer(window)) return;
     window.requestAnimationFrame(() => {
@@ -221,11 +223,12 @@ export function ChatInput({
       if (!node) return;
       const active = window.document.activeElement;
       if (!canStealFocus(active, node)) return;
-      // Already typing here (a same-route navigation, e.g. the first reply
-      // adopting a thread id): keep focus, but leave the caret where the user
-      // put it instead of yanking it to the end mid-edit.
-      if (active === node) return;
-      node.focus();
+      // A draft-key-only change is the first reply adopting its thread id, so
+      // preserve an active user's selection. A location change means browser
+      // navigation restored a different draft into this still-mounted node;
+      // in that case its old selection is stale even when it retained focus.
+      if (active === node && !locationChanged) return;
+      if (active !== node) node.focus();
       const end = textRef.current.length;
       node.setSelectionRange(end, end);
     });
@@ -340,7 +343,8 @@ export function ChatInput({
     if (textareaRef.current) textareaRef.current.style.height = "auto";
     const restoreSubmittedDraft = () => {
       const scopeUnchanged = authScope() === submittedScope;
-      const draftKeyUnchanged = currentDraftKeyRef.current === submittedDraftKey;
+      const draftKeyUnchanged =
+        currentDraftContextRef.current.draftKey === submittedDraftKey;
       if (!scopeUnchanged) return;
       const shouldRestoreActiveText = draftKeyUnchanged && textRef.current === "";
       if (shouldRestoreActiveText) {
