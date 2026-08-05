@@ -622,7 +622,10 @@ class RebornPrTestPlanTests(unittest.TestCase):
         # Both the historical root location and the current crate-owned one
         # (CHECKLIST WS4 moved `wit/` inside `ironclaw_wasm`) must delegate,
         # so a real `crates/ironclaw_wasm/wit/*.wit` change never falls
-        # through to `ironclaw_wasm`'s own production-package lane.
+        # through to `ironclaw_wasm`'s own production-package lane. The
+        # crate-owned prefix is resolved through the crate inventory
+        # (`_wasm_wit_prefix`), not a hardcoded literal — mirroring
+        # `test_frontend_change_is_owned_by_code_style_with_baseline_qa_replay`.
         for path in (
             "wit/tool.wit",
             "wit/channel.wit",
@@ -644,19 +647,60 @@ class RebornPrTestPlanTests(unittest.TestCase):
                     [f"Platform & Compat owns WIT compatibility: {path}"],
                 )
 
-    def test_wit_and_crate_change_keeps_package_dependency_closure(self) -> None:
-        plan = self.plan(
-            "pull_request",
-            ["wit/tool.wit", "crates/alpha/src/lib.rs"],
+    def test_wasm_wit_near_miss_resolves_normally(self) -> None:
+        """A path that merely looks like the WIT directory must not match.
+
+        `crates/ironclaw_wasm/witless/notes.txt` shares the
+        `crates/ironclaw_wasm/wit` characters as a prefix but sits outside
+        the resolved WIT directory (`wit` here is a sibling directory name,
+        not `wit/`), so it must fall through to `ironclaw_wasm`'s own
+        production-package lane like any other file in the crate — the same
+        near-miss shape the frontend-prefix tests pin for
+        `_webui_frontend_prefix`. Uses `ironclaw_wasm`'s real manifest path
+        (rather than the `alpha`/`beta`/`gamma` fixture) since
+        `_wasm_wit_prefix` resolves the crate through the live repo tree.
+        """
+        wasm_metadata = metadata()
+        wasm_metadata["workspace_members"].append("wasm")
+        wasm_metadata["packages"].append(
+            {
+                "id": "wasm",
+                "name": "ironclaw_wasm",
+                "manifest_path": str(ROOT / "crates/ironclaw_wasm/Cargo.toml"),
+            }
+        )
+        wasm_metadata["resolve"]["nodes"].append({"id": "wasm", "deps": []})
+
+        plan = planner.build_plan(
+            event="pull_request",
+            changed_paths=["crates/ironclaw_wasm/witless/notes.txt"],
+            metadata=wasm_metadata,
+            canonical_packages=self.canonical + ["ironclaw_wasm"],
         )
         self.assertEqual(plan["mode"], "selected")
-        self.assertEqual(plan["changed_packages"], ["alpha"])
-        self.assertEqual(plan["affected_packages"], ["alpha", "beta", "gamma"])
+        self.assertEqual(plan["changed_packages"], ["ironclaw_wasm"])
         self.assertEqual(
-            plan["crate_buckets"],
-            [{"name": "selected", "packages": ["alpha", "beta", "gamma"]}],
+            plan["reasons"],
+            ["production package changed: ironclaw_wasm"],
         )
-        self.assertTrue(plan["run_qa_replay"])
+
+    def test_wit_and_crate_change_keeps_package_dependency_closure(self) -> None:
+        for wit_path in ("wit/tool.wit", "crates/ironclaw_wasm/wit/tool.wit"):
+            with self.subTest(wit_path=wit_path):
+                plan = self.plan(
+                    "pull_request",
+                    [wit_path, "crates/alpha/src/lib.rs"],
+                )
+                self.assertEqual(plan["mode"], "selected")
+                self.assertEqual(plan["changed_packages"], ["alpha"])
+                self.assertEqual(
+                    plan["affected_packages"], ["alpha", "beta", "gamma"]
+                )
+                self.assertEqual(
+                    plan["crate_buckets"],
+                    [{"name": "selected", "packages": ["alpha", "beta", "gamma"]}],
+                )
+                self.assertTrue(plan["run_qa_replay"])
 
     # An unmapped extension-package manifest or `wasm-src/**` path used to be
     # carved out here for silent "Platform & Compat, no lane" delegation.

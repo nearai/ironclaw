@@ -42,6 +42,21 @@ def _webui_frontend_prefix() -> str:
             f"the frontend path prefix used to route Code Style is unknown: {error}"
         ) from error
     return f"{directory}/frontend/"
+
+
+@functools.lru_cache(maxsize=None)
+def _wasm_wit_prefix() -> str:
+    """`<ironclaw_wasm crate dir>/wit/`, resolved once per process."""
+    try:
+        directory = crate_directory("ironclaw_wasm", ROOT)
+    except CrateTreeError as error:
+        raise RuntimeError(
+            "reborn_pr_test_plan: cannot resolve the ironclaw_wasm crate, so "
+            f"the WIT path prefix used to route Platform & Compat is unknown: {error}"
+        ) from error
+    return f"{directory}/wit/"
+
+
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
 # Path classes with no Rust or E2E surface any Reborn lane can exercise.
@@ -507,8 +522,13 @@ def build_plan(
         # bare `wit/` path no longer occurs on disk; both prefixes are kept so
         # neither the historical root location nor the current crate-owned
         # one falls through to the crate's own production-package lane, which
-        # would duplicate `has_direct_wasm_abi_risk`'s coverage.
-        if path.startswith("wit/") or path.startswith("crates/ironclaw_wasm/wit/"):
+        # would duplicate `has_direct_wasm_abi_risk`'s coverage. The
+        # crate-owned prefix is resolved by crate NAME through the shared
+        # inventory (`_wasm_wit_prefix`), not a literal `crates/ironclaw_wasm`
+        # path, for the same reason `_webui_frontend_prefix` is: under the
+        # target-architecture family move (PROPOSAL §5) a literal prefix stops
+        # matching and WIT diffs silently stop routing here.
+        if path.startswith("wit/") or path.startswith(_wasm_wit_prefix()):
             reasons.append(f"Platform & Compat owns WIT compatibility: {path}")
             continue
         if (
