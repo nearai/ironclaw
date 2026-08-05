@@ -7213,3 +7213,251 @@ async fn scheduler_stopped_rejects_send_user_message() {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 // arch-exempt: large_file, runtime composition contract coverage remains centralized, plan #6175
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// Two-thread skill fixtures: thread 1 authors a skill carrying a script, thread 2 runs that script.
+//
+// Distilled from ten live demo runs against real models, every one of which failed somewhere in this
+// sequence, and none of which any existing hermetic test caught:
+//
+//   1. `skill_install` reported success and the skill never appeared again -- writer and reader
+//      resolved `/skills` to different trees (nearai/ironclaw#7168).
+//   2. A manifest with no `description:` installed fine and was skipped by discovery forever.
+//   3. Thread 2 activated the skill, read `scripts/egfr.py`, and could not execute it: the bundle
+//      lives in the database, so no host process can open it.
+//   4. Deprived of execution, one agent POSTed the patient's creatinine to `api.mathjs.org`.
+//   5. After staging landed, the path the model was TOLD still missed, because `/workspace` means
+//      `<root>/tenants/<t>/users/<u>` to the file tools and `<root>` to the shell.
+//
+// So these assert the whole chain, not a layer: installed, survives into a second conversation, the
+// path handed to the model is a real host path, and the script there runs and prints its own output.
+// A layer-at-a-time test passed through all ten failures.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+/// The skill an agent writes when asked for eGFR — the exact shape every demo produced.
+const SKILL_MD: &str = "---\nname: egfr-calc\ndescription: Compute eGFR from serum creatinine with the 2021 race-free CKD-EPI equation and assign a KDIGO stage.\n---\n\n# eGFR\n\nRun the bundled script:\n\n```bash\npython3 scripts/egfr.py --scr 1.3 --age 62 --female\n```\n";
+
+/// A real script, so \"it ran\" means the process produced this output and not the model's arithmetic.
+const SKILL_SCRIPT: &str = r#"#!/usr/bin/env python3
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--scr", type=float, required=True)
+parser.add_argument("--age", type=float, required=True)
+parser.add_argument("--female", action="store_true")
+args = parser.parse_args()
+
+kappa = 0.7 if args.female else 0.9
+alpha = -0.241 if args.female else -0.302
+factor = 1.012 if args.female else 1.0
+ratio = args.scr / kappa
+egfr = 142 * (min(ratio, 1) ** alpha) * (max(ratio, 1) ** -1.200) * (0.9938 ** args.age) * factor
+egfr = round(egfr, 1)
+stage = (
+    "G1" if egfr >= 90 else
+    "G2" if egfr >= 60 else
+    "G3a" if egfr >= 45 else
+    "G3b" if egfr >= 30 else
+    "G4" if egfr >= 15 else "G5"
+)
+print(f"FIXTURE-OK eGFR={egfr} stage={stage}")
+"#;
+
+const TENANT: &str = "two-thread-tenant";
+const OWNER: &str = "two-thread-owner";
+const AGENT: &str = "two-thread-agent";
+
+fn two_thread_caller() -> ProductSurfaceCaller {
+    ProductSurfaceCaller::new(
+        TenantId::new(TENANT).expect("tenant"),
+        UserId::new(OWNER).expect("user"),
+        Some(AgentId::new(AGENT).expect("agent")),
+        None,
+    )
+}
+
+fn two_thread_runtime_input(storage_root: std::path::PathBuf) -> RebornRuntimeInput {
+    let gateway = Arc::new(RecordingGateway {
+        reply: "fixture reply".to_string(),
+        requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+    });
+    RebornRuntimeInput::from_build_input(
+        crate::deployment::local_filesystem_build_input(OWNER, storage_root)
+            .with_runtime_policy(standalone_runtime_policy()),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: TENANT.to_string(),
+        agent_id: AGENT.to_string(),
+        source_binding_id: "two-thread-source".to_string(),
+        reply_target_binding_id: "two-thread-reply".to_string(),
+    })
+    .with_poll_settings(PollSettings {
+        interval: Duration::from_millis(10),
+        max_total: Duration::from_secs(5),
+    })
+    .with_model_gateway_override(gateway)
+}
+
+/// Thread 1 installs a skill carrying a script; thread 2 activates it and the script RUNS.
+///
+/// The assertion that matters is the last one: the staged path handed to the model is fed to a real
+/// process, and the process prints the script's own marker. Every previous version of this flow
+/// satisfied "the skill exists" and still could not run.
+#[tokio::test]
+async fn thread_one_authors_a_scripted_skill_and_thread_two_executes_it() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage_root = root.path().join("standalone");
+
+    // ── Thread 1: author ────────────────────────────────────────────────────────────────────────
+    let runtime = build_reborn_runtime(two_thread_runtime_input(storage_root.clone()))
+        .await
+        .expect("runtime builds");
+    let bundle = runtime.product_surface(None).expect("product surface");
+
+    let installed = invoke_product_capability(
+        bundle.as_ref(),
+        two_thread_caller(),
+        ironclaw_product::SKILL_INSTALL_CAPABILITY_ID,
+        serde_json::json!({
+            "name": "egfr-calc",
+            "content": SKILL_MD,
+            // `text` is the schema's field name for a UTF-8 bundle file; `bytes_base64` is the binary form.
+            "files": [{"path": "scripts/egfr.py", "text": SKILL_SCRIPT}],
+        }),
+    )
+    .await
+    .expect("skill install dispatches");
+    assert!(
+        matches!(&installed, ironclaw_host_api::resolution::Resolution::Done(outcome) if outcome.verdict.is_success()),
+        "installing a skill with a bundled script must succeed, got {installed:?}"
+    );
+
+    runtime.shutdown().await.expect("thread one shutdown");
+
+    // ── Thread 2: a NEW runtime over the SAME store, i.e. a later conversation ──────────────────
+    // Rebuilt rather than reused on purpose: the reported bug was that a skill survived its own
+    // session and nothing else, so a fixture that keeps one runtime alive cannot see it.
+    let runtime = build_reborn_runtime(two_thread_runtime_input(storage_root.clone()))
+        .await
+        .expect("runtime rebuilds over the same store");
+    let conversation = runtime
+        .new_conversation()
+        .await
+        .expect("thread two opens a conversation");
+
+    let result = runtime
+        .execute_skill_message(&conversation, "$egfr-calc")
+        .await
+        .expect("thread two executes a skill message");
+    let activated: Vec<String> = result
+        .plan
+        .activations()
+        .iter()
+        .map(|activation| activation.name.to_string())
+        .collect();
+    assert!(
+        activated.iter().any(|name| name == "egfr-calc"),
+        "a skill authored in thread one must activate in thread two; got {activated:?}"
+    );
+
+    // ── The payoff: the staged bundle must be a real, runnable path ─────────────────────────────
+    //
+    // Located by search rather than by assuming a layout: `/workspace` resolves to the shared root
+    // under the standalone policy and to `<root>/tenants/<t>/users/<u>` under a per-caller one, and a
+    // fixture that hardcodes either spelling tests the spelling instead of the mechanism.
+    fn find_staged_script(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                find_staged_script(&path, out);
+            } else if path.ends_with(".skills/egfr-calc/scripts/egfr.py") {
+                out.push(path);
+            }
+        }
+    }
+    let mut staged = Vec::new();
+    find_staged_script(&storage_root.join("workspace"), &mut staged);
+    assert_eq!(
+        staged.len(),
+        1,
+        "activation must stage the bundle exactly once somewhere a process can open it; found \
+         {staged:?} under {}",
+        storage_root.join("workspace").display()
+    );
+    let staged_script = staged.remove(0);
+    let staged_dir = staged_script
+        .parent()
+        .and_then(|scripts| scripts.parent())
+        .expect("staged script sits at <skill>/scripts/egfr.py")
+        .to_path_buf();
+
+    // Run it exactly as the skill body says, from the staged directory. If this fails, an agent
+    // following its own skill's instructions fails too -- which is what ten demo runs did.
+    let output = std::process::Command::new("python3")
+        .arg("scripts/egfr.py")
+        .args(["--scr", "1.3", "--age", "62", "--female"])
+        .current_dir(&staged_dir)
+        .output()
+        .expect("python3 must be available to run the staged script");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "the staged script must execute: status={:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("FIXTURE-OK") && stdout.contains("stage=G3a"),
+        "the answer must come from the script itself, not re-derived arithmetic; got {stdout:?}"
+    );
+
+    runtime.shutdown().await.expect("thread two shutdown");
+}
+
+/// A manifest with no `description:` must not become an invisible skill.
+///
+/// Measured with a real model: asked to save a reusable skill, it wrote frontmatter carrying `name:`
+/// alone. The install succeeded, Settings listed it, and every later discovery pass skipped it with
+/// only a `warn!` — so the skill existed and could never be used again.
+#[tokio::test]
+async fn a_skill_installed_without_a_description_is_still_discoverable() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage_root = root.path().join("standalone");
+    let runtime = build_reborn_runtime(two_thread_runtime_input(storage_root))
+        .await
+        .expect("runtime builds");
+    let bundle = runtime.product_surface(None).expect("product surface");
+
+    invoke_product_capability(
+        bundle.as_ref(),
+        two_thread_caller(),
+        ironclaw_product::SKILL_INSTALL_CAPABILITY_ID,
+        serde_json::json!({
+            "name": "no-description",
+            "content": "---\nname: no-description\n---\n\nConvert lab values between conventional and SI units.\n",
+        }),
+    )
+    .await
+    .expect("install dispatches");
+
+    let conversation = runtime.new_conversation().await.expect("conversation");
+    let result = runtime
+        .execute_skill_message(&conversation, "$no-description")
+        .await
+        .expect("execute skill message");
+    let activated: Vec<String> = result
+        .plan
+        .activations()
+        .iter()
+        .map(|activation| activation.name.to_string())
+        .collect();
+    assert!(
+        activated.iter().any(|name| name == "no-description"),
+        "a description-less manifest must be repaired at the write, not silently skipped by \
+         discovery forever; activated {activated:?}"
+    );
+
+    runtime.shutdown().await.expect("shutdown");
+}
