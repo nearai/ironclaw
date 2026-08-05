@@ -23,7 +23,7 @@ Files here are not implementation. They describe the vocabulary, validation rule
 
 ## When you change something here
 
-- Update the matching Rust contract types in `crates/ironclaw_host_api/src/` and adjust callers/tests in the same branch.
+- Update the matching Rust contract types in `crates/contracts/ironclaw_host_api/src/` and adjust callers/tests in the same branch.
 - If you change a schema ref name in `memory-profiles.md`, move/rename the JSON file under `schemas/memory/` in the same commit. The `memory_profile_schema_refs_exist_on_disk` test in `ironclaw_capabilities` guards against drift but only catches *missing* files, not stale ones.
 - If you add a new profile, list it explicitly in `memory-profiles.md` and add its schema refs under `schemas/<domain>/`. Mark anything that depends on unbuilt host ports (embeddings, vector search) under a "Deferred" section.
 - If you change validation behavior (e.g. relax/tighten allowed characters), update both `host-api.md` and the matching validator in `host_port.rs` / `capability_profile.rs`. Both must move together; one without the other is a silent contract drift.

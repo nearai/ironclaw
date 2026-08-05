@@ -47,7 +47,7 @@ Expected evidence:
 - The change is reachable only under a non-default `RebornCompositionProfile`
   (`disabled` is the default; `build_reborn_runtime` rejects live traffic
   outside `production` with validated readiness).
-- Crate-boundary tests still pass (`crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`);
+- Crate-boundary tests still pass (`crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`);
   the new code does not add a dependency edge from a v1/default path into
   Reborn-only crates.
 - **State plainly in the PR why this cannot become user-visible by default** —

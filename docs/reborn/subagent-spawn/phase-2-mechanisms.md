@@ -279,8 +279,8 @@ capability id passes straight through to the inner port unchanged.
 
 | Action | Path |
 |---|---|
-| **create** | `crates/ironclaw_loop_host/src/subagent_spawn_port.rs` |
-| **modify** | `crates/ironclaw_loop_host/src/lib.rs` (add `mod subagent_spawn_port;` + `pub use`) |
+| **create** | `crates/loop/ironclaw_loop_host/src/subagent_spawn_port.rs` |
+| **modify** | `crates/loop/ironclaw_loop_host/src/lib.rs` (add `mod subagent_spawn_port;` + `pub use`) |
 
 `SubagentSpawnCapabilityPort` is a decorator in the same family as
 `CapabilitySurfaceProfileFilter` (`capability_surface_filter.rs`) — it wraps an
@@ -380,7 +380,7 @@ pub struct ThreadScope { pub tenant_id: TenantId, pub agent_id: AgentId,
 ### 1.4 The decorator type
 
 ```rust
-// crates/ironclaw_loop_host/src/subagent_spawn_port.rs
+// crates/loop/ironclaw_loop_host/src/subagent_spawn_port.rs
 
 use std::sync::Arc;
 use async_trait::async_trait;
@@ -894,8 +894,8 @@ task data; and (c) **attenuation** — the child capability port wrapped so its
 
 | Action | Path |
 |---|---|
-| **create** | `crates/ironclaw_loop_host/src/subagent_prompt_port.rs` |
-| **modify** | `crates/ironclaw_loop_host/src/lib.rs` (add `mod subagent_prompt_port;` + `pub use`) |
+| **create** | `crates/loop/ironclaw_loop_host/src/subagent_prompt_port.rs` |
+| **modify** | `crates/loop/ironclaw_loop_host/src/lib.rs` (add `mod subagent_prompt_port;` + `pub use`) |
 
 `SubagentPromptComposer` is **not** a new `LoopPromptPort`. The host already has
 `HostManagedLoopPromptPort` (`run_profile/prompt.rs`) which builds a bundle from
@@ -975,7 +975,7 @@ impl CapabilitySurfaceProfileFilter {
 ### 2.4 The composer — pseudo code
 
 ```rust
-// crates/ironclaw_loop_host/src/subagent_prompt_port.rs
+// crates/loop/ironclaw_loop_host/src/subagent_prompt_port.rs
 
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, LoopInlineMessage, LoopInlineMessageRole,
@@ -1148,9 +1148,9 @@ driver + profile binding is not runnable* — a subagent run reaches the
 
 | Action | Path |
 |---|---|
-| **create** | `crates/ironclaw_turn_runner/src/subagent/driver.rs` |
-| **modify** | `crates/ironclaw_turn_runner/src/app_loop_family.rs` (register the `subagent` family) |
-| **modify** | `crates/ironclaw_turn_runner/src/lib.rs` (`mod subagent;` if not added by P1.C) |
+| **create** | `crates/loop/ironclaw_turn_runner/src/subagent/driver.rs` |
+| **modify** | `crates/loop/ironclaw_turn_runner/src/app_loop_family.rs` (register the `subagent` family) |
+| **modify** | `crates/loop/ironclaw_turn_runner/src/lib.rs` (`mod subagent;` if not added by P1.C) |
 
 > `planned_driver_factory.rs` is **not** modified — its CLAUDE.md says keep it
 > "limited to driver/profile factory wiring" for the *default* planned driver.
@@ -1216,7 +1216,7 @@ impl InMemoryRunProfileRegistry { pub fn register(&mut self, def: RunProfileDefi
 ### 3.4 The subagent driver factory — pseudo code
 
 ```rust
-// crates/ironclaw_turn_runner/src/subagent/driver.rs
+// crates/loop/ironclaw_turn_runner/src/subagent/driver.rs
 
 use std::sync::Arc;
 use ironclaw_agent_loop::{
@@ -1340,7 +1340,7 @@ pub fn register_subagent_run_profiles(
 the subagent family:
 
 ```rust
-// crates/ironclaw_turn_runner/src/app_loop_family.rs  (modified)
+// crates/loop/ironclaw_turn_runner/src/app_loop_family.rs  (modified)
 pub fn build_loop_family_registry() -> Result<Arc<LoopFamilyRegistry>, LoopFamilyRegistryError> {
     LoopFamilyRegistry::with_families(vec![
         Arc::new(families::default()),
@@ -1406,8 +1406,8 @@ recursive subtree `cancel_run`.
 
 | Action | Path |
 |---|---|
-| **create** | `crates/ironclaw_turn_runner/src/subagent/completion_observer.rs` |
-| **modify** | `crates/ironclaw_turn_runner/src/lib.rs` (`pub use` from `subagent`) |
+| **create** | `crates/loop/ironclaw_turn_runner/src/subagent/completion_observer.rs` |
+| **modify** | `crates/loop/ironclaw_turn_runner/src/lib.rs` (`pub use` from `subagent`) |
 
 ### 4.3 Signatures implemented against
 
@@ -1472,7 +1472,7 @@ pub struct AcceptedInboundMessage {
 ### 4.4 The observer type
 
 ```rust
-// crates/ironclaw_turn_runner/src/subagent/completion_observer.rs
+// crates/loop/ironclaw_turn_runner/src/subagent/completion_observer.rs
 
 pub struct SubagentCompletionObserver {
     coordinator:     Arc<dyn TurnCoordinator>,
@@ -1810,7 +1810,7 @@ assistant message yields a typed "completed, no output" entry.
 
 ## 5. File-overlap note (P2.A vs P2.B)
 
-P2.A and P2.B both land in `crates/ironclaw_loop_host/` but own **disjoint
+P2.A and P2.B both land in `crates/loop/ironclaw_loop_host/` but own **disjoint
 files**:
 
 | WS | New file | Touches `lib.rs` |

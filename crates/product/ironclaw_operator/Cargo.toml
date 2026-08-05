@@ -1,0 +1,60 @@
+[package]
+name = "ironclaw_operator"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Host/operator control-plane services for IronClaw Reborn"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "products"
+
+[dependencies]
+async-trait = "0.1"
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+fs4 = "1.1"
+ironclaw_common = { path = "../../contracts/ironclaw_common" }
+ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem" }
+ironclaw_host_api = { path = "../../contracts/ironclaw_host_api" }
+# Host-owned route-mount carriers. Operator owns the NEAR AI login callback
+# route; ingress owns the vocabulary that carries a router plus its policy
+# descriptors to whoever mounts it (PROPOSAL §6.9.2).
+ironclaw_host_ingress = { path = "../ironclaw_host_ingress" }
+ironclaw_product_contracts = { path = "../../contracts/ironclaw_product_contracts", version = "0.1.0" }
+ironclaw_llm = { path = "../../domains/ironclaw_llm", default-features = false, features = ["registry-provider-factory"] }
+ironclaw_config = { path = "../../app/ironclaw_config" }
+ironclaw_safety = { path = "../../substrates/ironclaw_safety" }
+nix = { version = "0.31", default-features = false, features = ["process"] }
+libc = "0.2"
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+toml = "1.1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", features = ["test-support"] }
+# The in-memory `OperatorSecretValueStore` fake. WS3 removed this crate's
+# `ironclaw_secrets` edge (PROPOSAL §8.2, §12.1b); the substrate-fidelity tests
+# moved to the port's implementor in `ironclaw_composition`, and what
+# stays here drives operator policy through the port.
+ironclaw_product_contracts = { path = "../../contracts/ironclaw_product_contracts", features = [
+    "test-support",
+] }
+rust_decimal = "1"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

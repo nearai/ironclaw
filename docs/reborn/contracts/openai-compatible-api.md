@@ -4,7 +4,7 @@
 Responses create/retrieve/cancel, idempotency/opaque-ref, and projection-backed
 SSE streaming slices (#4442, #4443, #4444, #4445, #4446, #4447)
 **Parent:** #3283
-**Crates:** `crates/ironclaw_openai_compat`
+**Crates:** `crates/product/ironclaw_openai_compat`
 
 ## Purpose
 

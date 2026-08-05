@@ -86,7 +86,7 @@ jobs:
           # pinned at 0.1.0 since Tier B deleted the v1 monolith.
           #
           # Resolved through the shared crate inventory (scripts/ci/crate-dir.sh)
-          # rather than the flat `crates/ironclaw_cli` literal, so this
+          # rather than the flat `crates/app/ironclaw_cli` literal, so this
           # step needs no edit when the crate moves into a family directory
           # (PROPOSAL §5). If resolution ever fails, `set -e` aborts here before
           # `grep` runs against an empty/garbage path — belt-and-suspenders with
