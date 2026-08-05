@@ -430,11 +430,11 @@ async def test_inspector_debug_activation_and_responsive_shell(
         await context.close()
 
 
-async def test_inspector_prompt_renders_host_resolved_diagnostics(
+async def test_inspector_prompt_and_stats_render_host_diagnostics(
     reborn_v2_server,
     reborn_v2_browser,
 ):
-    """A real model turn reaches the bounded operator-only Prompt tab."""
+    """A real model turn reaches the bounded operator-only Prompt and Stats tabs."""
     marker = f"prompt-inspector-e2e-{uuid.uuid4()}"
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
     async with httpx.AsyncClient(headers=headers) as client:
@@ -471,6 +471,21 @@ async def test_inspector_prompt_renders_host_resolved_diagnostics(
                 "Reconstructed content reflects the latest host prompt boundary",
             )
         ).to_have_count(1)
+
+        await page.locator("[data-testid='inspector-tab-stats']").click()
+        stats = page.locator("[data-testid='inspector-stats-content']")
+        await expect(stats).to_be_visible()
+        await expect(stats.get_by_text("Model calls", exact=True).locator("..")).to_contain_text(
+            "1"
+        )
+        await expect(stats.get_by_text("Input tokens", exact=True).locator("..")).to_contain_text(
+            "Unavailable"
+        )
+        await expect(stats.get_by_text("Tool calls", exact=True).locator("..")).to_contain_text(
+            "0"
+        )
+        await expect(stats.get_by_text("mock-model", exact=True)).to_be_visible()
+        await expect(stats.get_by_text("Statistics are partial:")).to_have_count(1)
     finally:
         await context.close()
 
