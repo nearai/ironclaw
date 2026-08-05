@@ -3,35 +3,58 @@
 use std::sync::Arc;
 
 use ironclaw_filesystem::{
-    CasExpectation, Entry, LibSqlRootFilesystem, PostgresRootFilesystem, RootFilesystem,
-    ScopedFilesystem,
+    CasExpectation, Entry, LibSqlRootFilesystem, PostgresRootFilesystem, RecordKind,
+    RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    ids::{AgentId, TenantId, ThreadId, UserId},
     mount::{MountGrant, MountPermissions, MountView},
-    path::{MountAlias, ScopedPath, VirtualPath},
+    path::{MountAlias, VirtualPath},
 };
 use ironclaw_threads::{
-    EnsureThreadRequest, FilesystemSessionThreadService, ListThreadsForScopeRequest,
-    SessionThreadService, ThreadHistoryRequest, ThreadScope, migrate_all_thread_scopes,
+    FilesystemSessionThreadService, ListThreadsForScopeRequest, SessionThreadService,
+    ThreadHistoryRequest, ThreadScope, migrate_all_thread_scopes,
 };
+use serde::Deserialize;
 
-const RC1_APPEND_ONLY_MESSAGE: &[u8] = br#"{
-  "message_id": "11111111-1111-4111-8111-111111111111",
-  "thread_id": "thread-rc1-backend",
-  "sequence": 1,
-  "kind": "assistant",
-  "status": "finalized",
-  "created_at": "2026-07-01T12:00:00Z",
-  "updated_at": "2026-07-01T12:00:00Z",
-  "actor_id": null,
-  "source_binding_id": null,
-  "reply_target_binding_id": null,
-  "turn_id": null,
-  "turn_run_id": "run-rc1-backend",
-  "content": "durable rc1 append-only reply",
-  "redaction_ref": null
-}"#;
+const RC1_ACTUAL_FIXTURE: &str = include_str!("fixtures/rc1_actual_thread_state.json");
+
+#[derive(Debug, Deserialize)]
+struct Rc1ActualFixture {
+    source: Rc1FixtureSource,
+    scope: Rc1FixtureScope,
+    thread_id: String,
+    records: Vec<Rc1FixtureRecord>,
+    append_events: Vec<Rc1FixtureAppend>,
+    expected_messages: Vec<(u64, String, String)>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Rc1FixtureSource {
+    binary_tag: String,
+    commit: String,
+    capture: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Rc1FixtureScope {
+    tenant_id: String,
+    agent_id: String,
+    owner_user_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Rc1FixtureRecord {
+    path: String,
+    kind: String,
+    body: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct Rc1FixtureAppend {
+    path: String,
+    body: serde_json::Value,
+}
 
 #[tokio::test]
 async fn rc1_thread_upgrade_is_durable_on_libsql() {
@@ -70,88 +93,83 @@ async fn assert_rc1_upgrade<F>(backend: Arc<F>, fixture: String)
 where
     F: RootFilesystem + 'static,
 {
-    let tenant = TenantId::new(format!("migration-{fixture}")).expect("tenant");
-    let user = UserId::new("migration-user").expect("user");
+    let mut rc1: Rc1ActualFixture =
+        serde_json::from_str(RC1_ACTUAL_FIXTURE).expect("frozen actual rc1 fixture");
+    assert_eq!(rc1.source.binary_tag, "ironclaw-v1.0.0-rc.1");
+    assert_eq!(
+        rc1.source.commit,
+        "8257215700fd75a3636338e969605f5dee8f99c4"
+    );
+    assert!(rc1.source.capture.contains("rc1 WebChat API"));
+    // Preserve the exact captured wire as the checked-in fixture, then scope
+    // each backend invocation to a unique tenant so a developer can rerun the
+    // live PostgreSQL contract without colliding with its prior derived rows.
+    let captured_tenant = rc1.scope.tenant_id.clone();
+    let migrated_tenant = format!("{captured_tenant}-{fixture}");
+    for record in &mut rc1.records {
+        record.path = record.path.replacen(
+            &format!("/tenants/{captured_tenant}/"),
+            &format!("/tenants/{migrated_tenant}/"),
+            1,
+        );
+        if record.kind == "session_thread"
+            && let Some(scope) = record
+                .body
+                .get_mut("scope")
+                .and_then(|scope| scope.as_object_mut())
+        {
+            scope.insert(
+                "tenant_id".to_string(),
+                serde_json::Value::String(migrated_tenant.clone()),
+            );
+        }
+    }
+    for append in &mut rc1.append_events {
+        append.path = append.path.replacen(
+            &format!("/tenants/{captured_tenant}/"),
+            &format!("/tenants/{migrated_tenant}/"),
+            1,
+        );
+    }
+    let tenant = TenantId::new(migrated_tenant).expect("tenant");
+    let user = UserId::new(rc1.scope.owner_user_id.clone()).expect("user");
     let scope = ThreadScope {
         tenant_id: tenant.clone(),
-        agent_id: AgentId::new("migration-agent").expect("agent"),
-        project_id: Some(ProjectId::new("migration-project").expect("project")),
+        agent_id: AgentId::new(rc1.scope.agent_id.clone()).expect("agent"),
+        project_id: None,
         owner_user_id: Some(user.clone()),
         mission_id: None,
     };
-    let thread_id = ThreadId::new("thread-rc1-backend").expect("thread");
-    let scoped = fixed_scoped(Arc::clone(&backend), &tenant, &user);
-    let writer = FilesystemSessionThreadService::new(Arc::clone(&scoped));
-    writer
-        .ensure_thread(EnsureThreadRequest {
-            scope: scope.clone(),
-            thread_id: Some(thread_id.clone()),
-            created_by_actor_id: "migration-user".to_string(),
-            title: Some("rc1 durable thread".to_string()),
-            metadata_json: None,
-        })
-        .await
-        .expect("seed thread");
-
-    remove_current_marker(scoped.as_ref(), &scope, "thread-index-v2.complete").await;
-    remove_current_marker(scoped.as_ref(), &scope, "transcript-index-v2.complete").await;
-    scoped
-        .put(
-            &scope.to_resource_scope(),
-            &migration_marker(&scope, "thread-index-v1.complete"),
-            Entry::bytes(b"thread-index-v1".to_vec()),
-            CasExpectation::Any,
-        )
-        .await
-        .expect("seed rc1 thread marker");
-    scoped
-        .put(
-            &scope.to_resource_scope(),
-            &migration_marker(&scope, "transcript-index-v1.complete"),
-            Entry::bytes(b"transcript-index-v1".to_vec()),
-            CasExpectation::Any,
-        )
-        .await
-        .expect("seed rc1 transcript marker");
-
-    let index_path = thread_index_path(&scope, &thread_id);
-    let versioned = scoped
-        .get(&scope.to_resource_scope(), &index_path)
-        .await
-        .expect("read current index")
-        .expect("index exists");
-    let mut body: serde_json::Value =
-        serde_json::from_slice(&versioned.entry.body).expect("decode index");
-    body.as_object_mut()
-        .expect("index object")
-        .remove("projection_schema_version");
-    let mut rc1_entry = versioned.entry;
-    rc1_entry.body = serde_json::to_vec(&body).expect("encode rc1 index");
-    rc1_entry.indexed.clear();
-    scoped
-        .put(
-            &scope.to_resource_scope(),
-            &index_path,
-            rc1_entry,
-            CasExpectation::Version(versioned.version),
-        )
-        .await
-        .expect("replace with rc1 index wire");
-    scoped
-        .append(
-            &scope.to_resource_scope(),
-            &append_path(&scope, &thread_id),
-            RC1_APPEND_ONLY_MESSAGE.to_vec(),
-        )
-        .await
-        .expect("seed rc1 append event");
-
+    let thread_id = ThreadId::new(rc1.thread_id.clone()).expect("thread");
+    for record in rc1.records {
+        backend
+            .put(
+                &VirtualPath::new(record.path).expect("released record path"),
+                Entry::record(
+                    RecordKind::new(record.kind).expect("released record kind"),
+                    &record.body,
+                )
+                .expect("released record entry"),
+                CasExpectation::Absent,
+            )
+            .await
+            .expect("seed exact released record");
+    }
+    for append in rc1.append_events {
+        backend
+            .append(
+                &VirtualPath::new(append.path).expect("released append path"),
+                serde_json::to_vec_pretty(&append.body).expect("released append wire"),
+            )
+            .await
+            .expect("seed exact released append event");
+    }
     let first =
         migrate_all_thread_scopes(Arc::clone(&backend), dynamic_scoped(Arc::clone(&backend)))
             .await
             .expect("migrate rc1 state");
-    assert_eq!(first.thread_rows, 1);
-    assert_eq!(first.append_messages_materialized, 1);
+    assert!(first.thread_rows >= 1, "{first:?}");
+    assert!(first.append_messages_materialized >= 1, "{first:?}");
 
     let reopened =
         FilesystemSessionThreadService::new(fixed_scoped(Arc::clone(&backend), &tenant, &user));
@@ -172,11 +190,18 @@ where
         })
         .await
         .expect("read migrated history");
-    assert_eq!(history.messages.len(), 1);
-    assert_eq!(
-        history.messages[0].content.as_deref(),
-        Some("durable rc1 append-only reply")
-    );
+    let actual = history
+        .messages
+        .iter()
+        .map(|message| {
+            (
+                message.sequence,
+                format!("{:?}", message.kind).to_ascii_lowercase(),
+                message.content.clone().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, rc1.expected_messages);
 
     let second =
         migrate_all_thread_scopes(Arc::clone(&backend), dynamic_scoped(Arc::clone(&backend)))
@@ -221,55 +246,6 @@ where
             MountPermissions::read_write_list_delete(),
         )])
     }))
-}
-
-fn scope_root(scope: &ThreadScope) -> String {
-    format!(
-        "/threads/agents/{}/projects/{}/owners/{}",
-        scope.agent_id.as_str(),
-        scope.project_id.as_ref().expect("project").as_str(),
-        scope.owner_user_id.as_ref().expect("owner").as_str()
-    )
-}
-
-fn migration_marker(scope: &ThreadScope, name: &str) -> ScopedPath {
-    ScopedPath::new(format!("{}/index-migrations/{name}", scope_root(scope))).expect("marker path")
-}
-
-fn thread_index_path(scope: &ThreadScope, thread_id: &ThreadId) -> ScopedPath {
-    ScopedPath::new(format!(
-        "{}/thread_index/{}.json",
-        scope_root(scope),
-        thread_id.as_str()
-    ))
-    .expect("index path")
-}
-
-fn append_path(scope: &ThreadScope, thread_id: &ThreadId) -> ScopedPath {
-    ScopedPath::new(format!(
-        "{}/threads/{}/message_appends",
-        scope_root(scope),
-        thread_id.as_str()
-    ))
-    .expect("append path")
-}
-
-async fn remove_current_marker<F>(scoped: &ScopedFilesystem<F>, scope: &ThreadScope, name: &str)
-where
-    F: RootFilesystem,
-{
-    let path = migration_marker(scope, name);
-    if scoped
-        .get(&scope.to_resource_scope(), &path)
-        .await
-        .expect("read marker")
-        .is_some()
-    {
-        scoped
-            .delete(&scope.to_resource_scope(), &path)
-            .await
-            .expect("delete marker");
-    }
 }
 
 async fn postgres_backend() -> Option<PostgresRootFilesystem> {

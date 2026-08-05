@@ -12,8 +12,13 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_product::{
-    IdempotencyDecision, IdempotencyLedger, IdempotencyLedgerMigrationError, ProductInboundAck,
-    ProductInboundAction, RebornFilesystemIdempotencyLedger, migrate_idempotency_ledger_root,
+    AdapterInstallationId, AuthRequirement, DefaultProductSurface, ExternalActorRef,
+    ExternalConversationRef, ExternalEventId, FakeConversationBindingService,
+    FakeInboundTurnService, IdempotencyDecision, IdempotencyLedger,
+    IdempotencyLedgerMigrationError, ParsedProductInbound, ProductAdapterId, ProductInboundAck,
+    ProductInboundAction, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
+    ProtocolAuthEvidence, RebornFilesystemIdempotencyLedger, TrustedInboundContext,
+    UserMessagePayload, migrate_idempotency_ledger_root,
 };
 use ironclaw_product_contracts::action::{ActionFingerprintKey, SourceBindingKey};
 
@@ -50,6 +55,38 @@ fn fingerprint(suffix: usize) -> ActionFingerprintKey {
         SourceBindingKey::new("space:0:;conversation:6:chat-a;topic:0:;").expect("binding"),
         ironclaw_product::ExternalEventId::new(format!("event-{suffix:04}")).expect("event"),
     )
+}
+
+fn provider_envelope(suffix: usize) -> ProductInboundEnvelope {
+    let installation = AdapterInstallationId::new("default-installation").expect("installation");
+    let evidence = ProtocolAuthEvidence::test_verified(
+        AuthRequirement::SharedSecretHeader {
+            header_name: "X-Test".to_string(),
+        },
+        installation.as_str(),
+    );
+    let context = TrustedInboundContext::from_verified_evidence(
+        ProductAdapterId::new("telegram").expect("adapter"),
+        installation,
+        Utc::now(),
+        &evidence,
+    )
+    .expect("trusted fixture context");
+    let parsed = ParsedProductInbound::new(
+        ExternalEventId::new(format!("event-{suffix:04}")).expect("event"),
+        ExternalActorRef::new("user", "telegram-user", None::<String>).expect("actor"),
+        ExternalConversationRef::new(None, "chat-a", None, None).expect("conversation"),
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new(
+                "provider retry must not duplicate this turn",
+                Vec::new(),
+                ProductTriggerReason::DirectChat,
+            )
+            .expect("message"),
+        ),
+    )
+    .expect("parsed fixture");
+    ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("envelope")
 }
 
 fn scope_suffix(scope: &ResourceScope) -> String {
@@ -216,6 +253,51 @@ async fn rc1_action_wire_migrates_replays_and_retains_source_on_repeat() {
             .expect("source retained")
             .entry,
         source_before.entry
+    );
+}
+
+#[tokio::test]
+async fn provider_retry_after_migration_replays_without_a_second_turn_submission() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let migration_scope = scope();
+    let source = source_root();
+    let target = target_root();
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let envelope = provider_envelope(77);
+
+    let rc1_surface = DefaultProductSurface::new(
+        inbound.clone(),
+        Arc::new(target_ledger(
+            Arc::clone(&backend),
+            &source,
+            migration_scope.clone(),
+        )),
+        Arc::new(FakeConversationBindingService::new()),
+    );
+    let first = rc1_surface
+        .submit_inbound(envelope.clone())
+        .await
+        .expect("rc1 provider delivery accepted");
+    assert!(matches!(first, ProductInboundAck::Accepted { .. }));
+    assert_eq!(inbound.accepted_count(), 1);
+
+    migrate_idempotency_ledger_root(backend.as_ref(), &source, &target)
+        .await
+        .expect("migrate settled rc1 provider outcome");
+    let upgraded_surface = DefaultProductSurface::new(
+        inbound.clone(),
+        Arc::new(target_ledger(backend, &target, migration_scope)),
+        Arc::new(FakeConversationBindingService::new()),
+    );
+    let retry = upgraded_surface
+        .submit_inbound(envelope)
+        .await
+        .expect("provider retry replays migrated outcome");
+    assert!(matches!(retry, ProductInboundAck::Duplicate { .. }));
+    assert_eq!(
+        inbound.accepted_count(),
+        1,
+        "the migrated idempotency decision must stop a second message/turn submission"
     );
 }
 

@@ -92,7 +92,16 @@ where
                 ));
             }
             report.thread_rows = report.thread_rows.saturating_add(1);
-            scopes.insert(scope_axes_string(&stored.record.scope), stored.record.scope);
+            // `scope_axes_string` is intentionally alias-relative and omits
+            // tenant identity. Startup scans the deployment-wide root, so its
+            // dedup key must restore that axis or equal agent/project/owner
+            // tuples from two tenants collapse and only one gets migrated.
+            let scope_key = format!(
+                "{}:{}",
+                stored.record.scope.tenant_id.as_str(),
+                scope_axes_string(&stored.record.scope)
+            );
+            scopes.insert(scope_key, stored.record.scope);
         }
         if received < Page::MAX_LIMIT as usize {
             break;

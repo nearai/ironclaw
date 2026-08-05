@@ -335,12 +335,16 @@ mod tests {
     };
     use ironclaw_host_api::{
         error::HostApiError,
+        ids::SecretHandle,
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
         resource::ResourceScope,
     };
+    use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};
+    use secrecy::ExposeSecret as _;
 
     use super::*;
+    use crate::{CredentialAccountRecordSource as _, FilesystemAuthProductServices};
 
     const RC1_ACCOUNT_WIRE: &str = r#"{"id":"11111111-1111-4111-8111-111111111111","scope":{"resource":{"tenant_id":"acme","user_id":"alice","agent_id":null,"project_id":null,"mission_id":null,"thread_id":null,"invocation_id":"22222222-2222-4222-8222-222222222222"},"surface":"web"},"provider":"slack_personal","label":"Alice Slack","status":"configured","ownership":"user_reusable","owner_extension":null,"granted_extensions":["slack"],"access_secret":"slack-access-handle","refresh_secret":"slack-refresh-handle","scopes":["channels:read","search:read"],"provider_identity":{"subject":"U123","team_id":"T123","enterprise_id":null,"app_id":"A123"},"created_at":"2026-07-01T10:00:00Z","updated_at":"2026-07-01T10:01:00Z"}"#;
     const RC1_INCOMPLETE_FLOW_WIRE: &str = r#"{"id":"33333333-3333-4333-8333-333333333333","scope":{"resource":{"tenant_id":"acme","user_id":"alice","agent_id":null,"project_id":null,"mission_id":null,"thread_id":"44444444-4444-4444-8444-444444444444","invocation_id":"55555555-5555-4555-8555-555555555555"},"surface":"web","session_id":"slack-setup-session"},"kind":"integration_credential","status":"awaiting_user","provider":"slack_personal","challenge":{"type":"o_auth_url","authorization_url":"https://slack.com/oauth/v2/authorize?client_id=fixture","expires_at":"2026-08-01T10:30:00Z"},"continuation":{"type":"setup_only"},"credential_account_id":null,"credential_secret_fingerprint":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","update_binding":null,"opaque_state_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","pkce_verifier_hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","authorization_code_hash":null,"error":null,"continuation_emitted_at":null,"created_at":"2026-08-01T10:00:00Z","updated_at":"2026-08-01T10:00:00Z","expires_at":"2026-08-01T10:30:00Z"}"#;
@@ -376,11 +380,26 @@ mod tests {
 
     #[tokio::test]
     async fn rc1_slack_oauth_migration_preserves_handles_expires_flow_and_is_idempotent() {
-        let _: CredentialAccount =
+        let fixture_account: CredentialAccount =
             serde_json::from_str(RC1_ACCOUNT_WIRE).expect("rc1 account fixture parses");
         let _: AuthFlowRecord =
             serde_json::from_str(RC1_INCOMPLETE_FLOW_WIRE).expect("rc1 flow fixture parses");
         let backend = Arc::new(InMemoryBackend::new());
+        let secret_store = Arc::new(SecretStore::ephemeral_over(Arc::clone(&backend)));
+        for (handle, material) in [
+            ("slack-access-handle", "xoxp-access-rc1"),
+            ("slack-refresh-handle", "xoxe-refresh-rc1"),
+        ] {
+            secret_store
+                .put(
+                    fixture_account.scope.resource.clone(),
+                    SecretHandle::new(handle).expect("secret handle"),
+                    SecretMaterial::from(material.to_string()),
+                    None,
+                )
+                .await
+                .expect("seed encrypted rc1 credential");
+        }
         let scoped = Arc::new(ScopedFilesystem::new(
             Arc::clone(&backend),
             invocation_mount_view,
@@ -500,6 +519,52 @@ mod tests {
                 .expect("secret still exists"),
             secret_before
         );
+
+        // Reopen the production account reader over the durable filesystem,
+        // then consume both retained handles. This is the caller-facing proof
+        // that a configured rc1 Slack account remains selectable and usable
+        // after the provider rename without starting a new OAuth flow.
+        let restarted_accounts = FilesystemAuthProductServices::new_with_root(
+            Arc::new(ScopedFilesystem::new(
+                Arc::clone(&backend),
+                invocation_mount_view,
+            )),
+            Arc::clone(&backend),
+            Arc::clone(&secret_store) as Arc<dyn SecretStorePort>,
+        );
+        let reopened = restarted_accounts
+            .accounts_for_owner(&migrated_account.scope)
+            .await
+            .expect("list configured accounts after restart");
+        assert_eq!(reopened.len(), 1);
+        assert_eq!(reopened[0].id, migrated_account.id);
+        assert_eq!(reopened[0].provider.as_str(), CURRENT_SLACK_PROVIDER_ID);
+        for (handle, expected) in [
+            (
+                reopened[0]
+                    .access_secret
+                    .as_ref()
+                    .expect("access handle retained"),
+                "xoxp-access-rc1",
+            ),
+            (
+                reopened[0]
+                    .refresh_secret
+                    .as_ref()
+                    .expect("refresh handle retained"),
+                "xoxe-refresh-rc1",
+            ),
+        ] {
+            let lease = secret_store
+                .lease_once(&fixture_account.scope.resource, handle)
+                .await
+                .expect("lease retained credential");
+            let material = secret_store
+                .consume(&fixture_account.scope.resource, lease.id)
+                .await
+                .expect("decrypt retained credential");
+            assert_eq!(material.expose_secret(), expected);
+        }
 
         let account_after_first = backend
             .get(&VirtualPath::new(account_path).expect("account path"))

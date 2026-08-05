@@ -3212,7 +3212,12 @@ async fn filesystem_upgrade_rejects_malformed_rc1_append_without_v2_marker() {
 async fn filesystem_startup_migration_discovers_every_durable_scope_before_reads() {
     let backend = Arc::new(InMemoryBackend::new());
     let scope_a = scope("startup-discovery-a");
-    let scope_b = scope("startup-discovery-b");
+    // Identical alias-relative axes in a second tenant reproduce the bug:
+    // deployment-wide discovery must include tenant identity in its key.
+    let scope_b = ThreadScope {
+        tenant_id: TenantId::new("tenant-startup-discovery-b").unwrap(),
+        ..scope_a.clone()
+    };
     let thread_a = ThreadId::new("thread-rc1-append").unwrap();
     let thread_b = ThreadId::new("thread-startup-discovery-b").unwrap();
 

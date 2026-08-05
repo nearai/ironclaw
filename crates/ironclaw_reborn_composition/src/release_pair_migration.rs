@@ -740,6 +740,19 @@ pub(crate) fn redacted_core_report(
 ) -> Value {
     let installations = installations.copied().unwrap_or_default();
     let extension_state = extension_state.cloned().unwrap_or_default();
+    let extension_state_scopes = extension_state
+        .scopes
+        .iter()
+        .map(|scope| {
+            json!({
+                "migrated": scope.migrated,
+                "unchanged": scope.unchanged,
+                "skipped": scope.skipped,
+                "conflicting": scope.conflicting,
+                "failed": scope.failed,
+            })
+        })
+        .collect::<Vec<_>>();
     let thread_scopes = threads
         .scopes
         .iter()
@@ -840,7 +853,8 @@ pub(crate) fn redacted_core_report(
                 .saturating_add(extension_state.identities)
                 .saturating_add(extension_state.route_values)
                 .saturating_add(extension_state.dm_targets),
-            "unchanged": 0,
+            "unchanged": extension_state.oauth_channel_connections_unchanged
+                .saturating_add(extension_state.proof_code_pairing_rows_unchanged),
             "skipped": extension_state.proof_code_pairing_challenges_expired
                 .saturating_add(extension_state.proof_code_pending_completions_expired)
                 .saturating_add(extension_state.oauth_channel_stale_connections_expired)
@@ -865,6 +879,7 @@ pub(crate) fn redacted_core_report(
                 .proof_code_pending_completions_expired,
             "proof_code_pairing_rows_unchanged": extension_state
                 .proof_code_pairing_rows_unchanged,
+            "scopes": extension_state_scopes,
         }
     })
 }
@@ -1006,6 +1021,61 @@ mod tests {
             .await
             .expect("retry does not wait for the prior lease timeout");
         retry.fail().await.expect("release retry lease");
+    }
+
+    #[tokio::test]
+    async fn failed_domain_attempt_never_publishes_false_completion_records() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let lease = ReleasePairMigrationLease::acquire(Arc::clone(&backend))
+            .await
+            .expect("startup acquires lease before domain validation");
+
+        // Production calls this path after any malformed/conflicting domain
+        // reader fails. It must leave an auditable failed attempt, not either
+        // the release-pair completion or a per-domain completion marker.
+        lease.fail().await.expect("record failed attempt");
+        let stored = backend
+            .get(&migration_path().expect("migration path"))
+            .await
+            .expect("read failed attempt")
+            .expect("attempt record exists");
+        let record: MigrationRecord =
+            serde_json::from_slice(&stored.entry.body).expect("decode attempt");
+        assert_eq!(record.status, MigrationStatus::Failed);
+        assert!(record.report.is_none());
+        let domain_rows = backend
+            .query(
+                &virtual_path(DOMAIN_MIGRATION_ROOT).expect("domain root"),
+                &Filter::All,
+                Page::new(0, Page::MAX_LIMIT),
+            )
+            .await
+            .expect("query domain completions");
+        assert!(domain_rows.is_empty());
+    }
+
+    #[test]
+    fn production_writer_workers_remain_behind_the_completed_migration_barrier() {
+        let source = include_str!("factory/production_backend_assembly.rs");
+        let production = source
+            .split_once("pub(super) async fn build_backend_production(")
+            .expect("production builder exists")
+            .1;
+        let channel_migration = production
+            .find("migrate_rc1_channel_state")
+            .expect("channel state migration remains in production startup");
+        let completion = production
+            .find("release_pair_lease\n        .complete")
+            .expect("release-pair completion barrier remains in production startup");
+        let first_worker = production
+            .find("let credential_refresh_worker")
+            .expect("credential refresh worker remains in production startup");
+        assert!(channel_migration < completion);
+        assert!(completion < first_worker);
+        assert!(
+            !production[..completion].contains("tokio::spawn"),
+            "no background writer may spawn before migration readback completes"
+        );
     }
 
     #[tokio::test]

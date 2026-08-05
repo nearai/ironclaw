@@ -1,0 +1,78 @@
+{
+  "source": {
+    "binary_tag": "ironclaw-v1.0.0-rc.1",
+    "commit": "8257215700fd75a3636338e969605f5dee8f99c4",
+    "capture": "Created through the rc1 WebChat API, then exported from root_filesystem_entries/root_filesystem_events before using current Rust wire types."
+  },
+  "scope": {
+    "tenant_id": "reborn-cli",
+    "agent_id": "reborn-cli-agent",
+    "owner_user_id": "reborn-cli"
+  },
+  "thread_id": "rc1-thread-a",
+  "records": [
+    {
+      "path": "/tenants/reborn-cli/users/reborn-cli/threads/agents/reborn-cli-agent/owners/reborn-cli/threads/rc1-thread-a/thread.json",
+      "kind": "session_thread",
+      "body": {
+        "scope": {
+          "tenant_id": "reborn-cli",
+          "agent_id": "reborn-cli-agent",
+          "owner_user_id": "reborn-cli"
+        },
+        "thread_id": "rc1-thread-a",
+        "created_by_actor_id": "reborn-cli",
+        "title": null,
+        "metadata_json": "{\"client_action_id\":\"rc1-create-a\"}",
+        "created_at": "2026-08-04T22:14:29.508217Z",
+        "updated_at": "2026-08-04T22:14:29.508217Z",
+        "next_sequence": 1
+      }
+    },
+    {
+      "path": "/tenants/reborn-cli/users/reborn-cli/threads/agents/reborn-cli-agent/owners/reborn-cli/threads/rc1-thread-a/messages/69173c11-014d-43a2-9b51-53f8282179bc.json",
+      "kind": "thread_message",
+      "body": {
+        "message_id": "69173c11-014d-43a2-9b51-53f8282179bc",
+        "thread_id": "rc1-thread-a",
+        "sequence": 1,
+        "kind": "user",
+        "status": "submitted",
+        "created_at": "2026-08-04T22:14:43.278078Z",
+        "updated_at": "2026-08-04T22:14:43.278078Z",
+        "actor_id": "reborn-cli",
+        "source_binding_id": "surface:5:webui;tenant:10:reborn-cli;agent:16:reborn-cli-agent;project_scope:4:none;actor:10:reborn-cli;",
+        "reply_target_binding_id": "surface:5:webui;tenant:10:reborn-cli;agent:16:reborn-cli-agent;project_scope:4:none;actor:10:reborn-cli;",
+        "turn_id": "384c3291-a7e8-4d59-a42a-a75620b4c584",
+        "turn_run_id": "b4ae0994-1971-446c-bd02-b9a9eb0a03c0",
+        "content": "Keep this exact message across the rc1 upgrade: alpha.",
+        "redaction_ref": null
+      }
+    }
+  ],
+  "append_events": [
+    {
+      "path": "/tenants/reborn-cli/users/reborn-cli/threads/agents/reborn-cli-agent/owners/reborn-cli/threads/rc1-thread-a/message_appends",
+      "body": {
+        "message_id": "d58af5c0-50ca-4d15-b0d4-1c836aff314e",
+        "thread_id": "rc1-thread-a",
+        "sequence": 2,
+        "kind": "assistant",
+        "status": "finalized",
+        "created_at": "2026-08-04T22:14:43.473578Z",
+        "updated_at": "2026-08-04T22:14:43.473578Z",
+        "actor_id": null,
+        "source_binding_id": null,
+        "reply_target_binding_id": null,
+        "turn_id": null,
+        "turn_run_id": "b4ae0994-1971-446c-bd02-b9a9eb0a03c0",
+        "content": "rc1 persisted reply",
+        "redaction_ref": null
+      }
+    }
+  ],
+  "expected_messages": [
+    [1, "user", "Keep this exact message across the rc1 upgrade: alpha."],
+    [2, "assistant", "rc1 persisted reply"]
+  ]
+}
