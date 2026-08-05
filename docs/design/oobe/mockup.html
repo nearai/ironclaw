@@ -197,6 +197,19 @@ h1,h2,h3,p{margin:0}
 #drawerToggle:hover{color:var(--v2-text-strong)}
 #drawerToggle svg{width:16px;height:16px;transition:transform .18s ease}
 #carouselBlock.collapsed #drawerToggle svg{transform:rotate(180deg)}
+/* Foundational: section-level dismiss X (top-right, both card + pill states) */
+#drawerDismiss{position:absolute;top:11px;right:11px;z-index:4;width:26px;height:26px;display:none;place-items:center;border:0;border-radius:8px;background:var(--v2-surface);box-shadow:-12px 0 12px 5px var(--v2-surface);color:var(--v2-text-muted);cursor:pointer}
+.v-foundational #drawerDismiss{display:grid}
+#drawerDismiss:hover{color:var(--v2-text-strong)}
+#drawerDismiss svg{width:15px;height:15px}
+#carouselBlock.dismissed{display:none}
+/* restore bar after the whole suggestions drawer is dismissed */
+.drawerrestore{display:none;margin:0 0 11px}
+.v-foundational .drawerrestore:not([hidden]){display:block}
+.drawerrestore button{display:inline-flex;align-items:center;gap:8px;font:inherit;font-size:12.5px;font-weight:560;color:var(--v2-text-muted);background:var(--v2-surface);border:1px solid var(--v2-panel-border);border-radius:11px;padding:8px 13px;cursor:pointer;box-shadow:0 1px 2px rgba(15,18,25,.04)}
+.drawerrestore button:hover{border-color:color-mix(in srgb,var(--v2-accent) 40%,var(--v2-panel-border));color:var(--v2-text-strong)}
+.drawerrestore svg{width:14px;height:14px}
+.drawerrestore .rcount{font-weight:700;color:var(--v2-text-strong)}
 .nearmark{display:inline-flex;flex:none;color:var(--near-blue)}
 .nearmark .near{width:16px;height:16px;overflow:visible;transform-box:fill-box;transform-origin:center}
 .nearmark.busy .near{animation:near-beat 2s ease-in-out infinite}
@@ -616,6 +629,7 @@ h1,h2,h3,p{margin:0}
           <div class="rev flagwrap" id="carouselBlock">
             <span class="flag"><span class="tag native">New UX</span><span class="tag newevt">New Feature</span></span>
             <button class="dctl toggle" id="drawerToggle" type="button" title="Collapse" aria-label="Collapse suggestions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
+            <button id="drawerDismiss" type="button" title="Dismiss suggestions" aria-label="Dismiss suggestions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
             <div class="carousel">
               <div class="chd"><span class="dtrow"><b class="dtitle" id="carTtl">Suggested for you</b><span class="chmeta" id="carMeta"></span></span><span class="sub" id="carSub">Approve to run, or tweak first</span></div>
               <div class="strip" id="realStrip"></div>
@@ -627,6 +641,9 @@ h1,h2,h3,p{margin:0}
         <!-- live NEAR indicator relocated into the carousel header (#carNear) -->
 
 
+        <div class="drawerrestore" id="drawerRestore" hidden>
+          <button id="drawerRestoreBtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/></svg>Show suggestions <span class="rcount" id="restoreCount"></span></button>
+        </div>
         <div class="composer flagwrap">
           <span class="flag"><span class="tag recompose">Redesign</span></span>
           <div class="inputrow">
@@ -944,10 +961,13 @@ h1,h2,h3,p{margin:0}
     if(!carouselBlock||!taskDrawer) return;
     var isVision=(version==='vision');
     var active=(scene==='first') && (isVision ? step>=2 : true);
+    var dismissed=active && drawerState==='dismissed';
     var typing=(!!(field&&field.value.trim())||composerAttach)&&taskDrawer.children.length>0;
-    var collapsed=active && (drawerState==='collapsed' || (typing && !autoCollapseSuppressed));
+    var collapsed=active && !dismissed && (drawerState==='collapsed' || (typing && !autoCollapseSuppressed));
+    carouselBlock.classList.toggle('dismissed',dismissed);
     carouselBlock.classList.toggle('collapsed',collapsed);
-    root.classList.toggle('drawer-on', isVision && active);
+    root.classList.toggle('drawer-on', isVision && active && !dismissed);
+    if(drawerRestore){ drawerRestore.hidden=!dismissed; var rc=document.getElementById('restoreCount'); if(rc){ var vis=visibleIdx().length; rc.textContent=vis?String(vis):''; } }
     if(drawerToggle){ drawerToggle.title=collapsed?'Expand':'Collapse'; drawerToggle.setAttribute('aria-label',collapsed?'Expand suggestions':'Collapse suggestions'); }
   }
   document.getElementById('ghostStrip').innerHTML=CARDS.map(function(c,i){return cardHTML(c,i,'completed',{ghost:true});}).join('');
@@ -1135,6 +1155,9 @@ h1,h2,h3,p{margin:0}
   // Vision drawer controls: collapse/expand + dismiss (with a restore bar)
   var drawerToggle=document.getElementById('drawerToggle');
   if(drawerToggle) drawerToggle.onclick=function(){ if(drawerState==='collapsed'){ drawerState='open'; autoCollapseSuppressed=true; } else { drawerState='collapsed'; } applyDrawer(); };
+  var drawerDismiss=document.getElementById('drawerDismiss'),drawerRestore=document.getElementById('drawerRestore'),drawerRestoreBtn=document.getElementById('drawerRestoreBtn');
+  if(drawerDismiss) drawerDismiss.onclick=function(){ drawerState='dismissed'; applyDrawer(); };
+  if(drawerRestoreBtn) drawerRestoreBtn.onclick=function(){ drawerState='open'; autoCollapseSuppressed=true; applyDrawer(); };
 
   // ================= THREAD scene (calendar reschedule) =================
   var CAL_ACCENT='#4285f4', TIMES=['4:15 – 4:45 PM','5:00 – 5:30 PM'];
