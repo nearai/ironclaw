@@ -286,6 +286,11 @@ struct RecoveryTestStore {
     claim_ordered_recovery: Option<ClaimOrderedRecovery>,
     fail_prepared_existing: Option<(OutboundDeliveryStatus, Option<DeliveryFailureKind>)>,
     settlement_failure: Option<SettlementFailureTiming>,
+    /// Simulates a durable terminal-status write that never lands (e.g. a
+    /// backend outage after the adapter already reported success), without
+    /// touching the underlying row — the caller must not report a success
+    /// outcome it cannot back with a durable read.
+    fail_terminal_write: bool,
     authoritative_attempts:
         Mutex<HashMap<ironclaw_outbound::OutboundDeliveryId, OutboundDeliveryAttempt>>,
     list_calls: AtomicU8,
@@ -518,6 +523,9 @@ impl OutboundStateStorePort for RecoveryTestStore {
         &self,
         request: UpdateDeliveryStatusRequest,
     ) -> Result<(), OutboundError> {
+        if self.fail_terminal_write {
+            return Err(OutboundError::Backend);
+        }
         if let Some(attempt) = self
             .authoritative_attempts
             .lock()
@@ -1010,6 +1018,7 @@ fn coordinator_with_existing_preflight_settlement(
         claim_ordered_recovery: None,
         fail_prepared_existing: Some((status, failure_kind)),
         settlement_failure: None,
+        fail_terminal_write: false,
         authoritative_attempts: Mutex::new(HashMap::new()),
         list_calls: AtomicU8::new(0),
     });
@@ -1041,6 +1050,7 @@ fn coordinator_with_settlement_failure(
         claim_ordered_recovery: None,
         fail_prepared_existing: None,
         settlement_failure: Some(timing),
+        fail_terminal_write: false,
         authoritative_attempts: Mutex::new(HashMap::new()),
         list_calls: AtomicU8::new(0),
     });
@@ -1301,6 +1311,82 @@ async fn coordinator_persists_sending_before_the_adapter_delivers() {
     assert_eq!(
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Delivered
+    );
+}
+
+/// The adapter can accept every part while the durable terminal write that
+/// would confirm it fails (e.g. a backend outage right after vendor egress).
+/// The coordinator must not report `Delivered` in that case — this repo's
+/// stated invariant is that only a durable `Delivered` row confirms success
+/// — so it reports the same `ExistingDeliveryUnconfirmed` non-success outcome
+/// used elsewhere in this file for "the authoritative state does not prove
+/// successful vendor delivery", rather than a false confirmation.
+#[tokio::test]
+async fn coordinator_does_not_report_delivered_when_the_terminal_write_fails() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-100")],
+        })],
+    ));
+    let decorated = Arc::new(RecoveryTestStore {
+        inner: Arc::clone(&store),
+        pause_after_snapshot: None,
+        fail_recovery_for: None,
+        claim_ordered_recovery: None,
+        fail_prepared_existing: None,
+        settlement_failure: None,
+        fail_terminal_write: true,
+        authoritative_attempts: Mutex::new(HashMap::new()),
+        list_calls: AtomicU8::new(0),
+    });
+    let policy = OutboundPolicyService::new(decorated.as_ref(), &ACCESS_POLICY, &validator);
+    let coordinator = coordinator_over_port(
+        Arc::clone(&decorated) as Arc<dyn OutboundStateStorePort>,
+        &adapter,
+    );
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
+        )
+        .await
+        .expect("delivery drives even when the terminal write fails");
+
+    assert!(
+        matches!(
+            outcome,
+            CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
+                status: ironclaw_outbound::OutboundDeliveryStatus::Sending,
+                failure_kind: None,
+            }
+        ),
+        "expected an unconfirmed non-success outcome, got {outcome:?}"
+    );
+    assert_eq!(
+        adapter.deliver_calls(),
+        1,
+        "the adapter did accept every part"
+    );
+    // The durable row never advanced past `Sending`: the write that would
+    // have confirmed `Delivered` failed, so the coordinator must not claim
+    // otherwise. Recovery reconciles it on a future lifetime.
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Sending
     );
 }
 
@@ -1803,6 +1889,7 @@ async fn concurrent_coordinators_claim_one_durable_delivery_before_egress() {
         }),
         fail_prepared_existing: None,
         settlement_failure: None,
+        fail_terminal_write: false,
         authoritative_attempts: Mutex::new(HashMap::new()),
         list_calls: AtomicU8::new(0),
     });
@@ -1817,6 +1904,7 @@ async fn concurrent_coordinators_claim_one_durable_delivery_before_egress() {
         }),
         fail_prepared_existing: None,
         settlement_failure: None,
+        fail_terminal_write: false,
         authoritative_attempts: Mutex::new(HashMap::new()),
         list_calls: AtomicU8::new(0),
     });
@@ -3058,6 +3146,7 @@ async fn coordinator_recovery_continues_after_a_per_attempt_store_failure() {
         claim_ordered_recovery: None,
         fail_prepared_existing: None,
         settlement_failure: None,
+        fail_terminal_write: false,
         authoritative_attempts: Mutex::new(HashMap::new()),
         list_calls: AtomicU8::new(0),
     });
@@ -3126,6 +3215,7 @@ async fn assert_coordinator_recovery_preserves_concurrent_terminal_status(
         claim_ordered_recovery: None,
         fail_prepared_existing: None,
         settlement_failure: None,
+        fail_terminal_write: false,
         authoritative_attempts: Mutex::new(HashMap::new()),
         list_calls: AtomicU8::new(0),
     });

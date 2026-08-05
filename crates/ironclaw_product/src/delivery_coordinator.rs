@@ -210,8 +210,14 @@ pub enum CoordinatedDeliveryOutcome {
         /// route, but does not fabricate a vendor message reference.
         conversation: Option<ExternalConversationRef>,
     },
-    /// Another caller already advanced this durable delivery, but the
-    /// authoritative state does not prove successful vendor delivery.
+    /// The durable delivery fact does not prove successful vendor delivery,
+    /// either because another caller already advanced it past `Prepared`
+    /// without reaching `Delivered`, or because this call's own terminal
+    /// write did not durably land (the adapter may have reported success,
+    /// but the store write that would confirm it failed). `status` and
+    /// `failure_kind` reflect the best-known durable state — the last state
+    /// this call is certain committed, not necessarily a fresh read — never
+    /// a fabricated `Delivered`.
     ExistingDeliveryUnconfirmed {
         status: OutboundDeliveryStatus,
         failure_kind: Option<DeliveryFailureKind>,
@@ -755,8 +761,23 @@ impl DeliveryCoordinator {
                         .all(|part| matches!(part, PartDeliveryOutcome::Sent { .. }));
 
                     if all_sent && !report.parts.is_empty() {
-                        self.mark_terminal(&attempt, OutboundDeliveryStatus::Delivered, None)
+                        let confirmed = self
+                            .mark_terminal(&attempt, OutboundDeliveryStatus::Delivered, None)
                             .await;
+                        if !confirmed {
+                            // The adapter accepted every part, but the
+                            // durable row never reached `Delivered` — the
+                            // PR invariant is that only a durable
+                            // `Delivered` row confirms success, so report
+                            // the closest existing non-success fit instead
+                            // of a false confirmation. `Sending` is the
+                            // last state this call is certain committed;
+                            // recovery reconciles the row from there.
+                            return Ok(CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
+                                status: OutboundDeliveryStatus::Sending,
+                                failure_kind: None,
+                            });
+                        }
                         return Ok(CoordinatedDeliveryOutcome::Delivered {
                             attempt,
                             conversation,
@@ -855,12 +876,19 @@ impl DeliveryCoordinator {
         }
     }
 
+    /// Write the terminal status durably. Returns whether the write
+    /// succeeded — callers reporting a success outcome (`Delivered`) must
+    /// check this instead of assuming the store write landed just because
+    /// the adapter call did (OUT invariant: only a durable `Delivered` row
+    /// confirms success). A caller reporting `Failed` may ignore the
+    /// result: recovery reconciles a stray `Sending`/`Unknown` row either
+    /// way, and `Failed` is never treated as a confirmed outcome.
     async fn mark_terminal(
         &self,
         attempt: &OutboundDeliveryAttempt,
         status: OutboundDeliveryStatus,
         failure_kind: Option<DeliveryFailureKind>,
-    ) {
+    ) -> bool {
         if let Err(error) = self
             .store
             .update_delivery_status(UpdateDeliveryStatusRequest {
@@ -872,15 +900,16 @@ impl DeliveryCoordinator {
             })
             .await
         {
-            // silent-ok: terminal-status bookkeeping must not mask the
-            // delivery outcome; the attempt stays in its prior durable state
-            // and recovery reconciles it.
+            // The attempt stays in its prior durable state and recovery
+            // reconciles it; the caller decides what outcome to report.
             debug!(
                 delivery_id = %attempt.delivery_id,
                 error = %error,
                 "delivery coordinator: terminal status write failed"
             );
+            return false;
         }
+        true
     }
 }
 
