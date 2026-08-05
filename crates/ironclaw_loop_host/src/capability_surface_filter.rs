@@ -305,6 +305,12 @@ async fn invoke_filtered_batch(
             "capability surface filter received too many inner outcomes",
         ));
     }
+    if !stopped_on_suspension && inner_outcomes.len() < allowed_idx.len() {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            "capability surface filter received too few inner outcomes without suspension",
+        ));
+    }
 
     let n_inner = inner_outcomes.len();
     for (outcome, original_index) in inner_outcomes
@@ -1433,10 +1439,20 @@ mod tests {
             .expect("batch outcome");
 
         assert_eq!(outcome.resolutions.len(), 3);
+        assert!(matches!(
+            &outcome.resolutions[0],
+            Resolution::Done(outcome)
+                if outcome.refs.origin.as_ref().is_some_and(|origin| origin.as_str() == "result:first")
+        ));
         assert_eq!(
             denied_reason(&outcome.resolutions[1]),
             Some("surface_profile_denied")
         );
+        assert!(matches!(
+            &outcome.resolutions[2],
+            Resolution::Done(outcome)
+                if outcome.refs.origin.as_ref().is_some_and(|origin| origin.as_str() == "result:second")
+        ));
         let batches = inner.batches.lock().expect("batch lock");
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].invocations.len(), 2);
@@ -1447,6 +1463,40 @@ mod tests {
         assert_eq!(
             batches[0].invocations[1].capability_id.as_str(),
             "demo.second"
+        );
+    }
+
+    #[tokio::test]
+    async fn short_inner_outcomes_without_suspension_are_rejected() {
+        let inner = Arc::new(SpyPort::default());
+        *inner.batch_outcome.lock().expect("batch outcome lock") =
+            Some(ironclaw_host_api::resolution::ResolutionBatch {
+                resolutions: vec![completed("result:first")],
+                stopped_on_suspension: false,
+            });
+        let filter = CapabilitySurfacePolicyFilter::new(
+            inner,
+            Arc::new(CapabilitySurfacePolicy::allow_only([
+                capability_id("demo.first"),
+                capability_id("demo.second"),
+            ])),
+        );
+
+        let error = filter
+            .invoke_capability_batch(LoopRequestBatch {
+                invocations: vec![
+                    invocation("demo.first", "input:first"),
+                    invocation("demo.second", "input:second"),
+                ],
+                stop_on_first_suspension: true,
+            })
+            .await
+            .expect_err("short non-suspended outcomes violate the inner port contract");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
+        assert_eq!(
+            error.safe_summary,
+            "capability surface filter received too few inner outcomes without suspension"
         );
     }
 
