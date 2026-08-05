@@ -62,7 +62,7 @@ hallucinates props), and a11y/token/interaction tests in the existing Vitest.
 | 2.3 | `.storybook/preview.ts`: import the global stylesheet (tokens load) and wrap stories in the app theme provider decorator. **a11y mode:** covered stories run at **`test: 'error'`** (fail on any violation); only not-yet-triaged stories sit at `'todo'` — see the CI gate in 2.6. | `.storybook/preview.ts` |
 | 2.4 | Author stories for **Tier-2 primitives first** (buttons, inputs, the items in `src/components/`): a smoke play test, a **token/CSS check** (computed style == token), and variant stories per visual state. | `src/**/*.stories.tsx` |
 | 2.5 | Wire the **Storybook MCP** (`http://localhost:6006/mcp`) and add a CLAUDE.md / design-rule line: "query Storybook MCP `get-documentation` before using any component — never guess props." | `CLAUDE.md` + rule |
-| 2.6 | Add the **Storybook test job to `reborn-tests.yml`** (the existing WebUI frontend lane). That lane today runs `vitest run` (VM/happy-dom) + `pnpm build` — **not browser-based** — so the Storybook Vitest addon needs its **own browser-mode Vitest project** (Playwright Chromium), separate from `vitest run`. **CI-observable a11y gate:** `test: 'todo'` prints nothing in CI and so cannot gate; instead run **covered stories at `test: 'error'`** (a violation fails the job) and leave only untriaged stories at `'todo'`, and emit the axe results as a job artifact for visibility. This `error`-on-covered job *is* the "passing a11y (axe) checks" success criterion in PROPOSAL.md. Scope the browser project to changed stories to bound CI minutes. | `.github/workflows/reborn-tests.yml` |
+| 2.6 | Add the **Storybook test job to `reborn-tests.yml`** (the existing WebUI frontend lane). That lane today runs `vitest run` (VM/happy-dom) + `pnpm build` — **not browser-based** — so the Storybook Vitest addon needs its **own browser-mode Vitest project** (Playwright Chromium), separate from `vitest run`. **CI-observable a11y gate:** `test: 'todo'` prints nothing in CI and so cannot gate; instead run **covered stories at `test: 'error'`** (a violation fails the job) and leave only untriaged stories at `'todo'`, and emit the axe results as a job artifact for visibility. This `error`-on-covered job *is* the "passing a11y (axe) checks" success criterion in PROPOSAL.md. **Coverage contract:** the CI gate runs the **full covered-story set** every run (that is what backs the "every covered story passes" guarantee); changed-story filtering is an optional **local / pre-push fast path only**, never the gate. | `.github/workflows/reborn-tests.yml` |
 
 **Exit:** `pnpm storybook` works **from a `--frozen-lockfile` install**;
 primitives have stories that run in the **browser-mode Vitest project**; **every
@@ -71,8 +71,10 @@ covered story passes axe at `test: 'error'`** in CI (untriaged stories stay
 
 **Risks:** (a) Storybook version drift vs. React 19 / Tailwind v4 — pin every
 Storybook package (incl. `@storybook/react-vite`) and smoke-test the build.
-(b) CI minutes — the browser-mode project adds a Playwright Chromium install;
-scope it to changed stories. (c) Tailwind v4 CSS-config (no `tailwind.config.js`)
+(b) CI minutes — the covered set starts small (primitives first), so the
+full-set gate is cheap; the main cost is the one-time Playwright Chromium
+install, which should be cached. (Changed-story filtering stays a local fast
+path, not a way to shrink the gate.) (c) Tailwind v4 CSS-config (no `tailwind.config.js`)
 — ensure the preview imports the same CSS entry the app uses so tokens resolve.
 
 ---
@@ -159,14 +161,17 @@ modified destructively in any phase. A full rollback has two parts — **delete
 the added files** *and* **revert the edits to existing files** — because
 deleting only the added docs would leave stale pointers and active rules behind.
 
-**Added files to delete** (exact paths):
+**Added files to delete** — delete **only the exact files this rollout added**,
+never a blanket glob (each phase records the files it introduces; do not delete
+feature docs or stories authored by other work):
 - `docs/design/DESIGN.md`
 - `.claude/rules/design.md` (and `design-a11y.md` if created), `.claude/rules/feature-workflow.md`, `.claude/rules/critical-flows.md`
 - `docs/qa/CRITICAL_FLOWS.md`
-- `docs/features/` (the `_templates/` scaffold + any piloted `<slug>/`)
-- `crates/product/ironclaw_webui/frontend/.storybook/` and any `*.stories.tsx`
+- the `docs/features/_templates/` scaffold and the specific piloted `docs/features/<slug>/` folder(s) this rollout created — **not** a blanket `docs/features/` delete
+- `crates/product/ironclaw_webui/frontend/.storybook/` and the specific `*.stories.tsx` files this rollout added — **not** every `*.stories.tsx`
 
-**Edits to existing files to revert** (not just delete):
+**Edits to existing files to revert with targeted patches** (revert only the
+rollout's hunks — do not wholesale-revert a file that other work also touched):
 - `CLAUDE.md` — the DESIGN.md pointer, the Storybook-MCP line, and the consolidated invariant list (Phase 1.4/1.5, 2.5)
 - `crates/product/ironclaw_webui/frontend/package.json` + `pnpm-lock.yaml` — the pinned Storybook `devDependencies`
 - `.github/workflows/reborn-tests.yml` — the Storybook/a11y test job

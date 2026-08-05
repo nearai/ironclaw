@@ -91,9 +91,10 @@ is additive and copy-in; nothing forces a rewrite of existing crates or CI.
 - **Storybook runs** in the frontend with the MCP addon, and at least the
   **atoms/primitives** ship stories with a smoke play test, a token/CSS check,
   and **passing a11y (axe) checks for every component that ships a story**.
-  These run in a Storybook browser-mode Vitest project; in CI, covered stories
-  run at `test: 'error'` (a violation fails the job) while untriaged stories
-  stay at `'todo'` (see the Phase 2 a11y-gate definition in
+  These run in a Storybook browser-mode Vitest project; in CI, the gate runs the
+  **full covered-story set** at `test: 'error'` (a violation fails the job)
+  while untriaged stories stay at `'todo'` — changed-story filtering is a local
+  fast path, not the gate (see the Phase 2 a11y-gate definition in
   [INTEGRATION_PLAN.md](INTEGRATION_PLAN.md)).
 - A **`CRITICAL_FLOWS.md`** catalogs IronClaw's real end-to-end journeys (e.g.
   onboarding/pairing, chat turn, extension auth, mission run) with hot-path
