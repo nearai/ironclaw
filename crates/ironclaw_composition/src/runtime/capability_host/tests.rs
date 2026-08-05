@@ -75,6 +75,24 @@ mod tests {
         EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     };
 
+    impl StagedCapabilityIo {
+        fn latest_result_output(
+            &self,
+        ) -> Result<Option<(String, serde_json::Value)>, AgentLoopHostError> {
+            self.results
+                .lock()
+                .map_err(|_| capability_io_error())
+                .map(|results| {
+                    results.oldest_refs.back().and_then(|result_ref| {
+                        results
+                            .get(result_ref)
+                            .cloned()
+                            .map(|output| (result_ref.clone(), output))
+                    })
+                })
+        }
+    }
+
     /// The §5.3 flip collapsed `CapabilityOutcome::Completed` into
     /// `Resolution::Done(Outcome)`; the minted `refs.result` is an opaque uuid,
     /// while the originating loop result ref the capability io staged the output

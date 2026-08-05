@@ -383,23 +383,6 @@ impl StagedCapabilityIo {
             .map(|results| results.get(result_ref).cloned())
     }
 
-    #[cfg(test)]
-    fn latest_result_output(
-        &self,
-    ) -> Result<Option<(String, serde_json::Value)>, AgentLoopHostError> {
-        self.results
-            .lock()
-            .map_err(|_| capability_io_error())
-            .map(|results| {
-                results.oldest_refs.back().and_then(|result_ref| {
-                    results
-                        .get(result_ref)
-                        .cloned()
-                        .map(|output| (result_ref.clone(), output))
-                })
-            })
-    }
-
     async fn persist_tool_result(
         &self,
         run_context: &LoopRunContext,
