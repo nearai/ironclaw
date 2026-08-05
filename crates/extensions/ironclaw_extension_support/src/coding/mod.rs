@@ -816,6 +816,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn readable_text_log_with_a_stray_nul_remains_writable() {
+        let fixture = CodingFixture::new("stray-nul-log-user");
+        let file = fixture.workspace_dir.join("syslog.log");
+        let mut original = b"Jan  1 00:00:00 host sshd[1]: Failed password for root\n".to_vec();
+        original.push(0u8);
+        original.extend_from_slice(b"Jan  1 00:00:01 host sshd[1]: more log line\n");
+        std::fs::write(&file, original).expect("seed text log");
+
+        fixture
+            .dispatch(
+                super::CodingCapabilityKind::ReadFile,
+                json!({"path": "/workspace/syslog.log"}),
+            )
+            .await
+            .expect("text log with a stray NUL must be readable");
+
+        fixture
+            .dispatch(
+                super::CodingCapabilityKind::WriteFile,
+                json!({"path": "/workspace/syslog.log", "content": "redacted log\n"}),
+            )
+            .await
+            .expect("a text log accepted by read_file must remain writable");
+
+        assert_eq!(
+            std::fs::read(file).expect("text log after overwrite"),
+            b"redacted log\n"
+        );
+    }
+
+    #[tokio::test]
     async fn write_file_rejects_existing_pdf_but_allows_new_pdf() {
         let fixture = CodingFixture::new("pdf-write-user");
         let existing = fixture.workspace_dir.join("existing.pdf");
