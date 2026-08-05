@@ -211,7 +211,8 @@ def main() -> int:
         print(
             "\nFix one of three ways:\n"
             "  * public page      -> add it to docs/docs.json navigation\n"
-            "  * internal doc     -> add its directory to docs/.mintignore\n"
+            "  * internal doc     -> move it under docs/internal/ (already\n"
+            "    fenced; docs/.mintignore is frozen)\n"
             "  * deliberately     -> add `hidden: true` to its frontmatter to\n"
             "    unlisted page       mark it intentionally public-but-unlisted",
             file=sys.stderr,
