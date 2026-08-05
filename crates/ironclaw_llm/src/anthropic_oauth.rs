@@ -98,6 +98,9 @@ pub(crate) struct AnthropicOAuthProvider {
     active_model: std::sync::RwLock<String>,
     /// Parameter names that this provider does not support.
     unsupported_params: HashSet<String>,
+    /// Anthropic prompt-cache retention; drives the explicit `cache_control`
+    /// breakpoints (system prompt, last tool, last message block). See #6984.
+    cache_retention: crate::config::CacheRetention,
 }
 
 impl AnthropicOAuthProvider {
@@ -127,6 +130,9 @@ impl AnthropicOAuthProvider {
         let unsupported_params: HashSet<String> =
             config.unsupported_params.iter().cloned().collect();
 
+        let cache_retention =
+            crate::rig_adapter::effective_cache_retention(config.cache_retention, &config.model);
+
         Ok(Self {
             client,
             token: std::sync::RwLock::new(token),
@@ -134,6 +140,7 @@ impl AnthropicOAuthProvider {
             base_url,
             active_model,
             unsupported_params,
+            cache_retention,
         })
     }
 
@@ -326,16 +333,18 @@ impl LlmProvider for AnthropicOAuthProvider {
         let (system, messages) = convert_messages(req.messages);
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
-        let request = AnthropicRequest {
+        let mut request = AnthropicRequest {
             thinking: thinking_for_request(&model, max_tokens, req.temperature, false),
             model,
             messages,
-            system,
+            system: system.map(AnthropicSystem::Text),
             max_tokens,
             temperature: req.temperature,
             tools: None,
             tool_choice: None,
         };
+
+        apply_cache_breakpoints(&mut request, self.cache_retention);
 
         let response: AnthropicResponse = self.send_request(&request).await?;
         let extracted = extract_response_content(&response);
@@ -375,6 +384,7 @@ impl LlmProvider for AnthropicOAuthProvider {
                 name: t.name,
                 description: t.description,
                 input_schema: t.parameters,
+                cache_control: None,
             })
             .collect();
 
@@ -406,7 +416,7 @@ impl LlmProvider for AnthropicOAuthProvider {
         let has_tools = !tools.is_empty();
         let opt_tools = if has_tools { Some(tools) } else { None };
 
-        let request = AnthropicRequest {
+        let mut request = AnthropicRequest {
             thinking: if has_tools {
                 None
             } else {
@@ -414,12 +424,14 @@ impl LlmProvider for AnthropicOAuthProvider {
             },
             model,
             messages,
-            system,
+            system: system.map(AnthropicSystem::Text),
             max_tokens,
             temperature: req.temperature,
             tools: opt_tools,
             tool_choice,
         };
+
+        apply_cache_breakpoints(&mut request, self.cache_retention);
 
         let response: AnthropicResponse = self.send_request(&request).await?;
         let extracted = extract_response_content(&response);
@@ -486,7 +498,7 @@ struct AnthropicRequest {
     model: String,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<AnthropicSystem>,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
@@ -504,6 +516,25 @@ struct AnthropicMessage {
     content: AnthropicContent,
 }
 
+/// Anthropic system prompt: a plain string (legacy wire shape, kept when
+/// caching is off) or content blocks so the last block can carry a
+/// `cache_control` breakpoint.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum AnthropicSystem {
+    Text(String),
+    Blocks(Vec<AnthropicSystemBlock>),
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicSystemBlock {
+    #[serde(rename = "type")]
+    block_type: &'static str,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<serde_json::Value>,
+}
+
 /// Anthropic content can be a simple string or a list of content blocks.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
@@ -516,20 +547,44 @@ enum AnthropicContent {
 #[serde(tag = "type")]
 enum AnthropicContentBlock {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<serde_json::Value>,
+    },
     #[serde(rename = "image")]
-    Image { source: AnthropicImageSource },
+    Image {
+        source: AnthropicImageSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<serde_json::Value>,
+    },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<serde_json::Value>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
         tool_use_id: String,
         content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<serde_json::Value>,
     },
+}
+
+impl AnthropicContentBlock {
+    /// Stamp a `cache_control` breakpoint on this block.
+    fn set_cache_control(&mut self, marker: serde_json::Value) {
+        match self {
+            Self::Text { cache_control, .. }
+            | Self::Image { cache_control, .. }
+            | Self::ToolUse { cache_control, .. }
+            | Self::ToolResult { cache_control, .. } => *cache_control = Some(marker),
+        }
+    }
 }
 
 /// Inline base64 image source for an Anthropic `image` content block.
@@ -546,6 +601,8 @@ struct AnthropicTool {
     name: String,
     description: String,
     input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -613,6 +670,7 @@ fn user_image_blocks(parts: &[ContentPart]) -> Vec<AnthropicContentBlock> {
             ContentPart::ImageUrl { image_url } => {
                 let (media_type, data) = image_url.decode_data_url()?;
                 Some(AnthropicContentBlock::Image {
+                    cache_control: None,
                     source: AnthropicImageSource {
                         source_type: "base64",
                         media_type: media_type.to_string(),
@@ -623,6 +681,61 @@ fn user_image_blocks(parts: &[ContentPart]) -> Vec<AnthropicContentBlock> {
             ContentPart::Text { .. } => None,
         })
         .collect()
+}
+
+/// Place the explicit Anthropic `cache_control` breakpoints (issue #6984):
+/// the system prompt, the last tool definition, and the last content block of
+/// the last message. Mirrors pi's placement so the tool/system prefix and the
+/// growing conversation each cache independently. All markers carry the same
+/// TTL, satisfying Anthropic's longer-TTL-first ordering rule. No-op when
+/// retention is `None`, preserving the legacy wire shape (plain-string
+/// system, no markers).
+fn apply_cache_breakpoints(
+    request: &mut AnthropicRequest,
+    retention: crate::config::CacheRetention,
+) {
+    let Some(marker) = retention.cache_control_json() else {
+        return;
+    };
+
+    // convert_messages only ever produces the string form, but restore any
+    // other value untouched rather than dropping it on the floor.
+    request.system = match request.system.take() {
+        Some(AnthropicSystem::Text(text)) => {
+            Some(AnthropicSystem::Blocks(vec![AnthropicSystemBlock {
+                block_type: "text",
+                text,
+                cache_control: Some(marker.clone()),
+            }]))
+        }
+        other => other,
+    };
+
+    if let Some(tools) = request.tools.as_mut()
+        && let Some(last) = tools.last_mut()
+    {
+        last.cache_control = Some(marker.clone());
+    }
+
+    if let Some(last_message) = request.messages.last_mut() {
+        match &mut last_message.content {
+            // Empty text blocks cannot carry cache_control (API rejects
+            // them), so an empty trailing message keeps the string form.
+            AnthropicContent::Text(text) if !text.is_empty() => {
+                last_message.content =
+                    AnthropicContent::Blocks(vec![AnthropicContentBlock::Text {
+                        text: std::mem::take(text),
+                        cache_control: Some(marker),
+                    }]);
+            }
+            AnthropicContent::Text(_) => {}
+            AnthropicContent::Blocks(blocks) => {
+                if let Some(last_block) = blocks.last_mut() {
+                    last_block.set_cache_control(marker);
+                }
+            }
+        }
+    }
 }
 
 /// Convert ChatMessage list to Anthropic format.
@@ -649,7 +762,10 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                     image_blocks => {
                         let mut blocks = Vec::with_capacity(1 + image_blocks.len());
                         if !msg.content.is_empty() {
-                            blocks.push(AnthropicContentBlock::Text { text: msg.content });
+                            blocks.push(AnthropicContentBlock::Text {
+                                text: msg.content,
+                                cache_control: None,
+                            });
                         }
                         blocks.extend(image_blocks);
                         AnthropicContent::Blocks(blocks)
@@ -665,13 +781,17 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                     // Assistant message with tool calls → content blocks
                     let mut blocks: Vec<AnthropicContentBlock> = Vec::new();
                     if !msg.content.is_empty() {
-                        blocks.push(AnthropicContentBlock::Text { text: msg.content });
+                        blocks.push(AnthropicContentBlock::Text {
+                            text: msg.content,
+                            cache_control: None,
+                        });
                     }
                     for tc in tool_calls {
                         blocks.push(AnthropicContentBlock::ToolUse {
                             id: tc.id,
                             name: tc.name,
                             input: tc.arguments,
+                            cache_control: None,
                         });
                     }
                     anthropic_msgs.push(AnthropicMessage {
@@ -694,6 +814,7 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                 let block = AnthropicContentBlock::ToolResult {
                     tool_use_id: tool_call_id,
                     content: msg.content,
+                    cache_control: None,
                 };
                 // If the last message is already a user message of *only*
                 // tool-result blocks, append to it (Anthropic requires
@@ -796,301 +917,7 @@ fn extract_response_content(response: &AnthropicResponse) -> ExtractedAnthropicR
     }
 }
 
+// The transport/cache-breakpoint test suite lives in its own file so this
+// one stays inside the file-size budget: `src/anthropic_oauth/tests.rs`.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn complete_preserves_missing_retry_after_on_headerless_502() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("loopback listener");
-        let base_url = format!(
-            "http://{}",
-            listener.local_addr().expect("loopback address")
-        );
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept request");
-            let mut request = vec![0_u8; 4096];
-            let _ = socket.read(&mut request).await.expect("read request");
-            let body = r#"{"error":{"message":"upstream unavailable"}}"#;
-            let response = format!(
-                "HTTP/1.1 502 Bad Gateway\r\ncontent-type: application/json\r\n\
-                 content-length: {}\r\n\r\n{body}",
-                body.len()
-            );
-            socket
-                .write_all(response.as_bytes())
-                .await
-                .expect("write error response");
-        });
-
-        let mut config = RegistryProviderConfig::generic(
-            crate::registry::ProviderProtocol::Anthropic,
-            "anthropic_oauth",
-            None,
-            base_url,
-            "claude-test",
-        );
-        config.oauth_token = Some(SecretString::from("test-token".to_string()));
-        let provider = AnthropicOAuthProvider::new(&config).expect("provider");
-        let error = provider
-            .complete(CompletionRequest::new(vec![ChatMessage::user("hello")]))
-            .await
-            .expect_err("scripted provider error");
-        server.await.expect("loopback server");
-
-        assert!(matches!(
-            error,
-            LlmError::BadGateway {
-                provider,
-                status: 502,
-                retry_after: None,
-            } if provider == "anthropic_oauth"
-        ));
-    }
-
-    #[test]
-    fn context_overflow_413_maps_to_context_length_exceeded() {
-        // A raw HTTP 413 (payload too large) must become ContextLengthExceeded
-        // so the loop's context-shrink recovery fires.
-        match context_length_error_for_status(413, "Request Entity Too Large") {
-            Some(LlmError::ContextLengthExceeded { .. }) => {}
-            other => panic!("expected ContextLengthExceeded, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn context_overflow_400_body_maps_to_context_length_exceeded() {
-        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 234872 tokens > 200000 maximum"}}"#;
-        match context_length_error_for_status(400, body) {
-            Some(LlmError::ContextLengthExceeded { used, limit }) => {
-                assert_eq!(used, 234872);
-                assert_eq!(limit, 200000);
-            }
-            other => panic!("expected ContextLengthExceeded, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn unrelated_400_is_not_context_overflow() {
-        // A plain bad-request (e.g. invalid request shape) must NOT be
-        // classified as context overflow — the caller falls through to
-        // RequestFailed.
-        assert!(
-            context_length_error_for_status(400, r#"{"error":{"message":"invalid request body"}}"#)
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn unrelated_5xx_is_not_context_overflow() {
-        assert!(context_length_error_for_status(503, "service unavailable").is_none());
-    }
-
-    #[test]
-    fn test_convert_messages_extracts_system() {
-        let messages = vec![
-            ChatMessage::system("You are helpful."),
-            ChatMessage::user("Hello"),
-        ];
-        let (system, msgs) = convert_messages(messages);
-        assert_eq!(system, Some("You are helpful.".to_string()));
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].role, "user");
-    }
-
-    #[test]
-    fn test_convert_messages_multiple_systems() {
-        let messages = vec![
-            ChatMessage::system("System 1"),
-            ChatMessage::system("System 2"),
-            ChatMessage::user("Hello"),
-        ];
-        let (system, msgs) = convert_messages(messages);
-        assert_eq!(system, Some("System 1\n\nSystem 2".to_string()));
-        assert_eq!(msgs.len(), 1);
-    }
-
-    #[test]
-    fn test_convert_messages_user_image_becomes_base64_image_block() {
-        let messages = vec![ChatMessage::user_with_parts(
-            "what is this?",
-            vec![ContentPart::ImageUrl {
-                image_url: crate::provider::ImageUrl {
-                    url: "data:image/png;base64,AQIDBA==".to_string(),
-                    detail: None,
-                },
-            }],
-        )];
-        let (_system, msgs) = convert_messages(messages);
-        assert_eq!(msgs.len(), 1);
-        // Text rides as the first block, the image as a base64 `image` block.
-        let value = serde_json::to_value(&msgs[0]).expect("serialize");
-        let blocks = value["content"].as_array().expect("content blocks");
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0]["type"], "text");
-        assert_eq!(blocks[0]["text"], "what is this?");
-        assert_eq!(blocks[1]["type"], "image");
-        assert_eq!(blocks[1]["source"]["type"], "base64");
-        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
-        assert_eq!(blocks[1]["source"]["data"], "AQIDBA==");
-    }
-
-    #[test]
-    fn test_convert_messages_text_only_user_stays_a_string() {
-        let messages = vec![ChatMessage::user("just text")];
-        let (_system, msgs) = convert_messages(messages);
-        let value = serde_json::to_value(&msgs[0]).expect("serialize");
-        // No inline images → compact string content, not a blocks array.
-        assert_eq!(value["content"], "just text");
-    }
-
-    #[test]
-    fn test_convert_messages_tool_calls() {
-        let tool_calls = vec![ToolCall {
-            id: "call_1".to_string(),
-            name: "search".to_string(),
-            arguments: serde_json::json!({"q": "test"}),
-            reasoning: None,
-            signature: None,
-            arguments_parse_error: None,
-        }];
-        let messages = vec![
-            ChatMessage::user("Search for test"),
-            ChatMessage::assistant_with_tool_calls(Some("Let me search.".to_string()), tool_calls),
-            ChatMessage::tool_result("call_1", "search", "found it"),
-        ];
-        let (system, msgs) = convert_messages(messages);
-        assert!(system.is_none());
-        assert_eq!(msgs.len(), 3);
-        assert_eq!(msgs[0].role, "user");
-        assert_eq!(msgs[1].role, "assistant");
-        // Tool result should be a user message
-        assert_eq!(msgs[2].role, "user");
-    }
-
-    #[test]
-    fn test_extract_response_text_only() {
-        let response = AnthropicResponse {
-            content: vec![AnthropicResponseBlock::Text {
-                text: "Hello!".to_string(),
-            }],
-            stop_reason: Some("end_turn".to_string()),
-            usage: AnthropicUsage {
-                input_tokens: 10,
-                output_tokens: 5,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-            },
-        };
-        let extracted = extract_response_content(&response);
-        assert_eq!(extracted.content, Some("Hello!".to_string()));
-        assert!(extracted.tool_calls.is_empty());
-    }
-
-    #[test]
-    fn test_extract_response_with_tool_use() {
-        let response = AnthropicResponse {
-            content: vec![
-                AnthropicResponseBlock::Text {
-                    text: "Let me search.".to_string(),
-                },
-                AnthropicResponseBlock::ToolUse {
-                    id: "call_1".to_string(),
-                    name: "search".to_string(),
-                    input: serde_json::json!({"q": "test"}),
-                },
-            ],
-            stop_reason: Some("tool_use".to_string()),
-            usage: AnthropicUsage {
-                input_tokens: 20,
-                output_tokens: 15,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-            },
-        };
-        let extracted = extract_response_content(&response);
-        assert_eq!(extracted.content, Some("Let me search.".to_string()));
-        assert_eq!(extracted.tool_calls.len(), 1);
-        assert_eq!(extracted.tool_calls[0].name, "search");
-    }
-
-    #[test]
-    fn test_extract_response_preserves_thinking_as_reasoning() {
-        let response = AnthropicResponse {
-            content: vec![
-                AnthropicResponseBlock::Thinking {
-                    thinking: Some("Raw thinking".to_string()),
-                    summary: Some("Summarized thinking".to_string()),
-                    _signature: Some("sig".to_string()),
-                },
-                AnthropicResponseBlock::Text {
-                    text: "Done.".to_string(),
-                },
-            ],
-            stop_reason: Some("end_turn".to_string()),
-            usage: AnthropicUsage {
-                input_tokens: 20,
-                output_tokens: 15,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-            },
-        };
-        let extracted = extract_response_content(&response);
-        assert_eq!(extracted.content, Some("Done.".to_string()));
-        assert_eq!(extracted.reasoning, Some("Summarized thinking".to_string()));
-    }
-
-    #[test]
-    fn test_extract_response_uses_thinking_when_summary_absent() {
-        let response = AnthropicResponse {
-            content: vec![
-                AnthropicResponseBlock::Thinking {
-                    thinking: Some("Raw thinking fallback".to_string()),
-                    summary: None,
-                    _signature: Some("sig".to_string()),
-                },
-                AnthropicResponseBlock::Text {
-                    text: "Done.".to_string(),
-                },
-            ],
-            stop_reason: Some("end_turn".to_string()),
-            usage: AnthropicUsage {
-                input_tokens: 20,
-                output_tokens: 15,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-            },
-        };
-
-        let extracted = extract_response_content(&response);
-
-        assert_eq!(extracted.content, Some("Done.".to_string()));
-        assert_eq!(
-            extracted.reasoning,
-            Some("Raw thinking fallback".to_string())
-        );
-    }
-
-    /// Regression test for #1136: token field must be mutable via RwLock
-    /// so that a refreshed token persists across subsequent requests.
-    #[test]
-    fn test_token_update_persists() {
-        let original = SecretString::from("old_token".to_string());
-        let token = std::sync::RwLock::new(original);
-
-        // Read the original
-        assert_eq!(token.read().unwrap().expose_secret(), "old_token");
-
-        // Simulate a successful refresh
-        let refreshed = SecretString::from("new_token".to_string());
-        *token.write().unwrap() = refreshed;
-
-        // Subsequent reads see the updated token
-        assert_eq!(token.read().unwrap().expose_secret(), "new_token");
-    }
-}
+mod tests;

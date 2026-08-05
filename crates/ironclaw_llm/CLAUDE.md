@@ -335,6 +335,29 @@ Providers in this crate import it as `use ironclaw_common::llm_costs as costs;`
 (a plain import alias, **not** a re-export — see the relocation note in
 `.claude/rules/type-placement.md`).
 
+## Anthropic Prompt Caching
+
+Both Anthropic transports emit explicit `cache_control` breakpoints when
+`cache_retention` (env: `ANTHROPIC_CACHE_RETENTION`) is not `none` (#6984):
+
+- **OAuth transport** (`anthropic_oauth.rs`, `apply_cache_breakpoints`): system
+  prompt block, last tool definition, and the last content block of the last
+  message, all carrying the retention TTL (`{"type":"ephemeral"}` for short,
+  `+ "ttl":"1h"` for long).
+- **API-key transport** (`rig_adapter.rs`, `build_rig_request` +
+  `create_anthropic_from_registry`): the top-level automatic-caching marker,
+  an explicit marker on the last tool (moved into rig's raw
+  `additional_params.tools`, which rig appends after typed tools), and — for
+  `short` only — rig's typed system/last-message breakpoints
+  (`CompletionModel::prompt_caching`). `long` must not enable the typed
+  breakpoints: rig's markers cannot carry a TTL, and a 5m block marker with a
+  1h automatic marker is an API error (TTL conflict on the last block).
+
+All markers within a request share one TTL, satisfying Anthropic's
+longer-TTL-first ordering rule. Models without cache support (claude-2 era)
+downgrade to `none` via `supports_prompt_cache`. Wire shape is pinned by
+capture-server tests in both files.
+
 ## rig_adapter.rs Details
 
 `RigAdapter<M>` bridges any rig-core `CompletionModel` to `LlmProvider`. It is actively used in production for all non-NEAR AI providers (OpenAI, Anthropic, Ollama, Tinfoil, OpenAI-compatible). Key behaviors:
