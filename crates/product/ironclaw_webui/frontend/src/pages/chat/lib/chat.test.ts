@@ -1015,6 +1015,49 @@ test("Chat intercepts known slash text as a command on an active thread", async 
   assert.deepEqual(sends, ["/status", "plain text"], "ordinary text still submits");
 });
 
+test("Chat navigates an active-thread command to a different response thread", async () => {
+  const selections = [];
+  const { tree, components } = renderChat({
+    activeThreadId: "thread-1",
+    onSelectThread: (...args) => selections.push(args),
+    contextOverrides: {
+      useChatCommands: () => [{ name: "new", usage: "/new" }],
+      matchCommand: (text) => (text === "/new" ? { name: "new" } : null),
+    },
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: false,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: null,
+      send: async () => {
+        throw new Error("new command must not submit a turn");
+      },
+      runCommand: async () => ({ thread_id: "thread-2" }),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const chatInput = findComponent(tree, components.ChatInput);
+  const props = componentProps(chatInput, components.ChatInput);
+  await props.onSend("/new", {});
+
+  assert.equal(selections.length, 1);
+  assert.equal(selections[0][0], "thread-2");
+  assert.equal(selections[0][1].replace, true);
+});
+
 test("Chat landing view renders no command menu and submits a known command as an ordinary message", async () => {
   // Homepage commands are intentionally OFF for now (see the interception
   // guard comment in chat.tsx's `handleSend`). A prior change let the

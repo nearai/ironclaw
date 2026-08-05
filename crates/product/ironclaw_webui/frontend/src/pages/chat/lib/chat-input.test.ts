@@ -1352,6 +1352,34 @@ test("ChatInput command-menu shows an intentional empty state for a bare prefix 
   assert.equal(extractText(count), "0/3");
 });
 
+test("ChatInput command-menu stays closed when no commands are available", () => {
+  const { tree } = renderChatInput({
+    disabled: false,
+    sendDisabled: false,
+    canCancel: false,
+    draft: "/status",
+    commands: [],
+  });
+
+  assert.equal(
+    findNode(tree, (node) => node.props?.["data-testid"] === "chat-command-menu-empty"),
+    null,
+  );
+  assert.equal(
+    findNode(tree, (node) => node.props?.["data-testid"] === "chat-command-menu-count"),
+    null,
+  );
+
+  let prevented = false;
+  templateProps(findTextarea(tree)).onKeyDown({
+    key: "Escape",
+    preventDefault: () => {
+      prevented = true;
+    },
+  });
+  assert.equal(prevented, false);
+});
+
 test("ChatInput command-menu renders nothing for plain text that isn't a bare command prefix", () => {
   const { tree } = renderChatInput({
     disabled: false,

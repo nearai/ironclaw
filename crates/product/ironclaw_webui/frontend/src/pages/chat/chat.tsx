@@ -218,20 +218,23 @@ export function Chat({
       }
       if (composerSendBlockedRef.current) return null;
       const sendCycleId = emptyThreadCycleIdRef.current;
-      // A newly created thread (from either path below) is not yet the
-      // selected/active one — route the browser to it, exactly as the send
+      // A response naming a thread other than the selected/active one —
+      // a newly created landing thread, or a command effect such as `/new`
+      // opening a fresh task — routes the browser to it, exactly as the send
       // path already did, so the result (a system notice for a command, the
-      // first reply for a message) renders somewhere visible. Only the send
-      // that still owns the current empty-thread cycle may navigate; see
-      // `emptyThreadCycleIdRef`.
+      // first reply for a message) renders somewhere visible. From the
+      // landing view, only the send that still owns the current empty-thread
+      // cycle may navigate; see `emptyThreadCycleIdRef`.
       const selectResponseThread = (response) => {
         const responseThreadId = response?.thread_id || activeThreadId;
-        if (
-          !activeThreadId &&
-          responseThreadId &&
-          onSelectThread &&
-          emptyThreadCycleIdRef.current === sendCycleId
-        ) {
+        if (!responseThreadId || !onSelectThread) return;
+        if (activeThreadId) {
+          if (responseThreadId !== activeThreadId) {
+            onSelectThread(responseThreadId, { replace: true });
+          }
+          return;
+        }
+        if (emptyThreadCycleIdRef.current === sendCycleId) {
           emptyThreadCycleIdRef.current += 1;
           onSelectThread(responseThreadId, { replace: true });
         }

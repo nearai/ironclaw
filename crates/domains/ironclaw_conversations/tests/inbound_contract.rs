@@ -12,9 +12,10 @@ use ironclaw_conversations::{
     ExternalConversationIdentity, ExternalEventId, InMemoryConversationServices,
     InboundConversationService, InboundMessageContentRef, InboundTurnError, InboundTurnRequest,
     InboundTurnService, LinkConversationRequest, LinkedConversationBinding,
-    MessageIdempotencyStatus, ReplyTargetBinding, ResolveStoredReplyTargetRequest,
-    StoredReplyTargetAccess, ThreadAccessDecision, TurnSubmissionError,
-    TurnSubmissionErrorCategory, TurnSubmissionRetry, ValidateReplyTargetRequest,
+    MessageIdempotencyStatus, ReplyTargetBinding, ResetConversationRequest,
+    ResolveStoredReplyTargetRequest, StoredReplyTargetAccess, ThreadAccessDecision,
+    TurnSubmissionError, TurnSubmissionErrorCategory, TurnSubmissionRetry,
+    ValidateReplyTargetRequest,
 };
 use ironclaw_extension_contracts::external::{
     ExternalActorBindingEpoch, ExternalActorRef, ExternalConversationRef,
@@ -1692,6 +1693,157 @@ async fn repeated_explicit_link_replays_existing_binding_refs() {
         duplicate.reply_target_binding_ref,
         first.reply_target_binding_ref
     );
+}
+
+#[tokio::test]
+async fn reset_conversation_binding_rotates_once_and_preserves_old_message_history() {
+    let services = InMemoryConversationServices::default();
+    let actor = external_actor("alice-telegram-reset");
+    let conversation = external_conversation("chat-reset", None);
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+        )
+        .await;
+    let first = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor.clone(),
+            conversation.clone(),
+            "reset-before",
+        ))
+        .await
+        .expect("initial binding");
+    services
+        .accept_inbound_message(AcceptConversationMessageRequest {
+            tenant_id: tenant(),
+            thread_id: first.turn_scope.thread_id.clone(),
+            actor: first.actor.clone(),
+            adapter_kind: telegram(),
+            adapter_installation_id: default_installation(),
+            external_actor_ref: actor.clone(),
+            source_binding_ref: first.source_binding_ref.clone(),
+            reply_target_binding_ref: first.reply_target_binding_ref.clone(),
+            external_conversation_ref: conversation.clone(),
+            external_event_id: ExternalEventId::new("reset-message").unwrap(),
+            route_kind: ConversationRouteKind::Direct,
+            content_ref: InboundMessageContentRef::new("content:reset-message").unwrap(),
+            received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 1, 0).unwrap(),
+            requested_run_profile: None,
+        })
+        .await
+        .expect("accepted message before reset");
+
+    let reset_request = ResetConversationRequest {
+        resolve_request: resolve_request(
+            telegram(),
+            actor.clone(),
+            conversation.clone(),
+            "reset-command-event",
+        ),
+        expected_thread_id: first.turn_scope.thread_id.clone(),
+    };
+    let reset = services
+        .reset_conversation_binding(reset_request.clone())
+        .await
+        .expect("reset binding");
+
+    assert_eq!(reset.previous_thread_id, first.turn_scope.thread_id);
+    assert_ne!(
+        reset.resolution.turn_scope.thread_id,
+        reset.previous_thread_id
+    );
+    assert_eq!(services.accepted_messages().await.len(), 1);
+    let resolved = services
+        .lookup_binding(resolve_request(
+            telegram(),
+            actor.clone(),
+            conversation,
+            "reset-after-lookup",
+        ))
+        .await
+        .expect("rotated route remains bound");
+    assert_eq!(
+        resolved.turn_scope.thread_id,
+        reset.resolution.turn_scope.thread_id
+    );
+
+    let stale_reply = services
+        .validate_reply_target(validate_reply_request(
+            user("alice"),
+            telegram(),
+            default_installation(),
+            actor,
+            reset.previous_thread_id.clone(),
+            first.reply_target_binding_ref,
+        ))
+        .await
+        .expect_err("reset must revoke the old delivery ref");
+    assert!(matches!(
+        stale_reply,
+        InboundTurnError::ThreadNotFound { .. }
+    ));
+
+    let replay = services
+        .reset_conversation_binding(reset_request)
+        .await
+        .expect("duplicate reset event replays");
+    assert_eq!(replay, reset);
+}
+
+#[tokio::test]
+async fn reset_conversation_binding_rejects_a_stale_expected_thread() {
+    let services = InMemoryConversationServices::default();
+    let actor = external_actor("alice-telegram-stale-reset");
+    let conversation = external_conversation("chat-stale-reset", None);
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user("alice"),
+        )
+        .await;
+    let first = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            actor.clone(),
+            conversation.clone(),
+            "stale-reset-before",
+        ))
+        .await
+        .expect("initial binding");
+    services
+        .reset_conversation_binding(ResetConversationRequest {
+            resolve_request: resolve_request(
+                telegram(),
+                actor.clone(),
+                conversation.clone(),
+                "stale-reset-first-command",
+            ),
+            expected_thread_id: first.turn_scope.thread_id.clone(),
+        })
+        .await
+        .expect("first reset");
+
+    let error = services
+        .reset_conversation_binding(ResetConversationRequest {
+            resolve_request: resolve_request(
+                telegram(),
+                actor,
+                conversation,
+                "stale-reset-second-command",
+            ),
+            expected_thread_id: first.turn_scope.thread_id.clone(),
+        })
+        .await
+        .expect_err("stale expected thread must fail closed");
+    assert!(matches!(error, InboundTurnError::BindingConflict { .. }));
 }
 
 #[tokio::test]

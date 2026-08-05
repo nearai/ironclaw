@@ -10,7 +10,8 @@ use ironclaw_product_contracts::actor_identity::{
     ProductActorUserResolutionRequest, ProductActorUserResolver, ResolvedProductActorUser,
 };
 use ironclaw_product_contracts::binding::{
-    ProductBindingResolver, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
+    ProductBindingResolver, ProductConversationRouteKind, ResetBindingOutcome, ResetBindingRequest,
+    ResolveBindingRequest, ResolvedBinding,
 };
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::subject_route::{
@@ -603,6 +604,82 @@ impl ProductBindingResolver for ProductConversationBindingService {
         ensure_resolved_actor_matches_expected_user(expected_actor.as_ref(), &resolution)?;
 
         resolved_binding_from_resolution(resolution, request.route_kind)
+    }
+
+    async fn reset_binding(
+        &self,
+        request: ResetBindingRequest,
+    ) -> Result<ResetBindingOutcome, ProductOperationFailure> {
+        let ResetBindingRequest {
+            resolve_request,
+            expected_thread_id,
+        } = request;
+        let installation_scope = self.installations.resolve(
+            &resolve_request.adapter_id,
+            &resolve_request.installation_id,
+        )?;
+        let conversation_request =
+            conversation_request(&resolve_request, installation_scope.tenant_id.clone())?;
+        let existing = self
+            .conversations
+            .lookup_binding(conversation_request.clone())
+            .await
+            .map_err(map_conversation_error)?;
+        let current_subject_user_id =
+            if resolve_request.route_kind == ProductConversationRouteKind::Shared {
+                installation_scope
+                    .current_subject_for_existing_shared_binding(&resolve_request)
+                    .await?
+            } else {
+                None
+            };
+        ensure_existing_shared_binding_matches_current_subject(
+            current_subject_user_id.as_ref(),
+            &existing,
+        )?;
+
+        let expected_actor = resolve_actor_user(&installation_scope, &resolve_request).await?;
+        if let Some(resolved_actor) = expected_actor.as_ref() {
+            self.apply_resolved_actor_binding(
+                &installation_scope,
+                &resolve_request,
+                resolved_actor,
+            )
+            .await?;
+        }
+        ensure_resolved_actor_matches_expected_user(expected_actor.as_ref(), &existing)?;
+        self.ensure_resolved_actor_binding_still_current(
+            &installation_scope,
+            &resolve_request,
+            expected_actor.as_ref(),
+        )
+        .await?;
+
+        let outcome = self
+            .conversations
+            .reset_conversation_binding(ironclaw_conversations::ResetConversationRequest {
+                resolve_request: conversation_request,
+                expected_thread_id,
+            })
+            .await
+            .map_err(map_conversation_error)?;
+        ensure_existing_shared_binding_matches_current_subject(
+            current_subject_user_id.as_ref(),
+            &outcome.resolution,
+        )?;
+        ensure_resolved_actor_matches_expected_user(expected_actor.as_ref(), &outcome.resolution)?;
+        self.ensure_resolved_actor_binding_still_current(
+            &installation_scope,
+            &resolve_request,
+            expected_actor.as_ref(),
+        )
+        .await?;
+        let binding =
+            resolved_binding_from_resolution(outcome.resolution, resolve_request.route_kind)?;
+        Ok(ResetBindingOutcome {
+            previous_thread_id: outcome.previous_thread_id,
+            binding,
+        })
     }
 }
 

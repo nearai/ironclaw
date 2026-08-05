@@ -180,7 +180,7 @@ display_name = "Slack messages"
 inbound = true
 outbound = true
 conversation_model = "continuous"
-commands = ["model", "status"]
+commands = ["model", "status", "new", "stop", "interrupt"]
 
 [channel.connection]
 provider = "slack"
