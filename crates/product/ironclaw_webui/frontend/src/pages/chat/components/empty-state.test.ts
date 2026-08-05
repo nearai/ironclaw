@@ -26,15 +26,10 @@ function renderEmptyState(props = {}) {
   const components = {
     Icon() {},
     ChatInput() {},
-    AutomationCarousel() {},
   };
   const context = {
     ...components,
     globalThis: {},
-    React: {
-      useState: (initial) => [initial, () => {}],
-    },
-    useAutomationTasks: () => ({ loading: false, tasks: [] }),
     useT: () => (key) => key,
   };
   vm.runInNewContext(emptyStateSourceForTest(), context);

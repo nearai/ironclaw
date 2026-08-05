@@ -4,6 +4,8 @@
 
 This is the evidence-backed specification behind the overview. It states the problem, defines the two-phase model, inventories **what extends shipped code vs. what is net-new** (§3–§4 — the core framing), enumerates every dependency with an implementation approach (§5), maps the work onto the existing codebase and the #6918 family folders — now landed on `main` (§6), and records the security model, test strategy, risks, and open decisions. §11 explains how the APDD kit and PR #6918 frameworks are applied.
 
+> **Branch is code-free.** The earlier UI prototype (#6994) was rolled back in review; this branch carries the design artifacts (the [mockup](mockup.html) + [integration-review.html](integration-review.html)) and this written plan. Where this spec says *"the prototype"* or *"mock→`fetch` swap,"* it describes the *demonstrated* target UI and the earlier prototype — not code in this PR. The first implementation builds fresh against the [contract](AUTOMATION-TASKS-CONTRACT.md) and the mockup.
+
 ---
 
 ## 1. Problem & goal
@@ -60,8 +62,8 @@ This is the section the review turns on. Each Foundational capability is classif
 
 | # | Capability | Why net-new | Where it lands |
 |---|---|---|---|
-| N1 | Suggested-task card + carousel / drawer components | New component family | frontend (prototype exists in #6994, mock data) |
-| N2 | Pills-collapse drawer interaction + section dismiss + in-composer restore | New interaction model | frontend (prototype in #6994) |
+| N1 | Suggested-task card + carousel / drawer components | New component family | frontend (prototyped earlier in #6994, rolled back; shape in the mockup) |
+| N2 | Pills-collapse drawer interaction + section dismiss + in-composer restore | New interaction model | frontend (in the mockup; prototype rolled back) |
 | N3 | `AutomationTask` domain model + 5 durable events + projection | New records/events; the source of truth for cards | `ironclaw_event_log`, `ironclaw_event_projections` (contract §§1–3) |
 | N4 | 5 HTTP routes + 5 facade methods | New capability commands | `ironclaw_webui/src/webui_v2/`, `ironclaw_assistant` (contract §§5–6) |
 | N5 | **First-run suggestion producer** | Nothing emits the first proposals for a fresh user — the contract covers *completed* and *inline* tasks, not the *first-run suggestion feed* | new; proposed home `ironclaw_triggers` (§5.2) |
@@ -82,11 +84,11 @@ None of these block Foundational; each is a superset of a Foundational piece.
 
 ## 5. Dependency inventory & implementation approach
 
-Each dependency states *what it needs* and *how to build it*; the PLAN sequences them. Foundational deps are **D-F\***; Vision-only deps are **D-V\***. The frontend data seam ([`lib/automation-tasks-api.ts`](../../../crates/product/ironclaw_webui/frontend/src/pages/chat/lib/automation-tasks-api.ts)) is already shaped for all of these — wiring is a mock→`fetch` body swap with no component change.
+Each dependency states *what it needs* and *how to build it*; the PLAN sequences them. Foundational deps are **D-F\***; Vision-only deps are **D-V\***. The typed API seam the frontend needs is specified in the [contract](AUTOMATION-TASKS-CONTRACT.md) (§§5–6, §8) and demonstrated by the mockup (the earlier prototype implemented it as a mock client); the first implementation builds against that shape — it is not carried in this branch.
 
 ### 5.1 D-F1 — Automation-task backend (events · projection · routes · facade)
 
-*Needs:* the durable source of truth the cards read and act on. *Approach* (from [AUTOMATION-TASKS-CONTRACT.md](../../../crates/product/ironclaw_webui/frontend/src/pages/chat/AUTOMATION-TASKS-CONTRACT.md) §§2–6, reconciled to current crate names):
+*Needs:* the durable source of truth the cards read and act on. *Approach* (from [AUTOMATION-TASKS-CONTRACT.md](AUTOMATION-TASKS-CONTRACT.md) §§2–6, reconciled to current crate names):
 
 - **Events** in `ironclaw_event_log` (`runtime_event.rs`): `AutomationTaskProposed`, `AutomationTaskModified`, `AutomationTaskAutomated`, `AutomationTaskReverted`, `AutomationTaskCancelled` — redacted, replayable, appended via the durable sink (never a direct handler broadcast). Payloads are **sensitive by default** (email bodies, attendee lists) and carry the owning redaction obligation.
 - **Projection** in `ironclaw_event_projections`: an `AutomationTaskProjection` scope-filtered by `(tenant, user)`, folding the events into `AutomationTaskState`, with a replay cursor. **Cross-user isolation gets a dedicated regression test** (a task for user A must never appear in user B's projection).
@@ -215,7 +217,7 @@ Following `.claude/rules/testing.md` (integration-first; test through the caller
 - **PR #6918 (target-architecture) framing** — this package mirrors #6918's document set: an executive **README** (overview + reviewer decisions + doc index), an evidence-backed **PROPOSAL** (this file), a sequenced **PLAN** (waves/gates/PR-sizing), and a **CHECKLIST** (definition of done). It borrows #6918's execution discipline: move-only/behavior-free PRs kept separate from semantic changes, guidance travels with the change, deletions use the un-masking discipline, and `main` stays shippable after every PR (PLAN).
 - **APDD kit (product/design governance)** — this package follows the kit's **docs-first feature workflow**: spec → team review (this §10 stays open until folded in) → plan → test plan, with the binding anchors present (*Feedback & Decisions* §10, *Regression Tests* §8, and a *Critical Bug Fix Log* below per Rule 2). The **design track** (D-F6) proposes seeding `DESIGN.md` + tokens + a Storybook workbench for the new component family, exactly the kit's core design governance. The kit's evaluation for IronClaw is recorded at `docs/plans/apdd-governance-kit/`.
 
-<a name="review-artifact"></a>**Human-review artifact.** A self-contained visual review aid — the 5-layer integration schematic, the dependency graph, the phase timeline, and the shipped-vs-net-new map — is published at **https://claude.ai/code/artifact/734b1b6a-e35d-4736-9ac2-952dcdf84ab4** (default-private; share via the artifact's Share menu). It renders §3, §5, and §6 for reviewers who prefer the visual.
+<a name="review-artifact"></a>**Human-review artifact.** A self-contained visual review aid — the 5-layer integration schematic, the dependency graph, the phase timeline, and the shipped-vs-net-new map — lives in this package as [integration-review.html](integration-review.html) ([rendered preview](https://html-preview.github.io/?url=https://github.com/nearai/ironclaw/blob/feat/oobe-chat-automations/docs/design/oobe/integration-review.html)). It renders §3, §5, and §6 for reviewers who prefer the visual.
 
 ## 12. Critical Bug Fix Log  *(APDD Rule 2 — the single canonical log)*
 

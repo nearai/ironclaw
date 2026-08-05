@@ -1,10 +1,12 @@
 # Automation Tasks — wiring contract (proposed)
 
-Status: **design prototype**. The frontend is built and live behind mock data
-(`lib/automation-tasks*.ts`, `hooks/useAutomationTasks.ts`); the backend below is
-**not yet implemented**. This document is the reviewable wiring path — the
-durable events, projection, transport frame, HTTP surface, and facade methods a
-follow-up must add to make the two OOBE concepts real. It follows the Reborn
+Status: **design reference (proposed wiring)**. An earlier UI prototype
+implemented the frontend against a mock data seam (`lib/automation-tasks*.ts`,
+`hooks/useAutomationTasks.ts`); that code was **rolled back** so the branch stays
+code-free, and its target UI now lives in the [mockup](mockup.html). Nothing here
+is implemented yet. This document is the reviewable wiring path — the durable
+events, projection, transport frame, HTTP surface, and facade methods a follow-up
+must add to make the two OOBE concepts real. It follows the Reborn
 rules in `.claude/rules/gateway-events.md`, `.claude/rules/lifecycle.md`, and
 `.claude/rules/types.md`. *(Crate names below reflect current `main` after the
 #6918 family-folder reorg: the event log is `ironclaw_event_log`, the durable

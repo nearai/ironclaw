@@ -129,16 +129,6 @@ const paths = {
   arrowDown: (<><path d="M12 5v14" /><path d="m6 13 6 6 6-6" /></>),
 
   retry: (<><path d="M3.5 12a8.5 8.5 0 1 1 2.6 6.1" /><path d="M3.2 18.5v-5h5" /></>),
-
-  mail: (<><path d="M4 6.5h16v11H4v-11Z" /><path d="m4.6 7 7.4 5.9L19.4 7" /></>),
-
-  external: (<><path d="M14 4.5h5.5V10" /><path d="M19.5 4.5 11.5 12.5" /><path
-      d="M18 13.8v3.7a2 2 0 0 1-2 2H6.5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3.7"
-    /></>),
-
-  undo: (<><path d="M9 7 4.5 11.5 9 16" /><path
-      d="M4.5 11.5H15a4.5 4.5 0 0 1 0 9h-2.6"
-    /></>),
 };
 
 export function Icon({ name, className = "", strokeWidth = 1.7 }) {

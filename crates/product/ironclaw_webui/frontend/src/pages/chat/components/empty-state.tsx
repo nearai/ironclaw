@@ -1,9 +1,6 @@
-import React from "react";
 import { Icon } from "../../../design-system/icons";
 import { useT } from "../../../lib/i18n";
 import { ChatInput } from "./chat-input";
-import { AutomationCarousel } from "./automation-carousel";
-import { useAutomationTasks } from "../hooks/useAutomationTasks";
 
 export function EmptyState({
   onSuggestion,
@@ -20,9 +17,6 @@ export function EmptyState({
   onCancel,
 }) {
   const t = useT();
-  const automations = useAutomationTasks();
-  const [composerFocused, setComposerFocused] = React.useState(false);
-  const showCarousel = !automations.loading && automations.tasks.length > 0;
   const suggestions = [
     {
       icon: "tool",
@@ -58,27 +52,7 @@ export function EmptyState({
         </p>
       </div>
 
-      {showCarousel &&
-      (
-        // Collapse the "Done for you" strip once the user focuses the composer,
-        // freeing vertical room to chat. grid-rows 1fr→0fr animates the height
-        // without needing to measure the content.
-        <div
-          aria-hidden={composerFocused}
-          className={[
-            "grid w-full max-w-5xl overflow-hidden transition-all duration-300 ease-out",
-            composerFocused
-              ? "mt-0 grid-rows-[0fr] opacity-0 pointer-events-none"
-              : "mt-9 grid-rows-[1fr] opacity-100",
-          ].join(" ")}
-        >
-          <div className="min-h-0 overflow-hidden">
-            <AutomationCarousel automations={automations} />
-          </div>
-        </div>
-      )}
-
-      <div className={`${showCarousel && !composerFocused ? "mt-6" : "mt-9"} w-full max-w-5xl transition-all duration-300`}>
+      <div className="mt-9 w-full max-w-5xl">
         <ChatInput
           onSend={onSend}
           commands={commands}
@@ -92,25 +66,31 @@ export function EmptyState({
           statusText={statusText}
           canCancel={canCancel}
           onCancel={onCancel}
-          onFocusChange={setComposerFocused}
         />
       </div>
 
-      <div className="mt-5 flex w-full max-w-5xl flex-wrap justify-center gap-2">
+      <div className="mt-8 grid w-full max-w-5xl gap-2">
         {suggestions.map(
           (item) => (
             <button
               type="button"
               key={item.title}
               onClick={() => onSuggestion(item.title)}
-              title={item.detail}
-              className="v2-button group inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.035] px-3.5 py-2 text-sm text-iron-200 transition-colors hover:border-signal/35 hover:text-white"
+              className="v2-button group grid grid-cols-[auto_1fr_auto] items-center gap-3 border-t border-white/10 px-2 py-4 text-left hover:border-signal/35"
             >
-              <Icon
-                name={item.icon}
-                className="h-3.5 w-3.5 shrink-0 text-iron-400 group-hover:text-signal"
-              />
-              <span>{item.title}</span>
+              <span
+                className="grid h-8 w-8 place-items-center rounded-full border border-white/10 bg-white/[0.035] text-iron-300 group-hover:border-signal/35 group-hover:text-signal"
+              >
+                <Icon name={item.icon} className="h-4 w-4" />
+              </span>
+              <span className="min-w-0">
+                <span className="block text-sm font-semibold text-iron-100">
+                  {item.title}
+                </span>
+                <span className="mt-0.5 block text-sm text-iron-300">
+                  {item.detail}
+                </span>
+              </span>
             </button>
           )
         )}

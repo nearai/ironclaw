@@ -1,9 +1,11 @@
 # IronClaw OOBE & Onboarding — Integration Proposal (Executive Overview)
 
-**Status:** Proposal, under review · **Reconciled against:** `origin/main` after the #6918 family-folder reorg (crates under `crates/{contracts,events,domains,product,app,…}/`; `ironclaw_events`→`ironclaw_event_log`, `ironclaw_product`→`ironclaw_assistant`) · **Track:** WebChat v2 first-run / onboarding
-**Documents:** this overview · [PROPOSAL.md](PROPOSAL.md) (full spec: phasing, shipped-vs-net-new scope, dependency inventory) · [PLAN.md](PLAN.md) (how to execute — phases, gates, PR sizing) · [CHECKLIST.md](CHECKLIST.md) (definition of done) · [oobe.md](../oobe.md) (design brief) · [mockup.html](mockup.html) (interactive mockup — self-contained, open in any browser)
+**Status:** Proposal, under review · **Scope:** design artifacts + integration plan (**code-free**) · **Reconciled against:** `origin/main` after the #6918 family-folder reorg (crates under `crates/{contracts,events,domains,product,app,…}/`; `ironclaw_events`→`ironclaw_event_log`, `ironclaw_product`→`ironclaw_assistant`) · **Track:** WebChat v2 first-run / onboarding
+**Documents:** this overview · [PROPOSAL.md](PROPOSAL.md) (full spec: phasing, shipped-vs-net-new scope, dependency inventory) · [PLAN.md](PLAN.md) (how to execute — phases, gates, PR sizing) · [CHECKLIST.md](CHECKLIST.md) (definition of done) · [oobe.md](../oobe.md) (design brief) · [mockup.html](mockup.html) (interactive mockup — self-contained, open in any browser) · [integration-review.html](integration-review.html) (visual review — schematics)
 
-This is the plan for turning the OOBE prototype (PR #6994, presentational + mock data) into shipped product, **in two phases that match the mockup's two versions** — a near-term **Foundational** track that ships against current `main`, and a north-star **Vision** track that follows. It exists so the onboarding work has a fixed destination and a sequenced path, and so a reviewer can tell at a glance which pieces *extend code that already ships* and which are *net-new*.
+This is the plan for taking OOBE from design into shipped product, **in two phases that match the mockup's two versions** — a near-term **Foundational** track that ships against current `main`, and a north-star **Vision** track that follows. It exists so the onboarding work has a fixed destination and a sequenced path, and so a reviewer can tell at a glance which pieces *extend code that already ships* and which are *net-new*.
+
+> **This branch is code-free — plan of record is the artifacts + this plan.** It carries the interactive [mockup.html](mockup.html) and the [integration-review.html](integration-review.html) page (the visual review) plus the written package below. An earlier UI prototype of these concepts (PR #6994) was **rolled back** in review — it rendered mock "done for you" automations to real users and an autonomy selector that execution ignored (IronLoop/CodeRabbit blockers). So wherever this package says *"the prototype (#6994)"* or *"mock→`fetch` swap,"* read it as: the earlier prototype and the mockup **demonstrate** the target UI; the first implementation builds it fresh, guided by the [contract](AUTOMATION-TASKS-CONTRACT.md) and the mockup — none of that code lives in this branch.
 
 ---
 
@@ -21,7 +23,7 @@ Both tracks converge on the same card language and the same populated carousel o
 ## Why phase it this way
 
 1. **Foundational rides existing rails.** The connect CTA, the busy/streaming states, the agent-mode semantics, and the "manage what I automated" destination are all **already shipped on `main`** — Foundational reuses them rather than inventing them (see the scope table below and PROPOSAL §3). The genuinely new surface area is small and testable.
-2. **The prototype is already the frontend half of the contract.** PR #6994 ships the components and a typed, endpoint-shaped data seam; making it real is a mock→`fetch` body swap plus the backend the seam expects — no component rewrites (PROPOSAL §5, [AUTOMATION-TASKS-CONTRACT.md](../../../crates/product/ironclaw_webui/frontend/src/pages/chat/AUTOMATION-TASKS-CONTRACT.md)).
+2. **The UI half is already specified.** The mockup + the earlier prototype (#6994, rolled back) worked out the components and a typed, endpoint-shaped data seam; the [contract](AUTOMATION-TASKS-CONTRACT.md) pins that shape. The first implementation builds the components against it — the plan is not starting from a blank sheet (PROPOSAL §5).
 3. **Vision is additive, not a redo.** Every Vision piece is a superset of a Foundational piece (per-card connect → batched connect; static reveal → animated reveal; plain drawer → docked frame), so nothing built in Foundational is thrown away.
 4. **It lands cleanly in the family folders already on `main`.** The #6918 reorg has landed, so each new backend piece has an obvious home today — events + projection → `crates/events/`, facade/DTOs → `crates/product/ironclaw_assistant`, routes → `crates/product/ironclaw_webui`, the suggestion producer → `crates/domains/ironclaw_triggers` — and this work does not fight the refactor train (PROPOSAL §6).
 
@@ -61,7 +63,7 @@ The single most important framing for review: **how much of Foundational is new.
 | Agent modes (Suggest / Plan / Auto) | approval-gate system on `main` (`resolve_gate`, `global_auto_approve`) | **New UI over shipped** |
 | "Done for you" → manage it | `pages/automations/` management page (on `main`) | **Reuse shipped** |
 | Decision model (Approve/Modify/Cancel · Modify/Revert) | generalizes `ApprovalCard` / gate resolution | **New UI over shipped** |
-| Suggested-task card + carousel/drawer | — | **Net-new** (prototype in #6994) |
+| Suggested-task card + carousel/drawer | — | **Net-new** (prototyped earlier; see the mockup) |
 | Pills-collapse drawer + dismiss + restore | — | **Net-new** |
 | `AutomationTask` events + projection + routes + facade | — | **Net-new backend** (#6993) |
 | First-run **suggestion producer** | — | **Net-new backend** (the load-bearing new dependency) |
@@ -96,7 +98,7 @@ Every dependency has an implementation approach in [PLAN.md](PLAN.md); the full 
 - Open [mockup.html](mockup.html), switch **Version** (Vision / Foundational) and **Scene** (First run / Thread / Plan) — every claim here is demonstrated there.
 - Argue sequencing in [PLAN.md](PLAN.md): the phases, gates, and suggested first PRs; only the ordering constraints marked ⚠ are load-bearing.
 - Challenge [CHECKLIST.md](CHECKLIST.md): it is the definition of done — anything missing goes there.
-- The **[human-review artifact](https://claude.ai/code/artifact/734b1b6a-e35d-4736-9ac2-952dcdf84ab4)** renders the schematics — the 5-layer code integration map, the dependency graph, and the phase timeline — for reviewers who prefer the visual.
+- The **[integration-review.html](integration-review.html)** page renders the schematics — the 5-layer code integration map, the dependency graph, and the phase timeline — for reviewers who prefer the visual ([rendered preview](https://html-preview.github.io/?url=https://github.com/nearai/ironclaw/blob/feat/oobe-chat-automations/docs/design/oobe/integration-review.html)).
 
 ---
 

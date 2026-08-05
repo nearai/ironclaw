@@ -1,7 +1,8 @@
 # OOBE & First-Run Onboarding — webui_v2
 
-**Status:** design exploration; the automation concepts are prototyped in draft **PR #6994**
-(UI-only, mock data). **Interactive mockup:** [`oobe/mockup.html`](./oobe/mockup.html) — open in a
+**Status:** design exploration. The automation concepts were prototyped in **PR #6994** (UI-only,
+mock data), since **rolled back** — the branch is code-free; the concepts now live in the mockup +
+the [integration plan](./oobe/README.md). **Interactive mockup:** [`oobe/mockup.html`](./oobe/mockup.html) — open in a
 browser, pick a **Version** (Vision / Foundational) and a **Scene** (First run / Thread / Plan),
 and on Vision → First run press **Play** to watch the journey. Toggle **Flags** and the theme.
 
@@ -88,18 +89,19 @@ users a persistent, dismissible "here's what I'd pick up" affordance without com
 
 ## Where this lives
 
-SPA: `crates/ironclaw_webui/frontend/src` (React 19 + TypeScript + Tailwind v4; tokens in
-`styles/app.css`). The landing view is `pages/chat/components/empty-state.tsx`; the automation
-surfaces are `automation-carousel.tsx`, `automation-task-card.tsx`, `task-action-bar.tsx`,
-`mode-selector.tsx`, and the mock data seam `lib/automation-tasks*.ts` + `hooks/useAutomationTasks.ts`
-(all landed in PR #6994). The DEV-only harness is `pages/design-preview/design-preview-page.tsx`.
+SPA: `crates/product/ironclaw_webui/frontend/src` (React 19 + TypeScript + Tailwind v4; tokens in
+`styles/app.css`). The landing view `pages/chat/components/empty-state.tsx` is on `main`; the automation
+surfaces (`automation-carousel.tsx`, `automation-task-card.tsx`, `task-action-bar.tsx`,
+`mode-selector.tsx`), the mock data seam (`lib/automation-tasks*.ts` + `hooks/useAutomationTasks.ts`), and
+the DEV harness (`pages/design-preview/design-preview-page.tsx`) were prototyped in PR #6994 **but rolled
+back** — they are not on `main`; their shape is captured in the mockup + the wiring contract.
 
 Today the carousel `return null`s when there are no tasks, so a fresh account sees the unchanged
 hero + composer — i.e. the cold-start state is currently *undesigned*. That is what this mockup fills.
 
 ## What already ships vs. needs backend
 
-- **Shipped (PR #6994, presentational, mock data):** the carousel + task card + action bar,
+- **Prototyped then rolled back (PR #6994, presentational, mock data):** the carousel + task card + action bar,
   calendar-reschedule card, plan card, agent-mode pill, and the endpoint-shaped data seam. The
   branded `NearProcessIndicator` (#6901) and the `AuthRequired` connector path are on main.
 - **Needs backend (issue #6993):** "no automations yet" / "working on the first one" projection

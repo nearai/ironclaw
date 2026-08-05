@@ -8,8 +8,9 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done. Every code box imp
 
 ## F0 — De-risk & unblock
 
-- [ ] **Carousel gate (D-F5)** — landing carousel no longer returns `MOCK_COMPLETED_TASKS` to real users; behind DEV/flag or an empty real projection. PR #6994 is mergeable.
-- [x] Branch merged up to date with `main` (post-#6918 family-folder reorg); prototype relocated to `crates/product/ironclaw_webui/`.
+- [x] Prototype code rolled back — branch is **code-free** (`crates/` identical to `main`); POR is the mockup + integration-review + this plan.
+- [x] Branch merged up to date with `main` (post-#6918 family-folder reorg); the `AUTOMATION-TASKS-CONTRACT.md` moved into `docs/design/oobe/`.
+- [ ] **Carousel gate (D-F5)** — *deferred to the implementation PR:* when the carousel is (re)built, it must not return `MOCK_COMPLETED_TASKS` to real users (behind DEV/flag or an empty real projection).
 - [x] Contract reconciled to the post-#6918 family-folder names (`ironclaw_event_log` + `ironclaw_event_store` under `crates/events/`; facade `RebornServicesApi` in `ironclaw_assistant`; `src/webui_v2/` confirmed current).
 - [ ] Decision round #1 recorded (PROPOSAL §10 items 2, 4, 5).
 - [ ] (If approved) first-draft `DESIGN.md` seeded with v2 tokens + card taxonomy (D-F6).
