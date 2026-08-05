@@ -1,12 +1,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 use ironclaw_loop_contracts::LoopRunContext;
 use ironclaw_loop_host::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    SubagentPromptMaterialSource,
+    CapabilityResolveError, CapabilitySurfaceProfileResolver, SubagentPromptMaterialSource,
 };
-use tracing::error;
 
 use crate::planned_driver_factory::is_subagent_planned_run_profile;
 
@@ -32,7 +31,7 @@ impl CapabilitySurfaceProfileResolver for SubagentCapabilitySurfaceResolver {
     async fn resolve(
         &self,
         run_context: &LoopRunContext,
-    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+    ) -> Result<CapabilitySurfacePolicy, CapabilityResolveError> {
         let base = self.inner.resolve(run_context).await?;
         if !is_subagent_planned_run_profile(run_context) {
             return Ok(base);
@@ -42,27 +41,7 @@ impl CapabilitySurfaceProfileResolver for SubagentCapabilitySurfaceResolver {
             .material_for_run(run_context)
             .await
             .map_err(|error| CapabilityResolveError::unavailable(error.safe_summary))?;
-        intersect_allow_sets(
-            base,
-            CapabilityAllowSet::allowlist(material.allowed_capabilities),
-        )
-    }
-}
-
-fn intersect_allow_sets(
-    left: CapabilityAllowSet,
-    right: CapabilityAllowSet,
-) -> Result<CapabilityAllowSet, CapabilityResolveError> {
-    match (left, right) {
-        (CapabilityAllowSet::All, other) | (other, CapabilityAllowSet::All) => Ok(other),
-        (CapabilityAllowSet::Allowlist(left), CapabilityAllowSet::Allowlist(right)) => Ok(
-            CapabilityAllowSet::allowlist(left.into_iter().filter(|id| right.contains(id))),
-        ),
-        unexpected => {
-            let reason = "unhandled CapabilityAllowSet variant in subagent allowlist intersection";
-            error!(?unexpected, "{reason}");
-            Err(CapabilityResolveError::internal(reason))
-        }
+        Ok(base.narrow_to_capability_ids(material.allowed_capabilities))
     }
 }
 
@@ -72,12 +51,11 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_agent_loop::test_support::test_run_context;
-    use ironclaw_host_api::ids::CapabilityId;
+    use ironclaw_host_api::{capability_surface::CapabilitySurfacePolicy, ids::CapabilityId};
     use ironclaw_loop_contracts::{AgentLoopHostError, AgentLoopHostErrorKind, LoopRunContext};
     use ironclaw_loop_host::CapabilitySurfaceProfileResolver;
     use ironclaw_loop_host::{
-        CapabilityAllowSet, CapabilityResolveError, SubagentPromptMaterial,
-        SubagentPromptMaterialSource,
+        CapabilityResolveError, SubagentPromptMaterial, SubagentPromptMaterialSource,
     };
     use ironclaw_turns::{RunProfileId, RunProfileVersion};
 
@@ -85,7 +63,7 @@ mod tests {
         PLANNED_DRIVER_DEFAULT_VERSION, SUBAGENT_PLANNED_DRIVER_ID, SUBAGENT_PLANNED_PROFILE_ID,
     };
 
-    use super::{SubagentCapabilitySurfaceResolver, intersect_allow_sets};
+    use super::SubagentCapabilitySurfaceResolver;
 
     fn cap(value: &str) -> CapabilityId {
         CapabilityId::new(value).expect("valid capability id")
@@ -103,18 +81,18 @@ mod tests {
         context
     }
 
-    fn allowlist(ids: &[&str]) -> CapabilityAllowSet {
-        CapabilityAllowSet::allowlist(ids.iter().copied().map(cap))
+    fn allowlist(ids: &[&str]) -> CapabilitySurfacePolicy {
+        CapabilitySurfacePolicy::allow_only(ids.iter().copied().map(cap))
     }
 
-    struct StaticResolver(CapabilityAllowSet);
+    struct StaticResolver(CapabilitySurfacePolicy);
 
     #[async_trait]
     impl ironclaw_loop_host::CapabilitySurfaceProfileResolver for StaticResolver {
         async fn resolve(
             &self,
             _run_context: &LoopRunContext,
-        ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+        ) -> Result<CapabilitySurfacePolicy, CapabilityResolveError> {
             Ok(self.0.clone())
         }
     }
@@ -153,46 +131,17 @@ mod tests {
         async fn resolve(
             &self,
             _run_context: &LoopRunContext,
-        ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+        ) -> Result<CapabilitySurfacePolicy, CapabilityResolveError> {
             Err(CapabilityResolveError::internal(
                 "inner resolver failed for test",
             ))
         }
     }
 
-    #[test]
-    fn intersect_allow_sets_all_all_returns_all() {
-        assert_eq!(
-            intersect_allow_sets(CapabilityAllowSet::All, CapabilityAllowSet::All).unwrap(),
-            CapabilityAllowSet::All
-        );
-    }
-
-    #[test]
-    fn intersect_allow_sets_allowlist_all_returns_allowlist() {
-        assert_eq!(
-            intersect_allow_sets(allowlist(&["builtin.read_file"]), CapabilityAllowSet::All)
-                .unwrap(),
-            allowlist(&["builtin.read_file"])
-        );
-    }
-
-    #[test]
-    fn intersect_allow_sets_allowlist_allowlist_empty_intersection() {
-        assert_eq!(
-            intersect_allow_sets(
-                allowlist(&["builtin.read_file"]),
-                allowlist(&["builtin.write_file"])
-            )
-            .unwrap(),
-            CapabilityAllowSet::allowlist(BTreeSet::new())
-        );
-    }
-
     #[tokio::test]
     async fn resolve_propagates_material_source_error_as_unavailable() {
         let resolver = SubagentCapabilitySurfaceResolver::new(
-            Arc::new(StaticResolver(CapabilityAllowSet::All)),
+            Arc::new(StaticResolver(CapabilitySurfacePolicy::allow_all())),
             Arc::new(FailingSource),
         );
 
@@ -259,7 +208,7 @@ mod tests {
         let material_caps =
             BTreeSet::from([cap("builtin.read_file"), cap("builtin.spawn_subagent")]);
         let resolver = SubagentCapabilitySurfaceResolver::new(
-            Arc::new(StaticResolver(CapabilityAllowSet::All)),
+            Arc::new(StaticResolver(CapabilitySurfacePolicy::allow_all())),
             Arc::new(SucceedingSource(SubagentPromptMaterial {
                 direction_markdown: "test".to_string(),
                 goal: ironclaw_loop_host::SubagentPromptGoal {
@@ -275,7 +224,7 @@ mod tests {
             .await
             .expect("subagent runs with an all base allowset should return the material allowset");
 
-        assert_eq!(resolved, CapabilityAllowSet::allowlist(material_caps));
+        assert_eq!(resolved, CapabilitySurfacePolicy::allow_only(material_caps));
     }
 
     #[tokio::test]

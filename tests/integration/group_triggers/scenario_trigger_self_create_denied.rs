@@ -4,14 +4,14 @@
 //! (`SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS`, PR #5515).
 //!
 //! Drives a triggered-origin run (`submit_triggered_turn_scripted`) that scripts
-//! `builtin.trigger_create`. The host's `PerSurfaceCapabilityDenyDecorator`,
+//! `builtin.trigger_create`. The host's `resolved CapabilitySurfacePolicy`,
 //! keyed on the `scheduled_trigger` run profile's capability-surface id, strips
 //! trigger_create/remove/pause/resume from the model-visible surface
 //! (`trigger_list` stays visible).
 //!
 //! Traced, not assumed: denial happens at the model-gateway seam
 //! (`ironclaw_loop_host::model_gateway`'s `validate_provider_tool_call`, via
-//! `CapabilitySurfaceDenyFilter`), BEFORE a `CapabilityCallCandidate` is ever
+//! `CapabilitySurfacePolicyFilter`), BEFORE a `CapabilityCallCandidate` is ever
 //! constructed — so `CapabilityStage` never runs and nothing is appended via
 //! `append_tool_result_reference` (confirmed empirically: persisted history is
 //! exactly `[User, Assistant]`, no `ToolResultReference`). The executor

@@ -1070,6 +1070,7 @@ async fn visible_surface_policy_filters_runtime_and_effects_before_authorization
         allowed_effects: vec![EffectKind::DispatchCapability],
         include_requires_approval: true,
         max_capabilities: None,
+        ..CapabilitySurfacePolicy::allow_only([capability_id("echo.say")])
     };
 
     let surface = runtime.visible_capabilities(request).await.unwrap();
@@ -1315,12 +1316,14 @@ async fn visible_surface_version_is_order_insensitive_for_equivalent_policy() {
         allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
         include_requires_approval: true,
         max_capabilities: None,
+        ..CapabilitySurfacePolicy::allow_all()
     };
     let policy_b = CapabilitySurfacePolicy {
         allowed_runtimes: vec![RuntimeKind::Script, RuntimeKind::Wasm],
         allowed_effects: vec![EffectKind::Network, EffectKind::DispatchCapability],
         include_requires_approval: true,
         max_capabilities: None,
+        ..CapabilitySurfacePolicy::allow_all()
     };
 
     let surface_a = runtime
@@ -1336,6 +1339,42 @@ async fn visible_surface_version_is_order_insensitive_for_equivalent_policy() {
     assert_eq!(
         surface_a.version, surface_b.version,
         "equivalent allow-list ordering must not churn the surface version"
+    );
+}
+
+#[tokio::test]
+async fn visible_surface_version_includes_capability_id_scope() {
+    let context = context_with_grants([(
+        capability_id("echo.say"),
+        vec![EffectKind::DispatchCapability],
+    )]);
+    let runtime = runtime_with(
+        registry_from_manifests([(ECHO_MANIFEST, "/system/extensions/echo")]),
+        Arc::new(GrantAuthorizer),
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([(
+        "echo",
+        "/system/extensions/echo/manifest.toml",
+        vec![EffectKind::DispatchCapability],
+    )])));
+
+    let all = runtime
+        .visible_capabilities(
+            visible_request(context.clone()).with_policy(CapabilitySurfacePolicy::allow_all()),
+        )
+        .await
+        .unwrap();
+    let only = runtime
+        .visible_capabilities(visible_request(context).with_policy(
+            CapabilitySurfacePolicy::allow_only([capability_id("echo.say")]),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(visible_ids(&all), visible_ids(&only));
+    assert_ne!(
+        all.version, only.version,
+        "distinct capability-id ceilings must not share a surface version"
     );
 }
 

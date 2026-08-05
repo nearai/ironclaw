@@ -2,7 +2,7 @@
 
 **Status:** Blocking implementation exists but is temporarily disabled in shipped profiles; background mode deferred
 
-> **Current status (2026-07):** the worker-side control plane is `TurnRunScheduler` plus `RebornTurnRunExecutor`, co-located in `ironclaw_runner`. `builtin.spawn_subagent` is currently deny-filtered off in all shipped profiles (`TEMP(disable-spawn-subagents)`). The completion-delivery/durability layer for background mode is designed in [`thread-harness-design.md`](./thread-harness-design.md) (canonical, supersedes the prior durability spec) — background mode ships staged per that doc's §7.
+> **Current status (2026-08):** the worker-side control plane is `TurnRunScheduler` plus `RebornTurnRunExecutor`, co-located in `ironclaw_runner`. `builtin.spawn_subagent` is currently removed from all shipped model-facing surfaces by the resolved `CapabilitySurfacePolicy` (`TEMP(disable-spawn-subagents)`). The completion-delivery/durability layer for background mode is designed in [`thread-harness-design.md`](./thread-harness-design.md) (canonical, supersedes the prior durability spec) — background mode ships staged per that doc's §7.
 **Date:** 2026-05-19
 **Branch:** `subagent-spawn-design`
 **Scope:** `crates/ironclaw_agent_loop`, `crates/ironclaw_turns`,
@@ -179,7 +179,7 @@ ironclaw_turns         + CapabilityOutcome::AwaitDependentRun
 
 ironclaw_loop_host  + spawn handling in the capability-port impl
 (host I/O glue)        ~ prompt/context port: direction system msg + user-role goal
-                       + attenuation (CapabilityAllowSet) + hard allow_nesting gate
+                       + attenuation (CapabilitySurfacePolicy) + hard allow_nesting gate
 
 ironclaw_runner        + `subagent` PlannedDriver + run-profile→driver binding
 (loop library)         + built-in subagent flavor table + direction .md files
@@ -402,7 +402,7 @@ The four-reviewer pass surfaced subagents as a meaningful attack surface. The
 mitigations below are **load-bearing**, not optional.
 
 1. **No authority inheritance.** A child starts with an empty grant/lease set.
-   `CapabilityAllowSet` filters the *surface* only. A child must re-acquire every
+   `CapabilitySurfacePolicy` filters the *surface* only. A child must re-acquire every
    privileged lease through its own `Approval` gate. A subagent can never exercise
    a lease the parent obtained from a prior user approval.
 2. **Approval ownership.** The child inherits the parent's `owner_user_id` AND

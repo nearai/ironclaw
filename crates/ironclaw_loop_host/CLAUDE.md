@@ -8,7 +8,7 @@ Owns reusable host-side adapters for neutral loop ports.
 - `skill_context.rs` and `identity_context.rs` build prompt-safe instruction
   and identity context.
 - `capability_port.rs`, `capability_surface_filter.rs`, and
-  `capability_allow_set.rs` adapt host runtime capability surfaces and enforce
+  `capability_surface_policy.rs` adapt host runtime capability surfaces and enforce
   profile-scoped narrowing.
 - `input_queue.rs` and `input_port.rs` adapt steering/followup queues.
 - `cancellation_port.rs` adapts run cancellation observations.
@@ -53,11 +53,11 @@ Owns reusable host-side adapters for neutral loop ports.
 ## Adding code
 
 - Add one file per host adapter or context source.
-- Add decorators, such as profile filters, as named types with a single policy
+- Add decorators, such as capability-surface filters, as named types with a single policy
   responsibility.
-- Put new capability-surface filtering policy in `capability_surface_filter.rs`.
-  Put profile-to-allow-set construction and validation in
-  `capability_allow_set.rs`.
+- Put capability-surface filtering behavior in `capability_surface_filter.rs`.
+  Put profile-to-policy resolution in `capability_surface_policy.rs`; neutral
+  policy vocabulary belongs to `ironclaw_host_api`.
 - Add traits here only when they are host-owned inputs to an existing loop port.
 
 ## Common mistakes

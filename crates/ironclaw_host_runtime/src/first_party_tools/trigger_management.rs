@@ -264,7 +264,7 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
         // The PRIMARY structural guarantees live one layer up, in the runner's
         // capability surface (`ironclaw_runner::runtime`):
         //   * a scheduled-trigger fire runs on the `scheduled_trigger` surface
-        //     profile, whose `PerSurfaceCapabilityDenyDecorator`
+        //     profile, whose `resolved CapabilitySurfacePolicy`
         //     (`SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS`) strips the four mutation
         //     capabilities before the model can see them (`trigger_list` stays);
         //   * a subagent runs on the `subagent_tools` surface, whose per-flavor

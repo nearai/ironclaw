@@ -36,6 +36,12 @@ The first implementation PR should create this crate before implementing `ironcl
 
 ## 2. Dependency rules
 
+`ironclaw_host_api::capability_surface::CapabilitySurfacePolicy` is the single
+neutral vocabulary for a model-visible capability ceiling. Its capability-id
+scope supports allow-only, intersection, and deny subtraction in one resolved
+value. It grants no authority: authorization, approvals, obligations, and
+dispatch-time checks remain separate host stages.
+
 ### May depend on
 
 - `serde`

@@ -134,6 +134,7 @@ pub use production::DefaultHostRuntime;
 // The sandbox lane (`sandbox_process`) moved to `ironclaw_sandbox` with the
 // WS3 merge; its Docker/CA cone is a runtimes-layer concern, and nothing
 // outside this crate ever consumed these re-exports.
+pub use ironclaw_host_api::capability_surface::CapabilitySurfacePolicy;
 /// Scoped cleanup guard consumed by the generic extension activation
 /// transaction's composition adapter. Raw obligation handoff stores remain
 /// private; `reborn_host_runtime_services_do_not_expose_lower_substrate_handles`
@@ -146,7 +147,7 @@ pub use services::{
     ProductionWiringIssue, ProductionWiringIssueKind, ProductionWiringReport,
     RegisteredRuntimeHealth,
 };
-pub use surface::{CapabilitySurfacePolicy, VisibleCapability, VisibleCapabilityAccess};
+pub use surface::{VisibleCapability, VisibleCapabilityAccess};
 /// Stable, validated idempotency key supplied by upper turn/loop services.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IdempotencyKey(String);

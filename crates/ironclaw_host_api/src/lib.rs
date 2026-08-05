@@ -38,6 +38,7 @@ pub mod audit;
 pub mod authorized;
 pub mod capability;
 pub mod capability_profile;
+pub mod capability_surface;
 pub mod decision;
 pub mod dispatch;
 #[cfg(feature = "test-support")]

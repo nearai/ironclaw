@@ -410,7 +410,7 @@ async fn backticked_code_reference_in_prompt_does_not_suppress_tool_call() {
 
 /// The globally-disabled `builtin.spawn_subagent` capability (configured
 /// through `DefaultPlannedRuntimeConfig::disabled_capability_ids`, applied as
-/// the OUTERMOST `PerSurfaceCapabilityDenyDecorator` in
+/// the OUTERMOST `CapabilitySurfacePolicyFilter` in
 /// `build_default_planned_runtime_inner` — see that function's doc comments)
 /// must never reach the model-facing tool list, whichever port would
 /// otherwise have surfaced it: the flavor-aware `SubagentSpawnCapabilityDecorator`
@@ -461,7 +461,7 @@ async fn disabled_spawn_subagent_capability_is_stripped_from_model_surface() {
 }
 
 /// A model that calls the disabled `builtin.spawn_subagent` anyway is rejected
-/// at the gateway (`CapabilitySurfaceDenyFilter`, before
+/// at the gateway (`CapabilitySurfacePolicyFilter`, before
 /// `register_provider_tool_call` ever stages an invocation). The loop must
 /// surface the precise `outside_capability_surface` observation to the model,
 /// let it repair the response on the next call, and complete without ever

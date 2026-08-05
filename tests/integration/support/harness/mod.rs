@@ -53,7 +53,7 @@ use ironclaw_loop_contracts::{
     LoopRequest, LoopRunContext,
 };
 use ironclaw_loop_host::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
+    CapabilityResolveError, CapabilitySurfacePolicy, CapabilitySurfaceProfileResolver,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
@@ -151,7 +151,7 @@ impl HarnessCapabilityMode {
                         port: Arc::clone(&port),
                     }),
                     Arc::new(StaticCapabilitySurfaceProfileResolver {
-                        allow_set: CapabilityAllowSet::allowlist(port.capability_allowlist()),
+                        policy: CapabilitySurfacePolicy::allow_only(port.capability_allowlist()),
                     }),
                     capability_io.clone(),
                     capability_io,
@@ -2159,8 +2159,8 @@ impl CapabilitySurfaceProfileResolver for HostRuntimeHarnessSurfaceResolver {
     async fn resolve(
         &self,
         _run_context: &LoopRunContext,
-    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
-        Ok(CapabilityAllowSet::All)
+    ) -> Result<CapabilitySurfacePolicy, CapabilityResolveError> {
+        Ok(CapabilitySurfacePolicy::allow_all())
     }
 }
 

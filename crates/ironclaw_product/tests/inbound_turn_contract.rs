@@ -16,7 +16,7 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_loop_host::RejectingInputEnqueue;
 use ironclaw_loop_host::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
+    CapabilityResolveError, CapabilityResultWrite, CapabilitySurfacePolicy,
     CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
     EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostInputBatch, HostInputEnqueuePort, HostInputEnvelope,
@@ -312,8 +312,8 @@ impl CapabilitySurfaceProfileResolver for AllowAllCapabilitySurfaceResolver {
     async fn resolve(
         &self,
         _run_context: &LoopRunContext,
-    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
-        Ok(CapabilityAllowSet::All)
+    ) -> Result<CapabilitySurfacePolicy, CapabilityResolveError> {
+        Ok(CapabilitySurfacePolicy::allow_all())
     }
 }
 

@@ -14,7 +14,8 @@
 
 - Loop host support services for `AgentLoopHost` / `ironclaw_turns` loop ports.
 - `skill_context.rs` and `identity_context.rs` prompt-safe instruction/context builders.
-- `capability_port.rs`, `capability_surface_filter.rs`, and `capability_allow_set.rs` capability-surface adapters.
+- `capability_port.rs`, `capability_surface_filter.rs`, and
+  `capability_surface_policy.rs` capability-surface adapters.
 - `input_queue.rs` / `input_port.rs` steering and followup queues.
 - `cancellation_port.rs` cancellation observation adapter.
 - `model_gateway.rs` / `model_routes.rs` / `thread_resolving_model_gateway.rs` — the model-gateway adapter over `ironclaw_llm` and the route policy it resolves (absorbed from `ironclaw_runner`, PROPOSAL §6.7.2).
@@ -42,6 +43,8 @@
 ## Agent Notes
 
 - Add one file per host adapter or context source.
-- Put capability filtering policy in `capability_surface_filter.rs`.
+- Put capability filtering behavior in `capability_surface_filter.rs` and
+  profile-to-policy resolution in `capability_surface_policy.rs`; the neutral
+  policy vocabulary belongs to `ironclaw_host_api`.
 - Add traits here only for host-owned inputs to existing loop ports.
 - Do not fold unrelated ports into `lib.rs`.

@@ -15,6 +15,7 @@
 - Validated IDs (`ids`) and the per-invocation authority envelope `ExecutionContext` (`scope`).
 - Host-internal/virtual/scoped paths (`path`) and mount permissions/grants/views (`mount`).
 - Capability descriptors, grants, sets, constraints, `EffectKind`, `PermissionMode` (`capability`), plus capability-profile schema/operation/contract types (`capability_profile`).
+- The neutral model-visible capability ceiling `CapabilitySurfacePolicy` and its capability-id scope algebra (`capability_surface`). It narrows disclosure and never grants dispatch authority.
 - Requested effects, host decisions, obligations, and approval scopes (`action`, `decision`, `approval`).
 - Budget/resource scopes, estimates, usage, and quota contracts (`resource`).
 - Redacted durable audit envelopes (`audit`).

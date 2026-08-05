@@ -29,10 +29,10 @@ use ironclaw_loop_contracts::{
     VisibleCapabilitySurface, resolution,
 };
 use ironclaw_loop_host::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    EmptyLoopCapabilityPort, EmptyUserProfileSource, HostIdentityContextBuildError,
-    HostIdentityContextCandidate, HostIdentityContextSource, HostInputBatch, HostInputQueue,
-    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    CapabilityResolveError, CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort,
+    EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
+    HostIdentityContextSource, HostInputBatch, HostInputQueue, HostInputQueueError,
+    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse, JsonSpawnSubagentInputCodec,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
     RejectingInputEnqueue, RunCancellationFactory, RunCancellationHandle,
@@ -776,7 +776,7 @@ impl LoopCapabilityPortFactory for ProductLiveHostRuntimeCapabilityFactory {
                 }),
                 capability_input_resolver: self.io.clone(),
                 capability_result_writer: self.io.clone(),
-                capability_allow_set: capability_allowlist([self.capability_id.clone()]),
+                capability_surface_policy: capability_allowlist([self.capability_id.clone()]),
                 model_routes: ProductLiveModelRouteSettings::new(
                     self.model_provider.clone(),
                     self.model_id.clone(),
@@ -1009,8 +1009,8 @@ impl CapabilitySurfaceProfileResolver for AllowAllCapabilitySurfaceResolver {
     async fn resolve(
         &self,
         _run_context: &LoopRunContext,
-    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
-        Ok(CapabilityAllowSet::All)
+    ) -> Result<CapabilitySurfacePolicy, CapabilityResolveError> {
+        Ok(CapabilitySurfacePolicy::allow_all())
     }
 }
 
