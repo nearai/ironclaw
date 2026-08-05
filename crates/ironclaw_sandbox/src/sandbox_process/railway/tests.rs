@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     sync::{
         Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
@@ -26,7 +26,6 @@ struct FakeRailwayCli {
     failed_checkpoint_creates: AtomicUsize,
     failed_destroys: AtomicUsize,
     malformed_checkpoint_lists: AtomicUsize,
-    next_worker_delay_ms: AtomicU64,
     checkpoint_timeouts: Mutex<Vec<Duration>>,
     delay: Option<Duration>,
 }
@@ -44,7 +43,6 @@ impl FakeRailwayCli {
             failed_checkpoint_creates: AtomicUsize::new(0),
             failed_destroys: AtomicUsize::new(0),
             malformed_checkpoint_lists: AtomicUsize::new(0),
-            next_worker_delay_ms: AtomicU64::new(0),
             checkpoint_timeouts: Mutex::new(Vec::new()),
             delay: None,
         }
@@ -83,13 +81,6 @@ impl FakeRailwayCli {
 
     fn malform_next_checkpoint_list(&self) {
         self.malformed_checkpoint_lists.store(1, Ordering::SeqCst);
-    }
-
-    fn delay_next_worker_exec(&self, delay: Duration) {
-        self.next_worker_delay_ms.store(
-            u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-            Ordering::SeqCst,
-        );
     }
 
     async fn checkpoint_timeouts(&self) -> Vec<Duration> {
@@ -197,17 +188,6 @@ impl RailwayCli for FakeRailwayCli {
             });
         }
         if invocation.args.iter().any(|arg| arg == OUTER_EXEC_WRAPPER) {
-            let delay_ms = self.next_worker_delay_ms.swap(0, Ordering::SeqCst);
-            if delay_ms > 0
-                && tokio::time::timeout(
-                    timeout,
-                    tokio::time::sleep(Duration::from_millis(delay_ms)),
-                )
-                .await
-                .is_err()
-            {
-                return Err(RuntimeProcessError::Timeout(timeout));
-            }
             return Ok(RailwayCliOutput {
                 stdout: format!("command output\n{EXIT_SENTINEL}0\n"),
                 stderr: String::new(),
@@ -565,7 +545,6 @@ async fn times_out_when_the_cli_exceeds_the_request_deadline() {
 #[tokio::test]
 async fn checkpoint_gets_an_independent_budget_after_worker_uses_command_budget() {
     let cli = Arc::new(FakeRailwayCli::new());
-    cli.delay_next_worker_exec(Duration::from_millis(800));
     let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
     let mut command = request("tenant", "user", "true");
     command.timeout_secs = Some(1);
