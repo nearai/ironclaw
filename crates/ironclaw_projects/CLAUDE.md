@@ -3,7 +3,8 @@
 First-class **Project** entity, membership, and access control for the IronClaw
 Reborn stack. Plan: `docs/plans/2026-06-17-reborn-projects.md`.
 
-> Not to be confused with `ironclaw_engine`'s legacy `Project` type. This crate
+> The v1 engine's legacy `Project` type is gone with `ironclaw_engine`; this is
+> now the only `Project` in the tree. This crate
 > serves the Reborn stack (`ironclaw_product` → composition →
 > `ironclaw_webui`).
 

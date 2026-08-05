@@ -70,7 +70,7 @@ struct SignedSessionTokenMinter {
 }
 
 #[async_trait::async_trait]
-impl ironclaw_reborn_composition::AdminApiTokenMinter for SignedSessionTokenMinter {
+impl ironclaw_product_contracts::admin_users::AdminApiTokenMinter for SignedSessionTokenMinter {
     async fn mint(&self, tenant: &TenantId, user_id: &UserId) -> Result<SecretString, String> {
         // `false`: this session is for the admin-created `user_id`, not the
         // operator. Stamping `true` would let any admin-created user (even
@@ -136,7 +136,7 @@ impl ServeCommand {
             ironclaw_reborn_config::RebornConfigFile::load(&boot_config.home().config_file_path())
                 .map_err(anyhow::Error::from)?;
         if let Some(file) = config_file.as_ref() {
-            reject_legacy_slack_config(file, &boot_config.home().config_file_path())?;
+            reject_retired_config_sections(file, &boot_config.home().config_file_path())?;
         }
 
         // Tenant id is host-trusted (operator-owned config), never
@@ -427,6 +427,23 @@ impl ServeCommand {
                     default_project_id.as_ref(),
                 ));
 
+            // ONE decision for both sides of the workspace. The browser
+            // confines every non-operator caller's Workspace reads to
+            // `tenants/{tenant}/users/{user}`; if the agent's writes were not
+            // scoped to the same subtree those callers see an empty workspace.
+            //
+            // `serve` raises unconditionally because it can ALWAYS produce a
+            // non-operator caller: the admin-API token minter is installed on
+            // every start (see `SignedSessionTokenMinter`, which stamps
+            // `operator = false`), and the no-SSO branch composes a
+            // `SessionAuthenticator` so those tokens validate. Gating this on
+            // SSO left `POST /admin/users` as an open door onto the same
+            // mismatch.
+            runtime_input = runtime_input.with_workspace_scoped_per_caller_services(true);
+            let effective_workspace_scoping = runtime_input
+                .config()
+                .is_some_and(ironclaw_reborn_composition::deployment::DeploymentConfig::workspace_scoped_per_caller);
+
             let runtime = build_reborn_runtime(runtime_input)
                 .await
                 .context("failed to assemble Reborn runtime for `serve`")?;
@@ -543,7 +560,13 @@ impl ServeCommand {
 
             let mut serve_config =
                 WebuiServeConfig::new(tenant_id.clone(), authenticator, allowed_origins)
-                    .with_default_agent_id(default_agent_id.clone());
+                    .with_default_agent_id(default_agent_id.clone())
+                    // Read back what the runtime actually received rather than
+                    // recomputing it: the raise is a request, and composition
+                    // owns the answer. Any future reason for composition to
+                    // decline (see `WorkspaceMountPolicy::resolve`) moves the
+                    // browser with it instead of silently drifting.
+                    .with_workspace_requires_scoped_projection(effective_workspace_scoping);
             if let Some(project_id) = default_project_id.clone() {
                 serve_config = serve_config.with_default_project_id(project_id);
             }
@@ -589,10 +612,18 @@ impl ServeCommand {
                     .context("failed to compose the extension ingress route mount")?;
                 serve_config = serve_config.with_public_route_mount(ingress_mount);
             }
+            if let Some(ironhub_mount) = runtime
+                .ironhub_register_route_mount()
+                .context("failed to compose the IronHub register route mount")?
+            {
+                serve_config = serve_config.with_public_route_mount(ironhub_mount);
+            }
             // Generic WebGeneratedCode pairing routes (mint/status/unpair per
             // extension), riding the shared protected-route seam.
-            if let Some(pairing_mount) = runtime.channel_pairing_route_mount() {
-                serve_config = serve_config.with_protected_route_mount(pairing_mount);
+            if let Some(pairing_registry) = runtime.channel_pairing_registry() {
+                serve_config = serve_config.with_protected_route_mount(
+                    ironclaw_webui::channel_pairing_route_mount(pairing_registry),
+                );
             }
             // Public NEAR AI login callback route (token redirect target). Built
             // from the runtime's LLM seam; absent when no LLM was wired.
@@ -888,42 +919,33 @@ fn trigger_fire_access_policy(
         .with_tenant_membership(default_agent_id.clone(), default_project_id.cloned())
 }
 
-/// The legacy `[slack]` setup fields are a retired configuration surface:
-/// Slack is configured by installing the Slack extension and completing
-/// workspace OAuth in the WebUI (`/extensions`). A populated setup field
-/// means the operator is following retired instructions — fail closed with
-/// the migration pointer instead of silently ignoring it. `[slack].enabled`
-/// is not rejected: the flag is unused, but existing installs may still
-/// carry it and must keep booting.
-fn reject_legacy_slack_config(
+/// Refuse to serve against a config file that still carries a retired
+/// *setup* key, and announce the retired sections that are merely inert.
+///
+/// Both halves are data-driven by `ironclaw_reborn_config`'s retired-section
+/// table rather than by per-vendor code here: which sections are retired is a
+/// fact about the config schema, so the CLI asks rather than re-deriving. The
+/// inert half is reported instead of ignored because the failure it catches
+/// is an operator setting a flag that documentation once advertised and
+/// nothing reads.
+fn reject_retired_config_sections(
     config_file: &ironclaw_reborn_config::RebornConfigFile,
     config_path: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let Some(slack) = config_file.slack.as_ref() else {
-        return Ok(());
-    };
-    let offending = [
-        ("installation_id", slack.installation_id.is_some()),
-        ("team_id", slack.team_id.is_some()),
-        ("api_app_id", slack.api_app_id.is_some()),
-        ("slack_user_id", slack.slack_user_id.is_some()),
-        ("user_id", slack.user_id.is_some()),
-        (
-            "shared_subject_user_id",
-            slack.shared_subject_user_id.is_some(),
-        ),
-        ("channel_routes", !slack.channel_routes.is_empty()),
-        ("signing_secret_env", slack.signing_secret_env.is_some()),
-        ("bot_token_env", slack.bot_token_env.is_some()),
-    ];
-    if let Some((field, _)) = offending.iter().find(|(_, set)| *set) {
-        anyhow::bail!(
-            "`[slack].{field}` in {path} is a retired configuration surface: Slack is \
-             configured by installing the Slack extension and completing workspace OAuth \
-             in the WebUI (/extensions). Remove the `[slack]` section to continue.",
-            field = field,
-            path = config_path.display(),
-        );
+    config_file.retired_section_migration(config_path)?;
+    for notice in config_file.retired_section_notices(config_path) {
+        // `target:`, not `target =`. The `=` form records a *field* named
+        // `target` and leaves the event's metadata target as the module path,
+        // so a subscriber filtering `ironclaw::reborn::cli::serve` would never
+        // see this notice — which is the whole point of emitting it rather
+        // than silently ignoring an inert retired section. Measured with a
+        // capturing subscriber, not assumed, and pinned by
+        // `retired_section_notice_is_emitted_on_the_serve_target`.
+        //
+        // The three sibling warns on this path still use the `=` form and are
+        // mis-targeted for the same reason. That is pre-existing and repo-wide
+        // (121 sites), so it is filed rather than fixed under a consolidation.
+        tracing::warn!(target: "ironclaw::reborn::cli::serve", "{notice}");
     }
     Ok(())
 }
@@ -1070,6 +1092,37 @@ mod tests {
     use super::*;
 
     const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
+
+    /// The per-profile DEFAULT, which `serve` then raises (see
+    /// `serve_scopes_workspace_writes_even_on_standalone_without_sso`). A
+    /// binary that cannot mint non-operator callers still gets the raw
+    /// workspace root on a local profile.
+    #[test]
+    fn workspace_scoping_default_follows_deployment_profile() {
+        use ironclaw_reborn_composition::RebornCompositionProfile;
+
+        for profile in [
+            RebornCompositionProfile::Standalone,
+            RebornCompositionProfile::StandaloneUnrestricted,
+        ] {
+            assert!(
+                !profile.workspace_scoped_per_caller(),
+                "local profile {profile:?} defaults to the raw workspace root"
+            );
+        }
+
+        for profile in [
+            RebornCompositionProfile::HostedSingleTenant,
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            RebornCompositionProfile::Production,
+            RebornCompositionProfile::MigrationDryRun,
+        ] {
+            assert!(
+                profile.workspace_scoped_per_caller(),
+                "hosted profile {profile:?} defaults to caller-scoped workspace"
+            );
+        }
+    }
 
     #[test]
     fn present_unicode_env_var_treats_unset_as_none() {
@@ -1386,7 +1439,7 @@ mod tests {
     }
 
     #[test]
-    fn serve_startup_rejects_loaded_config_with_legacy_slack_fields() {
+    fn serve_startup_rejects_loaded_config_with_retired_setup_fields() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config_path = dir.path().join("config.toml");
         std::fs::write(
@@ -1404,8 +1457,8 @@ slack_user_id = "U123"
             .expect("config file loads")
             .expect("config exists");
 
-        let error = reject_legacy_slack_config(&config_file, &config_path)
-            .expect_err("serve startup must reject legacy Slack config fields");
+        let error = reject_retired_config_sections(&config_file, &config_path)
+            .expect_err("serve startup must reject retired setup fields");
         let message = error.to_string();
 
         assert!(
@@ -1429,8 +1482,82 @@ slack_user_id = "U123"
         let config_file = ironclaw_reborn_config::RebornConfigFile::load(&config_path)
             .expect("config file loads")
             .expect("config exists");
-        reject_legacy_slack_config(&config_file, &config_path)
+        reject_retired_config_sections(&config_file, &config_path)
             .expect("an inert [slack].enabled must not block startup");
+
+        // The check is table-driven, so a section retired later must get the
+        // same treatment without new code here. `[telegram]` never had a
+        // setup field, so it is the inert-only case end to end.
+        std::fs::write(
+            &config_path,
+            "api_version = \"ironclaw.runtime/v1\"\n\n[telegram]\nenabled = true\n",
+        )
+        .expect("write config");
+        let config_file = ironclaw_reborn_config::RebornConfigFile::load(&config_path)
+            .expect("config file loads")
+            .expect("config exists");
+        reject_retired_config_sections(&config_file, &config_path)
+            .expect("an inert [telegram] section must not block startup");
+        assert_eq!(
+            config_file.retired_section_notices(&config_path).len(),
+            1,
+            "an inert retired section must still announce itself"
+        );
+    }
+
+    /// The notice must reach a subscriber filtering the documented serve
+    /// target. Asserts the emitted event's **metadata target**, which is the
+    /// only thing a `RUST_LOG=ironclaw::reborn::cli::serve=warn` filter reads.
+    ///
+    /// This exists because `tracing::warn!(target = "…")` — the form three
+    /// sibling warns on this path still use — does *not* set the metadata
+    /// target. It records a field named `target` and leaves the metadata
+    /// target as the module path, so the notice is invisible to exactly the
+    /// filter it was written for. Measured, not assumed: with `target =` this
+    /// test observes `ironclaw::commands::serve`; with `target:` it observes
+    /// the serve target.
+    #[test]
+    fn retired_section_notice_is_emitted_on_the_serve_target() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+
+        #[derive(Default, Clone)]
+        struct CaptureTargets(Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> Layer<S> for CaptureTargets {
+            fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+                self.0
+                    .lock()
+                    .expect("capture lock")
+                    .push(event.metadata().target().to_string());
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_path = temp.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "api_version = \"ironclaw.runtime/v1\"\n\n[telegram]\nenabled = true\n",
+        )
+        .expect("write config");
+        let config_file = ironclaw_reborn_config::RebornConfigFile::load(&config_path)
+            .expect("config file loads")
+            .expect("config exists");
+
+        let captured = CaptureTargets::default();
+        let subscriber = tracing_subscriber::registry::Registry::default().with(captured.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            reject_retired_config_sections(&config_file, &config_path)
+                .expect("an inert retired section must not block startup");
+        });
+
+        let targets = captured.0.lock().expect("capture lock").clone();
+        assert!(
+            targets
+                .iter()
+                .any(|target| target == "ironclaw::reborn::cli::serve"),
+            "the retired-section notice must be emitted on the serve target so an \
+             operator filtering it sees the announcement; observed targets: {targets:?}"
+        );
     }
 
     #[test]
@@ -1727,6 +1854,46 @@ slack_user_id = "U123"
         );
 
         clear_webui_env();
+    }
+
+    /// `serve` can always mint a non-operator caller --- the admin-API token
+    /// minter is installed on every start and stamps `operator = false`, and
+    /// the no-SSO branch composes a `SessionAuthenticator` so those bearers
+    /// validate. The browser scopes every non-operator caller's Workspace
+    /// reads, so the writes must be scoped too, even on a Standalone profile
+    /// with SSO off. Before this, `POST /admin/users` on a local-dev box gave
+    /// that user scoped reads over a shared write root: an empty workspace.
+    #[test]
+    fn serve_scopes_workspace_writes_even_on_standalone_without_sso() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let input = RebornRuntimeInput::from_build_input(
+            ironclaw_reborn_composition::local_runtime_build_input(
+                ironclaw_reborn_composition::RebornCompositionProfile::Standalone,
+                "serve-owner",
+                root.path().to_path_buf(),
+            )
+            .expect("standalone build input"),
+        );
+        assert!(
+            !input
+                .config()
+                .expect("build input carries a deployment config")
+                .workspace_scoped_per_caller(),
+            "the Standalone profile default is unscoped"
+        );
+
+        // The raise `serve` applies unconditionally.
+        let input = input.with_workspace_scoped_per_caller_services(true);
+
+        // The browser flag is read back from what the runtime received, so the
+        // two sides cannot drift.
+        let effective = input.config().is_some_and(
+            ironclaw_reborn_composition::deployment::DeploymentConfig::workspace_scoped_per_caller,
+        );
+        assert!(
+            effective,
+            "serve must scope workspace writes whenever it can mint a non-operator caller"
+        );
     }
 }
 // arch-exempt: large_file, serve composition remains centralized during assembly cleanup, plan #6175

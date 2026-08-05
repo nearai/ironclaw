@@ -23,7 +23,7 @@ mod duplicate_selection;
 
 /// Local injected policy used to prove the selector honors a wider-than-default
 /// account-visibility seam. The vendor-specific GSuite policy lives in
-/// `ironclaw_first_party_extensions`; `ironclaw_auth` stays neutral and must not
+/// `ironclaw_extension_support`; `ironclaw_auth` stays neutral and must not
 /// depend upward on that crate, even in tests.
 struct TestGoogleFamilyVisibilityPolicy;
 

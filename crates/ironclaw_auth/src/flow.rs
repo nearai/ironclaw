@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::ids::{AgentId, ExtensionId, ProjectId, TenantId, ThreadId, UserId};
 use serde::{Deserialize, Serialize};
 
+use crate::ProviderScope;
 use crate::{
     AuthErrorCode, AuthProductError, AuthorizationCodeHash, CredentialAccountId,
     CredentialAccountLabel, LifecyclePackageRef, OpaqueStateHash, ProductActionRef, Timestamp,
@@ -129,6 +130,18 @@ pub struct AuthFlowRecord {
     pub kind: AuthFlowKind,
     pub status: AuthFlowStatus,
     pub provider: AuthProviderId,
+    /// The installed extension whose manifest authorized this OAuth recipe.
+    /// Legacy and built-in flows have no requester and resolve only through
+    /// the static/bundled path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_extension: Option<ExtensionId>,
+    /// The scopes this flow asked the vendor for. Held server-side rather than
+    /// round-tripped through the opaque `state` value: a shared-vendor ceiling
+    /// is large enough that echoing it in the authorize URL pushed that URL
+    /// past its 2048-byte limit. Empty on records written before this field
+    /// existed, and on flows that never requested explicit scopes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requested_scopes: Vec<ProviderScope>,
     pub challenge: Option<AuthChallenge>,
     pub continuation: AuthContinuationRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -191,6 +204,8 @@ pub struct NewAuthFlow {
     pub scope: AuthProductScope,
     pub kind: AuthFlowKind,
     pub provider: AuthProviderId,
+    pub requester_extension: Option<ExtensionId>,
+    pub requested_scopes: Vec<ProviderScope>,
     pub challenge: AuthChallenge,
     pub continuation: AuthContinuationRef,
     pub update_binding: Option<CredentialAccountUpdateBinding>,

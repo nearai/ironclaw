@@ -55,7 +55,7 @@ impl TurnEventSink for CompositeTurnEventSink {
 }
 
 pub use learning::{
-    LiveSkillLearnedNotifier, LlmSkillRefiner, PortSkillWriter, SkillLearnedNotifier,
+    LlmSkillRefiner, MergeAction, PortSkillWriter, SkillLearnedNotifier,
     SkillLearningExtractionTasks, SkillLearningInferenceAdapter, SkillLearningTurnEventSink,
     SkillRefiner, SkillWriter,
 };
@@ -88,7 +88,6 @@ mod learning {
     };
     use tokio::task::JoinHandle;
 
-    use ironclaw_product::projection::LiveProjectionPublisher;
     use ironclaw_skills::{ScopedSkillManagementError, ScopedSkillManagementPort};
 
     /// Cheap pre-filter: skip the (paid) distillation LLM call on runs that
@@ -472,8 +471,14 @@ mod learning {
         out
     }
 
-    /// Live "learned a new skill" notification seam. Composition implements it
-    /// over the projection publisher; tests use a stub.
+    /// Live "learned a new skill" notification seam.
+    ///
+    /// This module declares the port and never the adapter: the only
+    /// implementation over a live projection publisher is
+    /// `ironclaw_reborn_composition`'s `LiveSkillLearnedNotifier`, because the
+    /// publisher is one of product's concrete types and naming it here was this
+    /// file's entire `ironclaw_product` dependency (CHECKLIST WS2 strays row).
+    /// Tests use a stub.
     pub trait SkillLearnedNotifier: Send + Sync {
         fn notify(
             &self,
@@ -483,32 +488,6 @@ mod learning {
             skill_name: &str,
             feedback: &str,
         );
-    }
-
-    /// [`SkillLearnedNotifier`] over the runtime's live projection publisher —
-    /// emits a `SkillActivation` projection item rendered as a chat bubble.
-    pub struct LiveSkillLearnedNotifier {
-        publisher: Arc<LiveProjectionPublisher>,
-    }
-
-    impl LiveSkillLearnedNotifier {
-        pub fn new(publisher: Arc<LiveProjectionPublisher>) -> Self {
-            Self { publisher }
-        }
-    }
-
-    impl SkillLearnedNotifier for LiveSkillLearnedNotifier {
-        fn notify(
-            &self,
-            owner: &UserId,
-            scope: &TurnScope,
-            run_id: TurnRunId,
-            skill_name: &str,
-            feedback: &str,
-        ) {
-            self.publisher
-                .publish_skill_learned(Some(owner), scope, run_id, skill_name, feedback);
-        }
     }
 
     /// Turn-end sink that distills a reusable skill from successful, substantive

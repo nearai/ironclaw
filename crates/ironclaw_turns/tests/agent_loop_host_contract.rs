@@ -5,51 +5,50 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, IdempotencyKey, LoopExitId, LoopGateRef, LoopMessageRef,
+    ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest, RunProfileVersion,
+    SourceBindingRef, TurnActor, TurnCheckpointId, TurnOwner, TurnRunId, TurnRunnerId, TurnStatus,
+};
 use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
     resolution::{Blocked, Resolution},
     runtime::RuntimeKind,
 };
+use ironclaw_loop_contracts::{
+    AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverHost,
+    AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply, BatchPolicyKind,
+    CapabilityDeniedReasonKind, CapabilityDescriptionTrust, CapabilityDescriptorView,
+    CapabilityInputRef, CapabilityProgress, CapabilitySurfaceVersion, CommunicationRuntimeContext,
+    ConcurrencyHint, ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
+    DeliveryTargetSummary, EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
+    InMemoryLoopHostMilestoneSink, InstructionBundleBuilder, InstructionBundleFingerprint,
+    InstructionBundleRequest, InstructionMaterializationStore, InstructionSafetyContext,
+    LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopBlocked, LoopBlockedKind,
+    LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointKind,
+    LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError,
+    LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest, LoopCompactionResponse,
+    LoopCompleted, LoopCompletionKind, LoopContextBundle, LoopContextMessage, LoopContextPort,
+    LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata, LoopDriverId,
+    LoopDriverNoteKind, LoopExit, LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter,
+    LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
+    LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant,
+    LoopModelCapabilityView, LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest,
+    LoopModelMessage, LoopModelPolicyGuard, LoopModelPort, LoopModelProgressSink, LoopModelRequest,
+    LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
+    LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
+    LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext,
+    LoopSafeSummary, LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput,
+    PromptMode, PromptSkillContextMetadata, SkillTrustLevel, SystemInferenceTaskId,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+};
 use ironclaw_processes::{ClaimProcessesRequest, ProcessKind, ProcessWorkerId};
 use ironclaw_turns::test_support::in_memory_agent_turn_process_system;
 use ironclaw_turns::{
-    AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
-    DefaultTurnCoordinator, IdempotencyKey, LoopBlocked, LoopBlockedKind, LoopCompleted,
-    LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, ProductTurnContext,
-    ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest, RunProfileVersion,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
-    TurnCoordinator, TurnOriginKind, TurnOwner, TurnRunId, TurnRunState, TurnRunnerId, TurnStatus,
-    claimed_turn_run_from_process_claim,
-    events::EventCursor,
-    run_profile::{
-        AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
-        BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityDescriptionTrust,
-        CapabilityDescriptorView, CapabilityInputRef, CapabilityProgress, CapabilitySurfaceVersion,
-        CommunicationRuntimeContext, ConcurrencyHint, ConnectedChannelSummary,
-        ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
-        EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
-        HostManagedLoopModelPort, HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink,
-        InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
-        InstructionMaterializationStore, InstructionSafetyContext,
-        LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopCancellationPort, LoopCancellationSignal,
-        LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
-        LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
-        LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata,
-        LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone,
-        LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputAckToken,
-        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
-        LoopModelBudgetAccountant, LoopModelCapabilityView, LoopModelGateway,
-        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard,
-        LoopModelPort, LoopModelProgressSink, LoopModelRequest, LoopModelResponse,
-        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
-        LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRequest,
-        LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopSafeSummary,
-        LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput, PromptMode,
-        PromptSkillContextMetadata, SkillTrustLevel, SystemInferenceTaskId,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
-    },
+    DefaultTurnCoordinator, ProductTurnContext, SubmitTurnRequest, SubmitTurnResponse,
+    TurnCoordinator, TurnOriginKind, TurnRunState, claimed_turn_run_from_process_claim,
 };
+use ironclaw_turns::{HostManagedLoopModelPort, HostManagedLoopPromptPort};
 
 #[test]
 fn loop_compaction_outcome_serializes_and_deserializes_wire_shape() {
@@ -262,7 +261,7 @@ async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let gateway = Arc::new(RecordingLoopModelGateway::default());
     gateway.push_response(Ok(LoopModelResponse {
-        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+        chunks: vec![ironclaw_loop_contracts::ModelStreamChunk {
             safe_text_delta: "safe delta".to_string(),
         }],
         safe_reasoning_deltas: vec![
@@ -326,7 +325,7 @@ async fn host_managed_model_port_returns_response_when_model_started_milestone_f
     let milestone_sink = Arc::new(FailingOnModelStartedMilestoneSink::default());
     let gateway = Arc::new(RecordingLoopModelGateway::default());
     gateway.push_response(Ok(LoopModelResponse {
-        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+        chunks: vec![ironclaw_loop_contracts::ModelStreamChunk {
             safe_text_delta: "safe delta".to_string(),
         }],
         safe_reasoning_deltas: Vec::new(),
@@ -371,7 +370,7 @@ async fn host_managed_model_port_returns_response_when_model_completed_milestone
     let milestone_sink = Arc::new(FailingOnModelCompletedMilestoneSink::default());
     let gateway = Arc::new(RecordingLoopModelGateway::default());
     gateway.push_response(Ok(LoopModelResponse {
-        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+        chunks: vec![ironclaw_loop_contracts::ModelStreamChunk {
             safe_text_delta: "safe delta".to_string(),
         }],
         safe_reasoning_deltas: Vec::new(),
@@ -2631,6 +2630,7 @@ async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-loop-host").unwrap(),
         resolved_run_profile_id: host.context.resolved_run_profile.profile_id.clone(),
         resolved_run_profile_version: host.context.resolved_run_profile.profile_version,
+        allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
         received_at: Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap(),
@@ -2879,7 +2879,7 @@ impl AgentLoopDriver for ReplyDriver {
 
     async fn run(
         &self,
-        request: ironclaw_turns::AgentLoopDriverRunRequest,
+        request: ironclaw_loop_contracts::AgentLoopDriverRunRequest,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
     ) -> Result<LoopExit, AgentLoopDriverError> {
         assert_eq!(host.run_context().turn_id, request.turn_id);
@@ -2948,11 +2948,11 @@ impl AgentLoopDriver for ReplyDriver {
 
     async fn resume(
         &self,
-        request: ironclaw_turns::AgentLoopDriverResumeRequest,
+        request: ironclaw_loop_contracts::AgentLoopDriverResumeRequest,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
     ) -> Result<LoopExit, AgentLoopDriverError> {
         self.run(
-            ironclaw_turns::AgentLoopDriverRunRequest {
+            ironclaw_loop_contracts::AgentLoopDriverRunRequest {
                 turn_id: request.turn_id,
                 run_id: request.run_id,
                 resolved_run_profile: request.resolved_run_profile,
@@ -2973,7 +2973,7 @@ impl AgentLoopDriver for CapabilityDriver {
 
     async fn run(
         &self,
-        _request: ironclaw_turns::AgentLoopDriverRunRequest,
+        _request: ironclaw_loop_contracts::AgentLoopDriverRunRequest,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
     ) -> Result<LoopExit, AgentLoopDriverError> {
         let surface = host
@@ -3034,11 +3034,11 @@ impl AgentLoopDriver for CapabilityDriver {
 
     async fn resume(
         &self,
-        request: ironclaw_turns::AgentLoopDriverResumeRequest,
+        request: ironclaw_loop_contracts::AgentLoopDriverResumeRequest,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
     ) -> Result<LoopExit, AgentLoopDriverError> {
         self.run(
-            ironclaw_turns::AgentLoopDriverRunRequest {
+            ironclaw_loop_contracts::AgentLoopDriverRunRequest {
                 turn_id: request.turn_id,
                 run_id: request.run_id,
                 resolved_run_profile: request.resolved_run_profile,
@@ -3395,7 +3395,7 @@ impl RecordingAgentLoopHost {
             .collect()
     }
 
-    fn milestones(&self) -> Vec<ironclaw_turns::run_profile::LoopHostMilestone> {
+    fn milestones(&self) -> Vec<ironclaw_loop_contracts::LoopHostMilestone> {
         self.milestone_sink.milestones()
     }
 
@@ -3716,8 +3716,10 @@ async fn claimed_run_context() -> LoopRunContext {
     )
 }
 
-fn driver_run_request(host: &RecordingAgentLoopHost) -> ironclaw_turns::AgentLoopDriverRunRequest {
-    ironclaw_turns::AgentLoopDriverRunRequest {
+fn driver_run_request(
+    host: &RecordingAgentLoopHost,
+) -> ironclaw_loop_contracts::AgentLoopDriverRunRequest {
+    ironclaw_loop_contracts::AgentLoopDriverRunRequest {
         turn_id: host.context.turn_id,
         run_id: host.context.run_id,
         resolved_run_profile: host.context.resolved_run_profile.clone(),
@@ -3864,7 +3866,7 @@ fn simple_model_request(context: &LoopRunContext) -> LoopModelRequest {
 
 fn success_response(context: &LoopRunContext) -> LoopModelResponse {
     LoopModelResponse {
-        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+        chunks: vec![ironclaw_loop_contracts::ModelStreamChunk {
             safe_text_delta: "safe delta".to_string(),
         }],
         safe_reasoning_deltas: Vec::new(),
@@ -3957,7 +3959,7 @@ async fn redaction_sentinels_never_leak_through_serialized_surfaces() {
 
     // Success path: response content has a sentinel, but milestones must not expose it.
     gateway.push_response(Ok(LoopModelResponse {
-        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+        chunks: vec![ironclaw_loop_contracts::ModelStreamChunk {
             safe_text_delta: "RAW_CREDENTIAL_SENTINEL visible in chunk".to_string(),
         }],
         safe_reasoning_deltas: Vec::new(),
@@ -4436,6 +4438,7 @@ async fn turn_run_state_product_context_defaults_to_none_when_missing_from_json(
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-origin-serde").unwrap(),
         resolved_run_profile_id: context.resolved_run_profile.profile_id.clone(),
         resolved_run_profile_version: context.resolved_run_profile.profile_version,
+        allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
         received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
@@ -4498,6 +4501,7 @@ async fn turn_run_state_resume_disposition_defaults_to_none_when_missing_from_js
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-ard-serde").unwrap(),
         resolved_run_profile_id: context.resolved_run_profile.profile_id.clone(),
         resolved_run_profile_version: context.resolved_run_profile.profile_version,
+        allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
         received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
@@ -4523,6 +4527,56 @@ async fn turn_run_state_resume_disposition_defaults_to_none_when_missing_from_js
     assert!(
         decoded.resume_disposition.is_none(),
         "resume_disposition must default to None when absent from legacy JSON"
+    );
+}
+
+#[tokio::test]
+async fn turn_run_state_allow_steering_defaults_to_true_when_missing_from_json() {
+    // Guard the #[serde(default = "steering_allowed_default")] backward-compat
+    // contract: legacy persisted TurnRunState payloads that pre-date the
+    // allow_steering field must deserialize as steering-allowed (true).
+    let context = claimed_run_context().await;
+    let state = TurnRunState {
+        scope: context.scope.clone(),
+        actor: None,
+        turn_id: ironclaw_turns::TurnId::new(),
+        run_id: context.run_id,
+        status: TurnStatus::Queued,
+        accepted_message_ref: AcceptedMessageRef::new("accepted-steer-serde").unwrap(),
+        source_binding_ref: SourceBindingRef::new("source-steer-serde").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-steer-serde").unwrap(),
+        resolved_run_profile_id: context.resolved_run_profile.profile_id.clone(),
+        resolved_run_profile_version: context.resolved_run_profile.profile_version,
+        // Deliberately false so the assertion below can only pass through the
+        // serde default fn, never by echoing the constructed value.
+        allow_steering: false,
+        resolved_model_route: None,
+        model_usage: None,
+        received_at: Utc.with_ymd_and_hms(2026, 6, 11, 21, 32, 0).unwrap(),
+        checkpoint_id: None,
+        gate_ref: None,
+        blocked_activity_id: None,
+        credential_requirements: Vec::new(),
+        failure: None,
+        event_cursor: EventCursor(0),
+        product_context: None,
+        resume_disposition: None,
+    };
+
+    // Serialize, drop the allow_steering key (simulates a pre-feature persisted
+    // row), then deserialize — the field must default to allowed.
+    let mut json = serde_json::to_value(&state).unwrap();
+    assert!(
+        json.as_object_mut()
+            .unwrap()
+            .remove("allow_steering")
+            .is_some(),
+        "current wire shape must always serialize allow_steering"
+    );
+    let decoded: TurnRunState = serde_json::from_value(json).unwrap();
+    assert!(
+        decoded.allow_steering,
+        "allow_steering must default to true when absent from legacy JSON"
     );
 }
 

@@ -21,19 +21,21 @@ use ironclaw_approvals::{
     PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
     ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
 };
+use ironclaw_attachments::{InboundAttachmentLander, InboundAttachmentReader};
 use ironclaw_auth::{
-    AuthAccountLastError, AuthAccountState, CredentialAccountId, CredentialAccountProjection,
-    CredentialAccountStatus,
+    AuthAccountLastError, AuthAccountState, ChannelAuthAccountState, ChannelConnectionService,
+    CredentialAccountId, CredentialAccountProjection, CredentialAccountStatus,
 };
-use ironclaw_host_api::{
-    attachment::InboundAttachment,
-    product_surface::{
-        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-        ProductSurfaceErrorKind, ProductSurfaceInvokeRequest, ProductSurfaceStreamRequest,
-        ProductSurfaceValidationCode,
-    },
+use ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection;
+use ironclaw_extension_contracts::{
     state::{InstallationState, LifecyclePublicState},
     surface::CapabilitySurfaceKind,
+};
+use ironclaw_host_api::attachment::InboundAttachment;
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
+    SanitizedFailure, SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
+    TurnStatus,
 };
 use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
@@ -47,6 +49,8 @@ use ironclaw_host_api::{
     safe_summary::SafeSummary,
     scope::Principal,
 };
+use ironclaw_loop_contracts::{LoopModelRouteSnapshot, LoopModelUsage};
+use ironclaw_product::EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID;
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
     ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
@@ -56,37 +60,31 @@ use ironclaw_product::{
     AUTOMATION_LIST_MAX_PAGE_SIZE, AUTOMATION_PAUSE_CAPABILITY_ID, AUTOMATION_RENAME_CAPABILITY_ID,
     AUTOMATION_RESUME_CAPABILITY_ID, AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, AUTOMATIONS_VIEW,
-    ActiveModelReader, ApprovalInteractionActionView, ApprovalInteractionDecision,
-    ApprovalInteractionScope, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionService, AutomationListRequest, AutomationName, AutomationProductService,
-    ChannelAuthAccountState, ChannelConfigProductService, ChannelConnectionRequirement,
-    ChannelConnectionService, CodexLoginStart, CommandResultView, EXTENSION_IMPORT_CAPABILITY_ID,
-    EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
-    EmptyProductCommandInput, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+    ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
+    ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
+    AutomationListRequest, AutomationProductService, ChannelConnectionRequirement,
+    CommandResultView, EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID,
+    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, EmptyProductCommandInput,
+    ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW,
-    FilesystemBrowseReader, FsMount, GLOBAL_AUTO_APPROVE_VIEW, InboundAttachmentLander,
-    InboundAttachmentReader, LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW,
-    LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW,
-    LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
+    FilesystemBrowseReader, FsMount, GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY_ID,
+    LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY_ID,
+    LOGS_VIEW, LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
     LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
-    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductService,
-    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmActiveSelection,
-    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
-    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload,
+    LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
+    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
+    ListPendingAuthInteractionsResponse, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
     OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
     OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
     OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
-    OUTBOUND_PREFERENCES_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
-    OperatorStatusService, OutboundPreferencesProductService, PRODUCT_COMMAND_EXECUTE_COMMAND_ID,
-    PRODUCT_COMMAND_LIST_COMMAND_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID,
-    PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW,
-    PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
+    OUTBOUND_PREFERENCES_VIEW, OutboundPreferencesProductService,
+    PRODUCT_COMMAND_EXECUTE_COMMAND_ID, PRODUCT_COMMAND_LIST_COMMAND_ID,
+    PRODUCT_STATUS_COMMAND_OPERATION_ID, PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW,
+    PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
     PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
     PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView, ProductAgentBoundCaller,
     ProductCancelRunRequest, ProductCapabilityInvoker, ProductCreateThreadRequest,
@@ -99,64 +97,93 @@ use ironclaw_product::{
     RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
     RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRequest,
     RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornChannelConfigField, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
-    RebornExecuteProductCommandRequest, RebornExecuteProductCommandResponse,
-    RebornExtensionListResponse, RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse,
-    RebornFsMountsRequest, RebornFsMountsResponse, RebornFsStatRequest, RebornFsStatResponse,
-    RebornGetProjectRequest, RebornGetRunStateRequest, RebornGlobalAutoApproveRequest,
-    RebornGlobalAutoApproveResponse, RebornListAutomationsResponse, RebornListMembersRequest,
-    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
-    RebornListThreadsResponse, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
-    RebornOperatorSetupRequest, RebornOperatorSetupStatus, RebornOperatorStatusCheck,
-    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornOperatorSurfaceStatus, RebornOperatorToolCatalog, RebornOperatorToolInfo,
-    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
-    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
-    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornProductCommandListResponse,
-    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsStatRequest,
-    RebornProjectFsStatResponse, RebornProjectInfo, RebornProjectMemberInfo,
-    RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
-    RebornRemoveMemberRequest, RebornRenameAutomationProductRequest, RebornResolveGateResponse,
-    RebornRunArtifact, RebornRunArtifactRequest, RebornServiceLifecycleAction,
-    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
-    RebornServices, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornThreadArtifact,
-    RebornThreadArtifactRequest, RebornTimelineRequest, RebornTimelineResponse,
-    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExecuteProductCommandRequest,
+    RebornExecuteProductCommandResponse, RebornExtensionListResponse, RebornExtensionSurface,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest, RebornFsMountsResponse,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
+    RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse, RebornListAutomationsResponse,
+    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
+    RebornListProjectsResponse, RebornListThreadsResponse, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigGetResponse,
+    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
+    RebornOperatorSetupStatus, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornProductCommandListResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
+    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
+    RebornProjectState, RebornRemoveMemberRequest, RebornRenameAutomationProductRequest,
+    RebornResolveGateResponse, RebornRunArtifact, RebornRunArtifactRequest, RebornServices,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillContentResponse,
+    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornThreadArtifact, RebornThreadArtifactRequest, RebornTimelineRequest,
+    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
     RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    RebornViewPage, RebornViewQuery, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
-    SetActiveLlmRequest, SkillsProductService, StaticOperatorStatusService,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW,
+    SKILL_SEARCH_VIEW, SKILLS_VIEW, SkillsProductService, StaticOperatorStatusService,
     THREAD_ARTIFACT_MAX_MESSAGES, THREAD_ARTIFACT_VIEW, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
     TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND,
-    TriggerRunThreadScope, UpsertLlmProviderRequest, approval_gate_ref,
-    automation_trigger_thread_metadata_json,
+    TriggerRunThreadScope, approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, ProductAdapterError, ProductAdapterId,
     ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductSurfaceRejectionKind, ProjectionCursor, ProjectionStream, ProjectionStreamSubscription,
+    ProductSurfaceRejectionKind, ProjectionCursor, ProjectionStreamSubscription,
     ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_product::{
-    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
-    AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
-    RebornAdminDeleteSecretProductRequest, RebornAdminPutSecretProductRequest,
-    RebornAdminPutSecretRequest, RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
+    RebornAdminCreateUserRequest, RebornAdminDeleteSecretProductRequest,
+    RebornAdminPutSecretProductRequest, RebornAdminPutSecretRequest,
+    RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
     RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
     RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest, RebornAdminUserListQuery,
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
     RebornAdminUserSecretsListResponse,
 };
+use ironclaw_product_contracts::admin_users::{
+    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
+    AdminUserSecretMeta, AdminUserService, AdminUserStatus,
+};
+use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
+use ironclaw_product_contracts::ironhub::{
+    IRONHUB_DELIVER_INSTALL_COMMAND_ID, IronhubInstallDeliveryRequest,
+    IronhubInstallDeliveryResult, IronhubLinkError, IronhubLinkService, IronhubRegisterRequest,
+};
+use ironclaw_product_contracts::lifecycle_service::{
+    LifecycleProductContext, LifecycleProductService,
+};
+use ironclaw_product_contracts::operator_llm::{
+    ActiveModelReader, CodexLoginStart, LlmActiveSelection, LlmConfigService,
+    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
+    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
+};
+use ironclaw_product_contracts::operator_service::{
+    OperatorLogsService, OperatorServiceLifecycleService, OperatorStatusService,
+};
+use ironclaw_product_contracts::operator_tools::{
+    RebornOperatorToolCatalog, RebornOperatorToolInfo,
+};
+use ironclaw_product_contracts::package_lifecycle::ChannelConfigField as RebornChannelConfigField;
+use ironclaw_product_contracts::product_wire::{
+    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorStatusCheck,
+    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
+    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
+    RebornServiceLifecycleState,
+};
+use ironclaw_product_contracts::projection::ProjectionStream;
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ProductSurfaceInvokeRequest, ProductSurfaceStreamRequest,
+    ProductSurfaceValidationCode,
+};
+use ironclaw_product_contracts::views::{RebornViewPage, RebornViewQuery};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
@@ -170,16 +197,13 @@ use ironclaw_threads::{
     ThreadMessageRange, ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
     UpdateToolResultReferenceRequest,
 };
-use ironclaw_turns::run_profile::{LoopModelRouteSnapshot, LoopModelUsage};
+use ironclaw_triggers::AutomationName;
 use ironclaw_turns::test_support::in_memory_agent_turn_runtime;
 use ironclaw_turns::{
-    AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
-    CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
-    ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, ResumeTurnResponse,
-    RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion, SanitizedFailure,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCapacityResource,
-    TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState, TurnScope,
-    TurnStatus,
+    AdmissionRejection, AdmissionRejectionReason, CancelRunRequest, CancelRunResponse,
+    DefaultTurnCoordinator, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
+    ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, SubmitTurnRequest, SubmitTurnResponse,
+    TurnCapacityResource, TurnCoordinator, TurnError, TurnOriginKind, TurnRunState,
 };
 use secrecy::SecretString;
 use serde::Serialize;
@@ -366,7 +390,7 @@ struct FakeTurnCoordinator {
     run_state_error: Mutex<Option<TurnError>>,
     run_state_actor: Mutex<Option<TurnActor>>,
     explicit_run_status: Mutex<Option<TurnStatus>>,
-    parked_gate_ref: Mutex<Option<GateRef>>,
+    parked_gate_ref: Mutex<Option<TurnGateRef>>,
     parked_auth_gate: Mutex<bool>,
     parked_approval_gate: Mutex<bool>,
     run_state_failure: Mutex<Option<SanitizedFailure>>,
@@ -424,19 +448,19 @@ impl FakeTurnCoordinator {
     /// parked gate. Needed by tests that exercise `resolve_gate` denied/
     /// cancelled paths now that `RebornServices` verifies the run is parked
     /// on the supplied gate before issuing cancellation.
-    fn set_parked_gate(&self, gate_ref: GateRef) {
+    fn set_parked_gate(&self, gate_ref: TurnGateRef) {
         *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
         *self.parked_auth_gate.lock().expect("lock") = false;
         *self.parked_approval_gate.lock().expect("lock") = false;
     }
 
-    fn set_parked_auth_gate(&self, gate_ref: GateRef) {
+    fn set_parked_auth_gate(&self, gate_ref: TurnGateRef) {
         *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
         *self.parked_auth_gate.lock().expect("lock") = true;
         *self.parked_approval_gate.lock().expect("lock") = false;
     }
 
-    fn set_parked_approval_gate(&self, gate_ref: GateRef) {
+    fn set_parked_approval_gate(&self, gate_ref: TurnGateRef) {
         *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
         *self.parked_auth_gate.lock().expect("lock") = false;
         *self.parked_approval_gate.lock().expect("lock") = true;
@@ -655,6 +679,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
                 .expect("valid ref"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
+            allow_steering: true,
             resolved_model_route: self.run_state_model_route.lock().expect("lock").clone(),
             model_usage: *self.run_state_usage.lock().expect("lock"),
             received_at: Utc::now(),
@@ -760,6 +785,7 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
                 .expect("valid ref"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
+            allow_steering: true,
             resolved_model_route: None,
             model_usage: None,
             received_at: Utc::now(),
@@ -1072,6 +1098,35 @@ impl LifecycleProductService for RecordingLifecycleService {
                         visible_capability_ids: Vec::new(),
                         connection_required: None,
                     }),
+                })
+            }
+            LifecycleProductAction::ExtensionSelectHostedMcpAuth { package_ref, .. } => {
+                Ok(LifecycleProductResponse {
+                    package_ref: Some(package_ref),
+                    phase: InstallationState::Installed,
+                    blockers: Vec::new(),
+                    message: Some("hosted MCP authentication selected".to_string()),
+                    payload: Some(LifecycleProductPayload::ExtensionActivate {
+                        activated: false,
+                        visible_capability_ids: Vec::new(),
+                        connection_required: None,
+                    }),
+                })
+            }
+            LifecycleProductAction::ExtensionRegisterHostedMcp { .. } => {
+                Ok(LifecycleProductResponse {
+                    package_ref: None,
+                    phase: InstallationState::Installed,
+                    blockers: vec![LifecycleReadinessBlocker::Setup {
+                        ref_id: Some(
+                            ironclaw_extension_contracts::lifecycle_id::LifecycleBlockerRef::new(
+                                ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF,
+                            )
+                            .expect("valid hosted MCP auth-selection blocker ref"),
+                        ),
+                    }],
+                    message: Some("internal lifecycle diagnostic".to_string()),
+                    payload: None,
                 })
             }
             other => panic!("unexpected lifecycle action in setup test service: {other:?}"),
@@ -2374,6 +2429,40 @@ impl SessionThreadService for ScriptedThreadService {
         }
     }
 
+    async fn read_thread_message(
+        &self,
+        _scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        // Reconcile point-read for the mark-failure scenarios: report the row
+        // in the settled state the scripted behavior models.
+        let status = match &self.behavior {
+            ScriptedThreadBehavior::RejectedBusyMarkFails { .. } => MessageStatus::RejectedBusy,
+            ScriptedThreadBehavior::DeferredBusyMarkFails { .. } => MessageStatus::DeferredBusy,
+            _ => scripted_stub_unreachable("read_thread_message"),
+        };
+        Ok(Some(ThreadMessageRecord {
+            message_id,
+            thread_id: thread_id.clone(),
+            sequence: 1,
+            kind: MessageKind::User,
+            status,
+            created_at: None,
+            updated_at: None,
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: None,
+            tool_result_ref: None,
+            tool_result_provider_call: None,
+            content: Some("scripted".to_string()),
+            attachments: Vec::new(),
+            redaction_ref: None,
+        }))
+    }
+
     async fn append_assistant_draft(
         &self,
         _request: AppendAssistantDraftRequest,
@@ -2548,7 +2637,7 @@ async fn trace_hold_authorize_capability_decodes_typed_product_input() {
     let response = ProductSurface::invoke(
         &services,
         caller(),
-        ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
             operation_id: operation_id.clone(),
             input: serde_json::to_value(RebornTraceHoldAuthorizeProductRequest {
                 submission_id: uuid::Uuid::new_v4().to_string(),
@@ -2566,7 +2655,7 @@ async fn trace_hold_authorize_capability_decodes_typed_product_input() {
     let error = ProductSurface::invoke(
         &services,
         caller(),
-        ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
             operation_id,
             input: serde_json::to_value(RebornTraceHoldAuthorizeProductRequest {
                 submission_id: "not-a-submission-id".to_string(),
@@ -2882,6 +2971,9 @@ impl ProjectService for RecordingProjectService {
         *self.listed.lock().expect("lock") += 1;
         Ok(RebornListProjectsResponse {
             projects: vec![sample_reborn_project("project-alpha")],
+            total_projects: 1,
+            active_projects: 1,
+            archived_projects: 0,
         })
     }
 
@@ -3118,6 +3210,9 @@ async fn project_and_filesystem_reads_are_available_as_product_views() {
     let projects: RebornListProjectsResponse =
         serde_json::from_value(projects.payload).expect("projects payload");
     assert_eq!(projects.projects[0].project_id, "project-alpha");
+    assert_eq!(projects.total_projects, 1);
+    assert_eq!(projects.active_projects, 1);
+    assert_eq!(projects.archived_projects, 0);
 
     let project = services
         .query(
@@ -3751,7 +3846,7 @@ async fn submit_turn_returns_internal_when_skill_activation_recorder_fails() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(threads, coordinator.clone())
         .with_skill_activation_recorder(|_, _, _| {
-            Err(ironclaw_host_api::product_surface::ProductSurfaceError {
+            Err(ironclaw_product_contracts::surface::ProductSurfaceError {
                 code: ProductSurfaceErrorCode::Internal,
                 kind: ProductSurfaceErrorKind::Internal,
                 status_code: 500,
@@ -4382,14 +4477,16 @@ async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
     let first_run_id = match &first {
         RebornSubmitTurnResponse::Submitted { run_id, .. }
         | RebornSubmitTurnResponse::AlreadySubmitted { run_id, .. } => *run_id,
-        RebornSubmitTurnResponse::RejectedBusy { .. } => {
+        RebornSubmitTurnResponse::RejectedBusy { .. }
+        | RebornSubmitTurnResponse::DeferredBusy { .. } => {
             panic!("duplicate submit must not defer while deduping")
         }
     };
     let second_run_id = match &second {
         RebornSubmitTurnResponse::Submitted { run_id, .. }
         | RebornSubmitTurnResponse::AlreadySubmitted { run_id, .. } => *run_id,
-        RebornSubmitTurnResponse::RejectedBusy { .. } => {
+        RebornSubmitTurnResponse::RejectedBusy { .. }
+        | RebornSubmitTurnResponse::DeferredBusy { .. } => {
             panic!("duplicate submit must not defer while deduping")
         }
     };
@@ -5373,7 +5470,7 @@ async fn resolve_gate_rejects_missing_run_state_actor() {
         coordinator.clone(),
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+    coordinator.set_parked_gate(TurnGateRef::new("gate-alpha").expect("gate"));
     coordinator.set_run_state_actor(None);
 
     let err = services
@@ -5405,7 +5502,7 @@ async fn resolve_gate_rejects_mismatched_run_state_actor() {
         coordinator.clone(),
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+    coordinator.set_parked_gate(TurnGateRef::new("gate-alpha").expect("gate"));
     coordinator.set_run_state_actor(Some(turn_actor_for_user("user-beta")));
 
     let err = services
@@ -5437,7 +5534,7 @@ async fn generic_gate_resolution_rejects_blocked_auth_run() {
         coordinator.clone(),
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_auth_gate(GateRef::new("custom-auth-gate").expect("gate"));
+    coordinator.set_parked_auth_gate(TurnGateRef::new("custom-auth-gate").expect("gate"));
 
     let err = services
         .resolve_gate(
@@ -5469,7 +5566,7 @@ async fn blocked_auth_run_routes_non_prefixed_gate_to_auth_interaction_service()
     )
     .with_auth_interactions(auth_interactions.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_auth_gate(GateRef::new("custom-auth-gate").expect("gate"));
+    coordinator.set_parked_auth_gate(TurnGateRef::new("custom-auth-gate").expect("gate"));
 
     let response = services
         .resolve_gate(
@@ -5504,7 +5601,7 @@ async fn blocked_auth_run_with_stale_gate_ref_returns_conflict() {
     )
     .with_auth_interactions(auth_interactions.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_auth_gate(GateRef::new("gate-current").expect("gate"));
+    coordinator.set_parked_auth_gate(TurnGateRef::new("gate-current").expect("gate"));
 
     let err = services
         .resolve_gate(
@@ -5539,7 +5636,7 @@ async fn blocked_approval_run_routes_non_prefixed_gate_to_approval_interaction_s
     )
     .with_approval_interactions(approval_interactions.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_approval_gate(GateRef::new("custom-approval-gate").expect("gate"));
+    coordinator.set_parked_approval_gate(TurnGateRef::new("custom-approval-gate").expect("gate"));
 
     let response = services
         .resolve_gate(
@@ -5577,7 +5674,7 @@ async fn blocked_approval_run_with_stale_gate_ref_returns_conflict() {
     )
     .with_approval_interactions(approval_interactions.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_approval_gate(GateRef::new("gate-current").expect("gate"));
+    coordinator.set_parked_approval_gate(TurnGateRef::new("gate-current").expect("gate"));
 
     let err = services
         .resolve_gate(
@@ -5941,7 +6038,7 @@ async fn denied_gate_resolution_cancels_run() {
         coordinator.clone(),
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+    coordinator.set_parked_gate(TurnGateRef::new("gate-alpha").expect("gate"));
 
     let response = services
         .resolve_gate(
@@ -6055,7 +6152,7 @@ async fn resolve_gate_rejects_cross_user_access() {
     );
     let alice = caller();
     create_thread_for(&services, alice.clone(), "thread-alice").await;
-    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+    coordinator.set_parked_gate(TurnGateRef::new("gate-alpha").expect("gate"));
 
     let bob = ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
@@ -6185,7 +6282,7 @@ async fn denied_gate_resolution_with_stale_gate_ref_returns_conflict() {
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
     // The run is parked on `gate-current`, but the browser supplies `gate-stale`.
-    coordinator.set_parked_gate(GateRef::new("gate-current").expect("gate"));
+    coordinator.set_parked_gate(TurnGateRef::new("gate-current").expect("gate"));
 
     let err = services
         .resolve_gate(
@@ -6673,7 +6770,7 @@ async fn list_extensions_golden_wire_multi_surface_extension_freezes_accounts_li
 /// projection through the real descriptor-backed `EXTENSIONS_VIEW` seam.
 struct FailedStateLifecycleService {
     extension: LifecycleInstalledExtensionSummary,
-    activation_errors: std::collections::HashMap<String, String>,
+    activation_errors: std::collections::HashMap<ExtensionId, String>,
 }
 
 #[async_trait]
@@ -6707,7 +6804,7 @@ impl LifecycleProductService for FailedStateLifecycleService {
     async fn installed_activation_errors(
         &self,
         _context: LifecycleProductContext,
-    ) -> Result<std::collections::HashMap<String, String>, ProductSurfaceError> {
+    ) -> Result<std::collections::HashMap<ExtensionId, String>, ProductSurfaceError> {
         Ok(self.activation_errors.clone())
     }
 }
@@ -6785,10 +6882,21 @@ async fn list_extensions_surfaces_failed_state_expired_account_and_activation_er
             phase: InstallationState::Failed,
             install_scope: None,
         },
-        activation_errors: std::collections::HashMap::from([(
-            "acme".to_string(),
-            "activation failed: runtime credential rejected".to_string(),
-        )]),
+        activation_errors: std::collections::HashMap::from([
+            (
+                ExtensionId::new("acme").expect("valid extension id"),
+                "activation failed: runtime credential rejected".to_string(),
+            ),
+            // A *different* extension's failure sits in the same map. The key
+            // is an `ExtensionId`, so the only way this reason could land on
+            // the acme card is a genuine lookup bug — which is exactly what a
+            // `String` key made indistinguishable from a package id, a display
+            // name, or an installation id being keyed in by mistake.
+            (
+                ExtensionId::new("other-extension").expect("valid extension id"),
+                "activation failed: a different extension entirely".to_string(),
+            ),
+        ]),
     }))
     .with_channel_connection_service(Arc::new(AccountStatusConnectionService {
         // The caller still holds a binding (connected), yet the durable
@@ -6830,6 +6938,12 @@ async fn list_extensions_surfaces_failed_state_expired_account_and_activation_er
         info.activation_error.as_deref(),
         Some("activation failed: runtime credential rejected"),
         "the installation record's last_error must reach the projected DTO",
+    );
+    assert_ne!(
+        info.activation_error.as_deref(),
+        Some("activation failed: a different extension entirely"),
+        "each card carries its OWN extension's reason; the map is keyed by \
+         ExtensionId precisely so a neighbouring failure cannot land here",
     );
 
     // (b) The auth account projects its real §6.3 state + typed last error,
@@ -10288,6 +10402,75 @@ async fn setup_extension_returns_post_setup_onboarding_payload() {
 }
 
 #[tokio::test]
+async fn setup_extension_dispatches_one_typed_hosted_mcp_auth_selection() {
+    let lifecycle = Arc::new(RecordingLifecycleService::with_credential_requirements(
+        vec![manual_credential_requirement(
+            "hosted_mcp_bearer_token",
+            true,
+        )],
+    ));
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_lifecycle_product_service(lifecycle.clone());
+
+    invoke_extension_setup_submit(
+        &services,
+        caller(),
+        "mcp-custom",
+        ProductSetupExtensionRequest {
+            client_action_id: None,
+            action: Some("select_auth".to_string()),
+            payload: Some(json!({
+                "auth_selection": { "kind": "bearer" }
+            })),
+        },
+    )
+    .await
+    .expect("typed hosted MCP auth selection dispatches");
+
+    assert_eq!(
+        lifecycle.actions(),
+        vec![LifecycleProductAction::ExtensionSelectHostedMcpAuth {
+            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "mcp-custom",)
+                .expect("package ref"),
+            auth_selection: HostedMcpAuthSelection::Bearer,
+        }],
+        "the setup boundary dispatches selection exactly once and does not run a second activation",
+    );
+    assert_eq!(
+        lifecycle.package_refs(),
+        vec![
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "mcp-custom",)
+                .expect("package ref")
+        ],
+        "setup re-projects the package after applying the auth selection",
+    );
+}
+
+#[tokio::test]
+async fn setup_extension_rejects_auto_as_a_recovery_selection() {
+    let services = setup_services_with_requirements(Vec::new());
+    let err = invoke_extension_setup_submit(
+        &services,
+        caller(),
+        "mcp-custom",
+        ProductSetupExtensionRequest {
+            client_action_id: None,
+            action: Some("select_auth".to_string()),
+            payload: Some(json!({
+                "auth_selection": { "kind": "auto" }
+            })),
+        },
+    )
+    .await
+    .expect_err("automatic detection cannot be retried as an explicit recovery choice");
+
+    assert_setup_validation(err, "payload", ProductSurfaceValidationCode::InvalidValue);
+}
+
+#[tokio::test]
 async fn setup_extension_rejects_blank_required_manual_secret() {
     let credentials = Arc::new(RecordingExtensionCredentialSetupService::default());
     let services =
@@ -10601,6 +10784,7 @@ struct SetupRecordingLlmConfigService {
     next_snapshot_error: Mutex<Option<LlmConfigServiceError>>,
     next_upsert_error: Mutex<Option<LlmConfigServiceError>>,
     next_set_active_error: Mutex<Option<LlmConfigServiceError>>,
+    next_login_error: Mutex<Option<LlmConfigServiceError>>,
 }
 
 impl Default for SetupRecordingLlmConfigService {
@@ -10617,6 +10801,7 @@ impl Default for SetupRecordingLlmConfigService {
             next_snapshot_error: Mutex::new(None),
             next_upsert_error: Mutex::new(None),
             next_set_active_error: Mutex::new(None),
+            next_login_error: Mutex::new(None),
         }
     }
 }
@@ -10656,6 +10841,22 @@ impl SetupRecordingLlmConfigService {
 
     fn fail_next_upsert(&self, error: LlmConfigServiceError) {
         *self.next_upsert_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_next_login(&self, error: LlmConfigServiceError) {
+        *self.next_login_error.lock().expect("login error lock") = Some(error);
+    }
+
+    fn take_login_error(&self) -> Result<(), LlmConfigServiceError> {
+        match self
+            .next_login_error
+            .lock()
+            .expect("login error lock")
+            .take()
+        {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn fail_next_set_active(&self, error: LlmConfigServiceError) {
@@ -10785,12 +10986,21 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
         })
     }
 
+    // The three vendor logins answer with `next_login_error` when one is armed.
+    // They used to `panic!("not used by operator setup tests")`, which made the
+    // *failure* half of each path untestable -- and that half is the whole
+    // point: WS5 replaced product's own `map_llm_config_error` with the `From`
+    // projection declared beside the port, so these three are the call sites
+    // that prove the projection is what product actually returns.
     async fn start_nearai_login(
         &self,
         _caller: ProductSurfaceCaller,
         _request: NearAiLoginRequest,
     ) -> Result<NearAiLoginStart, LlmConfigServiceError> {
-        panic!("start_nearai_login is not used by operator setup tests")
+        self.take_login_error()?;
+        Ok(NearAiLoginStart {
+            auth_url: "https://auth.example/v1/auth/github".to_string(),
+        })
     }
 
     async fn complete_nearai_wallet_login(
@@ -10798,14 +11008,19 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
         _caller: ProductSurfaceCaller,
         _request: NearAiWalletLoginRequest,
     ) -> Result<NearAiWalletLoginResult, LlmConfigServiceError> {
-        panic!("complete_nearai_wallet_login is not used by operator setup tests")
+        self.take_login_error()?;
+        Ok(NearAiWalletLoginResult { active: true })
     }
 
     async fn start_codex_login(
         &self,
         _caller: ProductSurfaceCaller,
     ) -> Result<CodexLoginStart, LlmConfigServiceError> {
-        panic!("start_codex_login is not used by operator setup tests")
+        self.take_login_error()?;
+        Ok(CodexLoginStart {
+            user_code: "ABCD-EFGH".to_string(),
+            verification_uri: "https://auth.example/device".to_string(),
+        })
     }
 }
 
@@ -11282,7 +11497,7 @@ async fn query_product_surface_page<S: ProductSurface + ?Sized>(
     let page = services
         .query(
             caller,
-            ironclaw_host_api::product_surface::ProductSurfaceQueryRequest {
+            ironclaw_product_contracts::surface::ProductSurfaceQueryRequest {
                 view_id: query.view_id,
                 input: query.params,
                 cursor: query.cursor,
@@ -11359,7 +11574,7 @@ where
     let response = services
         .invoke(
             caller,
-            ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+            ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
                 operation_id: CapabilityId::new(capability_id).expect("capability id"),
                 input: serde_json::to_value(input).expect("capability input"),
                 activity_id: ActivityId::new(),
@@ -11432,7 +11647,7 @@ async fn invoke_extension_setup_submit<S: ProductSurface + ?Sized>(
     let response = services
         .invoke(
             caller,
-            ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+            ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
                 operation_id: CapabilityId::new(EXTENSION_SETUP_SUBMIT_CAPABILITY_ID)
                     .expect("capability id"),
                 input,
@@ -11479,6 +11694,107 @@ async fn extension_import_is_available_as_product_capability() {
         Resolution::Done(outcome) if outcome.verdict.is_success()
     ));
     assert_eq!(lifecycle_service.imported_bundles(), vec![bundle]);
+}
+
+/// The other half of the import capability: what a runtime that never wired a
+/// bundle importer answers. Driven **through the surface**, not against the
+/// trait default, because that is where the status the browser sees is
+/// decided — `RebornServices` is constructed exactly as composition
+/// constructs it and then simply not given a lifecycle service, which leaves
+/// the `UnsupportedLifecycleProductService` default in place.
+///
+/// It must be `Unavailable`/503, never `InvalidRequest`/400: the caller
+/// uploaded a bundle nothing ever looked at, so there is nothing about their
+/// request to fault. (Flipped 2026-08-02 by the CHECKLIST WS2 "four WS2.1
+/// follow-ups" row; the code used to be 400.)
+#[tokio::test]
+async fn webui_extension_import_reports_unavailable_when_no_service_is_wired() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    let bundle: Vec<u8> = b"PK\x03\x04\x00\xff\xfe binary zip bytes".to_vec();
+
+    let error = services
+        .invoke(
+            caller(),
+            CapabilityId::new(EXTENSION_IMPORT_CAPABILITY_ID).expect("capability id"),
+            json!({ "bundle_base64": STANDARD.encode(&bundle) }),
+            ActivityId::new(),
+        )
+        .await
+        .expect_err("a runtime with no bundle importer must refuse the import");
+
+    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
+    assert_eq!(error.status_code, 503);
+    assert!(
+        !error.retryable,
+        "an unwired capability does not become wired by retrying"
+    );
+    // The request itself was never faulted: a validation error would carry the
+    // offending field, and this one has none.
+    assert!(error.field.is_none());
+    assert!(error.validation_code.is_none());
+}
+
+#[tokio::test]
+async fn hosted_mcp_registration_auth_selection_blocker_is_sanitized_surface_validation_error() {
+    let lifecycle = Arc::new(RecordingLifecycleService::new());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_lifecycle_product_service(lifecycle.clone());
+
+    let error = ProductSurface::invoke(
+        &services,
+        caller(),
+        ProductSurfaceInvokeRequest {
+            operation_id: CapabilityId::new(EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID)
+                .expect("hosted MCP registration capability id"),
+            input: json!({
+                "desired_id": "calendar",
+                "desired_name": "Calendar",
+                "endpoint": "https://mcp.example.test"
+            }),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await
+    .expect_err("auth-selection blocker must reject hosted MCP registration");
+
+    assert!(matches!(
+        lifecycle.actions().as_slice(),
+        [LifecycleProductAction::ExtensionRegisterHostedMcp { request }]
+            if request.desired_id.as_str() == "calendar"
+    ));
+    assert_eq!(error.code, ProductSurfaceErrorCode::InvalidRequest);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::Validation);
+    assert_eq!(error.status_code, 400);
+    assert!(!error.retryable);
+    assert_eq!(error.field.as_deref(), Some("auth_selection"));
+    assert_eq!(
+        error.validation_code,
+        Some(ProductSurfaceValidationCode::AuthSelectionRequired)
+    );
+    let rendered = serde_json::to_value(&error).expect("surface error serializes");
+    assert_eq!(
+        rendered,
+        json!({
+            "code": "invalid_request",
+            "kind": "validation",
+            "status_code": 400,
+            "retryable": false,
+            "field": "auth_selection",
+            "validation_code": "auth_selection_required"
+        })
+    );
+    assert!(
+        !rendered
+            .to_string()
+            .contains("internal lifecycle diagnostic"),
+        "the lifecycle response message must not cross the surface boundary"
+    );
 }
 
 #[tokio::test]
@@ -13718,7 +14034,6 @@ fn service_source_avoids_forbidden_runtime_dependencies() {
     for forbidden in [
         "CapabilityHost",
         "ironclaw_capabilities",
-        "ironclaw_dispatcher",
         "ironclaw_host_runtime",
         "ironclaw_approvals",
         "ironclaw_storage",
@@ -14824,8 +15139,8 @@ impl InboundAttachmentLander for RecordingLander {
         &self,
         _thread_scope: &ThreadScope,
         _referenced_storage_keys: &[String],
-    ) -> Result<ironclaw_product::AttachmentCleanupReport, ProductSurfaceError> {
-        Ok(ironclaw_product::AttachmentCleanupReport::default())
+    ) -> Result<ironclaw_attachments::AttachmentCleanupReport, ProductSurfaceError> {
+        Ok(ironclaw_attachments::AttachmentCleanupReport::default())
     }
 }
 
@@ -16325,7 +16640,7 @@ async fn execute_status_on_foreign_thread_is_indistinguishable_from_unknown() {
 // `extension_list` exercises the list-family shaping: a `Count` field plus
 // one readable row per installed extension (id, name, version, and its
 // public `LifecyclePublicState`, never the raw internal `InstallationState`
-// checkpoint — see `ironclaw_host_api::state`'s "must never expose those
+// checkpoint — see `ironclaw_extension_contracts::state`'s "must never expose those
 // checkpoints" contract).
 #[tokio::test]
 async fn admin_execute_lifecycle_command_executes_and_renders_installed_extensions() {
@@ -16662,4 +16977,302 @@ async fn execute_user_audience_commands_succeed_without_admin_directory_but_admi
     );
     assert_eq!(admin_audience_error.status_code, 503);
     assert!(admin_audience_error.retryable);
+}
+
+#[derive(Default)]
+struct RecordingIronhubLinkService {
+    deliveries: Mutex<Vec<(ProductSurfaceCaller, IronhubInstallDeliveryRequest)>>,
+}
+
+#[async_trait]
+impl IronhubLinkService for RecordingIronhubLinkService {
+    async fn register(&self, _request: IronhubRegisterRequest) -> Result<(), IronhubLinkError> {
+        Ok(())
+    }
+
+    async fn deliver_install(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: IronhubInstallDeliveryRequest,
+    ) -> Result<IronhubInstallDeliveryResult, IronhubLinkError> {
+        let slug = request.slug.clone();
+        self.deliveries
+            .lock()
+            .expect("lock")
+            .push((caller, request));
+        Ok(IronhubInstallDeliveryResult {
+            installed: true,
+            slug,
+            message: "installed".to_string(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn ironhub_delivery_command_forwards_authenticated_product_surface_caller() {
+    let link = Arc::new(RecordingIronhubLinkService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_ironhub_link_service(link.clone());
+    let authenticated_caller =
+        caller_for_user_with_project("user-ironhub", Some("project-ironhub"));
+
+    let response = ProductSurface::invoke(
+        &services,
+        authenticated_caller.clone(),
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
+            operation_id: CapabilityId::new(IRONHUB_DELIVER_INSTALL_COMMAND_ID)
+                .expect("operation id"),
+            input: serde_json::json!({
+                "slug": "private-skill",
+                "version": "1.2.3",
+                "uid": "body-user-is-not-authority",
+                "aid": "agent-alpha",
+                "ts": 1_700_000_000_u64,
+                "nonce": "nonce-1",
+                "artifact_digest": "sha256:deadbeef",
+                "sig": "signature",
+                "private_manifest_url": "https://catalog.example/private/repo?token=rotating"
+            }),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await
+    .expect("delivery command");
+
+    let output: IronhubInstallDeliveryResult =
+        serde_json::from_value(response.output).expect("typed output");
+    assert!(output.installed);
+    assert_eq!(output.slug, "private-skill");
+
+    let deliveries = link.deliveries.lock().expect("lock");
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].0, authenticated_caller);
+    assert_eq!(deliveries[0].1.uid, "body-user-is-not-authority");
+}
+
+#[tokio::test]
+async fn ironhub_delivery_command_fails_closed_when_link_service_is_unwired() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let error = ProductSurface::invoke(
+        &services,
+        caller(),
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
+            operation_id: CapabilityId::new(IRONHUB_DELIVER_INSTALL_COMMAND_ID)
+                .expect("operation id"),
+            input: serde_json::json!({
+                "slug": "private-skill",
+                "version": "1.2.3",
+                "uid": "body-user-is-not-authority",
+                "aid": "agent-alpha",
+                "ts": 1_700_000_000_u64,
+                "nonce": "nonce-1",
+                "artifact_digest": "sha256:deadbeef",
+                "sig": "signature"
+            }),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await
+    .expect_err("unwired IronHub link service must fail closed");
+
+    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::ServiceUnavailable);
+    assert_eq!(error.status_code, 503);
+    assert!(!error.retryable);
+}
+
+// ---------------------------------------------------------------------------
+// Queued-replay crash-orphan recovery (WebUI path): a Queued row whose queue
+// entry was lost (crash between the status write and the enqueue) must be
+// idempotently re-enqueued on replay instead of treating Queued as proof.
+// ---------------------------------------------------------------------------
+
+struct VanishingWebUiEnqueue;
+
+#[async_trait]
+impl ironclaw_loop_host::HostInputEnqueuePort for VanishingWebUiEnqueue {
+    async fn enqueue_queued_message(
+        &self,
+        request: ironclaw_loop_host::EnqueueQueuedMessageRequest,
+    ) -> Result<ironclaw_loop_host::HostInputEnvelope, ironclaw_loop_host::HostInputQueueError>
+    {
+        Ok(ironclaw_loop_host::HostInputEnvelope {
+            input: request.input,
+            cursor: ironclaw_loop_contracts::LoopInputCursorToken::new(
+                "input-cursor:1".to_string(),
+            )
+            .expect("cursor"),
+            ack_token: ironclaw_loop_contracts::LoopInputAckToken::new("input-ack:1".to_string())
+                .expect("ack token"),
+        })
+    }
+}
+
+#[tokio::test]
+async fn webui_queued_replay_re_enqueues_crash_orphaned_message() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let active_run_id = TurnRunId::new();
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id,
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(3),
+        }),
+    ));
+    // Phase 1 — the "crashed" process: the enqueue vanishes, leaving the row
+    // Queued with no backing queue entry.
+    let crashed = RebornServices::new(
+        thread_service.clone() as Arc<dyn SessionThreadService>,
+        coordinator.clone(),
+    )
+    .with_input_enqueue(Arc::new(VanishingWebUiEnqueue));
+    setup_owned_thread(&crashed, caller(), "thread-orphan-webui").await;
+    let request = || {
+        serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            "client_action_id": "send-orphan-webui",
+            "thread_id": "thread-orphan-webui",
+            "content": "orphaned webui steering"
+        }))
+        .expect("request")
+    };
+    let response = crashed
+        .submit_turn(caller(), request())
+        .await
+        .expect("busy submit succeeds");
+    assert!(
+        matches!(response, RebornSubmitTurnResponse::DeferredBusy { .. }),
+        "expected DeferredBusy, got {response:?}"
+    );
+
+    // Phase 2 — the restarted process with the REAL queue: the same
+    // client_action_id triggers the WebUI replay, which must re-enqueue.
+    let real_queue = Arc::new(ironclaw_loop_host::InMemoryHostInputQueue::new(
+        thread_service.clone() as Arc<dyn SessionThreadService>,
+    ));
+    let restarted = RebornServices::new(
+        thread_service.clone() as Arc<dyn SessionThreadService>,
+        coordinator,
+    )
+    .with_input_enqueue(real_queue.clone() as Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>);
+    let replayed = restarted
+        .submit_turn(caller(), request())
+        .await
+        .expect("replay succeeds");
+    assert!(
+        matches!(replayed, RebornSubmitTurnResponse::DeferredBusy { .. }),
+        "replay stays DeferredBusy, got {replayed:?}"
+    );
+    use ironclaw_loop_host::HostInputQueue as _;
+    let batch = real_queue
+        .next_after(
+            active_run_id,
+            ironclaw_loop_contracts::LoopInputCursorToken::origin(),
+            8,
+        )
+        .await
+        .expect("poll after replay");
+    assert_eq!(
+        batch.inputs.len(),
+        1,
+        "the WebUI queued replay must re-enqueue the orphaned steering input"
+    );
+}
+
+/// The three vendor-login paths, driven through `RebornServices`, on their
+/// failure half.
+///
+/// WS5 moved `LlmConfigServiceError`'s projection onto `ProductSurfaceError`
+/// out of product (`map_llm_config_error`) and into the `From` impl declared
+/// beside the port, so these three `.map_err(ProductSurfaceError::from)` call
+/// sites are what proves product still answers with the sanitized taxonomy --
+/// and there is a wrapper plus an `Option` unwrap between the port and the
+/// answer, so a direct test of the `From` impl would not prove it
+/// (`.claude/rules/testing.md`, "Test through the caller").
+///
+/// `Unavailable` is the arm that matters: it is the only retryable one, so a
+/// projection that lost it would turn a transient backend failure into a
+/// permanent-looking error in the Inference tab.
+#[tokio::test]
+async fn vendor_login_failures_project_the_sanitized_port_taxonomy() {
+    let nearai_request = || NearAiLoginRequest {
+        provider: ironclaw_product_contracts::operator_llm::NearAiAuthProvider::Github,
+        origin: "https://app.example".to_string(),
+    };
+    let wallet_request = || NearAiWalletLoginRequest {
+        account_id: "alice.near".to_string(),
+        public_key: "ed25519:key".to_string(),
+        signature: "c2ln".to_string(),
+        message: "login".to_string(),
+        recipient: "ironclaw".to_string(),
+        nonce: vec![0u8; 32],
+        callback_url: None,
+    };
+
+    // Unavailable -> 503, retryable.
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+    llm_config.fail_next_login(LlmConfigServiceError::Unavailable);
+    let error = services
+        .start_nearai_login(caller(), nearai_request())
+        .await
+        .expect_err("an unavailable backend must fail the login");
+    assert_eq!(error.status_code, 503);
+    assert!(error.retryable, "Unavailable is the one retryable arm");
+
+    llm_config.fail_next_login(LlmConfigServiceError::Unavailable);
+    let error = services
+        .start_codex_login(caller())
+        .await
+        .expect_err("an unavailable backend must fail the codex login");
+    assert_eq!(error.status_code, 503);
+    assert!(error.retryable);
+
+    llm_config.fail_next_login(LlmConfigServiceError::Unavailable);
+    let error = services
+        .complete_nearai_wallet_login(caller(), wallet_request())
+        .await
+        .expect_err("an unavailable backend must fail the wallet login");
+    assert_eq!(error.status_code, 503);
+    assert!(error.retryable);
+
+    // The non-retryable arms keep their own statuses, and none of them leaks a
+    // backend string: `InvalidRequest`'s reason is dropped by the projection.
+    for (arm, status) in [
+        (
+            LlmConfigServiceError::InvalidRequest {
+                field: Some("provider".to_string()),
+                reason: "backend said /var/lib/ironclaw is unreadable".to_string(),
+            },
+            400,
+        ),
+        (LlmConfigServiceError::NotFound, 404),
+        (LlmConfigServiceError::Internal, 500),
+    ] {
+        llm_config.fail_next_login(arm);
+        let error = services
+            .start_nearai_login(caller(), nearai_request())
+            .await
+            .expect_err("the armed error must surface");
+        assert_eq!(error.status_code, status);
+        assert!(!error.retryable, "only Unavailable is retryable");
+        let on_the_wire = serde_json::to_string(&error).expect("surface error serializes");
+        assert!(
+            !on_the_wire.contains("/var/lib/ironclaw"),
+            "no backend string may cross the membrane: {on_the_wire}"
+        );
+    }
+
+    // And the success half still works, so the double is not simply broken.
+    let start = services
+        .start_nearai_login(caller(), nearai_request())
+        .await
+        .expect("a healthy backend starts the login");
+    assert!(start.auth_url.contains("/v1/auth/github"));
 }

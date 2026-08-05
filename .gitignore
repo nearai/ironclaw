@@ -47,7 +47,7 @@ artifacts/
 
 # WASM build artifacts (loaded from disk, not bundled)
 *.wasm
-!crates/ironclaw_first_party_extensions/assets/*/wasm/*.wasm
+!crates/extensions/packages/*/wasm/*.wasm
 
 # Traces
 trace_*.json
@@ -109,3 +109,6 @@ crates/*/frontend/dist/
 # It is a regenerable build artifact of a local audit, never source.
 mutants.out/
 mutants.out.old/
+
+# for a local typescript app, but don't want to push with main repo
+/app/

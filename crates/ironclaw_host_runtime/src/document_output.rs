@@ -142,7 +142,10 @@ fn decode_and_extract_capped(
             format!("[No extractable text found in {mime} document.]")
         }
         ironclaw_extractors::DocumentExtraction::Failed(error) => {
-            tracing::debug!(mime, filename, %error, "document text extraction failed");
+            // `?error` (Debug) carries the parser diagnostic into the log; the
+            // model-facing string below is built from the caller's own `mime`
+            // and never from the error. See `ironclaw_extractors::ExtractionError`.
+            tracing::debug!(mime, filename, ?error, "document text extraction failed");
             format!("[Could not extract text from {mime} document.]")
         }
     }

@@ -1,5 +1,7 @@
 //! In-memory fakes for contract tests and downstream integration tests.
 
+use ironclaw_product_contracts::action::ActionFingerprintKey;
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -7,13 +9,13 @@ use std::time::Duration;
 use crate::{ProductInboundEnvelope, ProductInboundPayload, ProductRejection, UserMessagePayload};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{
-    ids::{AgentId, TenantId, ThreadId, UserId},
-    product_surface::{ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind},
+use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
-use crate::action::{ActionFingerprintKey, ProductInboundAction};
+use crate::action::ProductInboundAction;
 use crate::binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,

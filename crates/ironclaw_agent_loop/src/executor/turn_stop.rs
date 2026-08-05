@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_turns::LoopExit;
+use ironclaw_loop_contracts::LoopExit;
 use tracing::debug;
 
 use crate::{
@@ -7,10 +7,7 @@ use crate::{
     strategies::{StopKind, StopOutcome, TurnEndKind, TurnSummary},
 };
 
-use super::{
-    AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, PendingInputAck,
-    StageContext,
-};
+use super::{AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, StageContext};
 
 /// Stop-stage helper for callers that can observe and decide back-to-back.
 ///
@@ -23,7 +20,6 @@ pub(crate) struct StopStage;
 pub(super) struct StopInput {
     pub(super) state: LoopExecutionState,
     pub(super) summary: TurnSummary,
-    pub(super) pending_input_ack: PendingInputAck,
 }
 
 pub(super) struct StopObservationInput {
@@ -42,12 +38,10 @@ pub(super) enum StopObservationStep {
 pub(super) enum StopStep {
     Continue {
         state: LoopExecutionState,
-        pending_input_ack: PendingInputAck,
     },
     Stop {
         state: LoopExecutionState,
         kind: StopKind,
-        pending_input_ack: PendingInputAck,
     },
     Exit(LoopExit),
 }
@@ -77,7 +71,6 @@ impl ExecutorStage<StopInput> for StopStage {
                     StopInput {
                         state: *state,
                         summary,
-                        pending_input_ack: input.pending_input_ack,
                     },
                 )
                 .await
@@ -115,7 +108,6 @@ impl StopStage {
         input: StopInput,
     ) -> Result<StopStep, AgentLoopExecutorError> {
         let mut state = input.state;
-        let pending_input_ack = input.pending_input_ack;
         let warning_turn_repeated_no_progress = state.terminal_warning_state.active()
             == Some(TerminalWarningKind::NoProgressDetected)
             && input.summary.kind == TurnEndKind::AfterCapabilityBatch
@@ -147,26 +139,16 @@ impl StopStage {
                         iteration = state.iteration,
                         "agent loop scheduling final no-progress recovery iteration"
                     );
-                    return Ok(StopStep::Continue {
-                        state,
-                        pending_input_ack,
-                    });
+                    return Ok(StopStep::Continue { state });
                 }
-                Ok(StopStep::Stop {
-                    state,
-                    kind,
-                    pending_input_ack,
-                })
+                Ok(StopStep::Stop { state, kind })
             }
             StopOutcome::Continue {} => {
                 state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
                     CancelCheck::Continue(state) => *state,
                     CancelCheck::Exit(exit) => return Ok(StopStep::Exit(exit)),
                 };
-                Ok(StopStep::Continue {
-                    state,
-                    pending_input_ack,
-                })
+                Ok(StopStep::Continue { state })
             }
         }
     }

@@ -1,7 +1,8 @@
-use ironclaw_turns::{
-    LoopCancelled, LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopExit,
-    LoopExitId, LoopFailed, LoopFailureKind, LoopMessageRef, SanitizedFailure,
-    run_profile::{AgentLoopDriverHost, LoopCancelReasonKind, LoopCancellationSignal},
+use ironclaw_host_api::turn::{LoopExitId, LoopMessageRef, SanitizedFailure};
+use ironclaw_loop_contracts::{
+    AgentLoopDriverHost, LoopCancelReasonKind, LoopCancellationSignal, LoopCancelled,
+    LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopExit, LoopFailed,
+    LoopFailureKind,
 };
 
 use crate::state::LoopExecutionState;
@@ -11,7 +12,7 @@ use super::AgentLoopExecutorError;
 pub(super) fn completed_exit(
     host: &(dyn AgentLoopDriverHost + Send + Sync),
     state: LoopExecutionState,
-    final_checkpoint_id: Option<ironclaw_turns::TurnCheckpointId>,
+    final_checkpoint_id: Option<ironclaw_host_api::turn::TurnCheckpointId>,
 ) -> Result<LoopExit, AgentLoopExecutorError> {
     let completion_kind = if !state.assistant_refs.is_empty() {
         LoopCompletionKind::FinalReply
@@ -35,7 +36,7 @@ pub(super) fn failed_exit(
     host: &(dyn AgentLoopDriverHost + Send + Sync),
     state: LoopExecutionState,
     reason_kind: LoopFailureKind,
-    checkpoint_id: Option<ironclaw_turns::TurnCheckpointId>,
+    checkpoint_id: Option<ironclaw_host_api::turn::TurnCheckpointId>,
     details: FailedExitDetails,
 ) -> Result<LoopExit, AgentLoopExecutorError> {
     let model_usage = state.cumulative_model_usage;
@@ -92,7 +93,7 @@ pub(super) fn cancelled_reason_from_signal(
 pub(super) fn cancelled_exit(
     host: &(dyn AgentLoopDriverHost + Send + Sync),
     state: LoopExecutionState,
-    checkpoint_id: Option<ironclaw_turns::TurnCheckpointId>,
+    checkpoint_id: Option<ironclaw_host_api::turn::TurnCheckpointId>,
 ) -> Result<LoopExit, AgentLoopExecutorError> {
     cancelled_exit_with_reason(
         host,
@@ -106,7 +107,7 @@ pub(super) fn cancelled_exit_with_reason(
     host: &(dyn AgentLoopDriverHost + Send + Sync),
     state: LoopExecutionState,
     reason_kind: LoopCancelledReasonKind,
-    checkpoint_id: Option<ironclaw_turns::TurnCheckpointId>,
+    checkpoint_id: Option<ironclaw_host_api::turn::TurnCheckpointId>,
 ) -> Result<LoopExit, AgentLoopExecutorError> {
     Ok(LoopExit::Cancelled(LoopCancelled {
         reason_kind,

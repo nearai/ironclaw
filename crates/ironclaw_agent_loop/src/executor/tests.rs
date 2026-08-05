@@ -1,6 +1,9 @@
 // arch-exempt: large_file, canonical executor regression remains with shared loop fixtures, plan #4088
 use std::{collections::VecDeque, sync::Arc};
 
+use ironclaw_host_api::turn::{
+    CapabilityActivityId, GateResumeDisposition, LoopGateRef, LoopResultRef, TurnRunId,
+};
 use ironclaw_host_api::{
     decision::DenyReason,
     dispatch::DispatchInputIssueCode,
@@ -8,22 +11,19 @@ use ironclaw_host_api::{
     resolution::Denial,
     result_meta::{CapabilityRecoveryHint, FailureKind, SameCallRetryConstraint},
 };
-use ironclaw_turns::{
-    CapabilityActivityId, GateResumeDisposition, LoopCancelledReasonKind, LoopCompletionKind,
-    LoopExit, LoopFailureKind, LoopGateRef, LoopResultRef, TurnRunId,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
-        CapabilityCallCandidate, CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRef,
-        CapabilityInputRepair, CapabilityResumeToken, LoopCancelReasonKind, LoopCancellationSignal,
-        LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome, LoopCompactionResponse,
-        LoopContextCompactionKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
-        LoopInterruptKind, LoopModelCapabilityView, LoopProcessRef, LoopProgressEvent,
-        LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage, LoopRunInfoPort,
-        LoopSafeSummary, LoopSummaryArtifactId, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
-        ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput, PromptMode,
-        ProviderToolCallReplay, ToolObservationDetail, ToolObservationStatus,
-        VisibleCapabilityRequest, resolution,
-    },
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
+    CapabilityCallCandidate, CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRef,
+    CapabilityInputRepair, CapabilityResumeToken, LoopCancelReasonKind, LoopCancellationSignal,
+    LoopCancelledReasonKind, LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome,
+    LoopCompactionResponse, LoopCompletionKind, LoopContextCompactionKind, LoopExit,
+    LoopFailureKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
+    LoopInterruptKind, LoopModelCapabilityView, LoopProcessRef, LoopProgressEvent,
+    LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage, LoopRunInfoPort,
+    LoopSafeSummary, LoopSummaryArtifactId, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+    ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput, PromptMode,
+    ProviderToolCallReplay, ToolObservationDetail, ToolObservationStatus, VisibleCapabilityRequest,
+    resolution,
 };
 
 use crate::state::{
@@ -49,10 +49,9 @@ use super::{
     AgentLoopExecutor, AgentLoopExecutorError, AssistantReplyInput, AssistantReplyStage, BatchStep,
     BudgetInput, BudgetStage, BudgetStep, CanonicalAgentLoopExecutor, CapabilityInput,
     CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, GateInput, GateStage,
-    HostStage, InputStage, InputStep, ModelInput, ModelStage, PendingInputAck, PromptInput,
-    PromptStage, PromptStep, StageContext, StopInput, StopStage, StopStep, TurnCompletedStep,
-    UserFacingInputDrainMode, consume_drainable_inputs, sanitize_result_ref_suffix,
-    synthetic_provider_error_result_ref,
+    HostStage, InputStage, InputStep, ModelInput, ModelStage, PromptInput, PromptStage, PromptStep,
+    StageContext, TurnCompletedStep, UserFacingInputDrainMode, consume_drainable_inputs,
+    sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
 };
 
 #[allow(dead_code)]
@@ -235,12 +234,82 @@ async fn reply_only_drains_follow_up_before_stop_strategy_completes() {
         host.acked_input_tokens(),
         vec![LoopInputAckToken::new("input-ack:after-follow-up").expect("valid")]
     );
+    // Three before-model checkpoints: one per iteration from the spine, plus
+    // the follow-up drain's own cursor checkpoint (written so the drained
+    // input can be acked — and become model-visible — before the next prompt
+    // is built).
     assert_eq!(
         host.checkpoint_kinds(),
         vec![
             LoopCheckpointKind::BeforeModel,
             LoopCheckpointKind::BeforeModel,
+            LoopCheckpointKind::BeforeModel,
             LoopCheckpointKind::Final,
+        ]
+    );
+    assert_eq!(final_staged_state(&host).stop_state.turns_completed, 2);
+}
+
+#[tokio::test]
+async fn reply_only_drains_steering_arriving_at_exit_boundary() {
+    // Regression: a `Steering` input that arrives while the run's FINAL model
+    // call is in flight is only observable at the reply-only exit boundary —
+    // the steering drain at iteration start has already run. The follow-up
+    // drain must consume it and force one more iteration (so the model sees
+    // the message), rather than completing the run and stranding the input
+    // unconsumed at the queue head.
+    let host = MockHost::new(vec![reply_response(), reply_response()]);
+    let run_context = host.run_context().clone();
+    let host = host.with_input_batches(vec![
+        LoopInputBatch {
+            inputs: Vec::new(),
+            input_acks: Vec::new(),
+            next_cursor: input_cursor(&run_context, "input-cursor:no-input"),
+        },
+        LoopInputBatch {
+            inputs: vec![LoopInput::Steering {
+                message_ref: message_ref("msg:late-steering"),
+            }],
+            input_acks: vec![input_ack(
+                &run_context,
+                "input-cursor:after-late-steering",
+                "input-ack:after-late-steering",
+            )],
+            next_cursor: input_cursor(&run_context, "input-cursor:after-late-steering"),
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(
+        host.model_requests().len(),
+        2,
+        "the late steering input must force one more model iteration"
+    );
+    assert_eq!(
+        host.acked_input_tokens(),
+        vec![LoopInputAckToken::new("input-ack:after-late-steering").expect("valid")]
+    );
+    // Ordering, not just occurrence: the forced extra iteration must build its
+    // prompt AFTER the drain's durable cursor checkpoint and ack — the ack is
+    // what makes the queued row model-visible, so an iteration forced with the
+    // ack still pending would feed the model a prompt without the message.
+    assert_eq!(
+        host.events(),
+        vec![
+            "build_prompt_bundle".to_string(),
+            "checkpoint:before_model".to_string(),
+            "checkpoint:before_model".to_string(),
+            "ack_inputs".to_string(),
+            "build_prompt_bundle".to_string(),
+            "checkpoint:before_model".to_string(),
+            "checkpoint:final".to_string(),
         ]
     );
     assert_eq!(final_staged_state(&host).stop_state.turns_completed, 2);
@@ -293,13 +362,7 @@ async fn budget_stage_exits_at_iteration_limit() {
     state.terminal_warning_state.clear_active();
 
     let step = BudgetStage
-        .process(
-            ctx,
-            BudgetInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, BudgetInput { state })
         .await
         .expect("budget stage");
 
@@ -415,13 +478,7 @@ async fn explanation_prompt_bundle_error_degrades_to_original_failed_exit() {
     state.terminal_warning_state.clear_active();
 
     let step = BudgetStage
-        .process(
-            ctx,
-            BudgetInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, BudgetInput { state })
         .await
         .expect("budget stage");
 
@@ -476,13 +533,7 @@ async fn prompt_stage_compacts_candidate_emits_redaction_once_then_rebuilds_fina
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -494,7 +545,7 @@ async fn prompt_stage_compacts_candidate_emits_redaction_once_then_rebuilds_fina
         | PromptStep::ResumeExternalTool(_) => {
             panic!("unexpected resume step")
         }
-        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
+        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
     };
     assert_eq!(host.prompt_requests().len(), 2);
     assert_eq!(
@@ -550,7 +601,7 @@ async fn prompt_stage_compacts_candidate_emits_redaction_once_then_rebuilds_fina
 
 #[tokio::test]
 async fn prompt_stage_circuit_breaker_disables_compaction_after_repeated_ineffective_runs() {
-    use ironclaw_turns::run_profile::PromptContextTokenBudget;
+    use ironclaw_loop_contracts::PromptContextTokenBudget;
 
     use crate::state::CompactionStrategyState;
 
@@ -624,13 +675,7 @@ async fn prompt_stage_circuit_breaker_disables_compaction_after_repeated_ineffec
 
     for completed_compactions in 1..=CompactionStrategyState::INEFFECTIVE_COMPACTION_TRIP_LIMIT {
         let step = PromptStage
-            .process(
-                ctx,
-                PromptInput {
-                    state,
-                    pending_input_ack: PendingInputAck::default(),
-                },
-            )
+            .process(ctx, PromptInput { state })
             .await
             .expect("prompt stage");
         let output = match step {
@@ -660,13 +705,7 @@ async fn prompt_stage_circuit_breaker_disables_compaction_after_repeated_ineffec
     // Drive the prompt stage again with the breaker open and the prompt still
     // over threshold: threshold-triggered compaction must NOT run again.
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage after breaker opened");
     let output = match step {
@@ -686,7 +725,7 @@ async fn prompt_stage_circuit_breaker_disables_compaction_after_repeated_ineffec
 
 #[tokio::test]
 async fn prompt_stage_forced_compaction_bypasses_open_circuit_breaker() {
-    use ironclaw_turns::run_profile::PromptContextTokenBudget;
+    use ironclaw_loop_contracts::PromptContextTokenBudget;
 
     // BUG B1 regression: force_compact_on_next_iteration (context-overflow
     // recovery via RetryAlteration::ShrinkContext, byte-cap overflow) must
@@ -732,13 +771,7 @@ async fn prompt_stage_forced_compaction_bypasses_open_circuit_breaker() {
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
     let output = match step {
@@ -803,13 +836,7 @@ async fn prompt_stage_deferred_compaction_returns_to_normal_prompt_path() {
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -821,7 +848,7 @@ async fn prompt_stage_deferred_compaction_returns_to_normal_prompt_path() {
         | PromptStep::ResumeExternalTool(_) => {
             panic!("unexpected resume step")
         }
-        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
+        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
     };
     assert_eq!(host.prompt_requests().len(), 1);
     assert_eq!(
@@ -891,13 +918,7 @@ async fn prompt_stage_successful_compaction_clears_deferred_watermark() {
     });
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -909,7 +930,7 @@ async fn prompt_stage_successful_compaction_clears_deferred_watermark() {
         | PromptStep::ResumeExternalTool(_) => {
             panic!("unexpected resume step")
         }
-        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
+        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
     };
     assert_eq!(
         output.state.compaction_state.last_compacted_through_seq,
@@ -949,13 +970,7 @@ async fn prompt_stage_cancellation_after_deferred_compaction_returns_cancelled_e
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -987,13 +1002,7 @@ async fn prompt_stage_compaction_index_maps_system_summary_and_other_kinds() {
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1005,7 +1014,7 @@ async fn prompt_stage_compaction_index_maps_system_summary_and_other_kinds() {
         | PromptStep::ResumeExternalTool(_) => {
             panic!("unexpected resume step")
         }
-        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
+        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
     };
     assert_eq!(
         output.state.compaction_prompt.message_index,
@@ -1041,13 +1050,7 @@ async fn prompt_stage_cancellation_after_prompt_bundle_returns_cancelled_exit() 
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1062,7 +1065,7 @@ async fn prompt_stage_cancellation_after_prompt_bundle_returns_cancelled_exit() 
             panic!("unexpected resume step")
         }
         PromptStep::Exit(exit) => panic!("expected cancelled exit, got {exit:?}"),
-        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
+        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
     }
     assert_eq!(host.prompt_requests().len(), 1);
     assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
@@ -1099,13 +1102,7 @@ async fn prompt_stage_compaction_inference_timeout_returns_to_normal_prompt_path
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1117,7 +1114,7 @@ async fn prompt_stage_compaction_inference_timeout_returns_to_normal_prompt_path
         | PromptStep::ResumeExternalTool(_) => {
             panic!("unexpected resume step")
         }
-        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
+        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
     };
     assert_eq!(
         output.state.compaction_state.last_deferred,
@@ -1167,13 +1164,7 @@ async fn prompt_stage_compaction_security_rejection_returns_to_normal_prompt_pat
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1185,7 +1176,7 @@ async fn prompt_stage_compaction_security_rejection_returns_to_normal_prompt_pat
             panic!("unexpected resume step")
         }
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
-        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
+        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
     };
     assert_eq!(
         output.state.compaction_state.last_deferred,
@@ -1240,13 +1231,7 @@ async fn compaction_failure_cancellation_skips_explanation_and_returns_cancelled
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1262,7 +1247,7 @@ async fn compaction_failure_cancellation_skips_explanation_and_returns_cancelled
         | PromptStep::ResumeApproval(_)
         | PromptStep::ResumeAuth(_)
         | PromptStep::ResumeExternalTool(_)
-        | PromptStep::SkipModel(_, _) => panic!("unexpected prompt step"),
+        | PromptStep::SkipModel(_) => panic!("unexpected prompt step"),
     }
     assert_eq!(
         host.prompt_requests().len(),
@@ -1308,13 +1293,7 @@ async fn prompt_stage_compaction_cancelled_returns_cancelled_exit() {
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1358,13 +1337,7 @@ async fn prompt_stage_cancellation_during_compaction_aborts_prompt_planning() {
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1400,13 +1373,7 @@ async fn prompt_stage_compaction_aborts_immediately_when_cancellation_already_se
 
     let step = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        PromptStage.process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        ),
+        PromptStage.process(ctx, PromptInput { state }),
     )
     .await
     .expect("already-requested cancellation should not wait for compaction")
@@ -1441,13 +1408,7 @@ async fn prompt_stage_cancellation_after_compaction_success_skips_final_bundle_r
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1576,7 +1537,10 @@ async fn model_budget_approval_required_with_gate_ref_blocks_resource_gate() {
 
     match exit {
         LoopExit::Blocked(blocked) => {
-            assert_eq!(blocked.kind, ironclaw_turns::LoopBlockedKind::Resource);
+            assert_eq!(
+                blocked.kind,
+                ironclaw_loop_contracts::LoopBlockedKind::Resource
+            );
             assert_eq!(blocked.gate_ref, gate_ref);
             assert_eq!(blocked.blocked_activity_id, None);
         }
@@ -1700,7 +1664,7 @@ async fn model_shrink_context_call_scope_returns_planner_contract() {
 }
 
 #[tokio::test]
-async fn input_stage_steering_drain_carries_pending_ack() {
+async fn input_stage_steering_drain_acks_eagerly_after_cursor_checkpoint() {
     let host = MockHost::new(Vec::new());
     let run_context = host.run_context().clone();
     let host = host.with_input_batches(vec![LoopInputBatch {
@@ -1726,7 +1690,6 @@ async fn input_stage_steering_drain_carries_pending_ack() {
             ctx,
             DrainInput {
                 state,
-                pending_input_ack: PendingInputAck::default(),
                 mode: UserFacingInputDrainMode::Steering,
             },
         )
@@ -1734,21 +1697,26 @@ async fn input_stage_steering_drain_carries_pending_ack() {
         .expect("input stage");
 
     match step {
-        InputStep::Continue {
-            state,
-            mut pending_input_ack,
-            drained,
-        } => {
+        InputStep::Continue { state, drained } => {
             assert!(drained);
             assert_eq!(
                 state.input_cursor,
                 input_cursor(&run_context, "input-cursor:after-user")
             );
-            assert!(host.acked_input_tokens().is_empty());
-            pending_input_ack.ack(&host).await.expect("ack inputs");
+            // The drain stage acks the consumed input itself — after writing a
+            // durable checkpoint of the advanced cursor — so the queued
+            // transcript row is model-visible before this iteration's prompt
+            // is built. The ack lifecycle never leaves this stage.
             assert_eq!(
                 host.acked_input_tokens(),
                 vec![LoopInputAckToken::new("input-ack:after-user").expect("valid")]
+            );
+            assert_eq!(
+                host.events(),
+                vec![
+                    "checkpoint:before_model".to_string(),
+                    "ack_inputs".to_string(),
+                ]
             );
         }
         InputStep::Exit(exit) => panic!("expected continue, got {exit:?}"),
@@ -1782,7 +1750,6 @@ async fn input_stage_steering_input_is_drained_like_user_message() {
             ctx,
             DrainInput {
                 state,
-                pending_input_ack: PendingInputAck::default(),
                 mode: UserFacingInputDrainMode::Steering,
             },
         )
@@ -1900,7 +1867,7 @@ async fn reply_admission_rejects_candidate_before_finalizing_and_continues() {
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 "done".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 false,
                 0,
                 None,
@@ -1970,7 +1937,7 @@ async fn reply_admission_rejects_candidate_before_finalizing_and_continues() {
 /// now accumulates before branching on the model output.
 #[tokio::test]
 async fn cumulative_usage_counts_capability_call_and_reply_turns() {
-    use ironclaw_turns::run_profile::{LoopModelResponse, LoopModelUsage};
+    use ironclaw_loop_contracts::{LoopModelResponse, LoopModelUsage};
 
     let result_ref = LoopResultRef::new("result:done").expect("valid");
     // Turn 1 is a capability call carrying its own usage; turn 2 is the reply.
@@ -1999,7 +1966,7 @@ async fn cumulative_usage_counts_capability_call_and_reply_turns() {
             resolutions: vec![resolution::completed(
                 result_ref,
                 "done".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 false,
                 0,
                 None,
@@ -2042,7 +2009,7 @@ async fn reply_admission_rendered_flag_stays_false_when_context_suppresses_contr
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 "done".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 false,
                 0,
                 None,
@@ -2159,15 +2126,7 @@ async fn prompt_stage_host_unavailable_on_visible_capabilities_propagates_error(
     };
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let result = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
-        .await;
+    let result = PromptStage.process(ctx, PromptInput { state }).await;
     let error = match result {
         Ok(_) => panic!("visible capabilities failure should propagate"),
         Err(error) => error,
@@ -2191,15 +2150,7 @@ async fn prompt_stage_host_unavailable_on_build_prompt_bundle_propagates_error()
     };
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let result = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
-        .await;
+    let result = PromptStage.process(ctx, PromptInput { state }).await;
     let error = match result {
         Ok(_) => panic!("prompt bundle failure should propagate"),
         Err(error) => error,
@@ -2226,15 +2177,7 @@ async fn prompt_stage_preserves_policy_denied_kind_from_prompt_bundle() {
     };
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let result = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
-        .await;
+    let result = PromptStage.process(ctx, PromptInput { state }).await;
     let error = match result {
         Ok(_) => panic!("policy denial must stop prompt construction"),
         Err(error) => error,
@@ -2261,15 +2204,7 @@ async fn prompt_stage_maps_cancelled_prompt_bundle_error_to_cancelled() {
     };
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let result = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
-        .await;
+    let result = PromptStage.process(ctx, PromptInput { state }).await;
 
     assert!(matches!(result, Err(AgentLoopExecutorError::Cancelled)));
 }
@@ -2288,15 +2223,7 @@ async fn prompt_stage_redacts_rejected_prompt_error_summary() {
     };
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let result = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
-        .await;
+    let result = PromptStage.process(ctx, PromptInput { state }).await;
     let error = match result {
         Ok(_) => panic!("rejected prompt error summary should propagate safely"),
         Err(error) => error,
@@ -2312,7 +2239,7 @@ async fn prompt_stage_redacts_rejected_prompt_error_summary() {
         } => {
             assert_eq!(
                 safe_summary,
-                ironclaw_turns::run_profile::LoopSafeSummary::tool_failure_details_redacted()
+                ironclaw_loop_contracts::LoopSafeSummary::tool_failure_details_redacted()
             );
             assert!(detail.contains("prompt construction rejected token"));
             assert!(detail.contains("[redacted]"));
@@ -2330,7 +2257,7 @@ async fn capability_stage_returns_after_batch_summary() {
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 "done".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 false,
                 0,
                 None,
@@ -2355,7 +2282,7 @@ async fn capability_stage_returns_after_batch_summary() {
             ctx,
             CapabilityInput {
                 state,
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                surface: ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
                     &host,
                     VisibleCapabilityRequest,
                 )
@@ -2444,7 +2371,7 @@ fn sanitize_result_ref_suffix_handles_empty_special_chars_and_truncation() {
     assert_eq!(sanitized.len(), 300);
 
     let result_ref = synthetic_provider_error_result_ref(&CapabilityCallCandidate {
-        activity_id: ironclaw_turns::CapabilityActivityId::new(),
+        activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
         surface_version: surface_version(),
         capability_id: capability_id(),
         input_ref: CapabilityInputRef::new("input:demo").expect("valid"),
@@ -2611,13 +2538,7 @@ async fn budget_iteration_limit_schedules_normal_warning_turn() {
     state.iteration = family.planner().budget().iteration_limit(&state);
 
     let step = BudgetStage
-        .process(
-            ctx,
-            BudgetInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, BudgetInput { state })
         .await
         .expect("budget stage");
 
@@ -2650,7 +2571,7 @@ async fn completion_nudge_lets_model_use_tools_to_finish_after_trailing_off() {
         resolutions: vec![resolution::completed(
             result_ref.clone(),
             "wrote file".to_string(),
-            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
             false,
             0,
             None,
@@ -2779,13 +2700,7 @@ async fn consumed_iteration_warning_falls_back_to_failed_exit() {
     state.terminal_warning_state.clear_active();
 
     let step = BudgetStage
-        .process(
-            ctx,
-            BudgetInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, BudgetInput { state })
         .await
         .expect("budget stage should finalize the exhausted warning path");
 
@@ -2857,7 +2772,7 @@ async fn stopped_on_suspension_completed_outcome_still_appends_result() {
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 "stopped batch completed".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -2887,69 +2802,13 @@ async fn stopped_on_suspension_completed_outcome_still_appends_result() {
 }
 
 #[tokio::test]
-async fn stop_stage_preserves_ack_and_returns_stop_kind() {
-    let host = MockHost::new(Vec::new());
-    let family = crate::families::default();
-    let ctx = StageContext {
-        planner: family.planner(),
-        host: &host,
-    };
-    let state = LoopExecutionState::initial_for_run(host.run_context());
-    let mut pending_input_ack = PendingInputAck::default();
-    pending_input_ack
-        .replace(vec![
-            LoopInputAckToken::new("input-ack:pending").expect("valid"),
-        ])
-        .expect("store pending ack");
-
-    let step = StopStage
-        .process(
-            ctx,
-            StopInput {
-                state,
-                summary: TurnSummary::after_capability_batch(
-                    vec![LoopResultRef::new("result:done").expect("valid")],
-                    CapabilityBatchTurnSummary {
-                        invocation_count: 1,
-                        terminate_hint_count: 1,
-                        no_progress_count: 0,
-                        observed_signatures: Vec::new(),
-                        made_progress_signatures: Vec::new(),
-                        no_change_signatures: Vec::new(),
-                    },
-                ),
-                pending_input_ack,
-            },
-        )
-        .await
-        .expect("stop stage");
-
-    match step {
-        StopStep::Stop {
-            mut pending_input_ack,
-            kind,
-            ..
-        } => {
-            assert_eq!(kind, StopKind::GracefulStop);
-            assert!(host.acked_input_tokens().is_empty());
-            pending_input_ack.ack(&host).await.expect("ack inputs");
-            assert_eq!(
-                host.acked_input_tokens(),
-                vec![LoopInputAckToken::new("input-ack:pending").expect("valid")]
-            );
-        }
-        StopStep::Continue { .. } | StopStep::Exit(_) => panic!("expected graceful stop"),
-    }
-}
-
-#[tokio::test]
 async fn terminate_hint_after_batch_completes_without_extra_model_call() {
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
         ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 LoopResultRef::new("result:done").expect("valid"),
                 "done".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -2991,7 +2850,7 @@ async fn terminate_hint_after_batch_completes_without_extra_model_call() {
         .progress_events()
         .into_iter()
         .find_map(|event| match event {
-            ironclaw_turns::run_profile::LoopProgressEvent::CapabilityBatchCompleted {
+            ironclaw_loop_contracts::LoopProgressEvent::CapabilityBatchCompleted {
                 result_count,
                 denied_count,
                 gated_count,
@@ -3053,7 +2912,7 @@ async fn gate_blocks_with_before_block_checkpoint() {
         .progress_events()
         .into_iter()
         .find_map(|event| match event {
-            ironclaw_turns::run_profile::LoopProgressEvent::CapabilityBatchCompleted {
+            ironclaw_loop_contracts::LoopProgressEvent::CapabilityBatchCompleted {
                 result_count,
                 denied_count,
                 gated_count,
@@ -3096,7 +2955,7 @@ async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
             resolutions: vec![resolution::completed(
                 completed_ref.clone(),
                 "approval resumed".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -3343,7 +3202,7 @@ async fn parallel_batch_records_completed_results_before_blocking_on_suspension(
                 resolution::completed(
                     completed_ref.clone(),
                     "parallel call completed".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -3404,7 +3263,7 @@ async fn capability_batch_rejects_outcome_count_exceeding_invocation_count() {
                 resolution::completed(
                     LoopResultRef::new("result:first").expect("valid"),
                     "first".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -3413,7 +3272,7 @@ async fn capability_batch_rejects_outcome_count_exceeding_invocation_count() {
                 resolution::completed(
                     LoopResultRef::new("result:second").expect("valid"),
                     "second".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -4897,7 +4756,7 @@ async fn terminate_hint_counts_only_visible_invoked_calls() {
             resolutions: vec![resolution::completed(
                 LoopResultRef::new("result:visible").expect("valid"),
                 "visible call completed".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -4983,7 +4842,7 @@ async fn retry_uses_single_call_invocation() {
             .with_single_outcomes(vec![resolution::completed(
                 LoopResultRef::new("result:retry").expect("valid"),
                 "retry completed".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -5024,14 +4883,14 @@ async fn a_denial_tells_the_model_what_would_unlock_it() {
                 resolution::completed(
                     result_ref.clone(),
                     "provider call completed".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     true,
                     0,
                     None,
                     None,
                 ),
                 resolution::denied(
-                    ironclaw_turns::run_profile::CapabilityDeniedReasonKind::unknown("auth_denied")
+                    ironclaw_loop_contracts::CapabilityDeniedReasonKind::unknown("auth_denied")
                         .expect("valid reason tag"),
                     // Deliberately avoids the word "credential": the summary
                     // channel's credential-marker guard would scrub it to a
@@ -5120,7 +4979,7 @@ async fn policy_denied_capability_error_honors_retry_recovery() {
         .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::denied(
-                    ironclaw_turns::run_profile::CapabilityDeniedReasonKind::EmptySurface,
+                    ironclaw_loop_contracts::CapabilityDeniedReasonKind::EmptySurface,
                     "provider call denied".to_string(),
                 )
                 .resolution,
@@ -5130,7 +4989,7 @@ async fn policy_denied_capability_error_honors_retry_recovery() {
         .with_single_outcomes(vec![resolution::completed(
             LoopResultRef::new("result:policy-retry").expect("valid"),
             "policy retry completed".to_string(),
-            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
             true,
             0,
             None,
@@ -5291,7 +5150,7 @@ async fn completed_provider_call_appends_provider_replay_metadata() {
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 safe_summary.clone(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -5372,14 +5231,14 @@ async fn denied_provider_call_appends_failure_tool_result_for_replay() {
                 resolution::completed(
                     result_ref.clone(),
                     "provider call completed".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     true,
                     0,
                     None,
                     None,
                 ),
                 resolution::denied(
-                    ironclaw_turns::run_profile::CapabilityDeniedReasonKind::EmptySurface,
+                    ironclaw_loop_contracts::CapabilityDeniedReasonKind::EmptySurface,
                     "provider call denied".to_string(),
                 )
                 .resolution,
@@ -5655,14 +5514,14 @@ async fn completed_output_digest_is_recorded_into_seen_capability_output_digests
     // `append_completed_capability_result` cannot silently regress while it is still
     // inert — nothing reads the ring until output-aware detection lands in a later
     // change, so a behavior-only test would stay green even if the push were removed.
-    let digest = ironclaw_turns::run_profile::ContentDigest(4242);
+    let digest = ironclaw_loop_contracts::ContentDigest(4242);
     let result_ref = LoopResultRef::new("result:digest-recorded").expect("valid");
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
         ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 "completed with digest".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 Some(digest),
@@ -5859,18 +5718,12 @@ async fn prompt_stage_returns_skip_model_when_flag_set() {
     state.post_capability_state.skip_model_this_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
     let returned_state = match step {
-        PromptStep::SkipModel(state, _ack) => *state,
+        PromptStep::SkipModel(state) => *state,
         PromptStep::Prepared(_) => panic!("expected SkipModel, got Prepared"),
         PromptStep::ResumeApproval(_)
         | PromptStep::ResumeAuth(_)
@@ -5896,69 +5749,6 @@ async fn prompt_stage_returns_skip_model_when_flag_set() {
     );
 }
 
-/// D1 regression: PromptStep::SkipModel must carry the pending_input_ack so
-/// canonical.rs can deliver it. Before the fix, SkipModel(Box<LoopExecutionState>)
-/// had no second field, so the ack was silently dropped when
-/// PromptCompactionStep::run returned Skipped (empty message_index path).
-#[tokio::test]
-async fn prompt_stage_skip_model_carries_pending_input_ack() {
-    let host = MockHost::new(Vec::new());
-    let family = crate::families::default();
-    let ctx = StageContext {
-        planner: family.planner(),
-        host: &host,
-    };
-    let mut state = LoopExecutionState::initial_for_run(host.run_context());
-    state.post_capability_state.skip_model_this_iteration = true;
-
-    // Seed a pending ack token into the PendingInputAck that will be handed
-    // to PromptStage — this simulates an inbound user input that was drained
-    // but not yet acked.
-    let mut pending_input_ack = PendingInputAck::default();
-    pending_input_ack
-        .replace(vec![
-            LoopInputAckToken::new("input-ack:skip-model").expect("valid"),
-        ])
-        .expect("store pending ack");
-
-    let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack,
-            },
-        )
-        .await
-        .expect("prompt stage");
-
-    // The step must be SkipModel, and the second field must carry the ack.
-    let mut carried_ack = match step {
-        PromptStep::SkipModel(_state, ack) => ack,
-        PromptStep::Prepared(_) => panic!("expected SkipModel, got Prepared"),
-        PromptStep::ResumeApproval(_)
-        | PromptStep::ResumeAuth(_)
-        | PromptStep::ResumeExternalTool(_) => {
-            panic!("expected SkipModel, got resume step")
-        }
-        PromptStep::Exit(exit) => panic!("expected SkipModel, got Exit({exit:?})"),
-    };
-
-    // Nothing should have been acked yet — the ack must be carried, not fired.
-    assert!(
-        host.acked_input_tokens().is_empty(),
-        "ack must not have been delivered inside PromptStage on the Skipped path"
-    );
-
-    // Delivering the carried ack must forward the token to the host.
-    carried_ack.ack(&host).await.expect("ack inputs");
-    assert_eq!(
-        host.acked_input_tokens(),
-        vec![LoopInputAckToken::new("input-ack:skip-model").expect("valid")],
-        "carried ack must deliver the original token to the host"
-    );
-}
-
 // ---------------------------------------------------------------------------
 // WU-A Step 9 — caller-level executor tests for PostCapabilityStage + SkipModel
 // ---------------------------------------------------------------------------
@@ -5976,7 +5766,7 @@ async fn executor_post_capability_trips_policy_and_sets_flags_in_final_state() {
             resolutions: vec![resolution::completed(
                 LoopResultRef::new("result:big").expect("valid"),
                 "big result".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 33_001,
                 None,
@@ -6027,7 +5817,7 @@ async fn executor_post_capability_trips_policy_and_sets_flags_in_final_state() {
     // D-A: the initiator must be threaded through state.
     assert_eq!(
         final_state.compaction_state.force_compact_initiator,
-        Some(ironclaw_turns::run_profile::CompactionInitiator::CapabilityResultOverflow),
+        Some(ironclaw_loop_contracts::CompactionInitiator::CapabilityResultOverflow),
         "force_compact_initiator must be CapabilityResultOverflow after a byte-cap trip"
     );
 }
@@ -6040,7 +5830,7 @@ async fn executor_post_capability_does_not_trip_under_threshold() {
             resolutions: vec![resolution::completed(
                 LoopResultRef::new("result:small").expect("valid"),
                 "small result".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 100,
                 None,
@@ -6088,7 +5878,7 @@ async fn executor_skip_model_turn_bypasses_model_stage() {
             resolutions: vec![resolution::completed(
                 LoopResultRef::new("result:big-no-term").expect("valid"),
                 "big result no terminate".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 false,
                 33_001,
                 None,
@@ -6201,7 +5991,7 @@ async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
                 resolution::completed(
                     LoopResultRef::new("result:first").expect("valid"),
                     "first".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     true,
                     20_000,
                     None,
@@ -6210,7 +6000,7 @@ async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
                 resolution::completed(
                     LoopResultRef::new("result:second").expect("valid"),
                     "second".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     true,
                     20_000,
                     None,
@@ -6260,7 +6050,7 @@ async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
     // D-A: the initiator must be threaded through state.
     assert_eq!(
         final_state.compaction_state.force_compact_initiator,
-        Some(ironclaw_turns::run_profile::CompactionInitiator::CapabilityResultOverflow),
+        Some(ironclaw_loop_contracts::CompactionInitiator::CapabilityResultOverflow),
         "force_compact_initiator must be CapabilityResultOverflow after accumulated overflow"
     );
 }
@@ -6510,7 +6300,7 @@ async fn executor_emits_compaction_started_with_capability_result_overflow_initi
             resolutions: vec![resolution::completed(
                 LoopResultRef::new("result:big-f12").expect("valid"),
                 "big result for F12".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 false,
                 33_001,
                 None,
@@ -6565,7 +6355,7 @@ async fn executor_emits_compaction_started_with_capability_result_overflow_initi
         .filter(|event| {
             matches!(
                 event,
-                ironclaw_turns::run_profile::LoopProgressEvent::CompactionStarted { .. }
+                ironclaw_loop_contracts::LoopProgressEvent::CompactionStarted { .. }
             )
         })
         .collect();
@@ -6576,10 +6366,10 @@ async fn executor_emits_compaction_started_with_capability_result_overflow_initi
          got: {compaction_started_events:?}"
     );
     match compaction_started_events[0] {
-        ironclaw_turns::run_profile::LoopProgressEvent::CompactionStarted { initiator, .. } => {
+        ironclaw_loop_contracts::LoopProgressEvent::CompactionStarted { initiator, .. } => {
             assert_eq!(
                 initiator,
-                &ironclaw_turns::run_profile::CompactionInitiator::CapabilityResultOverflow,
+                &ironclaw_loop_contracts::CompactionInitiator::CapabilityResultOverflow,
                 "CompactionStarted initiator must be CapabilityResultOverflow; \
                  if it is Auto the D-A state-threaded initiator was dropped before \
                  PromptCompactionStep could consume it"
@@ -6620,7 +6410,7 @@ async fn executor_continues_after_forced_compaction_rejection_from_tool_result_o
         resolutions: vec![resolution::completed(
             LoopResultRef::new("result:big-compaction-rejected").expect("valid"),
             "large search result".to_string(),
-            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
             false,
             33_001,
             None,
@@ -6944,7 +6734,7 @@ async fn parallel_batch_records_completed_results_before_external_tool_block() {
                 resolution::completed(
                     completed_ref.clone(),
                     "parallel call completed".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -7005,7 +6795,7 @@ async fn resume_after_external_tool_gate_redispatches_without_model_turn() {
             resolutions: vec![resolution::completed(
                 completed_ref.clone(),
                 "external tool output".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -7083,7 +6873,7 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
             resolutions: vec![resolution::completed(
                 completed_ref.clone(),
                 "auth resumed and completed".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -7256,7 +7046,7 @@ async fn auth_resume_provider_registration_failure_fails_before_invocation() {
                 resolutions: vec![resolution::completed(
                     completed_ref,
                     "should not invoke".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     true,
                     0,
                     None,
@@ -7328,7 +7118,7 @@ async fn auth_resume_provider_activity_remap_fails_before_invocation() {
             resolutions: vec![resolution::completed(
                 completed_ref,
                 "should not invoke".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -7887,7 +7677,7 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
             resolutions: vec![resolution::completed(
                 completed_ref.clone(),
                 "completed after auth resume".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -8144,7 +7934,7 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
             resolutions: vec![resolution::completed(
                 completed_ref.clone(),
                 "done".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -8268,7 +8058,7 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
                 resolution::completed(
                     LoopResultRef::new("result:first").expect("valid"),
                     "first done".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -8277,7 +8067,7 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
                 resolution::completed(
                     LoopResultRef::new("result:second").expect("valid"),
                     "second done".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -8318,7 +8108,7 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
         ParentLoopOutput::AssistantReply(_) => panic!("expected calls fixture"),
     };
 
-    let surface = ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+    let surface = ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
         &host,
         VisibleCapabilityRequest,
     )
@@ -8437,18 +8227,18 @@ async fn resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
     };
 
     // Phase 1 model response: issues cap1 with original-run input_ref.
-    let cap1_model_response = ironclaw_turns::run_profile::LoopModelResponse {
+    let cap1_model_response = ironclaw_loop_contracts::LoopModelResponse {
         chunks: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: capability_id(),
             input_ref: cap1_input_ref,
             effective_capability_ids: vec![capability_id()],
             provider_replay: None,
         }]),
-        effective_model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("model")
+        effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("model")
             .expect("valid"),
         usage: None,
     };
@@ -8622,18 +8412,18 @@ async fn auth_resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
     // (No provider_replay — this is a non-provider-backed auth resume, so
     // Phase 2 reuses the stored input_ref directly via
     // pending_auth_resume_staged_input_candidate.)
-    let cap1_model_response = ironclaw_turns::run_profile::LoopModelResponse {
+    let cap1_model_response = ironclaw_loop_contracts::LoopModelResponse {
         chunks: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: capability_id(),
             input_ref: cap1_input_ref,
             effective_capability_ids: vec![capability_id()],
             provider_replay: None,
         }]),
-        effective_model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("model")
+        effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("model")
             .expect("valid"),
         usage: None,
     };
@@ -8804,7 +8594,7 @@ async fn capability_stage_denied_approval_resume_surfaces_gate_declined_failure_
             ctx,
             CapabilityInput {
                 state,
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                surface: ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
                     &host,
                     VisibleCapabilityRequest,
                 )
@@ -8903,7 +8693,7 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
         gate_ref: LoopGateRef::new("gate:auth-deny-test").expect("valid"),
         capability_id: capability_id(),
         surface_version: surface_version(),
-        input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:deny-test")
+        input_ref: ironclaw_loop_contracts::CapabilityInputRef::new("input:deny-test")
             .expect("valid"),
         effective_capability_ids: vec![capability_id()],
         provider_replay: None,
@@ -8912,7 +8702,7 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
         ),
         activity_id: denied_activity_id,
         prior_approval: None,
-        disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
+        disposition: Some(ironclaw_host_api::turn::GateResumeDisposition::Denied),
     });
 
     // Use provider_calls_response so provider_replay is set, enabling the
@@ -8923,13 +8713,12 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
     };
     calls[0].activity_id = denied_activity_id;
 
-    let mut current_surface =
-        ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
-            &host,
-            VisibleCapabilityRequest,
-        )
-        .await
-        .expect("visible surface");
+    let mut current_surface = ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
+        &host,
+        VisibleCapabilityRequest,
+    )
+    .await
+    .expect("visible surface");
     current_surface.descriptors.clear();
     current_surface.callable_capability_ids = Some(Vec::new());
 
@@ -8973,7 +8762,7 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
         .expect("denied auth resume reaches the capability lifecycle");
     assert_eq!(
         auth_resume.disposition,
-        Some(ironclaw_turns::GateResumeDisposition::Denied)
+        Some(ironclaw_host_api::turn::GateResumeDisposition::Denied)
     );
     assert!(auth_resume.resume_token.is_none());
     // 4. One model-visible observation appended with GateDeclined error + Forbidden retry.
@@ -9050,7 +8839,7 @@ async fn auth_gate_without_resume_token_records_activity_id_for_denial_failure()
             ctx,
             CapabilityInput {
                 state: LoopExecutionState::initial_for_run(host.run_context()),
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                surface: ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
                     &host,
                     VisibleCapabilityRequest,
                 )
@@ -9084,14 +8873,14 @@ async fn auth_gate_without_resume_token_records_activity_id_for_denial_failure()
         .pending_auth_resume
         .as_mut()
         .expect("pending auth resume")
-        .disposition = Some(ironclaw_turns::GateResumeDisposition::Denied);
+        .disposition = Some(ironclaw_host_api::turn::GateResumeDisposition::Denied);
 
     let phase2 = CapabilityStage
         .process(
             ctx,
             CapabilityInput {
                 state: blocked_state,
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                surface: ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
                     &host,
                     VisibleCapabilityRequest,
                 )
@@ -9126,7 +8915,7 @@ async fn auth_gate_without_resume_token_records_activity_id_for_denial_failure()
         .expect("denied tokenless resume reaches the capability lifecycle");
     assert_eq!(
         denied_resume.disposition,
-        Some(ironclaw_turns::GateResumeDisposition::Denied)
+        Some(ironclaw_host_api::turn::GateResumeDisposition::Denied)
     );
     assert!(
         denied_resume.resume_token.is_none(),
@@ -9158,14 +8947,14 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
     // visible rather than denied-by-surface.
     let host = MockHost::new(Vec::new())
         .with_extra_capability_descriptors(vec![
-            ironclaw_turns::run_profile::CapabilityDescriptorView {
+            ironclaw_loop_contracts::CapabilityDescriptorView {
                 capability_id: other_capability_id(),
                 provider: None,
                 runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
                 safe_name: "demo_list".to_string(),
                 safe_description: "demo list capability".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
+                concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
         ])
@@ -9181,7 +8970,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
                 resolution::completed(
                     y_result_ref.clone(),
                     "list done".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -9204,14 +8993,13 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
         gate_ref: LoopGateRef::new("gate:auth-deny-multi-test").expect("valid"),
         capability_id: capability_id(),
         surface_version: surface_version(),
-        input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:deny-x")
-            .expect("valid"),
+        input_ref: ironclaw_loop_contracts::CapabilityInputRef::new("input:deny-x").expect("valid"),
         effective_capability_ids: vec![capability_id()],
         provider_replay: None,
         resume_token: None,
         activity_id: denied_activity_id,
         prior_approval: None,
-        disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
+        disposition: Some(ironclaw_host_api::turn::GateResumeDisposition::Denied),
     });
 
     // Build a batch with two calls:
@@ -9222,14 +9010,14 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
     // written to appended_result_refs (same pattern as the single-call test).
     let calls = vec![
         // call X — denied
-        ironclaw_turns::run_profile::CapabilityCallCandidate {
+        ironclaw_loop_contracts::CapabilityCallCandidate {
             activity_id: denied_activity_id,
             surface_version: surface_version(),
             capability_id: capability_id(),
-            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:x-denied")
+            input_ref: ironclaw_loop_contracts::CapabilityInputRef::new("input:x-denied")
                 .expect("valid"),
             effective_capability_ids: vec![capability_id()],
-            provider_replay: Some(ironclaw_turns::run_profile::ProviderToolCallReplay {
+            provider_replay: Some(ironclaw_loop_contracts::ProviderToolCallReplay {
                 provider_id: "test-provider".to_string(),
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn_1".to_string(),
@@ -9243,11 +9031,11 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
             }),
         },
         // call Y — unrelated, must dispatch normally
-        ironclaw_turns::run_profile::CapabilityCallCandidate {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+        ironclaw_loop_contracts::CapabilityCallCandidate {
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: other_capability_id(),
-            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:y-unrelated")
+            input_ref: ironclaw_loop_contracts::CapabilityInputRef::new("input:y-unrelated")
                 .expect("valid"),
             effective_capability_ids: vec![other_capability_id()],
             provider_replay: None,
@@ -9259,7 +9047,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
             ctx,
             CapabilityInput {
                 state,
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                surface: ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
                     &host,
                     VisibleCapabilityRequest,
                 )
@@ -9310,7 +9098,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
         .expect("X must carry the typed denied auth resume");
     assert_eq!(
         x_resume.disposition,
-        Some(ironclaw_turns::GateResumeDisposition::Denied)
+        Some(ironclaw_host_api::turn::GateResumeDisposition::Denied)
     );
     assert!(x_resume.resume_token.is_none());
     let y_invocation = batches[0]
@@ -9404,7 +9192,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
                 resolution::completed(
                     y_result_ref.clone(),
                     "same capability second call done".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -9433,11 +9221,11 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
         resume_token: None,
         activity_id: denied_activity_id,
         prior_approval: None,
-        disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
+        disposition: Some(ironclaw_host_api::turn::GateResumeDisposition::Denied),
     });
 
     let calls = vec![
-        ironclaw_turns::run_profile::CapabilityCallCandidate {
+        ironclaw_loop_contracts::CapabilityCallCandidate {
             activity_id: denied_activity_id,
             surface_version: surface_version(),
             capability_id: capability_id(),
@@ -9456,7 +9244,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
                 signature: None,
             }),
         },
-        ironclaw_turns::run_profile::CapabilityCallCandidate {
+        ironclaw_loop_contracts::CapabilityCallCandidate {
             activity_id: surviving_activity_id,
             surface_version: surface_version(),
             capability_id: capability_id(),
@@ -9471,7 +9259,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
             ctx,
             CapabilityInput {
                 state,
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                surface: ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
                     &host,
                     VisibleCapabilityRequest,
                 )
@@ -9508,7 +9296,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
             .as_ref()
             .expect("denied activity carries the typed denied auth resume")
             .disposition,
-        Some(ironclaw_turns::GateResumeDisposition::Denied)
+        Some(ironclaw_host_api::turn::GateResumeDisposition::Denied)
     );
     let surviving_invocation = batches[0]
         .invocations
@@ -9562,25 +9350,25 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
     let host = MockHost::new(Vec::new())
         .with_extra_capability_descriptors(vec![
             // Y: demo.list
-            ironclaw_turns::run_profile::CapabilityDescriptorView {
+            ironclaw_loop_contracts::CapabilityDescriptorView {
                 capability_id: other_capability_id(),
                 provider: None,
                 runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
                 safe_name: "demo_list".to_string(),
                 safe_description: "demo list capability".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
+                concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
             // Z: demo.write
-            ironclaw_turns::run_profile::CapabilityDescriptorView {
+            ironclaw_loop_contracts::CapabilityDescriptorView {
                 capability_id: z_capability_id.clone(),
                 provider: None,
                 runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
                 safe_name: "demo_write".to_string(),
                 safe_description: "demo write capability".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
+                concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
         ])
@@ -9596,7 +9384,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
                 resolution::completed(
                     y_result_ref.clone(),
                     "list done".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -9605,7 +9393,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
                 resolution::completed(
                     z_result_ref.clone(),
                     "write done".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -9628,30 +9416,28 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
         gate_ref: LoopGateRef::new("gate:auth-deny-1plus2").expect("valid"),
         capability_id: capability_id(),
         surface_version: surface_version(),
-        input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:deny-x-1plus2")
+        input_ref: ironclaw_loop_contracts::CapabilityInputRef::new("input:deny-x-1plus2")
             .expect("valid"),
         effective_capability_ids: vec![capability_id()],
         provider_replay: None,
         resume_token: None,
         activity_id: denied_activity_id,
         prior_approval: None,
-        disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
+        disposition: Some(ironclaw_host_api::turn::GateResumeDisposition::Denied),
     });
 
     // Three calls: X (denied), Y (unrelated), Z (unrelated).
     let calls = vec![
         // X — matches denied pending_auth_resume; provider_replay set so the
         // gate-declined failure observation is written to appended_result_refs.
-        ironclaw_turns::run_profile::CapabilityCallCandidate {
+        ironclaw_loop_contracts::CapabilityCallCandidate {
             activity_id: denied_activity_id,
             surface_version: surface_version(),
             capability_id: capability_id(),
-            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new(
-                "input:x-denied-1plus2",
-            )
-            .expect("valid"),
+            input_ref: ironclaw_loop_contracts::CapabilityInputRef::new("input:x-denied-1plus2")
+                .expect("valid"),
             effective_capability_ids: vec![capability_id()],
-            provider_replay: Some(ironclaw_turns::run_profile::ProviderToolCallReplay {
+            provider_replay: Some(ironclaw_loop_contracts::ProviderToolCallReplay {
                 provider_id: "test-provider".to_string(),
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn_1".to_string(),
@@ -9665,26 +9451,22 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
             }),
         },
         // Y — unrelated, must dispatch normally.
-        ironclaw_turns::run_profile::CapabilityCallCandidate {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+        ironclaw_loop_contracts::CapabilityCallCandidate {
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: other_capability_id(),
-            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new(
-                "input:y-unrelated-1plus2",
-            )
-            .expect("valid"),
+            input_ref: ironclaw_loop_contracts::CapabilityInputRef::new("input:y-unrelated-1plus2")
+                .expect("valid"),
             effective_capability_ids: vec![other_capability_id()],
             provider_replay: None,
         },
         // Z — unrelated, must dispatch normally.
-        ironclaw_turns::run_profile::CapabilityCallCandidate {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+        ironclaw_loop_contracts::CapabilityCallCandidate {
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: z_capability_id.clone(),
-            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new(
-                "input:z-unrelated-1plus2",
-            )
-            .expect("valid"),
+            input_ref: ironclaw_loop_contracts::CapabilityInputRef::new("input:z-unrelated-1plus2")
+                .expect("valid"),
             effective_capability_ids: vec![z_capability_id.clone()],
             provider_replay: None,
         },
@@ -9695,7 +9477,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
             ctx,
             CapabilityInput {
                 state,
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                surface: ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
                     &host,
                     VisibleCapabilityRequest,
                 )
@@ -9746,7 +9528,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
             .as_ref()
             .expect("X carries the typed denied auth resume")
             .disposition,
-        Some(ironclaw_turns::GateResumeDisposition::Denied)
+        Some(ironclaw_host_api::turn::GateResumeDisposition::Denied)
     );
     let dispatched_ids: std::collections::HashSet<_> = batches[0]
         .invocations
@@ -9839,14 +9621,14 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
 
     let host = MockHost::new(Vec::new())
         .with_extra_capability_descriptors(vec![
-            ironclaw_turns::run_profile::CapabilityDescriptorView {
+            ironclaw_loop_contracts::CapabilityDescriptorView {
                 capability_id: other_capability_id(),
                 provider: None,
                 runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
                 safe_name: "demo_list".to_string(),
                 safe_description: "demo list capability".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
+                concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
         ])
@@ -9854,7 +9636,7 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
             resolutions: vec![resolution::completed(
                 y_result_ref.clone(),
                 "list done".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 false,
                 0,
                 None,
@@ -9884,7 +9666,7 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
         input_ref: CapabilityInputRef::new("input:approval-deny-x").expect("valid"),
         effective_capability_ids: vec![capability_id()],
         provider_replay: None,
-        disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
+        disposition: Some(ironclaw_host_api::turn::GateResumeDisposition::Denied),
     });
 
     // Build a batch with two calls:
@@ -9892,13 +9674,13 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
     //   call Y: other_capability_id() ("demo.list") — unrelated, must proceed normally
     let calls = vec![
         // call X — denied
-        ironclaw_turns::run_profile::CapabilityCallCandidate {
+        ironclaw_loop_contracts::CapabilityCallCandidate {
             activity_id: denied_activity_id,
             surface_version: surface_version(),
             capability_id: capability_id(),
             input_ref: CapabilityInputRef::new("input:x-approval-denied").expect("valid"),
             effective_capability_ids: vec![capability_id()],
-            provider_replay: Some(ironclaw_turns::run_profile::ProviderToolCallReplay {
+            provider_replay: Some(ironclaw_loop_contracts::ProviderToolCallReplay {
                 provider_id: "test-provider".to_string(),
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn_1".to_string(),
@@ -9912,8 +9694,8 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
             }),
         },
         // call Y — unrelated, must dispatch normally
-        ironclaw_turns::run_profile::CapabilityCallCandidate {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+        ironclaw_loop_contracts::CapabilityCallCandidate {
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: other_capability_id(),
             input_ref: CapabilityInputRef::new("input:y-approval-unrelated").expect("valid"),
@@ -9927,7 +9709,7 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
             ctx,
             CapabilityInput {
                 state,
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                surface: ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
                     &host,
                     VisibleCapabilityRequest,
                 )
@@ -10055,14 +9837,14 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
     // Only capability Y is needed in the batch outcome; X is never submitted.
     let host = MockHost::new(Vec::new())
         .with_extra_capability_descriptors(vec![
-            ironclaw_turns::run_profile::CapabilityDescriptorView {
+            ironclaw_loop_contracts::CapabilityDescriptorView {
                 capability_id: other_capability_id(),
                 provider: None,
                 runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
                 safe_name: "demo_list".to_string(),
                 safe_description: "demo list capability".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
+                concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
         ])
@@ -10070,7 +9852,7 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
             resolutions: vec![resolution::completed(
                 y_result_ref.clone(),
                 "list done no-match".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 false,
                 0,
                 None,
@@ -10100,12 +9882,12 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
         input_ref: CapabilityInputRef::new("input:approval-deny-no-match-x").expect("valid"),
         effective_capability_ids: vec![capability_id()],
         provider_replay: None,
-        disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
+        disposition: Some(ironclaw_host_api::turn::GateResumeDisposition::Denied),
     });
 
     // The model emits ONLY call Y (other_capability_id); no X in this batch.
-    let calls = vec![ironclaw_turns::run_profile::CapabilityCallCandidate {
-        activity_id: ironclaw_turns::CapabilityActivityId::new(),
+    let calls = vec![ironclaw_loop_contracts::CapabilityCallCandidate {
+        activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
         surface_version: surface_version(),
         capability_id: other_capability_id(),
         input_ref: CapabilityInputRef::new("input:y-no-match-approval").expect("valid"),
@@ -10118,7 +9900,7 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
             ctx,
             CapabilityInput {
                 state,
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                surface: ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
                     &host,
                     VisibleCapabilityRequest,
                 )

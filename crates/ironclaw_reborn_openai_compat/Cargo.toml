@@ -15,13 +15,19 @@ layer = "products"
 
 [dependencies]
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["clock"] }
 hex = "0.4"
 ironclaw_attachments = { path = "../ironclaw_attachments", version = "0.1.0" }
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
+# `ProductTriggerReason` — the channel-facing DTO the submit path stamps on a
+# turn — is owned here (PROPOSAL §6.1.2). §6.9.3 grants this adapter the same
+# "+`extension_contracts` where channel DTOs are shared" edge `product_contracts`
+# holds, so the enum is imported from its owner rather than through product.
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version = "0.1.0" }
 ironclaw_product = { path = "../ironclaw_product", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -36,9 +42,6 @@ futures-core = { version = "0.3" }
 tokio = { version = "1", features = ["sync", "time"] }
 
 [dev-dependencies]
-# Force `storage` on for this crate's own test builds so the ref-store contract
-# suite runs under a bare `cargo test -p ironclaw_reborn_openai_compat`.
-ironclaw_reborn_openai_compat = { path = "." }
 http = "1"
 http-body-util = "0.1"
 ironclaw_product = { path = "../ironclaw_product", version = "0.1.0", features = ["test-support"] }

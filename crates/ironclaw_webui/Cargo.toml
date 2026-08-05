@@ -23,23 +23,36 @@ test-support = []
 async-stream = "0.3"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 futures = "0.3"
 hex = "0.4.3"
 hmac = "0.13"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version = "0.1.0" }
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
+# The generic channel-pairing routes (`channel_pairing.rs`) are transport over
+# the pairing *service core*, which PROPOSAL §6.8.2 reserves to the extension
+# host. §6.9.4 puts the routes here, so this crate names the service; it must
+# never reach past it into lifecycle authority or the installation stores.
+ironclaw_extension_host = { path = "../ironclaw_extension_host" }
 ironclaw_host_ingress = { path = "../ironclaw_host_ingress" }
 ironclaw_auth = { path = "../ironclaw_auth" }
+# The advertised attachment ceilings the WebUI hands the browser: one home
+# for a size ceiling means the transport reads the same constant the landing
+# routine enforces (PROPOSAL §6.4.9).
+ironclaw_attachments = { path = "../ironclaw_attachments" }
 ironclaw_common = { path = "../ironclaw_common" }
 # Folded up from the former `ironclaw_webui_v2` crate: the v2 handlers consume
 # only the `ProductSurface` facade + ingress/error vocabulary.
-ironclaw_product = { path = "../ironclaw_product", features = ["host-auth-mint"] }
+ironclaw_product = { path = "../ironclaw_product" }
 # The `webui_v2_app` auth middleware stamps an `OpenAiCompatActorScope`
 # onto verified callers for protected OpenAI-compatible route mounts. The
-# tenant-scoped bearer evidence it pairs with the scope comes from
-# `ironclaw_product`; ingress must not depend on product_adapters directly
-# (architecture boundary).
+# tenant-scoped bearer evidence it pairs with the scope is minted here (this
+# crate is the host authenticator, trust stage T1) through the witness-gated
+# family in `ironclaw_host_api::product_adapter::auth` — WS1.5 replaced the
+# `ironclaw_product` re-export and its `host-auth-mint` feature opt-in, which
+# cargo's feature unification made a seal in name only.
 ironclaw_reborn_openai_compat = { path = "../ironclaw_reborn_openai_compat" }
 # Sliding-window per-route rate limiter (moved from composition's webui_rate_limit).
 lru = "0.18"
@@ -47,7 +60,7 @@ lru = "0.18"
 # Static compression is intentionally unconditional: it is part of the embedded
 # WebUI delivery contract, and optional build variants would leave cache and
 # transport behavior untested.
-tower-http = { version = "0.6", features = [
+tower-http = { version = "0.7", features = [
     "cors",
     "set-header",
     "limit",
@@ -55,7 +68,7 @@ tower-http = { version = "0.6", features = [
     "compression-br",
     "compression-gzip",
 ] }
-jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 parking_lot = "0.12"
 rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -99,7 +112,7 @@ ironclaw_turns = { path = "../ironclaw_turns" }
 rsa = { version = "0.9", features = ["sha2"] }
 rand = "0.10"
 rand_core = { version = "0.6", features = ["getrandom"] }
-base64 = "0.22"
+base64 = "0.23"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "time", "io-util", "sync", "test-util"] }

@@ -1,19 +1,23 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use ironclaw_attachments::InboundAttachmentLander;
+use ironclaw_auth::product_prompt::{AuthChallengeProvider, BlockedAuthFlowCanceller};
+use ironclaw_extension_contracts::extension::ExtensionHostAssemblyConfig;
 use ironclaw_extensions::ExtensionInstallationStorePort;
-use ironclaw_filesystem::{CompositeRootFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{CompositeRootFilesystem, RootFilesystem};
 use ironclaw_host_api::{
-    extension::ExtensionHostAssemblyConfig,
     ids::{CapabilityId, UserId},
     resource::ResourceScope,
 };
 use ironclaw_host_runtime::{ExtensionLaneToolBinder, HostRuntimeHttpEgressPort};
 use ironclaw_product::{
-    ApprovalInteractionService, ApprovalPromptContextSource, AuthChallengeProvider,
-    AuthInteractionService, BlockedAuthFlowCanceller, BlockedAuthPromptSource,
-    ExtensionAccountSetupDescriptor, ExtensionAccountSetupRegistry, InboundAttachmentLander,
+    ApprovalInteractionService, AuthInteractionService, ExtensionAccountSetupRegistry,
     ProjectFilesystemReader, RunDeliverySettings,
+};
+use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
+use ironclaw_product_contracts::prompt_source::{
+    ApprovalPromptContextSource, BlockedAuthPromptSource,
 };
 use ironclaw_resources::ResourceGovernor;
 use ironclaw_threads::{SessionThreadService, ThreadScope};
@@ -23,6 +27,9 @@ use crate::RebornBuildError;
 use crate::factory::RebornRuntimeStores;
 use crate::input::ChannelExtensionBinding;
 use crate::outbound::MutableOutboundDeliveryTargetRegistry;
+use ironclaw_product_contracts::account_setup::AccountConnectionStatusSource;
+use ironclaw_product_contracts::admin_users::AdminUserService;
+use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
 
 pub(crate) struct BackendExtensionHostAssemblyInput {
     pub(crate) binder: ExtensionLaneToolBinder,
@@ -45,8 +52,7 @@ pub(crate) struct BackendExtensionHostAssembly {
     pub(crate) ingress: ironclaw_extension_host::extension_ingress::ExtensionIngressParts,
     pub(crate) installation_store: Arc<dyn ExtensionInstallationStorePort>,
     pub(crate) delivery_coordinator: Option<Arc<ironclaw_product::DeliveryCoordinator>>,
-    pub(crate) channel_delivery_resolver:
-        Option<Arc<dyn ironclaw_product::ChannelDeliveryResolver>>,
+    pub(crate) channel_delivery_resolver: Option<Arc<dyn ChannelDeliveryResolver>>,
     #[cfg(feature = "test-support")]
     pub(crate) channel_egress_credential_bridges:
         Arc<ironclaw_extension_host::channel_egress::BridgedChannelEgressCredentials>,
@@ -144,7 +150,7 @@ pub(crate) async fn build_backend_extension_host(
     );
     let (delivery_coordinator, channel_delivery_resolver) = match channel_egress_transport {
         Some(transport) => {
-            let resolver: Arc<dyn ironclaw_product::ChannelDeliveryResolver> = Arc::new(
+            let resolver: Arc<dyn ChannelDeliveryResolver> = Arc::new(
                 ironclaw_extension_host::SnapshotChannelDeliveryResolver::new(
                     generic.host.snapshot_watch(),
                     transport,
@@ -191,7 +197,7 @@ pub(crate) struct BackendChannelPairingAssemblyInput {
     pub(crate) account_status_reader:
         Arc<dyn ironclaw_extension_host::channel_connection::ChannelAccountStatusReader>,
     pub(crate) disconnect_slot:
-        Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>>,
+        Arc<std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>>,
 }
 
 pub(crate) async fn build_backend_channel_pairing(
@@ -302,7 +308,7 @@ pub(crate) async fn build_backend_channel_pairing(
         }));
         if !account_setups.connect(
             &descriptor.extension_id,
-            Arc::clone(&service) as Arc<dyn ironclaw_product::AccountConnectionStatusSource>,
+            Arc::clone(&service) as Arc<dyn AccountConnectionStatusSource>,
         ) {
             return Err(RebornBuildError::InvalidConfig {
                 reason: format!(
@@ -336,6 +342,7 @@ pub(crate) async fn build_backend_channel_pairing(
 pub(crate) struct ChannelHostAssemblyWiring {
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) turn_coordinator: Arc<dyn TurnCoordinator>,
+    pub(crate) input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
     pub(crate) approval_interaction: Option<Arc<dyn ApprovalInteractionService>>,
     pub(crate) auth_interaction: Option<Arc<dyn AuthInteractionService>>,
     pub(crate) identity: ironclaw_extension_host::channel_host::ChannelHostIdentity,
@@ -343,12 +350,13 @@ pub(crate) struct ChannelHostAssemblyWiring {
     pub(crate) blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     pub(crate) auth_flow_cancel: Option<Arc<dyn BlockedAuthFlowCanceller>>,
     pub(crate) run_delivery_settings: RunDeliverySettings,
-    pub(crate) admin_users: Arc<dyn ironclaw_product::AdminUserService>,
+    pub(crate) admin_users: Arc<dyn AdminUserService>,
 }
 
 pub(crate) struct RuntimeExtensionHostAssemblyWiring<'a> {
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) turn_coordinator: Arc<dyn TurnCoordinator>,
+    pub(crate) input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
     pub(crate) approval_interaction: Arc<dyn ApprovalInteractionService>,
     pub(crate) auth_interaction: Arc<dyn AuthInteractionService>,
     pub(crate) thread_scope: &'a ThreadScope,
@@ -377,21 +385,21 @@ pub(crate) struct ChannelHostAssemblySource {
 }
 
 fn channel_host_source(services: &RebornRuntimeStores) -> Option<ChannelHostAssemblySource> {
-    let inbound_mounts = crate::runtime_mounts::workspace_mount_view(
-        ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
-        &[],
-    )
-    .ok()?;
-    let inbound_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
-        Arc::clone(&services.extension_filesystem),
-        inbound_mounts,
-    ));
+    // Lander and reader share ONE handle so an inbound attachment is read back
+    // from the subtree it landed in. Under a per-caller workspace policy that
+    // subtree is the caller's own; the shared read-only `workspace_filesystem`
+    // would address the root instead. Mirrors the test-support wiring in
+    // `RebornRuntime::start_channel_host_assembly_for_test`.
+    let inbound_filesystem = crate::runtime_mounts::read_write_workspace_filesystem(
+        &services.extension_filesystem,
+        &services.workspace_mounts,
+    )?;
     let inbound_attachments: Arc<dyn InboundAttachmentLander> = Arc::new(
-        ironclaw_product::ProjectScopedAttachmentLander::new(inbound_filesystem),
+        ironclaw_attachments::ProjectScopedAttachmentLander::new(Arc::clone(&inbound_filesystem)),
     );
     let project_filesystem: Arc<dyn ProjectFilesystemReader> = Arc::new(
         ironclaw_product::ProjectScopedFilesystemReader::with_max_read_bytes(
-            Arc::clone(&services.workspace_filesystem),
+            inbound_filesystem,
             ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64,
         ),
     );
@@ -416,7 +424,7 @@ fn channel_host_source(services: &RebornRuntimeStores) -> Option<ChannelHostAsse
 pub(crate) fn channel_admin_users(
     services: &RebornRuntimeStores,
     identity: &ironclaw_extension_host::channel_host::ChannelHostIdentity,
-) -> Arc<dyn ironclaw_product::AdminUserService> {
+) -> Arc<dyn AdminUserService> {
     let directory: Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> =
         crate::factory::filesystem_reborn_identity_store(
             Arc::clone(&services.scoped_filesystem),
@@ -425,10 +433,10 @@ pub(crate) fn channel_admin_users(
             identity.agent_id.clone(),
             identity.project_id.clone(),
         );
-    Arc::new(crate::admin_user_directory::RebornAdminUserDirectory::new(
+    Arc::new(ironclaw_product::RebornAdminUserDirectory::new(
         directory,
         Arc::clone(&services.admin_secret_provisioner),
-        Arc::new(crate::admin_token::RejectingAdminApiTokenMinter),
+        Arc::new(ironclaw_product::RejectingAdminApiTokenMinter),
     ))
 }
 
@@ -444,6 +452,7 @@ pub(crate) fn start_channel_host(
     let ChannelHostAssemblyWiring {
         thread_service,
         turn_coordinator,
+        input_enqueue,
         approval_interaction,
         auth_interaction,
         identity,
@@ -495,6 +504,7 @@ pub(crate) fn start_channel_host(
         thread_service,
         turn_coordinator,
         inbound_attachments: Arc::clone(inbound_attachments),
+        input_enqueue,
         approval_interaction,
         auth_interaction,
         identity,
@@ -514,6 +524,7 @@ pub(crate) async fn build_runtime_channel_host(
         turn_coordinator,
         approval_interaction,
         auth_interaction,
+        input_enqueue,
         thread_scope,
         actor_user_id,
         auth_challenges,
@@ -545,6 +556,7 @@ pub(crate) async fn build_runtime_channel_host(
         ChannelHostAssemblyWiring {
             thread_service,
             turn_coordinator,
+            input_enqueue,
             approval_interaction: Some(approval_interaction),
             auth_interaction: Some(auth_interaction),
             identity,

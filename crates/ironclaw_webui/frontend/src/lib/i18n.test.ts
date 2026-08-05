@@ -92,6 +92,62 @@ function loadLocalePack(locale) {
   return registeredPack;
 }
 
+function interpolationParams(value) {
+  return [...value.matchAll(/\{([^}]+)\}/g)].map((match) => match[1]).sort();
+}
+
+test("non-English locale packs cover the English key set and interpolation params", () => {
+  const english = loadLocalePack("en");
+  const englishKeys = Object.keys(english).sort();
+
+  for (const locale of LOCALES.filter((candidate) => candidate !== "en")) {
+    const pack = loadLocalePack(locale);
+    const missing = englishKeys.filter((key) => typeof pack[key] !== "string");
+
+    assert.deepEqual(missing, [], `${locale} missing keys: ${missing.join(", ")}`);
+    for (const key of englishKeys) {
+      assert.deepEqual(
+        interpolationParams(pack[key]),
+        interpolationParams(english[key]),
+        `${locale} interpolation params differ for ${key}`,
+      );
+    }
+  }
+});
+
+test("non-English locale packs localize exposed workflow copy", () => {
+  const english = loadLocalePack("en");
+  const technicalTerms = new Set([
+    "extensions.customMcpIdGenerated",
+    "extensions.customMcpAuth.oauth",
+  ]);
+  const exposedWorkflowKeys = Object.keys(english).filter(
+    (key) =>
+      !technicalTerms.has(key) &&
+      (key === "chat.downloadRunArtifact" ||
+        key === "chat.downloadThreadArtifact" ||
+        key.startsWith("pairing.web.") ||
+        key === "extensions.tools" ||
+        key === "tools.installed" ||
+        key === "tools.available" ||
+        key === "extensions.addCustomMcp" ||
+        key === "extensions.emptyToolsTitle" ||
+        key === "extensions.emptyToolsDesc" ||
+        key.startsWith("extensions.customMcp")),
+  );
+
+  for (const locale of LOCALES.filter((candidate) => candidate !== "en")) {
+    const pack = loadLocalePack(locale);
+    for (const key of exposedWorkflowKeys) {
+      assert.strictEqual(
+        pack[key] === english[key],
+        false,
+        `${locale} must localize ${key}`,
+      );
+    }
+  }
+});
+
 test("ensurePack: unknown locale resolves null (no loader, not registered)", async () => {
   const { ensurePack } = loadI18n();
   assert.equal(await ensurePack("zz-unknown"), null);
@@ -473,13 +529,30 @@ test("zh-CN localizes Reborn settings copy and compact automation filters", () =
   assert.equal(pack["automations.filter.paused"], "已暂停");
 });
 
-test("zh-CN localizes Reborn Projects summary copy", () => {
+test("locale packs include API-backed project states and access roles", () => {
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    for (const key of [
+      "projects.projectRole.owner",
+      "projects.projectRole.editor",
+      "projects.projectRole.viewer",
+      "projects.projectRole.unknown",
+      "projects.status.archived",
+    ]) {
+      assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+      assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
+    }
+  }
+});
+
+test("zh-CN localizes API-backed Projects overview copy", () => {
   const pack = loadLocalePack("zh-CN");
 
   assert.equal(pack["projects.summary.projects"], "项目");
-  assert.equal(pack["projects.summary.attentionQueue"], "关注队列");
-  assert.equal(pack["projects.summary.spendToday"], "今日花费");
-  assert.equal(pack["projects.card.pendingGates"], "待处理门禁：{count}");
+  assert.equal(pack["projects.status.active"], "活跃");
+  assert.equal(pack["projects.status.archived"], "已归档");
+  assert.equal(pack["projects.projectRole.owner"], "所有者");
+  assert.equal(pack["projects.projectRole.unknown"], "未知");
   assert.equal(pack["projects.files.label"], "文件");
 });
 

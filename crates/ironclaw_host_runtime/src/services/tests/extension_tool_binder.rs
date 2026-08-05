@@ -5,10 +5,11 @@
 
 use std::collections::BTreeSet;
 
+use ironclaw_extension_contracts::tool_adapter::{
+    ToolCall, ToolCallResources, ToolError, ToolPorts,
+};
 use ironclaw_host_api::{
-    path::VirtualPath,
-    runtime::TrustClass,
-    tool_adapter::{ToolCall, ToolCallResources, ToolError, ToolPorts},
+    path::VirtualPath, resource::RuntimeResourceBudget, runtime::TrustClass,
     trust::RequestedTrustClass,
 };
 
@@ -26,7 +27,7 @@ fn first_party_test_package(service: &str, capability_id: &str) -> ExtensionPack
             source: ManifestSource::HostBundled,
             requested_trust: RequestedTrustClass::FirstPartyRequested,
             descriptor_trust_default: TrustClass::Sandbox,
-            runtime: ironclaw_extensions::ExtensionRuntime::FirstParty {
+            runtime: ironclaw_extension_contracts::runtime::ExtensionRuntime::FirstParty {
                 service: service.to_string(),
             },
             host_apis: Vec::new(),
@@ -214,7 +215,7 @@ struct RecordingMcpExecutor {
 impl ironclaw_mcp::McpExecutor for RecordingMcpExecutor {
     async fn execute_extension_json(
         &self,
-        _governor: &dyn ResourceGovernor,
+        _budget: &dyn RuntimeResourceBudget,
         request: ironclaw_mcp::McpExecutionRequest<'_>,
     ) -> Result<ironclaw_mcp::McpExecutionResult, ironclaw_mcp::McpError> {
         *self.invoked.lock().expect("invoked lock") = Some((
@@ -278,15 +279,18 @@ async fn binder_invokes_a_discovered_mcp_tool_through_the_tool_adapter() {
     let base = test_package(MCP_TEST_MANIFEST, "test-mcp");
     let discovered = ironclaw_extensions::package_with_discovered_hosted_mcp_tools(
         &base,
-        &[ironclaw_extensions::HostedMcpDiscoveredTool {
-            name: "search".to_string(),
-            description: "Discovered search tool".to_string(),
-            input_schema: serde_json::json!({"type": "object"}),
-            annotations: ironclaw_extensions::HostedMcpDiscoveredToolAnnotations {
-                read_only_hint: true,
-                ..Default::default()
+        &[
+            ironclaw_extension_contracts::hosted_mcp::HostedMcpDiscoveredTool {
+                name: "search".to_string(),
+                description: "Discovered search tool".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                annotations:
+                    ironclaw_extension_contracts::hosted_mcp::HostedMcpDiscoveredToolAnnotations {
+                        read_only_hint: true,
+                        ..Default::default()
+                    },
             },
-        }],
+        ],
     )
     .expect("discovered hosted-MCP package builds");
 

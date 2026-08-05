@@ -1,13 +1,46 @@
-//! Protocol-authentication evidence.
+//! Protocol-authentication evidence and the witnesses that gate minting it.
 //!
 //! Webhook/protocol authentication happens in trusted host glue before an
 //! inbound event enters the host product surface. Verified evidence is an
-//! in-memory capability, not a wire format: production constructors are kept
-//! crate-private so downstream adapter crates cannot mint host-authenticated
-//! claims. Host-minted claims may also carry a resolved tenant scope when the
-//! consuming product surface is tenant-scoped. Test-support builds expose
+//! in-memory capability, not a wire format: the variant that says "verified" is
+//! private to this module, so no downstream crate can build one with struct
+//! literal syntax or replay a seal from one evidence value into another.
+//! Host-minted claims may also carry a resolved tenant scope when the consuming
+//! product surface is tenant-scoped. Test-support builds expose
 //! [`ProtocolAuthEvidence::test_verified`] and
 //! [`ProtocolAuthEvidence::test_verified_for_tenant`] for fakes only.
+//!
+//! ## Who may mint (PROPOSAL §11.2.5, CHECKLIST WS1's evidence-mint row)
+//!
+//! Minting is gated by **witness tokens**, the same idiom [`crate::authorized`]
+//! uses for the `Authorized` capability witness. Two grants, because the two
+//! minters hold different trust roles:
+//!
+//! | Grant | Source trait | Sole implementor | Trust stage |
+//! |---|---|---|---|
+//! | [`HostAuthenticationGrant`] | [`HostProtocolAuthenticator`] | `ironclaw_webui` | T1 — bearer/session |
+//! | [`VerifiedInboundGrant`] | [`ChannelIngressVerifier`] | `ironclaw_extension_host` | T2 — channel/webhook |
+//!
+//! Each grant's field is private to this crate, so its *only* source is the
+//! provided body of its trait method. The bearer/session mint family lives here
+//! (§6.1.1); the channel/webhook family lives in
+//! `ironclaw_extension_contracts::verified_inbound` (§6.1.2) and reaches the
+//! sealed variant through [`ProtocolAuthEvidence::seal_verified_inbound`], which
+//! consumes a [`VerifiedInboundGrant`].
+//!
+//! Pure cross-crate type-sealing is not expressible in Rust — this crate defines
+//! the grants but the legitimate minters are other crates — so the seal has two
+//! halves, exactly as `authorized.rs` records: the compiler enforces "you cannot
+//! mint without a grant", and `reborn_sealed_evidence_mint_ratchet` enforces
+//! "only one crate may implement each grant trait".
+//!
+//! **This replaced a `host-auth-mint` cargo feature that sealed nothing.** Cargo
+//! unifies features across the packages selected in one build, so a single
+//! consumer opting in compiled the mint family open for the entire workspace;
+//! measured on this row's base, a crate naming `ironclaw_host_api` with no
+//! features could mint a verified bearer claim whenever `ironclaw_webui` was in
+//! the same `cargo test`. A witness cannot be switched on from another crate's
+//! manifest.
 
 use serde::de::{self, Visitor};
 use serde::ser::SerializeStruct;
@@ -17,27 +50,61 @@ use std::fmt;
 use crate::product_adapter::error::ProductAdapterError;
 use crate::{ids::TenantId, product_adapter_error::ProtocolAuthFailure};
 
-/// Host-only seal. Cannot be named or constructed outside this module.
-#[cfg_attr(
-    not(any(test, feature = "test-support", feature = "host-auth-mint")),
-    allow(
-        dead_code,
-        reason = "constructed only by host-auth/test-support feature gates"
-    )
-)]
+/// Host-only seal carried inside the verified variant. Cannot be named or
+/// constructed outside this module, so a `Verified` value cannot be assembled
+/// from parts even by code that can see the claim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HostAuthSeal(());
 
 impl HostAuthSeal {
-    #[cfg_attr(
-        not(any(test, feature = "test-support", feature = "host-auth-mint")),
-        allow(
-            dead_code,
-            reason = "constructed only by host-auth/test-support feature gates"
-        )
-    )]
     fn host_only() -> Self {
         Self(())
+    }
+}
+
+/// Proof that the caller is the host transport that just performed bearer or
+/// session authentication. Zero-sized; its field is private to this crate, so
+/// the only source is [`HostProtocolAuthenticator::host_authentication_grant`].
+#[derive(Debug)]
+pub struct HostAuthenticationGrant(());
+
+/// Implemented by the host transport's authentication middleware — the code
+/// that validated the bearer token or session cookie — and by nothing else.
+///
+/// Like [`crate::authorized::CapabilityAuthorizer`], this trait is deliberately
+/// **not** sealed to `ironclaw_host_api`: sealing it here would stop the one
+/// crate that legitimately needs it from implementing it. Its teeth are (1) the
+/// only way to obtain a [`HostAuthenticationGrant`] is through it, and (2) the
+/// `reborn_sealed_evidence_mint_ratchet` architecture test, which keeps the
+/// implementor set at exactly one production crate (`ironclaw_webui`).
+pub trait HostProtocolAuthenticator {
+    /// Mint a grant. Provided and effectively not overridable: the grant's field
+    /// is private to this crate, so this default body is the sole source of a
+    /// bearer/session grant anywhere.
+    fn host_authentication_grant(&self) -> HostAuthenticationGrant {
+        HostAuthenticationGrant(())
+    }
+}
+
+/// Proof that the caller is the generic channel ingress verifier — the
+/// vendor-blind router that executed the manifest's verification recipe (HMAC
+/// signature or shared-secret header, replay window, constant-time compare)
+/// before any adapter code saw the request.
+///
+/// This is the witness PROPOSAL §12.1a is about: a channel package may
+/// misreport parsed content, but holding no grant it cannot forge verification
+/// or scope.
+#[derive(Debug)]
+pub struct VerifiedInboundGrant(());
+
+/// Implemented by the generic ingress verifier (`ironclaw_extension_host`) and
+/// by nothing else — never by a channel package, never by product code. Same
+/// two-halves seal as [`HostProtocolAuthenticator`].
+pub trait ChannelIngressVerifier {
+    /// Mint a grant. Provided and effectively not overridable, for the same
+    /// reason as [`HostProtocolAuthenticator::host_authentication_grant`].
+    fn verified_inbound_grant(&self) -> VerifiedInboundGrant {
+        VerifiedInboundGrant(())
     }
 }
 
@@ -133,24 +200,10 @@ pub struct VerifiedAuthClaim {
 }
 
 impl VerifiedAuthClaim {
-    #[cfg_attr(
-        not(any(test, feature = "test-support", feature = "host-auth-mint")),
-        allow(
-            dead_code,
-            reason = "constructed only by host-auth/test-support feature gates"
-        )
-    )]
     pub(crate) fn new(requirement: AuthRequirement, subject: impl Into<String>) -> Self {
         Self::new_with_tenant(requirement, subject, None)
     }
 
-    #[cfg_attr(
-        not(any(test, feature = "test-support", feature = "host-auth-mint")),
-        allow(
-            dead_code,
-            reason = "constructed only by host-auth/test-support feature gates"
-        )
-    )]
     pub(crate) fn new_for_tenant(
         requirement: AuthRequirement,
         subject: impl Into<String>,
@@ -184,13 +237,6 @@ impl VerifiedAuthClaim {
     }
 }
 
-#[cfg_attr(
-    not(any(test, feature = "test-support", feature = "host-auth-mint")),
-    allow(
-        dead_code,
-        reason = "verified evidence is host-minted behind feature gates"
-    )
-)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProtocolAuthEvidenceKind {
     Verified {
@@ -287,13 +333,6 @@ impl<'de> Deserialize<'de> for ProtocolAuthEvidence {
 }
 
 impl ProtocolAuthEvidence {
-    #[cfg_attr(
-        not(any(test, feature = "test-support", feature = "host-auth-mint")),
-        allow(
-            dead_code,
-            reason = "called only by host-auth/test-support feature gates"
-        )
-    )]
     pub(crate) fn host_verified(requirement: AuthRequirement, subject: impl Into<String>) -> Self {
         Self {
             kind: ProtocolAuthEvidenceKind::Verified {
@@ -303,13 +342,6 @@ impl ProtocolAuthEvidence {
         }
     }
 
-    #[cfg_attr(
-        not(any(test, feature = "test-support", feature = "host-auth-mint")),
-        allow(
-            dead_code,
-            reason = "called only by host-auth/test-support feature gates"
-        )
-    )]
     pub(crate) fn host_verified_for_tenant(
         requirement: AuthRequirement,
         subject: impl Into<String>,
@@ -320,6 +352,37 @@ impl ProtocolAuthEvidence {
                 claim: VerifiedAuthClaim::new_for_tenant(requirement, subject, tenant_id),
                 _seal: HostAuthSeal::host_only(),
             },
+        }
+    }
+
+    /// The channel/webhook half of the seal, reachable across the crate
+    /// boundary because the mint family PROPOSAL §6.1.2 assigns to
+    /// `ironclaw_extension_contracts` has to construct the verified variant
+    /// this module keeps private.
+    ///
+    /// Consuming a [`VerifiedInboundGrant`] is what keeps that reachability from
+    /// being a hole: the grant's only source is
+    /// [`ChannelIngressVerifier::verified_inbound_grant`], and only
+    /// `ironclaw_extension_host` may implement that trait. Callers pass the
+    /// requirement the ingress recipe actually verified, mirroring the recipe
+    /// the router executed.
+    ///
+    /// **Recorded residual:** the `requirement` parameter is the full
+    /// [`AuthRequirement`], so a grant holder could attest a bearer-shaped
+    /// requirement. The grant holder is the generic ingress verifier — trusted
+    /// host code by charter — and narrowing this would mean a second enum
+    /// duplicating `AuthRequirement`'s channel half. The property this seam
+    /// exists for (a *package* or a *product handler* cannot mint at all) is
+    /// unaffected.
+    pub fn seal_verified_inbound(
+        _grant: VerifiedInboundGrant,
+        requirement: AuthRequirement,
+        subject: impl Into<String>,
+        tenant_id: Option<TenantId>,
+    ) -> Self {
+        match tenant_id {
+            Some(tenant_id) => Self::host_verified_for_tenant(requirement, subject, tenant_id),
+            None => Self::host_verified(requirement, subject),
         }
     }
 
@@ -362,68 +425,20 @@ impl ProtocolAuthEvidence {
     }
 }
 
-#[cfg(feature = "host-auth-mint")]
-pub fn mark_request_signature_verified(
-    header_name: impl Into<String>,
-    timestamp_header_name: Option<String>,
-    subject: impl Into<String>,
-) -> ProtocolAuthEvidence {
-    ProtocolAuthEvidence::host_verified(
-        AuthRequirement::RequestSignature {
-            header_name: header_name.into(),
-            timestamp_header_name,
-        },
-        subject,
-    )
-}
+// ── Bearer/session mint family (PROPOSAL §6.1.1, trust stage T1) ────────────
+//
+// The channel/webhook half of this family lives in
+// `ironclaw_extension_contracts::verified_inbound` (§6.1.2). Splitting them by
+// trust role is the point: the host transport and the ingress verifier hold
+// different grants, so neither can attest the other's claim shape.
+//
+// Every function here consumes a `HostAuthenticationGrant`, so a caller must
+// hold `&impl HostProtocolAuthenticator` — in production, `ironclaw_webui`'s
+// authentication middleware and nothing else.
 
-#[cfg(feature = "host-auth-mint")]
-pub fn mark_request_signature_verified_for_tenant(
-    header_name: impl Into<String>,
-    timestamp_header_name: Option<String>,
-    subject: impl Into<String>,
-    tenant_id: TenantId,
-) -> ProtocolAuthEvidence {
-    ProtocolAuthEvidence::host_verified_for_tenant(
-        AuthRequirement::RequestSignature {
-            header_name: header_name.into(),
-            timestamp_header_name,
-        },
-        subject,
-        tenant_id,
-    )
-}
-
-#[cfg(feature = "host-auth-mint")]
-pub fn mark_shared_secret_header_verified(
-    header_name: impl Into<String>,
-    subject: impl Into<String>,
-) -> ProtocolAuthEvidence {
-    ProtocolAuthEvidence::host_verified(
-        AuthRequirement::SharedSecretHeader {
-            header_name: header_name.into(),
-        },
-        subject,
-    )
-}
-
-#[cfg(feature = "host-auth-mint")]
-pub fn mark_shared_secret_header_verified_for_tenant(
-    header_name: impl Into<String>,
-    subject: impl Into<String>,
-    tenant_id: TenantId,
-) -> ProtocolAuthEvidence {
-    ProtocolAuthEvidence::host_verified_for_tenant(
-        AuthRequirement::SharedSecretHeader {
-            header_name: header_name.into(),
-        },
-        subject,
-        tenant_id,
-    )
-}
-
-#[cfg(feature = "host-auth-mint")]
+/// Attest that a session cookie was verified by the host transport.
 pub fn mark_session_verified(
+    _grant: HostAuthenticationGrant,
     cookie_name: impl Into<String>,
     subject: impl Into<String>,
 ) -> ProtocolAuthEvidence {
@@ -435,8 +450,9 @@ pub fn mark_session_verified(
     )
 }
 
-#[cfg(feature = "host-auth-mint")]
+/// Tenant-scoped [`mark_session_verified`], for tenant-scoped product surfaces.
 pub fn mark_session_verified_for_tenant(
+    _grant: HostAuthenticationGrant,
     cookie_name: impl Into<String>,
     subject: impl Into<String>,
     tenant_id: TenantId,
@@ -450,13 +466,18 @@ pub fn mark_session_verified_for_tenant(
     )
 }
 
-#[cfg(feature = "host-auth-mint")]
-pub fn mark_bearer_token_verified(subject: impl Into<String>) -> ProtocolAuthEvidence {
+/// Attest that a bearer token was verified by the host transport.
+pub fn mark_bearer_token_verified(
+    _grant: HostAuthenticationGrant,
+    subject: impl Into<String>,
+) -> ProtocolAuthEvidence {
     ProtocolAuthEvidence::host_verified(AuthRequirement::BearerToken, subject)
 }
 
-#[cfg(feature = "host-auth-mint")]
+/// Tenant-scoped [`mark_bearer_token_verified`] — what the WebUI gateway's
+/// authentication middleware mints for OpenAI-compatible route mounts.
 pub fn mark_bearer_token_verified_for_tenant(
+    _grant: HostAuthenticationGrant,
     subject: impl Into<String>,
     tenant_id: TenantId,
 ) -> ProtocolAuthEvidence {

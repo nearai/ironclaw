@@ -5,15 +5,6 @@
 //! durable flow state and credential storage stay with the product-auth
 //! services.
 
-// v1 compatibility surface: the monolith's `src/auth/oauth.rs` re-exports the
-// loopback callback transport under this historical path. The items live in
-// [`crate::loopback_oauth`] (v1-only; see its header). Delete this re-export
-// with v1.
-pub use crate::loopback_oauth::{
-    OAUTH_CALLBACK_PORT, OAuthCallbackError, bind_callback_listener, callback_host, callback_url,
-    is_loopback_host, landing_html, wait_for_callback,
-};
-
 use std::fmt;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -75,7 +66,6 @@ struct OAuthCallbackStateWire {
     resource: ResourceScope,
     session_id: Option<AuthSessionId>,
     account_label: CredentialAccountLabel,
-    requested_scopes: Vec<ProviderScope>,
     nonce: String,
 }
 
@@ -94,7 +84,6 @@ pub struct OAuthCallbackState {
     flow_id: AuthFlowId,
     scope: AuthProductScope,
     account_label: CredentialAccountLabel,
-    requested_scopes: Vec<ProviderScope>,
     nonce: String,
 }
 
@@ -104,14 +93,12 @@ impl OAuthCallbackState {
         flow_id: AuthFlowId,
         scope: AuthProductScope,
         account_label: CredentialAccountLabel,
-        requested_scopes: Vec<ProviderScope>,
     ) -> Result<Self, AuthProductError> {
         Ok(Self {
             kind,
             flow_id,
             scope,
             account_label,
-            requested_scopes,
             nonce: ironclaw_common::pkce::generate_code_verifier(),
         })
     }
@@ -128,17 +115,12 @@ impl OAuthCallbackState {
         &self.account_label
     }
 
-    pub fn requested_scopes(&self) -> &[ProviderScope] {
-        &self.requested_scopes
-    }
-
     pub fn encode(&self) -> Result<OAuthState, AuthProductError> {
         let wire = OAuthCallbackStateWire {
             flow_id: self.flow_id,
             resource: self.scope.resource.clone(),
             session_id: self.scope.session_id.clone(),
             account_label: self.account_label.clone(),
-            requested_scopes: self.requested_scopes.clone(),
             nonce: self.nonce.clone(),
         };
         let payload =
@@ -170,7 +152,6 @@ impl OAuthCallbackState {
             flow_id: wire.flow_id,
             scope,
             account_label: wire.account_label,
-            requested_scopes: wire.requested_scopes,
             nonce: wire.nonce,
         })
     }
@@ -483,13 +464,11 @@ mod tests {
         let label = CredentialAccountLabel::new("acct").unwrap();
         let flow_id = AuthFlowId::new();
 
-        let scopes = vec![ProviderScope::new("search:read").unwrap()];
         let encoded = OAuthCallbackState::new(
             OAuthCallbackStateKind::RECIPE,
             flow_id,
             scope.clone(),
             label.clone(),
-            scopes.clone(),
         )
         .unwrap()
         .encode()
@@ -499,7 +478,6 @@ mod tests {
             OAuthCallbackState::decode(OAuthCallbackStateKind::RECIPE, encoded.as_str()).unwrap();
         assert_eq!(decoded.flow_id(), flow_id);
         assert_eq!(decoded.account_label(), &label);
-        assert_eq!(decoded.requested_scopes(), scopes.as_slice());
 
         // A value without the recipe prefix must not decode.
         assert!(

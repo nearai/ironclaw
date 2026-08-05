@@ -16,12 +16,13 @@
 
 use std::{sync::Arc, time::Duration};
 
-use ironclaw_host_api::{
-    channel_identity::{ChannelIdentityPostBind, ChannelIdentityPostBindFactory},
-    ids::UserId,
+use ironclaw_host_api::ids::UserId;
+
+use ironclaw_extension_contracts::channel_adapter::TargetQuery;
+use ironclaw_extension_contracts::channel_identity::{
+    ChannelIdentityPostBind, ChannelIdentityPostBindFactory,
 };
-use ironclaw_product::ChannelDeliveryResolver;
-use ironclaw_product::TargetQuery;
+use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
 
 use ironclaw_extension_host::{FilesystemChannelDmTargetStore, dm_target_payload};
 
@@ -170,8 +171,8 @@ async fn provision_dm_target(
         .adapter
         .list_targets(
             TargetQuery {
-                extension_id: channel.extension_id.clone(),
-                installation_id: channel.installation_id.clone(),
+                extension_id: channel.extension_id.as_str().to_string(),
+                installation_id: channel.installation_id.as_str().to_string(),
                 query: Some(direct_conversation_query(external_actor_id)),
                 limit: 1,
             },
@@ -180,7 +181,9 @@ async fn provision_dm_target(
         .await
     {
         Ok(candidates) => candidates,
-        Err(ironclaw_product::ChannelError::Unsupported) => return Ok(false),
+        Err(ironclaw_extension_contracts::channel_adapter::ChannelError::Unsupported) => {
+            return Ok(false);
+        }
         Err(error) => {
             return Err(DmTargetProvisioningError::TargetDiscovery(
                 error.to_string(),
@@ -213,19 +216,20 @@ mod tests {
     };
 
     use async_trait::async_trait;
+    use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+    use ironclaw_extension_contracts::channel_adapter::{
+        ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, TargetCandidate,
+        VerifiedInbound,
+    };
+    use ironclaw_extension_contracts::external::ExternalConversationRef;
+    use ironclaw_extension_contracts::tool_adapter::{
+        RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
+    };
     use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{
-        ids::TenantId,
-        tool_adapter::{
-            RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest,
-            RestrictedEgressResponse,
-        },
-    };
-    use ironclaw_product::ResolvedChannelDelivery;
-    use ironclaw_product::{
-        ChannelAdapter, ChannelError, DeliveryReport, ExternalConversationRef, InboundOutcome,
-        OutboundEnvelope, TargetCandidate, VerifiedInbound,
-    };
+    use ironclaw_host_api::ids::ExtensionId;
+    use ironclaw_host_api::ids::TenantId;
+    use ironclaw_host_api::product_adapter::AdapterInstallationId;
+    use ironclaw_product_contracts::delivery::ResolvedChannelDelivery;
 
     use super::*;
 
@@ -316,8 +320,9 @@ mod tests {
                 return None;
             }
             Some(ResolvedChannelDelivery {
-                extension_id: extension_id.to_string(),
-                installation_id: "vendorx-install-1".to_string(),
+                extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
+                installation_id: AdapterInstallationId::new("vendorx-install-1")
+                    .expect("valid installation id"),
                 adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
                 egress: Arc::new(NoopEgress),
             })
@@ -335,8 +340,9 @@ mod tests {
                 return None;
             }
             Some(ResolvedChannelDelivery {
-                extension_id: extension_id.to_string(),
-                installation_id: "vendorx-install-1".to_string(),
+                extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
+                installation_id: AdapterInstallationId::new("vendorx-install-1")
+                    .expect("valid installation id"),
                 adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
                 egress: Arc::new(NoopEgress),
             })

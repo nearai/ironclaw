@@ -3,9 +3,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_loop_contracts::{
+    LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
+};
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
+    ToolDisclosureMode,
 };
 use ironclaw_outbound::{
     DeliveryTargetCapabilities, OutboundDeliveryTargetId,
@@ -13,12 +17,8 @@ use ironclaw_outbound::{
     OutboundDeliveryTargetSummary, OutboundError,
 };
 use ironclaw_product::RebornOutboundDeliveryTargetId;
-use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_threads::{LoadContextMessagesRequest, MessageKind, ThreadHistoryRequest};
-use ironclaw_turns::{
-    ReplyTargetBindingRef, TurnStatus,
-    run_profile::{LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest},
-};
+use ironclaw_turns::{ReplyTargetBindingRef, TurnStatus};
 
 use crate::RebornCompositionProfile;
 use crate::outbound::{
@@ -154,7 +154,7 @@ impl HostManagedModelGateway for OutboundDeliveryTriggerGateway {
 }
 
 fn provider_tool_call(
-    tool_definitions: &[ironclaw_turns::run_profile::ProviderToolDefinition],
+    tool_definitions: &[ironclaw_loop_contracts::ProviderToolDefinition],
     capability_id: &str,
     call_id: &str,
     arguments: serde_json::Value,

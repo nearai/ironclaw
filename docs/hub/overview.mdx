@@ -1,0 +1,54 @@
+---
+title: "Overview"
+description: "The official catalog of installable tools and skills"
+---
+
+IronHub is the catalog of tools and skills for IronClaw, hosted at [hub.ironclaw.com](https://hub.ironclaw.com). Every entry is cryptographically signed — IronClaw verifies the signature before installation so you know exactly what you're installing and who published it.
+
+<CardGroup cols={2}>
+  <Card title="Marketplace" icon="store" href="https://hub.ironclaw.com/marketplace">
+    Browse the catalog of available tools and skills.
+  </Card>
+
+  <Card title="Use Cases" icon="lightbulb" href="https://hub.ironclaw.com/usecases">
+    See what others are building with IronClaw extensions.
+  </Card>
+</CardGroup>
+
+---
+
+## What's in the catalog
+
+IronHub distributes two kinds of packages:
+
+| Kind           | What it is                               | What you get                                  |
+|----------------|------------------------------------------|-----------------------------------------------|
+| Extension (Tool) | WASM binary + capability manifest (TOML, `manifest.toml`) | A new tool your agent can call at runtime     |
+| Skill          | SKILL.md                                 | Prompt instructions the agent loads on demand |
+
+---
+
+## Provenance tiers
+
+Every catalog entry carries a provenance label that tells you how it was reviewed:
+
+| Tier          | Description                                                                                                                               |
+|---------------|-------------------------------------------------------------------------------------------------------------------------------------------|
+| **Official**  | Published and maintained by the IronClaw team.                                                                                            |
+| **Trusted**   | Reviewed by the IronClaw team for safety and correctness.                                                                                 |
+| **Verified**  | Publisher identity is confirmed, but the package has not been audited.                                                                    |
+| **New**       | Community submission with no review yet. Requires explicit operator acknowledgement to install — the agent cannot install these autonomously. |
+
+---
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Install Tools & Skills" icon="download" href="/hub/installing">
+    Install packages via CLI or chat.
+  </Card>
+
+  <Card title="Contribute" icon="upload" href="/hub/contributing">
+    Publish your own tool or skill to IronHub.
+  </Card>
+</CardGroup>

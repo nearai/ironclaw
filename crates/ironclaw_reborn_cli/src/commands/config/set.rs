@@ -17,7 +17,7 @@ use crate::context::RebornCliContext;
 #[derive(Debug, Args)]
 pub(super) struct ConfigSetCommand {
     /// Dot-separated config key (e.g. google.client_id, openai.api_key,
-    /// slack.enabled, webui.token).
+    /// webui.token).
     key: String,
     /// Value to set for non-secret keys. Secret-destination keys
     /// (`<provider>.api_key`, `google.client_secret`) reject positional values
@@ -32,6 +32,19 @@ pub(super) struct ConfigSetCommand {
 
 impl ConfigSetCommand {
     pub(super) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
+        // A key whose section this crate has retired gets the migration
+        // pointer rather than the generic unknown-key list: an operator
+        // following an old runbook has not made a typo, and telling them so
+        // sends them looking in the wrong place. Sourced from
+        // `ironclaw_reborn_config`'s retired-section table so the CLI and the
+        // boot-time check cannot tell two different stories.
+        if let Some(guidance) = ironclaw_reborn_config::retired_config_key_guidance(&self.key) {
+            anyhow::bail!(
+                "{guidance} Open {base_url}/extensions to manage installed extensions.",
+                guidance = guidance,
+                base_url = default_webui_base_url(),
+            );
+        }
         let Some(key) = ConfigKey::classify(&self.key) else {
             anyhow::bail!(unknown_key_message(&self.key));
         };
@@ -57,7 +70,7 @@ fn unknown_key_message(key: &str) -> String {
     format!(
         "unknown config key `{key}` for `config set`\nSupported keys: <provider>.api_key \
          (default provider `{}`), google.client_id, google.client_secret, google.redirect_uri, \
-         slack.enabled, webui.token (--rotate only)\nRun `ironclaw config list` to see \
+         webui.token (--rotate only)\nRun `ironclaw config list` to see \
          all readable keys",
         super::init::DEFAULT_LLM_PROVIDER_ID,
     )
@@ -69,7 +82,6 @@ fn describe_key(key: &ConfigKey) -> String {
         ConfigKey::GoogleClientId => "google.client_id".to_string(),
         ConfigKey::GoogleClientSecret => "google.client_secret".to_string(),
         ConfigKey::GoogleRedirectUri => "google.redirect_uri".to_string(),
-        ConfigKey::SlackEnabled => "slack.enabled".to_string(),
         ConfigKey::WebuiToken => "webui.token".to_string(),
     }
 }
@@ -140,9 +152,6 @@ fn set_value_key(
         ConfigKey::GoogleClientSecret => {
             write_google_client_secret(context, &value, store_opener)?;
         }
-        ConfigKey::SlackEnabled => {
-            write_slack_enabled(home, &value)?;
-        }
         ConfigKey::WebuiToken => unreachable!("handled by execute_webui_token"),
     }
 
@@ -154,7 +163,7 @@ fn set_value_key(
 
 /// After a successful write, print the remaining BYO setup steps for the
 /// capability this key belongs to, via
-/// `capability_config::google_remediation_text`/`slack_remediation_text`.
+/// `capability_config::google_remediation_text`.
 fn print_remaining_setup_guidance(key: &ConfigKey) {
     match key {
         ConfigKey::GoogleClientId
@@ -162,13 +171,6 @@ fn print_remaining_setup_guidance(key: &ConfigKey) {
         | ConfigKey::GoogleRedirectUri => {
             println!();
             println!("{}", super::capability_config::google_remediation_text());
-        }
-        ConfigKey::SlackEnabled => {
-            println!();
-            println!(
-                "{}",
-                super::capability_config::slack_remediation_text(&default_webui_base_url())
-            );
         }
         ConfigKey::LlmApiKey { .. } | ConfigKey::WebuiToken => {}
     }
@@ -193,12 +195,6 @@ fn write_google_field(
         hosted_domain_hint: GoogleFieldUpdate::Keep,
     };
     ironclaw_reborn_config::update_google_oauth_config(&home.config_file_path(), &update)
-        .map_err(anyhow::Error::from)
-}
-
-fn write_slack_enabled(home: &RebornHome, value: &str) -> anyhow::Result<()> {
-    let enabled = value.eq_ignore_ascii_case("true");
-    ironclaw_reborn_config::update_slack_enabled(&home.config_file_path(), enabled)
         .map_err(anyhow::Error::from)
 }
 
@@ -400,7 +396,9 @@ impl SecretStoreOpener for StandaloneSecretStoreOpener {
             let store = ironclaw_reborn_composition::open_standalone_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
-            Ok::<_, anyhow::Error>(ironclaw_operator::LlmKeyStore::new(store))
+            Ok::<_, anyhow::Error>(ironclaw_operator::LlmKeyStore::new(
+                ironclaw_reborn_composition::RuntimeOperatorSecretValueStore::shared(store),
+            ))
         })
     }
 
@@ -482,7 +480,11 @@ mod tests {
                 .lock()
                 .expect("opened paths lock")
                 .push(home_path.to_path_buf());
-            Ok(ironclaw_operator::LlmKeyStore::new(self.store.clone()))
+            Ok(ironclaw_operator::LlmKeyStore::new(
+                ironclaw_reborn_composition::RuntimeOperatorSecretValueStore::shared(
+                    self.store.clone(),
+                ),
+            ))
         }
 
         fn open_google_oauth_secret_store(
@@ -654,21 +656,36 @@ mod tests {
         );
     }
 
+    /// `slack.enabled` used to be settable and used to write TOML that
+    /// nothing read. Driven through `execute` rather than `set_value_key`
+    /// because the retired-key check lives at the command entry point — a
+    /// `ConfigKey` fixture cannot reach it, and the property under test is
+    /// precisely that the key never becomes a `ConfigKey` at all.
     #[test]
-    fn slack_enabled_round_trips() {
+    fn retired_config_key_is_refused_with_migration_guidance_and_writes_nothing() {
         let (_tmp, context) = RebornCliContext::test_context();
-        set_value_key(
-            &context,
-            ConfigKey::SlackEnabled,
-            Some("true".to_string()),
-            &mut NeverPromptSource,
-            &FailingStoreOpener,
-        )
-        .expect("must succeed");
 
-        let toml = config_toml(&context);
-        assert!(toml.contains("[slack]"), "config: {toml}");
-        assert!(toml.contains("enabled = true"), "config: {toml}");
+        let error = ConfigSetCommand {
+            key: "slack.enabled".to_string(),
+            value: Some("true".to_string()),
+            rotate: false,
+        }
+        .execute(context.clone())
+        .expect_err("a retired key must be refused");
+
+        let message = error.to_string();
+        assert!(message.contains("slack.enabled"), "message: {message}");
+        assert!(message.contains("retired"), "message: {message}");
+        assert!(message.contains("/extensions"), "message: {message}");
+        assert!(
+            !message.contains("unknown config key"),
+            "a retired key must not be reported as a typo: {message}"
+        );
+        assert!(
+            config_toml(&context).is_empty(),
+            "a refused key must not write config.toml: {}",
+            config_toml(&context)
+        );
     }
 
     #[test]
@@ -849,9 +866,11 @@ mod tests {
         );
         let store = opener.store.clone();
         let stored = crate::runtime::block_on_cli(async move {
-            ironclaw_operator::LlmKeyStore::new(store)
-                .read("openai")
-                .await
+            ironclaw_operator::LlmKeyStore::new(
+                ironclaw_reborn_composition::RuntimeOperatorSecretValueStore::shared(store),
+            )
+            .read("openai")
+            .await
         })
         .expect("read store");
         let value = stored.expect("secret stored");

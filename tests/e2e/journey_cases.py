@@ -24,12 +24,12 @@ from journey_types import (
     PytestEvidence,
     SlackChannelFixture,
 )
-from provider_capability_inventory import EMULATE_SUPPORTED_TOOLS
+from provider_capability_inventory import shipped_provider_manifests, EMULATE_SUPPORTED_TOOLS
 
 ROOT = Path(__file__).resolve().parents[2]
 TRACE_DIR = ROOT / "tests/fixtures/llm_traces/reborn_qa/live_canary"
 MANIFEST_PATH = TRACE_DIR / "case-manifest.json"
-ASSET_ROOT = ROOT / "crates/ironclaw_first_party_extensions/assets"
+ASSET_ROOT = ROOT / "crates/extensions/packages"
 
 _TOOL_WORLD_PREFIXES = {
     "gmail__": ProviderWorld.GOOGLE,
@@ -64,7 +64,7 @@ def _production_mutating_tools() -> dict[str, ProviderWorld]:
     harness resets it afterwards; otherwise whatever the journey created
     survives into the next test. Which tools mutate is not a judgement call --
     production already states it, as the `external_write` effect on each tool
-    (`crates/ironclaw_first_party_extensions/assets/*/manifest.toml`).
+    (`crates/extensions/packages/*/manifest.toml`).
 
     This used to be a hand-kept list of five names while production declared
     seventy such tools. Every one of the other sixty-five -- `github__create_issue`,
@@ -73,7 +73,7 @@ def _production_mutating_tools() -> dict[str, ProviderWorld]:
     never got the chance to.
     """
     mutating: dict[str, ProviderWorld] = {}
-    for manifest_path in sorted(ASSET_ROOT.glob("*/manifest.toml")):
+    for manifest_path in shipped_provider_manifests():
         with manifest_path.open("rb") as manifest_file:
             manifest = tomllib.load(manifest_file)
         for tool in manifest.get("tools", []) or []:
@@ -104,7 +104,7 @@ _MUTATING_PROVIDER_TOOLS = _production_mutating_tools()
 def unreset_mutating_tools() -> frozenset[str]:
     """Production writes whose provider world no fixture can reset."""
     unreset = set()
-    for manifest_path in sorted(ASSET_ROOT.glob("*/manifest.toml")):
+    for manifest_path in shipped_provider_manifests():
         with manifest_path.open("rb") as manifest_file:
             manifest = tomllib.load(manifest_file)
         for tool in manifest.get("tools", []) or []:

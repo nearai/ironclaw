@@ -10,7 +10,7 @@
 //! (`trigger_list` stays visible).
 //!
 //! Traced, not assumed: denial happens at the model-gateway seam
-//! (`ironclaw_runner::model_gateway`'s `validate_provider_tool_call`, via
+//! (`ironclaw_loop_host::model_gateway`'s `validate_provider_tool_call`, via
 //! `CapabilitySurfaceDenyFilter`), BEFORE a `CapabilityCallCandidate` is ever
 //! constructed — so `CapabilityStage` never runs and nothing is appended via
 //! `append_tool_result_reference` (confirmed empirically: persisted history is
@@ -34,12 +34,12 @@ use std::sync::Arc;
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
 use ironclaw_host_api::{ids::CapabilityId, resolution::Resolution};
-use ironclaw_runner::planned_driver_factory::default_planned_run_profile_resolver;
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     InMemoryLoopHostMilestoneSink, LoopCapabilityPort, LoopRequest, LoopRunContext,
     ProviderToolCall, RegisterProviderToolCallRequest, RunProfileResolutionRequest,
     RunProfileResolver,
 };
+use ironclaw_runner::planned_driver_factory::default_planned_run_profile_resolver;
 use ironclaw_turns::{GetRunStateRequest, RunProfileRequest, TurnOriginKind, TurnStatus};
 use serde_json::json;
 

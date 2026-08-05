@@ -30,14 +30,15 @@
 
 use std::sync::Arc;
 
+use ironclaw_auth::ChannelConnectionService;
 use ironclaw_auth::{AuthProductScope, AuthSurface, OAuthProviderIdentity};
 use ironclaw_host_api::{
     ids::{AgentId, InvocationId, TenantId, UserId},
-    product_surface::ProductSurfaceCaller,
     resource::ResourceScope,
 };
-use ironclaw_product::ChannelConnectionService;
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 
+use ironclaw_extension_contracts::channel_identity::ChannelIdentityPostBindFactory;
 use ironclaw_extension_host::channel_connection::{
     ChannelAccountStatusReader, ChannelCredentialCleanup, GenericChannelConnectionService,
 };
@@ -45,9 +46,7 @@ use ironclaw_extension_host::channel_dm_provisioning::ChannelDmTargetProvisionin
 use ironclaw_extension_host::channel_identity_binding::{
     ChannelIdentityBindingConfig, bind_channel_identities_for_callback,
 };
-use ironclaw_host_api::{
-    channel_identity::ChannelIdentityPostBindFactory, user_identity::RebornUserIdentityLookup,
-};
+use ironclaw_host_api::user_identity::RebornUserIdentityLookup;
 
 /// Identity inputs for [`build_channel_connection_for_test`]. Plain strings
 /// so harness callers outside this crate don't need the id newtypes;

@@ -99,7 +99,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -113,13 +113,27 @@ jobs:
           MUT_JOBS: "3"
           MUT_OUT: target/nightly-mutation
           MUT_TIMEOUT: "300"
-        run: >-
-          scripts/mutation-audit.sh
-          -p ironclaw_dispatcher
-          crates/ironclaw_dispatcher/src/lib.rs
+        # Targets the dispatch routing logic itself. Keep this pointed at a file
+        # with real mutable statements — a pure `pub use` re-export file yields
+        # zero mutants and makes this step silently vacuous.
+        #
+        # The crate directory is resolved through the shared inventory
+        # (scripts/ci/crate-dir.sh) rather than the flat `crates/
+        # ironclaw_capabilities` literal, so this step needs no edit when the
+        # crate moves into a family directory (PROPOSAL §5) — a stale literal
+        # here used to be a SILENT failure: cargo-mutants would match zero
+        # mutants under a path that no longer exists and report a clean run
+        # over code it never read. `set -e` aborts here if resolution itself
+        # fails; scripts/mutation-audit.sh's own file-existence guard is the
+        # second layer, catching dispatch.rs being renamed within a crate that
+        # still resolves.
+        run: |
+          set -euo pipefail
+          capabilities_dir="$(bash scripts/ci/crate-dir.sh ironclaw_capabilities)"
+          scripts/mutation-audit.sh -p ironclaw_capabilities "${capabilities_dir}/src/dispatch.rs"
       - name: Upload mutation triage queue
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nightly-mutation-frontier
           path: target/nightly-mutation/mutants.out/

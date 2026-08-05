@@ -7,6 +7,7 @@
 //! 2xx. Checklist: ING-1/2/5/6/7/8-unit/9/11-storage; the recipe byte
 //! semantics themselves are pinned by the verifier unit tests (ING-3/4).
 
+use ironclaw_extension_contracts::state::InstallationState;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -16,6 +17,15 @@ use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
+use ironclaw_extension_contracts::channel_adapter::{ChannelAdapter, NormalizedInboundMessage};
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelAttachmentRef, ChannelError, DeliveryReport, ImmediateResponse, InboundBatchFragment,
+    InboundOutcome, OutboundEnvelope, ProductTriggerReason, VerifiedInbound,
+};
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
+    ProductAttachmentKind,
+};
 use ironclaw_extension_host::inbound_batches::{
     InboundBatchKey, InboundBatchStageOutcome, InboundBatchStageRequest, InboundBatchStore,
 };
@@ -28,18 +38,11 @@ use ironclaw_extension_host::ingress::{
 use ironclaw_extension_host::test_support::resolve_manifest_toml;
 use ironclaw_extension_host::{
     ExtensionBindings, ExtensionEntrypoint, ExtensionHost, ExtensionHostDeps, ExtensionLoader,
-    FilesystemInboundBatchStore, InstallationRecord, InstallationRecordStore, InstallationState,
-    LifecycleError, LoadContext, LoadedExtension, RehydratedInstallationRecordStore,
-    SnapshotConflict,
+    FilesystemInboundBatchStore, InstallationRecord, InstallationRecordStore, LifecycleError,
+    LoadContext, LoadedExtension, RehydratedInstallationRecordStore, SnapshotConflict,
 };
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::ids::{SecretHandle, TenantId, UserId};
-use ironclaw_product::{
-    ChannelAdapter, ChannelAttachmentRef, ChannelError, DeliveryReport, ExternalActorRef,
-    ExternalConversationRef, ExternalEventId, ImmediateResponse, InboundBatchFragment,
-    InboundOutcome, NormalizedInboundMessage, OutboundEnvelope, ProductAttachmentDescriptor,
-    ProductAttachmentKind, ProductTriggerReason, VerifiedInbound,
-};
 
 /// What the scripted adapter observed per call: forwarded headers, body,
 /// resolved installation id, and host-selected non-secret configuration.
@@ -224,7 +227,7 @@ impl ChannelAdapter for ScriptedChannelAdapter {
     async fn deliver(
         &self,
         _envelope: OutboundEnvelope,
-        _egress: &dyn ironclaw_host_api::tool_adapter::RestrictedEgress,
+        _egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
         Err(ChannelError::Unsupported)
     }
@@ -1463,17 +1466,19 @@ impl ChannelAdapter for GenerationChannelAdapter {
     async fn fetch_attachment(
         &self,
         attachment: &ChannelAttachmentRef,
-        egress: &dyn ironclaw_host_api::tool_adapter::RestrictedEgress,
+        egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
     ) -> Result<ironclaw_host_api::attachment::InboundAttachment, ChannelError> {
         egress
-            .send(ironclaw_host_api::tool_adapter::RestrictedEgressRequest {
-                method: ironclaw_host_api::action::NetworkMethod::Post,
-                url: format!("https://{}/files", self.vendor_host),
-                headers: Vec::new(),
-                body: None,
-                credential: None,
-                body_credentials: Vec::new(),
-            })
+            .send(
+                ironclaw_extension_contracts::tool_adapter::RestrictedEgressRequest {
+                    method: ironclaw_host_api::action::NetworkMethod::Post,
+                    url: format!("https://{}/files", self.vendor_host),
+                    headers: Vec::new(),
+                    body: None,
+                    credential: None,
+                    body_credentials: Vec::new(),
+                },
+            )
             .await
             .map_err(|error| ChannelError::AttachmentTransfer {
                 reason: error.to_string(),
@@ -1490,7 +1495,7 @@ impl ChannelAdapter for GenerationChannelAdapter {
     async fn deliver(
         &self,
         _envelope: OutboundEnvelope,
-        _egress: &dyn ironclaw_host_api::tool_adapter::RestrictedEgress,
+        _egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
         Err(ChannelError::Unsupported)
     }
@@ -1539,17 +1544,19 @@ impl ironclaw_extension_host::egress::ChannelEgressTransport for GenerationTrans
         &self,
         approved: ironclaw_extension_host::egress::ApprovedChannelEgress,
     ) -> Result<
-        ironclaw_host_api::tool_adapter::RestrictedEgressResponse,
-        ironclaw_host_api::tool_adapter::RestrictedEgressError,
+        ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse,
+        ironclaw_extension_contracts::tool_adapter::RestrictedEgressError,
     > {
         self.urls
             .lock()
             .expect("transport urls lock")
             .push(approved.url);
-        Ok(ironclaw_host_api::tool_adapter::RestrictedEgressResponse {
-            status: 200,
-            body: Vec::new(),
-        })
+        Ok(
+            ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
+                status: 200,
+                body: Vec::new(),
+            },
+        )
     }
 }
 

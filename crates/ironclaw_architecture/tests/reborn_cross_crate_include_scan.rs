@@ -3,14 +3,15 @@
 //! The rule (PROPOSAL §11.2 item 7): a relative include path that escapes its
 //! own crate root is a compile-time reach into someone else's tree. It bypasses
 //! the dependency graph the boundary tests police — `extension_host` has no
-//! cargo edge to `ironclaw_first_party_extensions`, yet it compiles that
+//! cargo edge to `ironclaw_extension_support`, yet it compiles that
 //! crate's manifests into itself — and it silently breaks the moment either
 //! crate moves, which is precisely what CHECKLIST WS7's family `git mv` does to
 //! every path in the tree.
 //!
 //! **This scan does not fail on the inventory it finds.** Arming it as a gate
 //! today would fail CI on ~60 pre-existing sites that only WS1–WS4 can fix
-//! (`providers.json` becoming a crate asset, `wit/` moving into the wasm lane,
+//! (`providers.json` becoming a crate asset, package colocation; `wit/` moved
+//! into the wasm lane under WS4 and is no longer in this inventory,
 //! package colocation). Warn mode makes that debt visible and countable now,
 //! at WS0, so the later PRs can prove they shrank it.
 //!
@@ -20,7 +21,7 @@
 //! binary; verify with the new §11.2.7 scan"* (workstream #6920, epic #3773).
 //! That PR sets `REPORT_ONLY = false` below, at which point the `cross-crate`
 //! findings become assertions. The `repo-root asset` half stays reported until
-//! its owners land (WS1 `providers.json`, WS4 `wit/`), then the whole scan is
+//! its owners land (WS1 `providers.json`; WS4 `wit/` is done), then the whole scan is
 //! enforcing and this comment goes away with `REPORT_ONLY`.
 //!
 //! To read the inventory:
@@ -88,7 +89,7 @@ struct EscapingInclude {
     resolved: String,
     /// The workspace package that owns the target, when one does — the
     /// cross-crate reach-ins §11.2.7 exists for. `None` means a repo-root
-    /// asset (`providers.json`, `wit/`, `migrations/`, `tests/fixtures/`).
+    /// asset (`providers.json`, `migrations/`, `tests/fixtures/`).
     target_crate: Option<String>,
 }
 
@@ -383,8 +384,8 @@ fn reborn_cross_crate_include_paths_are_inventoried() {
         render(&cross_crate)
     );
     eprintln!(
-        "\n  repo-root asset reach-ins (WS1 `providers.json`, WS4 `wit/`, and the migration/\
-         fixture owners):\n{}",
+        "\n  repo-root asset reach-ins (WS1 `providers.json` and the migration/\
+         fixture owners; WS4 `wit/` is done):\n{}",
         render(&repo_root)
     );
 
@@ -472,9 +473,11 @@ fn reborn_include_escape_classifier_self_test() {
     }
 
     // Positive fixtures: the two shapes §11.2.7 exists for.
+    // A reach across a crate boundary, written the way WS2's tree makes it look:
+    // out of this crate and into a family-nested sibling.
     let into_sibling_crate = resolve(
         &package_root.join("src"),
-        "../../ironclaw_first_party_extensions/assets/gmail/manifest.toml",
+        "../../extensions/ironclaw_extension_support/src/packages/gmail.rs",
     );
     assert!(
         !contains(package_root, &into_sibling_crate),
@@ -490,8 +493,8 @@ fn reborn_include_escape_classifier_self_test() {
     let packages = BTreeMap::from([
         ("ironclaw_example".to_string(), package_root.to_path_buf()),
         (
-            "ironclaw_first_party_extensions".to_string(),
-            PathBuf::from("/w/crates/ironclaw_first_party_extensions"),
+            "ironclaw_extension_support".to_string(),
+            PathBuf::from("/w/crates/extensions/ironclaw_extension_support"),
         ),
         // The workspace-root package contains every crate and must never win.
         ("workspace_root_package".to_string(), PathBuf::from("/w")),
@@ -499,7 +502,7 @@ fn reborn_include_escape_classifier_self_test() {
     let root = Path::new("/w");
     assert_eq!(
         owning_package(&packages, root, &into_sibling_crate),
-        Some("ironclaw_first_party_extensions")
+        Some("ironclaw_extension_support")
     );
     assert_eq!(
         owning_package(&packages, root, &into_repo_root),

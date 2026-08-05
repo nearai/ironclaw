@@ -2,9 +2,10 @@
 //!
 //! This module keeps persistence behind the
 //! [`OpenAiCompatRefStorePort`](crate::OpenAiCompatRefStorePort)
-//! port. Contract-only consumers keep the default feature set; Reborn
-//! composition enables `storage` when it needs the filesystem-backed adapter for
-//! concrete route behavior.
+//! port. There is exactly one adapter, [`OpenAiCompatRefStore`], and it is
+//! backend-neutral: it holds an `Arc<dyn RootFilesystem>`, so composition picks
+//! the concrete backend by profile. (This crate declares no cargo features; the
+//! `storage`/`libsql`/`postgres` gating this doc used to describe is retired.)
 
 use std::sync::Arc;
 
@@ -16,8 +17,6 @@ use crate::{
     OpenAiCompatResourceBinding, OpenAiCompatResourceMapping, OpenAiCompatRouteSurface,
 };
 use async_trait::async_trait;
-use ironclaw_filesystem::LibSqlRootFilesystem;
-use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{
     CasExpectation, Entry, FilesystemError, RecordKind, RecordVersion, RootFilesystem,
 };
@@ -308,116 +307,6 @@ impl OpenAiCompatRefStore {
             }
         }
         Err(OpenAiCompatRefError::StoreUnavailable)
-    }
-}
-pub struct RebornLibSqlOpenAiCompatRefStore {
-    inner: OpenAiCompatRefStore,
-}
-impl RebornLibSqlOpenAiCompatRefStore {
-    pub fn new(filesystem: Arc<LibSqlRootFilesystem>) -> Self {
-        Self {
-            inner: OpenAiCompatRefStore::new(filesystem),
-        }
-    }
-
-    pub fn with_root(filesystem: Arc<LibSqlRootFilesystem>, root: VirtualPath) -> Self {
-        Self {
-            inner: OpenAiCompatRefStore::with_root(filesystem, root),
-        }
-    }
-}
-#[async_trait]
-impl OpenAiCompatRefStorePort for RebornLibSqlOpenAiCompatRefStore {
-    async fn reserve(
-        &self,
-        request: OpenAiCompatRefReservation,
-    ) -> Result<OpenAiCompatRefReservationOutcome, OpenAiCompatRefError> {
-        self.inner.reserve(request).await
-    }
-
-    async fn bind_internal_refs(
-        &self,
-        request: OpenAiCompatBindInternalRefs,
-    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
-        self.inner.bind_internal_refs(request).await
-    }
-
-    async fn record_accepted_ack(
-        &self,
-        request: OpenAiCompatRecordAcceptedAck,
-    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
-        self.inner.record_accepted_ack(request).await
-    }
-
-    async fn mark_external_tool_resume_completed(
-        &self,
-        request: OpenAiCompatMarkExternalToolResumeCompleted,
-    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
-        self.inner
-            .mark_external_tool_resume_completed(request)
-            .await
-    }
-
-    async fn lookup_authorized(
-        &self,
-        request: OpenAiCompatRefLookup,
-    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
-        self.inner.lookup_authorized(request).await
-    }
-}
-pub struct RebornPostgresOpenAiCompatRefStore {
-    inner: OpenAiCompatRefStore,
-}
-impl RebornPostgresOpenAiCompatRefStore {
-    pub fn new(filesystem: Arc<PostgresRootFilesystem>) -> Self {
-        Self {
-            inner: OpenAiCompatRefStore::new(filesystem),
-        }
-    }
-
-    pub fn with_root(filesystem: Arc<PostgresRootFilesystem>, root: VirtualPath) -> Self {
-        Self {
-            inner: OpenAiCompatRefStore::with_root(filesystem, root),
-        }
-    }
-}
-#[async_trait]
-impl OpenAiCompatRefStorePort for RebornPostgresOpenAiCompatRefStore {
-    async fn reserve(
-        &self,
-        request: OpenAiCompatRefReservation,
-    ) -> Result<OpenAiCompatRefReservationOutcome, OpenAiCompatRefError> {
-        self.inner.reserve(request).await
-    }
-
-    async fn bind_internal_refs(
-        &self,
-        request: OpenAiCompatBindInternalRefs,
-    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
-        self.inner.bind_internal_refs(request).await
-    }
-
-    async fn record_accepted_ack(
-        &self,
-        request: OpenAiCompatRecordAcceptedAck,
-    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
-        self.inner.record_accepted_ack(request).await
-    }
-
-    async fn mark_external_tool_resume_completed(
-        &self,
-        request: OpenAiCompatMarkExternalToolResumeCompleted,
-    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
-        self.inner
-            .mark_external_tool_resume_completed(request)
-            .await
-    }
-
-    async fn lookup_authorized(
-        &self,
-        request: OpenAiCompatRefLookup,
-    ) -> Result<Option<OpenAiCompatResourceMapping>, OpenAiCompatRefError> {
-        self.inner.lookup_authorized(request).await
     }
 }
 

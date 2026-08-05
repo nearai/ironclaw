@@ -36,18 +36,17 @@ use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, InvocationId, ProviderToolName, SecretHandle, TenantId, UserId},
     resource::ResourceScope,
 };
+use ironclaw_loop_contracts::{
+    CapabilityCallCandidate, LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
+};
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
-    HostManagedModelStreamSink,
+    HostManagedModelStreamSink, ToolDisclosureMode,
 };
 use ironclaw_reborn_composition::{
     OAuthClientConfig, PollSettings, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
     build_reborn_runtime,
-};
-use ironclaw_runner::runtime::ToolDisclosureMode;
-use ironclaw_turns::run_profile::{
-    CapabilityCallCandidate, LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
 use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use serde_json::{Value, json};
@@ -690,81 +689,110 @@ async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
     authenticated_user_id: &str,
     google_oauth_backend: Option<OAuthClientConfig>,
 ) -> Harness {
-    let mut build_input =
-        ironclaw_reborn_composition::local_filesystem_build_input(runtime_owner_id, storage_root)
-            .with_runtime_policy(policy)
-            .with_bundled_first_party_for_test();
-    if let Some(google_oauth_backend) = google_oauth_backend {
-        build_input = build_input
-            .with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_oauth_backend);
-    }
-    let input = RebornRuntimeInput::from_build_input(build_input)
-        .with_tool_disclosure(ToolDisclosureMode::Off)
-        .with_identity(RebornRuntimeIdentity {
-            tenant_id: TENANT.to_string(),
-            agent_id: AGENT.to_string(),
-            source_binding_id: "e2e-source".to_string(),
-            reply_target_binding_id: "e2e-reply".to_string(),
-        })
-        .with_poll_settings(PollSettings {
-            interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(10),
-        })
-        .with_model_gateway_override(gateway);
+    // Every test in this file awaits this builder, so without the box the
+    // whole `build_reborn_runtime` composition state machine is inlined into
+    // each test's future and sits on the 2 MiB test-thread stack alongside
+    // the test's own locals. Debug builds do not collapse that nesting, and
+    // the combined frame has already overflowed the stack twice as the
+    // composition graph grew. Boxing here moves the composition future to the
+    // heap once, for every caller.
+    Box::pin(async move {
+        let mut build_input = ironclaw_reborn_composition::local_filesystem_build_input(
+            runtime_owner_id,
+            storage_root,
+        )
+        .with_runtime_policy(policy)
+        .with_bundled_first_party_for_test();
+        if let Some(google_oauth_backend) = google_oauth_backend {
+            build_input = build_input
+                .with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_oauth_backend);
+        }
+        let input = RebornRuntimeInput::from_build_input(build_input)
+            .with_tool_disclosure(ToolDisclosureMode::Off)
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: TENANT.to_string(),
+                agent_id: AGENT.to_string(),
+                source_binding_id: "e2e-source".to_string(),
+                reply_target_binding_id: "e2e-reply".to_string(),
+            })
+            .with_poll_settings(PollSettings {
+                interval: Duration::from_millis(10),
+                max_total: Duration::from_secs(10),
+            })
+            .with_model_gateway_override(gateway);
 
-    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    // The Tools-settings global auto-approve switch is authoritative for
-    // first-party tool dispatch; enable it for the e2e dispatch scope so
-    // scripted tool calls complete instead of parking on the per-tool approval
-    // gate (which would otherwise leave the turn without an assistant reply).
-    runtime
-        .standalone_auto_approve_settings_for_test()
-        .expect("standalone exposes auto-approve settings for test")
-        .set(ironclaw_approvals::AutoApproveSettingInput {
-            updated_by: ironclaw_host_api::scope::Principal::User(UserId::new(USER).expect("user")),
-            scope: ResourceScope {
-                tenant_id: TenantId::new(TENANT).expect("tenant"),
-                user_id: UserId::new(USER).expect("user"),
-                agent_id: Some(AgentId::new(AGENT).expect("agent")),
-                project_id: None,
-                mission_id: None,
-                thread_id: None,
-                invocation_id: InvocationId::new(),
-            },
-            enabled: true,
-        })
-        .await
-        .expect("enable global auto-approve for e2e dispatch");
-    let bundle = runtime.product_surface(None).expect("product surface");
-    let config = WebuiServeConfig::new(
-        TenantId::new(TENANT).expect("tenant"),
-        Arc::new(ValidTokenForUser::new(authenticated_user_id)),
-        // CORS allowlist is unused in oneshot tests (no Origin header
-        // is set), but the WebuiServeConfig constructor rejects an
-        // empty Vec to keep production deployments fail-closed. Any
-        // throwaway origin satisfies the type without affecting these
-        // tests.
-        vec![HeaderValue::from_static("http://localhost:0")],
-    )
-    .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
-    let router = webui_v2_app(bundle.clone(), config).expect("webui v2 app");
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        // The Tools-settings global auto-approve switch is authoritative for
+        // first-party tool dispatch; enable it for the e2e dispatch scope so
+        // scripted tool calls complete instead of parking on the per-tool
+        // approval gate (which would otherwise leave the turn without an
+        // assistant reply).
+        runtime
+            .standalone_auto_approve_settings_for_test()
+            .expect("standalone exposes auto-approve settings for test")
+            .set(ironclaw_approvals::AutoApproveSettingInput {
+                updated_by: ironclaw_host_api::scope::Principal::User(
+                    UserId::new(USER).expect("user"),
+                ),
+                scope: ResourceScope {
+                    tenant_id: TenantId::new(TENANT).expect("tenant"),
+                    user_id: UserId::new(USER).expect("user"),
+                    agent_id: Some(AgentId::new(AGENT).expect("agent")),
+                    project_id: None,
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: InvocationId::new(),
+                },
+                enabled: true,
+            })
+            .await
+            .expect("enable global auto-approve for e2e dispatch");
+        let bundle = runtime.product_surface(None).expect("product surface");
+        let config = WebuiServeConfig::new(
+            TenantId::new(TENANT).expect("tenant"),
+            Arc::new(ValidTokenForUser::new(authenticated_user_id)),
+            // CORS allowlist is unused in oneshot tests (no Origin header
+            // is set), but the WebuiServeConfig constructor rejects an
+            // empty Vec to keep production deployments fail-closed. Any
+            // throwaway origin satisfies the type without affecting these
+            // tests.
+            vec![HeaderValue::from_static("http://localhost:0")],
+        )
+        .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
+        let router = webui_v2_app(bundle.clone(), config).expect("webui v2 app");
 
-    Harness {
-        runtime,
-        router,
-        _root: root,
-    }
+        Harness {
+            runtime,
+            router,
+            _root: root,
+        }
+    })
+    .await
 }
 
 async fn build_two_user_harness(
     gateway: Arc<dyn HostManagedModelGateway>,
     policy: EffectiveRuntimePolicy,
 ) -> Harness {
+    build_two_user_harness_with_workspace_scoping(gateway, policy, false).await
+}
+
+/// `workspace_scoped_per_caller` reproduces the deployment shape `serve` builds
+/// when SSO is on: a standalone-composed runtime with a multi-user
+/// authenticator. The WebUI browser confines every non-operator caller's
+/// Workspace reads to their own subtree, so the agent's writes must be scoped
+/// to the same subtree or those users read an empty workspace.
+async fn build_two_user_harness_with_workspace_scoping(
+    gateway: Arc<dyn HostManagedModelGateway>,
+    policy: EffectiveRuntimePolicy,
+    workspace_scoped_per_caller: bool,
+) -> Harness {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
     let input = RebornRuntimeInput::from_build_input(
         ironclaw_reborn_composition::local_filesystem_build_input(USER, storage_root)
             .with_runtime_policy(policy)
+            .with_workspace_scoped_per_caller(workspace_scoped_per_caller)
             .with_bundled_first_party_for_test(),
     )
     .with_tool_disclosure(ToolDisclosureMode::Off)
@@ -1550,8 +1578,7 @@ async fn webui_v2_gmail_oauth_setup_complete_allows_activation() {
         .credential_account_service()
         .create_account(NewCredentialAccount {
             scope: webui_extension_setup_scope("gmail"),
-            provider: ironclaw_first_party_extensions::google_provider_id()
-                .expect("google provider id"),
+            provider: ironclaw_extension_support::google_provider_id().expect("google provider id"),
             label: CredentialAccountLabel::new("work google").expect("label"),
             status: CredentialAccountStatus::Configured,
             ownership: CredentialOwnership::UserReusable,
@@ -1883,51 +1910,54 @@ async fn webui_v2_google_drive_oauth_setup_coalesces_operation_scopes() {
 /// could not read the resulting thread's timeline.
 #[tokio::test]
 async fn untrusted_request_body_cannot_inject_system_scope() {
-    let harness = build_harness().await;
-    let sentinel = "\u{1f}SYSTEM\u{1f}";
+    Box::pin(async {
+        let harness = build_harness().await;
+        let sentinel = "\u{1f}SYSTEM\u{1f}";
 
-    let malicious = json!({
-        "client_action_id": "inject-scope-1",
-        "tenant_id": sentinel,
-        "user_id": sentinel,
-        "scope": { "tenant_id": sentinel, "user_id": sentinel },
-    });
-    let create = harness
-        .router
-        .clone()
-        .oneshot(bearer_post("/api/webchat/v2/threads", malicious))
-        .await
-        .expect("create oneshot");
-    assert_eq!(
-        create.status(),
-        StatusCode::OK,
-        "injected scope fields must be ignored (unknown fields), not honored or errored"
-    );
-    let body = read_json(create).await;
-    let thread_id = body["thread"]["thread_id"]
-        .as_str()
-        .expect("thread_id")
-        .to_string();
+        let malicious = json!({
+            "client_action_id": "inject-scope-1",
+            "tenant_id": sentinel,
+            "user_id": sentinel,
+            "scope": { "tenant_id": sentinel, "user_id": sentinel },
+        });
+        let create = harness
+            .router
+            .clone()
+            .oneshot(bearer_post("/api/webchat/v2/threads", malicious))
+            .await
+            .expect("create oneshot");
+        assert_eq!(
+            create.status(),
+            StatusCode::OK,
+            "injected scope fields must be ignored (unknown fields), not honored or errored"
+        );
+        let body = read_json(create).await;
+        let thread_id = body["thread"]["thread_id"]
+            .as_str()
+            .expect("thread_id")
+            .to_string();
 
-    let timeline = harness
-        .router
-        .clone()
-        .oneshot(bearer_get(&format!(
-            "/api/webchat/v2/threads/{thread_id}/timeline"
-        )))
-        .await
-        .expect("timeline oneshot");
-    assert_eq!(
-        timeline.status(),
-        StatusCode::OK,
-        "the thread must belong to the authenticated caller — the body could not set scope"
-    );
+        let timeline = harness
+            .router
+            .clone()
+            .oneshot(bearer_get(&format!(
+                "/api/webchat/v2/threads/{thread_id}/timeline"
+            )))
+            .await
+            .expect("timeline oneshot");
+        assert_eq!(
+            timeline.status(),
+            StatusCode::OK,
+            "the thread must belong to the authenticated caller — the body could not set scope"
+        );
 
-    harness
-        .runtime
-        .shutdown()
-        .await
-        .expect("runtime shutdown clean");
+        harness
+            .runtime
+            .shutdown()
+            .await
+            .expect("runtime shutdown clean");
+    })
+    .await;
 }
 
 // ─── operator LLM-config smoke (issue #4673) ──────────────────────────
@@ -2163,6 +2193,138 @@ async fn wait_for_assistant_reply(router: &axum::Router, thread_id: &str, needle
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
     panic!("turn never produced an assistant reply containing {needle:?}; timeline={timeline:#?}");
+}
+
+/// The reported bug, end to end, in the deployment shape that produced it: a
+/// multi-user WebUI over a standalone-composed runtime. User A's agent writes a
+/// workspace file; the browser confines A's Workspace reads to
+/// `tenants/{tenant}/users/{user}`. Before the write lanes read the same
+/// scoping decision, the file landed in the shared root and A saw an empty
+/// workspace while B could have seen A's artifacts.
+#[tokio::test]
+async fn agent_workspace_writes_are_visible_to_their_owner_and_hidden_from_other_users() {
+    let harness = build_two_user_harness_with_workspace_scoping(
+        Arc::new(WriteFileGateway::default()),
+        local_yolo_effective_policy(),
+        true,
+    )
+    .await;
+    let router = &harness.router;
+
+    let thread_id = create_thread(router, "e2e-workspace-isolation-create").await;
+    send_message(router, &thread_id, "e2e-workspace-isolation-send").await;
+    wait_for_assistant_reply(router, &thread_id, "ready to download").await;
+
+    // The owner sees the file the agent just wrote. This is the assertion that
+    // failed for hosted users: the browser read the caller subtree while the
+    // write landed in the shared root.
+    let owner_listing = router
+        .clone()
+        .oneshot(bearer_get_with_token(
+            "/api/webchat/v2/fs/list?mount=workspace",
+            VALID_TOKEN,
+        ))
+        .await
+        .expect("user A workspace list oneshot");
+    assert_eq!(
+        owner_listing.status(),
+        StatusCode::OK,
+        "user A workspace listing"
+    );
+    let owner_body = String::from_utf8_lossy(&read_body_bytes(owner_listing).await).to_string();
+    let owner_listing: Value = serde_json::from_str(&owner_body).expect("owner listing json");
+    let owner_names: Vec<&str> = owner_listing["entries"]
+        .as_array()
+        .expect("entries array")
+        .iter()
+        .filter_map(|entry| entry["name"].as_str())
+        .collect();
+    assert!(
+        owner_names.contains(&"report.csv"),
+        "user A must see the file their own agent wrote, got: {owner_names:?}"
+    );
+
+    // User B's listing resolves inside B's own subtree, which no agent has
+    // written to. An authorized-but-never-written workspace root reads as
+    // EMPTY, never as an error and never as A's files: a fresh user opening
+    // the Workspace tab before their first run must see an empty workspace.
+    let other_listing = router
+        .clone()
+        .oneshot(bearer_get_with_token(
+            "/api/webchat/v2/fs/list?mount=workspace",
+            USER_B_TOKEN,
+        ))
+        .await
+        .expect("user B workspace list oneshot");
+    let other_status = other_listing.status();
+    let other_body = String::from_utf8_lossy(&read_body_bytes(other_listing).await).to_string();
+    assert_eq!(
+        other_status,
+        StatusCode::OK,
+        "a fresh caller's workspace listing must succeed, got {other_status}: {other_body}"
+    );
+    let other_json: serde_json::Value =
+        serde_json::from_str(&other_body).expect("user B workspace listing is JSON");
+    assert_eq!(
+        other_json["entries"].as_array().map(Vec::len),
+        Some(0),
+        "a fresh caller's workspace lists as empty, got: {other_body}"
+    );
+    assert!(
+        !other_body.contains("report.csv"),
+        "user B must not see user A's workspace artifacts, got: {other_body}"
+    );
+
+    // A slash-only path names the same projected root and must get the same
+    // empty listing, not a NotFound.
+    let slash_listing = router
+        .clone()
+        .oneshot(bearer_get_with_token(
+            "/api/webchat/v2/fs/list?mount=workspace&path=/",
+            USER_B_TOKEN,
+        ))
+        .await
+        .expect("user B slash-root workspace list oneshot");
+    let slash_status = slash_listing.status();
+    let slash_body = String::from_utf8_lossy(&read_body_bytes(slash_listing).await).to_string();
+    assert_eq!(
+        slash_status,
+        StatusCode::OK,
+        "a slash-only path lists the projected root, got {slash_status}: {slash_body}"
+    );
+    let slash_json: serde_json::Value =
+        serde_json::from_str(&slash_body).expect("user B slash-root listing is JSON");
+    assert_eq!(
+        slash_json["entries"].as_array().map(Vec::len),
+        Some(0),
+        "a slash-only path on a fresh workspace lists as empty, got: {slash_body}"
+    );
+
+    let leaked = router
+        .clone()
+        .oneshot(bearer_get_with_token(
+            "/api/webchat/v2/fs/content?mount=workspace&path=report.csv",
+            USER_B_TOKEN,
+        ))
+        .await
+        .expect("user B workspace read oneshot");
+    let status = leaked.status();
+    let body = String::from_utf8_lossy(&read_body_bytes(leaked).await).to_string();
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "user B must not read user A's workspace file; body={body}"
+    );
+    assert!(
+        !body.contains(CSV_BODY),
+        "user B response leaked user A's workspace file contents: {body}"
+    );
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
 }
 
 #[tokio::test]

@@ -1,9 +1,12 @@
 // arch-exempt: large_file, mechanical DiskFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_extensions::{
+    ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+    default_host_api_contract_registry,
+};
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::result_meta::FailureKind;
@@ -14,6 +17,7 @@ use ironclaw_host_api::{
     },
     decision::{Decision, Obligation, Obligations},
     dispatch::CredentialStageError,
+    host_port::default_host_port_catalog,
     ids::{
         AgentId, CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId, InvocationId,
         MissionId, PackageId, ProjectId, RunId, SecretHandle, TenantId, UserId, VendorId,
@@ -27,8 +31,7 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
     RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
-    RuntimeCredentialAccountResolver, RuntimeInvocation, default_host_api_contract_registry,
-    default_host_port_catalog,
+    RuntimeCredentialAccountResolver, RuntimeInvocation,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -42,8 +45,8 @@ use ironclaw_trust::{
     AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, TrustDecision,
 };
 use ironclaw_wasm::{
-    RecordingWasmHostHttp, WasmHostError, WasmHttpResponse, WitToolExecution, WitToolHost,
-    WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
+    PreparedWitTool, RecordingWasmHostHttp, WasmHostError, WasmHttpResponse, WitToolExecution,
+    WitToolHost, WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
 };
 use serde_json::json;
 
@@ -2228,7 +2231,7 @@ fn filesystem_with_slack_user_package() -> DiskFilesystem {
 fn slack_user_asset_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("crates/ironclaw_first_party_extensions/assets/slack")
+        .join("crates/extensions/packages/slack")
 }
 
 fn slack_policy() -> NetworkPolicy {
@@ -2244,7 +2247,7 @@ fn slack_policy() -> NetworkPolicy {
 }
 
 /// The read-only scopes the Slack read capabilities (e.g. slack.search_messages)
-/// request. Kept in lockstep with `assets/slack/manifest.toml`, where the
+/// request. Kept in lockstep with `crates/extensions/packages/slack/manifest.toml`, where the
 /// read-only tools request only read scopes and only send_message adds chat:write.
 fn slack_user_scopes() -> Vec<String> {
     [
@@ -2369,7 +2372,7 @@ fn filesystem_with_google_package(package_id: &str) -> DiskFilesystem {
 fn github_asset_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("crates/ironclaw_first_party_extensions/assets/github")
+        .join("crates/extensions/packages/github")
 }
 
 fn google_drive_asset_root() -> std::path::PathBuf {
@@ -2379,7 +2382,7 @@ fn google_drive_asset_root() -> std::path::PathBuf {
 fn google_asset_root(package_id: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("crates/ironclaw_first_party_extensions/assets")
+        .join("crates/extensions/packages")
         .join(package_id)
 }
 
@@ -2530,13 +2533,10 @@ fn execute_bundled_github_wasm(
     input: serde_json::Value,
     http: Arc<RecordingWasmHostHttp>,
 ) -> WitToolExecution {
-    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::default()).unwrap();
-    let wasm_bytes =
-        std::fs::read(github_wasm_path()).expect("first-party GitHub WASM must be built");
-    let prepared = runtime.prepare("github", &wasm_bytes).unwrap();
+    let (runtime, prepared) = bundled_github_runtime();
     runtime
         .execute(
-            &prepared,
+            prepared,
             WitToolHost::deny_all().with_http(http),
             WitToolRequest::new(input.to_string()).with_context(
                 json!({
@@ -2553,17 +2553,36 @@ fn execute_bundled_google_drive_wasm(
     context: Option<&str>,
     http: Arc<RecordingWasmHostHttp>,
 ) -> WitToolExecution {
-    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::default()).unwrap();
-    let wasm_bytes = std::fs::read(google_drive_wasm_path())
-        .expect("first-party Google Drive WASM must be built");
-    let prepared = runtime.prepare("google-drive", &wasm_bytes).unwrap();
+    let (runtime, prepared) = bundled_google_drive_runtime();
     let request = match context {
         Some(context) => WitToolRequest::new(input.to_string()).with_context(context.to_string()),
         None => WitToolRequest::new(input.to_string()),
     };
     runtime
-        .execute(&prepared, WitToolHost::deny_all().with_http(http), request)
+        .execute(prepared, WitToolHost::deny_all().with_http(http), request)
         .unwrap()
+}
+
+fn bundled_github_runtime() -> &'static (WitToolRuntime, PreparedWitTool) {
+    static BUNDLE: OnceLock<(WitToolRuntime, PreparedWitTool)> = OnceLock::new();
+    BUNDLE.get_or_init(|| {
+        let runtime = WitToolRuntime::new(WitToolRuntimeConfig::default()).unwrap();
+        let wasm_bytes =
+            std::fs::read(github_wasm_path()).expect("first-party GitHub WASM must be built");
+        let prepared = runtime.prepare("github", &wasm_bytes).unwrap();
+        (runtime, prepared)
+    })
+}
+
+fn bundled_google_drive_runtime() -> &'static (WitToolRuntime, PreparedWitTool) {
+    static BUNDLE: OnceLock<(WitToolRuntime, PreparedWitTool)> = OnceLock::new();
+    BUNDLE.get_or_init(|| {
+        let runtime = WitToolRuntime::new(WitToolRuntimeConfig::default()).unwrap();
+        let wasm_bytes = std::fs::read(google_drive_wasm_path())
+            .expect("first-party Google Drive WASM must be built");
+        let prepared = runtime.prepare("google-drive", &wasm_bytes).unwrap();
+        (runtime, prepared)
+    })
 }
 
 fn assert_single_wasm_request(

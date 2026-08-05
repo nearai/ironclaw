@@ -3,14 +3,78 @@
 
 The denominator is mechanical:
 
-* added lines come from ``git diff --unified=0 BASE...HEAD``;
+* added lines come from
+  ``git diff --unified=0 --diff-algorithm=histogram BASE...HEAD`` — the
+  algorithm is deliberate, not a default: myers re-anchors deletion-shaped
+  diffs and reports unchanged surviving text as added;
 * testable lines are the intersection with LLVM's ``DA`` records;
 * changed branch arms are LLVM ``BRDA`` records located on those added lines.
+
+One further subtraction is mechanical rather than reviewed: a changed line
+whose **pre-image was already uncovered at the base commit** is pre-existing
+debt, not debt this change introduced, and leaves the denominator. "Changed"
+here is textual, so a rename or a rustfmt re-wrap re-emits an untested line as
+new; measured on PR #7000, 135 of 137 flagged lines were exactly that. A line
+that is genuinely new, or that *was* covered at base and is uncovered now,
+still gates — the latter is the regression this gate exists to catch.
+
+How the base coverage is obtained at runtime
+--------------------------------------------
+CI already publishes the merged lcov of every run as the artifact
+``reborn-integration-coverage-merged`` (member
+``reborn-integration-merged.lcov``, 90-day retention). With
+``--fetch-base-coverage`` this gate resolves it for ``--base`` itself, using the
+``gh`` CLI and ``GITHUB_TOKEN``:
+
+1. ``GET /repos/{repo}/actions/workflows/reborn-tests.yml/runs?head_sha={base}&
+   status=completed`` — this workflow's completed runs for that exact commit,
+   newest first, deliberately **not** filtered by event, so a merge-queue run
+   counts when the ``push`` run for the same commit does not.
+
+   Availability is partial and that is expected. Measured over 30 consecutive
+   ``main`` commits, this lookup found coverage for **17**; every miss is a
+   commit whose ``push`` run was cancelled by the next merge landing
+   (``concurrency.cancel-in-progress`` keyed on ``github.ref``), so no run
+   reached the publishing job. The fallback below is therefore the ordinary
+   path roughly two times in five, not a rare edge — which is exactly why it
+   has to be the *strict* behaviour and has to announce itself. Raising
+   availability is a concurrency-key change in this workflow, not a change
+   here.
+2. ``GET /repos/{repo}/actions/runs/{id}/artifacts`` — first unexpired artifact
+   with that name. Run *conclusion* is not consulted, and does not need to be:
+   the publishing job (``coverage-report``) has no ``if: always()``, so GitHub
+   skips it unless every coverage lane it ``needs`` succeeded. A partially
+   executed lcov — the one input that could over-forgive, by reporting covered
+   lines as uncovered at base — therefore cannot be published at all. Verified
+   over 14 consecutive ``main`` runs: the artifact is present exactly when
+   ``coverage-report`` succeeded, and absent otherwise, independent of whether
+   the run as a whole failed.
+3. ``GET /repos/{repo}/actions/artifacts/{id}/zip`` — the member above.
+
+The job needs ``actions: read``. ``--base-lcov`` takes an already-downloaded
+file instead, which is what the self-tests and offline replays use.
+
+**Fail closed.** No run for that SHA, an expired or missing artifact, a network
+or auth failure, an unreadable zip, an lcov with no ``DA`` records — every one
+of them degrades to *current* behaviour: base coverage is not applied, every
+changed line counts, and the run says so in its output and in
+``base_coverage_status``. The subtraction can only ever remove lines the gate
+positively observed to be uncovered at base; it is never inferred from a
+failure. Silence is the failure mode this repository has been bitten by twice
+(#6963, #6946), so the unavailable path is loud, not quiet.
 
 An exact-line exemption is the only way to remove an otherwise-testable line
 or branch from the denominator. Exemptions are deliberately review-heavy:
 owner, reason, issue, review date, file, and explicit line numbers are
 required. Whole files and globs are not accepted.
+
+Which files count as Reborn production is resolved from the **crate inventory**
+(`scripts/ci/lib/crate_tree.py`), not from a `crates/ironclaw_*` path pattern.
+A pattern keyed to the flat tree shape matches nothing once crates move into
+family directories (`crates/<family>/ironclaw_*`,
+docs/reborn/target-architecture/PROPOSAL.md §5): the gate would then see zero
+changed production files, find nothing to enforce, and report success — the
+WS10 silent-dark failure mode (CHECKLIST.md, #6963).
 """
 
 from __future__ import annotations
@@ -18,21 +82,163 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime as dt
+import io
 import json
+import os
 import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 import tomllib
+import zipfile
 
-PRODUCTION_PATH = re.compile(r"^crates/ironclaw_[^/]+/src/.+\.rs$")
-HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
+from crate_tree import (  # noqa: E402
+    CrateTreeError,
+    crate_directories,
+    workspace_root_directories,
+)
+
+CRATES_ROOT = "crates"
+# A crate-relative Reborn production source: `src/` of the crate itself, at any
+# depth below it. Deliberately *not* anchored at the repo root — the crate's
+# position comes from the inventory, its identity from its own `Cargo.toml`.
+# This reproduces the old `^crates/ironclaw_[^/]+/src/.+\.rs$` exactly on the
+# flat tree, including its exclusions: `crates/ironclaw_safety/fuzz/src/main.rs`
+# is owned by `crates/ironclaw_safety` and its remainder is `fuzz/src/main.rs`,
+# which is not `src/…`, so it stays out of the denominator as before.
+CRATE_PRODUCTION_SOURCE = re.compile(r"^src/.+\.rs$")
+HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 RAW_STRING_START = re.compile(r'(?:b|c)?r(#{0,255})"')
 TEST_PATH_PARTS = {"/tests/", "/test_support/"}
+
+# The artifact CI publishes for every run, and the member inside it. Changing
+# either without changing `.github/workflows/reborn-tests.yml` makes base
+# coverage permanently unavailable — which fails closed (strict denominator),
+# never open.
+BASE_COVERAGE_ARTIFACT = "reborn-integration-coverage-merged"
+BASE_COVERAGE_MEMBER = "reborn-integration-merged.lcov"
+# Runs are looked up through the **workflow-scoped** endpoint. The unscoped
+# `/actions/runs?head_sha=` list is unusable here: a `main` commit carries ~54
+# runs (Claude review, canaries, benchmarks, …) and the coverage run is not on
+# its first page, so a paged scan silently finds nothing and the gate would
+# report base coverage permanently unavailable. `test_reborn_changed_coverage.py`
+# pins that this file still exists, so renaming the workflow trips a test
+# instead of turning the lookup quietly dark.
+BASE_COVERAGE_WORKFLOW = "reborn-tests.yml"
+# Newest first; past the first handful only re-runs of the same commit remain.
+BASE_COVERAGE_RUN_SCAN = 20
+GH_API_TIMEOUT_SECONDS = 60
+GH_DOWNLOAD_TIMEOUT_SECONDS = 300
+# How many excluded lines are rendered into the job summary. Only the rendering
+# is capped — `preexisting_uncovered` in the JSON report is always complete, and
+# that artifact is the audit record.
+PREEXISTING_PRINT_LIMIT = 200
 
 
 class GateError(RuntimeError):
     pass
+
+
+class BaseCoverageUnavailable(RuntimeError):
+    """Base coverage could not be obtained; the gate must count every line.
+
+    Deliberately *not* a `GateError`: every raise site is a reason to fall back
+    to the strict denominator, never a reason to skip measuring.
+    """
+
+
+class ProductionPaths:
+    """Inventory-backed "is this a Reborn production source?" predicate.
+
+    Built once per run from where `Cargo.toml` files actually are, so it is
+    independent of how deeply crates sit under `crates/`.
+    """
+
+    def __init__(self, repo_root: pathlib.Path) -> None:
+        try:
+            # Outermost-wins, and empty/short inventories raise rather than
+            # returning a short list. That raise is this gate's "it measured
+            # something" assertion: every path verdict below flows from this
+            # inventory, so a broken tree cannot read as "nothing changed".
+            self._crate_directories = crate_directories(repo_root)
+            # Separate workspace roots under `crates/` (the `wasm-src/` guest
+            # components, `ironclaw_silk_decoder`). Nothing here compiles them,
+            # so no line inside one can ever be covered — but they are also not
+            # "the inventory and the tree disagree", which is what
+            # `reject_unattributable` is for. Enumerated once, beside the
+            # inventory, so both answers come from the same walk.
+            self._workspace_roots = workspace_root_directories(repo_root)
+        except CrateTreeError as error:
+            raise GateError(
+                f"crate discovery failed, so no changed line can be attributed: {error}"
+            ) from error
+
+    def owner(self, path: str) -> str | None:
+        """The crate directory owning ``path``, or ``None`` if no crate does."""
+
+        for directory in self._crate_directories:
+            if path.startswith(f"{directory}/"):
+                return directory
+        return None
+
+    def is_production(self, path: str) -> bool:
+        owner = self.owner(path)
+        if owner is None:
+            return False
+        return CRATE_PRODUCTION_SOURCE.fullmatch(path[len(owner) + 1 :]) is not None
+
+    def reject_unattributable(self, path: str) -> None:
+        """Refuse a `crates/` Rust file that belongs to no discovered crate.
+
+        Falling through to "not production" is how a moved tree goes quiet: the
+        path is real, the change is real, and the gate declines to measure it.
+        Same fail-closed rule `scripts/ci/classify-test-scope.sh` gained in
+        #6946 for unattributable `crates/` paths.
+        """
+
+        if not path.startswith(f"{CRATES_ROOT}/") or not path.endswith(".rs"):
+            return
+        if self.owner(path) is not None:
+            return
+        # Excluded by construction, not unattributable: a separate cargo
+        # workspace under `crates/` is never built or covered here, so "no
+        # crate owns it" is the correct and complete answer.
+        if any(path.startswith(f"{root}/") for root in self._workspace_roots):
+            return
+        raise GateError(
+            f"changed Rust file under {CRATES_ROOT}/ belongs to no discovered crate: "
+            f"{path}. Refusing to treat it as 'not production' — an unattributable "
+            "path means the crate inventory and the tree disagree "
+            "(docs/reborn/target-architecture/CHECKLIST.md WS10)."
+        )
+
+    def diff_pathspecs(self) -> list[str]:
+        """The pathspec for the production diff: the whole crates root.
+
+        Deliberately NOT per-crate `<crate>/src/**` any more. Rename detection
+        needs both sides of a rename inside the same `git diff` invocation, and
+        a pathspec built from the *current* inventory cannot name the source of
+        a file whose crate DIRECTORY moved — `crates/ironclaw_memory_native/`
+        is not in the inventory once the crate lives at
+        `crates/extensions/packages/memory-native/`. `-M` then had nothing to
+        pair against and every surviving line of a moved file landed in the
+        denominator: measured on the WS2 package colocation, **33,026 added
+        production lines** across 95 files, none of them an actual edit.
+
+        That is the same defect `-M` was added for in PR #7005, one level up —
+        there it was a file moving within a crate, here it is the crate itself
+        moving — and it fails in the expensive direction, because the changed-
+        line coverage floor then demands coverage for a pure `git mv`.
+
+        Widening costs nothing in precision: `parse_diff` classifies each
+        destination path with `is_production()` and drops everything else, so
+        the denominator is unchanged for every non-move diff. It only makes the
+        rename pairing possible.
+        """
+
+        return [CRATES_ROOT]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -98,7 +304,9 @@ def positive_ints(value: object, field: str) -> frozenset[int]:
     return frozenset(value)
 
 
-def load_manifest(path: pathlib.Path, repo_root: pathlib.Path) -> tuple[dict, list[Exemption]]:
+def load_manifest(
+    path: pathlib.Path, repo_root: pathlib.Path, production: ProductionPaths
+) -> tuple[dict, list[Exemption]]:
     if not path.is_file():
         raise GateError(f"changed-coverage exemption manifest not found: {path}")
     with path.open("rb") as handle:
@@ -134,7 +342,7 @@ def load_manifest(path: pathlib.Path, repo_root: pathlib.Path) -> tuple[dict, li
                 f"exemption #{index + 1} has missing={sorted(missing)} unknown={sorted(unknown)}"
             )
         path_value = entry["path"]
-        if not isinstance(path_value, str) or not PRODUCTION_PATH.fullmatch(path_value):
+        if not isinstance(path_value, str) or not production.is_production(path_value):
             raise GateError(
                 f"exemption #{index + 1} path must name one Reborn production .rs file"
             )
@@ -182,37 +390,114 @@ def load_manifest(path: pathlib.Path, repo_root: pathlib.Path) -> tuple[dict, li
     return policy, exemptions
 
 
-def parse_diff(text: str) -> dict[str, set[int]]:
+@dataclasses.dataclass
+class DiffChanges:
+    """Added lines, plus where each one came from.
+
+    ``preimage`` maps ``(new path, new line)`` to the ``(old path, old line)``
+    the hunk replaced. A key is absent whenever the line is a pure addition —
+    no pre-image exists, so nothing about it can be inherited from base.
+    """
+
+    added: dict[str, set[int]]
+    preimage: dict[tuple[str, int], tuple[str, int]]
+
+
+def pair_hunk(
+    preimage: dict[tuple[str, int], tuple[str, int]],
+    new_path: str | None,
+    old_path: str | None,
+    added_lines: list[int],
+    removed_lines: list[int],
+) -> None:
+    """Pair a hunk's added lines with the lines they replaced, by position.
+
+    ``--unified=0`` emits no context inside a hunk, so a hunk is exactly "these
+    old lines became these new lines". The i-th added line replaced the i-th
+    removed line:
+
+    * **Modified line** — equal counts. Every new line has a pre-image, exactly.
+      This is the rename and the rustfmt re-wrap-in-place case.
+    * **Grown region** — more added than removed, e.g. one line re-wrapped into
+      two by a longer type name. The leading added lines inherit the removed
+      lines they replaced; the surplus tail has **no** pre-image and counts.
+      Pairing from the start (not the end) is what makes a re-wrap inherit from
+      the line it re-wraps.
+    * **Pure addition** — nothing removed. No pre-image at all; every line
+      counts. This is the case the gate must never forgive.
+
+    The number of lines a hunk can excuse is therefore bounded by how much old
+    code it actually replaced, and each one still has to be observed uncovered
+    at base before anything is subtracted.
+    """
+
+    if new_path is None or old_path is None:
+        return
+    for index, new_line in enumerate(added_lines):
+        if index >= len(removed_lines):
+            break
+        preimage[(new_path, new_line)] = (old_path, removed_lines[index])
+
+
+def parse_diff(text: str, production: ProductionPaths) -> DiffChanges:
     added: dict[str, set[int]] = {}
+    preimage: dict[tuple[str, int], tuple[str, int]] = {}
     current: str | None = None
+    old_path: str | None = None
     new_line: int | None = None
+    old_line: int | None = None
+    hunk_added: list[int] = []
+    hunk_removed: list[int] = []
     for raw in text.splitlines():
         if raw.startswith("diff --git "):
+            pair_hunk(preimage, current, old_path, hunk_added, hunk_removed)
+            hunk_added, hunk_removed = [], []
             current = None
+            old_path = None
             new_line = None
+            old_line = None
+        elif new_line is None and raw.startswith("--- "):
+            # Only reachable in the extended header (`new_line is None`), so a
+            # removed body line whose text begins `-- ` cannot be mistaken for
+            # it. `--- /dev/null` means a created file: no pre-image path, so
+            # every one of its lines counts.
+            candidate = raw[4:]
+            old_path = candidate[2:] if candidate.startswith("a/") else None
         elif new_line is None and raw.startswith("+++ b/"):
             candidate = raw[6:]
-            current = candidate if PRODUCTION_PATH.fullmatch(candidate) else None
+            production.reject_unattributable(candidate)
+            current = candidate if production.is_production(candidate) else None
             if current is not None:
                 added.setdefault(current, set())
             new_line = None
         elif raw.startswith("@@ "):
+            pair_hunk(preimage, current, old_path, hunk_added, hunk_removed)
+            hunk_added, hunk_removed = [], []
             match = HUNK.match(raw)
             if current is not None and match is None:
                 raise GateError(f"malformed diff hunk header: {raw}")
-            new_line = int(match.group(1)) if match and current is not None else None
-        elif new_line is not None and current is not None:
+            if match and current is not None:
+                old_line = int(match.group(1))
+                new_line = int(match.group(3))
+            else:
+                old_line = None
+                new_line = None
+        elif new_line is not None and old_line is not None and current is not None:
             marker = raw[:1]
             if marker == "+":
                 added[current].add(new_line)
+                hunk_added.append(new_line)
                 new_line += 1
             elif marker == "-":
-                continue
+                hunk_removed.append(old_line)
+                old_line += 1
             elif marker == " ":
                 new_line += 1
+                old_line += 1
             elif raw != r"\ No newline at end of file":
                 raise GateError(f"malformed diff hunk line: {raw}")
-    return added
+    pair_hunk(preimage, current, old_path, hunk_added, hunk_removed)
+    return DiffChanges(added=added, preimage=preimage)
 
 
 def test_only_path(path: str) -> bool:
@@ -340,17 +625,55 @@ def rust_lexical_structure(source: str) -> tuple[list[str], list[int]]:
 
 def mechanically_uninstrumentable_lines(source: str) -> set[int]:
     """Return Rust scaffolding spans that LLVM cannot execute."""
-    lexical_lines, _brace_deltas = rust_lexical_structure(source)
+    lexical_lines, brace_deltas = rust_lexical_structure(source)
     uninstrumentable: set[int] = set()
     attribute_depth = 0
     in_use = False
+    in_const = False
+    # Enum bodies are pure declaration: variants (unit, tuple, or struct
+    # shaped) and their fields carry no LLVM coverage region, and even a
+    # discriminant initializer is const-evaluated. One unclassified variant
+    # line is enough to defeat the `candidate_lines <= uninstrumentable_lines`
+    # escape and read a declaration-only file as "absent from coverage" — the
+    # same single-line failure mode the inner-attribute fix above this one
+    # documents. Tracked by brace depth so multi-line struct variants and
+    # `where`-claused headers classify whole.
+    depth = 0
+    enum_body_floor: int | None = None
+    enum_header_pending = False
     for line_number, line in enumerate(lexical_lines, start=1):
         stripped = line.strip()
+        pre_depth = depth
+        depth += brace_deltas[line_number - 1]
+        if enum_body_floor is not None:
+            uninstrumentable.add(line_number)
+            if depth < enum_body_floor:
+                enum_body_floor = None
+            continue
+        if enum_header_pending:
+            uninstrumentable.add(line_number)
+            if depth > pre_depth:
+                enum_body_floor = pre_depth + 1
+                enum_header_pending = False
+            continue
+        if re.match(r"^(?:pub(?:\([^)]*\))?\s+)?enum\s+[A-Za-z_]\w*", stripped):
+            uninstrumentable.add(line_number)
+            if depth > pre_depth:
+                enum_body_floor = pre_depth + 1
+            else:
+                enum_header_pending = True
+            continue
         if attribute_depth:
             uninstrumentable.add(line_number)
             attribute_depth += stripped.count("[") - stripped.count("]")
             continue
-        if stripped.startswith("#["):
+        # Outer (`#[...]`) and INNER (`#![...]`) attributes alike. The inner
+        # form was missing, and it is the one every crate root carries:
+        # `#![forbid(unsafe_code)]` on its own kept a moved `lib.rs` of pure
+        # `mod`/`pub use` declarations in the "absent from coverage" bucket,
+        # because one unclassified line is enough to defeat the
+        # `candidate_lines <= uninstrumentable_lines` escape.
+        if stripped.startswith("#[") or stripped.startswith("#!["):
             uninstrumentable.add(line_number)
             attribute_depth = stripped.count("[") - stripped.count("]")
             continue
@@ -362,6 +685,25 @@ def mechanically_uninstrumentable_lines(source: str) -> set[int]:
         if re.match(r"^(?:pub(?:\([^)]*\))?\s+)?use\b", stripped):
             uninstrumentable.add(line_number)
             in_use = ";" not in stripped
+            continue
+        # A `const`/`static` item is evaluated at compile time and carries no
+        # LLVM coverage region — an `include_str!`/`include_bytes!` initializer
+        # least of all. Spans to the terminating `;` exactly like `use`, so a
+        # multi-line initializer is covered too. Without this, repointing an
+        # asset path (the whole content of a package move) leaves a file whose
+        # only changed lines are const declarations, which reads as
+        # "contributed no instrumented lines" and fails closed.
+        if in_const:
+            uninstrumentable.add(line_number)
+            if ";" in stripped:
+                in_const = False
+            continue
+        if re.match(
+            r"^(?:pub(?:\([^)]*\))?\s+)?(?:const|static)\s+(?:mut\s+)?[A-Z_][A-Z0-9_]*\s*:",
+            stripped,
+        ):
+            uninstrumentable.add(line_number)
+            in_const = ";" not in stripped
             continue
         if re.fullmatch(
             r"(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?mod\s+[A-Za-z_]\w*\s*;",
@@ -418,16 +760,74 @@ def cfg_test_only_lines(path: pathlib.Path) -> set[int]:
     return excluded
 
 
-def git_diff(repo_root: pathlib.Path, base: str, head: str) -> str:
+def screen_unattributable(
+    repo_root: pathlib.Path, base: str, head: str, production: ProductionPaths
+) -> None:
+    """Refuse unattributable `crates/` Rust changes BEFORE the diff is narrowed.
+
+    `git_diff` narrows to per-crate `src/` pathspecs, so a Rust file under
+    `crates/` that belongs to no discovered crate is filtered out of the diff
+    text entirely and `parse_diff`'s `reject_unattributable` never sees it. The
+    assertion existed but could not fire in the mode CI actually runs
+    (`--base/--head`); only the `--diff-file` path reached it, because that
+    input is not narrowed. Screening the unfiltered changed-file list first is
+    what makes the rule reachable in both modes.
+
+    That gap is the same shape as the bug this whole sweep is about: a
+    fail-closed check that cannot fail is not a check
+    (docs/reborn/target-architecture/CHECKLIST.md WS10, #6963).
+    """
+
+    result = subprocess.run(
+        [
+            "git",
+            "diff",
+            "--name-only",
+            "--diff-filter=AMR",
+            f"{base}...{head}",
+            "--",
+            f"{CRATES_ROOT}/",
+        ],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise GateError(f"git diff failed: {result.stderr.strip()}")
+    for path in result.stdout.splitlines():
+        production.reject_unattributable(path.strip())
+
+
+def git_diff(
+    repo_root: pathlib.Path, base: str, head: str, production: ProductionPaths
+) -> str:
+    screen_unattributable(repo_root, base, head, production)
     command = [
         "git",
         "diff",
         "--unified=0",
+        # Rename detection, pinned rather than inherited. `diff.renames` is on
+        # by default but is repo-configurable; with it off a rename reads as a
+        # whole new file and every surviving line lands in the denominator
+        # (PR #7005). Copy detection is deliberately *not* here — see
+        # `git_preimage_diff`.
+        "-M",
+        # Myers (git's default) anchors greedily: deleting a large block near the
+        # top of a file makes it re-emit the unchanged tail as additions rather
+        # than context, manufacturing "changed" lines this gate would then demand
+        # coverage for. Histogram matches the surviving text and reports only what
+        # actually changed. Deletion- and move-shaped diffs are the common case in
+        # the restructure workstreams, so this is load-bearing, not cosmetic.
+        "--diff-algorithm=histogram",
         "--diff-filter=AMR",
         f"{base}...{head}",
         "--",
-        "crates/ironclaw_*/src/**/*.rs",
-        "crates/ironclaw_*/src/*.rs",
+        # One pair of pathspecs per discovered crate rather than one glob over
+        # crate names: a `crates/ironclaw_*/src/…` glob selects nothing once a
+        # crate sits at `crates/<family>/ironclaw_*`, and `git diff` reports an
+        # empty diff — indistinguishable from "no production change".
+        *production.diff_pathspecs(),
     ]
     result = subprocess.run(
         command, cwd=repo_root, text=True, capture_output=True, check=False
@@ -435,6 +835,216 @@ def git_diff(repo_root: pathlib.Path, base: str, head: str) -> str:
     if result.returncode != 0:
         raise GateError(f"git diff failed: {result.stderr.strip()}")
     return result.stdout
+
+
+def git_preimage_diff(
+    repo_root: pathlib.Path, base: str, head: str, production: ProductionPaths
+) -> str:
+    """A second diff, `-M -C`, read **only** for pre-image line mapping.
+
+    Copy detection has to be kept off the denominator diff: `-C` turns the
+    lines a new file copied from a modified sibling into context, and a line
+    that never enters the denominator can never be reported. That is a silent
+    subtraction — precisely what this change is meant to make impossible.
+    Running it as a separate pass keeps `git_diff`'s added-line set intact
+    while still letting a copied line inherit its source's base coverage, via
+    the audited `pre-existing uncovered` list like every other exclusion.
+    `--diff-filter` gains `C` for the same reason: with `-C` on, a copy is
+    reported as `C`, and filtering it out would lose the pre-image entirely.
+    """
+
+    command = [
+        "git",
+        "diff",
+        "--unified=0",
+        "-M",
+        "-C",
+        "--diff-algorithm=histogram",
+        "--diff-filter=AMRC",
+        f"{base}...{head}",
+        "--",
+        *production.diff_pathspecs(),
+    ]
+    result = subprocess.run(
+        command, cwd=repo_root, text=True, capture_output=True, check=False
+    )
+    if result.returncode != 0:
+        raise GateError(f"git diff failed: {result.stderr.strip()}")
+    return result.stdout
+
+
+def gh_api(arguments: list[str], *, timeout: int, binary: bool = False):
+    """Run `gh api …`, raising `BaseCoverageUnavailable` on any problem."""
+
+    try:
+        result = subprocess.run(
+            ["gh", "api", *arguments],
+            capture_output=True,
+            text=not binary,
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise BaseCoverageUnavailable(f"gh api {arguments[0]} failed: {error}") from error
+    if result.returncode != 0:
+        detail = (
+            result.stderr.decode("utf-8", "replace") if binary else result.stderr
+        )
+        raise BaseCoverageUnavailable(
+            f"gh api {arguments[0]} exited {result.returncode}: "
+            f"{' '.join(detail.split())[:200]}"
+        )
+    if binary:
+        return result.stdout
+    try:
+        return json.loads(result.stdout or "null")
+    except json.JSONDecodeError as error:
+        raise BaseCoverageUnavailable(f"gh api {arguments[0]} returned non-JSON") from error
+
+
+def download_base_coverage(repo: str, base: str, destination: pathlib.Path) -> str:
+    """Write the base commit's merged lcov to `destination`; return provenance.
+
+    Raises `BaseCoverageUnavailable` — never `GateError` — so that every
+    failure here lands on the strict-denominator fallback.
+    """
+
+    # Responses are filtered here rather than with `gh --jq`: a typo in a jq
+    # expression would make every lookup fail, which fails *closed* and so
+    # would never show up as a red gate — it would just quietly stop
+    # subtracting forever. In Python the filtering is ordinary code the
+    # self-tests drive against recorded API payloads.
+    runs_payload = gh_api(
+        [
+            f"repos/{repo}/actions/workflows/{BASE_COVERAGE_WORKFLOW}/runs"
+            f"?head_sha={base}&status=completed&per_page={BASE_COVERAGE_RUN_SCAN}"
+        ],
+        timeout=GH_API_TIMEOUT_SECONDS,
+    )
+    runs = [
+        run
+        for run in (runs_payload or {}).get("workflow_runs") or []
+        if run.get("id") is not None
+    ]
+    if not runs:
+        raise BaseCoverageUnavailable(
+            f"no completed {BASE_COVERAGE_WORKFLOW} run exists for base commit "
+            f"{base[:10]}"
+        )
+    checked: list[str] = []
+    for run in runs:
+        artifacts_payload = gh_api(
+            [f"repos/{repo}/actions/runs/{run['id']}/artifacts?per_page=100"],
+            timeout=GH_API_TIMEOUT_SECONDS,
+        )
+        live = [
+            artifact
+            for artifact in (artifacts_payload or {}).get("artifacts") or []
+            if artifact.get("name") == BASE_COVERAGE_ARTIFACT
+            and not artifact.get("expired")
+            and artifact.get("id") is not None
+        ]
+        if not live:
+            checked.append(str(run["id"]))
+            continue
+        blob = gh_api(
+            [f"repos/{repo}/actions/artifacts/{live[0]['id']}/zip"],
+            timeout=GH_DOWNLOAD_TIMEOUT_SECONDS,
+            binary=True,
+        )
+        try:
+            with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+                payload = archive.read(BASE_COVERAGE_MEMBER)
+        except (zipfile.BadZipFile, KeyError, OSError) as error:
+            raise BaseCoverageUnavailable(
+                f"artifact {live[0]['id']} of run {run['id']} is unreadable: {error}"
+            ) from error
+        destination.write_bytes(payload)
+        return f"{repo} run {run['id']} ({run.get('event', '?')}) @ {base[:10]}"
+    raise BaseCoverageUnavailable(
+        f"no unexpired '{BASE_COVERAGE_ARTIFACT}' artifact on any of the "
+        f"{len(checked)} completed run(s) for base commit {base[:10]}"
+    )
+
+
+def load_base_coverage(
+    lcov: pathlib.Path, repo_root: pathlib.Path, provenance: str
+) -> tuple[Coverage, str]:
+    """Parse a base lcov, refusing one that measured nothing."""
+
+    try:
+        coverage = parse_lcov(lcov, repo_root)
+    except (GateError, OSError, UnicodeDecodeError) as error:
+        raise BaseCoverageUnavailable(f"base lcov is unusable: {error}") from error
+    if not any(coverage.lines.values()):
+        raise BaseCoverageUnavailable(
+            f"base lcov from {provenance} contains no DA records"
+        )
+    return coverage, provenance
+
+
+def resolve_base_coverage(
+    args: argparse.Namespace, repo_root: pathlib.Path, workspace: pathlib.Path
+) -> tuple[Coverage | None, str]:
+    """Return `(base coverage, human-readable status)`.
+
+    `None` means "not applied": every changed line stays in the denominator,
+    exactly as before this gate learned about base coverage.
+    """
+
+    if args.base_lcov is None and not args.fetch_base_coverage:
+        return None, (
+            "not requested (pass --base-lcov or --fetch-base-coverage to subtract "
+            "lines that were already uncovered at base)"
+        )
+    try:
+        if args.base_lcov is not None:
+            if not args.base_lcov.is_file():
+                raise BaseCoverageUnavailable(f"--base-lcov not found: {args.base_lcov}")
+            coverage, provenance = load_base_coverage(
+                args.base_lcov, repo_root, f"--base-lcov {args.base_lcov}"
+            )
+        else:
+            if not args.base:
+                raise BaseCoverageUnavailable("--fetch-base-coverage requires --base")
+            repo = args.github_repo or os.environ.get("GITHUB_REPOSITORY", "")
+            if not repo:
+                raise BaseCoverageUnavailable(
+                    "--fetch-base-coverage needs --github-repo or $GITHUB_REPOSITORY"
+                )
+            downloaded = workspace / "base-coverage.lcov"
+            provenance = download_base_coverage(repo, args.base, downloaded)
+            coverage, provenance = load_base_coverage(downloaded, repo_root, provenance)
+    except BaseCoverageUnavailable as error:
+        return None, str(error)
+    return coverage, provenance
+
+
+def preexisting_uncovered_origin(
+    preimage: dict[tuple[str, int], tuple[str, int]],
+    base_coverage: Coverage,
+    path: str,
+    line: int,
+) -> tuple[str, int] | None:
+    """Where this line was already uncovered at base, or `None`.
+
+    `None` — the line counts — for all three ways the answer is not a
+    positive observation of pre-existing debt:
+
+    * no pre-image: the line is genuinely new;
+    * the pre-image carries no `DA` record at base: it was not instrumented
+      there, so "uncovered at base" was never observed;
+    * the pre-image was **covered** at base: this is the regression the gate
+      exists to catch, and it must gate.
+    """
+
+    origin = preimage.get((path, line))
+    if origin is None:
+        return None
+    hits = base_coverage.lines.get(origin[0], {}).get(origin[1])
+    if hits is None or hits > 0:
+        return None
+    return origin
 
 
 def percent(hit: int, total: int) -> float:
@@ -455,30 +1065,61 @@ def write_json_report(path: pathlib.Path | None, report: dict[str, object]) -> N
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--lcov", required=True, type=pathlib.Path)
+    parser.add_argument("--lcov", type=pathlib.Path)
     parser.add_argument("--manifest", required=True, type=pathlib.Path)
+    parser.add_argument(
+        "--validate-manifest-only",
+        action="store_true",
+        help="validate policy and exemptions without requiring coverage inputs",
+    )
     parser.add_argument("--base")
     parser.add_argument("--head")
     parser.add_argument("--diff-file", type=pathlib.Path)
     parser.add_argument("--repo-root", type=pathlib.Path, default=pathlib.Path.cwd())
     parser.add_argument("--json", type=pathlib.Path)
+    parser.add_argument(
+        "--base-lcov",
+        type=pathlib.Path,
+        help="already-downloaded merged lcov for --base; lines uncovered there "
+        "are pre-existing debt and leave the denominator",
+    )
+    parser.add_argument(
+        "--fetch-base-coverage",
+        action="store_true",
+        help=f"resolve --base's '{BASE_COVERAGE_ARTIFACT}' artifact via `gh`; "
+        "any failure falls back to counting every changed line",
+    )
+    parser.add_argument("--github-repo", default=None)
     args = parser.parse_args()
     try:
+        repo_root = args.repo_root.resolve()
+        production = ProductionPaths(repo_root)
+        policy, exemptions = load_manifest(args.manifest, repo_root, production)
+        if args.validate_manifest_only:
+            print(
+                "changed coverage manifest valid: "
+                f"{len(exemptions)} exemptions, "
+                f"line floor {policy['line_percent']}%"
+            )
+            return 0
         if args.diff_file and (args.base or args.head):
             raise GateError("--diff-file cannot be combined with --base/--head")
         if not args.diff_file and (not args.base or not args.head):
             raise GateError("provide --diff-file or both --base and --head")
-        repo_root = args.repo_root.resolve()
-        policy, exemptions = load_manifest(args.manifest, repo_root)
+        if args.base_lcov is not None and args.fetch_base_coverage:
+            raise GateError("--base-lcov cannot be combined with --fetch-base-coverage")
+        if args.lcov is None:
+            raise GateError("--lcov is required unless --validate-manifest-only is used")
         coverage = parse_lcov(args.lcov, repo_root)
         diff_text = (
             args.diff_file.read_text(encoding="utf-8")
             if args.diff_file
-            else git_diff(repo_root, args.base, args.head)
+            else git_diff(repo_root, args.base, args.head, production)
         )
+        diff = parse_diff(diff_text, production)
         changed = {
             path: lines
-            for path, lines in parse_diff(diff_text).items()
+            for path, lines in diff.added.items()
             if not test_only_path(path)
         }
         if not coverage.saw_branch_records:
@@ -489,11 +1130,39 @@ def main() -> int:
             changed[path] -= cfg_test_only_lines(repo_root / path)
             if not changed[path]:
                 del changed[path]
+
+        with tempfile.TemporaryDirectory() as workspace:
+            base_coverage, base_status = resolve_base_coverage(
+                args, repo_root, pathlib.Path(workspace)
+            )
+        preimage: dict[tuple[str, int], tuple[str, int]] = {}
+        if base_coverage is not None:
+            # `-C` only ever *shrinks* a diff's added set, so it is read from a
+            # second pass rather than being allowed near `git_diff`'s
+            # denominator. In `--diff-file` mode the caller supplied the only
+            # diff there is, so its own pairings are the pre-image map.
+            preimage = (
+                diff.preimage
+                if args.diff_file
+                else parse_diff(
+                    git_preimage_diff(repo_root, args.base, args.head, production),
+                    production,
+                ).preimage
+            )
+            print(f"Base coverage: applied from {base_status}")
+        else:
+            print(
+                "Base coverage: NOT APPLIED — "
+                f"{base_status}. Falling back to the strict denominator: every "
+                "changed line counts, including lines that were already "
+                "uncovered before this change."
+            )
+
         if not changed:
             write_json_report(
                 args.json,
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "threshold_percent": float(policy["line_percent"]),
                     "coverage_percent": 100.0,
                     "covered_lines": 0,
@@ -506,6 +1175,10 @@ def main() -> int:
                     "missing_files": [],
                     "uncovered": [],
                     "uncovered_branches": [],
+                    "base_coverage_applied": base_coverage is not None,
+                    "base_coverage_status": base_status,
+                    "preexisting_uncovered_excluded": 0,
+                    "preexisting_uncovered": [],
                     "passed": True,
                 },
             )
@@ -523,6 +1196,7 @@ def main() -> int:
         uncovered_branches: list[str] = []
         uninstrumented_files: list[str] = []
         empty_denominator_files: list[str] = []
+        preexisting_uncovered: list[str] = []
         for path, added_lines in sorted(changed.items()):
             uninstrumentable_lines = mechanically_uninstrumentable_lines(
                 (repo_root / path).read_text(encoding="utf-8")
@@ -532,10 +1206,35 @@ def main() -> int:
             }
             instrumented = coverage.lines.get(path)
             if not instrumented:
+                # Deliberately evaluated on the *pre-subtraction* set: this is
+                # an instrumentation-presence assertion, not a debt question,
+                # and a file missing from coverage must stay loud even when
+                # every line it changed was uncovered at base.
                 if candidate_lines and candidate_lines <= uninstrumentable_lines:
                     continue
                 uninstrumented_files.append(path)
                 continue
+            if base_coverage is not None:
+                # Only a line that is uncovered *now* can be pre-existing debt.
+                # Subtracting a line that has since become covered would strip a
+                # hit from the numerator and punish adding the missing test.
+                inherited: dict[int, tuple[str, int]] = {}
+                for line in sorted(candidate_lines & set(instrumented)):
+                    if instrumented[line] > 0:
+                        continue
+                    origin = preexisting_uncovered_origin(
+                        preimage, base_coverage, path, line
+                    )
+                    if origin is None:
+                        continue
+                    inherited[line] = origin
+                    preexisting_uncovered.append(
+                        f"{path}:{line} (uncovered at base as {origin[0]}:{origin[1]})"
+                    )
+                # Subtracted from `candidate_lines`, not from `measured_lines`,
+                # so the empty-denominator assertion below sees a consistent
+                # set and cannot fire on lines this rule legitimately removed.
+                candidate_lines -= set(inherited)
             measured_lines = candidate_lines & set(instrumented)
             first_instrumented = min(instrumented)
             last_instrumented = max(instrumented)
@@ -574,6 +1273,25 @@ def main() -> int:
         else:
             line_pct = percent(line_hit, line_total)
         branch_pct = 100.0 if branch_total == 0 else percent(branch_hit, branch_total)
+        # Printed before the percentages, and always with the individual lines:
+        # a subtraction a reviewer cannot audit is how a gate becomes a rubber
+        # stamp, so the count alone is not enough.
+        print(
+            "Pre-existing uncovered lines excluded from the denominator: "
+            f"{len(preexisting_uncovered)}"
+        )
+        if preexisting_uncovered:
+            shown = preexisting_uncovered[:PREEXISTING_PRINT_LIMIT]
+            print("\n".join(f"  {item}" for item in shown))
+            if len(preexisting_uncovered) > len(shown):
+                # The step summary has a size cap; the machine report does not,
+                # and it always carries every entry. Truncate the rendering,
+                # never the record.
+                print(
+                    f"  … and {len(preexisting_uncovered) - len(shown)} more; the "
+                    "complete list is in reborn-changed-coverage.json "
+                    "(preexisting_uncovered)"
+                )
         print(f"Changed line coverage: {line_pct:.2f}% ({line_hit}/{line_total})")
         print(f"Changed branch coverage: {branch_pct:.2f}% ({branch_hit}/{branch_total})")
         failures: list[str] = []
@@ -604,7 +1322,7 @@ def main() -> int:
         write_json_report(
             args.json,
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "threshold_percent": float(policy["line_percent"]),
                 "coverage_percent": round(line_pct, 2),
                 "covered_lines": line_hit,
@@ -617,6 +1335,10 @@ def main() -> int:
                 "missing_files": uninstrumented_files,
                 "uncovered": uncovered_lines,
                 "uncovered_branches": uncovered_branches,
+                "base_coverage_applied": base_coverage is not None,
+                "base_coverage_status": base_status,
+                "preexisting_uncovered_excluded": len(preexisting_uncovered),
+                "preexisting_uncovered": preexisting_uncovered,
                 "passed": not failures,
             },
         )

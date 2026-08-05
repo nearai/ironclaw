@@ -29,35 +29,35 @@ use ironclaw_loop_host::{
 };
 use ironclaw_product::{OutboundPreferencesProductService, ProjectService};
 
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputRef,
+    LoopCapabilityPort, LoopHostMilestoneSink, LoopRunContext,
+    MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
+    ModelVisibleToolObservation, ObservationTrust, ProviderToolCall, ToolObservationDetail,
+    ToolObservationStatus, resolution,
+};
 use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
     CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, SessionThreadService,
     TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadMessageId, ThreadScope,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-use ironclaw_turns::{
-    ExternalToolCatalog, LoopResultRef,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputRef,
-        LoopCapabilityPort, LoopHostMilestoneSink, LoopRunContext,
-        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
-        ModelVisibleToolObservation, ObservationTrust, ProviderToolCall, ToolObservationDetail,
-        ToolObservationStatus, resolution,
-    },
-};
+use ironclaw_turns::{ExternalToolCatalog, LoopResultRef};
 
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::capability_authorization::{StoreApprovalSettingsProvider, effects_require_approval};
 use crate::factory::RebornRuntimeStores;
-use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::runtime::ComposedSelectableSkillContextSource;
-use crate::runtime_mounts::scoped_skill_management_mount_view;
+use crate::runtime_mounts::{WorkspaceMountPolicy, scoped_skill_management_mount_view};
+use ironclaw_approvals::ApprovalSettingsProvider;
 use ironclaw_product::projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
 
 mod outbound_delivery;
 mod refreshing_capability_port;
 #[cfg(test)]
 mod shell_tests;
+#[cfg(test)]
+mod workspace_scoping_tests;
 
 #[cfg(test)]
 pub(crate) use crate::outbound::{
@@ -214,7 +214,9 @@ struct RefreshingLoopCapabilityPortFactory {
     runtime: Arc<dyn HostRuntime>,
     fallback_user_id: UserId,
     policy: Arc<BuiltinCapabilityPolicy>,
-    workspace_mounts: MountView,
+    /// Resolved per run, not once per runtime: under a per-caller policy the
+    /// `mounts = "workspace"` grants must point at the caller's own subtree.
+    workspace_mounts: WorkspaceMountPolicy,
     memory_mounts: MountView,
     system_extensions_lifecycle_mounts: MountView,
     extension_surface_source: ExtensionCapabilitySurfaceSource,
@@ -248,17 +250,21 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        let skill_mounts = scoped_skill_management_mount_view(&resource_scope_for_run(
-            run_context,
-            &self.fallback_user_id,
-        ))
-        .map_err(host_api_agent_loop_error)?;
+        let resource_scope = resource_scope_for_run(run_context, &self.fallback_user_id);
+        let skill_mounts = scoped_skill_management_mount_view(&resource_scope)
+            .map_err(host_api_agent_loop_error)?;
+        // Same scope the skill mounts key off, so a run's workspace grants and
+        // its skill mounts can never resolve to different callers.
+        let workspace_mounts = self
+            .workspace_mounts
+            .capability_grant_view(&resource_scope)
+            .map_err(host_api_agent_loop_error)?;
         create_refreshing_capability_port(RefreshingCapabilityPortConfig {
             runtime: Arc::clone(&self.runtime),
             run_context: run_context.clone(),
             fallback_user_id: self.fallback_user_id.clone(),
             policy: Arc::clone(&self.policy),
-            workspace_mounts: self.workspace_mounts.clone(),
+            workspace_mounts,
             skill_mounts,
             memory_mounts: self.memory_mounts.clone(),
             system_extensions_lifecycle_mounts: self.system_extensions_lifecycle_mounts.clone(),

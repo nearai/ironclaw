@@ -10,23 +10,30 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: regression-check-${{ github.event.pull_request.number }}
+  # A COMMENTED review is skipped below and must not cancel the ordinary PR
+  # run that is still producing its enforcement result.
+  group: regression-check-${{ github.event.pull_request.number }}-${{ github.event_name }}-${{ github.event.review.state == 'commented' && 'commented' || 'enforcing' }}
   cancel-in-progress: true
 
 jobs:
   regression-test:
     name: Regression test enforcement
+    # COMMENTED reviews do not alter approval state. Review bots can emit many
+    # of them in one burst, so rerunning the same gate for each comment only
+    # consumes queued workers. Submitted approvals/change requests and
+    # dismissed reviews still rerun the enforcement check.
+    if: github.event_name != 'pull_request_review' || github.event.review.state != 'commented'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout PR head for diffing
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Checkout trusted regression gate
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: gate

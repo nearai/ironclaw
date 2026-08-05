@@ -18,7 +18,7 @@ use ironclaw_extension_host::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, FirstPartyHandlerRegistrar,
     FirstPartyRegistrarContext, ProductAuthProviderRuntimePorts,
 };
-use ironclaw_first_party_extensions::{
+use ironclaw_extension_support::{
     GOOGLE_PROVIDER_ID, GsuiteCapabilitySpec, GsuiteCredentialDispatchReason,
     GsuiteCredentialStageError, GsuiteCredentialStageRequest, GsuiteCredentialStager,
     GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor, GsuitePackageSpec,
@@ -285,12 +285,13 @@ impl RuntimeCredentialAccountVisibilityPolicy for GsuiteRuntimeCredentialAccount
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_first_party_extensions::GMAIL_LIST_MESSAGES_CAPABILITY_ID;
-    use ironclaw_reborn_composition::{
+    use ironclaw_auth::{
         AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId, CredentialAccountLabel,
-        CredentialAccountStatus, CredentialOwnership, RuntimeDispatchErrorKind, Timestamp,
-        host_api::{InvocationId, ResourceScope, UserId},
+        CredentialAccountStatus, CredentialOwnership, Timestamp,
     };
+    use ironclaw_extension_support::GMAIL_LIST_MESSAGES_CAPABILITY_ID;
+    use ironclaw_host_api::dispatch::RuntimeDispatchErrorKind;
+    use ironclaw_reborn_composition::host_api::{InvocationId, ResourceScope, UserId};
 
     use super::*;
 

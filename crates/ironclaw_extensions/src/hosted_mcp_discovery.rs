@@ -1,33 +1,15 @@
+use ironclaw_extension_contracts::hosted_mcp::HostedMcpDiscoveredTool;
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_host_api::{
     capability::{CapabilityDescriptor, EffectKind, PermissionMode},
     capability_profile::CapabilityProfileSchemaRef,
     ids::CapabilityId,
     runtime::RuntimeKind,
 };
-use serde_json::Value;
 
 use crate::{
-    CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage, ExtensionRuntime,
-    ManifestSource,
+    CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage, ManifestSource,
 };
-
-/// MCP tool descriptor discovered from a hosted provider and converted by the
-/// extension domain into a dynamic capability.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HostedMcpDiscoveredTool {
-    pub name: String,
-    pub description: String,
-    pub input_schema: Value,
-    pub annotations: HostedMcpDiscoveredToolAnnotations,
-}
-
-/// Advisory MCP tool behavior hints returned by `tools/list`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct HostedMcpDiscoveredToolAnnotations {
-    pub destructive_hint: bool,
-    pub side_effects_hint: bool,
-    pub read_only_hint: bool,
-}
 
 pub fn is_hosted_http_mcp_package(package: &ExtensionPackage) -> bool {
     hosted_http_mcp_url(package).is_some()
@@ -72,16 +54,34 @@ pub fn package_with_discovered_hosted_mcp_tools(
         })
         .collect();
 
-    ExtensionPackage::from_host_bundled_manifest_with_inline_dynamic_schemas(
-        manifest,
-        package.root.clone(),
-        package.manifest_digest(),
-        capabilities,
-    )
+    match package.manifest.source {
+        ManifestSource::HostBundled => {
+            ExtensionPackage::from_host_bundled_manifest_with_inline_dynamic_schemas(
+                manifest,
+                package
+                    .materialized_root()
+                    .map_err(|error| invalid_hosted_mcp_manifest(error.to_string()))?
+                    .clone(),
+                package.manifest_digest(),
+                capabilities,
+            )
+        }
+        ManifestSource::UserRegistered => ExtensionPackage::from_virtual_manifest(
+            manifest,
+            package.manifest_digest(),
+            capabilities,
+        ),
+        _ => Err(invalid_hosted_mcp_manifest(
+            "hosted MCP discovery requires bundled or user-registered provenance".to_string(),
+        )),
+    }
 }
 
 fn hosted_http_mcp_url(package: &ExtensionPackage) -> Option<&str> {
-    if package.manifest.source != ManifestSource::HostBundled {
+    if !matches!(
+        package.manifest.source,
+        ManifestSource::HostBundled | ManifestSource::UserRegistered
+    ) {
         return None;
     }
     let ExtensionRuntime::Mcp {
@@ -107,7 +107,6 @@ fn valid_hosted_mcp_url(url: &str) -> bool {
         && parsed.username().is_empty()
         && parsed.password().is_none()
         && parsed.host_str().is_some()
-        && parsed.query().is_none()
         && parsed.fragment().is_none()
 }
 
@@ -237,6 +236,7 @@ fn invalid_hosted_mcp_manifest(reason: String) -> ExtensionError {
 mod tests {
     use super::*;
     use crate::{ExtensionManifest, HostPortCatalog, ManifestSource};
+    use ironclaw_extension_contracts::hosted_mcp::HostedMcpDiscoveredToolAnnotations;
     use ironclaw_host_api::{capability::EffectKind, path::VirtualPath, runtime::RuntimeKind};
 
     const NOTION_MANIFEST: &str = r#"

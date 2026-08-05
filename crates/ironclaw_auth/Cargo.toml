@@ -23,7 +23,7 @@ test-support = []
 
 [dependencies]
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 deadpool-postgres = "0.14"
 futures = "0.3"
@@ -32,13 +32,20 @@ ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
+# The product-facing auth ports declared in `channel_connection.rs` and
+# `product_prompt.rs` error with `ProductSurfaceError` and carry
+# `ChannelConnectionRequirement` / `BlockedAuthPromptRequest`: their callers are
+# product surfaces. `ironclaw_product_contracts` is the neutral product-tier
+# contract crate and sits in the `contracts` layer, so this is a downward edge
+# like `host_api` — never a dependency on `ironclaw_product` itself. Same shape
+# and same rationale as `ironclaw_attachments`' landing/read ports.
+ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version = "0.1.0" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
-ironclaw_turns = { path = "../ironclaw_turns" }
 # Compile-time Mozilla Public Suffix List: DCR issuer/resource origin binding
 # needs real eTLD+1 resolution (naive label-splitting treats every `*.co.uk`
 # as one registrable domain — the PR #6116 security-high finding). Static data
 # baked into the binary; no runtime list fetch or I/O.
-psl = "2"
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -50,10 +57,6 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "
 tokio-util = "0.7"
 tracing = "0.1"
 url = "2"
-# Used by the v1-only `loopback_oauth` callback transport to decode OAuth
-# callback query parameters. Carried over with the W2.1 fold of the retired
-# `ironclaw_oauth` crate into this crate.
-urlencoding = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]

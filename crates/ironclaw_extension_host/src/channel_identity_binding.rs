@@ -31,14 +31,14 @@ use ironclaw_auth::{
     OAuthProviderIdentityBindingRollback, OAuthProviderIdentityCheck,
     OAuthProviderIdentityCheckFuture, ProviderIdentityHookFactory,
 };
+use ironclaw_extension_contracts::channel_identity::{
+    ChannelConnectionScopeSource, ChannelIdentityOverride, ChannelIdentityPostBind,
+    ChannelIdentityPostBindFactory,
+};
 use ironclaw_extension_host::{
     ChannelConfigService, channel_config_connection_scope_source, discover_channel_extensions,
 };
 use ironclaw_host_api::{
-    channel_identity::{
-        ChannelConnectionScopeSource, ChannelIdentityOverride, ChannelIdentityPostBind,
-        ChannelIdentityPostBindFactory,
-    },
     ids::{ExtensionId, TenantId, UserId},
     user_identity::{
         RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
@@ -396,16 +396,15 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
+    use ironclaw_extension_contracts::channel_identity::ChannelConnectionScope;
     use ironclaw_extension_host::handle_declares_claim;
     use ironclaw_extensions::{
         ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
         ExtensionInstallationStorePort as _, ExtensionManifestRecord, ExtensionManifestRef,
         ManifestSource,
     };
-    use ironclaw_host_api::{
-        channel_identity::ChannelConnectionScope, ids::InvocationId,
-        product_adapter::AdapterInstallationId, resource::ResourceScope,
-    };
+    use ironclaw_host_api::product_adapter::AdapterInstallationId;
+    use ironclaw_host_api::{ids::InvocationId, resource::ResourceScope};
 
     use super::*;
     use ironclaw_extension_host::product_extension_host_api_contract_registry;
@@ -496,7 +495,7 @@ app_id = "/app_id"
         let record = ExtensionManifestRecord::from_toml(
             CHANNEL_AUTH_FIXTURE_MANIFEST,
             ManifestSource::HostBundled,
-            &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
+            &ironclaw_host_api::host_port::default_host_port_catalog().expect("catalog"),
             None,
             &product_extension_host_api_contract_registry().expect("contracts"),
             None,

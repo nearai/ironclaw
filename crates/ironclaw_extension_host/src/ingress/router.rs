@@ -15,16 +15,14 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_extension_contracts::channel::{ChannelIngressDescriptor, ChannelIngressMethod};
+use ironclaw_extension_contracts::channel_adapter::{ChannelAdapter, NormalizedInboundMessage};
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelError, InboundBatchFragment, InboundOutcome, VerifiedInbound,
+};
+use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use ironclaw_extensions::ResolvedExtensionManifest;
-use ironclaw_host_api::{
-    channel::{ChannelIngressDescriptor, ChannelIngressMethod},
-    ids::SecretHandle,
-    tool_adapter::RestrictedEgress,
-};
-use ironclaw_product::{
-    ChannelAdapter, ChannelError, InboundBatchFragment, InboundOutcome, NormalizedInboundMessage,
-    VerifiedInbound,
-};
+use ironclaw_host_api::ids::SecretHandle;
 use sha2::{Digest, Sha256};
 
 use crate::active::ActiveExtension;
@@ -132,7 +130,7 @@ pub struct ReplyContextKey {
     pub extension_id: String,
     pub installation_id: String,
     /// The conversation fingerprint
-    /// ([`ironclaw_product::ExternalConversationRef::conversation_fingerprint`]).
+    /// ([`ironclaw_extension_contracts::external::ExternalConversationRef::conversation_fingerprint`]).
     pub conversation: String,
 }
 

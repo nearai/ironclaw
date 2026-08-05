@@ -1,10 +1,8 @@
 use async_trait::async_trait;
-use ironclaw_turns::{
-    LoopBlocked, LoopBlockedKind, LoopExit, LoopFailureKind,
-    run_profile::{
-        AgentLoopHostErrorKind, LoopDriverNoteKind, LoopModelCapabilityView, LoopModelRequest,
-        LoopProgressEvent, LoopRecoveryDisposition, LoopRecoveryStage, LoopSafeSummary,
-    },
+use ironclaw_loop_contracts::{
+    AgentLoopHostErrorKind, LoopBlocked, LoopBlockedKind, LoopDriverNoteKind, LoopExit,
+    LoopFailureKind, LoopModelCapabilityView, LoopModelRequest, LoopProgressEvent,
+    LoopRecoveryDisposition, LoopRecoveryStage, LoopSafeSummary,
 };
 use tracing::debug;
 
@@ -31,16 +29,16 @@ pub(crate) struct ModelStage;
 
 pub(super) struct ModelInput {
     pub(super) state: LoopExecutionState,
-    pub(super) messages: Vec<ironclaw_turns::run_profile::LoopModelMessage>,
-    pub(super) inline_messages: Vec<ironclaw_turns::run_profile::LoopInlineMessage>,
-    pub(super) surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion,
+    pub(super) messages: Vec<ironclaw_loop_contracts::LoopModelMessage>,
+    pub(super) inline_messages: Vec<ironclaw_loop_contracts::LoopInlineMessage>,
+    pub(super) surface_version: ironclaw_loop_contracts::CapabilitySurfaceVersion,
     pub(super) capability_view: LoopModelCapabilityView,
 }
 
 pub(super) enum ModelStep {
     Response(
         Box<LoopExecutionState>,
-        ironclaw_turns::run_profile::LoopModelResponse,
+        ironclaw_loop_contracts::LoopModelResponse,
     ),
     RetryIteration(Box<LoopExecutionState>),
     Exit(LoopExit),
@@ -118,7 +116,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
                     state.pending_model_retry_directive = None;
                     state.terminal_warning_state.mark_delivered();
                     match &response.output {
-                        ironclaw_turns::run_profile::ParentLoopOutput::AssistantReply(reply) => {
+                        ironclaw_loop_contracts::ParentLoopOutput::AssistantReply(reply) => {
                             debug!(
                                 iteration = state.iteration,
                                 response_kind = "assistant_reply",
@@ -126,7 +124,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                 "agent loop model response classified"
                             );
                         }
-                        ironclaw_turns::run_profile::ParentLoopOutput::CapabilityCalls(calls) => {
+                        ironclaw_loop_contracts::ParentLoopOutput::CapabilityCalls(calls) => {
                             debug!(
                                 iteration = state.iteration,
                                 response_kind = "capability_calls",
@@ -199,11 +197,11 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                         "model host error summary rejected; using fallback"
                                     );
                                     (
-                                    LoopSafeSummary::model_gateway_failed(),
-                                    Some(ironclaw_turns::run_profile::sanitize_model_visible_text(
-                                        raw_summary,
-                                    )),
-                                )
+                                        LoopSafeSummary::model_gateway_failed(),
+                                        Some(ironclaw_loop_contracts::sanitize_model_visible_text(
+                                            raw_summary,
+                                        )),
+                                    )
                                 }
                             };
                         let detail = error.detail.or(rejected_summary_detail);
@@ -407,7 +405,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
 async fn budget_approval_blocked_exit(
     ctx: StageContext<'_>,
     mut state: LoopExecutionState,
-    gate_ref: ironclaw_turns::LoopGateRef,
+    gate_ref: ironclaw_host_api::turn::LoopGateRef,
 ) -> Result<ModelStep, AgentLoopExecutorError> {
     state.last_gate = Some(gate_ref.clone());
     state = match CheckpointStage.cancel_if_requested(ctx, state).await? {

@@ -420,6 +420,133 @@ pub struct ResourceReceipt {
     pub actual: Option<ResourceUsage>,
 }
 
+/// Stable classification of a [`RuntimeResourceBudget`] failure.
+///
+/// This is the *denial vocabulary* a runtime lane may act on. It deliberately
+/// carries no account, limit, dimension, or threshold value: which account
+/// tripped and by how much is kernel budget authority, and a lane that could
+/// read it could also reason about other tenants' budgets. Same role as
+/// [`crate::http::RuntimeHttpEgressReasonCode`] plays for the egress port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeResourceErrorKind {
+    /// A hard budget cap was reached. Terminal — the work must not run.
+    LimitExceeded,
+    /// A pause threshold was crossed. Not a denial: the caller above the lane
+    /// must surface an approval gate and retry. Distinct from
+    /// [`Self::LimitExceeded`] because the two produce different user-facing
+    /// outcomes, and collapsing them would silently turn "ask the user" into
+    /// "refuse".
+    RequiresApproval,
+    /// The reservation id is already in use.
+    ReservationAlreadyExists,
+    /// The estimate is not a usable budget request (negative, non-finite, …).
+    InvalidEstimate,
+    /// A prepared reservation does not match the scope/estimate it is being
+    /// spent against. Lanes raise this themselves via
+    /// [`RuntimeResourceError::reservation_mismatch`] before any side effect.
+    ReservationMismatch,
+    /// No such reservation.
+    UnknownReservation,
+    /// The reservation was already reconciled or released.
+    ReservationClosed,
+    /// The budget authority could not read or write its durable state.
+    /// Callers must fail closed, exactly as for a denial.
+    Storage,
+}
+
+impl RuntimeResourceErrorKind {
+    /// Stable token safe to log or expose to runtime callers.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LimitExceeded => "limit_exceeded",
+            Self::RequiresApproval => "requires_approval",
+            Self::ReservationAlreadyExists => "reservation_already_exists",
+            Self::InvalidEstimate => "invalid_estimate",
+            Self::ReservationMismatch => "reservation_mismatch",
+            Self::UnknownReservation => "unknown_reservation",
+            Self::ReservationClosed => "reservation_closed",
+            Self::Storage => "storage",
+        }
+    }
+}
+
+/// Failure returned by [`RuntimeResourceBudget`].
+///
+/// Structurally narrower than the kernel governor's own error — a redaction
+/// boundary in the sense of `.claude/rules/type-placement.md` §3, kept manual
+/// so new budget-authority detail never auto-flows into a runtime lane. The
+/// rendered `reason` is the authority's own message, which lanes already
+/// forwarded verbatim as the model-visible cause; only the *structure* behind
+/// it stops at this boundary.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{reason}")]
+pub struct RuntimeResourceError {
+    kind: RuntimeResourceErrorKind,
+    reason: String,
+}
+
+impl RuntimeResourceError {
+    pub fn new(kind: RuntimeResourceErrorKind, reason: impl Into<String>) -> Self {
+        Self {
+            kind,
+            reason: reason.into(),
+        }
+    }
+
+    /// The lane-side mismatch check: a prepared reservation was handed to a
+    /// lane whose scope or estimate it does not cover. Raised by the lane
+    /// before any side effect starts, so the budget authority is never asked
+    /// to spend against the wrong hold.
+    pub fn reservation_mismatch(id: crate::ids::ResourceReservationId) -> Self {
+        Self::new(
+            RuntimeResourceErrorKind::ReservationMismatch,
+            format!("resource reservation {id} does not match requested scope or estimate"),
+        )
+    }
+
+    pub fn kind(&self) -> RuntimeResourceErrorKind {
+        self.kind
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
+/// The whole of what a runtime lane may do to a budget: open a reservation
+/// before side effects start, then close it exactly once — with actual usage
+/// on success, without usage on failure.
+///
+/// A dependency-inversion port (`.claude/rules/type-placement.md` §2):
+/// declared here in the contracts tier, implemented in the kernel over the
+/// `ResourceGovernor` budget authority. Lanes are given this and nothing else,
+/// so a lane cannot set limits, read account state, name an account, or hand
+/// out a reservation id of its own choosing — the authority surface stays in
+/// the kernel, where the accounting cascade and its denial policy live.
+pub trait RuntimeResourceBudget: Send + Sync {
+    /// Reserve estimated resources before costed or quota-limited work starts.
+    fn reserve(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+    ) -> Result<ResourceReservation, RuntimeResourceError>;
+
+    /// Close a reservation with actual usage, releasing the unused hold.
+    fn reconcile(
+        &self,
+        reservation_id: crate::ids::ResourceReservationId,
+        actual: ResourceUsage,
+    ) -> Result<ResourceReceipt, RuntimeResourceError>;
+
+    /// Close a reservation without usage, when work failed or was cancelled
+    /// before it could be reconciled.
+    fn release(
+        &self,
+        reservation_id: crate::ids::ResourceReservationId,
+    ) -> Result<ResourceReceipt, RuntimeResourceError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,6 +647,42 @@ mod tests {
     /// the tenant-shared secret subtree. It round-trips ONLY through
     /// `ResourceScope`'s user-id carve-out
     /// (`tenant_shared_managed_scope_swaps_user_for_sentinel_and_round_trips`).
+    /// The lane-raised mismatch is the one [`RuntimeResourceError`] a lane
+    /// constructs itself, and its rendered text reaches the model as the
+    /// dispatch cause. It must stay byte-identical to the budget authority's
+    /// own `ReservationMismatch` message that lanes forwarded before the port
+    /// existed, and it must classify as a mismatch — not as a denial.
+    #[test]
+    fn lane_raised_reservation_mismatch_keeps_the_authority_wording_and_kind() {
+        let id = crate::ids::ResourceReservationId::new();
+        let error = RuntimeResourceError::reservation_mismatch(id);
+        assert_eq!(error.kind(), RuntimeResourceErrorKind::ReservationMismatch);
+        assert_eq!(
+            error.to_string(),
+            format!("resource reservation {id} does not match requested scope or estimate")
+        );
+    }
+
+    /// The denial vocabulary is a stable log/wire token set. Every kind must
+    /// render distinctly, so a widened budget authority cannot quietly collapse
+    /// `requires_approval` into `limit_exceeded`.
+    #[test]
+    fn runtime_resource_error_kinds_have_distinct_stable_tokens() {
+        let kinds = [
+            RuntimeResourceErrorKind::LimitExceeded,
+            RuntimeResourceErrorKind::RequiresApproval,
+            RuntimeResourceErrorKind::ReservationAlreadyExists,
+            RuntimeResourceErrorKind::InvalidEstimate,
+            RuntimeResourceErrorKind::ReservationMismatch,
+            RuntimeResourceErrorKind::UnknownReservation,
+            RuntimeResourceErrorKind::ReservationClosed,
+            RuntimeResourceErrorKind::Storage,
+        ];
+        let tokens: std::collections::BTreeSet<&str> =
+            kinds.iter().map(|kind| kind.as_str()).collect();
+        assert_eq!(tokens.len(), kinds.len());
+    }
+
     #[test]
     fn tenant_shared_sentinel_is_rejected_for_bare_ids() {
         assert!(

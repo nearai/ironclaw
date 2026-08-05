@@ -1,13 +1,16 @@
 use std::path::{Path, PathBuf};
 
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_extensions::{
+    ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+    default_host_api_contract_registry,
+};
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     capability::EffectKind,
+    host_port::default_host_port_catalog,
     ids::{CapabilityId, ExtensionId, SecretHandle},
     path::VirtualPath,
 };
-use ironclaw_host_runtime::{default_host_api_contract_registry, default_host_port_catalog};
 
 type GithubSupportResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -73,7 +76,7 @@ pub fn extension_package() -> GithubSupportResult<ExtensionPackage> {
 }
 
 pub fn asset_root() -> PathBuf {
-    repo_root().join("crates/ironclaw_first_party_extensions/assets/github")
+    repo_root().join("crates/extensions/packages/github")
 }
 
 fn repo_root() -> &'static Path {

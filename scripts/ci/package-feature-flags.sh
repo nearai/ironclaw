@@ -37,7 +37,7 @@ fallback_feature_flags() {
 
 case "${package}" in
   ironclaw_product)
-    printf '%s\n' "--features test-support,host-auth-mint"
+    printf '%s\n' "--features test-support"
     ;;
   ironclaw_reborn_composition)
     # memory-mem0 turns on the (off-by-default) mem0 third-party memory provider
@@ -73,8 +73,7 @@ case "${package}" in
   ironclaw_reborn_config | \
   ironclaw_reborn_identity | \
   ironclaw_reborn_traces | \
-  ironclaw_telegram_extension | \
-  ironclaw_telegram_v2_adapter)
+  ironclaw_telegram_extension)
     # Already on the allowlist with no feature flags; keep them flag-free now
     # that the default branch derives fallback features for closure crates.
     ;;

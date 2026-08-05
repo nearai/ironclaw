@@ -32,7 +32,7 @@ function useExtensionsOauthSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${extensionActions}\n${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { extensionListItemIsConfigured, useOauthSetup, useSetupSubmit };`;
+  return `${extensionActions}\n${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { extensionListItemIsConfigured, useExtensionSetup, useOauthSetup, useSetupSubmit, useHostedMcpAuthSelection };`;
 }
 
 test("OAuth completion uses the canonical three-state lifecycle predicate", () => {
@@ -43,6 +43,25 @@ test("OAuth completion uses the canonical three-state lifecycle predicate", () =
   assert.equal(extensionListItemIsConfigured({ installation_state: "active" }), true);
   assert.equal(extensionListItemIsConfigured({ installation_state: "setup_needed" }), false);
   assert.equal(extensionListItemIsConfigured({}), false);
+});
+
+test("useExtensionSetup derives hosted MCP auth recovery from the typed setup blocker", () => {
+  const context = {
+    globalThis: {},
+    useQuery: () => ({
+      data: {
+        blockers: [
+          { kind: "setup", ref_id: "hosted_mcp_auth_selection_required" },
+        ],
+      },
+      isLoading: false,
+      error: null,
+    }),
+  };
+  vm.runInNewContext(useExtensionsOauthSourceForTest(), context);
+
+  const setup = context.globalThis.__testExports.useExtensionSetup({ id: "linear" });
+  assert.equal(setup.hostedMcpAuthSelectionRequired, true);
 });
 
 function loadLocalizedMutationHooks({ startExtensionOauth, submitExtensionSetup }) {
@@ -118,6 +137,92 @@ test("OAuth setup rejects an insecure authorization URL with translated copy", a
   await assert.rejects(
     mutationConfigs[0].mutationFn({ secret: null, popup: null }),
     { message: "localized:extensions.oauthInvalidAuthorizationUrl" },
+  );
+});
+
+test("hosted MCP auth selection submits one selection and refreshes setup state", async () => {
+  const invalidations = [];
+  const selections = [];
+  const mutationConfigs = [];
+  const saved = [];
+  let selectionResponse = { success: true };
+  const context = {
+    Error,
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: (initial) => ({ current: initial }),
+      useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
+    },
+    fetchExtensionRegistry: () => {},
+    fetchExtensionSetup: () => {},
+    fetchExtensions: () => {},
+    fetchOauthFlowStatus: () => Promise.resolve(null),
+    gatewayStatus: () => {},
+    globalThis: {},
+    installExtension: () => {},
+    removeExtension: () => {},
+    selectHostedMcpAuth: (packageRef, authSelection, options) => {
+      selections.push({ packageRef, authSelection, options });
+      return Promise.resolve(selectionResponse);
+    },
+    startExtensionOauth: () => {},
+    submitExtensionSetup: () => {},
+    useMutation: (config) => {
+      mutationConfigs.push(config);
+      return { isPending: false, mutate: () => {}, mutateAsync: () => {} };
+    },
+    useQuery: () => ({ data: {}, isLoading: false }),
+    useQueryClient: () => ({
+      invalidateQueries: ({ queryKey }) => invalidations.push(queryKey),
+    }),
+    useT: () => (key) => key,
+    window: { clearInterval: () => {}, setInterval: () => 1 },
+  };
+  vm.runInNewContext(useExtensionsOauthSourceForTest(), context);
+
+  context.globalThis.__testExports.useHostedMcpAuthSelection(
+    { kind: "extension", id: "linear" },
+    (result) => saved.push(result),
+  );
+  assert.equal(mutationConfigs.length, 1);
+
+  await mutationConfigs[0].mutationFn({
+    authSelection: { kind: "no_auth" },
+    clientActionId: "select-auth-action",
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(selections)), [
+    {
+      packageRef: { kind: "extension", id: "linear" },
+      authSelection: { kind: "no_auth" },
+      options: { clientActionId: "select-auth-action" },
+    },
+  ]);
+
+  const result = { success: true };
+  mutationConfigs[0].onSuccess(result);
+  assert.deepEqual(JSON.parse(JSON.stringify(invalidations)), [
+    ["extensions"],
+    ["extension-setup", "linear"],
+  ]);
+  assert.deepEqual(saved, [result]);
+
+  selectionResponse = {
+    success: true,
+    message: "Hosted MCP rejected unauthenticated access; choose OAuth or Bearer token.",
+    blockers: [
+      { kind: "setup", ref_id: "hosted_mcp_auth_selection_required" },
+    ],
+  };
+  await assert.rejects(
+    mutationConfigs[0].mutationFn({
+      authSelection: { kind: "no_auth" },
+      clientActionId: "select-no-auth-again",
+    }),
+    {
+      message: "Hosted MCP rejected unauthenticated access; choose OAuth or Bearer token.",
+    },
+    "a rejected no-auth choice remains in setup and surfaces the safe reason",
   );
 });
 

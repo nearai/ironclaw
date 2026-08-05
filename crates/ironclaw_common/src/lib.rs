@@ -1,26 +1,33 @@
-//! Shared types, paths, and platform helpers used across the IronClaw workspace.
+//! Domain-free cross-cutting primitives with persisted-compatibility
+//! guarantees, shared across the IronClaw workspace.
+//!
+//! Target-architecture contract: PROPOSAL §6.1.5. This crate owns `identity`,
+//! `pkce`, `hashing`, `paths`, `timezone`, `util`, `env_helpers`, and the
+//! `attachment` pair — and nothing that carries a domain. It has, and must
+//! keep, **no internal dependency**: every consumer sits above it, so a domain
+//! type here would invert the graph for the whole workspace.
+//!
+//! Three LLM-data modules survive the WS1.6 narrowing (`llm_costs`,
+//! `model_selection`, `provider_transcript`). Each is blocked from §6.1.5's
+//! assigned home by a *pinned rule*, not by preference — the measurements are
+//! in `AGENTS.md`. Do not add a fourth, and do not treat their presence as
+//! precedent for new domain data.
 #![warn(unreachable_pub)]
 
 mod attachment;
 pub mod attachment_format;
-mod automation;
 pub mod env_helpers;
-mod event;
 pub mod hashing;
 mod identity;
 pub mod llm_costs;
 pub mod model_selection;
 pub mod paths;
 pub mod pkce;
-mod platform;
 pub mod provider_transcript;
 mod timezone;
-#[allow(dead_code)] // Trust-boundary scaffolding for the Reborn architecture; not yet consumed.
-mod trust_boundary;
 mod util;
 
 pub use attachment::{AttachmentKind, AttachmentRef, IncomingAttachment, normalize_mime_type};
-pub use automation::{AutomationName, AutomationNameError, MAX_AUTOMATION_NAME_BYTES};
 // `attachment_format` is also a `pub mod`, but the registry query functions are
 // re-exported at the crate root because the whole attachment pipeline consumes
 // them as `ironclaw_common::is_supported_mime` / `kind_for_mime` / etc.
@@ -29,41 +36,10 @@ pub use attachment_format::{
     canonical_extension, extractor_for_mime, is_supported_mime, kind_for_mime, lookup,
     mime_for_extension,
 };
-pub use event::{
-    AppEvent, CodeExecutionFailureCategory, JobResultStatus, OnboardingStateDto, PlanStepDto,
-    SelfImprovementPhase, ToolDecisionDto,
-};
 pub use identity::{
     CredentialName, ExtensionName, ExternalThreadId, ExternalThreadIdError,
     MAX_MCP_SERVER_NAME_LEN, MAX_NAME_LEN, McpServerName,
 };
 pub use paths::ironclaw_base_dir;
-pub use platform::PlatformInfo;
 pub use timezone::{ValidTimezone, deserialize_option_lenient};
 pub use util::{truncate_for_preview, truncate_preview};
-
-/// Maximum worker agent loop iterations. Used by the orchestrator (server-side
-/// clamp in `create_job_inner`) and the worker runtime (`worker/job.rs`).
-/// A single source of truth prevents the two from drifting.
-pub const MAX_WORKER_ITERATIONS: u32 = 500;
-
-// ─── Reborn cost-based budget invariants ────────────────────────────────────
-//
-// These constants are the hard backstops behind the dollar-based budget
-// system. They guarantee that even a misconfigured per-thread limit cannot
-// let a runaway loop spend more than `HARD_CAP_BUDGET_USD` or run longer
-// than `HARD_CAP_WALL_CLOCK_SECS` / `HARD_CAP_ITERATIONS`. They are
-// invariants, not defaults: configuration that tries to exceed them must
-// fail validation at load time.
-
-/// Absolute per-thread wall-clock backstop (24h).
-pub const HARD_CAP_WALL_CLOCK_SECS: u64 = 86_400;
-
-/// Absolute per-thread iteration backstop. Catches infinite loops that
-/// somehow keep producing low-utilization steps under budget enforcement.
-pub const HARD_CAP_ITERATIONS: u32 = 10_000;
-
-/// Absolute per-thread USD ceiling. Represented as a string so callers
-/// can parse into their preferred Decimal type without forcing a
-/// workspace dep here.
-pub const HARD_CAP_BUDGET_USD: &str = "100.00";

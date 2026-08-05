@@ -1,6 +1,10 @@
 use super::*;
+use ironclaw_loop_contracts::{
+    LoopBlockedKind, LoopCancelledReasonKind, LoopCheckpointStateRef, LoopFailureKind,
+};
+
 use crate::{
-    BlockedReason, GateRef, SanitizedFailure, TurnCheckpointId, TurnStatus,
+    BlockedReason, LoopGateRef, SanitizedFailure, TurnCheckpointId, TurnGateRef, TurnStatus,
     runner::TurnRunnerOutcome,
 };
 use serde_json::json;
@@ -31,7 +35,7 @@ fn await_dependent_run_blocked_kind_maps_to_dependent_run_reason() {
     assert_eq!(
         reason,
         BlockedReason::AwaitDependentRun {
-            gate_ref: GateRef::new(gate_ref.as_str()).unwrap()
+            gate_ref: TurnGateRef::new(gate_ref.as_str()).unwrap()
         }
     );
     assert_eq!(reason.status(), TurnStatus::BlockedDependentRun);
@@ -340,7 +344,7 @@ fn validation_policy_requires_final_checkpoint_only_when_configured() {
 fn blocked_exit_maps_to_block_run_outcome_with_verified_checkpoint_and_gate_ref() {
     let checkpoint_id = TurnCheckpointId::new();
     let loop_gate_ref = loop_gate_ref("gate:approval-gate");
-    let gate_ref = GateRef::new(loop_gate_ref.as_str()).unwrap();
+    let gate_ref = TurnGateRef::new(loop_gate_ref.as_str()).unwrap();
     let state_ref = checkpoint_state_ref();
     let decision = LoopExit::Blocked(LoopBlocked {
         kind: LoopBlockedKind::Approval,
@@ -927,7 +931,7 @@ fn blocked_variants_map_to_correct_blocked_reason() {
     ] {
         let checkpoint_id = TurnCheckpointId::new();
         let lg = loop_gate_ref("gate:test-gate");
-        let gate_ref = GateRef::new(lg.as_str()).unwrap();
+        let gate_ref = TurnGateRef::new(lg.as_str()).unwrap();
         let state_ref = checkpoint_state_ref();
 
         let decision = LoopExit::Blocked(LoopBlocked {
@@ -950,6 +954,15 @@ fn blocked_variants_map_to_correct_blocked_reason() {
             LoopBlockedKind::Resource => BlockedReason::Resource { gate_ref },
             LoopBlockedKind::AwaitDependentRun => BlockedReason::AwaitDependentRun { gate_ref },
             LoopBlockedKind::ExternalTool => BlockedReason::ExternalTool { gate_ref },
+            // `LoopBlockedKind` is `#[non_exhaustive]` and now lives in
+            // `ironclaw_loop_contracts`, so this cross-crate match cannot be
+            // exhaustive. The exhaustiveness guard is
+            // `loop_exit::tests::blocked_kind_gate_correspondence_is_exhaustive`
+            // in that crate; this arm makes a missed variant loud here too.
+            other => panic!(
+                "unmapped LoopBlockedKind {other:?}: add it to this table and to the \
+                 exhaustiveness guard in ironclaw_loop_contracts::loop_exit"
+            ),
         };
 
         assert_eq!(decision.violation, None);
@@ -1004,10 +1017,12 @@ fn all_failure_kinds_produce_stable_sanitized_category_strings() {
         ),
     ];
 
-    // Exhaustiveness guard: adding a LoopFailureKind variant breaks this match
-    // (same-crate, so #[non_exhaustive] does not apply). When it fires, add a
-    // table row above AND extend this match with the new variant's expected
-    // category, keeping both in lockstep.
+    // Exhaustiveness guard: `LoopFailureKind` is `#[non_exhaustive]` and now
+    // lives in `ironclaw_loop_contracts`, so a cross-crate match cannot be
+    // exhaustive. The compiler-checked guard is
+    // `loop_exit::tests::failure_kind_category_strings_are_exhaustive` in that
+    // crate; adding a variant breaks it there. When it fires, add a table row
+    // above AND extend this match, keeping both in lockstep.
     let expected_by_guard = |kind: LoopFailureKind| match kind {
         LoopFailureKind::ModelError => "model_error",
         LoopFailureKind::ContextBuildFailed => "context_build_failed",
@@ -1022,6 +1037,10 @@ fn all_failure_kinds_produce_stable_sanitized_category_strings() {
         LoopFailureKind::NoProgressDetected => "no_progress_detected",
         LoopFailureKind::PolicyDenied => "policy_denied",
         LoopFailureKind::CompactionUnavailable => "compaction_unavailable",
+        other => panic!(
+            "unmapped LoopFailureKind {other:?}: add it to this table and to the \
+             exhaustiveness guard in ironclaw_loop_contracts::loop_exit"
+        ),
     };
     for (kind, expected_category) in variants {
         assert_eq!(

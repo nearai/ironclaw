@@ -1880,13 +1880,19 @@ fn config_set_google_client_id_writes_config_toml() {
     );
 }
 
-/// PR-C round-2 fix: `slack_remediation_text` used to embed its own
-/// trailing "run `service restart`" sentence on top of `print_apply_step`'s
-/// canonical line, double-printing the restart instruction. Pin the
-/// exactly-once invariant the same way the google.client_id test above
-/// does.
+/// `slack.enabled` was settable until the `[slack]` section was retired,
+/// and the value it wrote had no runtime reader — `config set` reported
+/// "saved" for a setting that did nothing. Pinned at the binary tier
+/// because that is where an operator following an old runbook meets it, and
+/// because the refusal happens before key classification, which an
+/// in-process `ConfigKey` fixture cannot reach.
+///
+/// (The "restart printed exactly once" invariant this test used to carry is
+/// not lost with it: `config_set_google_client_id_writes_config_toml` above
+/// asserts the same `matches("service restart").count() == 1` on a key that
+/// still exists.)
 #[test]
-fn config_set_slack_enabled_prints_restart_exactly_once() {
+fn config_set_retired_slack_key_is_refused_with_migration_guidance() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
 
@@ -1898,21 +1904,24 @@ fn config_set_slack_enabled_prints_restart_exactly_once() {
         .expect("ironclaw config set slack.enabled should run");
 
     assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "a retired key must be refused, not silently written; stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("slack.enabled: saved"), "stdout: {stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("slack.enabled"), "stderr: {stderr}");
+    assert!(stderr.contains("retired"), "stderr: {stderr}");
+    assert!(stderr.contains("/extensions"), "stderr: {stderr}");
     assert!(
-        stdout.contains("to apply: ironclaw service restart"),
-        "config set must never auto-restart; it must print the explicit apply step: {stdout}"
+        !stderr.contains("unknown config key"),
+        "a retired key must not be reported as a typo: {stderr}"
     );
-    assert_eq!(
-        stdout.matches("service restart").count(),
-        1,
-        "the restart instruction must appear exactly once (remediation text plus the \
-         apply-step line must not both print it): {stdout}"
+
+    let config_path = reborn_home.join("config.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap_or_default();
+    assert!(
+        !config.contains("[slack]"),
+        "a refused key must not write a `[slack]` section: {config}"
     );
 }
 
@@ -5038,10 +5047,12 @@ fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
         let store = ironclaw_reborn_composition::open_standalone_secret_store(&reborn_home)
             .await
             .expect("open standalone secret store");
-        ironclaw_operator::LlmKeyStore::new(store)
-            .put(&provider_id, ironclaw_secrets::SecretMaterial::from(key))
-            .await
-            .expect("seed provider key");
+        ironclaw_operator::LlmKeyStore::new(
+            ironclaw_reborn_composition::RuntimeOperatorSecretValueStore::shared(store),
+        )
+        .put(&provider_id, ironclaw_secrets::SecretMaterial::from(key))
+        .await
+        .expect("seed provider key");
     });
 }
 
@@ -6941,7 +6952,7 @@ api_key_env = "REBORN_TEST_UNSET_BC8F4D_KEY"
 }
 
 #[test]
-fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
+fn release_ci_publishes_reborn_and_regular_docker_without_legacy_or_dind_paths() {
     let root = workspace_root();
     let release_workflow =
         std::fs::read_to_string(root.join(".github/workflows/ironclaw-release.yml"))
@@ -7050,6 +7061,22 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
         "cargo-dist host must publish generated assets with generated title, notes, and prerelease state"
     );
 
+    let docker_job = release_job("docker-image");
+    assert!(
+        docker_job.contains("needs: host")
+            && docker_job.contains("needs.host.result == 'success'")
+            && docker_job.contains("permissions:\n      contents: read")
+            && docker_job.contains("packages: read")
+            && docker_job.contains("actions: write")
+            && docker_job.contains("uses: ./.github/workflows/docker.yml")
+            && docker_job.contains("release: true")
+            && docker_job.contains("trigger_dind: false")
+            && docker_job.contains("DOCKER_REGISTRY_TOKEN: ${{ secrets.DOCKER_REGISTRY_TOKEN }}")
+            && !docker_job.contains("secrets: inherit")
+            && !docker_job.contains("GH_RELEASES_MANAGER"),
+        "release CI must publish the regular Docker image only after the hosted release succeeds"
+    );
+
     let announce_job = release_job("announce");
     assert!(
         announce_job.contains("- plan")
@@ -7066,7 +7093,6 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
         "reborn-binary-compile",
         "publish-reborn-binaries",
         "build-wasm-extensions",
-        "docker-image",
         "update-registry-checksums",
     ] {
         assert!(
@@ -7075,15 +7101,50 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
         );
     }
     assert!(
-        !release_workflow.contains("uses: ./.github/workflows/docker.yml")
-            && !release_workflow.contains("ironclaw-legacy")
+        !release_workflow.contains("ironclaw-legacy")
             && !release_workflow.contains("ironclaw_legacy")
             && !release_workflow.contains("reborn-compile-"),
-        "the release workflow must consume only cargo-dist Reborn artifacts"
+        "the release workflow must consume only cargo-dist Reborn artifacts before Docker publishing"
+    );
+    let workflow_call_config = docker_workflow
+        .split_once("  workflow_call:\n")
+        .and_then(|(_, remainder)| {
+            remainder
+                .split_once("  workflow_dispatch:\n")
+                .map(|(section, _)| section)
+        })
+        .expect("Docker workflow should define workflow_call configuration");
+    let workflow_dispatch_config = docker_workflow
+        .split_once("  workflow_dispatch:\n")
+        .and_then(|(_, remainder)| {
+            remainder
+                .split_once("  schedule:\n")
+                .map(|(section, _)| section)
+        })
+        .expect("Docker workflow should define workflow_dispatch configuration");
+    assert!(
+        docker_workflow.contains("workflow_dispatch:")
+            && docker_workflow.contains("schedule:")
+            && docker_workflow.contains(r#"TAGS="${IMAGE_NAME}:${VERSION}""#)
+            && docker_workflow.contains(r#"TAGS="${TAGS},${IMAGE_NAME}:latest""#)
+            && docker_workflow.contains(r#"TAGS="${TAGS},${IMAGE_NAME}:${SHA}""#)
+            && docker_workflow.contains("SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}")
+            && workflow_call_config.contains(
+                "      trigger_dind:\n        description: \"Dispatch the optional ironclaw-dind image build\"\n        required: false\n        type: boolean\n        default: false"
+            )
+            && workflow_dispatch_config.contains(
+                "      trigger_dind:\n        description: \"Dispatch the optional ironclaw-dind image build\"\n        required: false\n        type: boolean\n        default: true"
+            ),
+        "the reusable Docker workflow must retain manual/staging entry points and release version/latest/SHA tags"
     );
     assert!(
-        docker_workflow.contains("workflow_dispatch:") && docker_workflow.contains("schedule:"),
-        "the independent Docker workflow must remain manually and periodically runnable"
+        docker_workflow.contains(
+            "if: (github.event_name == 'schedule' || inputs.trigger_dind) && steps.check.outputs.skip != 'true'"
+        ) && docker_workflow.contains(
+            "if: (github.event_name == 'schedule' || inputs.trigger_dind) && steps.app-token.outcome == 'success' && steps.check.outputs.skip != 'true'"
+        ) && !docker_workflow.contains("ironclaw-worker")
+            && !docker_workflow.contains("Dockerfile.worker"),
+        "release Docker publishing must not restore worker or dispatch ironclaw-dind"
     );
     assert!(
         workspace_manifest.contains("name = \"ironclaw_reborn_integration_tests\"")
@@ -7131,9 +7192,18 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
         wix_description, cli_description,
         "the checked-in WiX package description must match the Cargo package metadata"
     );
+    // Keyed to the crate NAME, not to `crates/<name>/`: the workflow's scope
+    // regex matches crate directories at any depth
+    // (`crates/([^/]+/)*ironclaw_reborn_cli/`) so it keeps working once crates
+    // move into family directories (#6963). A needle carrying the flat `crates/`
+    // prefix would stop finding this line the moment the regex was made
+    // depth-agnostic — and would then fail loudly here rather than silently, but
+    // only because this assertion exists. The authoritative pin on that regex,
+    // including the inventory cross-check that a named crate still exists, lives
+    // in `scripts/ci/ws12_workflow_contracts.py`.
     let reborn_cli_selector = code_style_workflow
         .lines()
-        .find(|line| line.contains("grep -Eq") && line.contains("crates/ironclaw_reborn_cli/"))
+        .find(|line| line.contains("grep -Eq") && line.contains("ironclaw_reborn_cli/"))
         .expect("code style workflow should classify Reborn CLI changes");
     assert!(
         reborn_cli_selector.contains(r"\.github/dist-build-setup\.yml$")

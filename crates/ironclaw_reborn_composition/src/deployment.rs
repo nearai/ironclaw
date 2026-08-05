@@ -32,6 +32,7 @@ use crate::readiness::{
     RebornReadinessDiagnostic, RebornReadinessDiagnosticReason, RebornReadinessDiagnosticStatus,
     RebornReadinessState,
 };
+use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
 
 impl RebornReadinessDiagnostic {
     pub fn disabled() -> Self {
@@ -230,6 +231,23 @@ pub struct DeploymentConfig {
     event_store_profile: RebornProfile,
     /// Whether this deployment reads hosted extension installation state.
     hosted_extension_installation_state: bool,
+    /// Whether the workspace mount is keyed per caller.
+    ///
+    /// The ONE decision every workspace write lane reads: capability grant
+    /// minting, approval lease terms, the WebUI attachment/upload handle, and
+    /// the channel-inbound attachment lander. `true` maps `/workspace` to
+    /// `/projects/workspace/tenants/{tenant}/users/{user}`, so a multi-user
+    /// deployment's agent writes land in the caller's own subtree -- the same
+    /// subtree the WebUI workspace browser reads. `false` keeps the ambient
+    /// shared view, including the raw host aliases local coding profiles
+    /// depend on.
+    ///
+    /// Profile-derived by default; the assembling host raises it through
+    /// [`crate::input::RebornHostBindings::with_workspace_scoped_per_caller`]
+    /// when its own wiring introduces callers the WebUI browser confines to a
+    /// subtree — a multi-user authenticator on a standalone-composed
+    /// deployment, for instance. Raise-only: a hosted profile stays scoped.
+    pub(crate) workspace_scoped_per_caller: bool,
     storage_shape: StorageShape,
     /// Runtime backends the build must provision (extension-runtime): a
     /// declarative requirement carried on the deployment rather than injected
@@ -262,7 +280,7 @@ pub struct DeploymentConfig {
     pub(crate) oauth_dcr_callback: Option<crate::input::OAuthDcrCallbackConfig>,
     pub(crate) nearai_mcp_bootstrap_config:
         Option<ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
-    pub(crate) account_setup_descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
+    pub(crate) account_setup_descriptors: Vec<ExtensionAccountSetupDescriptor>,
     pub(crate) first_party_bundles: Vec<ironclaw_extension_host::FirstPartyPackageBundle>,
 }
 
@@ -280,6 +298,7 @@ impl DeploymentConfig {
             },
             event_store_profile: RebornProfile::Standalone,
             hosted_extension_installation_state: false,
+            workspace_scoped_per_caller: true,
             storage_shape: StorageShape::None,
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
@@ -317,6 +336,7 @@ impl DeploymentConfig {
             },
             event_store_profile: RebornProfile::Standalone,
             hosted_extension_installation_state: false,
+            workspace_scoped_per_caller: false,
             storage_shape: StorageShape::LocalFilesystemRoot,
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
@@ -375,6 +395,7 @@ impl DeploymentConfig {
             },
             event_store_profile: RebornProfile::Standalone,
             hosted_extension_installation_state: true,
+            workspace_scoped_per_caller: true,
             storage_shape: StorageShape::HostedSingleTenantPool,
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
@@ -413,6 +434,7 @@ impl DeploymentConfig {
                 diagnostics: vec![RebornReadinessDiagnostic::hosted_single_tenant_volume()],
             },
             hosted_extension_installation_state: true,
+            workspace_scoped_per_caller: true,
             storage_shape: StorageShape::LocalFilesystemRoot,
             ..Self::hosted_single_tenant()
         }
@@ -435,6 +457,7 @@ impl DeploymentConfig {
             },
             event_store_profile: RebornProfile::Production,
             hosted_extension_installation_state: false,
+            workspace_scoped_per_caller: true,
             storage_shape: StorageShape::OperatorSupplied,
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
@@ -511,6 +534,17 @@ impl DeploymentConfig {
 
     pub(crate) fn uses_hosted_extension_installation_state(&self) -> bool {
         self.hosted_extension_installation_state
+    }
+
+    /// Whether workspace mounts are keyed per caller in this deployment.
+    ///
+    /// Single source of truth for the write lanes (capability grants, approval
+    /// lease terms, WebUI attachment handle, channel-inbound lander) and, via
+    /// [`crate::RebornCompositionProfile::workspace_scoped_per_caller`], for the
+    /// CLI's WebUI workspace-projection flag, so view and write policy cannot
+    /// drift.
+    pub fn workspace_scoped_per_caller(&self) -> bool {
+        self.workspace_scoped_per_caller
     }
 
     pub fn storage_shape(&self) -> StorageShape {

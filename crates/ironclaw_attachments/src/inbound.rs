@@ -227,7 +227,10 @@ fn extract_document_text(bytes: &[u8], mime: &str, filename: Option<&str>) -> Op
             // and referenced, the model just won't have its text. Log it so an
             // unsupported-format/corrupt-file case is observable (debug, not
             // warn: this runs in library context that may back the REPL/TUI).
-            tracing::debug!(mime, filename, %error, "document text extraction failed");
+            // `?error` (Debug), not `%error` (Display): the parser diagnostic
+            // is deliberately absent from `Display` and a log is exactly where
+            // it belongs. Nothing here reaches the model.
+            tracing::debug!(mime, filename, ?error, "document text extraction failed");
             None
         }
     }

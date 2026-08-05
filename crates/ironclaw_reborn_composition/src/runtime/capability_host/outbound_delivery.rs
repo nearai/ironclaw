@@ -14,26 +14,26 @@ use ironclaw_host_api::{
         ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId, GateRef, InvocationId,
         UserId,
     },
-    product_surface::{ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode},
     resolution::Resolution,
     resource::{ResourceEstimate, ResourceScope},
     result_meta::FailureKind,
     safe_summary::SafeSummary,
     scope::Principal,
 };
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume,
+    CapabilityDeniedReasonKind, CapabilityInputRef, CapabilityProgress, CapabilityResumeToken,
+    ConcurrencyHint, LoopRunContext, resolution,
+};
 use ironclaw_loop_host::{
     CapabilityResultWrite, DurablePersistence, SyntheticCapability, SyntheticCapabilityDescriptor,
     SyntheticCapabilityHandler, SyntheticCapabilityInvocation,
 };
 use ironclaw_product::{OutboundPreferencesProductService, RebornOutboundDeliveryTargetId};
-use ironclaw_turns::{
-    LoopGateRef,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume,
-        CapabilityDeniedReasonKind, CapabilityInputRef, CapabilityProgress, CapabilityResumeToken,
-        ConcurrencyHint, LoopRunContext, resolution,
-    },
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
 };
+use ironclaw_turns::LoopGateRef;
 
 use crate::outbound::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION,
@@ -44,7 +44,7 @@ use crate::outbound::{
     outbound_delivery_targets_list_input_schema, parse_outbound_delivery_target_set_input,
     parse_outbound_delivery_targets_list_input, set_outbound_delivery_target_for_model,
 };
-use crate::profile_approval_authorization::ApprovalSettingsProvider;
+use ironclaw_approvals::ApprovalSettingsProvider;
 // Synthetic outbound handler now also carries the host-private replay-payload
 // store it persists at its approval-gate raise and reconstitutes from on resume.
 // arch-exempt: too_many_args, outbound handler carries the replay-payload store (§5.3 Stage 2a-i), plan #6175
@@ -868,8 +868,8 @@ fn approval_lease_outcome(
 mod tests {
     use super::*;
     use crate::runtime::capability_host::assert_recoverable_failure;
-    use ironclaw_host_api::product_surface::ProductSurfaceErrorKind;
-    use ironclaw_turns::run_profile::LoopSafeSummary;
+    use ironclaw_loop_contracts::LoopSafeSummary;
+    use ironclaw_product_contracts::surface::ProductSurfaceErrorKind;
 
     fn service_error(code: ProductSurfaceErrorCode) -> ProductSurfaceError {
         ProductSurfaceError {

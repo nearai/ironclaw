@@ -47,6 +47,7 @@ function renderExtensionsPage(tab, extensionState = {}) {
   const removeCalls = [];
   function ConfirmDialog() {}
   function ConfigureModal() {}
+  function CustomMcpRegistrationModal() {}
   function RegistryTab() {}
   const translations = {
     "ext.catalog.loadErrorTitle": "Extension catalog unavailable",
@@ -62,6 +63,7 @@ function renderExtensionsPage(tab, extensionState = {}) {
     ChannelsTab() {},
     ConfirmDialog,
     ConfigureModal,
+    CustomMcpRegistrationModal,
     document: {
       activeElement: null,
       querySelectorAll: () => [],
@@ -113,6 +115,8 @@ function renderExtensionsPage(tab, extensionState = {}) {
       actionResult: null,
       clearResult: () => {},
       install: () => {},
+      registerCustomMcp: () => {},
+      isRegisteringCustomMcp: false,
       remove: (...args) => removeCalls.push(args),
       isRemoving: false,
       invalidate: () => {},
@@ -132,6 +136,7 @@ function renderExtensionsPage(tab, extensionState = {}) {
     render,
     CatalogErrorBanner: context.globalThis.__testExports.CatalogErrorBanner,
     ConfigureModal,
+    CustomMcpRegistrationModal,
     rendered: render(),
   };
 }
@@ -330,6 +335,34 @@ test("ExtensionsPage restores install focus to a registry-only installed card", 
     registryOnlyCard,
     "the installed registry card remains a programmatic focus fallback",
   );
+});
+
+test("custom MCP Done closes registration without opening configure", () => {
+  const harness = renderExtensionsPage("registry");
+  const [registration] = componentProps(
+    harness.rendered,
+    harness.CustomMcpRegistrationModal,
+  );
+
+  registration.onClose();
+
+  const rendered = harness.render();
+  const [updatedRegistration] = componentProps(
+    rendered,
+    harness.CustomMcpRegistrationModal,
+  );
+  assert.equal(updatedRegistration.open, false);
+  assert.equal(componentProps(rendered, harness.ConfigureModal).length, 0);
+});
+
+test("custom MCP registration does not expose a direct setup handoff", () => {
+  const harness = renderExtensionsPage("registry");
+  const [registration] = componentProps(
+    harness.rendered,
+    harness.CustomMcpRegistrationModal,
+  );
+  assert.equal(registration.onSetup, undefined);
+  assert.equal(componentProps(harness.rendered, harness.ConfigureModal).length, 0);
 });
 
 test("templateText includes text nested inside arrays", () => {

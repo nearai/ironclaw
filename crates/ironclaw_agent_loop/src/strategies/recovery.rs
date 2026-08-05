@@ -12,10 +12,8 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::result_meta::{FailureFate, FailureKind};
-use ironclaw_turns::{
-    LoopFailureKind, ModelInvalidOutputDetailReason,
-    run_profile::{LoopSafeSummary, ModelVisibleToolObservation},
-};
+use ironclaw_host_api::turn::ModelInvalidOutputDetailReason;
+use ironclaw_loop_contracts::{LoopFailureKind, LoopSafeSummary, ModelVisibleToolObservation};
 
 use crate::state::{
     LoopExecutionState, ModelErrorObservationClass, ModelErrorRecoveryObservation,
@@ -1086,16 +1084,16 @@ mod tests {
 
     mod default_recovery_strategy {
         use ironclaw_host_api::ids::{TenantId, ThreadId};
-        use ironclaw_turns::{
-            AgentLoopDriverDescriptor, ModelInvalidOutputDetailReason, RunProfileId,
-            RunProfileVersion, TurnId, TurnRunId, TurnScope,
-            run_profile::{
-                CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,
-                CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
-                LoopRunContext, ModelProfileId, RedactedRunProfileProvenance, ResolvedRunProfile,
-                ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
-                RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
-            },
+        use ironclaw_host_api::turn::{
+            ModelInvalidOutputDetailReason, RunProfileId, RunProfileVersion, TurnId, TurnRunId,
+            TurnScope,
+        };
+        use ironclaw_loop_contracts::{
+            AgentLoopDriverDescriptor, CancellationPolicy, CapabilitySurfaceProfileId,
+            CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
+            LoopRunContext, ModelProfileId, RedactedRunProfileProvenance, ResolvedRunProfile,
+            ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+            RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
         };
 
         use super::super::{
@@ -1109,7 +1107,7 @@ mod tests {
             RecoveryAttemptClass, RecoveryStrategyState,
         };
         use ironclaw_host_api::result_meta::{FailureFate, FailureKind};
-        use ironclaw_turns::LoopFailureKind;
+        use ironclaw_loop_contracts::LoopFailureKind;
 
         fn test_run_context() -> LoopRunContext {
             let scope = TurnScope::new(
@@ -1168,8 +1166,7 @@ mod tests {
                     max_model_calls: 32,
                     max_capability_invocations: 64,
                 },
-                personal_context_policy:
-                    ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
+                personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
                 runtime_constraints: RuntimeProfileConstraints {
                     allow_raw_runtime_backend_selection: false,
                     allow_broad_capability_surface: false,

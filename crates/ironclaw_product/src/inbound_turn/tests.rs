@@ -1,3 +1,4 @@
+use ironclaw_product_contracts::action::SourceBindingKey;
 use std::{
     collections::VecDeque,
     future::pending,
@@ -15,10 +16,14 @@ use crate::{
 };
 use async_trait::async_trait;
 use chrono::TimeZone;
-use ironclaw_host_api::{
-    ids::{AgentId, TenantId, ThreadId, UserId},
-    tool_adapter::{RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse},
+use ironclaw_extension_contracts::tool_adapter::{
+    RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
 };
+use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::turn::{
+    EventCursor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope, TurnStatus,
+};
+use ironclaw_loop_host::RejectingInputEnqueue;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
@@ -31,12 +36,9 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
-    RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion, SubmitTurnRequest,
-    SubmitTurnResponse, TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId,
-    TurnRunState, TurnScope, TurnStatus, TurnSurfaceType, events::EventCursor,
+    RetryTurnRequest, RetryTurnResponse, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator,
+    TurnError, TurnOriginKind, TurnRunState, TurnSurfaceType,
 };
-
-use crate::action::SourceBindingKey;
 
 use super::*;
 
@@ -280,7 +282,7 @@ async fn replay_submit_carries_direct_surface_type_and_adapter_id() {
     let thread_service = StubSessionThreadService;
 
     handoff
-        .submit_or_replay(&thread_service, &coordinator)
+        .submit_or_replay(&thread_service, &coordinator, &RejectingInputEnqueue)
         .await
         .expect("submit_or_replay succeeds");
 
@@ -546,7 +548,7 @@ async fn shared_user_message_records_channel_surface_type() {
     let thread_service = StubSessionThreadService;
 
     handoff
-        .submit_or_replay(&thread_service, &coordinator)
+        .submit_or_replay(&thread_service, &coordinator, &RejectingInputEnqueue)
         .await
         .expect("submit_or_replay succeeds");
 

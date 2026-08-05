@@ -5,11 +5,10 @@ use serde_json::{Value, json};
 
 use crate::{
     AcceptedMessageRef, GateResumeDisposition, ProductTurnContext, ReplyTargetBindingRef,
-    ResolvedRunProfile, RunProfileId, RunProfileVersion, SourceBindingRef, TurnActor,
-    TurnRunRecord, TurnRunState,
-    run_profile::{LoopModelRouteSnapshot, LoopModelUsage},
+    RunProfileId, RunProfileVersion, SourceBindingRef, TurnActor, TurnRunRecord, TurnRunState,
     runner::ClaimedTurnRun,
 };
+use ironclaw_loop_contracts::{LoopModelRouteSnapshot, LoopModelUsage, ResolvedRunProfile};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentTurnProcessMetadata {
@@ -19,6 +18,11 @@ pub struct AgentTurnProcessMetadata {
     pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub resolved_run_profile_id: RunProfileId,
     pub resolved_run_profile_version: RunProfileVersion,
+    /// Snapshot of the resolved profile's `SteeringPolicy::allow_steering`,
+    /// persisted so busy-submit admission can consult it without re-resolving
+    /// the profile. Legacy rows predate the field and default to allowed.
+    #[serde(default = "steering_allowed_metadata_default")]
+    pub allow_steering: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_model_route: Option<LoopModelRouteSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -44,6 +48,7 @@ impl AgentTurnProcessMetadata {
             reply_target_binding_ref: record.reply_target_binding_ref.clone(),
             resolved_run_profile_id: record.profile.id.clone(),
             resolved_run_profile_version: record.profile.version,
+            allow_steering: record.profile.allow_steering,
             resolved_model_route: record.resolved_model_route.clone(),
             model_usage: record.model_usage,
             subagent_depth: record.subagent_depth,
@@ -63,6 +68,12 @@ pub struct AgentTurnProcessStateMetadata {
     pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub resolved_run_profile_id: RunProfileId,
     pub resolved_run_profile_version: RunProfileVersion,
+    /// Snapshot of the resolved profile's `SteeringPolicy::allow_steering`.
+    /// Persisted explicitly (not derived from `resolved_run_profile`, which
+    /// state-derived rewrites drop) so busy-submit admission can consult it
+    /// without re-resolving. Legacy rows default to allowed.
+    #[serde(default = "steering_allowed_metadata_default")]
+    pub allow_steering: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_run_profile: Option<ResolvedRunProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -93,6 +104,7 @@ impl AgentTurnProcessStateMetadata {
             reply_target_binding_ref: state.reply_target_binding_ref.clone(),
             resolved_run_profile_id: state.resolved_run_profile_id.clone(),
             resolved_run_profile_version: state.resolved_run_profile_version,
+            allow_steering: state.allow_steering,
             resolved_run_profile: None,
             resolved_model_route: state.resolved_model_route.clone(),
             model_usage: state.model_usage,
@@ -122,4 +134,8 @@ pub(crate) fn agent_turn_metadata_from_claimed(
         metadata.model_usage = model_usage;
     }
     json!({ "agent_turn": metadata })
+}
+
+fn steering_allowed_metadata_default() -> bool {
+    true
 }

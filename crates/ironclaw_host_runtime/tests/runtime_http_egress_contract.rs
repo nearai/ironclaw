@@ -38,7 +38,7 @@ use ironclaw_network::{
     PolicyNetworkHttpEgress, ReqwestNetworkTransport,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_scripts::ScriptRuntimeHttpAdapter;
+use ironclaw_sandbox::ScriptRuntimeHttpAdapter;
 use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};
 use ironclaw_wasm::{
     WasmHostHttp, WasmHttpRequest, WasmRuntimeHttpAdapter, WasmStagedRuntimeCredential,

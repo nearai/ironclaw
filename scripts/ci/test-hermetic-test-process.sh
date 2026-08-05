@@ -30,8 +30,10 @@ run_probe() {
     AMBIENT_MULTILINE=$'first line\nPATH=/developer/injected' \
     LLM_BACKEND="ambient-provider" \
     REBORN_TOOL_DISCLOSURE="Bridged" \
+    REBORN_COV_COLLECT="false" \
     COREPACK_HOME="${probe_dir}/corepack" \
     PLAYWRIGHT_BROWSERS_PATH="${probe_dir}/playwright-browsers" \
+    REBORN_COV_COLLECT="false" \
     IRONCLAW_E2E_EMULATE_SLACK_CHANNEL_BEARER="emulate-slack-channel-token" \
     IRONCLAW_HERMETIC_SABOTAGE="${sabotage}" \
     "${runner}" -- bash -c '
@@ -105,9 +107,17 @@ run_probe() {
         echo "explicit Playwright browser toolchain path was not preserved" >&2
         exit 35
       fi
+      if [[ "${REBORN_COV_COLLECT:-}" != "false" ]]; then
+        echo "explicit Reborn coverage mode was not preserved" >&2
+        exit 41
+      fi
       if [[ "${IRONCLAW_E2E_EMULATE_SLACK_CHANNEL_BEARER:-}" != "emulate-slack-channel-token" ]]; then
         echo "explicit Emulate Slack fixture bearer was not preserved" >&2
         exit 37
+      fi
+      if [[ "${REBORN_COV_COLLECT:-}" != "false" ]]; then
+        echo "explicit coverage collection mode was not preserved" >&2
+        exit 41
       fi
       if [[ "${PYTHONHASHSEED:-}" != "0" ]]; then
         echo "deterministic Python hash seed is not injected" >&2
@@ -382,5 +392,23 @@ do
     exit 1
   fi
 done
+
+# WS10 (docs/reborn/target-architecture/CHECKLIST.md): the WebUI frontend
+# directory the crates/prepare/frontend stages build must be resolved through
+# the shared crate inventory (scripts/ci/crate-dir.sh), never a literal
+# `crates/ironclaw_webui/frontend` path that the family move (PROPOSAL §5) can
+# leave pointed at nothing. A literal regressing back in is a silent break —
+# the suite would `cd` into a directory that used to exist and report nothing
+# wrong until the frontend build actually runs. Matched as the exact removed
+# literal (with the `/frontend` suffix), not the bare crate name, so this
+# assertion does not trip on its own explanatory prose above.
+if grep -Fq "crates/ironclaw_webui/frontend" "${repo_root}/scripts/ci/run-hermetic-deterministic-suite.sh"; then
+  echo "run-hermetic-deterministic-suite.sh regressed to a literal crates/ironclaw_webui/frontend path" >&2
+  exit 1
+fi
+if ! grep -Fq "resolve_webui_frontend_dir" "${repo_root}/scripts/ci/run-hermetic-deterministic-suite.sh"; then
+  echo "run-hermetic-deterministic-suite.sh lost its crate-inventory-resolved frontend directory helper" >&2
+  exit 1
+fi
 
 echo "hermetic test-process self-test: OK"

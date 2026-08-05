@@ -28,7 +28,7 @@ use crate::LlmReloadTrigger;
 use crate::llm_admin::llm_config_service::{
     NEARAI_LOGIN_CALLBACK_PATH, NearAiLoginStateStore, apply_nearai_login,
 };
-use crate::route_mounts::OperatorPublicRouteMount;
+use ironclaw_host_ingress::PublicRouteMount;
 
 const NEARAI_CALLBACK_RATE_WINDOW_SECONDS: NonZeroU32 = match NonZeroU32::new(60) {
     Some(value) => value,
@@ -79,12 +79,16 @@ async fn nearai_callback(
 
 /// Build the public NEAR AI login callback mount for composition to merge via
 /// `ironclaw_webui::WebuiServeConfig::with_public_route_mount`.
+///
+/// The carrier is the host-owned `ironclaw_host_ingress::PublicRouteMount`, not
+/// an operator-local type: operator owns the *route*, ingress owns the mount
+/// vocabulary, and composition wires them together (PROPOSAL §6.9.2).
 pub fn nearai_login_callback_mount(
     session: Arc<ironclaw_llm::SessionManager>,
     reload: Arc<dyn LlmReloadTrigger>,
     boot: RebornBootConfig,
     states: Arc<NearAiLoginStateStore>,
-) -> Result<OperatorPublicRouteMount, HostApiError> {
+) -> Result<PublicRouteMount, HostApiError> {
     let router = Router::new()
         .route(NEARAI_LOGIN_CALLBACK_PATH, get(nearai_callback))
         .with_state(NearAiCallbackState {
@@ -93,7 +97,7 @@ pub fn nearai_login_callback_mount(
             boot,
             states,
         });
-    Ok(OperatorPublicRouteMount::new(
+    Ok(PublicRouteMount::new(
         router,
         vec![nearai_callback_descriptor()?],
     ))
@@ -158,7 +162,7 @@ mod tests {
         root: &std::path::Path,
         states: Arc<NearAiLoginStateStore>,
         reload: Arc<RecordingReload>,
-    ) -> OperatorPublicRouteMount {
+    ) -> PublicRouteMount {
         let home =
             RebornHome::resolve_from_env_parts(Some(root.as_os_str().to_os_string()), None, None)
                 .expect("temporary Reborn home is valid");

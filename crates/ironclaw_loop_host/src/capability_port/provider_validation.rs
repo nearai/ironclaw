@@ -1,10 +1,10 @@
+use ironclaw_loop_contracts::{AgentLoopHostError, AgentLoopHostErrorKind, ProviderToolCall};
 use ironclaw_safety::{
     PROVIDER_METADATA_TEXT_MAX_BYTES, ProviderValidationError,
     validate_optional_provider_metadata_text,
     validate_provider_arguments as validate_safety_provider_arguments, validate_provider_identity,
     validate_provider_token, validate_provider_tool_name as validate_safety_provider_tool_name,
 };
-use ironclaw_turns::run_profile::{AgentLoopHostError, AgentLoopHostErrorKind, ProviderToolCall};
 
 pub(super) use ironclaw_safety::PROVIDER_TOOL_NAME_MAX_BYTES;
 

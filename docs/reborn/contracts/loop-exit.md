@@ -128,10 +128,17 @@ Later slices may add validation against transcript draft state, checkpoint fresh
 
 ## 6. Implemented slice
 
-`ironclaw_turns` currently provides contract types, a crate-private validator policy, and a trusted runner-side applicator:
+The claim vocabulary and the authority that validates it live in two crates,
+and the split is the contract: a driver can only ever hold the claim half.
+
+`ironclaw_loop_contracts` (contracts layer) provides the claim types:
 
 - `LoopExit`, `LoopCompleted`, `LoopBlocked`, `LoopCancelled`, `LoopFailed`;
-- bounded durable reference types for loop exit/message/result/usage refs;
+- bounded durable reference types for loop exit/message/result/usage refs.
+
+`ironclaw_turns` (kernel) provides the validator policy and the trusted
+runner-side applicator, and depends on the contracts crate — never the reverse:
+
 - `LoopExitEvidencePort` and evidence request DTOs for host-owned validation inputs;
 - crate-private `LoopExitValidationPolicy` construction plus public `LoopExitValidationDecision`;
 - one-way mapping to `TurnRunnerOutcome` (invalid exits always map to Failed; valid failed outcomes may carry verified explanation refs and a retry checkpoint id; `LoopExitMapping::RecoveryRequired` is a backward-compat shim);

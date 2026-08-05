@@ -4,7 +4,7 @@
 //! Goal (docs/reborn/extension-runtime/overview.md §1): no generic crate
 //! contains a concrete product name, vendor id, or vendor API host. The
 //! forbidden vocabulary is **derived from the bundled package inventory**
-//! (`crates/ironclaw_first_party_extensions/assets/` plus the test fixture
+//! (`crates/extensions/packages/` plus the test fixture
 //! inventory `tests/fixtures/extensions/`), so a future `discord` package is
 //! caught without editing this scanner (checklist TEST-6).
 //!
@@ -13,7 +13,7 @@
 //!
 //! - **Concrete extension crates** (`CONCRETE_EXTENSION_CRATES`) — they *are*
 //!   the product code.
-//! - **The package inventory crate** (`ironclaw_first_party_extensions`) —
+//! - **The package inventory crate** (`ironclaw_extension_support`) —
 //!   it owns the concrete packages and their native executors.
 //! - **Sanctioned assemblers** — `ironclaw` (the binary assembles
 //!   the native factory registry; overview §4.0) and this architecture crate
@@ -57,31 +57,92 @@
 //! owner's next decision: do NOT casually "fix" one — degenericize by routing
 //! on a manifest capability, or carve deliberately with a one-line justification.
 
+#[allow(dead_code)]
+mod ratchet_support;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::Value;
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("architecture crate under crates")
-        .to_path_buf()
+// Crate paths are spelled flat (`crates/ironclaw_x/...`) and RESOLVED through
+// the crate inventory, so the family move (PROPOSAL section 5) repoints the
+// ~215 literals below without a lockstep edit. On today's tree resolution is
+// the identity - pinned by `reborn_crate_inventory.rs`.
+use ratchet_support::{
+    crate_dir, crate_directories, crate_path, try_resolve_crate_relative, workspace_root,
+};
+
+/// Resolve a listed path through the crate inventory, falling back to the
+/// literal when it names no crate that exists.
+///
+/// A crate that MOVED resolves, which is the point: the ~215 entries below keep
+/// their readable flat spelling across the family move (PROPOSAL section 5). A
+/// crate that was DELETED or RENAMED does not resolve, and keeping its literal
+/// spelling makes it match nothing - which each list's own stale-entry
+/// detection already reports, with a better message than a panic and with
+/// exactly the behavior this gate had before.
+fn resolve_listed_path(root: &Path, logical: &str) -> String {
+    try_resolve_crate_relative(root, logical).unwrap_or_else(|_| logical.to_string())
 }
 
 // ---------------------------------------------------------------------------
 // Inventory-derived forbidden terms
 // ---------------------------------------------------------------------------
 
+/// Package directories under `packages/` whose ids are NOT vendor vocabulary.
+///
+/// WS2 moved the two `[memory]` provider packages into `extensions/packages/`
+/// beside the extension packages. Deriving the forbidden vocabulary from their
+/// manifests as well would be wrong on both halves:
+///
+/// * `ironclaw.memory` and the `ironclaw.memory.*` tool ids are the
+///   *provider-neutral* memory contract — the ids stay identical whichever
+///   provider is bound, which is the whole point of
+///   `MEMORY_PROVIDER_PACKAGE_IDS`. The kernel and the contracts crates name
+///   them legitimately, so scanning them would flag the contract as vendor
+///   specificity.
+/// * `mem0` genuinely *is* a vendor name, and generic crates naming it
+///   genuinely is debt — but that is the rule PROPOSAL §8.2 states separately
+///   ("no crate outside the provider packages and the binary names a memory
+///   provider"), enforced by
+///   `reborn_dependency_boundaries.rs::only_the_sanctioned_residue_names_a_memory_provider`
+///   with its own named, shrink-only residue. Folding it in here instead would
+///   have meant raising this gate's shrink-only allowlist baseline by ~40
+///   entries for debt that predates the move.
+///
+/// Excluding these two restores exactly the pre-move term set: before WS2 the
+/// inventory was the twelve extension packages plus the fixtures, and it still
+/// is.
+const NON_VENDOR_PROVIDER_PACKAGE_DIRS: &[&str] = &["memory-native", "mem0"];
+
 /// Directories whose `*/manifest.toml` files form the package inventory the
 /// forbidden vocabulary derives from.
 fn inventory_dirs(root: &Path) -> Vec<PathBuf> {
-    vec![
-        root.join("crates/ironclaw_first_party_extensions/assets"),
-        root.join("tests/fixtures/extensions"),
-    ]
+    vec![packages_root(root), root.join("tests/fixtures/extensions")]
+}
+
+/// The shipped package inventory, anchored on the crate that owns it rather
+/// than on the literal `crates/extensions/packages`. A package directory is
+/// owned by no crate (PROPOSAL section 5), so it cannot be resolved by name -
+/// but its owning support crate can be, and `packages/` is that crate's
+/// sibling. This is the hop `scripts/build-wasm-extensions.sh` and
+/// `scripts/ci/ws12_workflow_contracts.py` already use.
+fn packages_root(root: &Path) -> PathBuf {
+    let support = crate_dir(root, "ironclaw_extension_support");
+    let packages = support
+        .parent()
+        .expect("the package-support crate must have a parent directory")
+        .join("packages");
+    assert!(
+        packages.is_dir(),
+        "package inventory root {} does not exist - the specificity vocabulary would derive \
+         from nothing. `packages/` is resolved as a sibling of the ironclaw_extension_support \
+         crate; if the packages moved elsewhere, repoint this hop.",
+        packages.display()
+    );
+    packages
 }
 
 /// Bare terms carved out of the derived set because they collide with a
@@ -177,26 +238,24 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "oauth2.googleapis.com",
         "WebUI browser-login SSO (OIDC) endpoints, not the extensions vendor",
     ),
+    // WS3 removed two carve-outs that used to live here — the skill-URL
+    // installer's `github` and `api.github.com` entries. The installer moved to
+    // `ironclaw_extension_support::skills::url_install`, and that crate is in
+    // `SANCTIONED_SCAN_EXEMPT_CRATES` (it is the sanctioned vendor-name home),
+    // so the scanner no longer reaches those files at all. Its two siblings
+    // survive further down because their subjects stayed in `host_runtime`:
+    // `first_party_tools/skill_management.rs` (the tool manifest description)
+    // and `first_party_tools/schemas.rs` (the input schema) are host-owned
+    // capability *declarations*, not the executor.
     (
-        "crates/ironclaw_host_runtime/src/first_party_tools/skill_url_install",
-        "github",
-        "skill installation from GitHub repositories — GitHub as a code host, not the \
-         github extension",
-    ),
-    (
-        "crates/ironclaw_host_runtime/src/first_party_tools/skill_url_install.rs",
-        "api.github.com",
-        "GitHub content API allowlist for skill installation",
-    ),
-    (
-        "crates/ironclaw_host_runtime/src/sandbox_process/network_allowlist.rs",
+        "crates/ironclaw_sandbox/src/sandbox_process/network_allowlist.rs",
         "github",
         "default sandboxed-shell egress allowlist includes github.com/\
          raw.githubusercontent.com/codeload.github.com for ordinary `git clone`/release-\
          archive workflows — GitHub as a code host, not the github extension",
     ),
     (
-        "crates/ironclaw_host_runtime/src/sandbox_process/network_allowlist.rs",
+        "crates/ironclaw_sandbox/src/sandbox_process/network_allowlist.rs",
         "api.github.com",
         "default sandboxed-shell egress allowlist includes GitHub's content API host for \
          `gh`/archive-download workflows — GitHub as a code host, not the github extension",
@@ -205,6 +264,12 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "crates/ironclaw_host_runtime/src/first_party_tools/skill_management.rs",
         "github",
         "skill-install tool description names GitHub as a skill source",
+    ),
+    (
+        "crates/ironclaw_extension_manager/src/ironhub/artifact_hosts.rs",
+        "github",
+        "IronHub's signed-package downloader pins GitHub release infrastructure as a code \
+         artifact source, independent of the github extension",
     ),
     (
         "crates/ironclaw_host_runtime/src/first_party_tools/schemas.rs",
@@ -257,13 +322,14 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "credential-prefix redaction (github_pat_)",
     ),
     (
-        "crates/ironclaw_turns/src/run_profile/host/validate.rs",
+        "crates/ironclaw_loop_contracts/src/host/validate.rs",
         "github",
         "credential-prefix redaction (github_pat_) — relocated here when \
-         run_profile/host.rs was decomposed (#6391)",
+         run_profile/host.rs was decomposed (#6391), and again when WS1.2 moved \
+         run_profile/** into ironclaw_loop_contracts",
     ),
     (
-        "crates/ironclaw_turns/src/run_profile/host/validate.rs",
+        "crates/ironclaw_loop_contracts/src/host/validate.rs",
         "google",
         "credential-prefix redaction (Google/GCP key shapes) at the \
          model-visible boundary — vendor-specific safety detection",
@@ -287,7 +353,7 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
          the leak-scanner carve-out domain (#5965)",
     ),
     (
-        "crates/ironclaw_turns/src/run_profile/prompt_text.rs",
+        "crates/ironclaw_loop_contracts/src/prompt_text.rs",
         "github",
         "credential-prefix redaction (github_pat_)",
     ),
@@ -422,11 +488,6 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "persisted credential-name / channel-id vocabulary in the shared identity crate (compat law: stored ids stay readable)",
     ),
     (
-        "crates/ironclaw_common/src/platform.rs",
-        "telegram",
-        "persisted credential-name / channel-id vocabulary in the shared identity crate (compat law: stored ids stay readable)",
-    ),
-    (
         "crates/ironclaw_reborn_identity/src/key.rs",
         "telegram",
         "credential-authority ProviderKind vocabulary (persisted identity keys), not the extensions vendor",
@@ -451,27 +512,38 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
     // weaken redaction. Not extension routing (the classifier has only the
     // tool-name string at trace-analysis time). Pinned by
     // `tool_payload_redaction_profile_is_a_safety_denylist_not_inventory_routing`.
+    //
+    // Scoped to two files since the `contribution.rs` split (WS6): the rule
+    // tables live in `tool_payloads.rs` and only the external-write detector
+    // (`classify_tool_side_effect`, `slack` alone) is in `classification.rs`.
+    // Both carve-outs are narrower than the single whole-file one they
+    // replace, so the gate now polices the rest of the module.
     (
-        "crates/ironclaw_reborn_traces/src/contribution.rs",
+        "crates/ironclaw_reborn_traces/src/contribution/tool_payloads.rs",
         "slack",
-        "trace payload-redaction/side-effect safety classifier keyed off tool-name \
-         keywords (messaging profile + external-write detection); a safety denylist, \
-         not extension routing",
+        "trace payload-redaction safety classifier keyed off tool-name keywords \
+         (messaging profile); a safety denylist, not extension routing",
     ),
     (
-        "crates/ironclaw_reborn_traces/src/contribution.rs",
+        "crates/ironclaw_reborn_traces/src/contribution/classification.rs",
+        "slack",
+        "trace external-write side-effect detection keyed off tool-name keywords \
+         (`classify_tool_side_effect`); a safety denylist, not extension routing",
+    ),
+    (
+        "crates/ironclaw_reborn_traces/src/contribution/tool_payloads.rs",
         "telegram",
         "trace payload-redaction safety classifier keyed off tool-name keywords \
          (messaging profile); a safety denylist, not extension routing",
     ),
     (
-        "crates/ironclaw_reborn_traces/src/contribution.rs",
+        "crates/ironclaw_reborn_traces/src/contribution/tool_payloads.rs",
         "gmail",
         "trace payload-redaction safety classifier keyed off tool-name keywords \
          (email profile); a safety denylist, not extension routing",
     ),
     (
-        "crates/ironclaw_reborn_traces/src/contribution.rs",
+        "crates/ironclaw_reborn_traces/src/contribution/tool_payloads.rs",
         "github",
         "trace payload-redaction safety classifier keyed off tool-name keywords \
          (issue-tracker profile); a safety denylist, not extension routing",
@@ -585,6 +657,12 @@ fn derive_forbidden_terms(inventory: &[PathBuf]) -> BTreeSet<String> {
         for entry in entries.flatten() {
             let package_dir = entry.path();
             if !package_dir.is_dir() {
+                continue;
+            }
+            if NON_VENDOR_PROVIDER_PACKAGE_DIRS
+                .iter()
+                .any(|name| package_dir.file_name().is_some_and(|dir| dir == *name))
+            {
                 continue;
             }
             let manifest_path = package_dir.join("manifest.toml");
@@ -722,17 +800,14 @@ const REBORN_LAYERS: &[&str] = &[
 /// Crates that are the concrete product code (present or planned). A missing
 /// directory is tolerated so the planned extension crates are covered from
 /// the day they appear.
-const CONCRETE_EXTENSION_CRATES: &[&str] = &[
-    "ironclaw_slack_extension",
-    "ironclaw_telegram_extension",
-    "ironclaw_telegram_v2_adapter",
-];
+const CONCRETE_EXTENSION_CRATES: &[&str] =
+    &["ironclaw_slack_extension", "ironclaw_telegram_extension"];
 
 /// Generic-side crates excluded from the scan for a documented structural
 /// reason (see the module header).
 const SANCTIONED_SCAN_EXEMPT_CRATES: &[&str] = &[
     // The package inventory + native executors for bundled extensions.
-    "ironclaw_first_party_extensions",
+    "ironclaw_extension_support",
     // The binary assembles the native factory registry (overview §4.0).
     "ironclaw",
     // The post-Tier-B workspace root: a test-only host for the Reborn
@@ -987,14 +1062,30 @@ fn collect_workspace_hits(root: &Path, terms: &BTreeSet<String>) -> BTreeSet<(St
         }
     }
     // The WebUI frontend ships from a non-src directory of a generic crate.
-    let frontend = root.join("crates/ironclaw_webui/frontend/src");
+    // `scan_dir` returns quietly on an unreadable directory, so a frontend that
+    // moved out from under this literal would drop the whole SPA out of the
+    // scan while the gate still passed - assert the root before scanning it.
+    let frontend = crate_path(root, "crates/ironclaw_webui/frontend/src");
+    assert!(
+        frontend.is_dir(),
+        "WebUI frontend scan root {} does not exist; the SPA would go unscanned while this \
+         gate still reported success (docs/reborn/target-architecture/CHECKLIST.md WS10)",
+        frontend.display()
+    );
     scan_dir(root, &frontend, terms, &mut hits);
 
+    // Resolved through the inventory: these fragments are matched against
+    // paths discovered on disk, so a crate that moved makes every fragment
+    // naming it stop carving - in the direction that ADDS violations.
+    let sanctioned: Vec<String> = SANCTIONED_PATHS
+        .iter()
+        .map(|fragment| resolve_listed_path(root, fragment))
+        .collect();
     hits.into_iter()
         .filter(|(path, _)| {
-            !SANCTIONED_PATHS
+            !sanctioned
                 .iter()
-                .any(|fragment| path.contains(fragment))
+                .any(|fragment| path.contains(fragment.as_str()))
         })
         .flat_map(|(path, terms)| {
             terms
@@ -1008,26 +1099,35 @@ fn collect_workspace_hits(root: &Path, terms: &BTreeSet<String>) -> BTreeSet<(St
 /// Split raw hits into (permanently carved-out, policed). Carve-outs that no
 /// longer match anything are returned as stale so the list cannot rot.
 fn apply_path_term_collisions(
+    root: &Path,
     hits: BTreeSet<(String, String)>,
 ) -> (BTreeSet<(String, String)>, Vec<String>) {
+    // The path fragments are matched against paths discovered on disk, so each
+    // is resolved through the crate inventory first. The reported staleness
+    // still names the LOGICAL spelling, which is what a reader would edit.
+    let carve_outs: Vec<(String, &str, &str)> = PATH_TERM_COLLISIONS
+        .iter()
+        .map(|(fragment, term, reason)| (resolve_listed_path(root, fragment), *term, *reason))
+        .collect();
     let mut used: BTreeSet<(&str, &str)> = BTreeSet::new();
     let policed: BTreeSet<(String, String)> = hits
         .into_iter()
         .filter(|(path, term)| {
-            let carved = PATH_TERM_COLLISIONS
-                .iter()
-                .find(|(fragment, carved_term, _)| path.contains(fragment) && term == carved_term);
+            let carved = carve_outs.iter().find(|(fragment, carved_term, _)| {
+                path.contains(fragment.as_str()) && term == carved_term
+            });
             if let Some((fragment, carved_term, _)) = carved {
-                used.insert((fragment, carved_term));
+                used.insert((fragment.as_str(), carved_term));
                 return false;
             }
             true
         })
         .collect();
-    let stale = PATH_TERM_COLLISIONS
+    let stale = carve_outs
         .iter()
-        .filter(|(fragment, term, _)| !used.contains(&(fragment, term)))
-        .map(|(fragment, term, _)| format!("{fragment} :: {term}"))
+        .zip(PATH_TERM_COLLISIONS.iter())
+        .filter(|((fragment, term, _), _)| !used.contains(&(fragment.as_str(), *term)))
+        .map(|(_, (fragment, term, _))| format!("{fragment} :: {term}"))
         .collect();
     (policed, stale)
 }
@@ -1061,10 +1161,23 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_webui/frontend/src/pages/chat/components/auth-oauth-card.tsx",
         "github",
     ),
-    ("crates/ironclaw_product/src/adapter_registry.rs", "github"),
-    ("crates/ironclaw_product/src/adapter_registry.rs", "slack"),
+    // The inline-secret guard's vendor token prefixes. Repointed (not added)
+    // when CHECKLIST WS5's `product` narrows row moved `adapter_registry` to
+    // `ironclaw_extensions::host_api::product_adapter`; the guard stayed with
+    // the raw-TOML parse stage, so the entries moved file and nothing else.
+    // The schema half that went to `ironclaw_extension_contracts` carries no
+    // vendor name — its fixtures were rewritten generically rather than carved,
+    // the same disposition PROPOSAL §6.1.3 records for `ProductConversationRouteKey`.
     (
-        "crates/ironclaw_product/src/adapter_registry.rs",
+        "crates/ironclaw_extensions/src/host_api/product_adapter.rs",
+        "github",
+    ),
+    (
+        "crates/ironclaw_extensions/src/host_api/product_adapter.rs",
+        "slack",
+    ),
+    (
+        "crates/ironclaw_extensions/src/host_api/product_adapter.rs",
         "telegram",
     ),
     (
@@ -1079,38 +1192,66 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // shrink as the old composition-hosted tests become manifest-driven.
     ("crates/ironclaw_extension_host/Cargo.toml", "slack"),
     (
-        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
+        "crates/ironclaw_extension_contracts/src/auth_prompt.rs",
         "github",
     ),
     (
-        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
+        "crates/ironclaw_extension_contracts/src/auth_prompt.rs",
         "google",
     ),
     (
-        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
+        "crates/ironclaw_extension_contracts/src/auth_prompt.rs",
         "notion",
     ),
     (
-        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
+        "crates/ironclaw_extension_contracts/src/auth_prompt.rs",
         "telegram",
     ),
     ("crates/ironclaw_product/Cargo.toml", "telegram"),
-    (
-        "crates/ironclaw_product/src/conversation_binding.rs",
-        "slack",
-    ),
+    // `conversation_binding.rs` was carved for a vendor example in
+    // `ProductConversationRouteKey`'s doc. WS2.2 moved that type to
+    // `ironclaw_product_contracts::subject_route`, where a vendor name is
+    // forbidden outright, so the example was rewritten generically rather than
+    // re-carved. The entry is deleted, not repointed — the allowlist shrinks.
     ("crates/ironclaw_product/src/lib.rs", "telegram"),
-    ("crates/ironclaw_product/src/reborn_services.rs", "slack"),
+    // WS5 port inversion: these three wire-DTO sites moved to the contracts
+    // crate with their code (`NearAiAuthProvider`'s OAuth identity providers and
+    // the project-metadata doc example). Same terms, same debt, new file.
+    //
+    // Repointed, not deleted and not added: the two entries moved with the
+    // `LlmConfigService` port from `ironclaw_product` to
+    // `ironclaw_product_contracts::operator_llm` (WS5 operator row). Same two
+    // terms, same count — the baseline is untouched.
+    //
+    // The terms are `NearAiAuthProvider::{Github, Google}`, the two SSO
+    // identity providers NEAR AI accepts, whose `as_path()` builds
+    // `/v1/auth/github` and `/v1/auth/google`. They are not extension package
+    // references; they are LLM-vendor admin vocabulary, which PROPOSAL §8.2's
+    // vendor rule sanctions for `ironclaw_operator` ("*this* is the LLM-vendor
+    // admin layer", §6.9.2).
+    //
+    // **Recorded finding, not resolved here.** §8.2's sanctioned-vendor list
+    // names `packages/*`, `llm` providers, `operator`, `webui::auth` login
+    // providers, and recipes-as-data — it does **not** name the contracts
+    // family. Declaring the port at the boundary therefore carries vendor
+    // vocabulary somewhere the rule does not cover, and this pair is only the
+    // visible tip: `LlmConfigService` has three vendor-named *methods*
+    // (`start_nearai_login`, `complete_nearai_wallet_login`,
+    // `start_codex_login`) and six vendor-named DTOs the scanner's inventory
+    // does not know to flag. Generifying that is a design change — NEAR AI SSO,
+    // NEAR wallet NEP-413, and OpenAI Codex device-code are three different
+    // protocols behind one port — and PLAN's operating principle 2 keeps
+    // semantic changes out of a move PR. The finding is in the WS5 row.
     (
-        "crates/ironclaw_product/src/reborn_services/llm_config.rs",
+        "crates/ironclaw_product_contracts/src/operator_llm.rs",
         "github",
     ),
     (
-        "crates/ironclaw_product/src/reborn_services/llm_config.rs",
+        "crates/ironclaw_product_contracts/src/operator_llm.rs",
         "google",
     ),
     (
-        "crates/ironclaw_product/src/reborn_services/projects.rs",
+        "crates/ironclaw_product_contracts/src/workspace_views.rs",
         "github",
     ),
     ("crates/ironclaw_product/src/workflow.rs", "slack"),
@@ -1124,21 +1265,21 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     ("crates/ironclaw_runner/src/loop_driver_host.rs", "slack"),
-    ("crates/ironclaw_runner/src/tool_disclosure.rs", "google"),
+    ("crates/ironclaw_loop_host/src/tool_disclosure.rs", "google"),
     (
-        "crates/ironclaw_runner/src/tool_disclosure.rs",
+        "crates/ironclaw_loop_host/src/tool_disclosure.rs",
         "google-calendar",
     ),
     (
-        "crates/ironclaw_runner/src/tool_disclosure.rs",
+        "crates/ironclaw_loop_host/src/tool_disclosure.rs",
         "web-access",
     ),
     (
-        "crates/ironclaw_runner/src/tool_disclosure_port.rs",
+        "crates/ironclaw_loop_host/src/tool_disclosure_port.rs",
         "google",
     ),
     (
-        "crates/ironclaw_runner/src/tool_disclosure_port.rs",
+        "crates/ironclaw_loop_host/src/tool_disclosure_port.rs",
         "google-calendar",
     ),
     (
@@ -1163,10 +1304,14 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // lane-4: nearai-slice — the last catalog package (nearai_mcp) is still
     // patched from LLM-admin bootstrap config; it now lives with the generic
     // available-extension catalog in ironclaw_extension_host.
-    (
-        "crates/ironclaw_extension_host/src/available_extensions.rs",
-        "nearai-mcp",
-    ),
+    //
+    // The `nearai-mcp` *asset-directory* carve-out for this file is gone (WS2
+    // include_str kills): the package's embeds moved to the inventory module
+    // `ironclaw_extension_support::packages::nearai`, which is a sanctioned
+    // scan-exempt crate, so this file no longer names the directory. The
+    // `nearai_mcp` / `nearaimcp` entries below stay — the endpoint patch and
+    // the `nearai_mcp` module it reads are still here, by §6.8.2 (the fork is
+    // what prevents an `extension_host -> operator` upward edge).
     (
         "crates/ironclaw_extension_host/src/available_extensions.rs",
         "nearai_mcp",
@@ -1177,10 +1322,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     ("crates/ironclaw_extension_host/src/lib.rs", "nearai_mcp"),
     ("crates/ironclaw_extension_host/src/lib.rs", "nearaimcp"),
-    (
-        "crates/ironclaw_extension_host/src/lifecycle_restore.rs",
-        "slack",
-    ),
     (
         "crates/ironclaw_extension_host/src/nearai_mcp.rs",
         "nearai_mcp",
@@ -1259,14 +1400,15 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     // lane-4: migration — one-time forward-migration call sites naming the v1 vocabulary they fold forward — correct-by-design (same pattern the retired-taxonomy gate sanctions); would become a SANCTIONED_PATHS carve if the sites move into a dedicated migration module
     // lane-4: doc-str — incidental doc-comment / error-string / tool-description examples that NAME an extension but branch on nothing — the code routes by a manifest field (display_name/provider/effects); reword or leave (Ben's call)
+    (
+        "crates/ironclaw_extension_contracts/src/surface.rs",
+        "slack",
+    ),
     ("crates/ironclaw_filesystem/src/index.rs", "acme"),
     ("crates/ironclaw_host_api/src/capability.rs", "slack"),
     ("crates/ironclaw_host_api/src/http.rs", "slack"),
     ("crates/ironclaw_host_api/src/ids.rs", "github"),
-    ("crates/ironclaw_host_api/src/surface.rs", "slack"),
     ("crates/ironclaw_loop_host/src/capability_port.rs", "gmail"),
-    ("crates/ironclaw_auth/src/loopback_oauth.rs", "google"),
-    ("crates/ironclaw_auth/src/loopback_oauth.rs", "notion"),
     (
         "crates/ironclaw_outbound/src/delivered_gate_routes.rs",
         "slack",
@@ -1277,11 +1419,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/blocked_auth_resume.rs",
+        "crates/ironclaw_product/src/blocked_auth_resume.rs",
         "google",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/blocked_auth_resume.rs",
+        "crates/ironclaw_product/src/blocked_auth_resume.rs",
         "slack",
     ),
     (
@@ -1342,14 +1484,17 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     ("crates/ironclaw_reborn_config/src/config_file.rs", "gmail"),
     ("crates/ironclaw_reborn_config/src/config_file.rs", "google"),
-    ("crates/ironclaw_reborn_config/src/config_file.rs", "slack"),
+    // The retired-section gravestones: the only place this crate still
+    // names a vendor, and only as the TOML table name an operator typed.
     (
-        "crates/ironclaw_reborn_config/src/config_file.rs",
+        "crates/ironclaw_reborn_config/src/retired_sections.rs",
+        "slack",
+    ),
+    (
+        "crates/ironclaw_reborn_config/src/retired_sections.rs",
         "telegram",
     ),
     ("crates/ironclaw_reborn_config/src/lib.rs", "google"),
-    ("crates/ironclaw_reborn_config/src/lib.rs", "slack"),
-    ("crates/ironclaw_reborn_config/src/lib.rs", "telegram"),
     // lane-4: dev-deps — sanctioned DEL-7 linkage of concrete channel crates
     // for the production-shaped channel-host E2E suite; the scanner sees the
     // crate names in Cargo.toml even though Rust test sources are excluded.
@@ -1429,16 +1574,115 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// entries of `ALLOWLIST` above (`ALLOWLIST.len()`, printed by the ratchet
 /// below on failure).
 ///
+/// Re-measured 2026-08-04 during the Wave 4 consolidation, and **lowered
+/// 125 → 124**. The vendor-config retirement removes two net entries, which
+/// against the `origin/main` this branch was first cut from (`1e2a294083`,
+/// `ALLOWLIST` = 127) gave 125. #7094 then deleted a further entry on `main`
+/// (127 → 126), so the same two removals now land on **124**. The count is
+/// read off the ratchet's own failure message with this constant temporarily
+/// set to `0`, never counted by eye — a plain paren count over the literal
+/// answers 142, because the entries' comments contain parentheses too.
+///
 /// PROPOSAL §11.2.8 shrinks this list to the §8.1 rule-4 set and CHECKLIST
 /// WS12 wants it empty. The staleness half of that discipline already lives in
 /// the gate above (an entry that no longer matches fails); this ceiling is the
 /// other half — the list cannot *grow* untracked either. Lower it in the same
 /// PR that deletes entries so the new floor is locked in.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 130;
+///
+/// ✎ **129 → 125, and the gate below is now an equality (2026-08-04).**
+/// Two branches found the same defect independently and this is their union;
+/// the count was **recounted on the merged tree**, not taken from either side.
+///
+/// - **#7143 deleted an entry** — `("…/lifecycle_restore.rs", "slack")`, made
+///   stale by the retired-identity branch deletion — and lowered the ceiling in
+///   the same PR, which is exactly what the sentence above requires. Shipping
+///   without that would have banked the deletion as slack rather than as a
+///   floor.
+/// - **#7147 found the ceiling was already carrying 3 entries of slack before
+///   either branch.** The list held **126** pairs against a constant of 129, so
+///   three earlier deletions lowered the list without lowering the ceiling —
+///   silent, because a `<=` ratchet says nothing when the constant sits *above*
+///   the list. Three new vendor carve-outs could have been added green.
+/// - **#7147 also closed the mechanism, not just the number:** the gate below
+///   is an **equality**. Slack now fails with its own message, so this cannot
+///   recur — a deletion that forgets to lower the constant is a red build
+///   instead of a fresh budget for the next carve-out.
+///
+/// Counted with a script over the entries between `const ALLOWLIST` and its
+/// closing `];`, ignoring comment lines, on the **pushed ref** — not by eye and
+/// not with `grep`, which also matches prose. Tracked as #7147; whichever of
+/// the concurrent branches touching this list merges last must recount the
+/// union rather than trusting any single branch's number.
+///
+/// ✎ **125 → 123 (2026-08-04, #7139 — the Wave 4 consolidation).** Neither
+/// side of this merge was right for the union, so it was recounted rather than
+/// picked. #7143 set **125** measuring its own branch; this branch had **124**
+/// measuring its own. #7143 additionally *deleted* an entry
+/// (`lifecycle_restore.rs`/`slack`) that this branch never saw, so the merged
+/// list is lower than either: 126 on `main` after #7094, minus this branch's
+/// two net vendor-config removals, minus #7143's one, is **123**.
+///
+/// Read off the ratchet's own failure message with this constant temporarily
+/// set to `0` (`ALLOWLIST grew to 123 entries`) — never counted by eye, and
+/// never with `grep`, which also matches prose (a paren count over the literal
+/// once answered 142 because the entries' comments contain parentheses).
+///
+/// ⚠ **#7141 and #7152 are still open and both touch this list** (#7147).
+/// Whichever merges last must recount the union the same way rather than
+/// inheriting 123, 124 or 125 from any single branch.
+///
+/// ✎ **Union recount, 2026-08-04 (WS3/WS4 consolidation — the merge-last
+/// recount #7147 asks for): the answer is 125.** Both branches lowered this
+/// constant independently and each was right about its own tree — #7143
+/// measured **125** after deleting the `lifecycle_restore.rs`/slack pair, and
+/// the WS3/WS4 consolidation measured **126** after finding a slot of
+/// pre-existing slack (129 → 127, then 126). Merging them, the union is
+/// **125**: #7143's deletion is the only entry either branch removed, and the
+/// WS3/WS4 work (the catalog-defaults move to `host_api`/`extensions`, the
+/// `capabilities/host.rs` split) relocates code without naming a vendor, so it
+/// removes no pair. The prediction going in was 124 — that both branches would
+/// each contribute a deletion — and it was WRONG; the compiler said 125, which
+/// is exactly why this is measured rather than reasoned. Read back the way the
+/// paragraph above requires: baseline set to `0`, the ratchet's own failure
+/// message reporting the length, never by eye and never with `grep` (which
+/// matches prose, and once answered 142 where the truth was 124).///
+/// ✎ **Union-of-unions recount, 2026-08-04 (#7139 merged to main, then main
+/// merged into #7141):** per the ⚠ note above, recounted by the ratchet's own
+/// failure message with the baseline set to 0 — never inherited from either
+/// side (#7141's own-tree 125, #7139's 123). The ratchet reported **123**
+/// — #7139's removals and #7141's repoints do not overlap on any entry.
+/// The number is read off the **compiler** — set the constant to `0`, run the
+/// gate, and the panic prints `ALLOWLIST.len()` — never by counting parens or
+/// `grep`-ing the file, both of which also match the entry comments and the
+/// prose above.
+///
+/// ⚠ **#7139 and #7141 also touch this list.** Whichever merges next must
+/// recount on *its* merged tree and set this constant to that number in the
+/// merge commit. The equality turns a stale union into a red build rather than
+/// into new silent slack — which is the point — but it makes the recount
+/// mandatory rather than optional.///
+/// ✎ **Batch union recount, 2026-08-04 (Waves 0–4 batch: #7141+#7160+#7159+
+/// #7161+#7156).** Recounted on the batch's merged tree per the mandate
+/// above, by the ratchet's own failure message with the constant set to 0:
+/// the batch union is **123** — #7161's conversions repoint entries in place
+/// and add none.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 122;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
+///
+/// **Equality, not `<=`.** Growth past the baseline is new vendor debt;
+/// *slack* (a baseline above the live list) is an unclaimed budget for exactly
+/// that debt, and a one-directional ratchet cannot see it. Both directions
+/// fail, with distinct messages, so the constant tracks the list on every
+/// commit.
 #[test]
 fn reborn_extension_specificity_allowlist_ratchets_down_only() {
+    assert!(
+        !ALLOWLIST.is_empty(),
+        "extension-specificity ALLOWLIST is empty — the ratchet below would pass having \
+         measured nothing. Either the list really reached §11.2.8's target (delete this gate \
+         and the baseline together, and say so in the PR) or the const was truncated."
+    );
     assert!(
         ALLOWLIST.len() <= WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE,
         "extension-specificity ALLOWLIST grew to {} entries (WS0 baseline {}): this list is \
@@ -1450,18 +1694,33 @@ fn reborn_extension_specificity_allowlist_ratchets_down_only() {
         ALLOWLIST.len(),
         WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE
     );
+    assert!(
+        ALLOWLIST.len() >= WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE,
+        "extension-specificity ALLOWLIST holds {} entries but \
+         WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE is {} — {} entries of UNTRACKED SLACK. \
+         A ceiling above the live list is an unclaimed budget: that many new vendor carve-outs \
+         can be added and every gate stays green. Lower the constant to {} in the PR that \
+         deleted the entries, which is what the doc comment on it already required (#7147).",
+        ALLOWLIST.len(),
+        WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE,
+        WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE - ALLOWLIST.len(),
+        ALLOWLIST.len()
+    );
 }
 
 /// One `(relative path, matched term)` scanner hit.
 type HitEntry = (String, String);
 
 fn classify_hits(
+    root: &Path,
     hits: &BTreeSet<HitEntry>,
     allowlist: &[(&str, &str)],
 ) -> (Vec<HitEntry>, Vec<HitEntry>) {
+    // Resolved through the inventory: a moved crate would otherwise turn every
+    // entry naming it into BOTH a stale entry and a new violation at once.
     let allowed: BTreeSet<HitEntry> = allowlist
         .iter()
-        .map(|(path, term)| (path.to_string(), term.to_string()))
+        .map(|(path, term)| (resolve_listed_path(root, path), term.to_string()))
         .collect();
     let new_violations = hits.difference(&allowed).cloned().collect();
     let stale_entries = allowed.difference(hits).cloned().collect();
@@ -1472,6 +1731,24 @@ fn classify_hits(
 // The gate
 // ---------------------------------------------------------------------------
 
+/// A carve-out that names a directory which is not there stops carving
+/// anything out — silently, and in the direction that *adds* terms. Pin the
+/// two provider package directories so a rename has to come here.
+#[test]
+fn the_non_vendor_provider_carve_out_names_real_packages() {
+    let packages = packages_root(&workspace_root());
+    for name in NON_VENDOR_PROVIDER_PACKAGE_DIRS {
+        let dir = packages.join(name);
+        assert!(
+            dir.join("manifest.toml").is_file(),
+            "NON_VENDOR_PROVIDER_PACKAGE_DIRS names {name}, but {} has no manifest.toml. \
+             A stale entry excludes nothing; a renamed package silently rejoins the vendor \
+             vocabulary. Repoint it in the same change that moved the package.",
+            dir.display()
+        );
+    }
+}
+
 #[test]
 fn reborn_generic_code_names_no_concrete_extension() {
     let root = workspace_root();
@@ -1481,8 +1758,8 @@ fn reborn_generic_code_names_no_concrete_extension() {
         "inventory-derived term set must not be empty — is the package inventory readable?"
     );
     let raw_hits = collect_workspace_hits(&root, &terms);
-    let (hits, stale_carve_outs) = apply_path_term_collisions(raw_hits);
-    let (new_violations, stale_entries) = classify_hits(&hits, ALLOWLIST);
+    let (hits, stale_carve_outs) = apply_path_term_collisions(&root, raw_hits);
+    let (new_violations, stale_entries) = classify_hits(&root, &hits, ALLOWLIST);
 
     let mut failures = Vec::new();
     if !stale_carve_outs.is_empty() {
@@ -1546,16 +1823,51 @@ fn concrete_extension_crates_link_only_from_the_binary_and_tests() {
         .iter()
         .filter_map(|package| package["name"].as_str())
         .collect();
-    for concrete in CONCRETE_EXTENSION_CRATES {
-        let manifest = root.join("crates").join(concrete).join("Cargo.toml");
-        if manifest.exists() {
-            assert!(
-                registered.contains(concrete),
-                "{concrete} has a Cargo.toml but is not in cargo metadata; register it as a \
-                 workspace member so this gate actually checks its dependents"
-            );
-        }
+    // Resolved by PACKAGE NAME across the crate inventory, not by joining
+    // `crates/<package name>/Cargo.toml`.
+    //
+    // The old join assumed directory == package name. WS2 colocation made the
+    // directories `extensions/packages/{slack,telegram}` while the packages
+    // kept their `ironclaw_*_extension` names, so the join has been resolving
+    // to a path that does not exist and this fail-open guard has been checking
+    // **zero** crates ever since — green, and measuring nothing. Walking the
+    // inventory and reading each manifest's declared name fixes that and is
+    // also what survives the family move (WS10).
+    let mut resolved_concrete: Vec<&str> = Vec::new();
+    for directory in crate_directories(&root) {
+        let manifest = root.join(&directory).join("Cargo.toml");
+        let Ok(text) = std::fs::read_to_string(&manifest) else {
+            continue;
+        };
+        let Some(package_name) = text.lines().find_map(|line| {
+            line.trim()
+                .strip_prefix("name = \"")
+                .and_then(|rest| rest.strip_suffix('"'))
+        }) else {
+            continue;
+        };
+        let Some(concrete) = CONCRETE_EXTENSION_CRATES
+            .iter()
+            .find(|concrete| **concrete == package_name)
+        else {
+            continue;
+        };
+        resolved_concrete.push(concrete);
+        assert!(
+            registered.contains(concrete),
+            "{concrete} has a Cargo.toml at {} but is not in cargo metadata; register it as \
+             a workspace member so this gate actually checks its dependents",
+            manifest.display()
+        );
     }
+    // A planned-but-absent concrete crate is tolerated by design, but ALL of
+    // them being absent means the guard resolved nothing and checked nothing.
+    assert!(
+        !resolved_concrete.is_empty(),
+        "no concrete extension package resolved to a manifest, so the registration guard \
+         checked nothing. CONCRETE_EXTENSION_CRATES is {CONCRETE_EXTENSION_CRATES:?} \
+         (docs/reborn/target-architecture/CHECKLIST.md WS10)."
+    );
 
     let mut violations = Vec::new();
     let mut used_exceptions = BTreeSet::new();
@@ -1730,7 +2042,7 @@ fn scanner_allowlist_is_shrink_only() {
         ("crates/a/src/lib.rs", "slack"),
         ("crates/gone/src/lib.rs", "gmail"),
     ];
-    let (new_violations, stale_entries) = classify_hits(&hits, &allowlist);
+    let (new_violations, stale_entries) = classify_hits(&workspace_root(), &hits, &allowlist);
     assert_eq!(
         new_violations,
         vec![("crates/b/src/lib.rs".to_string(), "github".to_string())],
@@ -1740,6 +2052,56 @@ fn scanner_allowlist_is_shrink_only() {
         stale_entries,
         vec![("crates/gone/src/lib.rs".to_string(), "gmail".to_string())],
         "an allowlist entry with no matching hit must be reported stale"
+    );
+}
+
+/// WS10: the allowlist keys on the crate NAME, not on the crate's directory.
+///
+/// A family move (PROPOSAL section 5) changes every discovered path at once. If
+/// the listed paths were compared literally, every entry naming a moved crate
+/// would be reported BOTH stale and as a new violation in the same run — ~215
+/// of them, which is the lockstep sweep this row exists to remove. Resolution
+/// makes the same entry keep matching; an entry naming a crate that is really
+/// gone still falls through to `stale`.
+#[test]
+fn reborn_allowlist_entries_follow_a_crate_into_its_family_directory() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let root = temporary.path();
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("root manifest");
+    for index in 0..24 {
+        let filler = root.join(format!("crates/ironclaw_filler_{index}"));
+        std::fs::create_dir_all(&filler).expect("filler crate");
+        std::fs::write(filler.join("Cargo.toml"), "[package]\n").expect("filler manifest");
+    }
+    let moved = root.join("crates/substrates/ironclaw_llm");
+    std::fs::create_dir_all(moved.join("src")).expect("moved crate");
+    std::fs::write(moved.join("Cargo.toml"), "[package]\n").expect("moved manifest");
+
+    // What the scanner would discover on the moved tree.
+    let hits: BTreeSet<HitEntry> = [(
+        "crates/substrates/ironclaw_llm/src/registry.rs".to_string(),
+        "nearai".to_string(),
+    )]
+    .into_iter()
+    .collect();
+    // What the allowlist still says, unedited.
+    let allowlist = [
+        ("crates/ironclaw_llm/src/registry.rs", "nearai"),
+        ("crates/ironclaw_deleted/src/lib.rs", "slack"),
+    ];
+
+    let (new_violations, stale_entries) = classify_hits(root, &hits, &allowlist);
+    assert!(
+        new_violations.is_empty(),
+        "an allowlisted hit must stay allowlisted after its crate moves: {new_violations:?}"
+    );
+    assert_eq!(
+        stale_entries,
+        vec![(
+            "crates/ironclaw_deleted/src/lib.rs".to_string(),
+            "slack".to_string()
+        )],
+        "an entry naming a crate that no longer exists must still be reported stale"
     );
 }
 

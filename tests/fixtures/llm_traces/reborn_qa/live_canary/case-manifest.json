@@ -109,10 +109,10 @@
       ],
       "retirement_evidence": {
         "deterministic_test": "uv run --project tests/e2e --python 3.12 pytest tests/e2e/scenarios/test_reborn_qa_trace_replay.py::test_every_harvested_trace_replays -q",
-        "reason": "Retired from recurring live coverage after deterministic harvested-trace replay passed; representative drift remains scheduled.",
+        "reason": "Eligible for retirement after deterministic harvested-trace replay passed; retained on the recurring full-matrix schedule.",
         "retired_at": "2026-07-29"
       },
-      "retired_cases": [
+      "retirement_candidates": [
         {
           "case": "qa_2d_calendar_prep_live_chat",
           "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_2d_calendar_prep_live_chat.json"
@@ -209,7 +209,8 @@
           "case": "qa_10i_slack_raw_entity_hygiene",
           "deterministic_fixture": "tests/fixtures/llm_traces/reborn_qa/live_canary/qa_10i_slack_raw_entity_hygiene.json"
         }
-      ]
+      ],
+      "retired_cases": []
     }
   }
 }

@@ -1,5 +1,5 @@
 use clap::{Args, Subcommand};
-use ironclaw_host_api::operator_llm::{
+use ironclaw_product_contracts::operator_llm::{
     RebornProviderList, RebornProviderStatus, RebornProviderWriteOutcome,
 };
 

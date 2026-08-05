@@ -1,18 +1,18 @@
 //! Filesystem-backed product workflow [`IdempotencyLedger`] storage adapters.
 
+use ironclaw_product_contracts::action::ActionFingerprintKey;
+
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::{
-    ActionFingerprintKey, ActionPhase, IdempotencyDecision, IdempotencyLedger,
-    ProductInboundAction, ProductSurfaceFailure,
+    ActionPhase, IdempotencyDecision, IdempotencyLedger, ProductInboundAction,
+    ProductSurfaceFailure,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use futures::StreamExt;
-use ironclaw_filesystem::LibSqlRootFilesystem;
-use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{
     CasExpectation, Entry, FilesystemError, Filter, IndexKey, IndexValue, Page, RecordKind,
     RecordVersion, RootFilesystem, ScopedFilesystem,
@@ -440,11 +440,28 @@ where
     }
 }
 
-/// Scoped-filesystem-backed product workflow idempotency ledger.
+/// Filesystem-backed product workflow idempotency ledger.
 ///
-/// Construct with the same [`ScopedFilesystem`] handle used by the Reborn host
-/// stores. The supplied [`ResourceScope`] is passed to the filesystem for every
-/// operation so the filesystem's mount resolver owns any tenant/user rewriting.
+/// **The one form.** It is generic over the `RootFilesystem` implementation, so
+/// there is no per-backend wrapper: a libSQL ledger is
+/// `RebornFilesystemIdempotencyLedger::<LibSqlRootFilesystem>::new_root(fs)` and
+/// a PostgreSQL one is the same call with `PostgresRootFilesystem`. (WS5 collapsed
+/// the `RebornLibSqlIdempotencyLedger` / `RebornPostgresIdempotencyLedger`
+/// newtypes — fossilized boundaries of the per-backend sub-crates folded in by
+/// #5540 — onto this generic form; they were byte-identical modulo the concrete
+/// filesystem type and had zero production construction sites.)
+///
+/// Two constructor families:
+///
+/// - **scoped** ([`new`](Self::new), [`with_in_flight_lease`](Self::with_in_flight_lease),
+///   [`with_root`](Self::with_root)) — construct with the same [`ScopedFilesystem`]
+///   handle used by the Reborn host stores. The supplied [`ResourceScope`] is passed
+///   to the filesystem for every operation so the filesystem's mount resolver owns
+///   any tenant/user rewriting. This is what production wires.
+/// - **root** ([`new_root`](Self::new_root), [`with_root_lease`](Self::with_root_lease),
+///   [`with_virtual_root`](Self::with_virtual_root)) — construct straight from a raw
+///   `RootFilesystem`; the ledger wraps it in a synthetic root scope itself. This is
+///   the durable-backend contract suites' entry point.
 pub struct RebornFilesystemIdempotencyLedger<F: ?Sized>
 where
     F: RootFilesystem,
@@ -458,6 +475,34 @@ where
 {
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>, scope: ResourceScope) -> Self {
         Self::with_in_flight_lease(filesystem, scope, DEFAULT_IN_FLIGHT_LEASE)
+    }
+
+    /// Root-scoped construction from a raw filesystem handle.
+    pub fn new_root(filesystem: Arc<F>) -> Self {
+        Self {
+            inner: FilesystemIdempotencyLedger::new_root(filesystem),
+        }
+    }
+
+    /// Root-scoped construction with an explicit in-flight lease.
+    pub fn with_root_lease(filesystem: Arc<F>, in_flight_lease: Duration) -> Self {
+        Self {
+            inner: FilesystemIdempotencyLedger::with_root_lease(filesystem, in_flight_lease),
+        }
+    }
+
+    /// Root-scoped construction with an explicit ledger root and lease.
+    ///
+    /// Named `with_virtual_root` rather than `with_root` because the scoped
+    /// family already owns that name with a different signature.
+    pub fn with_virtual_root(
+        filesystem: Arc<F>,
+        root: VirtualPath,
+        in_flight_lease: Duration,
+    ) -> Self {
+        Self {
+            inner: FilesystemIdempotencyLedger::with_root(filesystem, root, in_flight_lease),
+        }
     }
 
     pub fn with_in_flight_lease(
@@ -502,126 +547,6 @@ impl<F> IdempotencyLedger for RebornFilesystemIdempotencyLedger<F>
 where
     F: RootFilesystem + ?Sized + 'static,
 {
-    async fn begin_or_replay(
-        &self,
-        fingerprint: ActionFingerprintKey,
-        received_at: DateTime<Utc>,
-    ) -> Result<IdempotencyDecision, ProductSurfaceFailure> {
-        self.inner.begin_or_replay(fingerprint, received_at).await
-    }
-
-    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure> {
-        self.inner.settle(action).await
-    }
-
-    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure> {
-        self.inner.release(action).await
-    }
-}
-
-/// libSQL-backed product workflow idempotency ledger using the shared
-/// SQL filesystem backend for persistence.
-pub struct RebornLibSqlIdempotencyLedger {
-    inner: FilesystemIdempotencyLedger<LibSqlRootFilesystem>,
-}
-impl RebornLibSqlIdempotencyLedger {
-    pub fn new(filesystem: Arc<LibSqlRootFilesystem>) -> Self {
-        Self {
-            inner: FilesystemIdempotencyLedger::new_root(filesystem),
-        }
-    }
-
-    pub fn with_in_flight_lease(
-        filesystem: Arc<LibSqlRootFilesystem>,
-        in_flight_lease: Duration,
-    ) -> Self {
-        Self {
-            inner: FilesystemIdempotencyLedger::with_root_lease(filesystem, in_flight_lease),
-        }
-    }
-
-    pub fn with_root(
-        filesystem: Arc<LibSqlRootFilesystem>,
-        root: VirtualPath,
-        in_flight_lease: Duration,
-    ) -> Self {
-        Self {
-            inner: FilesystemIdempotencyLedger::with_root(filesystem, root, in_flight_lease),
-        }
-    }
-
-    pub fn with_settled_entry_limit(mut self, limit: NonZeroUsize) -> Self {
-        self.inner = self.inner.with_settled_entry_limit(limit);
-        self
-    }
-
-    pub fn with_settled_prune_interval(mut self, interval: NonZeroUsize) -> Self {
-        self.inner = self.inner.with_settled_prune_interval(interval);
-        self
-    }
-}
-#[async_trait]
-impl IdempotencyLedger for RebornLibSqlIdempotencyLedger {
-    async fn begin_or_replay(
-        &self,
-        fingerprint: ActionFingerprintKey,
-        received_at: DateTime<Utc>,
-    ) -> Result<IdempotencyDecision, ProductSurfaceFailure> {
-        self.inner.begin_or_replay(fingerprint, received_at).await
-    }
-
-    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure> {
-        self.inner.settle(action).await
-    }
-
-    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductSurfaceFailure> {
-        self.inner.release(action).await
-    }
-}
-
-/// PostgreSQL-backed product workflow idempotency ledger using the shared
-/// SQL filesystem backend for persistence.
-pub struct RebornPostgresIdempotencyLedger {
-    inner: FilesystemIdempotencyLedger<PostgresRootFilesystem>,
-}
-impl RebornPostgresIdempotencyLedger {
-    pub fn new(filesystem: Arc<PostgresRootFilesystem>) -> Self {
-        Self {
-            inner: FilesystemIdempotencyLedger::new_root(filesystem),
-        }
-    }
-
-    pub fn with_in_flight_lease(
-        filesystem: Arc<PostgresRootFilesystem>,
-        in_flight_lease: Duration,
-    ) -> Self {
-        Self {
-            inner: FilesystemIdempotencyLedger::with_root_lease(filesystem, in_flight_lease),
-        }
-    }
-
-    pub fn with_root(
-        filesystem: Arc<PostgresRootFilesystem>,
-        root: VirtualPath,
-        in_flight_lease: Duration,
-    ) -> Self {
-        Self {
-            inner: FilesystemIdempotencyLedger::with_root(filesystem, root, in_flight_lease),
-        }
-    }
-
-    pub fn with_settled_entry_limit(mut self, limit: NonZeroUsize) -> Self {
-        self.inner = self.inner.with_settled_entry_limit(limit);
-        self
-    }
-
-    pub fn with_settled_prune_interval(mut self, interval: NonZeroUsize) -> Self {
-        self.inner = self.inner.with_settled_prune_interval(interval);
-        self
-    }
-}
-#[async_trait]
-impl IdempotencyLedger for RebornPostgresIdempotencyLedger {
     async fn begin_or_replay(
         &self,
         fingerprint: ActionFingerprintKey,

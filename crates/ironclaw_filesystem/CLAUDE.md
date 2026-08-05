@@ -22,7 +22,7 @@ boundary. The current rule is codified in
 - `IndexSpec` / `IndexName` / `IndexKey` / `IndexValue` / `IndexKind` /
   `Filter` / `Page` (`src/index.rs`) — declarative index/query primitives.
   No SQL strings cross this boundary.
-- `BackendCapabilities` / `IndexCapability` / `TxnCapability`
+- `BackendCapabilities` / `Capability` / `TxnCapability`
   (`src/types.rs`) — declared up front; mount-time validation refuses a
   backend that cannot serve what a consumer demands.
 - `StorageTxn` / `EventRecord` (`src/backend.rs`) — supporting handle types.
@@ -32,8 +32,20 @@ boundary. The current rule is codified in
   higher-level stores accept in their constructor. Performs the permission
   check against `MountView` before any backend dispatch.
 - Backends: `DiskFilesystem`, `PostgresRootFilesystem`,
-  `LibSqlRootFilesystem`, `InMemoryBackend`. All implement
-  `RootFilesystem`.
+  `LibSqlRootFilesystem`, `InMemoryBackend`, `HsmBackend`. All implement
+  `RootFilesystem` (re-derive with
+  `rg -n "impl RootFilesystem for" src/`).
+- `PostgresConnectionPool` (`src/postgres.rs`) — the workspace's own carrier for
+  an opened `deadpool_postgres::Pool`. This crate is the Postgres substrate, so
+  the driver is a chartered dependency *here*; crates above that only pass a
+  pool along name this type instead, so a third-party type stops appearing in
+  their public APIs (PROPOSAL §6.3.2/§11.2.6). It is a carrier, not an
+  abstraction — `driver()` / `into_driver()` hand the pool to code that actually
+  runs SQL — and it deliberately does **not** implement `Deref` (an implicit
+  unwrap would let the driver back into a signature unnoticed) or a derived
+  `Debug` (the driver's own `Debug` prints host/user/dbname/port).
+  `crates/ironclaw_architecture/tests/reborn_persistence_driver_boundary.rs`
+  pins which crates may link the driver at all.
 - Backend containment checks (symlink traversal, mount escape, raw-host
   path prevention).
 - `FaultInjecting` (`src/fault.rs`, behind the `test-support` feature) — a
@@ -175,7 +187,7 @@ boundary. The current rule is codified in
 migration window. Default impls route reads/writes through `put`/`get` so
 existing backends (and existing consumer code) continue to work without
 changes. These methods will be removed entirely once
-`src/db/` is dissolved (task #17 of the storage rework). Do not add new
+`src/db.rs` is dissolved (task #17 of the storage rework). Do not add new
 consumers of the legacy methods — new code should call `put`/`get`/
 `query`/etc. directly.
 

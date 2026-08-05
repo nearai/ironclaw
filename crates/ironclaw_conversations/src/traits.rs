@@ -1,14 +1,15 @@
 use async_trait::async_trait;
-use ironclaw_turns::{AcceptedMessageRef, IdempotencyKey, SubmitTurnResponse};
+use ironclaw_host_api::turn::{AcceptedMessageRef, IdempotencyKey, SubmitTurnResponse};
 
 use crate::{
-    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
-    AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind, ConditionalUnpairOutcome,
-    ConversationBindingResolution, ExpectedExternalActorOwner, ExternalActorBindingEpoch,
-    ExternalActorRef, InboundTurnError, LinkConversationRequest, LinkedConversationBinding,
-    ReplyTargetBinding, ResolveConversationRequest, ResolveStoredReplyTargetRequest,
-    StoredReplyTargetBinding, ValidateReplyTargetRequest,
+    AcceptConversationMessageRequest, AcceptedConversationMessage,
+    AcceptedConversationMessageLookup, AcceptedConversationMessageReplay, AdapterInstallationId,
+    AdapterKind, ConditionalUnpairOutcome, ConversationBindingResolution,
+    ExpectedExternalActorOwner, InboundTurnError, LinkConversationRequest,
+    LinkedConversationBinding, ReplyTargetBinding, ResolveConversationRequest,
+    ResolveStoredReplyTargetRequest, StoredReplyTargetBinding, ValidateReplyTargetRequest,
 };
+use ironclaw_extension_contracts::external::{ExternalActorBindingEpoch, ExternalActorRef};
 
 #[async_trait]
 pub trait ConversationBindingService: Send + Sync {
@@ -117,16 +118,16 @@ pub trait ConversationActorPairingService: Send + Sync {
 }
 
 #[async_trait]
-pub trait SessionThreadService: Send + Sync {
+pub trait InboundConversationService: Send + Sync {
     async fn accept_inbound_message(
         &self,
-        request: AcceptInboundMessageRequest,
-    ) -> Result<AcceptedInboundMessage, InboundTurnError>;
+        request: AcceptConversationMessageRequest,
+    ) -> Result<AcceptedConversationMessage, InboundTurnError>;
 
     async fn replay_accepted_inbound_message(
         &self,
-        lookup: AcceptedInboundMessageLookup,
-    ) -> Result<Option<AcceptedInboundMessageReplay>, InboundTurnError>;
+        lookup: AcceptedConversationMessageLookup,
+    ) -> Result<Option<AcceptedConversationMessageReplay>, InboundTurnError>;
 
     async fn inbound_message_turn_submission(
         &self,

@@ -3,8 +3,9 @@ use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowRecord, AuthFlowStatus,
     AuthProductScope, CredentialAccountId, CredentialAccountStatus, Timestamp,
 };
-use ironclaw_turns::{CancelRunResponse, GateRef, IdempotencyKey, ResumeTurnResponse, TurnActor};
-use ironclaw_turns::{TurnRunId, TurnScope};
+use ironclaw_host_api::turn::{IdempotencyKey, TurnActor, TurnGateRef};
+use ironclaw_host_api::turn::{TurnRunId, TurnScope};
+use ironclaw_turns::{CancelRunResponse, ResumeTurnResponse};
 use serde::{Deserialize, Serialize};
 
 use super::auth_rejected;
@@ -227,7 +228,7 @@ impl AuthInteractionChallengeView {
 pub struct PendingAuthInteractionView {
     pub scope: AuthInteractionScope,
     pub run_id: TurnRunId,
-    pub auth_request_ref: GateRef,
+    pub auth_request_ref: TurnGateRef,
     pub flow_id: AuthFlowId,
     pub status: AuthInteractionStatus,
     pub provider: ironclaw_auth::AuthProviderId,
@@ -241,14 +242,14 @@ pub struct PendingAuthInteractionView {
 pub struct AuthGateRecord {
     scope: AuthInteractionScope,
     run_id: TurnRunId,
-    gate_ref: GateRef,
+    gate_ref: TurnGateRef,
     flow: AuthFlowRecord,
 }
 
 impl AuthGateRecord {
     pub fn new(
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         flow: AuthFlowRecord,
     ) -> Result<Self, ProductSurfaceFailure> {
         let scope = AuthInteractionScope::from_auth_scope(&flow.scope)?;
@@ -264,7 +265,7 @@ impl AuthGateRecord {
         if turn_run_ref.as_str() != run_id.to_string() {
             return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
         }
-        let expected_gate = GateRef::new(continuation_gate_ref.as_str().to_string())
+        let expected_gate = TurnGateRef::new(continuation_gate_ref.as_str().to_string())
             .map_err(|_| auth_rejected(AuthInteractionRejectionKind::InvalidGateRef))?;
         if gate_ref != expected_gate {
             return Err(auth_rejected(AuthInteractionRejectionKind::InvalidGateRef));
@@ -285,7 +286,7 @@ impl AuthGateRecord {
         self.run_id
     }
 
-    pub fn gate_ref(&self) -> &GateRef {
+    pub fn gate_ref(&self) -> &TurnGateRef {
         &self.gate_ref
     }
 
@@ -352,7 +353,7 @@ pub struct ResolveAuthInteractionRequest {
     pub scope: TurnScope,
     pub actor: TurnActor,
     pub run_id_hint: Option<TurnRunId>,
-    pub gate_ref: GateRef,
+    pub gate_ref: TurnGateRef,
     pub decision: AuthInteractionDecision,
     pub idempotency_key: IdempotencyKey,
 }

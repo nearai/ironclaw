@@ -8,7 +8,6 @@ fn secrets_crate_does_not_depend_on_workflow_runtime_or_observability_crates() {
         "ironclaw_authorization",
         "ironclaw_approvals",
         "ironclaw_capabilities",
-        "ironclaw_dispatcher",
         "ironclaw_events",
         "ironclaw_extensions",
         "ironclaw_host_runtime",
@@ -16,7 +15,7 @@ fn secrets_crate_does_not_depend_on_workflow_runtime_or_observability_crates() {
         "ironclaw_processes",
         "ironclaw_resources",
         "ironclaw_approvals",
-        "ironclaw_scripts",
+        "ironclaw_sandbox",
         "ironclaw_wasm",
     ] {
         assert!(

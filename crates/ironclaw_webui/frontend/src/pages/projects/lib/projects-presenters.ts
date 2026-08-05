@@ -25,6 +25,19 @@ const PROJECT_HEALTH_LABELS = {
   unknown: "Unknown",
 };
 
+const PROJECT_STATE_LABELS = {
+  active: "Active",
+  archived: "Archived",
+  unknown: "Unknown",
+};
+
+const PROJECT_ROLE_LABELS = {
+  owner: "Owner",
+  editor: "Editor",
+  viewer: "Viewer",
+  unknown: "Unknown",
+};
+
 const MISSION_STATUS_LABELS = {
   active: "Active",
   paused: "Paused",
@@ -110,6 +123,10 @@ export function healthTone(health) {
   return "muted";
 }
 
+export function projectStateTone(state) {
+  return state === "active" ? "success" : "muted";
+}
+
 export function missionTone(status) {
   if (status === "Active") return "signal";
   if (status === "Paused") return "warning";
@@ -129,6 +146,20 @@ export function formatProjectHealth(health, t) {
   return formatEnumLabel(health, t, {
     labels: PROJECT_HEALTH_LABELS,
     keyPrefix: "projects.health",
+  });
+}
+
+export function formatProjectState(state, t) {
+  return formatEnumLabel(state, t, {
+    labels: PROJECT_STATE_LABELS,
+    keyPrefix: "projects.status",
+  });
+}
+
+export function formatProjectRole(role, t) {
+  return formatEnumLabel(role, t, {
+    labels: PROJECT_ROLE_LABELS,
+    keyPrefix: "projects.projectRole",
   });
 }
 
@@ -220,21 +251,12 @@ export function threadPresentation(thread, t) {
 }
 
 export function summarizeOverview(overview) {
-  const projects = overview?.projects || [];
-  const totalSpend = projects.reduce((sum, project) => sum + Number(project.cost_today_usd || 0), 0);
-  const activeMissions = projects.reduce((sum, project) => sum + Number(project.active_missions || 0), 0);
-  const threadsToday = projects.reduce((sum, project) => sum + Number(project.threads_today || 0), 0);
-  const pendingGates = projects.reduce((sum, project) => sum + Number(project.pending_gates || 0), 0);
-  const failures24h = projects.reduce((sum, project) => sum + Number(project.failures_24h || 0), 0);
+  const counts = overview?.lifecycleCounts;
 
   return {
-    totalProjects: projects.length,
-    activeMissions,
-    threadsToday,
-    totalSpend,
-    pendingGates,
-    failures24h,
-    attentionCount: overview?.attention?.length || 0,
+    totalProjects: counts?.total ?? 0,
+    activeProjects: counts?.active ?? 0,
+    archivedProjects: counts?.archived ?? 0,
   };
 }
 

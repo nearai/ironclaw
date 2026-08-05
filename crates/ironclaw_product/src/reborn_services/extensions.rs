@@ -1,3 +1,6 @@
+use ironclaw_product_contracts::lifecycle_service::{
+    LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
+};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -6,22 +9,24 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::{StreamExt, TryStreamExt, stream};
 use ironclaw_auth::{
-    AuthAccountLastError, AuthAccountState, CredentialAccountStatus, project_auth_account_state,
+    AuthAccountLastError, AuthAccountState, ChannelAuthAccountState, ChannelConnectionService,
+    CredentialAccountStatus, project_auth_account_state,
 };
-use ironclaw_host_api::{
-    ids::ExtensionId,
-    product_surface::{ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode},
+use ironclaw_extension_contracts::{
     state::{InstallationState, LifecyclePublicState},
     surface::CapabilitySurfaceKind,
 };
+use ironclaw_host_api::ids::ExtensionId;
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode,
+};
 
 use crate::{
-    ChannelAuthAccountState, ChannelConnectionService, LifecycleExtensionSummary,
-    LifecycleInstalledExtensionSummary, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductService,
-    LifecycleProductSurfaceContext, ProductView, RebornAccountBindingSource, RebornAuthAccount,
-    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornExtensionSurface, RebornVendorAuthAccounts,
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecycleProductAction,
+    LifecycleProductPayload, LifecycleProductResponse, ProductView, RebornAccountBindingSource,
+    RebornAuthAccount, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSurface,
+    RebornVendorAuthAccounts,
 };
 
 use super::{
@@ -179,7 +184,7 @@ async fn lifecycle_extension_infos(
     caller: ProductSurfaceCaller,
     connections: HashMap<String, bool>,
     account_states: HashMap<String, ChannelAuthAccountState>,
-    activation_errors: HashMap<String, String>,
+    activation_errors: HashMap<ExtensionId, String>,
 ) -> Result<Vec<RebornExtensionInfo>, ProductSurfaceError> {
     let resolved = stream::iter(installed)
         .map(|installed| {
@@ -253,7 +258,7 @@ fn extension_info(
     readiness: ExtensionCredentialReadiness,
     connections: &HashMap<String, bool>,
     account_states: &HashMap<String, ChannelAuthAccountState>,
-    activation_errors: &HashMap<String, String>,
+    activation_errors: &HashMap<ExtensionId, String>,
 ) -> RebornExtensionInfo {
     let phase = installed.phase;
     let onboarding =
@@ -271,9 +276,12 @@ fn extension_info(
     // Redacted activation error for this extension (host installation record's
     // typed `last_error`), threaded onto the card slot the frontend already
     // renders. `None` when the service surfaces no failure for this extension.
-    let activation_error = activation_errors
-        .get(summary.package_ref.id.as_str())
-        .cloned();
+    // The map is keyed by `ExtensionId`; a package id that is not valid
+    // extension vocabulary cannot be a key, so it reports no error rather
+    // than being looked up as a string that could never have matched.
+    let activation_error = ExtensionId::new(summary.package_ref.id.as_str())
+        .ok()
+        .and_then(|extension_id| activation_errors.get(&extension_id).cloned());
     // A channel extension the calling user has not personally connected — via
     // the vendor's OAuth or a pairing/proof-code binding — is not ready for
     // that caller, whatever the host record says. Absence of a connection
@@ -522,22 +530,21 @@ mod tests {
         CredentialAccountId, CredentialAccountLabel, CredentialAccountProjection,
         CredentialOwnership,
     };
-    use ironclaw_host_api::{
-        ids::{AgentId, ProjectId, TenantId, UserId},
-        surface::CapabilitySurfaceKind,
-    };
+    use ironclaw_extension_contracts::surface::CapabilitySurfaceKind;
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 
     use super::*;
     use crate::reborn_services::StaticChannelConnectionService;
     use crate::{
-        ChannelConnectionRequirement, ChannelConnectionService, ExtensionCredentialStatusRequest,
+        ChannelConnectionRequirement, ExtensionCredentialStatusRequest,
         ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
         LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding,
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
         LifecycleSearchExtensionSummary, RebornChannelConnectStrategy,
     };
-    use ironclaw_host_api::product_surface::{
+    use ironclaw_auth::ChannelConnectionService;
+    use ironclaw_product_contracts::surface::{
         ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     };
 

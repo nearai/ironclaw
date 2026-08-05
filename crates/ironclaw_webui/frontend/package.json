@@ -6,7 +6,7 @@
   "packageManager": "pnpm@11.7.0",
   "type": "module",
   "engines": {
-    "node": ">=22 <23",
+    "node": ">=22.22 <23",
     "pnpm": ">=11 <12"
   },
   "scripts": {
@@ -22,16 +22,16 @@
   },
   "dependencies": {
     "@tanstack/react-query": "5.87.4",
-    "dompurify": "3.2.3",
+    "dompurify": "3.4.12",
     "event-source-plus": "0.1.15",
     "highlight.js": "11.11.1",
     "marked": "17.0.2",
     "qrcode": "1.5.4",
-    "react": "19.1.0",
-    "react-dom": "19.1.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
     "react-hook-form": "7.62.0",
     "react-hot-toast": "2.6.0",
-    "react-router": "7.15.1",
+    "react-router": "8.3.0",
     "streamdown": "2.5.0"
   },
   "devDependencies": {
@@ -42,6 +42,7 @@
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.3",
     "happy-dom": "20.11.1",
+    "jsdom": "29.1.1",
     "tailwindcss": "4.3.2",
     "typescript": "6.0.3",
     "vite": "8.1.3",

@@ -1,6 +1,7 @@
 use super::*;
 
-use crate::{AuthChallengeProvider, AuthChallengeView, AuthPromptChallengeKind};
+use crate::AuthPromptChallengeKind;
+use ironclaw_auth::product_prompt::{AuthChallengeProvider, AuthChallengeView};
 use ironclaw_auth::{AuthProviderId, OAuthAuthorizationUrl};
 use ironclaw_host_api::{
     capability::RuntimeCredentialAccountSetup, decision::RuntimeCredentialAuthRequirement,
@@ -77,7 +78,7 @@ impl AuthChallengeProvider for FakePairingAuthChallengeProvider {
             account_label: None,
             authorization_url: None,
             expires_at: None,
-            pairing: Some(crate::PairingAuthChallengeView {
+            pairing: Some(ironclaw_auth::product_prompt::PairingAuthChallengeView {
                 code: "ABCD2345".to_string(),
                 deep_link: Some("https://t.me/fixturebot?start=ABCD2345".to_string()),
                 expires_at: chrono::Utc::now() + chrono::Duration::minutes(15),
@@ -129,7 +130,7 @@ async fn product_event_stream_enriches_auth_prompt_through_projection_stream() {
                 status: TurnStatus::BlockedAuth,
                 kind: TurnEventKind::Blocked,
                 blocked_gate: Some(TurnBlockedGateMetadata {
-                    gate_ref: GateRef::new(gate_ref).unwrap(),
+                    gate_ref: TurnGateRef::new(gate_ref).unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
                     activity_id: None,
                     credential_requirements: Vec::new(),
@@ -225,7 +226,7 @@ async fn product_event_stream_projects_pairing_prompt_connection_context() {
                 status: TurnStatus::BlockedAuth,
                 kind: TurnEventKind::Blocked,
                 blocked_gate: Some(TurnBlockedGateMetadata {
-                    gate_ref: GateRef::new(gate_ref).unwrap(),
+                    gate_ref: TurnGateRef::new(gate_ref).unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
                     activity_id: None,
                     credential_requirements: credential_requirements.clone(),
@@ -237,7 +238,7 @@ async fn product_event_stream_projects_pairing_prompt_connection_context() {
         }),
         Arc::new(FakeTurnCoordinator {
             state: TurnRunState {
-                gate_ref: Some(GateRef::new(gate_ref).unwrap()),
+                gate_ref: Some(TurnGateRef::new(gate_ref).unwrap()),
                 credential_requirements,
                 ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1))
             },
@@ -353,7 +354,7 @@ async fn product_event_stream_uses_credential_requirement_for_manual_token_auth_
                 status: TurnStatus::BlockedAuth,
                 kind: TurnEventKind::Blocked,
                 blocked_gate: Some(TurnBlockedGateMetadata {
-                    gate_ref: GateRef::new(gate_ref).unwrap(),
+                    gate_ref: TurnGateRef::new(gate_ref).unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
                     activity_id: None,
                     credential_requirements: credential_requirements.clone(),
@@ -447,7 +448,7 @@ async fn product_event_stream_keeps_retired_channel_pairing_requirement_generic(
                 status: TurnStatus::BlockedAuth,
                 kind: TurnEventKind::Blocked,
                 blocked_gate: Some(TurnBlockedGateMetadata {
-                    gate_ref: GateRef::new(gate_ref).unwrap(),
+                    gate_ref: TurnGateRef::new(gate_ref).unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
                     activity_id: None,
                     credential_requirements: credential_requirements.clone(),
@@ -536,7 +537,7 @@ async fn product_event_stream_keeps_oauth_requirement_as_oauth_prompt_without_ur
                 status: TurnStatus::BlockedAuth,
                 kind: TurnEventKind::Blocked,
                 blocked_gate: Some(TurnBlockedGateMetadata {
-                    gate_ref: GateRef::new(gate_ref).unwrap(),
+                    gate_ref: TurnGateRef::new(gate_ref).unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
                     activity_id: None,
                     credential_requirements: credential_requirements.clone(),
@@ -609,7 +610,7 @@ async fn product_event_stream_surfaces_auth_challenge_lookup_failure() {
                 status: TurnStatus::BlockedAuth,
                 kind: TurnEventKind::Blocked,
                 blocked_gate: Some(TurnBlockedGateMetadata {
-                    gate_ref: GateRef::new(gate_ref).unwrap(),
+                    gate_ref: TurnGateRef::new(gate_ref).unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
                     activity_id: None,
                     credential_requirements: Vec::new(),
@@ -716,7 +717,7 @@ async fn product_event_stream_creates_vendor_oauth_prompt_for_runtime_credential
                 status: TurnStatus::BlockedAuth,
                 kind: TurnEventKind::Blocked,
                 blocked_gate: Some(TurnBlockedGateMetadata {
-                    gate_ref: GateRef::new(gate_ref).unwrap(),
+                    gate_ref: TurnGateRef::new(gate_ref).unwrap(),
                     gate_kind: TurnBlockedGateKind::Auth,
                     activity_id: None,
                     credential_requirements: credential_requirements.clone(),

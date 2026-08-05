@@ -16,22 +16,37 @@ use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
-use ironclaw_common::{AutomationName, AutomationNameError};
+use ironclaw_host_api::turn::TurnRunId;
 use ironclaw_host_api::{
     Timestamp,
     ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
 };
-use ironclaw_turns::TurnRunId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use ulid::Ulid;
+mod automation;
+mod fire_access;
 mod in_memory;
 mod libsql;
 mod postgres;
 mod trusted_submit;
 mod worker;
 
+/// The automation-name vocabulary. An automation *is* a trigger as the user
+/// names it, so this crate owns the newtype (PROPOSAL §6.1.5 evicts it from
+/// `ironclaw_common`, which must hold no domain vocabulary); `MAX_TRIGGER_NAME_BYTES`
+/// below is the same bound under this crate's own noun.
+pub use automation::{AutomationName, AutomationNameError, MAX_AUTOMATION_NAME_BYTES};
+/// Fire-time access: the check contract plus the checkers that are pure
+/// trigger-scope policy. The deployment *grant* value and the identity-directory
+/// checker stay in the composition root — see `fire_access`'s module doc
+/// (CHECKLIST WS6 / PROPOSAL §6.10.1).
+pub use fire_access::{
+    CompositeTriggerFireChecker, StaticOwnerTriggerFireChecker, TriggerFireAccessCheck,
+    TriggerFireAccessChecker, TriggerFireAccessDecision, TriggerFireAccessError,
+    trigger_fire_access_denied, trigger_fire_scope_matches,
+};
 pub use ironclaw_host_api::outbound::OutboundDeliveryTargetId as TriggerDeliveryTargetId;
 pub use trusted_submit::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
@@ -44,7 +59,7 @@ const MAX_DUE_TRIGGER_POLL_LIMIT: usize = 128;
 const MAX_TRIGGER_LIST_LIMIT: usize = 100;
 const MAX_TRIGGER_RUN_HISTORY_LIMIT: usize = 500;
 const MAX_TRIGGER_RUN_HISTORY_RETAINED: usize = 500;
-pub const MAX_TRIGGER_NAME_BYTES: usize = ironclaw_common::MAX_AUTOMATION_NAME_BYTES;
+pub const MAX_TRIGGER_NAME_BYTES: usize = MAX_AUTOMATION_NAME_BYTES;
 pub const MAX_TRIGGER_PROMPT_BYTES: usize = 32 * 1024;
 const IDENTITY_VERSION_LABEL: &str = "ironclaw.trigger-fire.v1";
 const ROUTE_THREAD_DOMAIN: &str = "route-thread";
@@ -109,7 +124,7 @@ pub struct TriggerId(Ulid);
 
 impl TriggerId {
     pub fn new() -> Self {
-        Self(Ulid::new())
+        Self(Ulid::generate())
     }
 
     pub fn parse(value: &str) -> Result<Self, TriggerError> {

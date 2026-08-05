@@ -39,18 +39,18 @@ use ironclaw_filesystem::{
     RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::ids::UserId;
+use ironclaw_host_api::turn::{AcceptedMessageRef, IdempotencyKey, SubmitTurnResponse};
 use ironclaw_host_api::{error::HostApiError, path::ScopedPath, resource::ResourceScope};
-use ironclaw_turns::{AcceptedMessageRef, IdempotencyKey, SubmitTurnResponse};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
-    AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind, ConditionalUnpairOutcome,
-    ConversationActorPairingService, ConversationBindingResolution, ConversationBindingService,
-    ExpectedExternalActorOwner, ExternalActorBindingEpoch, ExternalActorRef,
-    ExternalConversationIdentity, InMemoryConversationServices, InboundTurnError,
-    LinkConversationRequest, LinkedConversationBinding, ReplyTargetBinding,
-    ResolveConversationRequest, SessionThreadService, ThreadMessageRecord,
+    AcceptConversationMessageRequest, AcceptedConversationMessage,
+    AcceptedConversationMessageLookup, AcceptedConversationMessageReplay, AdapterInstallationId,
+    AdapterKind, ConditionalUnpairOutcome, ConversationActorPairingService,
+    ConversationBindingResolution, ConversationBindingService, ConversationMessageRecord,
+    ExpectedExternalActorOwner, ExternalConversationIdentity, InMemoryConversationServices,
+    InboundConversationService, InboundTurnError, LinkConversationRequest,
+    LinkedConversationBinding, ReplyTargetBinding, ResolveConversationRequest,
     ValidateReplyTargetRequest,
     memory::{
         AcceptedMessageReplayKey, ActorKey, BindingKey, BindingRecord, ExternalEventRouteKey,
@@ -59,6 +59,7 @@ use crate::{
     },
     state_store::{ConversationStateRepository, PersistedConversationState},
 };
+use ironclaw_extension_contracts::external::{ExternalActorBindingEpoch, ExternalActorRef};
 
 const STATE_PREFIX: &str = "/conversations";
 
@@ -119,11 +120,11 @@ struct StoredConversationState {
     reply_targets: HashMap<String, ReplyTargetRecord>,
     threads: Vec<(ThreadKey, ThreadRecord)>,
     external_event_routes: Vec<(ExternalEventRouteKey, ExternalConversationIdentity)>,
-    message_idempotency: Vec<(MessageIdempotencyKey, AcceptedInboundMessage)>,
+    message_idempotency: Vec<(MessageIdempotencyKey, AcceptedConversationMessage)>,
     message_replays: Vec<(AcceptedMessageReplayKey, StoredAcceptedMessageReplay)>,
     submission_keys: Vec<(AcceptedMessageRef, IdempotencyKey)>,
     submitted_message_responses: Vec<(AcceptedMessageRef, SubmitTurnResponse)>,
-    messages: Vec<ThreadMessageRecord>,
+    messages: Vec<ConversationMessageRecord>,
 }
 
 impl StoredConversationState {
@@ -673,25 +674,25 @@ impl ConversationBindingService for RebornFilesystemConversationServices {
 }
 
 #[async_trait]
-impl SessionThreadService for RebornFilesystemConversationServices {
+impl InboundConversationService for RebornFilesystemConversationServices {
     async fn accept_inbound_message(
         &self,
-        request: AcceptInboundMessageRequest,
-    ) -> Result<AcceptedInboundMessage, InboundTurnError> {
+        request: AcceptConversationMessageRequest,
+    ) -> Result<AcceptedConversationMessage, InboundTurnError> {
         self.inner.accept_inbound_message(request).await
     }
 
     async fn replay_accepted_inbound_message(
         &self,
-        lookup: AcceptedInboundMessageLookup,
-    ) -> Result<Option<AcceptedInboundMessageReplay>, InboundTurnError> {
+        lookup: AcceptedConversationMessageLookup,
+    ) -> Result<Option<AcceptedConversationMessageReplay>, InboundTurnError> {
         self.inner.replay_accepted_inbound_message(lookup).await
     }
 
     async fn inbound_message_turn_submission(
         &self,
-        message_ref: &ironclaw_turns::AcceptedMessageRef,
-    ) -> Result<Option<ironclaw_turns::SubmitTurnResponse>, InboundTurnError> {
+        message_ref: &AcceptedMessageRef,
+    ) -> Result<Option<SubmitTurnResponse>, InboundTurnError> {
         self.inner
             .inbound_message_turn_submission(message_ref)
             .await
@@ -699,8 +700,8 @@ impl SessionThreadService for RebornFilesystemConversationServices {
 
     async fn inbound_message_turn_submission_key(
         &self,
-        message_ref: &ironclaw_turns::AcceptedMessageRef,
-    ) -> Result<ironclaw_turns::IdempotencyKey, InboundTurnError> {
+        message_ref: &AcceptedMessageRef,
+    ) -> Result<IdempotencyKey, InboundTurnError> {
         self.inner
             .inbound_message_turn_submission_key(message_ref)
             .await
@@ -708,7 +709,7 @@ impl SessionThreadService for RebornFilesystemConversationServices {
 
     async fn rotate_inbound_message_turn_submission_key(
         &self,
-        message_ref: &ironclaw_turns::AcceptedMessageRef,
+        message_ref: &AcceptedMessageRef,
     ) -> Result<(), InboundTurnError> {
         self.inner
             .rotate_inbound_message_turn_submission_key(message_ref)
@@ -717,8 +718,8 @@ impl SessionThreadService for RebornFilesystemConversationServices {
 
     async fn mark_inbound_message_turn_submitted(
         &self,
-        message_ref: &ironclaw_turns::AcceptedMessageRef,
-        response: ironclaw_turns::SubmitTurnResponse,
+        message_ref: &AcceptedMessageRef,
+        response: SubmitTurnResponse,
     ) -> Result<(), InboundTurnError> {
         self.inner
             .mark_inbound_message_turn_submitted(message_ref, response)

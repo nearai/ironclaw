@@ -124,10 +124,12 @@ async fn create_manual_token_flow(
     };
     service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider,
+            requester_extension: None,
             challenge: AuthChallenge::ManualTokenRequired {
                 interaction_id,
                 provider: google_provider(),
@@ -472,10 +474,12 @@ async fn filesystem_manual_token_completion_persists_auth_flow_account() {
 
     let flow = service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::ManualTokenRequired {
                 interaction_id,
                 provider,
@@ -694,10 +698,12 @@ async fn filesystem_flow_record_source_projects_session_scoped_manual_flows() {
     };
     let flow = service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::ManualTokenRequired {
                 interaction_id,
                 provider,
@@ -950,13 +956,16 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
     let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+    let requester_extension = ExtensionId::new("hosted-mcp-fixture").unwrap();
 
     let flow = service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: Some(requester_extension.clone()),
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -982,6 +991,11 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
         .await
         .unwrap();
     assert_eq!(claimed.status, AuthFlowStatus::CallbackReceived);
+    assert_eq!(
+        claimed.requester_extension.as_ref(),
+        Some(&requester_extension),
+        "callback claim preserves requester-scoped recipe authority"
+    );
 
     let second_claim = service
         .claim_oauth_callback(&scope, claim.clone())
@@ -1029,6 +1043,10 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
         .expect("completed flow should be durable");
     assert_eq!(stored.status, AuthFlowStatus::Completed);
     assert_eq!(stored.continuation_emitted_at, Some(emitted_at));
+    assert_eq!(
+        stored.requester_extension.as_ref(),
+        Some(&requester_extension)
+    );
 
     let completed_replay = recreated
         .claim_oauth_callback(&scope, claim)
@@ -1036,6 +1054,10 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
         .expect("completed callback replay should not reclaim provider exchange");
     assert_eq!(completed_replay.status, AuthFlowStatus::Completed);
     assert_eq!(completed_replay.continuation_emitted_at, Some(emitted_at));
+    assert_eq!(
+        completed_replay.requester_extension.as_ref(),
+        Some(&requester_extension)
+    );
 }
 
 #[tokio::test]
@@ -1133,10 +1155,12 @@ async fn filesystem_oauth_continuation_marker_is_idempotent() {
 
     let flow = service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -1830,10 +1854,12 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
     // ── Step 1: initial OAuth flow creates a new account ─────────────────────
     let flow1 = service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -1932,10 +1958,12 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
     // ── Step 2: re-auth flow bound to the existing account ───────────────────
     let flow2 = service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -2071,10 +2099,12 @@ async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation()
     // ── Step 1: initial flow creates the account under `setup_scope`. ─────────
     let flow1 = service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: setup_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -2139,10 +2169,12 @@ async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation()
 
     let flow2 = service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: reauth_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -2326,10 +2358,12 @@ async fn filesystem_oauth_callback_cas_conflict_reuses_concurrent_account() {
 
     let flow = service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -2623,10 +2657,12 @@ async fn filesystem_cancel_flow_and_terminal_state_rejection() {
 
     let flow = service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -2662,10 +2698,12 @@ async fn filesystem_fail_oauth_callback_marks_flow_failed() {
 
     let flow = service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -2734,10 +2772,12 @@ async fn filesystem_complete_credential_selection_completes_flow() {
 
     let flow = service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::AccountSelectionRequired {
                 provider: google_provider(),
                 accounts: vec![account.projection()],
@@ -2778,10 +2818,12 @@ async fn filesystem_create_flow_rejects_invalid_update_binding() {
     // Non-existent account in update_binding → CredentialMissing.
     let err = service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -3063,10 +3105,12 @@ async fn filesystem_expired_flow_status_persisted_before_returning_error() {
 
     let flow = service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -3136,10 +3180,12 @@ async fn filesystem_expired_flow_status_persisted_before_returning_error() {
     // persist the Expired status before returning error.
     let flow2 = service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -3198,10 +3244,12 @@ async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
 
     let flow = service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),
@@ -4060,10 +4108,12 @@ async fn filesystem_complete_credential_selection_succeeds_across_different_invo
     // Create the account-selection flow under invocation B.
     let flow = service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: flow_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::AccountSelectionRequired {
                 provider: google_provider(),
                 accounts: vec![account.projection()],
@@ -4156,10 +4206,12 @@ async fn filesystem_complete_credential_selection_rejects_genuinely_foreign_owne
     // account id (simulates a tampered or confused client submission).
     let flow = service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: alice_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::AccountSelectionRequired {
                 provider: google_provider(),
                 accounts: vec![bob_account.projection()],
@@ -4251,10 +4303,12 @@ async fn filesystem_complete_credential_selection_rejects_different_session_id()
     // Create the account-selection flow under session S2.
     let flow = service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: flow_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::AccountSelectionRequired {
                 provider: google_provider(),
                 accounts: vec![account.projection()],
@@ -4343,10 +4397,12 @@ async fn filesystem_complete_credential_selection_rejects_different_auth_surface
     // Create the account-selection flow under Cli surface.
     let flow = service
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: cli_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
+            requester_extension: None,
             challenge: AuthChallenge::AccountSelectionRequired {
                 provider: google_provider(),
                 accounts: vec![account.projection()],
@@ -4408,10 +4464,12 @@ async fn create_flow_supersedes_prior_live_setup_class_flows_in_the_durable_stor
                       flow_provider: &AuthProviderId,
                       continuation: AuthContinuationRef,
                       state: &str| NewAuthFlow {
+        requested_scopes: Vec::new(),
         id: None,
         scope: scope.clone(),
         kind: AuthFlowKind::IntegrationCredential,
         provider: flow_provider.clone(),
+        requester_extension: None,
         challenge: AuthChallenge::OAuthUrl {
             authorization_url: OAuthAuthorizationUrl::new(
                 "https://example.com/oauth/authorize?state=supersede",
@@ -4580,10 +4638,12 @@ async fn filesystem_cleanup_cancels_pending_flow_across_surfaces() {
         async move {
             service
                 .create_flow(NewAuthFlow {
+                    requested_scopes: Vec::new(),
                     id: None,
                     scope,
                     kind: AuthFlowKind::IntegrationCredential,
                     provider,
+                    requester_extension: None,
                     challenge: AuthChallenge::OAuthUrl {
                         authorization_url: OAuthAuthorizationUrl::new(
                             "https://provider.example/oauth",
@@ -4609,10 +4669,12 @@ async fn filesystem_cleanup_cancels_pending_flow_across_surfaces() {
         async move {
             service
                 .create_flow(NewAuthFlow {
+                    requested_scopes: Vec::new(),
                     id: None,
                     scope,
                     kind: AuthFlowKind::IntegrationCredential,
                     provider: github,
+                    requester_extension: None,
                     challenge: AuthChallenge::OAuthUrl {
                         authorization_url: OAuthAuthorizationUrl::new(
                             "https://provider.example/oauth",

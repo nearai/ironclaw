@@ -1,14 +1,13 @@
 use crate::ProductSurfaceRejectionKind;
 use ironclaw_approvals::ApprovalStatus;
+use ironclaw_host_api::turn::{IdempotencyKey, TurnActor, TurnGateRef, TurnRunId, TurnScope};
 use ironclaw_host_api::{
     action::Action,
     approval::ApprovalRequest,
     ids::{ApprovalRequestId, CapabilityId, InvocationId},
     resource::ResourceScope,
 };
-use ironclaw_turns::{
-    GateRef, IdempotencyKey, ResumeTurnResponse, TurnActor, TurnRunId, TurnScope,
-};
+use ironclaw_turns::ResumeTurnResponse;
 use serde::{Deserialize, Serialize};
 
 use super::{approval_gate_ref, approval_rejected};
@@ -153,7 +152,7 @@ impl ApprovalInteractionActionView {
 pub struct PendingApprovalInteractionView {
     pub scope: ApprovalInteractionScope,
     pub run_id: TurnRunId,
-    pub gate_ref: GateRef,
+    pub gate_ref: TurnGateRef,
     pub approval_request_id: ApprovalRequestId,
     pub summary: String,
     pub action: ApprovalInteractionActionView,
@@ -164,7 +163,7 @@ pub struct ApprovalGateRecord {
     scope: ApprovalInteractionScope,
     resource_scope: ResourceScope,
     run_id: TurnRunId,
-    gate_ref: GateRef,
+    gate_ref: TurnGateRef,
     request: ApprovalRequest,
     status: ApprovalStatus,
 }
@@ -173,7 +172,7 @@ impl ApprovalGateRecord {
     pub fn new(
         resource_scope: ResourceScope,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         request: ApprovalRequest,
     ) -> Result<Self, ProductSurfaceFailure> {
         Self::with_status(
@@ -188,7 +187,7 @@ impl ApprovalGateRecord {
     pub fn with_status(
         resource_scope: ResourceScope,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         request: ApprovalRequest,
         status: ApprovalStatus,
     ) -> Result<Self, ProductSurfaceFailure> {
@@ -229,7 +228,7 @@ impl ApprovalGateRecord {
         self.run_id
     }
 
-    pub fn gate_ref(&self) -> &GateRef {
+    pub fn gate_ref(&self) -> &TurnGateRef {
         &self.gate_ref
     }
 
@@ -277,7 +276,7 @@ pub struct ResolveApprovalInteractionRequest {
     pub scope: TurnScope,
     pub actor: TurnActor,
     pub run_id_hint: Option<TurnRunId>,
-    pub gate_ref: GateRef,
+    pub gate_ref: TurnGateRef,
     pub decision: ApprovalInteractionDecision,
     pub idempotency_key: IdempotencyKey,
 }
@@ -334,6 +333,58 @@ mod tests {
         );
     }
 
+    /// The contracts-side prompt-lookup scope and this crate's interaction
+    /// scope must derive the *same* `ResourceScope` from the same turn.
+    ///
+    /// WS2.5 moved the approval-prompt lookup scope into
+    /// `ironclaw_product_contracts::approval_prompt` so the extension host can
+    /// read the approval store without reaching up into product. That leaves
+    /// two derivations of the same six fields in two crates, and nothing in the
+    /// compiler couples them — this pins the equivalence in both directions, so
+    /// a field added or re-mapped on either side fails here rather than
+    /// silently scoping one reader's store read differently from the other's.
+    /// Every field except `invocation_id` (freshly minted on each call, by
+    /// design) must agree, and the owner-over-actor precedence must agree too.
+    #[test]
+    fn approval_prompt_lookup_scope_matches_the_interaction_scope_projection() {
+        let actor = TurnActor::new(UserId::new("user:actor").unwrap());
+        let owner_user_id = UserId::new("user:subject").unwrap();
+        for scope in [
+            // Shared/team subject: the explicit owner wins over the actor.
+            TurnScope::new_with_owner(
+                TenantId::new("tenant:shared").unwrap(),
+                Some(AgentId::new("agent:shared").unwrap()),
+                Some(ProjectId::new("project:shared").unwrap()),
+                ThreadId::new("thread:shared").unwrap(),
+                Some(owner_user_id.clone()),
+            ),
+            // Personal scope with no explicit owner: the actor is the owner,
+            // and the optional ids are absent.
+            TurnScope::new_with_owner(
+                TenantId::new("tenant:personal").unwrap(),
+                None,
+                None,
+                ThreadId::new("thread:personal").unwrap(),
+                None,
+            ),
+        ] {
+            let from_product =
+                ApprovalInteractionScope::from_turn(&scope, &actor).to_resource_scope();
+            let from_contracts =
+                ironclaw_product_contracts::approval_prompt::approval_prompt_lookup_scope(
+                    &scope,
+                    &actor.user_id,
+                );
+
+            assert_eq!(from_contracts.tenant_id, from_product.tenant_id);
+            assert_eq!(from_contracts.user_id, from_product.user_id);
+            assert_eq!(from_contracts.agent_id, from_product.agent_id);
+            assert_eq!(from_contracts.project_id, from_product.project_id);
+            assert_eq!(from_contracts.mission_id, from_product.mission_id);
+            assert_eq!(from_contracts.thread_id, from_product.thread_id);
+        }
+    }
+
     #[test]
     fn approval_gate_record_with_status_rejects_scope_without_thread_id() {
         let request = approval_request();
@@ -366,7 +417,7 @@ mod tests {
             ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
                 .unwrap();
         resource_scope.thread_id = Some(ThreadId::new("thread-a").unwrap());
-        let wrong_gate_ref = GateRef::new("gate:approval-wrong").unwrap();
+        let wrong_gate_ref = TurnGateRef::new("gate:approval-wrong").unwrap();
 
         let error = ApprovalGateRecord::with_status(
             resource_scope,

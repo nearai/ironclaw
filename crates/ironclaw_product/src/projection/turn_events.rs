@@ -1,40 +1,40 @@
+use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
 };
 
-use crate::{ApprovalInteractionScope, approval_request_id_from_gate_ref, is_approval_gate_ref};
+use crate::is_approval_gate_ref;
 use crate::{
-    ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
-    ApprovalPromptDetailView, ApprovalPromptScopeView, AuthPromptContextView, GatePromptView,
-    ProductAdapterError, ProductGateKind, ProductOutboundPayload, ProductProjectionItem,
-    ProductProjectionState, ProductSurfaceRejectionKind, RedactedString,
+    ApprovalPromptContextView, AuthPromptContextView, GatePromptView, ProductAdapterError,
+    ProductGateKind, ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
+    ProductSurfaceRejectionKind, RedactedString,
 };
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
 use ironclaw_approvals::ApprovalRequestStorePort;
-use ironclaw_host_api::{
-    action::{Action, NetworkMethod, NetworkScheme},
-    approval::ApprovalRequest,
-    ids::{InvocationId, UserId},
+use ironclaw_host_api::ids::{InvocationId, UserId};
+use ironclaw_host_api::turn::{
+    ModelInvalidOutputDetailReason, SanitizedFailure, TurnGateRef, TurnRunId, TurnScope, TurnStatus,
+};
+use ironclaw_loop_contracts::{
+    SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest, SystemInferenceTaskId,
+    SystemPromptId, SystemPromptSource, SystemTaskKind, sanitize_model_visible_text,
+};
+use ironclaw_product_contracts::approval_prompt::{
+    approval_prompt_context_for_request, approval_prompt_lookup_scope,
+    approval_request_id_from_gate_ref,
 };
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, ModelInvalidOutputDetailReason, SanitizedFailure, TurnActor,
-    TurnBlockedGateKind, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
-    TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionSource,
-    TurnEventReducerService, TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
-    run_profile::{
-        SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
-        SystemInferenceTaskId, SystemPromptId, SystemPromptSource, SystemTaskKind,
-        sanitize_model_visible_text,
-    },
+    GetRunStateRequest, TurnBlockedGateKind, TurnCoordinator, TurnError, TurnEventKind,
+    TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
+    TurnEventProjectionSource, TurnEventReducerService, TurnLifecycleEvent,
 };
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
-use crate::AuthChallengeProvider;
-use crate::{BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth};
-use ironclaw_runner::failure_categories::CHECKPOINT_REJECTED_CATEGORY;
-use ironclaw_runner::failure_summary::{
+use ironclaw_auth::product_prompt::{AuthChallengeProvider, auth_prompt_view_for_blocked_auth};
+use ironclaw_host_api::failure::categories::CHECKPOINT_REJECTED_CATEGORY;
+use ironclaw_host_api::failure::summary::{
     checkpoint_rejection_host_explanation_from_detail, pinned_failure_summary_for_category,
     reborn_failure_summary_for_category_and_detail,
 };
@@ -419,7 +419,7 @@ async fn blocked_prompt_payload(
                 fallback_owner_user_id: event.owner_user_id.as_ref().unwrap_or(caller_user_id),
                 scope: &event.scope,
                 run_id: event.run_id,
-                gate_ref: &gate_ref_str,
+                gate_ref,
                 invocation_id: blocked_invocation_id,
                 body: event
                     .sanitized_reason
@@ -468,7 +468,7 @@ async fn approval_gate_prompt(
     caller_user_id: &UserId,
     approval_requests: Option<&dyn ApprovalRequestStorePort>,
     event: &TurnLifecycleEvent,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
     gate_ref_string: String,
 ) -> Result<ProductOutboundPayload, ProductAdapterError> {
     let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
@@ -502,9 +502,13 @@ async fn approval_gate_prompt(
 /// so both surface the *same* "what is being approved" data from one source.
 /// Returns `None` when no store is wired, the gate ref is not an approval ref,
 /// the request is missing, or the lookup fails.
+///
+/// The projection itself lives in
+/// `ironclaw_product_contracts::approval_prompt`; this wrapper adds the store
+/// read and the documented best-effort degradation.
 pub async fn approval_prompt_context_view(
     approval_requests: Option<&dyn ApprovalRequestStorePort>,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
 ) -> Option<ApprovalPromptContextView> {
@@ -522,156 +526,23 @@ struct ApprovalPromptLookup {
 
 async fn approval_prompt_lookup(
     approval_requests: Option<&dyn ApprovalRequestStorePort>,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
 ) -> Result<ApprovalPromptLookup, ironclaw_approvals::ApprovalStoreError> {
     let (store, request_id) =
-        match approval_requests.zip(approval_request_id_from_gate_ref(gate_ref).ok()) {
+        match approval_requests.zip(approval_request_id_from_gate_ref(gate_ref)) {
             Some(value) => value,
             None => return Ok(ApprovalPromptLookup::default()),
         };
-    let scope =
-        ApprovalInteractionScope::from_turn(turn_scope, &TurnActor::new(owner_user_id.clone()))
-            .to_resource_scope();
+    let scope = approval_prompt_lookup_scope(turn_scope, owner_user_id);
     Ok(match store.get(&scope, request_id).await? {
         Some(record) => ApprovalPromptLookup {
-            context: approval_context_for_request(&record.request),
+            context: approval_prompt_context_for_request(&record.request),
             invocation_id: Some(record.scope.invocation_id),
         },
         None => ApprovalPromptLookup::default(),
     })
-}
-
-fn approval_context_for_request(request: &ApprovalRequest) -> Option<ApprovalPromptContextView> {
-    let (tool_name, action, destination, details) =
-        approval_action_context(request.action.as_ref())?;
-    ApprovalPromptContextView::new(
-        tool_name,
-        action,
-        ApprovalPromptScopeView::new(
-            approval_scope_label(request),
-            request.reusable_scope.is_some(),
-        )
-        .ok()?,
-        non_empty_string(&request.reason),
-        destination,
-        details,
-    )
-    .ok()
-}
-
-fn approval_action_context(
-    action: &Action,
-) -> Option<(
-    String,
-    ApprovalPromptActionView,
-    Option<ApprovalPromptDestinationView>,
-    Vec<ApprovalPromptDetailView>,
-)> {
-    match action {
-        Action::Dispatch {
-            capability,
-            estimated_resources,
-        } => {
-            let mut details = vec![detail("Capability", capability.as_str())?];
-            if let Some(bytes) = estimated_resources.network_egress_bytes {
-                details.push(detail("Estimated network egress", format_bytes(bytes))?);
-            }
-            Some((
-                capability.as_str().to_string(),
-                ApprovalPromptActionView::new("Run tool", None).ok()?,
-                None,
-                details,
-            ))
-        }
-        Action::SpawnCapability {
-            capability,
-            estimated_resources,
-        } => {
-            let mut details = vec![detail("Capability", capability.as_str())?];
-            if let Some(process_count) = estimated_resources.process_count {
-                details.push(detail("Processes", process_count.to_string())?);
-            }
-            Some((
-                capability.as_str().to_string(),
-                ApprovalPromptActionView::new("Start tool", None).ok()?,
-                None,
-                details,
-            ))
-        }
-        Action::Network {
-            target,
-            method,
-            estimated_bytes,
-        } => {
-            let destination =
-                network_destination(method, target.scheme, &target.host, target.port)?;
-            let mut details = vec![detail("Method", method_label(method))?];
-            if let Some(bytes) = estimated_bytes {
-                details.push(detail("Estimated transfer", format_bytes(*bytes))?);
-            }
-            Some((
-                "builtin.http".to_string(),
-                ApprovalPromptActionView::new("Network request", Some(*method)).ok()?,
-                Some(destination),
-                details,
-            ))
-        }
-        _ => None,
-    }
-}
-
-fn approval_scope_label(request: &ApprovalRequest) -> &'static str {
-    if request.reusable_scope.is_some() {
-        "Reusable grant"
-    } else {
-        "This request only"
-    }
-}
-
-fn network_destination(
-    method: &NetworkMethod,
-    scheme: NetworkScheme,
-    host: &str,
-    port: Option<u16>,
-) -> Option<ApprovalPromptDestinationView> {
-    let scheme = match scheme {
-        NetworkScheme::Http => "http",
-        NetworkScheme::Https => "https",
-    };
-    let authority = match port {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
-    };
-    let url = format!("{scheme}://{authority}");
-    ApprovalPromptDestinationView::new(
-        format!("{} {url}", method_label(method)),
-        Some(url),
-        Some(host.to_string()),
-    )
-    .ok()
-}
-
-fn detail(label: impl Into<String>, value: impl Into<String>) -> Option<ApprovalPromptDetailView> {
-    ApprovalPromptDetailView::new(label, value).ok()
-}
-
-fn method_label(method: &NetworkMethod) -> String {
-    method.to_string().to_ascii_uppercase()
-}
-
-fn format_bytes(bytes: u64) -> String {
-    format!("{bytes} bytes")
-}
-
-fn non_empty_string(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
 }
 
 fn gate_prompt(
@@ -992,9 +863,19 @@ fn failure_explanation_request(input: &FailureExplanationInput) -> Option<System
     })
 }
 
+/// The failure-explainer system prompt.
+///
+/// The asset is product-owned (WS1.7): this projection is its only consumer,
+/// and prompt *content* is explicitly out of charter for the loop tier
+/// (PROPOSAL §6.1.4/§6.7.2), where it used to live as
+/// `ironclaw_loop_host::FAILURE_EXPLANATION_SYSTEM_PROMPT`.
 fn failure_explanation_system_prompt() -> &'static str {
-    ironclaw_loop_host::FAILURE_EXPLANATION_SYSTEM_PROMPT
+    FAILURE_EXPLANATION_SYSTEM_PROMPT
 }
+
+/// Product-owned prompt asset; see [`failure_explanation_system_prompt`].
+const FAILURE_EXPLANATION_SYSTEM_PROMPT: &str =
+    include_str!("../../prompts/failure_explanation.md");
 
 pub(super) fn failure_explanation_user_prompt(input: &FailureExplanationInput) -> String {
     let mut prompt = format!(

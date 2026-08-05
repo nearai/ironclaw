@@ -58,12 +58,12 @@ use ironclaw_filesystem::{
     Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page, RootFilesystem,
     ScopedFilesystem, VersionedEntry, cas_update,
 };
+use ironclaw_host_api::turn::{EventCursor as TurnEventCursor, TurnActor, TurnScope};
 use ironclaw_host_api::{
     ids::{RunId, TenantId, ThreadId, UserId},
     path::ScopedPath,
     resource::ResourceScope,
 };
-use ironclaw_turns::{EventCursor as TurnEventCursor, TurnActor, TurnScope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -1405,7 +1405,7 @@ fn policy_path(scope: &TurnScope) -> Result<ScopedPath, OutboundError> {
 }
 
 fn run_final_reply_target_path(
-    run_id: ironclaw_turns::TurnRunId,
+    run_id: ironclaw_host_api::turn::TurnRunId,
 ) -> Result<ScopedPath, OutboundError> {
     ScopedPath::new(format!("{RUN_FINAL_REPLY_TARGETS_ROOT}/{run_id}.json"))
         .map_err(|_| OutboundError::Backend)
@@ -1829,7 +1829,7 @@ where
 
     async fn load_triggered_run_delivery(
         &self,
-        run_id: ironclaw_turns::TurnRunId,
+        run_id: ironclaw_host_api::turn::TurnRunId,
     ) -> Result<Option<TriggeredRunDeliveryRecord>, String> {
         let run_id_str = run_id.to_string();
         let path = ScopedPath::new(format!("{TRIGGERED_RUN_DELIVERY_ROOT}/{run_id_str}.json"))
@@ -2212,12 +2212,12 @@ mod tests {
 
     use chrono::{Duration, Utc};
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::turn::{TurnRunId, TurnScope};
     use ironclaw_host_api::{
         ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
     };
-    use ironclaw_turns::{TurnRunId, TurnScope};
 
     use super::{
         DeliveredGateRouteConversationIndexFile, OutboundStateStore, SCOPE_NONE_SENTINEL,

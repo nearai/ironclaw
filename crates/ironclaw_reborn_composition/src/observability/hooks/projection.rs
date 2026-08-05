@@ -29,7 +29,7 @@ pub const MAX_INSTALLED_EXTENSIONS_CONSIDERED: usize = 64;
 /// running total past this budget is quarantined (skipped + audited), not
 /// whole-build failed. Builtin / host-bundled bindings do not count against
 /// this third-party budget (they are trusted and fail-closed-whole-build).
-pub const MAX_TOTAL_HOOKS_PER_TENANT: usize = 256;
+pub(crate) const MAX_TOTAL_HOOKS_PER_TENANT: usize = 256;
 
 /// The hook-only metadata extracted from ONE extension package: exactly the
 /// fields the projection needs, and NOTHING from the capability / runtime /
@@ -62,11 +62,17 @@ impl HookProjection {
         if package.manifest.hooks.is_empty() {
             return None;
         }
+        // silent-ok: only virtual-root (hosted MCP) packages fail materialized_root();
+        // they cannot declare filesystem hooks, so skipping projection is correct.
+        let Ok(root) = package.materialized_root() else {
+            return None;
+        };
+        let root = root.clone();
         Some(Self {
             extension_id: package.manifest.id.clone(),
             version: package.manifest.version.clone(),
             source: package.manifest.source,
-            root: package.root.clone(),
+            root,
             hooks: package.manifest.hooks.clone(),
         })
     }
@@ -149,7 +155,7 @@ impl std::fmt::Debug for HookProjectionRegistry {
 /// `openat2(RESOLVE_BENEATH)` / `O_NOFOLLOW` backend hardening lands, because
 /// that hardening is precisely what protects the scoped-FS-is-the-boundary
 /// property against symlink/`..` escapes below the virtual layer.
-pub fn tenant_extension_root(
+pub(crate) fn tenant_extension_root(
     _tenant_id: &ironclaw_host_api::ids::TenantId,
 ) -> Result<ironclaw_host_api::path::VirtualPath, RebornBuildError> {
     ironclaw_host_api::path::VirtualPath::new("/system/extensions").map_err(|error| {

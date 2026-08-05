@@ -1,6 +1,7 @@
 //! C-HOOKS (+ E-HOOK-INFRA): a wired `hook_dispatcher_builder_factory` should
 //! fire hooks at the expected lifecycle points on a real coordinator-path turn,
-//! and a hook deny should block the capability without wedging the run.
+//! a hook deny should block the capability without wedging the run, and
+//! dispatcher-owned state must not leak from one run into the next (#6945).
 //!
 //! These drive a full coordinator-path turn with an active hook dispatcher —
 //! the first tests to do so — so they also pin that `HookedLoopCheckpointPort`
@@ -22,7 +23,8 @@ use ironclaw_hooks::dispatch::HOOK_DENY_PREDICATE_CODE;
 use reborn_support::assertions::ToolErrorClass;
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
 use reborn_support::hooks::{
-    HOOK_TEST_DENY_REASON, RecordingHookLog, denying_hook_factory, recording_hook_factory,
+    HOOK_TEST_DENY_REASON, RecordingHookLog, denying_hook_factory, poisoning_hook_factory,
+    recording_hook_factory,
 };
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
@@ -195,4 +197,93 @@ async fn hook_deny_blocks_capability_without_wedging_run() {
     )
     .await
     .expect("hook deny must record a security-audit event through the harness recorder");
+}
+
+/// #6945: dispatcher-owned state must not survive from one run into the next.
+///
+/// `RebornLoopDriverHostFactory` offers three hook seams with two deliberately
+/// different lifetimes. Production wires the isolating one
+/// (`with_hook_dispatcher_builder_factory`, minted by
+/// `ironclaw_reborn_composition::hooks` and installed at
+/// `ironclaw_runner::runtime`), so the closure runs once per
+/// `build_text_only_host*` — i.e. once per run. The legacy
+/// `with_hook_dispatcher(Arc<HookDispatcher>)` adapter deliberately does the
+/// opposite and clones one dispatcher into every build. Nothing failed if a
+/// caller swapped one for the other, and `crates/ironclaw_hooks/CLAUDE.md` once
+/// claimed a regression test — naming a file and two tests that never existed
+/// — which is the gap #6945 tracks.
+///
+/// The observable is slot poisoning. The installed hook commits a gate-sink
+/// protocol violation, so run 1 fails closed (the capability is denied and
+/// never reaches the wire) **and** the hook's slot is poisoned. A poisoned slot
+/// is skipped for the rest of that dispatcher's life. So:
+///
+/// - per-run dispatcher (production): run 2 gets a clean slot, the hook fires a
+///   second time, and the fail-closed deny is re-applied — 2 fires, 0 egress.
+/// - shared dispatcher (legacy adapter): run 2 skips the poisoned hook entirely,
+///   so the gate goes quiet and the capability reaches the wire — 1 fire, 1
+///   egress. Both assertions below flip, which is what makes this red-able.
+///
+/// Deliberately NOT asserted: predicate counter state. It is keyed by
+/// `(hook_id, tenant_id, capability)` and shared across runs *by design* (the
+/// evaluator is built once per tenant by composition, outside the per-run
+/// closure), so asserting isolation for it would pin a rate-cap bypass.
+#[tokio::test]
+async fn poisoned_hook_slot_does_not_leak_into_the_next_run() {
+    let log = RecordingHookLog::new();
+    let h = RebornIntegrationHarness::test_default()
+        .with_builtin_http_tools()
+        .with_hook_factory(poisoning_hook_factory(log.clone(), "builtin.http"))
+        // One entry per model call: each turn makes a tool call and then a
+        // terminal text reply, so two turns need four.
+        .script([
+            RebornScriptedReply::tool_call("builtin.http", json!({"url": HTTP_TOOL_URL})),
+            RebornScriptedReply::text("first done"),
+            RebornScriptedReply::tool_call("builtin.http", json!({"url": HTTP_TOOL_URL})),
+            RebornScriptedReply::text("second done"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("fetch items")
+        .await
+        .expect("turn 1 completes");
+    assert_eq!(
+        log.fires(),
+        vec!["before_capability_poison:builtin.http"],
+        "run 1 must dispatch the hook exactly once before it poisons its slot"
+    );
+    h.assert_egress_count(0)
+        .await
+        .expect("run 1's fail-closed deny must keep the capability off the wire");
+
+    h.submit_turn("fetch items again")
+        .await
+        .expect("turn 2 completes");
+
+    // The load-bearing assertion. Under the legacy shared-dispatcher adapter the
+    // run-1 poison survives into run 2, the hook is skipped, and this stays at
+    // one fire.
+    assert_eq!(
+        log.fires(),
+        vec![
+            "before_capability_poison:builtin.http",
+            "before_capability_poison:builtin.http",
+        ],
+        "run 2 must get a fresh dispatcher with an un-poisoned slot, so the hook \
+         fires again; a shared dispatcher would skip it and record only one fire"
+    );
+    // …and the consequence that makes the leak a security problem rather than a
+    // telemetry one: a skipped gate hook is an un-applied deny, so the
+    // capability would reach real egress in run 2.
+    h.assert_egress_count(0)
+        .await
+        .expect("run 2 must re-apply the fail-closed deny from a clean slot");
+    h.assert_tool_error(
+        ToolErrorClass::Denied,
+        "hook completed without minting a decision",
+    )
+    .await
+    .expect("run 2's denial must carry the fail-closed reason, not a stale/blank one");
 }

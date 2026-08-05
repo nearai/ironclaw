@@ -16,7 +16,7 @@ use ironclaw_host_api::{
     capability::EffectKind,
     ids::{CapabilityId, PackageId},
     resource::ResourceCeiling,
-    trust::{PackageIdentity, RequestedTrustClass},
+    trust::{PackageIdentity, RequestedTrustClass, TrustPolicyInput},
 };
 
 use crate::clock::{Clock, SystemClock};
@@ -53,18 +53,6 @@ impl Drop for PublishReentryGuard {
             }
         });
     }
-}
-
-/// Untrusted input to the policy engine.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrustPolicyInput {
-    pub identity: PackageIdentity,
-    pub requested_trust: RequestedTrustClass,
-    /// Set of capabilities the package is requesting authority over.
-    /// Typed as `BTreeSet` (not `Vec`) so the policy engine sees a
-    /// canonicalized set — capability authority is conceptually a set,
-    /// not a multiset, and `[a, a, b]` should never differ from `[a, b]`.
-    pub requested_authority: BTreeSet<CapabilityId>,
 }
 
 /// The host trust policy contract.

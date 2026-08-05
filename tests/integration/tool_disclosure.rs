@@ -18,7 +18,7 @@
 //! 2. **Threshold gate**: `Bridged` mode alone does NOT defer — deferral is
 //!    additionally gated on the catalog exceeding `DisclosureCaps::default()`
 //!    (`max_tools: 32` / ~12k estimated schema tokens; `select_active_set`,
-//!    `crates/ironclaw_runner/src/tool_disclosure.rs`). The
+//!    `crates/ironclaw_loop_host/src/tool_disclosure.rs`). The
 //!    `GithubIssueTools` backend surfaces all 48 `github.*` manifest
 //!    capabilities (`github_support::capability_ids()`), none of which is
 //!    Core-tier (`CORE_TOOL_NAMES` suffix-match misses every github id), so
@@ -46,8 +46,9 @@ use reborn_support::reply::RebornScriptedReply;
 
 /// Bridge meta-tool names (`tool_disclosure.rs`'s `TOOL_SEARCH_NAME`/
 /// `TOOL_DESCRIBE_NAME`/`TOOL_CALL_NAME`), hardcoded as literals: the
-/// constants are `pub(crate)` inside `ironclaw_runner` and not part of the
-/// crate's public surface for a test-tree import.
+/// constants are `pub(crate)` inside `ironclaw_loop_host` (the cluster moved
+/// there with the WS3 runner sheds) and are not part of that crate's public
+/// surface for a test-tree import.
 const TOOL_SEARCH_NAME: &str = "tool_search";
 const TOOL_DESCRIBE_NAME: &str = "tool_describe";
 const TOOL_CALL_NAME: &str = "tool_call";
@@ -147,10 +148,10 @@ async fn bridged_mode_defers_wide_catalog_to_bridge_meta_tools() {
         .expect("deferral replaces the flat tool list, not adds to it");
 }
 
-/// Negative control: the SAME wide catalog without
-/// `.with_tool_disclosure_bridged()` surfaces the flat 48-tool list (today's
-/// default, `ToolDisclosureMode::Off`) — proves the bridged assertion above
-/// discriminates on the disclosure mode, not on the backend.
+/// Negative control: the SAME wide catalog under explicit
+/// `ToolDisclosureMode::Off` surfaces the flat 48-tool list — proves the
+/// bridged assertion above discriminates on the disclosure mode, not on the
+/// backend.
 ///
 /// Pins Off-mode explicitly via `.with_tool_disclosure_off()` rather than
 /// leaving this on the `from_env()` default-resolution path: without an
@@ -187,8 +188,8 @@ async fn explicit_off_surfaces_the_flat_wide_tool_list() {
 }
 
 /// The production default enables progressive disclosure for a wide catalog.
-/// The unit contract in `ironclaw_runner::runtime` separately proves that an
-/// unset or empty environment value resolves to this default.
+/// The `ironclaw_loop_host` unit contract separately proves that an unset or
+/// empty environment value resolves to this default.
 #[tokio::test]
 async fn production_default_defers_wide_catalog_to_bridge_meta_tools() {
     let harness = RebornIntegrationHarness::test_default()

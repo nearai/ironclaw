@@ -10,6 +10,10 @@ import {
   commandMenuToken,
 } from "./chat-commands";
 import {
+  canStealFocus,
+  shouldAutoFocusComposer,
+} from "./chat-input-focus";
+import {
   HTML_ATTRIBUTE_PATTERN,
   componentProps,
   componentSourceForTest,
@@ -130,6 +134,8 @@ function renderChatInput({
     commandMenuToken,
     commandMenuSelectionReducer,
     INITIAL_COMMAND_MENU_SELECTION,
+    canStealFocus,
+    shouldAutoFocusComposer,
     useAttachmentConfig: () => ({
       accept: [],
       maxCount: 10,
@@ -145,6 +151,8 @@ function renderChatInput({
     setStagedAttachments: () => {},
     window: {
       clearTimeout: () => {},
+      document: { activeElement: null },
+      matchMedia: () => ({ matches: true }),
       requestAnimationFrame: (fn) => fn(),
       setTimeout: () => 1,
     },
@@ -227,6 +235,30 @@ test("ChatInput keeps the textarea editable when only submit is disabled", () =>
   const sendButton = findComponent(tree, components.Button);
   const sendProps = componentProps(sendButton, components.Button);
   assert.equal(sendProps.disabled, true);
+});
+
+// Regression: the queued-steering composer swaps cancel for send as soon as the
+// user types, so a follow-up can be queued behind the running turn. But when the
+// send itself is unavailable (cooldown — the only `sendDisabled` cause that
+// co-occurs with `canCancel`, since a gate/onboarding clears `canCancel`), that
+// swap left a disabled send button and NO cancel: the user had to erase their
+// draft to reach cancel. Keep cancel reachable whenever send cannot be used.
+test("ChatInput keeps cancel reachable when a draft exists but send is disabled", () => {
+  const { tree, components } = renderChatInput({
+    disabled: false,
+    sendDisabled: true,
+    canCancel: true,
+    draft: "follow-up while the run is cooling down",
+  });
+
+  const button = findComponent(tree, components.Button);
+  const props = componentProps(button, components.Button);
+  assert.equal(
+    props["data-testid"],
+    "chat-cancel-run",
+    "a disabled send must not hide the cancel affordance behind clearing the draft",
+  );
+  assert.equal(props.disabled, false, "cancel stays clickable");
 });
 
 test("ChatInput blocks Enter send when only submit is disabled", async () => {
@@ -684,6 +716,8 @@ function renderChatInputStateful({ getDraftByKey = {} } = {}) {
     commandMenuToken,
     commandMenuSelectionReducer,
     INITIAL_COMMAND_MENU_SELECTION,
+    canStealFocus,
+    shouldAutoFocusComposer,
     useAttachmentConfig: () => ({
       accept: [],
       maxCount: 10,
@@ -699,6 +733,8 @@ function renderChatInputStateful({ getDraftByKey = {} } = {}) {
     setStagedAttachments: () => {},
     window: {
       clearTimeout: () => {},
+      document: { activeElement: null },
+      matchMedia: () => ({ matches: true }),
       requestAnimationFrame: (fn) => fn(),
       setTimeout: () => 1,
     },
@@ -707,6 +743,11 @@ function renderChatInputStateful({ getDraftByKey = {} } = {}) {
   const ChatInputFn = context.globalThis.__testExports.ChatInput;
   return {
     components,
+    host,
+    // Exposed so a test can put focus on the control that navigated us here —
+    // the real browser does exactly that, and stubbing it to `null` forever is
+    // what let the "focus is never stolen from the sidebar button" bug ship.
+    windowStub: context.window,
     render: (props) => {
       host.beginRender();
       return ChatInputFn({
@@ -720,6 +761,173 @@ function renderChatInputStateful({ getDraftByKey = {} } = {}) {
     },
   };
 }
+
+test("chat composer autofocus is desktop-only and survives a missing matchMedia", () => {
+  assert.strictEqual(
+    shouldAutoFocusComposer({ matchMedia: () => ({ matches: true }) }),
+    true,
+  );
+  assert.strictEqual(
+    shouldAutoFocusComposer({ matchMedia: () => ({ matches: false }) }),
+    false,
+  );
+  assert.strictEqual(shouldAutoFocusComposer({}), false);
+  assert.strictEqual(
+    shouldAutoFocusComposer({
+      matchMedia: () => {
+        throw new Error("unavailable");
+      },
+    }),
+    false,
+  );
+});
+
+test("canStealFocus takes focus from the control that navigated here", () => {
+  // The bug this pins: Chrome/Firefox focus a <button> on click, so after
+  // clicking "+ New" or a sidebar thread row that button IS document
+  // .activeElement when the composer's rAF runs. Refusing to steal from it
+  // meant the composer was never focused on the two paths #7204 is about.
+  const child = { tagName: "BUTTON", closest: () => null };
+  const composer = {
+    tagName: "TEXTAREA",
+    contains: (node) => node === child,
+  };
+  const outside = (tagName, extra = {}) => ({
+    tagName,
+    closest: () => null,
+    ...extra,
+  });
+
+  assert.strictEqual(canStealFocus(null, composer), true);
+  assert.strictEqual(canStealFocus(outside("BODY"), composer), true);
+  assert.strictEqual(canStealFocus(composer, composer), true);
+  assert.strictEqual(canStealFocus(child, composer), true);
+  assert.strictEqual(canStealFocus(outside("BUTTON"), composer), true);
+  assert.strictEqual(canStealFocus(outside("A"), composer), true);
+
+  // Deliberate text entry elsewhere, and any modal focus trap, still win.
+  assert.strictEqual(canStealFocus(outside("INPUT"), composer), false);
+  assert.strictEqual(canStealFocus(outside("TEXTAREA"), composer), false);
+  assert.strictEqual(canStealFocus(outside("SELECT"), composer), false);
+  assert.strictEqual(
+    canStealFocus(outside("DIV", { isContentEditable: true }), composer),
+    false,
+  );
+  assert.strictEqual(
+    canStealFocus(
+      { tagName: "BUTTON", closest: (selector) => ({ selector }) },
+      composer,
+    ),
+    false,
+  );
+});
+
+test("ChatInput focuses restored drafts only when composer identity changes", () => {
+  const { render, windowStub } = renderChatInputStateful({
+    getDraftByKey: {
+      "thread-a": "first",
+      "thread-b": "restored draft",
+      "thread-e": "history restored",
+    },
+  });
+  const focusCalls = [];
+  const composer = {
+    style: {},
+    scrollHeight: 40,
+    focus: () => focusCalls.push("focus"),
+    setSelectionRange: (start, end) => focusCalls.push([start, end]),
+    contains: () => false,
+  };
+  // What a real browser hands us after the click that navigated here.
+  const sidebarButton = { tagName: "BUTTON", closest: () => null };
+
+  const tree = render({ draftKey: "thread-a", resetKey: "route-a" });
+  templateProps(findTextarea(tree)).ref.current = composer;
+
+  // Opening "thread-b" from the sidebar: the row button holds focus, and the
+  // composer must take it and land the caret at the end of the restored draft.
+  windowStub.document.activeElement = sidebarButton;
+  render({ draftKey: "thread-b", resetKey: "route-b" });
+  assert.deepStrictEqual(focusCalls, ["focus", [14, 14]]);
+
+  // Same identity re-render (a keystroke, an SSE frame): no refocus, no caret move.
+  render({ draftKey: "thread-b", resetKey: "route-b" });
+  assert.deepStrictEqual(focusCalls, ["focus", [14, 14]]);
+
+  // A hard-disabled composer is never focused.
+  render({ draftKey: "thread-c", resetKey: "route-c", disabled: true });
+  assert.deepStrictEqual(focusCalls, ["focus", [14, 14]]);
+
+  // Deliberate text entry elsewhere keeps focus.
+  windowStub.document.activeElement = { tagName: "INPUT", closest: () => null };
+  render({ draftKey: "thread-d", resetKey: "route-d" });
+  assert.deepStrictEqual(focusCalls, ["focus", [14, 14]]);
+
+  // Browser history can leave the mounted composer focused while restoring a
+  // different route's draft. Its stale selection still moves to the new end.
+  windowStub.document.activeElement = composer;
+  render({ draftKey: "thread-e", resetKey: "route-e" });
+  assert.deepStrictEqual(focusCalls, ["focus", [14, 14], [16, 16]]);
+
+  // The first reply can adopt its thread id without changing location. Keep
+  // the user's active selection in that same-route case.
+  render({ draftKey: "thread-e-adopted", resetKey: "route-e" });
+  assert.deepStrictEqual(focusCalls, ["focus", [14, 14], [16, 16]]);
+});
+
+test("ChatInput focuses a handed-off landing draft with the caret at its end", () => {
+  // The landing-hero -> thread hand-off used to own the only focus call. It
+  // now rides the shared focus effect, so it needs its own assertion that the
+  // caret still lands after the handed-off text rather than at offset 0.
+  const { render, windowStub } = renderChatInputStateful();
+  const focusCalls = [];
+  const composer = {
+    style: {},
+    scrollHeight: 40,
+    focus: () => focusCalls.push("focus"),
+    setSelectionRange: (start, end) => focusCalls.push([start, end]),
+    contains: () => false,
+  };
+
+  const tree = render({ draftKey: "__new__", resetKey: "route-a" });
+  templateProps(findTextarea(tree)).ref.current = composer;
+
+  windowStub.document.activeElement = { tagName: "BUTTON", closest: () => null };
+  render({
+    draftKey: "thread-new",
+    resetKey: "route-b",
+    initialText: "handed off",
+  });
+  assert.deepStrictEqual(focusCalls, ["focus", [10, 10]]);
+});
+
+test("ChatInput removes the container focus ring but keeps textarea neutralizers", () => {
+  const { tree } = renderChatInput({ disabled: false });
+  const textarea = findTextarea(tree);
+  const textareaClass = templateProps(textarea).className;
+  const allClassNames = [];
+  findNode(tree, (node) => {
+    const className = templateProps(node).className;
+    if (typeof className === "string") allClassNames.push(className);
+    return false;
+  });
+
+  // Anchor first: without this the absence assertion below passes vacuously
+  // the day the harness stops capturing `className`.
+  assert.strictEqual(
+    allClassNames.some((name) => name.includes("rounded-[20px]")),
+    true,
+    "composer container className must be reachable for this test to mean anything",
+  );
+  assert.strictEqual(
+    allClassNames.some((name) => name.includes("focus-within:")),
+    false,
+  );
+  // These suppress the global `input:focus` accent in styles/app.css. Deleting
+  // them re-draws the same ring, tighter, around the textarea itself.
+  assert.strictEqual(textareaClass.includes("focus:!shadow-none"), true);
+  assert.strictEqual(textareaClass.includes("focus:!border-transparent"), true);
+});
 
 test("ChatInput ArrowDown moves the active command-menu row", () => {
   const setCalls = [];

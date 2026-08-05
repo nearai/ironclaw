@@ -11,7 +11,7 @@ description: 使用 Rust 构建一个天气 WASM 工具
 
 完整参考实现：
 
-<Card title="first-party extension examples" icon="github" href="https://github.com/nearai/ironclaw/tree/main/crates/ironclaw_first_party_extensions/assets">
+<Card title="first-party extension examples" icon="github" href="https://github.com/nearai/ironclaw/tree/main/crates/extensions/packages">
   查看当前打包扩展示例：manifest、schemas、prompts 与 WASM 产物。
 </Card>
 
@@ -76,7 +76,7 @@ IronClaw 工具是实现了 WIT 接口的 WASM 组件。宿主提供 HTTP、日�
 ```rust src/lib.rs
 wit_bindgen::generate!({
     world: "sandboxed-tool",
-    path: "../../wit/tool.wit",
+    path: "../../crates/ironclaw_wasm/wit/tool.wit",
 });
 
 use serde::{Deserialize, Serialize};

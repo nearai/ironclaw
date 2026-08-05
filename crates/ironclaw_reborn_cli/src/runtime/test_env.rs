@@ -1,8 +1,8 @@
 //! Crate-wide test-only env-var harness. Any test in `ironclaw_reborn_cli`
 //! that reads or mutates process env vars (`IRONCLAW_TRIGGER_POLLER_*`,
 //! `IRONCLAW_REBORN_RUNNER_*`, `IRONCLAW_REBORN_WEBUI_*`, OAuth knobs,
-//! credential-refresh knobs) must hold this single lock and mutate through
-//! `EnvGuard`.
+//! credential-refresh knobs, `IRONHUB_MANIFEST_URL`) must hold this single
+//! lock and mutate through `EnvGuard`.
 //!
 //! All of a crate's unit tests link into ONE test binary and run in parallel,
 //! so the lock must be process-wide across *every* env-mutating module, not
@@ -39,8 +39,7 @@ pub(crate) fn lock_runtime_env() -> MutexGuard<'static, ()> {
 /// manual snapshot/restore pattern does not. Tests install this guard so
 /// other tests running in parallel cannot observe their mutations.
 pub(crate) struct EnvGuard {
-    key: &'static str,
-    prior: Option<std::ffi::OsString>,
+    prior: Vec<(&'static str, Option<std::ffi::OsString>)>,
 }
 
 impl EnvGuard {
@@ -50,24 +49,51 @@ impl EnvGuard {
         // panic unwind. Callers must hold `lock_runtime_env()` for the
         // life of this guard to serialise against sibling test threads.
         unsafe { std::env::set_var(key, value) };
-        Self { key, prior }
+        Self {
+            prior: vec![(key, prior)],
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn set_os(key: &'static str, value: &std::ffi::OsStr) -> Self {
+        let prior = std::env::var_os(key);
+        // SAFETY: env mutation is process-global; callers hold `lock_runtime_env`
+        // and this guard restores the previous value on drop.
+        unsafe { std::env::set_var(key, value) };
+        Self {
+            prior: vec![(key, prior)],
+        }
     }
 
     pub(crate) fn clear(key: &'static str) -> Self {
         let prior = std::env::var_os(key);
         // SAFETY: see EnvGuard::set.
         unsafe { std::env::remove_var(key) };
-        Self { key, prior }
+        Self {
+            prior: vec![(key, prior)],
+        }
+    }
+
+    pub(crate) fn clear_many(keys: &[&'static str]) -> Self {
+        let mut prior = Vec::with_capacity(keys.len());
+        for key in keys {
+            prior.push((*key, std::env::var_os(*key)));
+            // SAFETY: see EnvGuard::set.
+            unsafe { std::env::remove_var(key) };
+        }
+        Self { prior }
     }
 }
 
 impl Drop for EnvGuard {
     fn drop(&mut self) {
-        match self.prior.take() {
-            // SAFETY: see EnvGuard::set.
-            Some(v) => unsafe { std::env::set_var(self.key, v) },
-            // SAFETY: see EnvGuard::set.
-            None => unsafe { std::env::remove_var(self.key) },
+        for (key, prior) in self.prior.drain(..).rev() {
+            match prior {
+                // SAFETY: see EnvGuard::set.
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                // SAFETY: see EnvGuard::set.
+                None => unsafe { std::env::remove_var(key) },
+            }
         }
     }
 }

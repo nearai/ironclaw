@@ -91,28 +91,21 @@ fn channel_actor(
     }
 }
 
-fn channel_key(tenant: &TenantId, provider: &str, actor: &str) -> ExternalIdentityKey {
-    ExternalIdentityKey {
-        tenant_id: tenant.clone(),
-        surface_kind: SurfaceKind::ChannelActor,
-        provider_kind: ProviderKind::new(provider).expect("provider"),
-        provider_instance_id: None,
-        external_subject_id: ExternalSubjectId::new(actor).expect("actor"),
-    }
-}
-
-fn channel_key_with_instance(
+fn oauth_with_instance(
     tenant: &TenantId,
     provider: &str,
     instance: &str,
-    actor: &str,
-) -> ExternalIdentityKey {
-    ExternalIdentityKey {
+    sub: &str,
+) -> ResolveExternalIdentity {
+    ResolveExternalIdentity {
         tenant_id: tenant.clone(),
-        surface_kind: SurfaceKind::ChannelActor,
+        surface_kind: SurfaceKind::Oauth,
         provider_kind: ProviderKind::new(provider).expect("provider"),
         provider_instance_id: Some(ProviderInstanceId::new(instance).expect("instance")),
-        external_subject_id: ExternalSubjectId::new(actor).expect("actor"),
+        external_subject_id: ExternalSubjectId::new(sub).expect("subject"),
+        email: None,
+        email_verified: false,
+        display_name: None,
     }
 }
 
@@ -247,27 +240,40 @@ async fn verified_email_link_is_tenant_scoped() {
 
 #[tokio::test]
 async fn different_provider_instance_does_not_collide() {
-    // provider_instance_id is part of the identity key: the same actor id
-    // under two adapter installations addresses two distinct paths, so a
-    // binding made under one installation is invisible under the other.
+    // `provider_instance_id` is part of the identity key: the same subject id
+    // under two provider installations addresses two distinct paths, so one
+    // never resolves to the other's user.
+    //
+    // Driven through `resolve_or_create` since #5618 retired `bind`/`lookup`.
+    // The key axis under test is unchanged — this is the same property, read
+    // off the surviving API. It uses the OAuth surface because channel actors
+    // are not mint-capable here at all (see `resolve_or_create_rejects_channel_actor`).
     let store = store();
     let t = tenant("t");
-    store
-        .bind(
-            channel_key_with_instance(&t, "telegram", "inst-1", "actor-7"),
-            &UserId::new("reborn-user-1").unwrap(),
-        )
+    let under_first = store
+        .resolve_or_create(oauth_with_instance(&t, "google", "inst-1", "subject-7"))
         .await
-        .expect("bind");
-    let under_other_instance = store
-        .lookup(channel_key_with_instance(
-            &t, "telegram", "inst-2", "actor-7",
-        ))
+        .expect("resolve under first installation");
+    let under_second = store
+        .resolve_or_create(oauth_with_instance(&t, "google", "inst-2", "subject-7"))
         .await
-        .expect("lookup");
-    assert!(
-        under_other_instance.is_none(),
-        "the same actor id under a different installation must not collide"
+        .expect("resolve under second installation");
+    assert_ne!(
+        under_first.as_str(),
+        under_second.as_str(),
+        "the same subject id under a different installation must not collide"
+    );
+
+    // …and the axis is stable, not merely mint-happy: re-resolving the first
+    // key returns the first user rather than minting a third.
+    let first_again = store
+        .resolve_or_create(oauth_with_instance(&t, "google", "inst-1", "subject-7"))
+        .await
+        .expect("re-resolve under first installation");
+    assert_eq!(
+        first_again.as_str(),
+        under_first.as_str(),
+        "re-resolving one installation's key must return that installation's user"
     );
 }
 
@@ -510,137 +516,26 @@ async fn adopt_migrated_identity_does_not_clobber_a_live_record() {
     );
 }
 
-#[tokio::test]
-async fn lookup_unbound_actor_returns_none() {
-    let store = store();
-    let resolved = store
-        .lookup(channel_key(&tenant("t"), "slack", "U-unbound"))
-        .await
-        .expect("lookup");
-    assert!(resolved.is_none(), "an unbound actor must fail closed");
-}
-
-#[tokio::test]
-async fn bind_then_lookup_returns_bound_user() {
-    let store = store();
-    let t = tenant("t");
-    let user = UserId::new("reborn-user-7").expect("user");
-    store
-        .bind(channel_key(&t, "slack", "U-1"), &user)
-        .await
-        .expect("bind");
-    let resolved = store
-        .lookup(channel_key(&t, "slack", "U-1"))
-        .await
-        .expect("lookup");
-    assert_eq!(resolved.as_ref().map(UserId::as_str), Some("reborn-user-7"));
-}
-
-#[tokio::test]
-async fn rebind_repoints_to_new_user() {
-    let store = store();
-    let t = tenant("t");
-    store
-        .bind(
-            channel_key(&t, "slack", "U-1"),
-            &UserId::new("user-a").unwrap(),
-        )
-        .await
-        .expect("first bind");
-    store
-        .bind(
-            channel_key(&t, "slack", "U-1"),
-            &UserId::new("user-b").unwrap(),
-        )
-        .await
-        .expect("rebind");
-    let resolved = store
-        .lookup(channel_key(&t, "slack", "U-1"))
-        .await
-        .expect("lookup");
-    assert_eq!(
-        resolved.as_ref().map(UserId::as_str),
-        Some("user-b"),
-        "re-binding the same key re-points it"
-    );
-}
-
-#[tokio::test]
-async fn bind_is_scoped_per_tenant() {
-    let store = store();
-    let user = UserId::new("user-a").expect("user");
-    store
-        .bind(channel_key(&tenant("tenant-a"), "slack", "U-1"), &user)
-        .await
-        .expect("bind");
-    let other = store
-        .lookup(channel_key(&tenant("tenant-b"), "slack", "U-1"))
-        .await
-        .expect("lookup");
-    assert!(
-        other.is_none(),
-        "a binding in one tenant is invisible in another"
-    );
-}
-
-#[tokio::test]
-async fn concurrent_rebind_converges_and_a_later_bind_repoints() {
-    // bind() reads the current version then writes with CAS::Version, falling
-    // through to a CAS::Any overwrite on VersionMismatch to honor re-point
-    // semantics under a lost race. Two processes (shared backend, independent
-    // lock maps, so the per-key lock does not serialize them) rebind the SAME
-    // channel key concurrently across several rounds to drive that overwrite
-    // branch: every bind must succeed (never surface VersionMismatch) and
-    // lookup must resolve to one of the two writers. A final explicit bind
-    // then re-points deterministically and must be observed.
-    let t = tenant("t");
-    for round in 0..16 {
-        let (p1, p2) = store_pair();
-        let (p1, p2) = (Arc::new(p1), Arc::new(p2));
-        let observer = Arc::clone(&p1);
-        let (a, b) = (Arc::clone(&p1), Arc::clone(&p2));
-        let (ka, kb) = (
-            channel_key(&t, "slack", "U-1"),
-            channel_key(&t, "slack", "U-1"),
-        );
-        let (ra, rb) = tokio::join!(
-            tokio::spawn(async move { a.bind(ka, &UserId::new("user-a").unwrap()).await }),
-            tokio::spawn(async move { b.bind(kb, &UserId::new("user-b").unwrap()).await }),
-        );
-        ra.expect("join")
-            .unwrap_or_else(|err| panic!("round {round}: first concurrent bind errored: {err}"));
-        rb.expect("join")
-            .unwrap_or_else(|err| panic!("round {round}: second concurrent bind errored: {err}"));
-
-        let raced = observer
-            .lookup(channel_key(&t, "slack", "U-1"))
-            .await
-            .expect("lookup after race")
-            .expect("a concurrent bind must leave the key bound");
-        assert!(
-            matches!(raced.as_str(), "user-a" | "user-b"),
-            "round {round}: concurrent rebind must converge on a writer, got {}",
-            raced.as_str()
-        );
-
-        observer
-            .bind(
-                channel_key(&t, "slack", "U-1"),
-                &UserId::new("user-final").unwrap(),
-            )
-            .await
-            .expect("final rebind");
-        let resolved = observer
-            .lookup(channel_key(&t, "slack", "U-1"))
-            .await
-            .expect("lookup after final rebind");
-        assert_eq!(
-            resolved.as_ref().map(UserId::as_str),
-            Some("user-final"),
-            "round {round}: a later explicit bind must re-point the key"
-        );
-    }
-}
+// The five `bind`/`lookup` tests that stood here were deleted with the surface
+// they covered (#5618): `lookup_unbound_actor_returns_none`,
+// `bind_then_lookup_returns_bound_user`, `rebind_repoints_to_new_user`,
+// `bind_is_scoped_per_tenant`, and
+// `concurrent_rebind_converges_and_a_later_bind_repoints`. Every one drove code
+// with no production caller. Two are worth naming rather than silently losing:
+//
+//   * `rebind_repoints_to_new_user` pinned an *upsert* re-point. The store that
+//     actually binds channel identities in production asserts the OPPOSITE and
+//     fails closed with `ProviderIdentityAlreadyBound`
+//     (`ironclaw_extension_host::channel_identity_store`), which
+//     `channel_pairing` maps to `AlreadyBoundToOtherUser`. The retired
+//     semantic was contrary to the shipped contract, not a gap in it.
+//   * `bind_is_scoped_per_tenant` was the only per-call multi-tenant *binding*
+//     test. Tenant keying of this store is still covered through
+//     `resolve_or_create` (see the cross-tenant verified-email test above);
+//     what went with it is an implementation that took the tenant per call,
+//     where the channel identity store fixes one tenant per instance. If
+//     multi-tenant channel binding is ever needed, that is the shape to
+//     revisit — the retired implementation is in git history.
 
 #[tokio::test]
 async fn empty_verified_email_does_not_index_or_link() {
@@ -719,7 +614,8 @@ async fn resolve_or_create_keys_on_provider_instance() {
 async fn corrupt_persisted_user_id_surfaces_invalid_user_id() {
     // A persisted identity record whose `user_id` fails `UserId` validation on
     // read-back must surface `InvalidUserId` (backend inconsistency), never be
-    // silently dropped. Drives both the `lookup` fast path and `resolve_or_create`.
+    // silently dropped. Driven through `resolve_or_create` — the `lookup` arm
+    // went with that method in #5618; the read path under test is the same one.
     let store = store();
     let t = tenant("t");
     let path =
@@ -738,20 +634,6 @@ async fn corrupt_persisted_user_id_surfaces_invalid_user_id() {
         .await
         .expect("seed corrupt record");
 
-    let via_lookup = store
-        .lookup(ExternalIdentityKey {
-            tenant_id: t.clone(),
-            surface_kind: SurfaceKind::Oauth,
-            provider_kind: ProviderKind::new("google").expect("provider"),
-            provider_instance_id: None,
-            external_subject_id: ExternalSubjectId::new("g-corrupt").expect("subject"),
-        })
-        .await;
-    assert!(
-        matches!(via_lookup, Err(RebornIdentityError::InvalidUserId(_))),
-        "lookup of a corrupt persisted user id must surface InvalidUserId, got {via_lookup:?}"
-    );
-
     let via_resolve = store
         .resolve_or_create(oauth(&t, "google", "g-corrupt", Some("a@x.com"), true))
         .await;
@@ -764,7 +646,9 @@ async fn corrupt_persisted_user_id_surfaces_invalid_user_id() {
 #[tokio::test]
 async fn corrupt_json_body_surfaces_backend_error() {
     // A stored body that is not valid JSON for the record type must surface
-    // `Backend` (deserialize failure), not panic and not be swallowed.
+    // `Backend` (deserialize failure), not panic and not be swallowed. Driven
+    // through `resolve_or_create` — the `lookup` arm went with that method in
+    // #5618; the deserialize path under test is the same one.
     let store = store();
     let t = tenant("t");
     let path =
@@ -781,13 +665,7 @@ async fn corrupt_json_body_surfaces_backend_error() {
         .expect("seed raw bytes");
 
     let result = store
-        .lookup(ExternalIdentityKey {
-            tenant_id: t.clone(),
-            surface_kind: SurfaceKind::Oauth,
-            provider_kind: ProviderKind::new("google").expect("provider"),
-            provider_instance_id: None,
-            external_subject_id: ExternalSubjectId::new("g-badjson").expect("subject"),
-        })
+        .resolve_or_create(oauth(&t, "google", "g-badjson", Some("a@x.com"), true))
         .await;
     assert!(
         matches!(result, Err(RebornIdentityError::Backend(_))),

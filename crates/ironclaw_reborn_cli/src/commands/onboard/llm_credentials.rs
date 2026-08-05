@@ -99,7 +99,9 @@ impl LlmKeyStoreOpener for EncryptedLlmKeyStoreOpener {
             let store = ironclaw_reborn_composition::open_standalone_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
-            Ok::<_, anyhow::Error>(ironclaw_operator::LlmKeyStore::new(store))
+            Ok::<_, anyhow::Error>(ironclaw_operator::LlmKeyStore::new(
+                ironclaw_reborn_composition::RuntimeOperatorSecretValueStore::shared(store),
+            ))
         })
     }
 }
@@ -882,7 +884,9 @@ mod tests {
                 ),
             );
             let store = Arc::new(ironclaw_secrets::SecretStore::ephemeral_over(backend));
-            Ok(ironclaw_operator::LlmKeyStore::new(store))
+            Ok(ironclaw_operator::LlmKeyStore::new(
+                ironclaw_reborn_composition::RuntimeOperatorSecretValueStore::shared(store),
+            ))
         }
     }
 
@@ -1038,10 +1042,12 @@ mod tests {
             let store = ironclaw_reborn_composition::open_standalone_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
-            ironclaw_operator::LlmKeyStore::new(store)
-                .read("openai")
-                .await
-                .map_err(anyhow::Error::from)
+            ironclaw_operator::LlmKeyStore::new(
+                ironclaw_reborn_composition::RuntimeOperatorSecretValueStore::shared(store),
+            )
+            .read("openai")
+            .await
+            .map_err(anyhow::Error::from)
         })
         .expect("read back through a fresh open of the same root");
         let material = stored.expect("a value must have been written");
@@ -1126,10 +1132,12 @@ mod tests {
             let store = ironclaw_reborn_composition::open_standalone_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
-            ironclaw_operator::LlmKeyStore::new(store)
-                .read("nearai")
-                .await
-                .map_err(anyhow::Error::from)
+            ironclaw_operator::LlmKeyStore::new(
+                ironclaw_reborn_composition::RuntimeOperatorSecretValueStore::shared(store),
+            )
+            .read("nearai")
+            .await
+            .map_err(anyhow::Error::from)
         })
         .expect("read back through a fresh open of the same root");
         assert_eq!(
@@ -1564,10 +1572,12 @@ mod tests {
             let store = ironclaw_reborn_composition::open_standalone_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
-            ironclaw_operator::LlmKeyStore::new(store)
-                .read("openai")
-                .await
-                .map_err(anyhow::Error::from)
+            ironclaw_operator::LlmKeyStore::new(
+                ironclaw_reborn_composition::RuntimeOperatorSecretValueStore::shared(store),
+            )
+            .read("openai")
+            .await
+            .map_err(anyhow::Error::from)
         })
         .expect("read back through a fresh open of the same root");
         let material = stored.expect(
@@ -1671,10 +1681,12 @@ mod tests {
             let store = ironclaw_reborn_composition::open_standalone_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
-            ironclaw_operator::LlmKeyStore::new(store)
-                .read("openai")
-                .await
-                .map_err(anyhow::Error::from)
+            ironclaw_operator::LlmKeyStore::new(
+                ironclaw_reborn_composition::RuntimeOperatorSecretValueStore::shared(store),
+            )
+            .read("openai")
+            .await
+            .map_err(anyhow::Error::from)
         })
         .expect("read back through a fresh open of the same root");
         let material = stored.expect(
@@ -1834,10 +1846,12 @@ mod tests {
             let store = ironclaw_reborn_composition::open_standalone_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
-            ironclaw_operator::LlmKeyStore::new(store)
-                .read("openai")
-                .await
-                .map_err(anyhow::Error::from)
+            ironclaw_operator::LlmKeyStore::new(
+                ironclaw_reborn_composition::RuntimeOperatorSecretValueStore::shared(store),
+            )
+            .read("openai")
+            .await
+            .map_err(anyhow::Error::from)
         })
         .expect("read back through a fresh open of the same root");
         assert_eq!(
@@ -1965,10 +1979,12 @@ mod tests {
             let store = ironclaw_reborn_composition::open_standalone_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
-            ironclaw_operator::LlmKeyStore::new(store)
-                .read("openai")
-                .await
-                .map_err(anyhow::Error::from)
+            ironclaw_operator::LlmKeyStore::new(
+                ironclaw_reborn_composition::RuntimeOperatorSecretValueStore::shared(store),
+            )
+            .read("openai")
+            .await
+            .map_err(anyhow::Error::from)
         })
         .expect("read back through a fresh open of the same root");
         assert_eq!(

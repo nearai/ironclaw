@@ -1,12 +1,25 @@
+//! Registrar-side adapter for the first-party skill-management tools.
+//!
+//! WS3 moved the executable half — URL/GitHub source fetching, bundle
+//! extraction, and install-input normalization — into
+//! `ironclaw_extension_support::skills`. What stays here is the host's own
+//! concern: the capability manifests the builtin package declares, the
+//! registry wiring, and the translation between the host's dispatch types and
+//! the executor's neutral request/error pair — the same executor/adapter seam
+//! every binary-registered first-party tool already uses.
+
 use std::{sync::Arc, time::Instant};
 
-use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use ironclaw_extensions::{CapabilityManifest, ExtensionError};
-use ironclaw_first_party_extensions::skills::{
-    SkillManagementCapabilityError, SkillManagementCapabilityKind,
-    SkillManagementCapabilityRequest, dispatch,
+use crate::{
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
+use async_trait::async_trait;
+use ironclaw_extension_support::skills::{
+    SkillManagementCapabilityError, SkillManagementCapabilityKind,
+    SkillManagementCapabilityRequest, SkillUrlFetchContext, dispatch, resolve_install_input,
+};
+use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
     dispatch::RuntimeDispatchErrorKind,
@@ -14,17 +27,8 @@ use ironclaw_host_api::{
     ids::CapabilityId,
     resource::ResourceUsage,
 };
-use ironclaw_skills::InstalledSkillMetadataSource;
-use serde_json::{Map, Value, json};
 
-use crate::{
-    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
-    FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
-};
-
-use super::{
-    first_party_capability_manifest, resource_profile, skill_url_install::fetch_skill_url_payload,
-};
+use super::{first_party_capability_manifest, resource_profile};
 
 pub const SKILL_LIST_CAPABILITY_ID: &str = "builtin.skill_list";
 pub const SKILL_INSTALL_CAPABILITY_ID: &str = "builtin.skill_install";
@@ -128,9 +132,20 @@ impl FirstPartyCapabilityHandler for SkillManagementToolHandler {
         };
         let mut usage = ResourceUsage::default();
         let input = if kind == SkillManagementCapabilityKind::Install {
-            skill_install_input(&request, &mut usage)
-                .await
-                .map_err(|error| error.with_usage(usage_with_elapsed(&usage, started)))?
+            resolve_install_input(
+                &request.input,
+                &skill_url_fetch_context(&request),
+                &mut usage,
+            )
+            .await
+            // Deliberately NOT `skill_management_error`: the install-input path
+            // never logged before this executor moved out of the crate, and a
+            // move-only change must not add a log line. The `dispatch` arm below
+            // keeps the debug record it already had.
+            .map_err(|error| {
+                FirstPartyCapabilityError::new(error.kind())
+                    .with_usage(usage_with_elapsed(&usage, started))
+            })?
         } else {
             request.input.clone()
         };
@@ -151,66 +166,14 @@ impl FirstPartyCapabilityHandler for SkillManagementToolHandler {
     }
 }
 
-async fn skill_install_input(
-    request: &FirstPartyCapabilityRequest,
-    usage: &mut ResourceUsage,
-) -> Result<Value, FirstPartyCapabilityError> {
-    let Some(object) = request.input.as_object() else {
-        return Err(FirstPartyCapabilityError::new(
-            RuntimeDispatchErrorKind::InputEncode,
-        ));
-    };
-    let has_content = object.contains_key("content");
-    let url = object
-        .get("url")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty());
-    match (has_content, url) {
-        (true, None)
-            if !object.contains_key("files")
-                && !object.contains_key("source")
-                && !object.contains_key("source_url") =>
-        {
-            Ok(request.input.clone())
-        }
-        (false, Some(url)) => {
-            let payload = fetch_skill_url_payload(request, url, usage).await?;
-            let mut rewritten = Map::new();
-            if let Some(name) = object.get("name").cloned() {
-                rewritten.insert("name".to_string(), name);
-            }
-            rewritten.insert("content".to_string(), Value::String(payload.content));
-            rewritten.insert(
-                "source".to_string(),
-                Value::String(
-                    InstalledSkillMetadataSource::InstalledUrl
-                        .as_str()
-                        .to_string(),
-                ),
-            );
-            rewritten.insert("source_url".to_string(), Value::String(url.to_string()));
-            if !payload.files.is_empty() {
-                rewritten.insert(
-                    "files".to_string(),
-                    Value::Array(
-                        payload
-                            .files
-                            .into_iter()
-                            .map(|file| {
-                                json!({
-                                    "path": file.path.display().to_string(),
-                                    "bytes_base64": BASE64_STANDARD.encode(file.contents),
-                                })
-                            })
-                            .collect(),
-                    ),
-                );
-            }
-            Ok(Value::Object(rewritten))
-        }
-        _ => Err(FirstPartyCapabilityError::new(
-            RuntimeDispatchErrorKind::InputEncode,
-        )),
+/// The host-runtime-free slice of an already-authorized dispatch input the
+/// skill-URL fetch path needs. Everything else the host holds (mounts,
+/// filesystem, secret staging, process ports) stays on this side of the seam.
+fn skill_url_fetch_context(request: &FirstPartyCapabilityRequest) -> SkillUrlFetchContext {
+    SkillUrlFetchContext {
+        capability_id: request.capability_id.clone(),
+        scope: request.scope.clone(),
+        runtime_http_egress: request.services.runtime_http_egress.clone(),
     }
 }
 

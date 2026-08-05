@@ -84,12 +84,11 @@ mod tests;
 pub use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
 
 // Public surface of the activation path (consumed by `crate::runtime`).
-pub use factory::{
-    build_hook_dispatcher_builder_factory, build_hook_dispatcher_builder_factory_for_tenant,
-};
+pub use factory::build_hook_dispatcher_builder_factory;
+pub(crate) use factory::build_hook_dispatcher_builder_factory_for_tenant;
 pub use projection::{
-    HookProjectionRegistry, MAX_INSTALLED_EXTENSIONS_CONSIDERED, MAX_TOTAL_HOOKS_PER_TENANT,
-    ThirdPartyDiscoveryInput, build_hook_projection_registry, tenant_extension_root,
+    HookProjectionRegistry, MAX_INSTALLED_EXTENSIONS_CONSIDERED, ThirdPartyDiscoveryInput,
+    build_hook_projection_registry,
 };
 
 /// Activation configuration for the hook framework.
@@ -133,12 +132,12 @@ pub struct HooksActivationConfig {
 
 /// Environment variable that flips the hook framework on. Absent / empty /
 /// any value other than a recognized truthy token ⇒ OFF.
-pub const HOOKS_ENABLED_ENV: &str = "HOOKS_ENABLED";
+pub(crate) const HOOKS_ENABLED_ENV: &str = "HOOKS_ENABLED";
 
 /// Environment variable that additionally flips *third-party installed
 /// extension* hook activation on. Requires [`HOOKS_ENABLED_ENV`] to also be
 /// truthy. Absent / empty / non-truthy ⇒ OFF.
-pub const HOOKS_THIRD_PARTY_ENABLED_ENV: &str = "HOOKS_THIRD_PARTY_ENABLED";
+pub(crate) const HOOKS_THIRD_PARTY_ENABLED_ENV: &str = "HOOKS_THIRD_PARTY_ENABLED";
 
 impl HooksActivationConfig {
     /// Explicitly enabled (master flag only; third-party still OFF).

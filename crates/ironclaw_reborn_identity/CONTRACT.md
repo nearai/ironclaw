@@ -10,10 +10,40 @@ provisioning lives here, not in WebUI ingress and not in `ironclaw_conversations
 This crate is **also the durable home of the minimal user profile** (email,
 display name, timestamps), not only an identity→`UserId` map. Resolving an
 identity persists a `StoredUser` record keyed by `UserId`, so "what do we know
-about this user, and where is it stored" is answered *here* — there is no
-separate users table elsewhere in the Reborn stack. Any future enumeration or
-admin surface extends this store; it does not stand up a new one. See
+about this user, and where is it stored" is answered *here* — this is the only
+user *profile* store in the Reborn stack. Any future enumeration or admin
+surface extends this store; it does not stand up a new one. See
 [Persisted records](#persisted-records) for the exact shapes.
+
+## Two external-identity stores, and the line between them
+
+The Reborn stack has **two** durable external-identity stores. They are not
+rivals and neither is a migration target for the other; a reader who assumes
+one is redundant will delete live behavior. The split is by *concern*:
+
+| | This crate — `identity_store` | `ironclaw_extension_host::channel_identity_store` |
+|---|---|---|
+| Owns | **Principal identity**: external subject → canonical `UserId`, plus the user profile and the verified-email index | **Post-OAuth channel binding**: `(provider, provider_user_id)` → user, plus an advisory by-user inverse index |
+| Key | `(tenant, surface_kind, provider_kind, provider_instance, subject)` — five separate path segments | `(provider, provider_user_id)`, where `provider_user_id` is the installation-scoped composite from `ironclaw_host_api::user_identity` |
+| Mints users? | Yes — `resolve_or_create` is the only user-minting path in the stack | Never. It binds an *already-authenticated* user |
+| Ports | Owns its own trait (`RebornIdentityResolver`) | Implements `ironclaw_host_api::user_identity`'s three ports |
+| Tenancy | Tenant is part of every key | One store instance is fixed to one tenant at construction |
+
+**The ports stay in `ironclaw_host_api`.** Moving them into this crate was
+proposed by the target-architecture WS6 row and **refuted** (2026-08-04): the
+sole production implementor is the channel identity store, this crate
+implements none of the three ports, and since this crate already depends on
+`ironclaw_host_api` — not the reverse — the move would force
+`ironclaw_extension_host` to take a **new** dependency purely to name a port it
+implements, separating a port from its implementor.
+
+**Channel actors are not bound here.** This crate rejects `ChannelActor` on
+`resolve_or_create` (`RebornIdentityError::ChannelActorNotMintable`) and no
+longer offers a binding path of its own: `ExternalIdentityKey` and
+`RebornIdentityResolver::lookup` / `::bind` were retired in #5618 after audit
+showed zero production callers, with the channel-binding role resolved onto the
+store that actually serves it. What remains here for channel actors is the
+fail-closed guard, which is deliberate.
 
 ## Position in the stack
 
@@ -67,9 +97,15 @@ tracked as #5616.)
   email, or creates a new user. **`SurfaceKind::ChannelActor` is rejected**
   (`ChannelActorNotMintable`): channel actors are never mint-capable and must
   fail closed, not auto-provision.
-- `lookup` — link-only; returns the bound user or `None`, never creates.
-- `bind` — links an external identity to an **already-existing** user (upsert,
-  last-writer-wins). The caller must have authenticated the user first.
+- ~~`lookup` — link-only; returns the bound user or `None`, never creates.~~
+- ~~`bind` — links an external identity to an **already-existing** user (upsert,
+  last-writer-wins). The caller must have authenticated the user first.~~
+  **Both retired 2026-08-04 (#5618), with `ExternalIdentityKey`.** Neither had a
+  production caller and the key was absent from the composition facade, so no
+  downstream crate could construct one. Binding an already-authenticated user to
+  a channel identity is the channel identity store's job — and note its rule is
+  the *opposite* of the retired `bind`'s: it rejects a re-point with
+  `ProviderIdentityAlreadyBound` rather than upserting last-writer-wins.
 - `adopt_migrated_identity` — seeds a pre-existing identity carried from a legacy
   store, preserving its `user_id` and (for a verified email) the verified-email
   index. Never mints. Idempotent — existing identity/index records win.
@@ -133,7 +169,8 @@ service can map it to a 404.
    `adopt_migrated_identity` writes identity-then-index (safe for its
    same-identity fast path; see the migration race note below).
 4. **Channel actors never mint** — enforced at the top of `resolve_or_create`;
-   `bind`/`adopt_migrated_identity` take an explicit authenticated `user_id`.
+   `adopt_migrated_identity`, the only other write path, takes an explicit
+   authenticated `user_id` rather than minting one.
 5. **`delete_user` cascades, and is the one sanctioned unwind of invariants 1/3.**
    Deleting a user removes, in order: every external-identity record in the
    tenant subtree bound to that `user_id` (walked iteratively over the
@@ -191,8 +228,22 @@ unreferenced user rows is out of scope for this crate.
 Filed from the de-slop review:
 
 - **#5614** — cross-process divergent-email logins can split a principal.
-- **#5615** — `bind()` has no OAuth-surface guard (defense-in-depth).
+- ~~**#5615** — `bind()` has no OAuth-surface guard (defense-in-depth).~~
+  **Closed 2026-08-04 by deletion**: the method it guards no longer exists (#5618).
 - **#5616** — `adopt_migrated_identity` never writes `StoredUser` and reverses the
   index/identity write order.
 - **#5617** — the login seam is tested only with fakes on both sides.
-- **#5618** — decide the `ExternalIdentityKey` + `lookup`/`bind` public surface.
+- ~~**#5618** — decide the `ExternalIdentityKey` + `lookup`/`bind` public
+  surface.~~ **Closed 2026-08-04: dropped.** Both trait methods and the key type
+  had zero production callers and the key was deliberately absent from the
+  composition facade, so downstream could not construct one; the channel-actor
+  path they were documented to serve is served by the channel identity store.
+  See "Two external-identity stores" above. #5615 (`bind()` has no OAuth-surface
+  guard) is closed by the same deletion — the method it guards is gone.
+
+  One capability went with them and is recorded rather than lost: those methods
+  took the tenant **per call**, where the channel identity store fixes one
+  tenant per instance. Tenant keying of *this* store is unaffected
+  (`resolve_or_create` remains tenant-keyed and cross-tenant isolation is still
+  tested). If multi-tenant channel binding is ever required, the channel store's
+  shape — not this crate — is what needs revisiting.

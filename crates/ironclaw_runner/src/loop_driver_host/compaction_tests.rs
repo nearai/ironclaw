@@ -6,11 +6,12 @@
 use super::*;
 
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
-use ironclaw_turns::test_support::{in_memory_agent_turn_runtime, in_memory_loop_checkpoint_store};
-use ironclaw_turns::{
-    InMemoryRunProfileResolver, RunProfileResolver, TurnId, TurnRunId, TurnScope,
-    run_profile::{InMemoryLoopHostMilestoneSink, RunProfileResolutionRequest},
+use ironclaw_loop_contracts::{
+    InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, RunProfileResolutionRequest,
+    RunProfileResolver,
 };
+use ironclaw_turns::test_support::{in_memory_agent_turn_runtime, in_memory_loop_checkpoint_store};
+use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
 /// Coverage gap closed: `build_compaction_ports` (see above) resolves a
 /// scope-specific gateway via `self.model_gateway.resolve_for_scope(&run_context.scope)`,
@@ -29,11 +30,11 @@ use ironclaw_turns::{
 /// passes if compaction reaches the scoped gateway.
 #[tokio::test]
 async fn build_compaction_ports_dispatches_through_scope_resolved_gateway() {
+    use ironclaw_loop_contracts::{LoopCompactionMode, SystemInferenceTaskId};
     use ironclaw_loop_host::{
         HostManagedModelError, HostManagedModelRequest, HostManagedModelResponse,
     };
     use ironclaw_threads::{AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent};
-    use ironclaw_turns::run_profile::{LoopCompactionMode, SystemInferenceTaskId};
 
     /// Records every request it receives. This is the gateway
     /// `resolve_for_scope` hands back — the destination compaction must

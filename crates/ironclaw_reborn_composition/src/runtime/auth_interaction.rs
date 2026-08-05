@@ -5,6 +5,7 @@ use ironclaw_auth::{
     AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthGateRef, TurnGateAuthFlowQuery,
     TurnRunRef, flow_matches_turn_gate_query,
 };
+use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnScope};
 use ironclaw_processes::{
     ProcessGateOwnerMatch, ProcessGateQuery, ProcessGateQuerySource, ProcessSuspensionKind,
 };
@@ -14,9 +15,8 @@ use ironclaw_product::{
     ListPendingAuthInteractionsResponse, ProductSurfaceFailure, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse,
 };
-use ironclaw_turns::{GateRef, TurnRunId, TurnScope};
 
-use crate::process_gate_turn_view::{current_turn_gate_runs, first_turn_run_for_gate};
+use ironclaw_product::{current_turn_gate_runs, first_turn_run_for_gate};
 
 pub(super) struct ProcessGateAuthInteractionReadModel {
     gates: Arc<dyn ProcessGateQuerySource<Error = ironclaw_turns::TurnError>>,
@@ -56,7 +56,7 @@ impl ProcessGateAuthInteractionReadModel {
     async fn query(
         &self,
         scope: &AuthInteractionScope,
-        gate_ref: Option<GateRef>,
+        gate_ref: Option<TurnGateRef>,
         include_historical: bool,
     ) -> Result<Vec<ironclaw_processes::ProcessGateRecord>, ProductSurfaceFailure> {
         self.gates
@@ -82,7 +82,7 @@ impl ProcessGateAuthInteractionReadModel {
     async fn blocked_auth_runs(
         &self,
         scope: &AuthInteractionScope,
-    ) -> Result<Vec<(TurnRunId, GateRef)>, ProductSurfaceFailure> {
+    ) -> Result<Vec<(TurnRunId, TurnGateRef)>, ProductSurfaceFailure> {
         Ok(current_turn_gate_runs(
             self.query(scope, None, false).await?,
         ))
@@ -91,7 +91,7 @@ impl ProcessGateAuthInteractionReadModel {
     async fn auth_run_for_gate(
         &self,
         scope: &AuthInteractionScope,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> Result<Option<TurnRunId>, ProductSurfaceFailure> {
         Ok(first_turn_run_for_gate(
             self.query(scope, Some(gate_ref.clone()), true).await?,
@@ -102,7 +102,7 @@ impl ProcessGateAuthInteractionReadModel {
         &self,
         scope: &AuthInteractionScope,
         run_id: TurnRunId,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> Result<Option<AuthFlowRecord>, ProductSurfaceFailure> {
         self.flow_records
             .flow_for_turn_gate(turn_gate_query(scope, run_id, gate_ref)?)
@@ -132,7 +132,7 @@ fn owner_scope_for_interaction(scope: &AuthInteractionScope) -> AuthFlowOwnerSco
 fn turn_gate_query(
     scope: &AuthInteractionScope,
     run_id: TurnRunId,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
 ) -> Result<TurnGateAuthFlowQuery, ProductSurfaceFailure> {
     Ok(TurnGateAuthFlowQuery {
         owner: owner_scope_for_interaction(scope),
@@ -166,7 +166,7 @@ fn matching_flow_for_run(
     flows: &[AuthFlowRecord],
     scope: &AuthInteractionScope,
     run_id: TurnRunId,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
 ) -> Result<Option<AuthFlowRecord>, ProductSurfaceFailure> {
     let query = turn_gate_query(scope, run_id, gate_ref)?;
     Ok(flows
@@ -204,7 +204,7 @@ impl AuthInteractionReadModel for ProcessGateAuthInteractionReadModel {
         &self,
         scope: &AuthInteractionScope,
         run_id_hint: Option<TurnRunId>,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> Result<Option<AuthGateRecord>, ProductSurfaceFailure> {
         let run_id = match run_id_hint {
             Some(run_id) => run_id,

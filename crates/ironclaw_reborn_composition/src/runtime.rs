@@ -39,6 +39,10 @@ use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
     SkillActivationSelectorConfig, SkillExecutionAdapter, SkillInjectionMode,
 };
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, IdempotencyKey, LoopGateRef, ReplyTargetBindingRef,
+    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnId, TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
     audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage, DecisionSummary},
     capability::EffectKind,
@@ -48,10 +52,11 @@ use ironclaw_host_api::{
         InvocationId, TenantId, ThreadId, UserId,
     },
     mount::MountView,
-    product_surface::ProductSurface,
     resource::ResourceScope,
     scope::Principal,
 };
+use ironclaw_loop_contracts::{LoopHostMilestoneSink, LoopRunContext, RunProfileResolutionRequest};
+use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
     AwaitEdgeSettler, AwaitEdgeWriter, CapabilityAllowSet, CapabilityResolveError,
     CapabilitySurfaceProfileResolver, EmptyUserProfileSource, FilesystemSkillBundleSource,
@@ -64,14 +69,17 @@ use ironclaw_processes::{
     ProcessConcurrencyClass, ProcessConcurrencyLimits, ProcessGateOwnerMatch, ProcessGateQuery,
     ProcessGateQuerySource, ProcessLifecycleLookupSource, ProcessSuspensionKind,
 };
-use ironclaw_product::ProjectionStream;
 use ironclaw_product::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
     DefaultApprovalInteractionService, DefaultAuthInteractionService,
-    LifecycleProductSurfaceContext, OutboundPreferencesProductService,
-    PersistentApprovalGranteeResolver, RunStateApprovalInteractionReadModel,
+    OutboundPreferencesProductService, PersistentApprovalGranteeResolver,
+    RunStateApprovalInteractionReadModel,
 };
+use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
+use ironclaw_product_contracts::operator_llm::ActiveModelReader;
+use ironclaw_product_contracts::projection::ProjectionStream;
+use ironclaw_product_contracts::surface::ProductSurface;
 use ironclaw_runner::loop_exit_applier::{
     ApprovalGateEvidenceStore, AwaitDependentRunEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
 };
@@ -80,7 +88,7 @@ use ironclaw_runner::milestone_events::{
 };
 use ironclaw_runner::runtime::{
     DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
-    ProcessRuntimeSystem, ToolDisclosureMode, build_default_planned_runtime,
+    ProcessRuntimeSystem, build_default_planned_runtime,
 };
 use ironclaw_runner::subagent::await_edge::{
     boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver, store::AwaitEdgeStore,
@@ -91,16 +99,12 @@ use ironclaw_threads::{
     SessionThreadService, ThreadHistoryRequest, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, AgentTurnProcessRuntime, AgentTurnSpawnTreeRuntimePort, CancelRunRequest,
-    CancelRunResponse, GetRunStateRequest, IdempotencyKey, LoopGateRef, ReplyTargetBindingRef,
-    RunProfileResolutionRequest, SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnEventProjectionSource, TurnId,
-    TurnRunId, TurnRunState, TurnRunWake, TurnScope, TurnStatus,
-    events::EventCursor,
-    run_profile::{LoopHostMilestoneSink, LoopRunContext},
+    AgentTurnProcessRuntime, AgentTurnSpawnTreeRuntimePort, CancelRunRequest, CancelRunResponse,
+    GetRunStateRequest, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError,
+    TurnEventProjectionSource, TurnRunState, TurnRunWake,
 };
 
-use ironclaw_host_runtime::{HostRuntime, HostRuntimeHttpEgressPort};
+use ironclaw_host_runtime::HostRuntime;
 use ironclaw_outbound::CommunicationPreferenceRepository;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_outbound::OutboundDeliveryTargetRegistrationOutcome;
@@ -134,18 +138,19 @@ use crate::outbound::{
     OutboundDeliveryTargetProvider, RebornOutboundPreferencesService,
     outbound_delivery_synthetic_provider,
 };
-use crate::process_gate_turn_view::{current_turn_gate_runs, first_turn_run_for_gate};
 use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
+pub(crate) use ironclaw_auth::product_prompt::blocked_auth_flow_canceller;
+pub use ironclaw_auth::product_prompt::product_auth_challenge_provider;
 use ironclaw_extension_host::AdminConfigurationCatalogUse;
-use ironclaw_extension_host::admin_configuration::{
-    ComposedAdminConfigurationService, ComposedExtensionAdminConfigurationResolver,
-};
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_extension_host::channel_pairing::ChannelPairingConsumeOutcome;
 use ironclaw_extension_host::channel_pairing::ChannelPairingRegistry;
 use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
+use ironclaw_extension_manager::admin_configuration::{
+    ComposedAdminConfigurationService, ComposedExtensionAdminConfigurationResolver,
+};
 use ironclaw_product::projection::{RebornProjectionServices, build_reborn_projection_services};
-pub use ironclaw_product::{blocked_auth_flow_canceller, product_auth_challenge_provider};
+use ironclaw_product::{current_turn_gate_runs, first_turn_run_for_gate};
 use ironclaw_secrets::SecretStorePort;
 use ironclaw_skills::ScopedSkillManagementPort;
 
@@ -188,15 +193,13 @@ use crate::runtime_input::{
     PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessChecker,
     TriggerFireAccessGrant,
 };
-use crate::trigger_fire_access::{
-    CompositeTriggerFireChecker, IdentityMembershipTriggerFireChecker,
-    StaticOwnerTriggerFireChecker,
-};
+use crate::trigger_fire_access::IdentityMembershipTriggerFireChecker;
 use crate::trigger_poller_assembly::{
     build_trigger_active_run_lookup, build_trigger_poller_services, poller_user_directory,
     validate_trigger_poller_authorization,
 };
 use crate::{RebornBuildError, RebornReadiness};
+use ironclaw_triggers::{CompositeTriggerFireChecker, StaticOwnerTriggerFireChecker};
 use production::{
     EmptyCapabilitySurfaceResolver, EmptyIdentityContextSource,
     UnavailableApprovalInteractionService, UnavailableCapabilityIo,
@@ -230,7 +233,7 @@ struct RuntimeStoreParts {
     trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     /// Process lifecycle source for trigger active-run lookup. Every substrate
     /// now provides the same typed process-journal projection.
-    admin_secret_provisioner: Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
+    admin_secret_provisioner: Arc<dyn ironclaw_product::AdminSecretProvisioner>,
     project_service: Arc<dyn ironclaw_product::ProjectService>,
     trigger_conversation_services: Option<RebornFilesystemConversationServices>,
 }
@@ -396,13 +399,26 @@ pub(crate) use capability_host::RESULT_READ_CAPABILITY_ID_FOR_TEST;
 pub(crate) use capability_host::SKILL_ACTIVATE_CAPABILITY_ID;
 
 pub use skills::{
-    RebornSkillActivation, RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle,
-    RebornSkillExecutionPlan, RebornSkillExecutionResult, RebornSkillSourceKind,
+    RebornSkillActivation, RebornSkillActivationMode, RebornSkillActivationSource,
+    RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan, RebornSkillExecutionResult,
 };
 
 use skills::skill_asset_error;
 
 use ironclaw_operator::ResolvedRebornLlm;
+// Named only by `#[cfg(any(test, feature = "test-support"))]` accessors
+// below, so the imports carry the same gate. Without it, any build that
+// compiles this crate as a *dependency* without `test-support` — e.g. the
+// PR clippy lane when the changed-package set is `{ironclaw,
+// ironclaw_reborn_config}` — sees three unused imports and fails `-D
+// warnings`. See #7119.
+#[cfg(any(test, feature = "test-support"))]
+use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+#[cfg(any(test, feature = "test-support"))]
+use ironclaw_product_contracts::admin_users::AdminUserService;
+#[cfg(any(test, feature = "test-support"))]
+use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
+use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
 
 /// Stable identifier for a Reborn CLI conversation. Wraps a `ThreadId`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -454,12 +470,12 @@ pub enum RebornTurnDriveOutcome {
     Terminal(AssistantReply),
     /// The run parked on a user-resolvable gate (auth/approval/resource) and is
     /// awaiting resolution through the facade. `gate_ref` is required: the
-    /// blocked-reason contract carries a `GateRef` for every such block, so its
+    /// blocked-reason contract carries a `TurnGateRef` for every such block, so its
     /// absence is an invariant violation, not a valid recorder outcome.
     BlockedOnGate {
         run_id: TurnRunId,
         status: TurnStatus,
-        gate_ref: ironclaw_turns::GateRef,
+        gate_ref: ironclaw_host_api::turn::TurnGateRef,
         partial_text: Option<String>,
     },
 }
@@ -532,7 +548,7 @@ pub struct RebornRuntime {
     pub(crate) extension_lifecycle_surface_context: LifecycleProductSurfaceContext,
     pub(crate) secret_store: Arc<dyn SecretStorePort>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
-    pub(crate) admin_secret_provisioner: Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
+    pub(crate) admin_secret_provisioner: Arc<dyn ironclaw_product::AdminSecretProvisioner>,
     pub(crate) project_service: Arc<dyn ironclaw_product::ProjectService>,
     pub(crate) trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     #[cfg(any(test, feature = "test-support"))]
@@ -564,9 +580,19 @@ pub struct RebornRuntime {
     pub(crate) skill_auto_activate_learned: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) extension_management: Arc<RebornLocalExtensionManagementPort>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
-    pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
+    /// Durable nonce and signed-manifest replay state shared by CLI IronHub
+    /// installs and the optional deep-link gateway.
+    pub(crate) ironhub_link_state: Arc<ironclaw_extension_manager::ironhub::IronhubLinkStateStore>,
+    pub(crate) ironhub_manifest_url: ironclaw_extension_manager::ironhub::IronhubManifestUrl,
+    /// Single composed IronHub deep-link service. `None` is the default-off
+    /// registration gate; the same option controls facade and route wiring.
+    pub(crate) ironhub_link_service:
+        Option<Arc<dyn ironclaw_product_contracts::ironhub::IronhubLinkService>>,
     pub(crate) owner_user_id: UserId,
     pub(crate) extension_filesystem: Arc<CompositeRootFilesystem>,
+    /// The deployment's single workspace scoping decision, carried so the WebUI
+    /// attachment handle addresses the same subtree as agent tool writes.
+    pub(crate) workspace_mount_policy: crate::runtime_mounts::WorkspaceMountPolicy,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
     #[cfg(any(test, feature = "test-support"))]
@@ -578,7 +604,7 @@ pub struct RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) delivery_coordinator: Option<Arc<ironclaw_product::DeliveryCoordinator>>,
     pub(crate) channel_facade_slot:
-        Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>>,
+        Arc<std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>>,
     pub(crate) admin_configuration: Arc<ComposedAdminConfigurationService>,
     pub(crate) admin_configuration_uses: Arc<Vec<AdminConfigurationCatalogUse>>,
     pub(crate) channel_config_service: Arc<ComposedExtensionAdminConfigurationResolver>,
@@ -590,8 +616,7 @@ pub struct RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     pub(crate) channel_pairing: Option<Arc<ChannelPairingRegistry>>,
-    pub(crate) channel_delivery_resolver:
-        Option<Arc<dyn ironclaw_product::ChannelDeliveryResolver>>,
+    pub(crate) channel_delivery_resolver: Option<Arc<dyn ChannelDeliveryResolver>>,
     #[cfg(feature = "test-support")]
     pub(crate) channel_egress_credential_bridges:
         Option<Arc<ironclaw_extension_host::channel_egress::BridgedChannelEgressCredentials>>,
@@ -605,11 +630,12 @@ pub struct RebornRuntime {
     pub(crate) _process_gate_query_source: Arc<dyn ProcessGateQuerySource<Error = TurnError>>,
     turn_tree_store: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
     thread_service: Arc<dyn SessionThreadService>,
+    input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
     thread_scope: ThreadScope,
     turn_scheduler: RuntimeTurnScheduler,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
     credential_refresh_worker_handle: Option<ironclaw_auth::KeepaliveSweepHandle>,
-    trace_flush_worker: crate::observability::trace_capture::TraceQueueFlushWorkerHandle,
+    trace_flush_worker: ironclaw_reborn_traces::capture::TraceQueueFlushWorkerHandle,
     skill_learning_extraction_tasks:
         Option<Arc<ironclaw_extension_host::skill_learning::SkillLearningExtractionTasks>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -622,7 +648,8 @@ pub struct RebornRuntime {
     /// Mints the one-time API bearer on admin user creation. Read by
     /// `runtime.product_surface` when wiring the admin surface. `None` leaves the
     /// admin create path reporting the token minter unavailable.
-    admin_api_token_minter: Option<Arc<dyn crate::AdminApiTokenMinter>>,
+    admin_api_token_minter:
+        Option<Arc<dyn ironclaw_product_contracts::admin_users::AdminApiTokenMinter>>,
     actor_user_id: UserId,
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
@@ -645,7 +672,7 @@ pub struct RebornRuntime {
     llm_reload: Option<RebornLlmReloadParts>,
 }
 
-impl ironclaw_extension_host::extension_lifecycle_command::RebornExtensionLifecycleRuntime
+impl ironclaw_extension_manager::extension_lifecycle_command::RebornExtensionLifecycleRuntime
     for RebornRuntime
 {
     fn skill_management(&self) -> Arc<ironclaw_skills::ScopedSkillManagementPort> {
@@ -656,10 +683,6 @@ impl ironclaw_extension_host::extension_lifecycle_command::RebornExtensionLifecy
         &self,
     ) -> Arc<ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort> {
         Arc::clone(&self.extension_management)
-    }
-
-    fn runtime_http_egress(&self) -> Option<Arc<dyn RuntimeHttpEgress>> {
-        self.runtime_http_egress.clone()
     }
 
     fn runtime_credential_accounts(
@@ -674,7 +697,7 @@ impl ironclaw_extension_host::extension_lifecycle_command::RebornExtensionLifecy
     }
 }
 
-impl ironclaw_extension_host::ironhub::RebornIronHubRuntime for RebornRuntime {
+impl ironclaw_extension_manager::ironhub::RebornIronHubRuntime for RebornRuntime {
     fn ironhub_skill_management(&self) -> Arc<ironclaw_skills::ScopedSkillManagementPort> {
         Arc::clone(&self.skill_management)
     }
@@ -685,8 +708,18 @@ impl ironclaw_extension_host::ironhub::RebornIronHubRuntime for RebornRuntime {
         Arc::clone(&self.extension_management)
     }
 
-    fn ironhub_host_runtime_http_egress(&self) -> Option<HostRuntimeHttpEgressPort> {
-        self.host_runtime_http_egress.clone()
+    fn ironhub_runtime_http_egress(&self) -> Option<Arc<dyn RuntimeHttpEgress>> {
+        self.runtime_http_egress.clone()
+    }
+
+    fn ironhub_link_state(
+        &self,
+    ) -> Arc<ironclaw_extension_manager::ironhub::IronhubLinkStateStore> {
+        Arc::clone(&self.ironhub_link_state)
+    }
+
+    fn ironhub_manifest_url(&self) -> ironclaw_extension_manager::ironhub::IronhubManifestUrl {
+        self.ironhub_manifest_url.clone()
     }
 
     fn ironhub_surface_context(&self) -> LifecycleProductSurfaceContext {
@@ -708,7 +741,7 @@ pub(crate) struct InteractionServiceTestParts {
     approval_requests: Arc<crate::factory::ComposedApprovalRequestStore>,
     capability_leases: Arc<crate::factory::ComposedCapabilityLeaseStore>,
     extension_registry: Arc<ExtensionRegistry>,
-    workspace_mounts: MountView,
+    workspace_mounts: crate::runtime_mounts::WorkspaceMountPolicy,
     skill_mounts: MountView,
     memory_mounts: MountView,
     system_extensions_lifecycle_mounts: MountView,
@@ -718,7 +751,6 @@ pub(crate) struct InteractionServiceTestParts {
     skill_management: Arc<ScopedSkillManagementPort>,
     admin_configuration_resolver: Arc<ComposedExtensionAdminConfigurationResolver>,
     product_auth: Arc<RebornProductAuthServices>,
-    runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     builtin_capability_policy: Arc<BuiltinCapabilityPolicy>,
 }
 
@@ -728,15 +760,15 @@ pub(crate) struct InteractionServiceTestParts {
 /// forwarder above.
 #[cfg(feature = "test-support")]
 pub(crate) fn wrap_result_read_capability_for_test(
-    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    inner: std::sync::Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
     thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
     fallback_user_id: ironclaw_host_api::ids::UserId,
-    run_context: ironclaw_turns::run_profile::LoopRunContext,
+    run_context: ironclaw_loop_contracts::LoopRunContext,
     input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
 ) -> Result<
-    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    ironclaw_turns::run_profile::AgentLoopHostError,
+    std::sync::Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
+    ironclaw_loop_contracts::AgentLoopHostError,
 > {
     capability_host::wrap_result_read_capability_for_test(
         inner,
@@ -758,8 +790,8 @@ pub(crate) fn wrap_result_read_capability_for_test(
 pub(crate) async fn create_refreshing_capability_port_for_test(
     parts: crate::test_support::RefreshingCapabilityPortTestParts,
 ) -> Result<
-    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    ironclaw_turns::run_profile::AgentLoopHostError,
+    std::sync::Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
+    ironclaw_loop_contracts::AgentLoopHostError,
 > {
     capability_host::create_refreshing_capability_port_for_test(parts).await
 }
@@ -820,6 +852,26 @@ impl RebornRuntime {
             channel_connection,
             Vec::new(),
         )
+    }
+
+    pub(crate) fn ironhub_link_service(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_contracts::ironhub::IronhubLinkService>> {
+        self.ironhub_link_service.as_ref().map(Arc::clone)
+    }
+
+    /// Build the public registration mount from the same optional service
+    /// attached to the product facade. `None` is the default-off gate.
+    pub fn ironhub_register_route_mount(
+        &self,
+    ) -> Result<Option<ironclaw_host_ingress::PublicRouteMount>, RebornBuildError> {
+        self.ironhub_link_service()
+            .map(|service| {
+                crate::ironhub_link_serve::ironhub_register_route_mount(
+                    crate::ironhub_link_serve::IronhubRegisterRouteState::new(service),
+                )
+            })
+            .transpose()
     }
 
     pub fn product_auth_services(&self) -> Arc<RebornProductAuthServices> {
@@ -883,6 +935,7 @@ impl RebornRuntime {
         self.extension_management
             .install(package_ref, &self.actor_user_id)
             .await
+            .map_err(ironclaw_product::ProductSurfaceFailure::from)
     }
 
     /// Test-only caller for the production static activation path with the
@@ -897,11 +950,9 @@ impl RebornRuntime {
     ) -> Result<ironclaw_product::LifecycleProductResponse, ironclaw_product::ProductSurfaceFailure>
     {
         self.extension_management
-            .activate_with_prechecked_credentials_for_test(
-                package_ref,
-                ironclaw_extension_host::ExtensionActivationMode::Static,
-            )
+            .activate_with_prechecked_credentials_for_test(package_ref)
             .await
+            .map_err(ironclaw_product::ProductSurfaceFailure::from)
     }
 
     /// Test-support handles onto the approval/lease/gate stores the integration
@@ -1031,8 +1082,8 @@ impl RebornRuntime {
             run_delivery_settings,
         } = wiring;
         let attachment_filesystem = self.read_write_workspace_filesystem()?;
-        let inbound_attachments: Arc<dyn ironclaw_product::InboundAttachmentLander> =
-            Arc::new(ironclaw_product::ProjectScopedAttachmentLander::new(
+        let inbound_attachments: Arc<dyn ironclaw_attachments::InboundAttachmentLander> =
+            Arc::new(ironclaw_attachments::ProjectScopedAttachmentLander::new(
                 Arc::clone(&attachment_filesystem),
             ));
         let project_filesystem: Arc<dyn ironclaw_product::ProjectFilesystemReader> = Arc::new(
@@ -1057,17 +1108,18 @@ impl RebornRuntime {
             channel_config: Arc::clone(&self.channel_config_service),
             channel_pairing: self.channel_pairing.clone(),
         };
-        let admin_users: Arc<dyn ironclaw_product::AdminUserService> =
-            Arc::new(crate::admin_user_directory::RebornAdminUserDirectory::new(
+        let admin_users: Arc<dyn AdminUserService> =
+            Arc::new(ironclaw_product::RebornAdminUserDirectory::new(
                 self.reborn_user_directory(),
                 self.reborn_admin_secret_provisioner(),
-                Arc::new(crate::admin_token::RejectingAdminApiTokenMinter),
+                Arc::new(ironclaw_product::RejectingAdminApiTokenMinter),
             ));
         Some(crate::extension_host_assembly::start_channel_host(
             &source,
             crate::extension_host_assembly::ChannelHostAssemblyWiring {
                 thread_service,
                 turn_coordinator,
+                input_enqueue: self.webui_input_enqueue(),
                 approval_interaction: None,
                 auth_interaction: None,
                 identity,
@@ -1184,30 +1236,28 @@ impl RebornRuntime {
     pub fn pairing_connection_notices_for_test(
         &self,
         extension_id: &str,
-    ) -> Option<ironclaw_product::ChannelConnectionNoticePolicy> {
+    ) -> Option<ChannelConnectionNoticePolicy> {
         let service = self.channel_pairing.as_ref()?.get(extension_id)?;
         Some(service.connection_notices().clone())
     }
 
-    /// The production protected pairing route mount (`pairing/{mint,status,
-    /// unpair}`) over the composed pairing registry. Tests only.
+    /// The composed pairing registry, for building the protected pairing
+    /// route mount (`pairing/{mint,status,unpair}`). Tests only.
+    ///
+    /// Composition hands out the *registry*, not the mount: the routes live in
+    /// `ironclaw_webui` (PROPOSAL §6.9.4) and this crate does not depend on
+    /// the transport — `ironclaw_webui` is a dev-dependency here, not a
+    /// normal one, and building the mount from production code would make it
+    /// a normal one.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn channel_pairing_route_mount_for_test(
-        &self,
-    ) -> Option<ironclaw_host_ingress::ProtectedRouteMount> {
-        self.channel_pairing.as_ref().map(|registry| {
-            ironclaw_extension_host::channel_pairing_serve::channel_pairing_route_mount(Arc::clone(
-                registry,
-            ))
-        })
+    pub fn channel_pairing_registry_for_test(&self) -> Option<Arc<ChannelPairingRegistry>> {
+        self.channel_pairing.as_ref().map(Arc::clone)
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn channel_config_service(
-        &self,
-    ) -> Option<Arc<dyn ironclaw_product::ChannelConfigProductService>> {
+    pub fn channel_config_service(&self) -> Option<Arc<dyn ChannelConfigProductService>> {
         Some(Arc::new(
-            ironclaw_extension_host::RebornChannelConfigProductService::new(Arc::clone(
+            ironclaw_extension_manager::RebornChannelConfigProductService::new(Arc::clone(
                 &self.channel_config_service,
             )),
         ))
@@ -1272,9 +1322,9 @@ impl RebornRuntime {
     #[cfg(feature = "test-support")]
     pub fn standalone_inbound_attachment_reader_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product::InboundAttachmentReader>> {
+    ) -> Option<Arc<dyn ironclaw_attachments::InboundAttachmentReader>> {
         Some(self.standalone_workspace_attachment_reader_for_test()?
-            as Arc<dyn ironclaw_product::InboundAttachmentReader>)
+            as Arc<dyn ironclaw_attachments::InboundAttachmentReader>)
     }
 
     #[cfg(feature = "test-support")]
@@ -1286,7 +1336,7 @@ impl RebornRuntime {
         let read_write_workspace_filesystem = self.read_write_workspace_filesystem()?;
         Some(crate::factory::AttachmentTestSupport {
             read_port,
-            lander: Arc::new(ironclaw_product::ProjectScopedAttachmentLander::new(
+            lander: Arc::new(ironclaw_attachments::ProjectScopedAttachmentLander::new(
                 read_write_workspace_filesystem,
             )),
         })
@@ -1301,7 +1351,8 @@ impl RebornRuntime {
         Some(
             self.extension_management
                 .publish_bundled_package_for_test(package, resolved)
-                .await,
+                .await
+                .map_err(ironclaw_product::ProductSurfaceFailure::from),
         )
     }
 
@@ -1327,16 +1378,10 @@ impl RebornRuntime {
     fn read_write_workspace_filesystem(
         &self,
     ) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
-        let extension_filesystem = &self.extension_filesystem;
-        let attachment_mounts = crate::runtime_mounts::workspace_mount_view(
-            ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
-            &[],
+        crate::runtime_mounts::read_write_workspace_filesystem(
+            &self.extension_filesystem,
+            &self.workspace_mount_policy,
         )
-        .ok()?;
-        Some(Arc::new(ScopedFilesystem::with_fixed_view(
-            Arc::clone(extension_filesystem),
-            attachment_mounts,
-        )))
     }
 
     /// Seed a bare `secret_handle` secret for an owner scope so keyed
@@ -1411,11 +1456,12 @@ impl RebornRuntime {
         let Some(states) = self.webui_nearai_login_states() else {
             return Ok(None);
         };
-        Ok(Some(
-            crate::llm_admin::nearai_login_serve::nearai_login_callback_mount(
-                session, reload, boot, states,
-            )?,
-        ))
+        // Called through operator's crate-root facade: operator now returns the
+        // host-owned `PublicRouteMount`, so the composition-side repackaging
+        // shim that existed only to convert an operator-local carrier is gone.
+        Ok(Some(ironclaw_operator::nearai_login_callback_mount(
+            session, reload, boot, states,
+        )?))
     }
 
     /// Live LLM-provider reload trigger for the settings service. Returns the
@@ -1431,7 +1477,9 @@ impl RebornRuntime {
             boot.clone(),
             Arc::clone(&parts.reload_handle),
             Arc::clone(&parts.session),
-            ironclaw_operator::LlmKeyStore::new(self.secret_store()),
+            ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+                self.secret_store(),
+            )),
         )))
     }
 
@@ -1440,9 +1488,7 @@ impl RebornRuntime {
     /// against the model that actually ran. Backed by the same hot-swappable
     /// primary provider the model gateway drives, so it tracks operator model
     /// swaps. `None` when no LLM provider was wired at boot.
-    pub(crate) fn webui_active_model_reader(
-        &self,
-    ) -> Option<Arc<dyn ironclaw_product::ActiveModelReader>> {
+    pub(crate) fn webui_active_model_reader(&self) -> Option<Arc<dyn ActiveModelReader>> {
         let parts = self.llm_reload.as_ref()?;
         Some(Arc::new(ironclaw_operator::ProviderActiveModelReader::new(
             parts.reload_handle.primary_provider(),
@@ -1539,7 +1585,7 @@ impl RebornRuntime {
     /// `admin_secrets.rs`.
     pub(crate) fn reborn_admin_secret_provisioner(
         &self,
-    ) -> Arc<dyn crate::admin_secrets::AdminSecretProvisioner> {
+    ) -> Arc<dyn ironclaw_product::AdminSecretProvisioner> {
         Arc::clone(&self.admin_secret_provisioner)
     }
 
@@ -1551,7 +1597,9 @@ impl RebornRuntime {
 
     /// The admin API-token minter supplied via
     /// [`RebornRuntimeInput::with_admin_api_token_minter`], if any.
-    pub(crate) fn reborn_admin_token_minter(&self) -> Option<Arc<dyn crate::AdminApiTokenMinter>> {
+    pub(crate) fn reborn_admin_token_minter(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_contracts::admin_users::AdminApiTokenMinter>> {
         self.admin_api_token_minter.clone()
     }
 
@@ -1585,6 +1633,10 @@ impl RebornRuntime {
         self.product_turn_coordinator()
     }
 
+    pub(crate) fn webui_input_enqueue(&self) -> Arc<dyn ironclaw_loop_host::HostInputEnqueuePort> {
+        Arc::clone(&self.input_enqueue)
+    }
+
     /// The generic post-OAuth channel-identity binding config for this
     /// deployment (extension-runtime §5.5): channel extensions bind through
     /// generic discovery over the durable installation store; bindings
@@ -1592,16 +1644,14 @@ impl RebornRuntime {
     /// provisioning opens the caller's direct conversation through the
     /// extension's own adapter. `None` when the composed runtime carries no
     /// durable channel-identity storage.
-    /// The bearer-authed generic pairing route mount (`WebGeneratedCode`
-    /// channels), when the composed runtime built any pairing service.
-    pub fn channel_pairing_route_mount(
-        &self,
-    ) -> Option<ironclaw_host_ingress::ProtectedRouteMount> {
-        self.channel_pairing.as_ref().map(|registry| {
-            ironclaw_extension_host::channel_pairing_serve::channel_pairing_route_mount(
-                std::sync::Arc::clone(registry),
-            )
-        })
+    /// The composed pairing registry for the bearer-authed generic pairing
+    /// routes (`WebGeneratedCode` channels), when the composed runtime built
+    /// any pairing service. The binary turns it into a route mount through
+    /// `ironclaw_webui::channel_pairing_route_mount` — see
+    /// `channel_pairing_registry_for_test` for why the mount is not built
+    /// here.
+    pub fn channel_pairing_registry(&self) -> Option<Arc<ChannelPairingRegistry>> {
+        self.channel_pairing.as_ref().map(Arc::clone)
     }
 
     pub fn channel_identity_binding_config(
@@ -1626,7 +1676,7 @@ impl RebornRuntime {
                     snapshot_updates,
                 ),
             )
-                as Arc<dyn ironclaw_host_api::channel_identity::ChannelIdentityPostBindFactory>),
+                as Arc<dyn ironclaw_extension_contracts::channel_identity::ChannelIdentityPostBindFactory>),
             _ => None,
         };
         Some(
@@ -1654,7 +1704,7 @@ impl RebornRuntime {
     /// channel-identity storage.
     pub(crate) fn generic_channel_connection_facade(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product::ChannelConnectionService>> {
+    ) -> Option<Arc<dyn ironclaw_auth::ChannelConnectionService>> {
         let identity_store = self.channel_identity_store.clone();
         let installation_store = Some(self.extension_management.installation_store_handle());
         let credential_cleanup = Some(Arc::clone(&self.product_auth)
@@ -2856,6 +2906,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
         services: services_input,
         llm,
         boot,
+        ironhub_agent_shared_key,
+        ironhub_manifest_url,
         runner,
         tool_disclosure,
         trigger_poller,
@@ -2946,6 +2998,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             .map(std::num::NonZeroU32::get),
         max_running_by_class,
     });
+    services_input = services_input.with_ironhub_manifest_url(ironhub_manifest_url.clone());
     let actor_user_id =
         UserId::new(owner_id.clone()).map_err(|reason| RebornRuntimeError::InvalidArgument {
             reason: format!("user id: {reason}"),
@@ -3129,7 +3182,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // explicit precedence and a `validate()` call instead of being
     // re-read by the wiring helper).
     let model_budget_accountant: Option<
-        Arc<dyn ironclaw_turns::run_profile::LoopModelBudgetAccountant>,
+        Arc<dyn ironclaw_loop_contracts::LoopModelBudgetAccountant>,
     > = match (
         ironclaw_runtime_policy::budget_enforcement(&runtime_policy),
         resolved_cost_table,
@@ -3383,12 +3436,12 @@ pub(crate) async fn build_runtime_with_resource_governor(
         thread_scope.tenant_id.as_str(),
         actor_user_id.as_str(),
     );
-    let trace_capture_scopes: crate::observability::trace_capture::ObservedTraceScopes =
+    let trace_capture_scopes: ironclaw_reborn_traces::capture::ObservedTraceScopes =
         Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::from([
             runtime_owner_trace_scope,
         ])));
     let trace_capture_sink: Arc<dyn ironclaw_turns::TurnEventSink> = Arc::new(
-        crate::observability::trace_capture::TraceCaptureTurnEventSink::new(
+        ironclaw_runner::trace_capture::TraceCaptureTurnEventSink::new(
             Arc::clone(&thread_service),
             Arc::clone(&trace_capture_scopes),
         ),
@@ -3434,9 +3487,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         let skill_learned_notifier: Arc<
             dyn ironclaw_extension_host::skill_learning::SkillLearnedNotifier,
         > = Arc::new(
-            ironclaw_extension_host::skill_learning::LiveSkillLearnedNotifier::new(
-                skill_learning_publisher,
-            ),
+            crate::model_gateway_assembly::LiveSkillLearnedNotifier::new(skill_learning_publisher),
         );
         let extraction_tasks =
             Arc::new(ironclaw_extension_host::skill_learning::SkillLearningExtractionTasks::new());
@@ -3456,11 +3507,11 @@ pub(crate) async fn build_runtime_with_resource_governor(
     );
 
     let communication_context_provider: Option<
-        Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>,
+        Arc<dyn ironclaw_loop_contracts::CommunicationContextProvider>,
     > = match (local_runtime, outbound_preferences_facade.clone()) {
         (Some(local_runtime), Some(outbound_preferences_facade)) => {
             let lifecycle_service =
-                ironclaw_extension_host::ExtensionHostLifecycleProductService::new(Arc::clone(
+                ironclaw_extension_manager::ExtensionHostLifecycleProductService::new(Arc::clone(
                     &local_runtime.skill_management,
                 ))
                 .with_extension_management(Arc::clone(&local_runtime.extension_management))
@@ -3472,7 +3523,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 .with_lifecycle_service(Arc::new(lifecycle_service)),
             )
                 as Arc<
-                    dyn ironclaw_turns::run_profile::CommunicationContextProvider,
+                    dyn ironclaw_loop_contracts::CommunicationContextProvider,
                 >)
         }
         _ => None,
@@ -3516,6 +3567,37 @@ pub(crate) async fn build_runtime_with_resource_governor(
         .map_err(|error| RebornRuntimeError::MalformedConfig {
             reason: format!("await-edge resolver result writer bind failed: {error}"),
         })?;
+    // Steering/followup input queue: a message queued while a run is busy is
+    // persisted per-run through the composed scoped filesystem
+    // (`FilesystemHostInputQueue`), so it survives a daemon restart — the
+    // scheduler re-claims the run from its checkpoint and drains the persisted
+    // input. The same instance serves as the loop's drain reader
+    // (`parts.input_queue`) and every inbound surface's enqueue port.
+    let host_input_queue = {
+        let owner_scope = ResourceScope {
+            tenant_id: thread_scope.tenant_id.clone(),
+            user_id: actor_user_id.clone(),
+            agent_id: Some(thread_scope.agent_id.clone()),
+            project_id: thread_scope.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        Arc::new(ironclaw_loop_host::FilesystemHostInputQueue::new(
+            Arc::clone(&services.scoped_filesystem),
+            owner_scope,
+            Arc::clone(&thread_service),
+        ))
+    };
+    let host_input_queue_reader: Arc<dyn ironclaw_loop_host::HostInputQueue> =
+        host_input_queue.clone();
+    let host_input_queue_for_cancel_reconcile: Arc<
+        dyn ironclaw_loop_host::HostInputQueueReconcile,
+    > = host_input_queue.clone();
+    let host_input_queue_for_terminal_reconcile: Arc<
+        dyn ironclaw_loop_host::HostInputQueueReconcile,
+    > = host_input_queue.clone();
+    let host_input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort> = host_input_queue;
 
     #[cfg(feature = "test-support")]
     let runtime_skill_context_source = skill_context_source.clone();
@@ -3591,7 +3673,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
         model_route_resolver: None,
         cancellation_factory: None,
         skill_context_source,
-        input_queue: None,
+        input_queue: Some(host_input_queue_reader),
+        input_queue_reconcile: Some(host_input_queue_for_terminal_reconcile),
         identity_context_source: match (
             services.standalone_storage_root.clone(),
             services.default_system_prompt_path.clone(),
@@ -3709,9 +3792,18 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 TurnRunId::new(),
                 failure_explanation_profile.clone(),
             ),
-        )) as Arc<dyn ironclaw_turns::run_profile::SystemInferencePort>
+        )) as Arc<dyn ironclaw_loop_contracts::SystemInferencePort>
     });
-    let planned_turn_coordinator: Arc<dyn TurnCoordinator> = composition.coordinator.clone();
+    // Terminal reconciliation of stranded steering inputs: every cancel caller
+    // goes through this ONE decorated coordinator, so a run cancelled before
+    // its next drain flips its queued messages to `RejectedBusy` (resend
+    // affordance) instead of leaving them `Queued` forever.
+    let planned_turn_coordinator: Arc<dyn TurnCoordinator> = Arc::new(
+        ironclaw_runner::steering_reconcile::CancelReconcilingTurnCoordinator::new(
+            composition.coordinator.clone(),
+            host_input_queue_for_cancel_reconcile,
+        ),
+    );
     let approval_interaction_service: Arc<dyn ApprovalInteractionService> =
         if let (Some(local_runtime), Some(builtin_capability_policy)) =
             (local_runtime, builtin_capability_policy.as_ref())
@@ -3764,6 +3856,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         crate::extension_host_assembly::RuntimeExtensionHostAssemblyWiring {
             thread_service: Arc::clone(&thread_service),
             turn_coordinator: Arc::clone(&planned_turn_coordinator),
+            input_enqueue: Arc::clone(&host_input_enqueue),
             approval_interaction: Arc::clone(&approval_interaction_service),
             auth_interaction: Arc::clone(&auth_interaction_service),
             thread_scope: &thread_scope,
@@ -3949,7 +4042,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
             skill_management: Arc::clone(&local_runtime.skill_management),
             admin_configuration_resolver: Arc::clone(&local_runtime.channel_config_service),
             product_auth: Arc::clone(&local_runtime.product_auth),
-            runtime_http_egress: local_runtime.runtime_http_egress.clone(),
             builtin_capability_policy: Arc::clone(builtin_capability_policy),
         },
     );
@@ -3980,7 +4072,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         crate::factory::CredentialRefreshWorkerReady::Absent => None,
     };
     let trace_flush_worker =
-        crate::observability::trace_capture::spawn_trace_queue_flush_worker(trace_capture_scopes);
+        ironclaw_reborn_traces::capture::spawn_trace_queue_flush_worker(trace_capture_scopes);
     // Scheduler is running (started inside build_default_planned_runtime); mark readiness.
     services.readiness.workers.turn_runner = true;
     services.readiness.workers.trigger_poller = trigger_poller_handle.is_some();
@@ -3996,7 +4088,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // `RebornRuntimeInput::with_budget_event_observer`.
     let budget_event_projection = Some({
         let observer = budget_event_observer.unwrap_or_else(|| {
-            Arc::new(crate::TracingBudgetEventObserver) as Arc<dyn crate::BudgetEventObserver>
+            Arc::new(crate::observability::budget_events::TracingBudgetEventObserver)
+                as Arc<dyn crate::BudgetEventObserver>
         });
         crate::observability::budget_events::BudgetEventProjection::spawn(
             broadcast_budget_event_sink.as_ref(),
@@ -4014,7 +4107,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
             boot_config.clone(),
             Arc::clone(&reload_parts.reload_handle),
             Arc::clone(&reload_parts.session),
-            ironclaw_operator::LlmKeyStore::new(Arc::clone(&services.secret_store)),
+            ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+                Arc::clone(&services.secret_store),
+            )),
         );
         if let Err(error) = ironclaw_operator::LlmReloadTrigger::reload(&boot_reload_adapter).await
         {
@@ -4025,6 +4120,35 @@ pub(crate) async fn build_runtime_with_resource_governor(
             );
         }
     }
+
+    let ironhub_link_state = Arc::clone(&services.ironhub_link_state);
+    let ironhub_link_service = match ironhub_agent_shared_key {
+        Some(shared_key) => {
+            let egress = services.runtime_http_egress.clone().ok_or_else(|| {
+                RebornRuntimeError::MalformedConfig {
+                    reason:
+                        "IronHub gateway key was configured but mediated HTTP egress is unavailable"
+                            .to_string(),
+                }
+            })?;
+            let service = ironclaw_extension_manager::ironhub::RebornIronhubLinkService::new(
+                services.skill_management.clone(),
+                services.extension_management.clone(),
+                egress,
+                Arc::clone(&ironhub_link_state),
+                shared_key,
+            )
+            .map_err(|error| RebornRuntimeError::MalformedConfig {
+                reason: error.to_string(),
+            })?
+            .with_manifest_url(ironhub_manifest_url.clone());
+            Some(Arc::new(service)
+                as Arc<
+                    dyn ironclaw_product_contracts::ironhub::IronhubLinkService,
+                >)
+        }
+        None => None,
+    };
 
     let runtime = RebornRuntime {
         host_runtime: services.host_runtime.clone(),
@@ -4051,9 +4175,12 @@ pub(crate) async fn build_runtime_with_resource_governor(
         skill_auto_activate_learned: Arc::clone(&services.skill_auto_activate_learned),
         extension_management: services.extension_management.clone(),
         runtime_http_egress: services.runtime_http_egress.as_ref().map(Arc::clone),
-        host_runtime_http_egress: services.host_runtime_http_egress.clone(),
+        ironhub_link_state,
+        ironhub_manifest_url,
+        ironhub_link_service,
         owner_user_id: services.owner_user_id.clone(),
         extension_filesystem: services.extension_filesystem.clone(),
+        workspace_mount_policy: services.workspace_mounts.clone(),
         system_extensions_lifecycle_mounts: services.system_extensions_lifecycle_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),
         #[cfg(any(test, feature = "test-support"))]
@@ -4085,6 +4212,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         _process_gate_query_source: process_gate_query_source,
         turn_tree_store: turn_projection,
         thread_service,
+        input_enqueue: host_input_enqueue,
         thread_scope,
         turn_scheduler: RuntimeTurnScheduler::new(composition.scheduler_handle, scheduler_notifier),
         trigger_poller_handle,
@@ -4406,7 +4534,9 @@ async fn overlay_stored_llm_key_for_nearai_mcp_bootstrap(
         return Ok(None);
     };
 
-    let keys = ironclaw_operator::LlmKeyStore::new(Arc::clone(&services.secret_store));
+    let keys = ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+        Arc::clone(&services.secret_store),
+    ));
     if let Some(stored) = keys
         .read(llm.provider_id())
         .await

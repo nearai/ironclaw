@@ -2,6 +2,9 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_host_api::turn::{
+    LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnGateRef, TurnRunId, TurnScope,
+};
 use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, InvocationId, ProcessId, ProjectId, TenantId, ThreadId, UserId},
     mount::{MountGrant, MountPermissions, MountView},
@@ -16,9 +19,6 @@ use ironclaw_processes::{
     SettleProcessDependencyRequest, SubmitProcessRequest,
 };
 use ironclaw_runner::subagent::await_edge::{EdgeTerminalKind, store::AwaitEdgeStore};
-use ironclaw_turns::{
-    GateRef, LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnRunId, TurnScope,
-};
 
 #[tokio::test]
 async fn runner_await_edge_is_a_projection_over_process_dependencies() {
@@ -43,7 +43,7 @@ async fn runner_await_edge_is_a_projection_over_process_dependencies() {
         as Arc<dyn ProcessDependencyPort<Error = ironclaw_processes::ProcessJournalStoreError>>;
     let store = AwaitEdgeStore::new(dependencies);
     let dependency_metadata = serde_json::to_value(AwaitedChildSetRecord {
-        gate_ref: GateRef::new("gate:child").expect("gate"),
+        gate_ref: TurnGateRef::new("gate:child").expect("gate"),
         parent_run_context: parent_context,
         tree_root_run_id: parent_run_id,
         child_scope: child_scope.clone(),
