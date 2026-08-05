@@ -247,12 +247,15 @@ impl DiagnosticStoreState {
         sender.subscribe()
     }
 
-    fn live_update_sender(
-        &mut self,
-        scope: &DiagnosticScope,
-    ) -> Option<broadcast::Sender<Arc<DiagnosticUpdateEnvelope>>> {
-        self.prune_inactive_live_updates();
-        self.live_updates.get(scope).cloned()
+    fn send_live_update(&mut self, envelope: DiagnosticUpdateEnvelope) {
+        let scope = envelope.scope.clone();
+        let has_no_receivers = self
+            .live_updates
+            .get(&scope)
+            .is_some_and(|sender| sender.send(Arc::new(envelope)).is_err());
+        if has_no_receivers {
+            self.live_updates.remove(&scope);
+        }
     }
 
     fn prune_inactive_live_updates(&mut self) {
@@ -498,11 +501,7 @@ impl InMemoryDiagnosticStore {
             .get_mut(&session_key)
             .ok_or(DiagnosticStoreError::Invariant)?;
         mutate_session(session);
-        let live_sender = state.live_update_sender(&envelope.scope);
-        drop(state);
-        if let Some(sender) = live_sender {
-            let _ = sender.send(Arc::new(envelope));
-        }
+        state.send_live_update(envelope);
         Ok(cursor)
     }
 }
@@ -557,6 +556,7 @@ impl DiagnosticSubscription {
 #[cfg(test)]
 mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::Barrier;
 
     use chrono::Utc;
     use ironclaw_host_api::{
@@ -928,6 +928,9 @@ mod tests {
         let mut subscription = store
             .subscribe(allowed.clone())
             .expect("scoped subscription");
+        let mut other_subscription = store
+            .subscribe(other.clone())
+            .expect("other scoped subscription");
         for index in 0..=limits.live_update_capacity {
             store
                 .record_activity(other.clone(), activity(&format!("other-{index}")))
@@ -937,9 +940,50 @@ mod tests {
             .record_activity(allowed.clone(), activity("allowed"))
             .expect("allowed");
 
+        assert!(matches!(
+            other_subscription.recv().await,
+            Err(DiagnosticStoreError::SubscriberLagged(_))
+        ));
         let update = subscription.recv().await.expect("matching update");
         assert_eq!(update.scope, allowed);
         assert_eq!(update.sequence, DiagnosticSequence::new(1));
+    }
+
+    #[tokio::test]
+    async fn concurrent_writers_deliver_live_updates_in_sequence_order() {
+        const WRITER_COUNT: usize = 32;
+
+        let mut limits = tiny_limits();
+        limits.live_update_capacity = WRITER_COUNT;
+        let store = Arc::new(InMemoryDiagnosticStore::new(limits).expect("store"));
+        let scope = scope("tenant", "user", "thread", TurnRunId::new());
+        let mut subscription = store.subscribe(scope.clone()).expect("scoped subscription");
+        let barrier = Arc::new(Barrier::new(WRITER_COUNT));
+
+        std::thread::scope(|threads| {
+            let handles = (0..WRITER_COUNT)
+                .map(|index| {
+                    let store = Arc::clone(&store);
+                    let scope = scope.clone();
+                    let barrier = Arc::clone(&barrier);
+                    threads.spawn(move || {
+                        barrier.wait();
+                        store
+                            .record_activity(scope, activity(&format!("writer-{index}")))
+                            .expect("record")
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            for handle in handles {
+                handle.join().expect("writer thread");
+            }
+        });
+
+        for expected in 1..=WRITER_COUNT as u64 {
+            let update = subscription.recv().await.expect("ordered update");
+            assert_eq!(update.sequence, DiagnosticSequence::new(expected));
+        }
     }
 
     #[tokio::test]
