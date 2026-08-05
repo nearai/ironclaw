@@ -49,6 +49,10 @@ ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_loop_contracts = { path = "../ironclaw_loop_contracts", version = "0.1.0" }
+# `trace_capture` is the turn-runner observer half of autonomous Trace Commons
+# capture (PROPOSAL §6.10.1, WS6): it adapts a terminal turn's transcript and
+# hands it to `ironclaw_reborn_traces::capture`, which owns the pipeline.
+ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 parking_lot = "0.12"
@@ -57,6 +61,8 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+# Message ids for the captured-transcript adaptation in `trace_capture`.
+uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 
 [dev-dependencies]
@@ -72,7 +78,7 @@ ironclaw_memory_native = { path = "../extensions/packages/memory-native", versio
 ironclaw_processes = { path = "../ironclaw_processes", version = "0.1.0", features = ["test-support"] }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store", version = "0.1.0" }
 ironclaw_resources = { path = "../ironclaw_resources", version = "0.1.0" }
-ironclaw_scripts = { path = "../ironclaw_scripts", version = "0.1.0" }
+ironclaw_sandbox = { path = "../ironclaw_sandbox", version = "0.1.0" }
 ironclaw_skills = { path = "../ironclaw_skills", version = "0.3.0", default-features = false }
 ironclaw_trust = { path = "../ironclaw_trust", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0", features = ["test-support"] }

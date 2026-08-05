@@ -1,6 +1,7 @@
 use super::*;
 
-use crate::{AuthChallengeProvider, AuthChallengeView, AuthPromptChallengeKind};
+use crate::AuthPromptChallengeKind;
+use ironclaw_auth::product_prompt::{AuthChallengeProvider, AuthChallengeView};
 use ironclaw_auth::{AuthProviderId, OAuthAuthorizationUrl};
 use ironclaw_host_api::{
     capability::RuntimeCredentialAccountSetup, decision::RuntimeCredentialAuthRequirement,
@@ -77,7 +78,7 @@ impl AuthChallengeProvider for FakePairingAuthChallengeProvider {
             account_label: None,
             authorization_url: None,
             expires_at: None,
-            pairing: Some(crate::PairingAuthChallengeView {
+            pairing: Some(ironclaw_auth::product_prompt::PairingAuthChallengeView {
                 code: "ABCD2345".to_string(),
                 deep_link: Some("https://t.me/fixturebot?start=ABCD2345".to_string()),
                 expires_at: chrono::Utc::now() + chrono::Duration::minutes(15),

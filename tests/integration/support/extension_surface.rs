@@ -205,9 +205,9 @@ pub fn bundled_extension_manifest_capability_ids()
         let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
             std::fs::read_to_string(asset_root.join("manifest.toml"))?,
             ironclaw_extensions::ManifestSource::HostBundled,
-            &ironclaw_host_runtime::default_host_port_catalog()?,
+            &ironclaw_host_api::host_port::default_host_port_catalog()?,
             None,
-            &ironclaw_host_runtime::default_host_api_contract_registry()?,
+            &ironclaw_extensions::default_host_api_contract_registry()?,
             // The manifest's own id (needed for the root) is only known
             // after parsing; this helper only reads capability ids anyway.
             None,

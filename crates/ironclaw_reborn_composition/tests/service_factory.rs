@@ -683,15 +683,15 @@ fn test_sandbox_process_binding() -> RebornRuntimeProcessBinding {
 struct ProductionReadySandboxTransport;
 
 #[async_trait::async_trait]
-impl ironclaw_host_runtime::SandboxCommandTransport for ProductionReadySandboxTransport {
+impl ironclaw_host_api::process::SandboxCommandTransport for ProductionReadySandboxTransport {
     async fn run_command(
         &self,
-        _request: ironclaw_host_runtime::CommandExecutionRequest,
+        _request: ironclaw_host_api::process::CommandExecutionRequest,
     ) -> Result<
-        ironclaw_host_runtime::CommandExecutionOutput,
-        ironclaw_host_runtime::RuntimeProcessError,
+        ironclaw_host_api::process::CommandExecutionOutput,
+        ironclaw_host_api::process::RuntimeProcessError,
     > {
-        Ok(ironclaw_host_runtime::CommandExecutionOutput {
+        Ok(ironclaw_host_api::process::CommandExecutionOutput {
             output: String::new(),
             saved_output: None,
             exit_code: 0,

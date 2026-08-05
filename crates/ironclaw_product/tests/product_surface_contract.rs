@@ -11,10 +11,11 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
 use ironclaw_conversations::{
-    ConversationBindingService as ConversationBindingPort, ExternalActorBindingEpoch,
-    InMemoryConversationServices,
+    ConversationBindingService as ConversationBindingPort, InMemoryConversationServices,
 };
-use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
+use ironclaw_extension_contracts::external::{
+    ExternalActorBindingEpoch, ExternalActorRef, ExternalConversationRef,
+};
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, LoopGateRef, RunProfileId, RunProfileVersion, TurnActor,
@@ -37,12 +38,11 @@ use ironclaw_product::{
     InMemoryIdempotencyLedger, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
     ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, PendingApprovalInteractionView,
-    PendingAuthInteractionView, ProductActorUserResolutionRequest, ProductActorUserResolver,
-    ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
-    ProductSurfaceFailure, RebornFilesystemIdempotencyLedger, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, ResolveBindingRequest, ResolvedBinding,
-    ResolvedProductActorUser, StaticProductInstallationResolver, approval_gate_ref,
+    PendingAuthInteractionView, ProductConversationBindingService, ProductInstallationKey,
+    ProductInstallationScope, ProductSurfaceFailure, RebornFilesystemIdempotencyLedger,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
+    ResolvedBinding, StaticProductInstallationResolver, approval_gate_ref,
 };
 use ironclaw_product::{
     AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
@@ -58,6 +58,9 @@ use ironclaw_product::{
 use ironclaw_product_contracts::action::{
     ActionFingerprintKey, AuthRequestRef, LinkedThreadActionId, ProductCommandName,
     SourceBindingKey,
+};
+use ironclaw_product_contracts::actor_identity::{
+    ProductActorUserResolutionRequest, ProductActorUserResolver, ResolvedProductActorUser,
 };
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::subject_route::{
@@ -6545,7 +6548,7 @@ impl ProductActorUserResolver for MutableProductActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         _request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductOperationFailure> {
         Ok(self
             .current
             .lock()
@@ -6575,7 +6578,7 @@ impl ProductActorUserResolver for RecordingProductActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductOperationFailure> {
         self.calls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -6622,7 +6625,7 @@ impl ProductActorUserResolver for ReplacingProductActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductOperationFailure> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         if request.external_actor_ref != self.actor_ref {
             return Ok(None);
@@ -6671,7 +6674,7 @@ impl ProductActorUserResolver for RevokingProductActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductOperationFailure> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         if call == 0 && request.external_actor_ref == self.actor_ref {
             Ok(Some(ResolvedProductActorUser::new(self.user_id.clone())))
@@ -6853,8 +6856,8 @@ impl ProductActorUserResolver for FailingProductActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         _request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
-        Err(ProductSurfaceFailure::BindingResolutionFailed {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductOperationFailure> {
+        Err(ProductOperationFailure::BindingResolutionFailed {
             reason: "actor resolver backend down".into(),
         })
     }

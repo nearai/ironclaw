@@ -51,8 +51,12 @@ use std::path::Path;
 #[allow(dead_code)]
 mod ratchet_support;
 
+// Crate paths are spelled flat (`crates/ironclaw_x/...`) and RESOLVED through
+// the crate inventory, so the family move (PROPOSAL section 5) repoints them
+// without editing the literals. Identity on today's tree - pinned by
+// `reborn_crate_inventory.rs` (CHECKLIST WS10).
 use ratchet_support::{
-    TypeDefOccurrence, collect_type_defs, strip_comments_and_strings, workspace_root,
+    TypeDefOccurrence, collect_type_defs, crate_path, strip_comments_and_strings, workspace_root,
 };
 
 const TYPE_KEYWORDS: &[&str] = &["trait ", "struct ", "enum "];
@@ -382,7 +386,7 @@ fn the_attachment_ports_and_size_ceilings_live_in_the_attachments_crate() {
          crate now depends on ironclaw_loop_host, which the layer matrix forbids"
     );
     let attachments_manifest =
-        std::fs::read_to_string(root.join("crates/ironclaw_attachments/Cargo.toml"))
+        std::fs::read_to_string(crate_path(&root, "crates/ironclaw_attachments/Cargo.toml"))
             .expect("ironclaw_attachments must have a manifest");
     assert!(
         !attachments_manifest.contains("ironclaw_loop_host"),

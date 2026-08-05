@@ -2,14 +2,14 @@ mod support;
 
 use std::{sync::Arc, time::Duration};
 
+use ironclaw_host_api::process::{
+    CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
+};
 use ironclaw_host_api::runtime_policy::{
     AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
     RuntimeProfile, SecretMode, {ApprovalPolicy, EffectiveRuntimePolicy},
 };
-use ironclaw_host_runtime::{
-    CapabilitySurfaceVersion, CommandExecutionOutput, CommandExecutionRequest,
-    ProductionWiringConfig, RuntimeProcessError, SandboxCommandTransport,
-};
+use ironclaw_host_runtime::{CapabilitySurfaceVersion, ProductionWiringConfig};
 use ironclaw_reborn_composition::{
     LibSqlProductionSubstrateConfig, RebornCompositionError, RebornProductionRuntimePolicy,
     build_libsql_production_host_runtime_services,

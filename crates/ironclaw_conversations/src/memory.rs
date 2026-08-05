@@ -8,7 +8,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use async_trait::async_trait;
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_turns::{
+use ironclaw_host_api::turn::{
     AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef,
     SubmitTurnResponse, TurnActor, TurnScope,
 };
@@ -20,14 +20,15 @@ use crate::{
     AcceptedConversationMessageLookup, AcceptedConversationMessageReplay, AdapterInstallationId,
     AdapterKind, ConditionalUnpairOutcome, ConversationActorPairingService,
     ConversationBindingResolution, ConversationBindingService, ConversationMessageRecord,
-    ConversationRouteKind, ExpectedExternalActorOwner, ExternalActorBindingEpoch,
-    ExternalConversationIdentity, InboundConversationService, InboundTurnError,
-    LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
-    ReplyTargetBinding, ResolveConversationRequest, ResolveStoredReplyTargetRequest,
-    StoredReplyTargetAccess, StoredReplyTargetBinding, ThreadAccessDecision,
-    ValidateReplyTargetRequest,
+    ConversationRouteKind, ExpectedExternalActorOwner, ExternalConversationIdentity,
+    InboundConversationService, InboundTurnError, LinkConversationRequest,
+    LinkedConversationBinding, MessageIdempotencyStatus, ReplyTargetBinding,
+    ResolveConversationRequest, ResolveStoredReplyTargetRequest, StoredReplyTargetAccess,
+    StoredReplyTargetBinding, ThreadAccessDecision, ValidateReplyTargetRequest,
 };
-use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
+use ironclaw_extension_contracts::external::{
+    ExternalActorBindingEpoch, ExternalActorRef, ExternalConversationRef,
+};
 
 #[derive(Clone)]
 pub struct InMemoryConversationServices {

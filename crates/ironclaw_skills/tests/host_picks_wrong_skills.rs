@@ -274,7 +274,7 @@ fn the_host_keyword_scorer_picks_skills_the_task_does_not_need() {
         println!("  PERTASK {task} {picked} {correct}");
     }
 
-    worst.sort_by_key(|case| std::cmp::Reverse(case.3.len()));
+    worst.sort_by_key(|task| std::cmp::Reverse(task.3.len()));
     println!("\n  worst tasks:");
     for (task, picked, correct, wrong) in worst.iter().take(6) {
         println!(

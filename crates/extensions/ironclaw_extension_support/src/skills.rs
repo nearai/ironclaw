@@ -9,7 +9,9 @@ use std::sync::{Arc, LazyLock};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    dispatch::RuntimeDispatchErrorKind, mount::MountView, resource::ResourceScope,
+    dispatch::RuntimeDispatchErrorKind,
+    mount::MountView,
+    resource::{ResourceScope, ResourceUsage},
 };
 use ironclaw_skills::{
     InstalledSkillMetadataSource, SkillContentRequest, SkillInstallFile, SkillInstallRequest,
@@ -17,7 +19,11 @@ use ironclaw_skills::{
     SkillRemoveRequest, SkillUpdateRequest, install_skill, list_skills, read_skill_content,
     remove_skill, skill_summary_json, update_skill,
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
+
+mod url_install;
+
+pub use url_install::{SkillUrlFetchContext, is_allowed_code_artifact_host};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillManagementCapabilityKind {
@@ -59,15 +65,32 @@ impl<'a> SkillManagementCapabilityRequest<'a> {
 #[error("skill management capability dispatch failed: {kind}")]
 pub struct SkillManagementCapabilityError {
     kind: RuntimeDispatchErrorKind,
+    /// Resource consumed before the failure. Only the URL-install path sets it
+    /// (a denied or panicking fetch still burns egress bytes the host must
+    /// account for); the filesystem paths leave it `None` and the host runtime
+    /// supplies its own wall-clock accounting.
+    usage: Option<ResourceUsage>,
 }
 
 impl SkillManagementCapabilityError {
     pub fn new(kind: RuntimeDispatchErrorKind) -> Self {
-        Self { kind }
+        Self { kind, usage: None }
     }
 
     pub fn kind(&self) -> RuntimeDispatchErrorKind {
         self.kind
+    }
+
+    #[must_use]
+    pub fn with_usage(self, usage: ResourceUsage) -> Self {
+        Self {
+            usage: Some(usage),
+            ..self
+        }
+    }
+
+    pub fn usage(&self) -> Option<&ResourceUsage> {
+        self.usage.as_ref()
     }
 }
 
@@ -75,6 +98,116 @@ impl SkillManagementCapabilityError {
 struct ParsedInstallFile {
     path: String,
     contents: Vec<u8>,
+}
+
+/// Normalize a `builtin.skill_install` input before [`dispatch`] sees it.
+///
+/// Inline installs — `content`, optionally with the rest of the bundle in
+/// `files` — pass through untouched. A `url` install is resolved here: the
+/// HTTPS/GitHub source is fetched through the mediated egress port on `fetch`,
+/// and the fetched SKILL.md plus any bundle files are rewritten into that same
+/// `content`/`files` shape, with `source`/`source_url` recording the provenance.
+/// Anything else (both, or neither, or either arm carrying forged provenance) is
+/// an input error.
+///
+/// `usage` accumulates the fetch's network egress so the host runtime can
+/// account for a failed install exactly as it accounts for a successful one.
+pub async fn resolve_install_input(
+    input: &Value,
+    fetch: &SkillUrlFetchContext,
+    usage: &mut ResourceUsage,
+) -> Result<Value, SkillManagementCapabilityError> {
+    let Some(object) = input.as_object() else {
+        return Err(SkillManagementCapabilityError::new(
+            RuntimeDispatchErrorKind::InputEncode,
+        ));
+    };
+    let has_content = object.contains_key("content");
+    let url = object
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    // `source` and `source_url` are PROVENANCE fields this resolver sets itself
+    // on the url path. A caller may never supply them, on either arm, and the two
+    // arms refuse them differently on purpose:
+    //
+    //   * inline `content` + either of them -> hard `InputEncode`, nothing
+    //     written. Accepting them would let a caller forge provenance: claim its
+    //     own output was fetched from a trusted URL. Pinned by
+    //     `builtin_skill_install_rejects_forged_provenance_fields` and, with a
+    //     bundle attached as well, by
+    //     `builtin_skill_install_rejects_a_bundle_that_also_forges_provenance`.
+    //   * `url` + either of them, or `url` + `files` -> the url arm below
+    //     rebuilds a fresh object from the fetched payload and simply does not
+    //     carry them over, so the install succeeds with the caller's files
+    //     DROPPED (`files_installed` is 0). Pinned by
+    //     `builtin_skill_install_url_path_ignores_caller_supplied_hidden_bundle_files`.
+    //
+    // Do not "fix" that asymmetry by making the url arm reject; a fetch is the
+    // authority on what a fetched skill contains, and dropping is what the
+    // rebuild already does.
+    //
+    // `files` is NOT in that set. It sat here because the pre-move host-runtime
+    // copy of this resolver refused it, and #7141 carried that refusal across the
+    // move to this crate verbatim — correctly, since a move-only refactor is the
+    // wrong place to change behavior, which is also why it declined a reviewer's
+    // suggestion to relax the arm there. This is that change, made on purpose.
+    //
+    // `files` is ordinary caller content: an agent authoring a skill has to be
+    // able to attach the script the skill exists to preserve. Refusing it did not
+    // drop the file, it failed the WHOLE install — measured on the 31-task
+    // SkillsBench subset (nearai/benchmarks#287), 18 correctly-shaped
+    // `{path, text}` entries across 9 calls were all refused, and 0 of 27
+    // agent-authored skills shipped a resource file against 18 of 31
+    // human-curated ones. Pinned by
+    // `builtin_skill_install_accepts_an_agent_authored_bundle_with_scripts`. What
+    // makes it safe is not the shape check: each entry's path is normalized and
+    // confined to the skill's own directory downstream
+    // (`install_bundle::normalize_safe_relative_path`), pinned by
+    // `builtin_skill_install_rejects_a_bundle_file_escaping_its_skill_directory`.
+    match (has_content, url) {
+        (true, None) if !object.contains_key("source") && !object.contains_key("source_url") => {
+            Ok(input.clone())
+        }
+        (false, Some(url)) => {
+            let payload = url_install::fetch_skill_url_payload(fetch, url, usage).await?;
+            let mut rewritten = Map::new();
+            if let Some(name) = object.get("name").cloned() {
+                rewritten.insert("name".to_string(), name);
+            }
+            rewritten.insert("content".to_string(), Value::String(payload.content));
+            rewritten.insert(
+                "source".to_string(),
+                Value::String(
+                    InstalledSkillMetadataSource::InstalledUrl
+                        .as_str()
+                        .to_string(),
+                ),
+            );
+            rewritten.insert("source_url".to_string(), Value::String(url.to_string()));
+            if !payload.files.is_empty() {
+                rewritten.insert(
+                    "files".to_string(),
+                    Value::Array(
+                        payload
+                            .files
+                            .into_iter()
+                            .map(|file| {
+                                json!({
+                                    "path": file.path.display().to_string(),
+                                    "bytes_base64": BASE64_STANDARD.encode(file.contents),
+                                })
+                            })
+                            .collect(),
+                    ),
+                );
+            }
+            Ok(Value::Object(rewritten))
+        }
+        _ => Err(SkillManagementCapabilityError::new(
+            RuntimeDispatchErrorKind::InputEncode,
+        )),
+    }
 }
 
 #[tracing::instrument(
@@ -529,5 +662,99 @@ mod install_files_encoding_tests {
     fn entry_without_any_content_is_rejected() {
         assert!(parse_install_files(&json!({ "files": [{ "path": "x.py" }] })).is_err());
         assert!(parse_install_files(&json!({ "files": [{ "text": "no path" }] })).is_err());
+    }
+}
+
+/// Which inline inputs [`resolve_install_input`] admits, tested on the function itself.
+///
+/// The fetch context deliberately carries no egress port, so a case that wrongly routes to the url
+/// arm fails closed instead of passing for the wrong reason. The same contract is asserted end to end
+/// through runtime dispatch in `ironclaw_host_runtime/tests/first_party_builtin_tools.rs`; these are
+/// the cheap version that runs in this crate's own suite.
+#[cfg(test)]
+mod resolve_install_input_tests {
+    use ironclaw_host_api::{
+        ids::{CapabilityId, InvocationId, UserId},
+        resource::{ResourceScope, ResourceUsage},
+    };
+    use serde_json::json;
+
+    use super::{SkillUrlFetchContext, resolve_install_input};
+
+    fn fetch_context() -> SkillUrlFetchContext {
+        SkillUrlFetchContext {
+            capability_id: CapabilityId::new("builtin.skill_install").expect("capability id"),
+            scope: ResourceScope::local_default(
+                UserId::new("ada").expect("user"),
+                InvocationId::new(),
+            )
+            .expect("scope"),
+            runtime_http_egress: None,
+        }
+    }
+
+    async fn resolve(input: serde_json::Value) -> Option<serde_json::Value> {
+        let mut usage = ResourceUsage::default();
+        resolve_install_input(&input, &fetch_context(), &mut usage)
+            .await
+            .ok()
+    }
+
+    /// The bundle an agent authors is forwarded whole, `files` included.
+    #[tokio::test]
+    async fn an_inline_bundle_is_forwarded_unchanged() {
+        let input = json!({
+            "name": "verify-bib",
+            "content": "# Verify BibTeX\n\nRun scripts/verify_bib.py\n",
+            "files": [{ "path": "scripts/verify_bib.py", "text": "#!/usr/bin/env python3\n" }]
+        });
+        assert_eq!(
+            resolve(input.clone()).await.as_ref(),
+            Some(&input),
+            "the resolver must not rewrite an inline install; `dispatch` reads `files` from it"
+        );
+    }
+
+    /// Prose-only installs are unaffected by admitting `files`.
+    #[tokio::test]
+    async fn prose_only_still_resolves() {
+        let input = json!({ "name": "x", "content": "# x" });
+        assert_eq!(resolve(input.clone()).await.as_ref(), Some(&input));
+    }
+
+    /// Provenance stays the resolver's to set, with or without a bundle attached.
+    #[tokio::test]
+    async fn forged_provenance_is_refused_with_or_without_files() {
+        for input in [
+            json!({ "content": "# x", "source": "installed_url" }),
+            json!({ "content": "# x", "source_url": "https://e.example/SKILL.md" }),
+            json!({
+                "content": "# x",
+                "files": [{ "path": "scripts/x.py", "text": "print(1)\n" }],
+                "source": "installed_url"
+            }),
+        ] {
+            assert!(
+                resolve(input.clone()).await.is_none(),
+                "must refuse caller-set provenance: {input}"
+            );
+        }
+    }
+
+    /// Neither `content` nor `url`, or both, is still an input error.
+    #[tokio::test]
+    async fn ambiguous_and_empty_inputs_are_refused() {
+        assert!(resolve(json!({ "name": "x" })).await.is_none());
+        assert!(
+            resolve(json!({ "content": "# x", "url": "https://github.com/o/r" }))
+                .await
+                .is_none()
+        );
+        assert!(
+            resolve(json!({ "files": [{ "path": "a.py", "text": "" }] }))
+                .await
+                .is_none(),
+            "a bundle with no SKILL.md has nothing to install"
+        );
     }
 }

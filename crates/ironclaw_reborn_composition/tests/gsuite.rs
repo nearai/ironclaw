@@ -6,6 +6,7 @@ use ironclaw_auth::{
     CredentialAccountStatus, CredentialOwnership, GOOGLE_GMAIL_SEND_SCOPE,
     InMemoryAuthProductServices, NewCredentialAccount, ProviderScope,
 };
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_extension_support::{
     CALENDAR_LIST_CALENDARS_CAPABILITY_ID, GMAIL_SEND_MESSAGE_CAPABILITY_ID, GOOGLE_PROVIDER_ID,
     GsuiteCapabilitySpec, GsuiteCredentialDispatchReason, GsuiteCredentialStageError,
@@ -13,7 +14,7 @@ use ironclaw_extension_support::{
     GsuiteDispatchRequest, GsuiteExecutor, GsuitePackageSpec, find_gsuite_capability,
     google_provider_id, gsuite_package_specs,
 };
-use ironclaw_extensions::{ExtensionRuntime, ManifestSource};
+use ironclaw_extensions::ManifestSource;
 use ironclaw_host_api::{
     action::{NetworkScheme, NetworkTargetPattern},
     capability::{

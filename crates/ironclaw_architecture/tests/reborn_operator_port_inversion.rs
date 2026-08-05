@@ -80,6 +80,12 @@ const INVERTED_PORTS: &[(&str, &str)] = &[
     ("ActiveModelReader", OPERATOR),
     ("LlmConfigService", OPERATOR),
     ("OperatorLogsService", OPERATOR),
+    // WS3's secrets tightening. Implemented by COMPOSITION for the same reason
+    // `OperatorStatusService` is: assembly is the only layer that may name both
+    // the products-tier port and the `ironclaw_secrets` substrate behind it,
+    // which is the whole point of removing the operator's direct edge
+    // (PROPOSAL §8.2's product row, §12.1b).
+    ("OperatorSecretValueStore", COMPOSITION),
     ("OperatorServiceLifecycleService", OPERATOR),
     ("OperatorStatusService", COMPOSITION),
 ];
@@ -92,6 +98,7 @@ const INVERTED_PORTS: &[(&str, &str)] = &[
 /// alias" becomes permanent.
 const INVERTED_PORT_DTOS: &[&str] = &[
     "CodexLoginStart",
+    "OperatorSecretValueStoreError",
     "LlmActiveSelection",
     "LlmConfigServiceError",
     "LlmConfigSnapshot",

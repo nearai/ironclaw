@@ -3,7 +3,10 @@ use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_extensions::{
+    ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+    default_host_api_contract_registry,
+};
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::result_meta::FailureKind;
@@ -14,6 +17,7 @@ use ironclaw_host_api::{
     },
     decision::{Decision, Obligation, Obligations},
     dispatch::CredentialStageError,
+    host_port::default_host_port_catalog,
     ids::{
         AgentId, CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId, InvocationId,
         MissionId, PackageId, ProjectId, RunId, SecretHandle, TenantId, UserId, VendorId,
@@ -27,8 +31,7 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
     RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
-    RuntimeCredentialAccountResolver, RuntimeInvocation, default_host_api_contract_registry,
-    default_host_port_catalog,
+    RuntimeCredentialAccountResolver, RuntimeInvocation,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,

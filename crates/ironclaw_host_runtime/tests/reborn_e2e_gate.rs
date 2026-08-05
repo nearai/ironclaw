@@ -53,7 +53,7 @@ use ironclaw_network::{
 };
 use ironclaw_processes::{ProcessInvocationStatePort, ProcessInvocationStatus};
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount, ResourceTally};
-use ironclaw_scripts::{
+use ironclaw_sandbox::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
 use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};

@@ -17,8 +17,33 @@ release = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = release
 SPEC.loader.exec_module(release)
 
+# `release` imports crate_tree as a side effect of exec_module above (it
+# inserts scripts/ci/lib onto sys.path), so this import is safe here without
+# repeating the path insertion.
+import crate_tree  # noqa: E402
+
 VERSION = "1.1.0-rc.1"
 SHA = "a" * 40
+
+
+def _write_candidate_manifest(
+    root: Path, crate_relative_dir: str, version: str
+) -> None:
+    """A candidate checkout fixture: the reborn-cli crate at
+    `crate_relative_dir` plus enough filler crates to clear crate_tree's
+    discovery floor (a realistic-enough tree, not a one-crate stub)."""
+    manifest = root / crate_relative_dir / "Cargo.toml"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        f'[package]\nname = "ironclaw"\nversion = "{version}"\n',
+        encoding="utf-8",
+    )
+    for index in range(crate_tree.MIN_CRATE_DIRECTORIES + 2):
+        filler = root / "crates" / f"ironclaw_filler_{index}"
+        filler.mkdir(parents=True, exist_ok=True)
+        (filler / "Cargo.toml").write_text(
+            f'[package]\nname = "ironclaw_filler_{index}"\n', encoding="utf-8"
+        )
 
 
 class ReleaseTagTests(unittest.TestCase):
@@ -210,11 +235,8 @@ class ReleaseTagTests(unittest.TestCase):
     def test_candidate_metadata_comes_from_supplied_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             candidate_root = Path(directory)
-            manifest = candidate_root / "crates/ironclaw_reborn_cli/Cargo.toml"
-            manifest.parent.mkdir(parents=True)
-            manifest.write_text(
-                f'[package]\nname = "ironclaw"\nversion = "{VERSION}"\n',
-                encoding="utf-8",
+            _write_candidate_manifest(
+                candidate_root, "crates/ironclaw_reborn_cli", VERSION
             )
             self.assertEqual(release._manifest_version(candidate_root), VERSION)
 
@@ -224,6 +246,41 @@ class ReleaseTagTests(unittest.TestCase):
             ) as run:
                 self.assertEqual(release._checked_out_sha(candidate_root), SHA)
             self.assertEqual(run.call_args.kwargs["cwd"], candidate_root)
+
+    def test_candidate_manifest_resolves_through_crate_inventory_when_nested(
+        self,
+    ) -> None:
+        """WS10: the candidate's ironclaw_reborn_cli manifest is found by
+        crate NAME even after the target-architecture family move
+        (crates/<family>/ironclaw_reborn_cli, PROPOSAL §5) — this is exactly
+        the shape a release cut against a moved candidate commit hits."""
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_root = Path(directory)
+            _write_candidate_manifest(
+                candidate_root, "crates/substrates/ironclaw_reborn_cli", VERSION
+            )
+            self.assertEqual(release._manifest_version(candidate_root), VERSION)
+
+    def test_candidate_manifest_resolution_fails_closed_when_crate_missing(
+        self,
+    ) -> None:
+        """A candidate checkout that cannot resolve ironclaw_reborn_cli must
+        refuse loudly, not silently read `manifest_version` as empty/wrong —
+        the WS10 failure mode this whole module guards against."""
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_root = Path(directory)
+            for index in range(crate_tree.MIN_CRATE_DIRECTORIES + 2):
+                filler = candidate_root / "crates" / f"ironclaw_filler_{index}"
+                filler.mkdir(parents=True)
+                (filler / "Cargo.toml").write_text(
+                    f'[package]\nname = "ironclaw_filler_{index}"\n',
+                    encoding="utf-8",
+                )
+            with self.assertRaisesRegex(
+                release.ReleaseTagError,
+                "cannot resolve the ironclaw_reborn_cli crate",
+            ):
+                release._manifest_version(candidate_root)
 
 
 if __name__ == "__main__":

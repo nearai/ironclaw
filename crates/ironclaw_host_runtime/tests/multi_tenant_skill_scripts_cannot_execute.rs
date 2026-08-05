@@ -41,23 +41,22 @@ fn capability_ids(backend: ProcessBackendKind) -> Vec<String> {
 #[test]
 fn a_backend_that_cannot_execute_has_no_shell_so_skill_scripts_are_inert() {
     // `None` is what `HostedMultiTenant` resolves to today, via `RuntimeProfile::SecureDefault`.
-    // Asserted directly rather than looped: there is exactly one backend that cannot execute, and the
-    // anti-vacuity arm below covers the ones that can.
-    {
-        let backend = ProcessBackendKind::None;
-        let ids = capability_ids(backend);
-        assert!(
-            !ids.iter().any(|id| id == SHELL_CAPABILITY),
-            "{backend:?} exposes {SHELL_CAPABILITY}, so a skill's scripts/*.py become executable \
-             under multi-tenant hosting. Script-bearing skills are disabled for multi-tenant \
-             execution until the tenant sandbox lands; if this is now intentional, the sandbox \
-             must be wired first."
-        );
-        assert!(
-            !ids.is_empty(),
-            "removing process-backed builtins must not empty the package"
-        );
-    }
+    // Named as one backend rather than looped over a one-element list: the moment a second
+    // non-executing backend exists (`TenantSandbox` is the expected one), it needs its OWN case
+    // with its own message, not a silent extra iteration here.
+    let backend = ProcessBackendKind::None;
+    let ids = capability_ids(backend);
+    assert!(
+        !ids.iter().any(|id| id == SHELL_CAPABILITY),
+        "{backend:?} exposes {SHELL_CAPABILITY}, so a skill's scripts/*.py become executable \
+         under multi-tenant hosting. Script-bearing skills are disabled for multi-tenant \
+         execution until the tenant sandbox lands; if this is now intentional, the sandbox \
+         must be wired first."
+    );
+    assert!(
+        !ids.is_empty(),
+        "removing process-backed builtins must not empty the package"
+    );
 }
 
 #[test]

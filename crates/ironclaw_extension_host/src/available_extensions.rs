@@ -1,4 +1,5 @@
 // arch-exempt: large_file, bundled extension catalog and manifest projection, plan #5905
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_extension_contracts::{
     channel::ChannelConnectionStrategy, surface::CapabilitySurfaceKind,
 };
@@ -6,8 +7,7 @@ use ironclaw_extension_support::packages::nearai::{NEARAI_MANIFEST_ASSET_PATH, n
 use ironclaw_extension_support::packages::{PackageAssetContent, PackageBundle};
 use ironclaw_extensions::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionAdminConfigurationDescriptor,
-    ExtensionManifestRecord, ExtensionPackage, ExtensionRuntime, HostApiContractRegistry,
-    ManifestSource,
+    ExtensionManifestRecord, ExtensionPackage, HostApiContractRegistry, ManifestSource,
 };
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::product_adapter::{ProductCapabilityFlag, ProductSurfaceKind};
@@ -429,11 +429,12 @@ impl AvailableExtensionCatalog {
     ) -> Result<Vec<ironclaw_auth::ResolvedVendorAuthRecipe>, ProductOperationFailure> {
         let catalog =
             Self::from_first_party_assets_with_nearai_mcp_config(None, first_party_bundles)?;
-        let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-            ProductOperationFailure::InvalidBindingRequest {
-                reason: format!("host port catalog unavailable for recipe resolution: {error}"),
-            }
-        })?;
+        let host_ports =
+            ironclaw_host_api::host_port::default_host_port_catalog().map_err(|error| {
+                ProductOperationFailure::InvalidBindingRequest {
+                    reason: format!("host port catalog unavailable for recipe resolution: {error}"),
+                }
+            })?;
         let contracts = product_extension_host_api_contract_registry().map_err(|error| {
             ProductOperationFailure::InvalidBindingRequest {
                 reason: format!("host API contracts unavailable for recipe resolution: {error}"),
@@ -783,11 +784,12 @@ fn bundled_extension_package(
 ) -> Result<AvailableExtensionPackage, ProductOperationFailure> {
     let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, id)?;
     let root = VirtualPath::new(format!("/system/extensions/{id}")).map_err(map_binding_error)?;
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        ProductOperationFailure::InvalidBindingRequest {
-            reason: format!("host port catalog rejected bundled {label} extension: {error}"),
-        }
-    })?;
+    let host_ports =
+        ironclaw_host_api::host_port::default_host_port_catalog().map_err(|error| {
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: format!("host port catalog rejected bundled {label} extension: {error}"),
+            }
+        })?;
     let contracts = product_extension_host_api_contract_registry().map_err(|error| {
         ProductOperationFailure::InvalidBindingRequest {
             reason: format!("host API contracts rejected bundled {label} extension: {error}"),
@@ -935,15 +937,14 @@ fn channel_directions_from_manifest_record(
         }));
     }
     // Manifest v2: derive from the product-adapter section capability flags.
-    let sections =
-        ironclaw_product::adapter_registry::product_adapter_sections(record).map_err(|error| {
-            ProductOperationFailure::InvalidBindingRequest {
-                reason: format!("{label} ProductAdapter manifest projection is invalid: {error}"),
-            }
+    let sections = ironclaw_extensions::host_api::product_adapter::product_adapter_sections(record)
+        .map_err(|error| ProductOperationFailure::InvalidBindingRequest {
+            reason: format!("{label} ProductAdapter manifest projection is invalid: {error}"),
         })?;
     let mut directions: Option<LifecycleChannelDirections> = None;
     for section in sections
         .iter()
+        .map(|section| section.resolved())
         .filter(|section| section.surface_kind() == ProductSurfaceKind::ExternalChannel)
     {
         let flags = section.capabilities();
@@ -1025,11 +1026,12 @@ where
     };
     entries.sort_by(|left, right| left.name.cmp(&right.name));
 
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        ProductOperationFailure::InvalidBindingRequest {
-            reason: format!("host port catalog rejected available extension: {error}"),
-        }
-    })?;
+    let host_ports =
+        ironclaw_host_api::host_port::default_host_port_catalog().map_err(|error| {
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: format!("host port catalog rejected available extension: {error}"),
+            }
+        })?;
     let contracts = product_extension_host_api_contract_registry().map_err(|error| {
         ProductOperationFailure::InvalidBindingRequest {
             reason: format!("host API contract registry rejected available extension: {error}"),

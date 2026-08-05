@@ -69,7 +69,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ratchet_support::{strip_comments_and_strings, workspace_root};
+use ratchet_support::{crate_path, strip_comments_and_strings, workspace_root};
 
 /// The retired cargo feature. It must not come back under any spelling that a
 /// manifest, a CI script, or guidance could re-enable.
@@ -246,12 +246,16 @@ fn collect_workspace_production_rs(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// The crate that owns `path`, by crate-directory basename.
+///
+/// Resolved through the crate inventory rather than by taking the first
+/// component under `crates/`. That older idiom answers the FAMILY name once a
+/// crate moves (`substrates`, not `ironclaw_webui`), and already answers
+/// `extensions` for the two crates nested one level down today — so this
+/// security-critical census would attribute a mint site to the wrong owner
+/// (CHECKLIST WS10).
 fn owning_crate(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root.join("crates"))
-        .ok()
-        .and_then(|relative| relative.components().next())
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .unwrap_or_default()
+    ratchet_support::owning_crate_name(root, path)
 }
 
 fn render(root: &Path, path: &Path) -> String {
@@ -1346,7 +1350,7 @@ fn manifest_and_script_walks_reach_the_files_they_claim_to() {
     assert!(
         manifests
             .iter()
-            .any(|path| path.ends_with("crates/ironclaw_host_api/Cargo.toml")),
+            .any(|path| path == &crate_path(&root, "crates/ironclaw_host_api/Cargo.toml")),
         "the manifest walk must reach the crate that owns the evidence type"
     );
     assert!(

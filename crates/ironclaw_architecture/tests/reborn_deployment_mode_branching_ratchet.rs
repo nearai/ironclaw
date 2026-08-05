@@ -54,7 +54,11 @@ mod ratchet_support;
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use ratchet_support::workspace_root;
+// Crate paths are spelled flat (`crates/ironclaw_x/...`) and RESOLVED through
+// the crate inventory, so the family move (PROPOSAL section 5) repoints them
+// without editing the literals. Identity on today's tree - pinned by
+// `reborn_crate_inventory.rs` (CHECKLIST WS10).
+use ratchet_support::{crate_path, workspace_root};
 
 /// Production files under composition `src/` allowed to name a
 /// `RebornCompositionProfile` variant, each with the reason it is still here.
@@ -201,7 +205,7 @@ fn collect(dir: &Path, root: &Path, found: &mut BTreeSet<String>) {
 
 #[test]
 fn deployment_mode_branching_allowlist_is_frozen_and_only_shrinks() {
-    let root = workspace_root().join("crates/ironclaw_reborn_composition/src");
+    let root = crate_path(&workspace_root(), "crates/ironclaw_reborn_composition/src");
     let mut found = BTreeSet::new();
     collect(&root, &root, &mut found);
 

@@ -1,28 +1,31 @@
-//! Composition implementations of the generic run-delivery ports
-//! (`ironclaw_product::run_delivery`): approval-gate context from
-//! the projection layer, blocked-auth prompt views from the product-auth
+//! Host implementations of the generic run-delivery ports
+//! (`ironclaw_product_contracts::prompt_source`): approval-gate context from
+//! the approval request store, blocked-auth prompt views from the product-auth
 //! engine, and the auth-flow cancel bridge. All delivery *semantics* live in
-//! the generic components; these adapters only surface composition-owned
-//! read models.
+//! the generic components; these adapters only surface host-owned read models.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_auth::product_prompt::{
+    AuthChallengeProvider, AuthChallengeView, PairingAuthChallengeView,
+    auth_prompt_view_for_blocked_auth,
+};
 use ironclaw_auth::{AuthProductError, AuthProviderId};
 use ironclaw_extension_contracts::auth_prompt::AuthPromptView;
 use ironclaw_host_api::product_adapter_error::ProductAdapterError;
 use ironclaw_host_api::turn::{TurnGateRef, TurnScope};
 use ironclaw_host_api::{capability::RuntimeCredentialAccountSetup, ids::UserId};
-use ironclaw_product::{AuthChallengeProvider, AuthChallengeView, PairingAuthChallengeView};
+use ironclaw_product_contracts::approval_prompt::{
+    approval_prompt_context_for_request, approval_prompt_lookup_scope,
+    approval_request_id_from_gate_ref,
+};
 use ironclaw_product_contracts::outbound::ApprovalPromptContextView;
 use ironclaw_product_contracts::prompt_source::{
-    ApprovalPromptContextSource, BlockedAuthPromptSource,
+    ApprovalPromptContextSource, BlockedAuthPromptRequest, BlockedAuthPromptSource,
 };
 
-use ironclaw_product::auth_prompt_view_for_blocked_auth;
-
 use crate::channel_pairing::ChannelPairingRegistry;
-use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
 
 /// One recipe-driven challenge materializer for every product surface.
 /// Product auth owns OAuth/manual challenges; the canonical channel-pairing
@@ -127,6 +130,13 @@ impl AuthChallengeProvider for RecipeAuthChallengeProvider {
 
 /// Approval-gate context over the shared projection read model — the same
 /// source the WebUI gate projection renders from.
+///
+/// The store read is here because the store is here
+/// (`ironclaw_approvals::ApprovalRequestStorePort`); the gate-ref parse, the
+/// lookup scope, and the request→view projection are the *shared* half and live
+/// in `ironclaw_product_contracts::approval_prompt`, so this and product's
+/// `projection::approval_prompt_context_view` render from one definition
+/// instead of this crate reaching up into product for it.
 pub struct ProjectionApprovalPromptContextSource {
     approval_requests: Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>,
 }
@@ -145,13 +155,19 @@ impl ApprovalPromptContextSource for ProjectionApprovalPromptContextSource {
         owner_user_id: &UserId,
         scope: &TurnScope,
     ) -> Option<ApprovalPromptContextView> {
-        ironclaw_product::projection::approval_prompt_context_view(
-            Some(self.approval_requests.as_ref()),
-            gate_ref,
-            owner_user_id,
-            scope,
-        )
-        .await
+        let request_id = approval_request_id_from_gate_ref(gate_ref)?;
+        let resource_scope = approval_prompt_lookup_scope(scope, owner_user_id);
+        match self
+            .approval_requests
+            .get(&resource_scope, request_id)
+            .await
+        {
+            Ok(Some(record)) => approval_prompt_context_for_request(&record.request),
+            // silent-ok: the same documented best-effort degradation product's
+            // delivery-prompt path applies — a missing or unreadable request
+            // renders the generic prompt rather than failing the delivery.
+            Ok(None) | Err(_) => None,
+        }
     }
 }
 

@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -736,9 +736,9 @@ where
         // Same rule on the active-plan path: only short-circuit to bodies when something is
         // actually active, otherwise fall through to the listing so the model can still see
         // what it could activate.
-        // Bind the plan by pattern rather than re-asserting it: the previous shape tested
-        // `is_some_and(...)` and then `expect`ed the same Option, which the production panic gate
-        // rightly rejects -- the invariant lived in a comment instead of the types.
+        // Bound by pattern rather than re-`expect`ed after an `is_some_and` guard: the two forms
+        // are equivalent today, and only one of them stays correct if the condition is ever
+        // edited. `check_no_panics.py` flags the other for exactly that reason.
         let active_full_plan = plan.as_ref().filter(|plan| {
             self.config.injection_mode == SkillInjectionMode::Full
                 && !plan.selection.activations.is_empty()
@@ -1455,6 +1455,11 @@ fn single_line_truncated(text: &str, max_chars: usize) -> String {
 /// Compose the one-line available-skills listing as a single discoverable
 /// candidate. Trust is pinned to `Installed` so downstream snapshot
 /// construction can never disclose prompt content through this entry.
+/// Hidden-entry count the truncation warning last reported, so it fires on a change
+/// rather than on every prompt build. See the warning site in
+/// [`skill_listing_candidate`] for why a per-build `warn!` is the wrong shape.
+static LAST_WARNED_HIDDEN_LISTING_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 fn skill_listing_candidate(entries: &[SkillListingEntry]) -> Option<HostSkillContextCandidate> {
     if entries.is_empty() {
         return None;
@@ -1490,12 +1495,24 @@ fn skill_listing_candidate(entries: &[SkillListingEntry]) -> Option<HostSkillCon
              listing does not fit its character budget. Activating one by exact name still \
              works if you already know it.)"
         ));
-        tracing::warn!(
-            listed,
-            hidden,
-            total = entries.len(),
-            "skill listing truncated; skills past the budget are invisible to the model"
-        );
+        // Warned once per hidden count, not once per prompt build. This function runs on
+        // every context construction, and a catalog that is over the budget stays over it,
+        // so an unconditional `warn!` would repeat the same line for the rest of the
+        // process and bury everything else. The count changing is the only new
+        // information, and it is what an operator would act on. The model-visible message
+        // above is unconditional -- it must never be rate-limited.
+        if LAST_WARNED_HIDDEN_LISTING_COUNT.swap(hidden, Ordering::Relaxed) != hidden {
+            tracing::warn!(
+                listed,
+                hidden,
+                total = entries.len(),
+                "skill listing truncated; skills past the budget are invisible to the model"
+            );
+        }
+    } else {
+        // Reset so a catalog that drops back under the budget and later exceeds it again
+        // warns rather than being silenced by the stale count.
+        LAST_WARNED_HIDDEN_LISTING_COUNT.store(0, Ordering::Relaxed);
     }
     Some(
         HostSkillContextCandidate::discoverable(
@@ -1681,6 +1698,22 @@ fn select_skill_activations(
 
         for skill in outcome.selected {
             let candidate = candidate_for_loaded_skill(skill, &active_candidates)?;
+            // Same gate as the explicit-mention loop above, and it has to be here too: a
+            // criteria-selected skill is the one the USER never asked for by name, so
+            // activating it with an unmet requirement is the case where nothing at all
+            // connects the later shell failure back to the missing binary. Reaching this
+            // path without the gate was how a skill declaring `requires.bins` still
+            // "activated cleanly".
+            // Same gate as the explicit-mention loop above, and it has to be here too: a
+            // criteria-selected skill is the one the USER never asked for by name, so
+            // activating it with an unmet requirement is the case where nothing at all
+            // connects the later shell failure back to the missing binary. Reaching this
+            // path without the gate was how a skill declaring `requires.bins` still
+            // "activated cleanly".
+            if let Some(reason) = unmet_requirements_refusal(candidate) {
+                feedback.push(reason);
+                continue;
+            }
             let key = (
                 candidate.descriptor.id().source_kind(),
                 candidate.loaded.manifest.name.clone(),
@@ -1756,8 +1789,11 @@ fn refusal_reason(name: &str, eligible: &[&ActivationCandidate]) -> String {
         .iter()
         .find(|candidate| candidate.loaded.manifest.name.eq_ignore_ascii_case(name))
     {
+        // `{}` not `{:?}`: this string goes to the model, so it renders through
+        // `SkillTrust`'s `Display` (`installed`/`trusted`) rather than a debug spelling
+        // that would drift the moment a variant is renamed or gains a field.
         Some(candidate) => format!(
-            "{display}: found, but its trust is {:?} and activation requires Trusted; it must be \
+            "{display}: found, but its trust is {} and activation requires trusted; it must be \
              promoted before it can be used",
             candidate.loaded.trust
         ),
@@ -2129,12 +2165,6 @@ fn content_hash(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    // Tests whose SUBJECT is criteria selection opt into it explicitly.
-    //
-    // The library default is now `ExplicitOnly` -- the model decides, the keyword/regex scorer does
-    // not. These tests exercise the scorer itself, so they ask for it rather than inheriting it. That
-    // is the point of the new default: nothing gets the scorer by accident.
-
     /// Assert no skill BODY reached the model, allowing the listing.
     ///
     /// These assertions used to read `selected.is_empty()`. That is no longer the right
@@ -2428,6 +2458,11 @@ mod tests {
         );
     }
 
+    /// Config for tests whose SUBJECT is criteria selection.
+    ///
+    /// The library default is now `ExplicitOnly` -- the model decides, the keyword/regex scorer
+    /// does not. These tests exercise the scorer itself, so they opt in explicitly rather than
+    /// inheriting it. That is the point of the new default: nothing gets the scorer by accident.
     fn criteria_config() -> SkillActivationSelectorConfig {
         SkillActivationSelectorConfig::default()
             .set_selection_mode(SkillActivationSelectionMode::ExplicitAndCriteria)
@@ -3099,8 +3134,9 @@ mod tests {
                 "CODE_REVIEW_SENTINEL",
             ),
         )]));
-        // Default mode is ExplicitAndCriteria, but the global master switch is
-        // off: a keyword-matching skill must NOT auto-activate.
+        // `criteria_config()` opts into ExplicitAndCriteria (the config default is
+        // ExplicitOnly), but the global master switch is off: a keyword-matching skill
+        // must NOT auto-activate. The switch has to win over the mode, not the reverse.
         let flag = Arc::new(AtomicBool::new(false));
         let selectable = SelectableSkillContextSource::new(source, criteria_config())
             .with_auto_activate_flag(Arc::clone(&flag));
@@ -3513,8 +3549,8 @@ mod tests {
         assert_eq!(
             plan.selection.feedback,
             vec![
-                "installed-helper: found, but its trust is Installed and activation requires \
-                 Trusted; it must be promoted before it can be used"
+                "installed-helper: found, but its trust is installed and activation requires \
+                 trusted; it must be promoted before it can be used"
             ],
             "a refusal must say WHY: 'not available' is indistinguishable from a bad name, and \
              the two need opposite responses from the model"
@@ -3594,6 +3630,86 @@ mod tests {
         assert!(
             feedback.contains("ironclaw-absent-binary-for-test"),
             "the refusal must name the missing requirement: {feedback}"
+        );
+    }
+
+    /// The same gate on the path the user never asked for by name.
+    ///
+    /// `unmet_requirements_refusal` was wired into the explicit-mention loop and into
+    /// `select_named_skill_activations`, but NOT into the criteria loop, so a keyword-matching
+    /// skill with an unmet `requires.bins` auto-activated and "activated cleanly". That is the
+    /// worse half of the two: on the explicit path the model at least chose the skill and can
+    /// connect a later shell failure to its own request, while a criteria selection arrives
+    /// unrequested, so nothing links the missing binary to anything.
+    ///
+    /// Asserted through the observer rather than a return value because that is where the
+    /// criteria path's feedback actually goes -- it is the seam the live projection consumes
+    /// (`runtime.rs::set_activation_observer`), so a refusal invisible here is invisible in
+    /// the product.
+    #[tokio::test]
+    async fn an_unmet_requirement_blocks_criteria_activation_too_and_says_which() {
+        #[derive(Debug, Default)]
+        struct RecordingActivationObserver {
+            events: Mutex<Vec<SkillActivationObservedEvent>>,
+        }
+
+        impl SkillActivationObserver for RecordingActivationObserver {
+            fn observe_skill_activation(&self, event: SkillActivationObservedEvent) {
+                self.events.lock().expect("observer lock").push(event);
+            }
+        }
+
+        let manifest = concat!(
+            "---\n",
+            "name: needs-binary\n",
+            "description: Requires a binary that does not exist\n",
+            "activation:\n",
+            "  keywords: [\"transcode\"]\n",
+            "requires:\n",
+            "  bins:\n",
+            "    - ironclaw-absent-binary-for-test\n",
+            "---\n\n",
+            "NEEDS_BINARY_SENTINEL\n",
+        );
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "needs-binary",
+            manifest,
+        )]));
+        let observer = Arc::new(RecordingActivationObserver::default());
+        let selectable = SelectableSkillContextSource::new(source, criteria_config());
+        selectable
+            .set_activation_observer(Arc::clone(&observer) as Arc<dyn SkillActivationObserver>)
+            .expect("observer registers");
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "please transcode this file",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("an unmet requirement is a refusal, not an error");
+
+        assert_no_skill_body_disclosed(&selected, "criteria match with an unmet requirement");
+        let events = observer.events.lock().expect("observer lock");
+        let feedback = events
+            .iter()
+            .flat_map(|event| event.feedback.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            events.iter().all(|event| event.activations.is_empty()),
+            "a skill whose required binary is absent must not activate, however it was selected"
+        );
+        assert!(
+            feedback.contains("requirements are unmet")
+                && feedback.contains("ironclaw-absent-binary-for-test"),
+            "the refusal must reach the observer and name the missing requirement: {feedback}"
         );
     }
 

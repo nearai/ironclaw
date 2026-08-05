@@ -518,10 +518,12 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
             ironclaw_reborn_composition::open_standalone_secret_store(&runtime_storage_root)
                 .await
                 .map_err(anyhow::Error::from)?;
-        ironclaw_operator::LlmKeyStore::new(store)
-            .exists(&provider_id)
-            .await
-            .map_err(anyhow::Error::from)
+        ironclaw_operator::LlmKeyStore::new(
+            ironclaw_reborn_composition::RuntimeOperatorSecretValueStore::shared(store),
+        )
+        .exists(&provider_id)
+        .await
+        .map_err(anyhow::Error::from)
     })?;
     if !has_stored_key {
         return Err(error.into());

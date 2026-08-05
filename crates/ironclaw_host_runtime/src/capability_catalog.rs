@@ -281,9 +281,12 @@ fn validate_relative_manifest_asset_ref(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_extension_contracts::hosted_mcp::{
+        HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations,
+    };
     use ironclaw_extensions::{
-        CapabilityProviderHostApiContract, HostApiContractRegistry, HostedMcpDiscoveredTool,
-        HostedMcpDiscoveredToolAnnotations, package_with_discovered_hosted_mcp_tools,
+        CapabilityProviderHostApiContract, HostApiContractRegistry,
+        package_with_discovered_hosted_mcp_tools,
     };
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::host_port::HostPortCatalog;

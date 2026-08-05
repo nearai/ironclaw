@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_extensions::{
-    ExtensionPackage, ExtensionRegistry, ExtensionRuntime, SharedExtensionRegistry,
+    ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry,
     package_with_discovered_hosted_mcp_tools,
 };
 use ironclaw_host_api::{http::RuntimeHttpEgress, resource::ResourceScope};
@@ -351,7 +352,7 @@ effects = ["network"]
         let record = ExtensionManifestRecord::from_toml_with_root_binding(
             manifest,
             ManifestSource::UserRegistered,
-            &ironclaw_host_runtime::default_host_port_catalog().expect("test port catalog"),
+            &ironclaw_host_api::host_port::default_host_port_catalog().expect("test port catalog"),
             None,
             &crate::product_extension_host_api_contract_registry().expect("test contracts"),
             PackageRootBinding::Virtual,

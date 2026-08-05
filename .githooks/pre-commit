@@ -8,7 +8,7 @@ set -euo pipefail
 STAGED=$(git diff --cached --name-only)
 
 NEEDS_CHECK=false
-if echo "$STAGED" | grep -qE '^wit/|^channels-src/|^tools-src/'; then
+if echo "$STAGED" | grep -qE '^crates/ironclaw_wasm/wit/|^channels-src/|^tools-src/'; then
     NEEDS_CHECK=true
 fi
 

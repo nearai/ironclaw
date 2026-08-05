@@ -10,6 +10,10 @@ use crate::{
     ConversationBindingService, ProductConversationRouteKind, ProductSurfaceFailure,
     ResolveBindingRequest, ResolvedBinding,
 };
+use ironclaw_product_contracts::actor_identity::{
+    ProductActorUserResolutionRequest, ProductActorUserResolver, ResolvedProductActorUser,
+};
+use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::subject_route::{
     ProductConversationRouteKey, ProductConversationSubjectRouteResolutionRequest,
     ProductConversationSubjectRouteResolver,
@@ -29,74 +33,6 @@ impl ProductInstallationKey {
             adapter_id,
             installation_id,
         }
-    }
-}
-
-/// Request passed to host-owned actor-to-user resolvers before the workflow
-/// writes a conversation pairing.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ProductActorUserResolutionRequest {
-    pub adapter_id: ProductAdapterId,
-    pub installation_id: AdapterInstallationId,
-    pub external_actor_ref: ExternalActorRef,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedProductActorUser {
-    pub user_id: UserId,
-    pub binding_epoch: Option<ironclaw_conversations::ExternalActorBindingEpoch>,
-}
-
-impl ResolvedProductActorUser {
-    pub fn new(user_id: UserId) -> Self {
-        Self {
-            user_id,
-            binding_epoch: None,
-        }
-    }
-
-    pub fn with_binding_epoch(
-        user_id: UserId,
-        binding_epoch: ironclaw_conversations::ExternalActorBindingEpoch,
-    ) -> Self {
-        Self {
-            user_id,
-            binding_epoch: Some(binding_epoch),
-        }
-    }
-}
-
-impl ProductActorUserResolutionRequest {
-    pub fn new(
-        adapter_id: ProductAdapterId,
-        installation_id: AdapterInstallationId,
-        external_actor_ref: ExternalActorRef,
-    ) -> Self {
-        Self {
-            adapter_id,
-            installation_id,
-            external_actor_ref,
-        }
-    }
-}
-
-#[async_trait]
-pub trait ProductActorUserResolver: Send + Sync {
-    async fn resolve_product_actor_user(
-        &self,
-        request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure>;
-
-    async fn resolved_product_actor_user_is_current(
-        &self,
-        request: &ProductActorUserResolutionRequest,
-        expected: &ResolvedProductActorUser,
-    ) -> Result<bool, ProductSurfaceFailure> {
-        Ok(self
-            .resolve_product_actor_user(request.clone())
-            .await?
-            .as_ref()
-            == Some(expected))
     }
 }
 
@@ -136,7 +72,7 @@ impl ProductActorUserResolver for StaticProductActorUserResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<ResolvedProductActorUser>, ProductSurfaceFailure> {
+    ) -> Result<Option<ResolvedProductActorUser>, ProductOperationFailure> {
         Ok(self
             .bindings
             .get(&request.external_actor_ref)
@@ -802,8 +738,26 @@ fn map_conversation_error(
                 reason: "conversation binding store unavailable".into(),
             }
         }
+        // Unreachable on this surface, and kept only for exhaustiveness. Every
+        // `InboundTurnError` this function sees comes from
+        // `ConversationBindingService` — resolve/lookup/link/validate and the
+        // id constructors — which never submits a turn; the submission
+        // orchestration is `ironclaw_conversations::InboundTurnService`, which
+        // this crate does not use (it has its own `DefaultInboundTurnService`
+        // calling the coordinator directly, and that is where every live
+        // `ProductSurfaceFailure::TurnSubmissionFailed` is minted, with a real
+        // `TurnError`).
+        //
+        // Since WS5's port inversion, conversations carries the *port's*
+        // `TurnSubmissionError` here rather than a `TurnError`. A `TurnError`
+        // is deliberately NOT synthesized back from it: fabricating a kernel
+        // error to satisfy a variant no caller can reach would be a shim.
+        // The port error's own rendering is carried through instead, so the
+        // typed cause is preserved in the message rather than dropped.
         ironclaw_conversations::InboundTurnError::TurnSubmissionFailed { error } => {
-            ProductSurfaceFailure::TurnSubmissionFailed { error }
+            ProductSurfaceFailure::TurnSubmissionRejected {
+                reason: error.to_string(),
+            }
         }
     }
 }

@@ -28,6 +28,7 @@ memory-mem0 = ["dep:ironclaw_memory_mem0"]
 # test-support.
 test-support = [
     "dep:ironclaw_extension_support",
+    "ironclaw_network/test-support",
     "ironclaw_extension_host/test-support",
     "ironclaw_extension_manager/test-support",
     "ironclaw_auth/test-support",

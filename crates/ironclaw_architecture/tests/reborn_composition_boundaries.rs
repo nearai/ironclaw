@@ -11,7 +11,11 @@ use serde_json::Value;
 
 const COMPOSITION_CRATE: &str = "ironclaw_reborn_composition";
 
-use ratchet_support::workspace_root;
+// Crate paths are spelled flat (`crates/ironclaw_x/...`) and RESOLVED through
+// the crate inventory, so the family move (PROPOSAL section 5) repoints them
+// without editing the literals. Identity on today's tree - pinned by
+// `reborn_crate_inventory.rs` (CHECKLIST WS10).
+use ratchet_support::{crate_path, workspace_root};
 
 const SUBSTRATE_CRATES: &[&str] = &[
     "ironclaw_auth",
@@ -34,7 +38,7 @@ const SUBSTRATE_CRATES: &[&str] = &[
     "ironclaw_memory",
     "ironclaw_host_runtime",
     "ironclaw_mcp",
-    "ironclaw_scripts",
+    "ironclaw_sandbox",
     "ironclaw_wasm",
     "ironclaw_turns",
     "ironclaw_threads",
@@ -69,17 +73,20 @@ fn composition_root_is_workspace_member() {
 
 #[test]
 fn composition_public_api_is_service_shaped() {
-    let lib = std::fs::read_to_string(
-        workspace_root().join("crates/ironclaw_reborn_composition/src/lib.rs"),
-    )
+    let lib = std::fs::read_to_string(crate_path(
+        &workspace_root(),
+        "crates/ironclaw_reborn_composition/src/lib.rs",
+    ))
     .expect("composition lib readable");
-    let input = std::fs::read_to_string(
-        workspace_root().join("crates/ironclaw_reborn_composition/src/input.rs"),
-    )
+    let input = std::fs::read_to_string(crate_path(
+        &workspace_root(),
+        "crates/ironclaw_reborn_composition/src/input.rs",
+    ))
     .expect("composition input readable");
-    let factory = std::fs::read_to_string(
-        workspace_root().join("crates/ironclaw_reborn_composition/src/factory.rs"),
-    )
+    let factory = std::fs::read_to_string(crate_path(
+        &workspace_root(),
+        "crates/ironclaw_reborn_composition/src/factory.rs",
+    ))
     .expect("composition factory readable");
     let public_surface = format!("{lib}\n{input}\n{factory}");
 
@@ -194,6 +201,82 @@ fn composition_public_pub_use_surface_matches_snapshot() {
     );
 }
 
+/// CHECKLIST WS6 asks that the re-export wall be reduced *to a documented
+/// snapshot* — "every survivor names consumer + enforcing test". The snapshot
+/// half is pinned above; this is the documentation half.
+///
+/// Every top-level `pub use` in composition's `lib.rs` must carry a
+/// `// consumer: … · pinned by: …` line in the comment block directly above it
+/// (above any `#[cfg(…)]` attributes, which is also where the snapshot
+/// extractor expects them, so annotating never perturbs the snapshot).
+///
+/// The rule this enforces: a re-export earns its place only when the consumer
+/// cannot reach the symbol at its owning crate. Without the annotation, a wall
+/// entry is indistinguishable from an accident, which is how the previous 52
+/// entries accumulated 17 with no consumer at all.
+#[test]
+fn composition_public_pub_use_entries_name_their_consumer() {
+    let lib = std::fs::read_to_string(composition_src_path().join("lib.rs"))
+        .expect("composition lib.rs readable");
+    let lines: Vec<&str> = lib.lines().collect();
+
+    let mut undocumented = Vec::new();
+    let mut documented = 0usize;
+    let mut in_pub_use = false;
+    for (index, line) in lines.iter().enumerate() {
+        if in_pub_use {
+            if line.trim_start().contains(';') {
+                in_pub_use = false;
+            }
+            continue;
+        }
+        if !line.starts_with("pub use") {
+            continue;
+        }
+        if !line.trim_start().contains(';') {
+            in_pub_use = true;
+        }
+
+        // Walk back over the contiguous attribute / comment block above the
+        // entry looking for the annotation.
+        let mut cursor = index;
+        let mut annotated = false;
+        while cursor > 0 {
+            let above = lines[cursor - 1].trim_start();
+            let is_block = above.starts_with("#[")
+                || above.starts_with("//")
+                || above.starts_with("///")
+                || above.starts_with("]");
+            if !is_block {
+                break;
+            }
+            if above.starts_with("// consumer:") && above.contains("pinned by:") {
+                annotated = true;
+            }
+            cursor -= 1;
+        }
+        if annotated {
+            documented += 1;
+        } else {
+            undocumented.push(format!("lib.rs:{}: {}", index + 1, line));
+        }
+    }
+
+    assert!(
+        documented > 0,
+        "the annotation scan found no documented entries at all — the scan is broken, \
+         not the wall"
+    );
+    assert!(
+        undocumented.is_empty(),
+        "every public `pub use` in the composition root must name its consumer and the \
+         test that pins it, as a `// consumer: <who> · pinned by: <test>` line above the \
+         entry (above any `#[cfg]`). A re-export whose consumer can reach the symbol at \
+         its owning crate should be deleted, not annotated. Undocumented entries:\n{}",
+        undocumented.join("\n")
+    );
+}
+
 #[test]
 fn extension_host_cluster_stays_internal() {
     let lib = std::fs::read_to_string(composition_src_path().join("lib.rs"))
@@ -232,8 +315,9 @@ fn extension_host_cluster_stays_internal() {
 #[test]
 fn reborn_binary_main_is_thin_bootstrap() {
     let root = workspace_root();
-    let reborn_main = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/src/main.rs"))
-        .expect("reborn cli main.rs readable");
+    let reborn_main =
+        std::fs::read_to_string(crate_path(&root, "crates/ironclaw_reborn_cli/src/main.rs"))
+            .expect("reborn cli main.rs readable");
 
     assert!(
         reborn_main.contains("cli::run()"),
@@ -275,7 +359,7 @@ fn reborn_binary_main_is_thin_bootstrap() {
 /// is `HookRegistrar::install`.
 #[test]
 fn composition_crate_installs_installed_tier_only_through_registrar() {
-    let crate_src = workspace_root().join("crates/ironclaw_reborn_composition/src");
+    let crate_src = crate_path(&workspace_root(), "crates/ironclaw_reborn_composition/src");
     let sources = rust_sources(&crate_src);
     assert!(
         !sources.is_empty(),
@@ -387,7 +471,7 @@ const EXTENSION_HOST_EXTERNALIZED_GENERIC_MODULES: &[&str] = &[
 ];
 
 fn composition_src_path() -> PathBuf {
-    workspace_root().join("crates/ironclaw_reborn_composition/src")
+    crate_path(&workspace_root(), "crates/ironclaw_reborn_composition/src")
 }
 
 fn extract_pub_use_surface(contents: &str) -> String {

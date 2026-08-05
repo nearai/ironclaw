@@ -9,10 +9,12 @@
 use std::{collections::HashMap, path::PathBuf, process::Stdio, time::Duration};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{mount::MountView, resource::ResourceScope};
+use ironclaw_host_api::process::{
+    CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
+};
+use ironclaw_host_api::resource::ResourceScope;
 #[cfg(unix)]
 use libc::{SIGKILL, kill};
-use thiserror::Error;
 use tokio::process::Command;
 
 use crate::process_aliases::{
@@ -20,8 +22,8 @@ use crate::process_aliases::{
     rewrite_local_host_output_aliases,
 };
 use crate::process_output::{
-    CapturedCommandOutput, SavedCommandOutput, StreamCapture, capture_command_output,
-    read_stream_capped, truncate_output,
+    CapturedCommandOutput, StreamCapture, capture_command_output, read_stream_capped,
+    truncate_output,
 };
 
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
@@ -64,56 +66,9 @@ const SAFE_ENV_VARS: &[&str] = &[
     "WINDIR",
 ];
 
-/// Placement-neutral command request handed to the selected process port.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandExecutionRequest {
-    pub scope: ResourceScope,
-    pub mounts: Option<MountView>,
-    pub command: String,
-    pub workdir: Option<String>,
-    pub timeout_secs: Option<u64>,
-    pub extra_env: HashMap<String, String>,
-}
-
-/// Process-port command result normalized for capability handlers.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandExecutionOutput {
-    pub output: String,
-    pub saved_output: Option<SavedCommandOutput>,
-    pub exit_code: i64,
-    pub sandboxed: bool,
-    pub duration: Duration,
-}
-
-/// Stable redacted process-port failure.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum RuntimeProcessError {
-    #[error("command timed out after {0:?}")]
-    Timeout(Duration),
-    #[error("process execution failed: {0}")]
-    ExecutionFailed(String),
-}
-
 /// Abstract process effect used by process-backed capabilities.
 #[async_trait]
 pub trait RuntimeProcessPort: Send + Sync {
-    async fn run_command(
-        &self,
-        request: CommandExecutionRequest,
-    ) -> Result<CommandExecutionOutput, RuntimeProcessError>;
-}
-
-/// Transport for tenant-sandbox command execution.
-///
-/// This trait intentionally hides Docker/daemon details from host-runtime tool
-/// code. Product adapters can implement it with the V1 sandbox daemon JSON-RPC
-/// transport or another tenant-isolated runner.
-///
-/// Implementations must enforce `CommandExecutionRequest::timeout_secs` and
-/// clean up any remote process/container before returning
-/// `RuntimeProcessError::Timeout`.
-#[async_trait]
-pub trait SandboxCommandTransport: Send + Sync {
     async fn run_command(
         &self,
         request: CommandExecutionRequest,
@@ -410,7 +365,7 @@ mod tests {
     use super::*;
     use crate::process_output::COMMAND_MAX_OUTPUT_SIZE;
     #[cfg(unix)]
-    use crate::process_output::SavedCommandOutputSanitization;
+    use ironclaw_host_api::process::SavedCommandOutputSanitization;
     use std::sync::Mutex;
 
     #[derive(Debug)]

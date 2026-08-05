@@ -1345,9 +1345,9 @@ mod tests {
     };
     use serde_json::json;
 
-    use crate::{
-        CommandExecutionOutput, CommandExecutionRequest, InvocationServices, RuntimeProcessError,
-        RuntimeProcessPort,
+    use crate::{InvocationServices, RuntimeProcessPort};
+    use ironclaw_host_api::process::{
+        CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError,
     };
 
     use super::*;

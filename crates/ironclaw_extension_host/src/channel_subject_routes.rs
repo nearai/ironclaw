@@ -350,8 +350,8 @@ supports_threads = false
     fn product_extension_host_api_contract_registry()
     -> Result<ironclaw_extensions::HostApiContractRegistry, ironclaw_extensions::ManifestV2Error>
     {
-        let mut registry = ironclaw_host_runtime::default_host_api_contract_registry()?;
-        ironclaw_product::adapter_registry::register_product_adapter_host_api_contract(
+        let mut registry = ironclaw_extensions::default_host_api_contract_registry()?;
+        ironclaw_extensions::host_api::product_adapter::register_product_adapter_host_api_contract(
             &mut registry,
         )
         .map_err(|error| ironclaw_extensions::ManifestV2Error::Invalid {
@@ -365,7 +365,7 @@ supports_threads = false
         let record = ExtensionManifestRecord::from_toml(
             ADMISSION_FIXTURE_MANIFEST,
             ManifestSource::HostBundled,
-            &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
+            &ironclaw_host_api::host_port::default_host_port_catalog().expect("catalog"),
             None,
             &product_extension_host_api_contract_registry().expect("contracts"),
             None,
@@ -518,7 +518,7 @@ supports_threads = false
         let record = ExtensionManifestRecord::from_toml(
             ADMISSION_FIXTURE_MANIFEST,
             ManifestSource::HostBundled,
-            &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
+            &ironclaw_host_api::host_port::default_host_port_catalog().expect("catalog"),
             None,
             &product_extension_host_api_contract_registry().expect("contracts"),
             None,
