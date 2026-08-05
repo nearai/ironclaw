@@ -476,6 +476,23 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["coverage_mode"], "none")
 
+    def test_user_sandbox_worker_change_selects_real_docker_lane(self) -> None:
+        for path in (
+            "Dockerfile.sandbox-worker",
+            "crates/ironclaw_sandbox/src/sandbox_process.rs",
+            "crates/ironclaw_reborn_composition/src/builtin_capability_policy.rs",
+            "crates/ironclaw_reborn_composition/src/factory/production_build_assembly.rs",
+            "crates/ironclaw_host_runtime/src/first_party_tools/mod.rs",
+            "crates/ironclaw_host_runtime/src/process_port.rs",
+            "crates/ironclaw_sandbox/tests/user_sandbox_docker_live.rs",
+            "tests/integration/reborn_sandbox_shell_turn.rs",
+            "tests/integration/support/docker_gate.rs",
+            "tests/integration/support/harness/profiles/sandbox_shell.rs",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertTrue(plan["run_sandbox_docker"])
+
     def test_empty_diff_fails_fast(self) -> None:
         with self.assertRaisesRegex(ValueError, "empty pull-request diff"):
             self.plan("pull_request", [])
@@ -1166,6 +1183,9 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertIn("needs.changes.outputs.crate_buckets", workflow)
         self.assertIn("needs.changes.outputs.root_partitions", workflow)
         self.assertIn("needs.changes.outputs.integration_lanes", workflow)
+        self.assertIn("needs.changes.outputs.run_sandbox_docker", workflow)
+        self.assertIn("--test user_sandbox_docker_live", workflow)
+        self.assertIn("--test reborn_integration_sandbox_shell_turn", workflow)
         self.assertIn(
             '"${feature_args[@]}" --ignore-rust-version --all-targets',
             workflow,

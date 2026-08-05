@@ -920,7 +920,7 @@ fn production_effective_policy() -> EffectiveRuntimePolicy {
         requested_profile: RuntimeProfile::SecureDefault,
         resolved_profile: RuntimeProfile::SecureDefault,
         filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-        process_backend: ProcessBackendKind::TenantSandbox,
+        process_backend: ProcessBackendKind::UserSandbox,
         network_mode: NetworkMode::Deny,
         secret_mode: SecretMode::BrokeredHandles,
         approval_policy: ApprovalPolicy::AskAlways,
@@ -953,8 +953,8 @@ async fn build_admin_harness_production() -> AdminHarness {
     .expect("libSQL bindings")
     .with_first_party_bundles(first_party_support::test_first_party_bundles())
     .with_runtime_policy(production_effective_policy())
-    .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-        ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
+    .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
+        ironclaw_host_runtime::UserSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
     )));
     build_admin_harness_from(root, build_input).await
 }

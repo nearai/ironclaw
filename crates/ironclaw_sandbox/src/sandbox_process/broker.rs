@@ -31,7 +31,7 @@ const CONTAINER_HTTP_BROKER_SOCKET: &str = "/tmp/ironclaw-http-broker.sock";
 const CONTAINER_SECRET_BROKER_SOCKET: &str = "/tmp/ironclaw-secret-broker.sock";
 const CONTAINER_BROKER_URL: &str = "http://ironclaw-broker";
 
-/// Broker affordance exposed to tenant sandbox commands.
+/// Broker affordance exposed to user sandbox commands.
 ///
 /// The Unix-socket variant preserves Docker `--network none`; the HTTP-proxy
 /// variant intentionally requires Docker network attachment and is for
@@ -117,7 +117,7 @@ impl RebornSandboxNetworkBroker {
     }
 }
 
-/// Secret broker affordance exposed to tenant sandbox commands.
+/// Secret broker affordance exposed to user sandbox commands.
 ///
 /// The value is an endpoint, not secret material. Concrete brokers remain
 /// responsible for authentication, one-shot leases, redaction, and audit.

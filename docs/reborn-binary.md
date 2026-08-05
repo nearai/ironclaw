@@ -576,7 +576,7 @@ Remote managed PostgreSQL URLs must use TLS, for example `sslmode=require`.
 Set `IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE` to override the configured pool
 size when a managed provider enforces a smaller session-pool cap.
 The first production launch slice supports runtime policies that do not require
-a tenant-sandbox process binding.
+a user-sandbox process binding.
 
 ### `repl`
 

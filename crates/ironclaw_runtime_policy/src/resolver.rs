@@ -324,7 +324,7 @@ fn backends_for(
 
         HostedSafe => (
             FilesystemBackendKind::TenantWorkspace,
-            ProcessBackendKind::TenantSandbox,
+            ProcessBackendKind::UserSandbox,
             NetworkMode::Brokered,
             SecretMode::TenantBroker,
             ApprovalPolicy::AskWrites,
@@ -332,7 +332,7 @@ fn backends_for(
         ),
         HostedDev => (
             FilesystemBackendKind::TenantWorkspace,
-            ProcessBackendKind::TenantSandbox,
+            ProcessBackendKind::UserSandbox,
             NetworkMode::Allowlist,
             SecretMode::TenantBroker,
             ApprovalPolicy::AskDestructive,
@@ -340,7 +340,7 @@ fn backends_for(
         ),
         HostedYoloTenantScoped => (
             FilesystemBackendKind::TenantWorkspace,
-            ProcessBackendKind::TenantSandbox,
+            ProcessBackendKind::UserSandbox,
             NetworkMode::Allowlist,
             SecretMode::TenantBroker,
             ApprovalPolicy::Minimal,

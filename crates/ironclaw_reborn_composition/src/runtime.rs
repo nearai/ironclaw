@@ -116,7 +116,7 @@ use ironclaw_turns::ExternalToolCatalog;
 
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
-use crate::builtin_capability_policy::{BuiltinCapabilityPolicy, builtin_capability_policy};
+use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::deployment::{DeploymentConfig, TrafficPolicy};
 use crate::factory::{
     ComposedAutoApproveSettingStore, ComposedPersistentApprovalPolicyStore,
@@ -3325,12 +3325,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         builtin_capability_policy,
         display_previews,
     ) = if local_runtime.is_some() {
-        let builtin_capability_policy = Arc::new(builtin_capability_policy().map_err(|error| {
-            tracing::error!(%error, "capability policy is invalid");
-            RebornRuntimeError::InvalidArgument {
-                reason: format!("capability policy is invalid: {error}"),
-            }
-        })?);
+        let builtin_capability_policy = Arc::clone(&services.capability_policy);
         let capability_host = capability_host::capability_wiring(
             &services,
             Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,

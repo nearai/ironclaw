@@ -200,17 +200,17 @@ where
             if self
                 .runtime_policy
                 .as_ref()
-                .is_some_and(|policy| policy.process_backend == ProcessBackendKind::TenantSandbox)
+                .is_some_and(|policy| policy.process_backend == ProcessBackendKind::UserSandbox)
             {
                 self.push_missing(
                     &mut issues,
                     ProductionWiringComponent::RuntimeProcessPort,
-                    self.tenant_sandbox_process_port.is_some(),
+                    self.user_sandbox_process_port.is_some(),
                 );
                 self.push_local_only(
                     &mut issues,
                     ProductionWiringComponent::RuntimeProcessPort,
-                    self.component_types.tenant_sandbox_process_port,
+                    self.component_types.user_sandbox_process_port,
                 );
             } else {
                 self.push_local_only(

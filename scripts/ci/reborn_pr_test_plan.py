@@ -81,6 +81,22 @@ QA_HARNESS_PREFIXES = (
     "scripts/reborn_qa_matrix/",
 )
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
+SANDBOX_DOCKER_EXACT_PATHS = {
+    "Dockerfile.sandbox-worker",
+    "crates/ironclaw_reborn_cli/src/runtime/mod.rs",
+    "crates/ironclaw_reborn_composition/src/sandbox.rs",
+    "crates/ironclaw_reborn_composition/src/builtin_capability_policy.rs",
+    "crates/ironclaw_reborn_composition/src/factory/production_build_assembly.rs",
+    "crates/ironclaw_reborn_config/src/profile.rs",
+    "crates/ironclaw_host_runtime/src/first_party_tools/mod.rs",
+    "crates/ironclaw_host_runtime/src/process_port.rs",
+    "crates/ironclaw_sandbox/tests/support/docker_gate.rs",
+    "crates/ironclaw_sandbox/tests/user_sandbox_docker_live.rs",
+    "tests/integration/reborn_sandbox_shell_turn.rs",
+    "tests/integration/support/docker_gate.rs",
+    "tests/integration/support/harness/profiles/sandbox_shell.rs",
+}
+SANDBOX_DOCKER_PREFIXES = ("crates/ironclaw_sandbox/src/sandbox_process",)
 # Asset trees that live outside every crate root but are compiled *into* a
 # workspace crate through a relative `include_bytes!` / `include_str!` that
 # escapes its own crate (the §11.2.7 reach-ins inventoried by
@@ -443,6 +459,7 @@ def _full_plan(
         "integration_lanes": [0, 1, 2, 3, "groups"],
         "run_group_tests": True,
         "run_qa_replay": True,
+        "run_sandbox_docker": True,
         "coverage_mode": "full",
     }
 
@@ -479,6 +496,7 @@ def build_plan(
     # not affected-area coverage. Keep it on for every pull request even when
     # no changed path maps to another Reborn lane.
     run_qa_replay = True
+    run_sandbox_docker = False
     qa_evidence_changed = False
     reasons: list[str] = []
     root_inventory = _root_test_partitions()
@@ -520,6 +538,11 @@ def build_plan(
             or (path.endswith(".md") and "/" not in path)
         ):
             continue
+        if path in SANDBOX_DOCKER_EXACT_PATHS or path.startswith(SANDBOX_DOCKER_PREFIXES):
+            run_sandbox_docker = True
+            reasons.append(f"sandbox Docker surface changed: {path}")
+            if not path.startswith("crates/"):
+                continue
         if path.startswith(_webui_frontend_prefix()):
             reasons.append("Code Style owns WebUI lint, tests, and production build")
             continue
@@ -729,6 +752,7 @@ def build_plan(
         or root_partitions
         or integration_lanes
         or qa_evidence_changed
+        or run_sandbox_docker
     )
     return {
         "mode": "selected" if active else "none",
@@ -742,6 +766,7 @@ def build_plan(
         ),
         "run_group_tests": False,
         "run_qa_replay": run_qa_replay,
+        "run_sandbox_docker": run_sandbox_docker,
         "coverage_mode": "none",
     }
 

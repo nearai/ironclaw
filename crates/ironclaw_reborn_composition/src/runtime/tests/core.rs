@@ -2741,16 +2741,14 @@ async fn production_runtime_wires_enabled_hooks_through_unified_runtime() {
             requested_profile: RuntimeProfile::SecureDefault,
             resolved_profile: RuntimeProfile::SecureDefault,
             filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::UserSandbox,
             network_mode: NetworkMode::Deny,
             secret_mode: SecretMode::BrokeredHandles,
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::Standard,
         })
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-            ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
-                RecordingSandboxTransport,
-            )),
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
+            ironclaw_host_runtime::UserSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
         ))),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -2803,16 +2801,14 @@ async fn build_reborn_runtime_allows_validated_production_readiness() {
             requested_profile: RuntimeProfile::SecureDefault,
             resolved_profile: RuntimeProfile::SecureDefault,
             filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::UserSandbox,
             network_mode: NetworkMode::Deny,
             secret_mode: SecretMode::BrokeredHandles,
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::Standard,
         })
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-            ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
-                RecordingSandboxTransport,
-            )),
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
+            ironclaw_host_runtime::UserSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
         ))),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -2876,16 +2872,14 @@ async fn build_reborn_runtime_wires_trajectory_observer_through_unified_runtime(
             requested_profile: RuntimeProfile::SecureDefault,
             resolved_profile: RuntimeProfile::SecureDefault,
             filesystem_backend: FilesystemBackendKind::ScopedVirtual,
-            process_backend: ProcessBackendKind::TenantSandbox,
+            process_backend: ProcessBackendKind::UserSandbox,
             network_mode: NetworkMode::Deny,
             secret_mode: SecretMode::BrokeredHandles,
             approval_policy: ApprovalPolicy::AskAlways,
             audit_mode: AuditMode::Standard,
         })
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(
-            ironclaw_host_runtime::TenantSandboxProcessPort::new(Arc::new(
-                RecordingSandboxTransport,
-            )),
+        .with_runtime_process_binding(RebornRuntimeProcessBinding::user_sandbox(Arc::new(
+            ironclaw_host_runtime::UserSandboxProcessPort::new(Arc::new(RecordingSandboxTransport)),
         ))),
     )
     .with_identity(RebornRuntimeIdentity {

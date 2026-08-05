@@ -53,7 +53,7 @@ use ironclaw_host_api::process::{CommandExecutionRequest, RuntimeProcessError};
 /// port even under a hosted deployment. Running the check through that port
 /// would execute the operator command on the shared provider host. The
 /// resolver — the only layer that inspects process backends — instead selects
-/// the port matching the plan's process backend (the tenant sandbox under
+/// the port matching the plan's process backend (the user sandbox under
 /// `HostedMultiTenant`, the local host port under `LocalSingleUser`) and bundles
 /// it here, so the check runs inside the same isolation boundary a declared
 /// process effect would. `InvocationServices::post_edit_check` is `None`

@@ -1,17 +1,19 @@
+use std::path::Path;
+
 use ironclaw_host_api::process::RuntimeProcessError;
 
 use super::reject_nul;
 
 #[derive(Debug, Clone)]
 pub struct RebornSandboxContainerIdentity {
-    user: Option<String>,
+    user: RebornSandboxContainerUser,
     workspace_mode: RebornSandboxWorkspaceMode,
 }
 
 impl RebornSandboxContainerIdentity {
-    pub fn image_default() -> Self {
+    pub fn workspace_owner() -> Self {
         Self {
-            user: None,
+            user: RebornSandboxContainerUser::WorkspaceOwner,
             workspace_mode: RebornSandboxWorkspaceMode::Private,
         }
     }
@@ -21,21 +23,30 @@ impl RebornSandboxContainerIdentity {
         workspace_mode: RebornSandboxWorkspaceMode,
     ) -> Self {
         Self {
-            user: Some(user.into()),
+            user: RebornSandboxContainerUser::Configured(user.into()),
             workspace_mode,
         }
     }
 
-    pub fn container_user(&self) -> Result<Option<String>, RuntimeProcessError> {
-        self.user
-            .as_deref()
-            .map(validate_container_user)
-            .transpose()
+    pub fn container_user(&self, workspace: &Path) -> Result<String, RuntimeProcessError> {
+        match &self.user {
+            RebornSandboxContainerUser::WorkspaceOwner => workspace_owner_user(workspace),
+            RebornSandboxContainerUser::Configured(user) => validate_container_user(user),
+        }
     }
 
     pub fn workspace_mode(&self) -> u32 {
         self.workspace_mode.as_unix_mode()
     }
+}
+
+#[derive(Debug, Clone)]
+enum RebornSandboxContainerUser {
+    /// Match the numeric owner of the private host workspace. This keeps a
+    /// native non-root IronClaw deployment writable without granting broader
+    /// host permissions, while still overriding a root-default worker image.
+    WorkspaceOwner,
+    Configured(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +74,31 @@ fn validate_container_user(user: &str) -> Result<String, RuntimeProcessError> {
     Ok(user.to_string())
 }
 
+#[cfg(unix)]
+fn workspace_owner_user(workspace: &Path) -> Result<String, RuntimeProcessError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = std::fs::metadata(workspace).map_err(|error| {
+        RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox workspace identity could not be resolved: {error}"
+        ))
+    })?;
+    if metadata.uid() == 0 {
+        return Err(RuntimeProcessError::ExecutionFailed(
+            "local sandbox workspace must be owned by a non-root IronClaw user".to_string(),
+        ));
+    }
+    Ok(format!("{}:{}", metadata.uid(), metadata.gid()))
+}
+
+#[cfg(not(unix))]
+fn workspace_owner_user(_workspace: &Path) -> Result<String, RuntimeProcessError> {
+    // Docker Desktop's Linux VM cannot consume native Windows ownership IDs.
+    // The worker image and documented local setup use this explicit non-root
+    // identity instead of inheriting an operator-overridable image default.
+    Ok("1000:1000".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,7 +111,7 @@ mod tests {
                 RebornSandboxWorkspaceMode::Private,
             );
 
-            assert!(identity.container_user().is_err());
+            assert!(identity.container_user(Path::new(".")).is_err());
         }
     }
 
@@ -87,8 +123,31 @@ mod tests {
         );
 
         assert_eq!(
-            identity.container_user().unwrap(),
-            Some("1000:1000".to_string())
+            identity.container_user(Path::new(".")).unwrap(),
+            "1000:1000".to_string()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_owner_is_an_explicit_non_root_container_user() {
+        let workspace = tempfile::tempdir().unwrap();
+        let metadata = std::fs::metadata(workspace.path()).unwrap();
+        use std::os::unix::fs::MetadataExt as _;
+
+        if metadata.uid() == 0 {
+            assert!(
+                RebornSandboxContainerIdentity::workspace_owner()
+                    .container_user(workspace.path())
+                    .is_err()
+            );
+        } else {
+            assert_eq!(
+                RebornSandboxContainerIdentity::workspace_owner()
+                    .container_user(workspace.path())
+                    .unwrap(),
+                format!("{}:{}", metadata.uid(), metadata.gid())
+            );
+        }
     }
 }

@@ -1,9 +1,11 @@
 use super::*;
+use crate::deployment::DeploymentConfig;
 use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
 
 pub(super) async fn build_production_shaped(
     input: RebornHostBindings,
 ) -> Result<RebornRuntimeStores, RebornBuildError> {
+    validate_sandbox_profile_binding(&input.deployment, &input.runtime_process_binding)?;
     let RebornHostBindings {
         deployment,
         storage,
@@ -216,6 +218,27 @@ pub(super) async fn build_production_shaped(
             )
             .await
         }
+    }
+}
+
+fn validate_sandbox_profile_binding(
+    deployment: &DeploymentConfig,
+    binding: &RebornRuntimeProcessBinding,
+) -> Result<(), RebornBuildError> {
+    match (deployment.sandbox_enabled(), binding.is_user_sandbox()) {
+        (true, true) | (false, false) => Ok(()),
+        (true, false) => Err(RebornBuildError::InvalidConfig {
+            reason: format!(
+                "profile={} requires a user sandbox process binding; refusing an unsandboxed fallback",
+                deployment.profile()
+            ),
+        }),
+        (false, true) => Err(RebornBuildError::InvalidConfig {
+            reason: format!(
+                "profile={} does not enable sandboxing but a user sandbox process binding was supplied",
+                deployment.profile()
+            ),
+        }),
     }
 }
 
@@ -473,3 +496,63 @@ pub(super) fn planned_run_profile_resolver()
 
 pub(super) type FilesystemProductionHostRuntimeServices<F> =
     HostRuntimeServices<F, FilesystemResourceGovernor<F>>;
+
+#[cfg(test)]
+mod sandbox_profile_binding_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use ironclaw_host_api::process::{
+        CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError,
+        SandboxCommandTransport,
+    };
+    use ironclaw_host_runtime::UserSandboxProcessPort;
+
+    use super::validate_sandbox_profile_binding;
+    use crate::deployment::DeploymentConfig;
+    use crate::{RebornCompositionProfile, RebornRuntimeProcessBinding};
+
+    struct UnusedTransport;
+
+    #[async_trait]
+    impl SandboxCommandTransport for UnusedTransport {
+        async fn run_command(
+            &self,
+            _request: CommandExecutionRequest,
+        ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+            Err(RuntimeProcessError::ExecutionFailed("unused".to_string()))
+        }
+    }
+
+    fn user_sandbox_binding() -> RebornRuntimeProcessBinding {
+        RebornRuntimeProcessBinding::user_sandbox(Arc::new(UserSandboxProcessPort::new(Arc::new(
+            UnusedTransport,
+        ))))
+    }
+
+    #[test]
+    fn sandbox_profiles_require_binding_and_non_sandbox_profiles_reject_it() {
+        for profile in [
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway,
+        ] {
+            let deployment = DeploymentConfig::for_profile(profile, false);
+            let error =
+                validate_sandbox_profile_binding(&deployment, &RebornRuntimeProcessBinding::none())
+                    .expect_err("sandbox profile without binding must fail closed");
+            assert!(error.to_string().contains("unsandboxed fallback"));
+            validate_sandbox_profile_binding(&deployment, &user_sandbox_binding())
+                .expect("sandbox profile accepts its sandbox binding");
+        }
+
+        let deployment = DeploymentConfig::for_profile(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            false,
+        );
+        let error = validate_sandbox_profile_binding(&deployment, &user_sandbox_binding())
+            .expect_err("non-sandbox profile must reject sandbox binding");
+        assert!(error.to_string().contains("does not enable sandboxing"));
+        validate_sandbox_profile_binding(&deployment, &RebornRuntimeProcessBinding::none())
+            .expect("non-sandbox profile does not need a sandbox binding");
+    }
+}

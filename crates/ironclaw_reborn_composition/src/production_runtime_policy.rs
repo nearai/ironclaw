@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
-use ironclaw_host_runtime::TenantSandboxProcessPort;
+use ironclaw_host_runtime::UserSandboxProcessPort;
 
 use crate::input::RebornRuntimeProcessBindingError;
 use crate::{RebornCompositionError, RebornRuntimeProcessBinding};
@@ -28,11 +28,11 @@ impl RebornProductionRuntimePolicy {
         })
     }
 
-    pub fn with_tenant_sandbox_process_port(
+    pub fn with_user_sandbox_process_port(
         runtime_policy: EffectiveRuntimePolicy,
-        process_port: Arc<TenantSandboxProcessPort>,
+        process_port: Arc<UserSandboxProcessPort>,
     ) -> Result<Self, RebornCompositionError> {
-        let process_binding = RebornRuntimeProcessBinding::tenant_sandbox(process_port);
+        let process_binding = RebornRuntimeProcessBinding::user_sandbox(process_port);
         process_binding
             .validate_for_production_policy(&runtime_policy)
             .map_err(map_process_binding_error)?;
@@ -49,11 +49,11 @@ impl RebornProductionRuntimePolicy {
 
 fn map_process_binding_error(error: RebornRuntimeProcessBindingError) -> RebornCompositionError {
     match error {
-        RebornRuntimeProcessBindingError::MissingTenantSandboxProcessPort => {
-            RebornCompositionError::MissingTenantSandboxProcessPort
+        RebornRuntimeProcessBindingError::MissingUserSandboxProcessPort => {
+            RebornCompositionError::MissingUserSandboxProcessPort
         }
-        RebornRuntimeProcessBindingError::UnexpectedTenantSandboxProcessPort {
-            process_backend,
-        } => RebornCompositionError::UnexpectedTenantSandboxProcessPort { process_backend },
+        RebornRuntimeProcessBindingError::UnexpectedUserSandboxProcessPort { process_backend } => {
+            RebornCompositionError::UnexpectedUserSandboxProcessPort { process_backend }
+        }
     }
 }

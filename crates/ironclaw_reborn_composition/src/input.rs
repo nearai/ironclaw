@@ -11,7 +11,7 @@ use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
 };
-use ironclaw_host_runtime::TenantSandboxProcessPort;
+use ironclaw_host_runtime::UserSandboxProcessPort;
 use ironclaw_host_runtime::memory_binding::MemoryBindingPolicy;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
@@ -109,26 +109,26 @@ pub(crate) struct OAuthDcrCallbackConfig {
 pub enum RebornRuntimeProcessBinding {
     #[default]
     None,
-    TenantSandbox {
-        process_port: Arc<TenantSandboxProcessPort>,
+    UserSandbox {
+        process_port: Arc<UserSandboxProcessPort>,
     },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RebornRuntimeProcessBindingError {
-    MissingTenantSandboxProcessPort,
-    UnexpectedTenantSandboxProcessPort { process_backend: ProcessBackendKind },
+    MissingUserSandboxProcessPort,
+    UnexpectedUserSandboxProcessPort { process_backend: ProcessBackendKind },
 }
 
 impl std::fmt::Display for RebornRuntimeProcessBindingError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingTenantSandboxProcessPort => formatter.write_str(
-                "production tenant-sandbox process backend requires a tenant sandbox process binding",
+            Self::MissingUserSandboxProcessPort => formatter.write_str(
+                "production user-sandbox process backend requires a user sandbox process binding",
             ),
-            Self::UnexpectedTenantSandboxProcessPort { process_backend } => write!(
+            Self::UnexpectedUserSandboxProcessPort { process_backend } => write!(
                 formatter,
-                "production runtime policy uses {process_backend:?} but a tenant sandbox process binding was supplied"
+                "production runtime policy uses {process_backend:?} but a user sandbox process binding was supplied"
             ),
         }
     }
@@ -139,8 +139,12 @@ impl RebornRuntimeProcessBinding {
         Self::default()
     }
 
-    pub fn tenant_sandbox(process_port: Arc<TenantSandboxProcessPort>) -> Self {
-        Self::TenantSandbox { process_port }
+    pub fn user_sandbox(process_port: Arc<UserSandboxProcessPort>) -> Self {
+        Self::UserSandbox { process_port }
+    }
+
+    pub(crate) fn is_user_sandbox(&self) -> bool {
+        matches!(self, Self::UserSandbox { .. })
     }
 
     pub(crate) fn validate_for_production_policy(
@@ -148,15 +152,14 @@ impl RebornRuntimeProcessBinding {
         runtime_policy: &EffectiveRuntimePolicy,
     ) -> Result<(), RebornRuntimeProcessBindingError> {
         match (runtime_policy.process_backend, self) {
-            (
-                ProcessBackendKind::TenantSandbox,
-                RebornRuntimeProcessBinding::TenantSandbox { .. },
-            ) => Ok(()),
-            (ProcessBackendKind::TenantSandbox, RebornRuntimeProcessBinding::None) => {
-                Err(RebornRuntimeProcessBindingError::MissingTenantSandboxProcessPort)
+            (ProcessBackendKind::UserSandbox, RebornRuntimeProcessBinding::UserSandbox { .. }) => {
+                Ok(())
             }
-            (_, RebornRuntimeProcessBinding::TenantSandbox { .. }) => Err(
-                RebornRuntimeProcessBindingError::UnexpectedTenantSandboxProcessPort {
+            (ProcessBackendKind::UserSandbox, RebornRuntimeProcessBinding::None) => {
+                Err(RebornRuntimeProcessBindingError::MissingUserSandboxProcessPort)
+            }
+            (_, RebornRuntimeProcessBinding::UserSandbox { .. }) => Err(
+                RebornRuntimeProcessBindingError::UnexpectedUserSandboxProcessPort {
                     process_backend: runtime_policy.process_backend,
                 },
             ),

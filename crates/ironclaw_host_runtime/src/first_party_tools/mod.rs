@@ -256,10 +256,29 @@ pub fn builtin_first_party_package_for_process_backend(
     process_backend: ProcessBackendKind,
 ) -> Result<ExtensionPackage, ExtensionError> {
     let mut package = builtin_first_party_package()?;
-    if !process_port_backed_builtins_enabled(process_backend) {
-        remove_process_port_backed_builtin_capabilities(&mut package)?;
-    }
+    restrict_package_for_process_backend(&mut package, process_backend)?;
     Ok(package)
+}
+
+fn restrict_package_for_process_backend(
+    package: &mut ExtensionPackage,
+    process_backend: ProcessBackendKind,
+) -> Result<(), ExtensionError> {
+    if !process_port_backed_builtins_enabled(process_backend) {
+        remove_process_port_backed_builtin_capabilities(package)?;
+    } else if process_backend == ProcessBackendKind::UserSandbox {
+        // The PR1 user sandbox owns its isolated `/workspace` and runs with
+        // Docker `--network none`. These are not host-filesystem or host-network
+        // effects, so do not ask the invocation resolver to bind either service.
+        for effect in [
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
+            EffectKind::Network,
+        ] {
+            remove_builtin_capability_effect(package, SHELL_CAPABILITY_ID, effect)?;
+        }
+    }
+    Ok(())
 }
 
 fn process_port_backed_builtins_enabled(process_backend: ProcessBackendKind) -> bool {
@@ -269,7 +288,7 @@ fn process_port_backed_builtins_enabled(process_backend: ProcessBackendKind) -> 
             | ProcessBackendKind::Srt
             | ProcessBackendKind::SmolVm
             | ProcessBackendKind::LocalHost
-            | ProcessBackendKind::TenantSandbox
+            | ProcessBackendKind::UserSandbox
             | ProcessBackendKind::OrgDedicatedRunner
     )
 }
@@ -312,6 +331,39 @@ fn remove_builtin_capability(
         .manifest
         .capabilities
         .retain(|candidate| candidate.id != capability_id);
+    Ok(())
+}
+
+fn remove_builtin_capability_effect(
+    package: &mut ExtensionPackage,
+    capability_id: &str,
+    effect: EffectKind,
+) -> Result<(), ExtensionError> {
+    let capability_id = CapabilityId::new(capability_id)?;
+    let descriptor = package
+        .capabilities
+        .iter_mut()
+        .find(|candidate| candidate.id == capability_id)
+        .ok_or_else(|| ExtensionError::InvalidManifest {
+            reason: format!("built-in first-party package is missing capability {capability_id}"),
+        })?;
+    let manifest = package
+        .manifest
+        .capabilities
+        .iter_mut()
+        .find(|candidate| candidate.id == capability_id)
+        .ok_or_else(|| ExtensionError::InvalidManifest {
+            reason: format!("built-in first-party manifest is missing capability {capability_id}"),
+        })?;
+    if !descriptor.effects.contains(&effect) || !manifest.effects.contains(&effect) {
+        return Err(ExtensionError::InvalidManifest {
+            reason: format!(
+                "built-in first-party capability {capability_id} is missing effect {effect:?}"
+            ),
+        });
+    }
+    descriptor.effects.retain(|candidate| *candidate != effect);
+    manifest.effects.retain(|candidate| *candidate != effect);
     Ok(())
 }
 
@@ -583,7 +635,7 @@ impl BuiltinFirstPartyTools {
             return false;
         };
         // Run the check through the resolver-selected, deployment-isolated
-        // process port (tenant sandbox under hosted multi-tenant), NOT
+        // process port (user sandbox under hosted multi-tenant), NOT
         // `services.process` (the deployment-blind local port the edit plan
         // carries), and in the mount that backs the just-edited file (from the
         // edit result's `path`), so a multi-mount workspace checks the edited

@@ -99,11 +99,11 @@ async fn libsql_substrate_builder_rejects_invalid_secret_master_key() {
         process_local_resource_governor_singleton: true,
         secret_master_key: Some(SecretString::from("too-short")),
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
-        runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+        runtime_policy: RebornProductionRuntimePolicy::with_user_sandbox_process_port(
             production_runtime_policy(),
             sandbox_process_port(),
         )
-        .expect("create production runtime policy with tenant sandbox process port"),
+        .expect("create production runtime policy with user sandbox process port"),
         turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
         surface_version: CapabilitySurfaceVersion::new("test-surface")
             .expect("create test capability surface version"),
@@ -138,11 +138,11 @@ async fn libsql_substrate_builder_rejects_weak_env_secret_master_key() {
         process_local_resource_governor_singleton: true,
         secret_master_key: None,
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
-        runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+        runtime_policy: RebornProductionRuntimePolicy::with_user_sandbox_process_port(
             production_runtime_policy(),
             sandbox_process_port(),
         )
-        .expect("create production runtime policy with tenant sandbox process port"),
+        .expect("create production runtime policy with user sandbox process port"),
         turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
         surface_version: CapabilitySurfaceVersion::new("test-surface")
             .expect("create test capability surface version"),
@@ -172,11 +172,11 @@ async fn libsql_substrate_builder_rejects_without_singleton_resource_governor_au
         process_local_resource_governor_singleton: false,
         secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
-        runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+        runtime_policy: RebornProductionRuntimePolicy::with_user_sandbox_process_port(
             production_runtime_policy(),
             sandbox_process_port(),
         )
-        .expect("create production runtime policy with tenant sandbox process port"),
+        .expect("create production runtime policy with user sandbox process port"),
         turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
         surface_version: CapabilitySurfaceVersion::new("test-surface")
             .expect("create test capability surface version"),
@@ -210,11 +210,11 @@ async fn libsql_substrate_builder_rejects_unproven_runtime_target_claim() {
         process_local_resource_governor_singleton: true,
         secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
-        runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+        runtime_policy: RebornProductionRuntimePolicy::with_user_sandbox_process_port(
             production_runtime_policy(),
             sandbox_process_port(),
         )
-        .expect("create production runtime policy with tenant sandbox process port"),
+        .expect("create production runtime policy with user sandbox process port"),
         turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
         surface_version: CapabilitySurfaceVersion::new("test-surface")
             .expect("create test capability surface version"),
@@ -232,28 +232,28 @@ async fn libsql_substrate_builder_rejects_unproven_runtime_target_claim() {
 }
 
 #[test]
-fn production_runtime_policy_requires_tenant_sandbox_process_port() {
+fn production_runtime_policy_requires_user_sandbox_process_port() {
     let result = RebornProductionRuntimePolicy::without_process_port(production_runtime_policy());
 
     assert!(matches!(
         result,
-        Err(RebornCompositionError::MissingTenantSandboxProcessPort)
+        Err(RebornCompositionError::MissingUserSandboxProcessPort)
     ));
 }
 
 #[test]
-fn production_runtime_policy_rejects_unexpected_tenant_sandbox_process_port() {
+fn production_runtime_policy_rejects_unexpected_user_sandbox_process_port() {
     let mut policy = production_runtime_policy();
     policy.process_backend = ProcessBackendKind::None;
 
-    let result = RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+    let result = RebornProductionRuntimePolicy::with_user_sandbox_process_port(
         policy,
         sandbox_process_port(),
     );
 
     assert!(matches!(
         result,
-        Err(RebornCompositionError::UnexpectedTenantSandboxProcessPort {
+        Err(RebornCompositionError::UnexpectedUserSandboxProcessPort {
             process_backend: ProcessBackendKind::None
         })
     ));
@@ -265,7 +265,7 @@ fn production_runtime_policy() -> EffectiveRuntimePolicy {
         requested_profile: RuntimeProfile::HostedSafe,
         resolved_profile: RuntimeProfile::HostedSafe,
         filesystem_backend: FilesystemBackendKind::TenantWorkspace,
-        process_backend: ProcessBackendKind::TenantSandbox,
+        process_backend: ProcessBackendKind::UserSandbox,
         network_mode: NetworkMode::Brokered,
         secret_mode: SecretMode::TenantBroker,
         approval_policy: ApprovalPolicy::AskDestructive,
@@ -294,11 +294,11 @@ async fn build_libsql_test_services() -> LibSqlTestServices {
         process_local_resource_governor_singleton: true,
         secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
-        runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+        runtime_policy: RebornProductionRuntimePolicy::with_user_sandbox_process_port(
             production_runtime_policy(),
             sandbox_process_port(),
         )
-        .expect("create production runtime policy with tenant sandbox process port"),
+        .expect("create production runtime policy with user sandbox process port"),
         turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
         surface_version: CapabilitySurfaceVersion::new("test-surface")
             .expect("create test capability surface version"),
@@ -313,8 +313,8 @@ async fn build_libsql_test_services() -> LibSqlTestServices {
     }
 }
 
-fn sandbox_process_port() -> Arc<ironclaw_host_runtime::TenantSandboxProcessPort> {
-    Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(
+fn sandbox_process_port() -> Arc<ironclaw_host_runtime::UserSandboxProcessPort> {
+    Arc::new(ironclaw_host_runtime::UserSandboxProcessPort::new(
         Arc::new(RecordingSandboxTransport),
     ))
 }

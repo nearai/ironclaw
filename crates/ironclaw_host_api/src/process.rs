@@ -6,7 +6,7 @@
 //! `runtimes`-layer lane implement what the kernel consumes without an upward
 //! dependency: `ironclaw_sandbox` (runtimes) implements
 //! [`SandboxCommandTransport`], `ironclaw_host_runtime` (kernel) wraps it in
-//! `TenantSandboxProcessPort`. PROPOSAL §6.6.4 records that this home is
+//! `UserSandboxProcessPort`. PROPOSAL §6.6.4 records that this home is
 //! load-bearing, not cosmetic.
 //!
 //! `ironclaw_host_runtime` still owns the *behavior* — process spawning, output
@@ -68,11 +68,11 @@ pub enum RuntimeProcessError {
     ExecutionFailed(String),
 }
 
-/// Transport for tenant-sandbox command execution.
+/// Transport for user-sandbox command execution.
 ///
 /// This trait intentionally hides Docker/daemon details from host-runtime tool
-/// code. A lane implements it with a container runtime or another
-/// tenant-isolated runner.
+/// code. A lane implements it with a container runtime or another runner that
+/// isolates each authenticated user within the tenant boundary.
 ///
 /// Implementations must enforce [`CommandExecutionRequest::timeout_secs`] and
 /// clean up any remote process/container before returning

@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! LocalHost + filesystem.read   -> HostWorkspace read under selected root
-//! HostedDev + shell.run        -> tenant-sandbox process, never provider-host
+//! HostedDev + shell.run        -> user-sandbox process, never provider-host
 //! EnterpriseDev + process.run  -> org-dedicated runner if org policy permits
 //! Experiment + package install -> disposable SmolVm/Docker workspace
 //! ```
@@ -307,21 +307,21 @@ mod tests {
     }
 
     #[test]
-    fn plans_hosted_dev_shell_run_against_tenant_sandbox_never_local_host() {
-        // Issue example: `HostedDev + shell.run -> tenant-sandbox
+    fn plans_hosted_dev_shell_run_against_user_sandbox_never_local_host() {
+        // Issue example: `HostedDev + shell.run -> user-sandbox
         // process, never provider-host shell`. The resolver guarantees
-        // the policy carries `TenantSandbox`; the planner forwards it.
+        // the policy carries `UserSandbox`; the planner forwards it.
         // A regression that swapped to `LocalHost` here would defeat
         // the resolver's hosted-multi-tenant fail-closed contract.
         let desc = descriptor(vec![EffectKind::SpawnProcess, EffectKind::ExecuteCode]);
         let policy = policy_with(
             FilesystemBackendKind::TenantWorkspace,
-            ProcessBackendKind::TenantSandbox,
+            ProcessBackendKind::UserSandbox,
             NetworkMode::Allowlist,
             SecretMode::TenantBroker,
         );
         let plan = plan_capability(&desc, &policy).unwrap();
-        assert_eq!(plan.process_backend, ProcessBackendKind::TenantSandbox);
+        assert_eq!(plan.process_backend, ProcessBackendKind::UserSandbox);
         assert_ne!(plan.process_backend, ProcessBackendKind::LocalHost);
     }
 

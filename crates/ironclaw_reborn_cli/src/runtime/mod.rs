@@ -708,6 +708,10 @@ pub(crate) fn build_services_input_with_options(
         | RebornProfile::HostedSingleTenantVolume => {
             build_standalone_local_runtime_services_input(profile, owner_id, config, options)?
         }
+        RebornProfile::HostedSingleTenantVolumeSandboxed
+        | RebornProfile::HostedSingleTenantVolumeSandboxedRailway => {
+            build_sandboxed_local_runtime_services_input(profile, owner_id, config, options)?
+        }
         RebornProfile::HostedSingleTenant => build_hosted_single_tenant_services_input(
             profile,
             owner_id,
@@ -776,6 +780,136 @@ pub(crate) fn build_services_input_with_options(
         profile,
         config_file,
     })
+}
+
+const SANDBOX_WORKSPACES_SUBDIR: &str = "sandbox-workspaces";
+const RAILWAY_SANDBOX_PROJECT_ENV: &str = "IRONCLAW_REBORN_RAILWAY_PROJECT_ID";
+const RAILWAY_SANDBOX_ENVIRONMENT_ENV: &str = "IRONCLAW_REBORN_RAILWAY_ENVIRONMENT_ID";
+const RAILWAY_SANDBOX_CLI_PATH_ENV: &str = "IRONCLAW_REBORN_RAILWAY_CLI_PATH";
+const RAILWAY_SANDBOX_IDLE_TIMEOUT_ENV: &str = "IRONCLAW_REBORN_RAILWAY_IDLE_TIMEOUT_MINUTES";
+const RAILWAY_SANDBOX_WORKER_IMAGE_ENV: &str = "IRONCLAW_REBORN_RAILWAY_WORKER_IMAGE";
+
+fn railway_preview_config_from_env()
+-> Result<ironclaw_reborn_composition::RailwayPreviewSandboxConfig, SandboxProcessBootError> {
+    let project_id =
+        required_railway_sandbox_env(RAILWAY_SANDBOX_PROJECT_ENV, "RAILWAY_PROJECT_ID")?;
+    let environment_id =
+        required_railway_sandbox_env(RAILWAY_SANDBOX_ENVIRONMENT_ENV, "RAILWAY_ENVIRONMENT_ID")?;
+    let project_token = sandbox_env_value("RAILWAY_TOKEN")?;
+    let api_token = sandbox_env_value("RAILWAY_API_TOKEN")?;
+    match (project_token.is_some(), api_token.is_some()) {
+        (false, false) => {
+            return Err(SandboxProcessBootError::RailwayUnavailable {
+                reason: "RAILWAY_TOKEN or RAILWAY_API_TOKEN is required".to_string(),
+            });
+        }
+        (true, true) => {
+            return Err(SandboxProcessBootError::RailwayUnavailable {
+                reason: "set exactly one of RAILWAY_TOKEN or RAILWAY_API_TOKEN".to_string(),
+            });
+        }
+        _ => {}
+    }
+
+    let mut config =
+        ironclaw_reborn_composition::RailwayPreviewSandboxConfig::new(project_id, environment_id)
+            .map_err(|error| SandboxProcessBootError::RailwayUnavailable {
+            reason: error.to_string(),
+        })?;
+    if let Some(cli_path) = sandbox_env_value(RAILWAY_SANDBOX_CLI_PATH_ENV)? {
+        config = config.with_cli_path(cli_path);
+    }
+    if let Some(raw) = sandbox_env_value(RAILWAY_SANDBOX_IDLE_TIMEOUT_ENV)? {
+        let minutes =
+            raw.parse::<u16>()
+                .map_err(|_| SandboxProcessBootError::RailwayUnavailable {
+                    reason: format!(
+                        "{RAILWAY_SANDBOX_IDLE_TIMEOUT_ENV} must be an integer from 1 to 65535"
+                    ),
+                })?;
+        config = config.with_idle_timeout_minutes(minutes).map_err(|error| {
+            SandboxProcessBootError::RailwayUnavailable {
+                reason: error.to_string(),
+            }
+        })?;
+    }
+    if let Some(worker_image) = sandbox_env_value(RAILWAY_SANDBOX_WORKER_IMAGE_ENV)? {
+        config = config.with_worker_image(worker_image).map_err(|error| {
+            SandboxProcessBootError::RailwayUnavailable {
+                reason: error.to_string(),
+            }
+        })?;
+    }
+    Ok(config)
+}
+
+fn required_railway_sandbox_env(
+    preferred: &'static str,
+    railway_default: &'static str,
+) -> Result<String, SandboxProcessBootError> {
+    if let Some(value) = sandbox_env_value(preferred)? {
+        return Ok(value);
+    }
+    sandbox_env_value(railway_default)?.ok_or_else(|| SandboxProcessBootError::RailwayUnavailable {
+        reason: format!("{preferred} or {railway_default} is required"),
+    })
+}
+
+fn sandbox_env_value(name: &'static str) -> Result<Option<String>, SandboxProcessBootError> {
+    match std::env::var(name) {
+        Ok(value) => Ok((!value.trim().is_empty()).then(|| value.trim().to_string())),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(SandboxProcessBootError::RailwayUnavailable {
+                reason: format!("{name} must contain valid UTF-8"),
+            })
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum SandboxProcessBootError {
+    #[error(
+        "profile={profile} requires a reachable Docker daemon for its user-sandbox process backend; refusing to boot with an unsandboxed fallback: {reason}"
+    )]
+    DockerUnreachable {
+        profile: RebornProfile,
+        reason: String,
+    },
+    #[error("Railway preview sandbox configuration is unavailable: {reason}")]
+    RailwayUnavailable { reason: String },
+    #[error("profile={profile} is not a user-sandbox deployment profile")]
+    UnsupportedProfile { profile: RebornProfile },
+}
+
+fn build_sandboxed_local_runtime_services_input(
+    profile: RebornProfile,
+    owner_id: &str,
+    config: &RebornBootConfig,
+    options: RuntimeInputOptions,
+) -> anyhow::Result<RebornHostBindings> {
+    let process_binding = match profile {
+        RebornProfile::HostedSingleTenantVolumeSandboxed => {
+            let workspace_root =
+                local_runtime_storage_root(config, profile).join(SANDBOX_WORKSPACES_SUBDIR);
+            block_on_cli(
+                ironclaw_reborn_composition::UserSandboxFactory::local_docker(workspace_root),
+            )
+            .map_err(|error| SandboxProcessBootError::DockerUnreachable {
+                profile,
+                reason: error.to_string(),
+            })?
+        }
+        RebornProfile::HostedSingleTenantVolumeSandboxedRailway => {
+            ironclaw_reborn_composition::UserSandboxFactory::railway_preview(
+                railway_preview_config_from_env()?,
+            )
+        }
+        _ => return Err(SandboxProcessBootError::UnsupportedProfile { profile }.into()),
+    };
+    let services_input =
+        build_standalone_local_runtime_services_input(profile, owner_id, config, options)?;
+    Ok(services_input.with_runtime_process_binding(process_binding))
 }
 
 fn build_standalone_local_runtime_services_input(
@@ -1201,6 +1335,8 @@ pub(crate) async fn initialize_local_runtime_storage_root(
         RebornProfile::Standalone
             | RebornProfile::StandaloneUnrestricted
             | RebornProfile::HostedSingleTenantVolume
+            | RebornProfile::HostedSingleTenantVolumeSandboxed
+            | RebornProfile::HostedSingleTenantVolumeSandboxedRailway
     ) {
         let root = local_runtime_storage_root(config, profile);
         tokio::fs::create_dir_all(&root).await.with_context(|| {
@@ -1220,6 +1356,12 @@ fn composition_profile(profile: RebornProfile) -> RebornCompositionProfile {
         RebornProfile::HostedSingleTenant => RebornCompositionProfile::HostedSingleTenant,
         RebornProfile::HostedSingleTenantVolume => {
             RebornCompositionProfile::HostedSingleTenantVolume
+        }
+        RebornProfile::HostedSingleTenantVolumeSandboxed => {
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
+        }
+        RebornProfile::HostedSingleTenantVolumeSandboxedRailway => {
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway
         }
         RebornProfile::Production => RebornCompositionProfile::Production,
         RebornProfile::MigrationDryRun => RebornCompositionProfile::MigrationDryRun,
@@ -2480,6 +2622,92 @@ regex_activation_enabled = false
         );
     }
 
+    #[test]
+    fn railway_sandbox_profile_selects_remote_transport_without_connecting_docker() {
+        let _lock = lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _project = EnvGuard::set("IRONCLAW_REBORN_RAILWAY_PROJECT_ID", "project-test");
+        let _environment =
+            EnvGuard::set("IRONCLAW_REBORN_RAILWAY_ENVIRONMENT_ID", "environment-test");
+        let _project_token = EnvGuard::set("RAILWAY_TOKEN", "railway-test-token");
+        let _api_token = EnvGuard::clear("RAILWAY_API_TOKEN");
+        let _docker = EnvGuard::set("DOCKER_HOST", "tcp://127.0.0.1:1");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            Some("hosted-single-tenant-volume-sandboxed-railway".into()),
+        )
+        .expect("boot config");
+
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+        let services = runtime_input.services.expect("services input");
+        let policy = services.runtime_policy().expect("runtime policy");
+        assert_eq!(
+            services.profile(),
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway
+        );
+        assert_eq!(policy.process_backend.as_str(), "user_sandbox");
+    }
+
+    #[test]
+    fn non_sandbox_profile_ignores_railway_sandbox_environment() {
+        let _lock = lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _project = EnvGuard::set("IRONCLAW_REBORN_RAILWAY_PROJECT_ID", " ");
+        let _environment = EnvGuard::set("IRONCLAW_REBORN_RAILWAY_ENVIRONMENT_ID", " ");
+        let _project_token = EnvGuard::set("RAILWAY_TOKEN", "railway-test-token");
+        let _api_token = EnvGuard::set("RAILWAY_API_TOKEN", "railway-test-token-2");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            Some("hosted-single-tenant-volume".into()),
+        )
+        .expect("boot config");
+
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+        let services = runtime_input.services.expect("services input");
+        assert_eq!(
+            services.profile(),
+            RebornCompositionProfile::HostedSingleTenantVolume
+        );
+        assert_eq!(
+            services
+                .runtime_policy()
+                .expect("runtime policy")
+                .process_backend
+                .as_str(),
+            "none"
+        );
+    }
+
+    #[test]
+    fn railway_sandbox_configuration_requires_exactly_one_token() {
+        let _lock = super::test_env::lock_runtime_env();
+        let _project = EnvGuard::set("IRONCLAW_REBORN_RAILWAY_PROJECT_ID", "project-test");
+        let _environment =
+            EnvGuard::set("IRONCLAW_REBORN_RAILWAY_ENVIRONMENT_ID", "environment-test");
+        let _project_token = EnvGuard::set("RAILWAY_TOKEN", "project-token");
+        let _api_token = EnvGuard::set("RAILWAY_API_TOKEN", "api-token");
+
+        let error = super::railway_preview_config_from_env()
+            .expect_err("ambiguous Railway auth must fail closed");
+        assert!(error.to_string().contains("exactly one"));
+        assert!(!error.to_string().contains("project-token"));
+        assert!(!error.to_string().contains("api-token"));
+    }
+
     fn boot_config_with_config_toml(
         profile: &str,
         config_toml: &str,
@@ -2504,6 +2732,8 @@ regex_activation_enabled = false
             ironclaw_reborn_config::RebornProfile::Standalone,
             ironclaw_reborn_config::RebornProfile::StandaloneUnrestricted,
             ironclaw_reborn_config::RebornProfile::HostedSingleTenantVolume,
+            ironclaw_reborn_config::RebornProfile::HostedSingleTenantVolumeSandboxed,
+            ironclaw_reborn_config::RebornProfile::HostedSingleTenantVolumeSandboxedRailway,
         ] {
             let (_temp, config) = boot_config_with_config_toml("local-dev", "");
             let root = local_runtime_storage_root(&config, profile);

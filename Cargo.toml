@@ -272,6 +272,10 @@ name = "reborn_integration_attach"
 path = "tests/integration/attach.rs"
 
 [[test]]
+name = "reborn_integration_sandbox_shell_turn"
+path = "tests/integration/reborn_sandbox_shell_turn.rs"
+
+[[test]]
 name = "reborn_integration_subagent_await_edge"
 path = "tests/integration/subagent_await_edge.rs"
 

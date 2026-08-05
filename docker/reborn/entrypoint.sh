@@ -43,7 +43,7 @@ else
     hosted-single-tenant)
       default_config="/opt/ironclaw/reborn/config.hosted-single-tenant.toml"
       ;;
-    hosted-single-tenant-volume)
+    hosted-single-tenant-volume|hosted-single-tenant-volume-sandboxed|hosted-single-tenant-volume-sandboxed-railway)
       default_config="/opt/ironclaw/reborn/config.hosted-single-tenant-volume.toml"
       ;;
     *)
@@ -207,7 +207,7 @@ if railway_runtime_detected \
   && ! is_truthy "${IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY:-}"
 then
   case "$effective_profile" in
-    local-dev|local-dev-yolo|hosted-single-tenant|hosted-single-tenant-volume)
+    local-dev|local-dev-yolo|hosted-single-tenant|hosted-single-tenant-volume|hosted-single-tenant-volume-sandboxed|hosted-single-tenant-volume-sandboxed-railway)
       if [ -z "$railway_volume_mount" ]; then
         echo "Railway deployment using profile=$effective_profile requires a persistent volume for IRONCLAW_REBORN_HOME=$IRONCLAW_REBORN_HOME." >&2
         echo "Attach a Railway volume mounted at /data (or set IRONCLAW_REBORN_HOME under RAILWAY_VOLUME_MOUNT_PATH)." >&2

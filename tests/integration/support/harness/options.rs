@@ -123,6 +123,9 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// default) matches every pre-existing harness: no Google OAuth backend,
     /// i.e. this instance is "unconfigured".
     pub(crate) google_oauth_backend_for_test: bool,
+    /// Build through the Docker-backed sandbox profile instead of the normal
+    /// local-development profile. Only the real sandbox-shell E2E enables it.
+    pub(crate) sandboxed_shell: bool,
     /// Raise the deployment's workspace scoping to per-caller, exactly as
     /// `serve` does unconditionally
     /// (`RebornRuntimeInput::with_workspace_scoped_per_caller_services`,
@@ -155,6 +158,7 @@ impl HostRuntimeHarnessOptions {
             durable_capability_io: false,
             trigger_active_run_lookup_requested: false,
             google_oauth_backend_for_test: false,
+            sandboxed_shell: false,
             workspace_scoped_per_caller: false,
         }
     }
@@ -164,6 +168,11 @@ impl HostRuntimeHarnessOptions {
     /// [`Self::trigger_active_run_lookup_requested`].
     pub(crate) fn with_trigger_active_run_lookup_for_test(mut self) -> Self {
         self.trigger_active_run_lookup_requested = true;
+        self
+    }
+
+    pub(crate) fn with_sandboxed_shell(mut self) -> Self {
+        self.sandboxed_shell = true;
         self
     }
 

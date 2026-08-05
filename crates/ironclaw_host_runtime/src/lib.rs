@@ -129,7 +129,7 @@ pub use post_edit_check::{
     POST_EDIT_CHECK_ENV, POST_EDIT_CHECK_TIMEOUT_ENV, PostEditCheckConfig,
     PostEditCheckConfigError, PostEditCheckService,
 };
-pub use process_port::{HostProcessPort, RuntimeProcessPort, TenantSandboxProcessPort};
+pub use process_port::{HostProcessPort, RuntimeProcessPort, UserSandboxProcessPort};
 pub use production::DefaultHostRuntime;
 // The sandbox lane (`sandbox_process`) moved to `ironclaw_sandbox` with the
 // WS3 merge; its Docker/CA cone is a runtimes-layer concern, and nothing

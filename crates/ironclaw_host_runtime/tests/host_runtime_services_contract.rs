@@ -56,7 +56,7 @@ use ironclaw_host_runtime::{
     BuiltinObligationServices, CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceVersion,
     HostRuntime, HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig,
     ProductionWiringIssueKind, RuntimeCapabilityOutcome, RuntimeStatusRequest, RuntimeWorkId,
-    TenantSandboxProcessPort, builtin_first_party_handlers,
+    UserSandboxProcessPort, builtin_first_party_handlers,
 };
 use ironclaw_loop_contracts::InMemoryRunProfileResolver;
 use ironclaw_processes::{
@@ -1257,7 +1257,7 @@ async fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
 }
 
 #[tokio::test]
-async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_builtin_shell() {
+async fn production_wiring_validation_tracks_user_sandbox_process_port_for_builtin_shell() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_builtin_first_party_package()),
         Arc::new(DiskFilesystem::new()),
@@ -1273,14 +1273,14 @@ async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_bui
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::FirstParty]))
-        .expect_err("tenant sandbox process policy must require a sandbox process port");
+        .expect_err("user sandbox process policy must require a sandbox process port");
 
     assert!(
         report.contains(
             ProductionWiringComponent::RuntimeProcessPort,
             ProductionWiringIssueKind::Missing
         ),
-        "tenant sandbox process backend should require the tenant sandbox process port: {report:?}"
+        "user sandbox process backend should require the user sandbox process port: {report:?}"
     );
 
     let services = HostRuntimeServices::new(
@@ -1295,7 +1295,7 @@ async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_bui
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
     .with_runtime_policy(hosted_dev_runtime_policy())
-    .with_tenant_sandbox_process_port(Arc::new(TenantSandboxProcessPort::new(Arc::new(
+    .with_user_sandbox_process_port(Arc::new(UserSandboxProcessPort::new(Arc::new(
         ProductionCandidateSandboxTransport,
     ))));
 
@@ -1313,7 +1313,7 @@ async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_bui
             ProductionWiringComponent::RuntimeProcessPort,
             ProductionWiringIssueKind::UnverifiedProductionImplementation
         ),
-        "configured tenant sandbox process port should clear missing but remain unverified: {report:?}"
+        "configured user sandbox process port should clear missing but remain unverified: {report:?}"
     );
 
     let services = HostRuntimeServices::new(
@@ -1328,9 +1328,9 @@ async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_bui
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
     .with_runtime_policy(hosted_dev_runtime_policy())
-    .with_production_tenant_sandbox_process_port(Arc::new(TenantSandboxProcessPort::new(
-        Arc::new(ProductionCandidateSandboxTransport),
-    )));
+    .with_production_user_sandbox_process_port(Arc::new(UserSandboxProcessPort::new(Arc::new(
+        ProductionCandidateSandboxTransport,
+    ))));
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::FirstParty]))
@@ -1344,7 +1344,7 @@ async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_bui
             ProductionWiringComponent::RuntimeProcessPort,
             ProductionWiringIssueKind::UnverifiedProductionImplementation
         ),
-        "verified tenant sandbox process port should satisfy the process-port gate: {report:?}"
+        "verified user sandbox process port should satisfy the process-port gate: {report:?}"
     );
 }
 

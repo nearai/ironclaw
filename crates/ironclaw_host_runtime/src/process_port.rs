@@ -77,27 +77,27 @@ pub trait RuntimeProcessPort: Send + Sync {
 
 /// Tenant-isolated process port backed by a sandbox command transport.
 #[derive(Clone)]
-pub struct TenantSandboxProcessPort {
+pub struct UserSandboxProcessPort {
     transport: std::sync::Arc<dyn SandboxCommandTransport>,
 }
 
-impl std::fmt::Debug for TenantSandboxProcessPort {
+impl std::fmt::Debug for UserSandboxProcessPort {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("TenantSandboxProcessPort")
+            .debug_struct("UserSandboxProcessPort")
             .field("transport", &"<sandbox command transport>")
             .finish()
     }
 }
 
-impl TenantSandboxProcessPort {
+impl UserSandboxProcessPort {
     pub fn new(transport: std::sync::Arc<dyn SandboxCommandTransport>) -> Self {
         Self { transport }
     }
 }
 
 #[async_trait]
-impl RuntimeProcessPort for TenantSandboxProcessPort {
+impl RuntimeProcessPort for UserSandboxProcessPort {
     async fn run_command(
         &self,
         request: CommandExecutionRequest,
@@ -392,9 +392,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tenant_sandbox_process_port_marks_output_sandboxed() {
+    async fn user_sandbox_process_port_marks_output_sandboxed() {
         let transport = std::sync::Arc::new(RecordingSandboxTransport::default());
-        let port = TenantSandboxProcessPort::new(transport);
+        let port = UserSandboxProcessPort::new(transport);
 
         let output = port
             .run_command(CommandExecutionRequest {
@@ -413,9 +413,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tenant_sandbox_process_port_sets_default_timeout_on_transport_request() {
+    async fn user_sandbox_process_port_sets_default_timeout_on_transport_request() {
         let transport = std::sync::Arc::new(RecordingSandboxTransport::default());
-        let port = TenantSandboxProcessPort::new(transport.clone());
+        let port = UserSandboxProcessPort::new(transport.clone());
 
         port.run_command(CommandExecutionRequest {
             scope: ResourceScope::system(),
@@ -436,8 +436,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tenant_sandbox_process_port_propagates_transport_error() {
-        let port = TenantSandboxProcessPort::new(std::sync::Arc::new(FailingSandboxTransport));
+    async fn user_sandbox_process_port_propagates_transport_error() {
+        let port = UserSandboxProcessPort::new(std::sync::Arc::new(FailingSandboxTransport));
 
         let error = port
             .run_command(CommandExecutionRequest {
@@ -458,8 +458,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tenant_sandbox_process_port_propagates_transport_timeout() {
-        let port = TenantSandboxProcessPort::new(std::sync::Arc::new(TimeoutSandboxTransport));
+    async fn user_sandbox_process_port_propagates_transport_timeout() {
+        let port = UserSandboxProcessPort::new(std::sync::Arc::new(TimeoutSandboxTransport));
 
         let error = port
             .run_command(CommandExecutionRequest {
@@ -477,12 +477,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tenant_sandbox_process_port_truncates_transport_output() {
+    async fn user_sandbox_process_port_truncates_transport_output() {
         let transport = std::sync::Arc::new(RecordingSandboxTransport {
             requests: Mutex::new(Vec::new()),
             output: "x".repeat(COMMAND_MAX_OUTPUT_SIZE + 1),
         });
-        let port = TenantSandboxProcessPort::new(transport);
+        let port = UserSandboxProcessPort::new(transport);
 
         let output = port
             .run_command(CommandExecutionRequest {

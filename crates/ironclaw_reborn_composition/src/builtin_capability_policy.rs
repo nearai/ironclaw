@@ -9,6 +9,7 @@ use ironclaw_host_api::{
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
     ids::{CapabilityGrantId, CapabilityId, ExtensionId, PackageId},
     mount::MountView,
+    runtime_policy::ProcessBackendKind,
     scope::Principal,
 };
 use serde::Deserialize;
@@ -28,6 +29,8 @@ pub(crate) enum BuiltinCapabilityPolicyError {
     DuplicateGrant { capability: CapabilityId },
     #[error("standalone capability policy is missing grant for {capability}")]
     MissingGrant { capability: CapabilityId },
+    #[error("standalone capability policy is missing its built-in shell grant")]
+    MissingShellGrant,
     #[error("standalone capability policy has empty effect set for {target}")]
     EmptyEffects { target: String },
     #[error("standalone capability policy has duplicate effect {effect:?} for {target}")]
@@ -52,6 +55,33 @@ pub(crate) struct BuiltinCapabilityPolicy {
 }
 
 impl BuiltinCapabilityPolicy {
+    pub(crate) fn for_process_backend(
+        mut self,
+        process_backend: ProcessBackendKind,
+    ) -> Result<Self, BuiltinCapabilityPolicyError> {
+        if process_backend != ProcessBackendKind::UserSandbox {
+            return Ok(self);
+        }
+
+        let shell = self
+            .grants
+            .iter_mut()
+            .find(|grant| grant.capability.as_str() == ironclaw_host_runtime::SHELL_CAPABILITY_ID)
+            .ok_or(BuiltinCapabilityPolicyError::MissingShellGrant)?;
+        shell.effects.retain(|effect| {
+            !matches!(
+                effect,
+                EffectKind::ReadFilesystem | EffectKind::WriteFilesystem | EffectKind::Network
+            )
+        });
+        // The sandbox transport supplies its own per-user `/workspace` bind.
+        // Passing the host runtime's tenant-workspace grant would either expose
+        // the wrong storage boundary or fail its trusted-mount resolution.
+        shell.mounts = CapabilityMountProfile::Ambient;
+        shell.network = CapabilityNetworkProfile::Default;
+        Ok(self)
+    }
+
     fn grant(
         &self,
         capability: &CapabilityId,
@@ -740,6 +770,38 @@ mod tests {
         );
         assert_eq!(profile_set.mounts, CapabilityMountProfile::Ambient);
         assert_eq!(profile_set.network, CapabilityNetworkProfile::DevWildcard);
+    }
+
+    #[test]
+    fn user_sandbox_shell_grant_uses_transport_workspace_without_network() {
+        let policy = builtin_capability_policy()
+            .expect("policy parses")
+            .for_process_backend(ProcessBackendKind::UserSandbox)
+            .expect("user-sandbox policy projects");
+        let shell = policy
+            .grant(&CapabilityId::new("builtin.shell").expect("capability id"))
+            .expect("shell grant");
+
+        for effect in [
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
+            EffectKind::Network,
+        ] {
+            assert!(!shell.effects.contains(&effect));
+        }
+        assert_eq!(shell.network, CapabilityNetworkProfile::Default);
+        assert_eq!(shell.mounts, CapabilityMountProfile::Ambient);
+
+        let local_policy = builtin_capability_policy()
+            .expect("policy parses")
+            .for_process_backend(ProcessBackendKind::LocalHost)
+            .expect("local policy projects");
+        let local_shell = local_policy
+            .grant(&CapabilityId::new("builtin.shell").expect("capability id"))
+            .expect("shell grant");
+        assert!(local_shell.effects.contains(&EffectKind::Network));
+        assert_eq!(local_shell.network, CapabilityNetworkProfile::DevWildcard);
+        assert_eq!(local_shell.mounts, CapabilityMountProfile::Ambient);
     }
 
     #[test]

@@ -644,6 +644,13 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Route scripted `builtin.shell` calls through the real Docker-backed
+    /// sandbox profile. The calling test owns the Docker availability gate.
+    pub fn with_sandbox_shell_tools(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::SandboxShellTools;
+        self
+    }
+
     /// Wire the real MCP runtime backed by a loopback mock MCP server.
     ///
     /// `mcp_url` is the full mock endpoint URL (e.g. `server.mcp_url()`). The

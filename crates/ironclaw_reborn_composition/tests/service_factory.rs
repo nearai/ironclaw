@@ -147,7 +147,7 @@ fn production_runtime_policy() -> EffectiveRuntimePolicy {
         requested_profile: RuntimeProfile::HostedDev,
         resolved_profile: RuntimeProfile::HostedDev,
         filesystem_backend: FilesystemBackendKind::TenantWorkspace,
-        process_backend: ProcessBackendKind::TenantSandbox,
+        process_backend: ProcessBackendKind::UserSandbox,
         network_mode: NetworkMode::Allowlist,
         secret_mode: SecretMode::TenantBroker,
         approval_policy: ApprovalPolicy::AskDestructive,
@@ -673,10 +673,10 @@ async fn hosted_single_tenant_volume_hides_process_capabilities() {
 }
 
 fn test_sandbox_process_binding() -> RebornRuntimeProcessBinding {
-    let process_port = Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(
+    let process_port = Arc::new(ironclaw_host_runtime::UserSandboxProcessPort::new(
         Arc::new(ProductionReadySandboxTransport),
     ));
-    RebornRuntimeProcessBinding::tenant_sandbox(process_port)
+    RebornRuntimeProcessBinding::user_sandbox(process_port)
 }
 
 #[derive(Debug)]
@@ -907,7 +907,7 @@ async fn production_requires_process_binding_for_defaulted_first_party_trust_pol
         panic!("expected production first-party runtime to require a process binding");
     };
     assert!(
-        reason.contains("tenant sandbox process binding"),
+        reason.contains("user sandbox process binding"),
         "production first-party trust default should still keep process binding fail-closed: {reason}"
     );
 }
@@ -1650,8 +1650,8 @@ async fn production_libsql_services_require_process_port_for_first_party_runtime
         panic!("expected production first-party runtime to require a process port, ");
     };
     assert!(
-        reason.contains("tenant sandbox process binding"),
-        "first-party shell capability should keep production wiring fail-closed until a tenant sandbox process port is configured: {reason}"
+        reason.contains("user sandbox process binding"),
+        "first-party shell capability should keep production wiring fail-closed until a user sandbox process port is configured: {reason}"
     );
 }
 
@@ -1684,8 +1684,8 @@ async fn production_postgres_services_require_process_port_for_first_party_runti
         panic!("expected postgres production first-party runtime to require a process port, ");
     };
     assert!(
-        reason.contains("tenant sandbox process binding"),
-        "postgres first-party shell capability should keep production wiring fail-closed until a tenant sandbox process port is configured: {reason}"
+        reason.contains("user sandbox process binding"),
+        "postgres first-party shell capability should keep production wiring fail-closed until a user sandbox process port is configured: {reason}"
     );
 }
 
@@ -1725,7 +1725,7 @@ async fn migration_dry_run_validates_libsql_shape() {
 }
 
 #[tokio::test]
-#[ignore = "TODO(#3856): restore when tenant sandbox process-port wiring exists"]
+#[ignore = "TODO(#3856): restore when user sandbox process-port wiring exists"]
 async fn migration_dry_run_validates_postgres_planned_turn_profile() {
     // Restore the MigrationDryRunValidated readiness and planned-profile
     // submit_turn assertions that are temporarily fail-closed below.

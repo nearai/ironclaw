@@ -1,10 +1,5 @@
 //! Capability-host approval-gate tests.
 
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
-
 use ironclaw_approvals::{ApprovalRequestStorePort as _, ApprovalStatus};
 use ironclaw_approvals::{
     ApprovalResolver, AutoApproveSettingInput, AutoApproveSettingStorePort as _,
@@ -100,71 +95,6 @@ async fn standalone_ask_destructive_shell_invocation_blocks_then_resumes_with_on
         .await;
     assert_eq!(leases.len(), 1);
     assert_eq!(leases[0].status, CapabilityLeaseStatus::Consumed);
-}
-
-#[tokio::test]
-async fn standalone_approved_shell_uses_injected_tenant_sandbox_process_port() {
-    let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only fixture setup.
-    let transport = Arc::new(RecordingSandboxTransport::default());
-    let process_port = Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(
-        transport.clone(),
-    ));
-    let services = build_runtime_substrate(
-        crate::deployment::local_filesystem_build_input(
-            "sandbox-port-owner",
-            dir.path().join("standalone"),
-        )
-        .with_runtime_policy(tenant_sandbox_process_policy())
-        .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(process_port)),
-    )
-    .await
-    .expect("standalone services build"); // safety: test-only standalone fixture setup.
-    let runtime_surfaces = services
-        .local_runtime_for_test()
-        .expect("standalone runtime substrate"); // safety: test-only service fixture invariant.
-    let host_runtime = services.host_runtime.as_ref();
-    let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
-    let estimate = ResourceEstimate::default();
-    let input = serde_json::json!({"command": "echo composed sandbox", "timeout": 9});
-    let context = shell_execution_context("sandbox-port-owner", "sandbox-port-thread");
-    disable_global_auto_approve(runtime_surfaces, &context).await;
-
-    let blocked = host_runtime
-        .invoke_capability((
-            context.clone(),
-            capability_id.clone(),
-            estimate.clone(),
-            input.clone(),
-        ))
-        .await
-        .expect("shell invocation returns approval gate");
-    let RuntimeCapabilityOutcome::ApprovalRequired(gate) = blocked else {
-        panic!("expected approval gate, got {blocked:?}");
-    };
-    approve_shell_dispatch(runtime_surfaces, &context, &gate).await;
-    let resumed = host_runtime
-        .resume_capability((
-            context,
-            gate.approval_request_id,
-            capability_id,
-            estimate,
-            input,
-        ))
-        .await
-        .expect("approved shell invocation resumes");
-    let RuntimeCapabilityOutcome::Completed(completed) = resumed else {
-        panic!("expected completed shell resume, got {resumed:?}");
-    };
-
-    assert_eq!(completed.output["sandboxed"], serde_json::json!(true));
-    assert_eq!(
-        completed.output["output"],
-        serde_json::json!("sandbox port: echo composed sandbox")
-    );
-    let requests = transport.requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].command, "echo composed sandbox");
-    assert_eq!(requests[0].timeout_secs, Some(9));
 }
 
 #[tokio::test]
@@ -736,34 +666,6 @@ async fn standalone_yolo_explicit_ask_each_time_still_requires_approval_gate() {
     );
 }
 
-#[derive(Debug, Default)]
-struct RecordingSandboxTransport {
-    requests: Mutex<Vec<ironclaw_host_api::process::CommandExecutionRequest>>,
-}
-
-#[async_trait::async_trait]
-impl ironclaw_host_api::process::SandboxCommandTransport for RecordingSandboxTransport {
-    async fn run_command(
-        &self,
-        request: ironclaw_host_api::process::CommandExecutionRequest,
-    ) -> Result<
-        ironclaw_host_api::process::CommandExecutionOutput,
-        ironclaw_host_api::process::RuntimeProcessError,
-    > {
-        let command = request.command.clone();
-        self.requests.lock().unwrap().push(request); // safety: test transport records requests under #[cfg(test)].
-        Ok(ironclaw_host_api::process::CommandExecutionOutput {
-            output: format!("sandbox port: {command}"),
-            saved_output: None,
-            exit_code: 0,
-            // The injected transport acts as the sandbox, so the output is
-            // sandboxed from the host process's perspective.
-            sandboxed: true,
-            duration: Duration::from_millis(5),
-        })
-    }
-}
-
 #[tokio::test]
 async fn standalone_denied_shell_approval_does_not_issue_resume_lease() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -965,12 +867,6 @@ fn echo_dispatch_lease_approval() -> LeaseApproval {
         expires_at: None,
         max_invocations: None,
     })
-}
-
-fn tenant_sandbox_process_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
-    let mut policy = local_host_policy();
-    policy.process_backend = ironclaw_host_api::runtime_policy::ProcessBackendKind::TenantSandbox;
-    policy
 }
 
 fn standalone_minimal_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {

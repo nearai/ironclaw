@@ -253,7 +253,7 @@ pub(super) struct ProductionComponentTypes {
     pub(super) runtime_http_egress: Option<ProductionComponentType>,
     pub(super) runtime_http_egress_verified: bool,
     pub(super) runtime_process_port: ProductionComponentType,
-    pub(super) tenant_sandbox_process_port: Option<ProductionComponentType>,
+    pub(super) user_sandbox_process_port: Option<ProductionComponentType>,
     pub(super) wasm_credential_provider: Option<ProductionComponentType>,
     pub(super) wasm_credential_provider_verified: bool,
     pub(super) wasm_runtime_credential_provider_captured: bool,

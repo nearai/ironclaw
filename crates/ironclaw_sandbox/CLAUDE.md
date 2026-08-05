@@ -13,9 +13,11 @@ no longer declares any of the three.
 
 ## Wiring status — read before assuming this is dead code
 
-**Three** production call paths cross this crate today, and none of them is
-execution. Only the first is plan validation — do not delete the other two as
-dead code on the strength of a "plan validation only" reading:
+Production process execution now crosses this crate when either explicit
+sandbox profile is selected. The local profile constructs the Docker transport;
+the Railway preview profile constructs the Railway transport. Every other
+profile is rejected if given a sandbox binding, and both sandbox profiles fail
+closed without one. Existing non-execution paths remain:
 
 - `ironclaw_host_runtime::production::host_runtime_spawn_input_for_capability`
   parses and validates `SandboxProcessPlan` → `ValidatedSandboxProcessPlan` on
@@ -28,11 +30,9 @@ dead code on the strength of a "plan validation only" reading:
   the scoped saved-output directory — a production path through this crate's
   scope-key digest.
 
-There is still **no production execution backend** for
-`system.process_sandbox.run`: the Docker/CA machinery and the script lane have
-no production constructor (`with_script_runtime` and
-`RebornScopedSandboxCommandTransport::new` are called only from tests). The
-`#[allow(dead_code)] // consumed by W6` markers are accurate.
+`system.process_sandbox.run` remains a separate plan-driven capability and is
+not newly wired by this slice. The production path here is `builtin.shell`
+through `SandboxCommandTransport`; the script-runtime lane remains separate.
 
 ## Ownership
 

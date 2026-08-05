@@ -34,7 +34,7 @@ The counts in each section header are checked-in facts, not estimates. Update th
 | Tier | Location | What is real | What is faked | Cost |
 |---|---|---|---|---|
 | **Group scenarios** (§3) | `tests/integration/group_*/scenario_*.rs` | whole Reborn turn, shared runtime + shared stores across several threads | the model, at the vendor-SDK seam | fast, offline, no setup |
-| **Flat integration** (§4) | `tests/integration/*.rs`, `tests/integration/auth/*.rs` | whole Reborn turn, one thread | the model | fast, offline |
+| **Flat integration** (§4) | `tests/integration/*.rs`, `tests/integration/auth/*.rs` | whole Reborn turn, one thread; one dedicated sandbox test also uses a real local Docker worker | the model | usually fast/offline; sandbox worker test runs in its Docker CI lane |
 | **Binary / parity / QA-trace** (§5) | `tests/*.rs` | composed runtime or shipping binary; recorded real-LLM traces | model responses replayed from committed traces | medium |
 | **Python E2E** (§6) | `tests/e2e/scenarios/test_*.py` | current Reborn scenarios use real `ironclaw serve`, HTTP, and Playwright; retained legacy-fixture scenarios are pending migration | LLM (mock or recorded), external SaaS (Emulate/fakes) | slow |
 
@@ -54,7 +54,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Memory & workspace | 5 | 2 | — | ✓ |
 | Skills | 1 | 1 | — | ✓ |
 | Multi-user / scope isolation | 5 | 2 | 9 | ✓ |
-| Tools & tool dispatch | — | 10 | ✓ | ✓ |
+| Tools & tool dispatch | — | 11 | ✓ | ✓ |
 | Turn lifecycle (cancel/steer/retry/restart) | — | 8 | ✓ | ✓ |
 | WebUI surfaces & APIs | 2 | 2 | — | ✓ (largest) |
 | Durability & restart | 4 | 5 | ✓ | ✓ |
@@ -62,7 +62,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **51** group scenarios · **54** flat integration bins (48 in
+Totals: **51** group scenarios · **55** flat integration bins (49 in
 `tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
 **102** Python scenario files (**867** test functions).
 
@@ -180,6 +180,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 |---|---|
 | An HTTP tool call reaches the real egress boundary and the result reaches the model | `tool_call.rs`, `http_matcher.rs` |
 | Shell commands dispatch through the real path without spawning an OS process | `process_port.rs` |
+| A sandbox-profile shell turn executes as an unprivileged user in a real Docker worker and keeps its workspace across calls | `reborn_sandbox_shell_turn.rs` |
 | MCP tools work over a real loopback HTTP MCP server | `mcp.rs` |
 | User-registered hosted MCP servers register, authenticate, restore, and invoke | `hosted_mcp_registration.rs` |
 | Web search/fetch runs the real Exa MCP handshake | `web_access.rs` |
