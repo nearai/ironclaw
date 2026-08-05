@@ -18,8 +18,10 @@ use super::*;
 struct FakeRailwayCli {
     invocations: Mutex<Vec<RailwayCliInvocation>>,
     checkpoints: Mutex<BTreeSet<String>>,
+    live_sandboxes: Mutex<BTreeSet<String>>,
     next_sandbox: AtomicUsize,
     expired_liveness_checks: AtomicUsize,
+    failed_liveness_lists: AtomicUsize,
     failed_worker_execs: AtomicUsize,
     malformed_checkpoint_lists: AtomicUsize,
     next_worker_delay_ms: AtomicU64,
@@ -32,8 +34,10 @@ impl FakeRailwayCli {
         Self {
             invocations: Mutex::new(Vec::new()),
             checkpoints: Mutex::new(BTreeSet::new()),
+            live_sandboxes: Mutex::new(BTreeSet::new()),
             next_sandbox: AtomicUsize::new(1),
             expired_liveness_checks: AtomicUsize::new(0),
+            failed_liveness_lists: AtomicUsize::new(0),
             failed_worker_execs: AtomicUsize::new(0),
             malformed_checkpoint_lists: AtomicUsize::new(0),
             next_worker_delay_ms: AtomicU64::new(0),
@@ -55,6 +59,10 @@ impl FakeRailwayCli {
 
     fn expire_next_liveness_check(&self) {
         self.expired_liveness_checks.store(1, Ordering::SeqCst);
+    }
+
+    fn fail_next_liveness_list(&self) {
+        self.failed_liveness_lists.store(1, Ordering::SeqCst);
     }
 
     fn fail_next_worker_exec(&self) {
@@ -94,6 +102,30 @@ impl RailwayCli for FakeRailwayCli {
         self.invocations.lock().await.push(invocation.clone());
         if invocation
             .args
+            .starts_with(&["sandbox".into(), "list".into()])
+        {
+            if self.failed_liveness_lists.swap(0, Ordering::SeqCst) > 0 {
+                return Err(RuntimeProcessError::ExecutionFailed(
+                    "fake Railway authentication failed".into(),
+                ));
+            }
+            if self.expired_liveness_checks.swap(0, Ordering::SeqCst) > 0 {
+                self.live_sandboxes.lock().await.clear();
+            }
+            let sandboxes = self.live_sandboxes.lock().await;
+            return Ok(RailwayCliOutput {
+                stdout: serde_json::Value::Array(
+                    sandboxes
+                        .iter()
+                        .map(|id| serde_json::json!({ "id": id }))
+                        .collect(),
+                )
+                .to_string(),
+                stderr: String::new(),
+            });
+        }
+        if invocation
+            .args
             .starts_with(&["sandbox".into(), "checkpoint".into(), "list".into()])
         {
             if self.malformed_checkpoint_lists.swap(0, Ordering::SeqCst) > 0 {
@@ -119,20 +151,15 @@ impl RailwayCli for FakeRailwayCli {
         {
             return Err(RuntimeProcessError::Timeout(timeout));
         }
-        if invocation.args.iter().any(|arg| arg == "info")
-            && self.expired_liveness_checks.swap(0, Ordering::SeqCst) > 0
-        {
-            return Err(RuntimeProcessError::ExecutionFailed(
-                "fake sandbox expired".into(),
-            ));
-        }
         if invocation
             .args
             .starts_with(&["sandbox".into(), "create".into()])
         {
             let number = self.next_sandbox.fetch_add(1, Ordering::SeqCst);
+            let sandbox_id = format!("sandbox-{number}");
+            self.live_sandboxes.lock().await.insert(sandbox_id.clone());
             return Ok(RailwayCliOutput {
-                stdout: format!(r#"{{"id":"sandbox-{number}"}}"#),
+                stdout: serde_json::json!({ "id": sandbox_id }).to_string(),
                 stderr: String::new(),
             });
         }
@@ -168,6 +195,14 @@ impl RailwayCli for FakeRailwayCli {
                 stdout: format!("command output\n{EXIT_SENTINEL}0\n"),
                 stderr: String::new(),
             });
+        }
+        if invocation
+            .args
+            .starts_with(&["sandbox".into(), "destroy".into()])
+            && let Some(index) = invocation.args.iter().position(|arg| arg == "--id")
+            && let Some(id) = invocation.args.get(index + 1)
+        {
+            self.live_sandboxes.lock().await.remove(id);
         }
         Ok(RailwayCliOutput {
             stdout: String::new(),
@@ -215,7 +250,6 @@ async fn provisions_once_per_user_and_runs_ephemeral_workers_per_command() {
     second.unwrap();
     let invocations = cli.invocations().await;
     assert_eq!(count_creates(&invocations), 1);
-    assert_eq!(count_worker_launches(&invocations), 0);
     let model_runs = model_container_runs(&invocations);
     assert_eq!(model_runs.len(), 2);
     for run in model_runs {
@@ -225,7 +259,9 @@ async fn provisions_once_per_user_and_runs_ephemeral_workers_per_command() {
                 .any(|args| args == ["docker", "run", "--rm"])
         );
         assert!(!run.args.iter().any(|arg| arg == "-d"));
+        assert!(!run.args.iter().any(|arg| arg == "--detach"));
         assert!(!run.args.iter().any(|arg| arg == "--restart"));
+        assert!(!run.args.iter().any(|arg| arg == "--name"));
         assert!(run.args.iter().any(|arg| {
             arg.starts_with("type=bind,src=/workspace/ironclaw-users/")
                 && arg.ends_with(",dst=/workspace")
@@ -382,6 +418,24 @@ async fn expired_sandbox_id_reprovisions_from_the_last_checkpoint() {
             .windows(2)
             .any(|pair| pair[0] == "--checkpoint" && pair[1].ends_with("-checkpoint"))
     }));
+}
+
+#[tokio::test]
+async fn liveness_provider_failure_is_propagated_without_reprovisioning() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
+    transport
+        .run_command(request("tenant", "user", "true"))
+        .await
+        .unwrap();
+    cli.fail_next_liveness_list();
+
+    assert!(matches!(
+        transport.run_command(request("tenant", "user", "true")).await,
+        Err(RuntimeProcessError::ExecutionFailed(message))
+            if message.contains("authentication failed")
+    ));
+    assert_eq!(count_creates(&cli.invocations().await), 1);
 }
 
 #[tokio::test]
@@ -617,6 +671,20 @@ fn checkpoint_listing_is_structured_and_fail_closed() {
 }
 
 #[test]
+fn sandbox_listing_is_structured_and_fail_closed() {
+    assert!(sandbox_exists(r#"[{"id":"sandbox-1"}]"#, "sandbox-1").unwrap());
+    assert!(
+        sandbox_exists(
+            r#"{"sandboxes":[{"sandbox":{"id":"sandbox-1"}}]}"#,
+            "sandbox-1"
+        )
+        .unwrap()
+    );
+    assert!(!sandbox_exists(r#"[{"id":"sandbox-2"}]"#, "sandbox-1").unwrap());
+    assert!(sandbox_exists("truncated sandbox response", "sandbox-1").is_err());
+}
+
+#[test]
 fn railway_exec_exit_124_is_a_timeout_but_other_operations_are_provider_failures() {
     let environment = BTreeMap::new();
     assert!(matches!(
@@ -668,13 +736,6 @@ fn count_checkpoint_lists(calls: &[RailwayCliInvocation]) -> usize {
         .count()
 }
 
-fn count_worker_launches(calls: &[RailwayCliInvocation]) -> usize {
-    calls
-        .iter()
-        .filter(|call| worker_from_launch(call).is_some())
-        .count()
-}
-
 fn model_container_runs(calls: &[RailwayCliInvocation]) -> Vec<&RailwayCliInvocation> {
     calls
         .iter()
@@ -688,11 +749,6 @@ fn host_workspace_from_run(call: &RailwayCliInvocation) -> Option<&str> {
         .find(|arg| arg.starts_with("type=bind,src=/workspace/ironclaw-users/"))
         .and_then(|mount| mount.strip_prefix("type=bind,src="))
         .and_then(|mount| mount.strip_suffix(",dst=/workspace"))
-}
-
-fn worker_from_launch(call: &RailwayCliInvocation) -> Option<&str> {
-    let index = call.args.iter().position(|arg| arg == "--name")?;
-    call.args.get(index + 1).map(String::as_str)
 }
 
 fn assert_pair(argv: &[String], flag: &str, value: &str) {

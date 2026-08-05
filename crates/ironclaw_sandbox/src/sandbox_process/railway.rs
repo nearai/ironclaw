@@ -23,7 +23,6 @@ use ironclaw_host_api::process::{
 
 use crate::sandbox_process::RebornSandboxUserKey;
 
-#[cfg(test)]
 use super::worker_spec::DOCKER_WORKER_USER as WORKER_USER;
 
 const DEFAULT_IDLE_TIMEOUT_MINUTES: u16 = 30;
@@ -41,7 +40,7 @@ const REMOTE_CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(120);
 // bounded, but large enough for the maximum tracked-user registry. Truncation
 // produces invalid JSON and therefore fails closed instead of treating an
 // existing durable checkpoint as absent.
-const CHECKPOINT_LIST_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
+const PROVIDER_LIST_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const MAX_TRACKED_USERS: usize = 4_096;
 const WORKSPACE_ROOT: &str = "/workspace";
 const RAILWAY_WORKSPACES_ROOT: &str = "/workspace/ironclaw-users";
@@ -191,7 +190,7 @@ impl RailwayPreviewSandboxTransport {
                 RailwayCliInvocation::new(
                     self.config.cli_path.clone(),
                     checkpoint_list_argv(&self.config),
-                    CHECKPOINT_LIST_OUTPUT_LIMIT,
+                    PROVIDER_LIST_OUTPUT_LIMIT,
                 ),
                 deadline,
             )
@@ -232,26 +231,18 @@ impl RailwayPreviewSandboxTransport {
         &self,
         sandbox_id: &str,
         deadline: Instant,
-        output_limit: usize,
-    ) -> bool {
-        self.execute_cli(
-            RailwayCliInvocation::new(
-                self.config.cli_path.clone(),
-                sandbox_exec_argv(
-                    &self.config,
-                    sandbox_id,
-                    match deadline_remaining(deadline) {
-                        Ok(remaining) => remaining,
-                        Err(_) => return false,
-                    },
-                    vec!["docker".into(), "info".into()],
+    ) -> Result<bool, RuntimeProcessError> {
+        let sandboxes = self
+            .execute_cli(
+                RailwayCliInvocation::new(
+                    self.config.cli_path.clone(),
+                    sandbox_list_argv(&self.config),
+                    PROVIDER_LIST_OUTPUT_LIMIT,
                 ),
-                output_limit,
-            ),
-            deadline,
-        )
-        .await
-        .is_ok()
+                deadline,
+            )
+            .await?;
+        sandbox_exists(&sandboxes.stdout, sandbox_id)
     }
 
     async fn checkpoint(
@@ -350,9 +341,7 @@ impl SandboxCommandTransport for RailwayPreviewSandboxTransport {
         // use of that worker serialize without blocking other tenant/users.
         let mut state = state.lock().await;
         if let Some(sandbox_id) = state.sandbox_id.as_deref()
-            && !self
-                .sandbox_is_live(sandbox_id, deadline, output_limit)
-                .await
+            && !self.sandbox_is_live(sandbox_id, deadline).await?
         {
             state.sandbox_id = None;
         }
@@ -459,6 +448,7 @@ struct RailwayCliInvocation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RailwayCliOperation {
     ListCheckpoints,
+    ListSandboxes,
     CreateSandbox,
     ExecuteSandboxCommand,
     CreateCheckpoint,
@@ -474,6 +464,7 @@ impl RailwayCliOperation {
             {
                 Self::ListCheckpoints
             }
+            [sandbox, list, ..] if sandbox == "sandbox" && list == "list" => Self::ListSandboxes,
             [sandbox, create, ..] if sandbox == "sandbox" && create == "create" => {
                 Self::CreateSandbox
             }
@@ -495,6 +486,7 @@ impl RailwayCliOperation {
     fn label(self) -> &'static str {
         match self {
             Self::ListCheckpoints => "list checkpoints",
+            Self::ListSandboxes => "list sandboxes",
             Self::CreateSandbox => "create sandbox",
             Self::ExecuteSandboxCommand => "execute sandbox command",
             Self::CreateCheckpoint => "create checkpoint",
@@ -548,13 +540,18 @@ impl PrivateRailwayCliHome {
             use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 
             let mut builder = std::fs::DirBuilder::new();
-            builder.mode(0o700).create(&path).map_err(|_| {
+            builder.mode(0o700).create(&path).map_err(|error| {
+                tracing::error!(
+                    ?error,
+                    "Railway CLI private state directory creation failed"
+                );
                 RuntimeProcessError::ExecutionFailed(
                     "Railway preview could not create private CLI state".to_string(),
                 )
             })?;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).map_err(
-                |_| {
+                |error| {
+                    tracing::error!(?error, "Railway CLI private state permission update failed");
                     let _ = std::fs::remove_dir_all(&path);
                     RuntimeProcessError::ExecutionFailed(
                         "Railway preview could not secure private CLI state".to_string(),
@@ -563,7 +560,11 @@ impl PrivateRailwayCliHome {
             )?;
         }
         #[cfg(not(unix))]
-        std::fs::create_dir(&path).map_err(|_| {
+        std::fs::create_dir(&path).map_err(|error| {
+            tracing::error!(
+                ?error,
+                "Railway CLI private state directory creation failed"
+            );
             RuntimeProcessError::ExecutionFailed(
                 "Railway preview could not create private CLI state".to_string(),
             )
@@ -728,6 +729,18 @@ fn checkpoint_list_argv(config: &RailwayPreviewSandboxConfig) -> Vec<String> {
     ]
 }
 
+fn sandbox_list_argv(config: &RailwayPreviewSandboxConfig) -> Vec<String> {
+    vec![
+        "sandbox".into(),
+        "list".into(),
+        "--json".into(),
+        "--project".into(),
+        config.project_id.clone(),
+        "--environment".into(),
+        config.environment_id.clone(),
+    ]
+}
+
 fn sandbox_create_argv(
     config: &RailwayPreviewSandboxConfig,
     checkpoint: Option<&str>,
@@ -810,7 +823,7 @@ fn workspace_bootstrap_argv(workspace: &str) -> Vec<String> {
     vec![
         "sh".into(),
         "-c".into(),
-        "mkdir -p \"$1\" && chown 1000:1000 \"$1\"".into(),
+        format!("mkdir -p \"$1\" && chown {WORKER_USER} \"$1\""),
         "ironclaw-railway-workspace-bootstrap".into(),
         workspace.into(),
     ]
@@ -965,6 +978,34 @@ fn checkpoint_exists(stdout: &str, checkpoint_name: &str) -> Result<bool, Runtim
             .or_else(|| checkpoint.get("name"))
             .and_then(serde_json::Value::as_str)
             .is_some_and(|name| name == checkpoint_name)
+    }))
+}
+
+fn sandbox_exists(stdout: &str, sandbox_id: &str) -> Result<bool, RuntimeProcessError> {
+    let value: serde_json::Value = serde_json::from_str(stdout).map_err(|_| {
+        RuntimeProcessError::ExecutionFailed(
+            "Railway preview sandbox listing returned an invalid response".into(),
+        )
+    })?;
+    let sandboxes = value
+        .as_array()
+        .or_else(|| value.get("sandboxes").and_then(serde_json::Value::as_array))
+        .ok_or_else(|| {
+            RuntimeProcessError::ExecutionFailed(
+                "Railway preview sandbox listing returned an invalid response".into(),
+            )
+        })?;
+    Ok(sandboxes.iter().any(|sandbox| {
+        sandbox
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                sandbox
+                    .get("sandbox")
+                    .and_then(|sandbox| sandbox.get("id"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .is_some_and(|id| id == sandbox_id)
     }))
 }
 

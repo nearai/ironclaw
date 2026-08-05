@@ -507,6 +507,8 @@ Supported profiles:
 - `local-dev-yolo`
 - `hosted-single-tenant`
 - `hosted-single-tenant-volume`
+- `hosted-single-tenant-volume-sandboxed` (preview; local Docker)
+- `hosted-single-tenant-volume-sandboxed-railway` (preview; Railway Sandboxes)
 - `production`
 - `migration-dry-run`
 
@@ -653,6 +655,8 @@ Supported values:
 - `local-dev-yolo`
 - `hosted-single-tenant`
 - `hosted-single-tenant-volume`
+- `hosted-single-tenant-volume-sandboxed` (preview; local Docker)
+- `hosted-single-tenant-volume-sandboxed-railway` (preview; Railway Sandboxes)
 - `production`
 - `migration-dry-run`
 

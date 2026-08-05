@@ -8,6 +8,7 @@
 pub(super) const DOCKER_WORKER_USER: &str = "1000:1000";
 pub(super) const DOCKER_WORKER_PIDS_LIMIT: i64 = 1024;
 pub(super) const DOCKER_WORKER_NANO_CPUS: i64 = 1_000_000_000;
+pub(super) const DOCKER_WORKER_CPUS: f64 = DOCKER_WORKER_NANO_CPUS as f64 / 1_000_000_000_f64;
 pub(super) const DOCKER_WORKER_TMPFS: &str = "rw,noexec,nosuid,size=64m";
 pub(super) const DOCKER_WORKER_LOG_DRIVER: &str = "json-file";
 pub(super) const DOCKER_WORKER_LOG_MAX_SIZE: &str = "1m";
@@ -82,13 +83,14 @@ impl DockerWorkerSecuritySpec {
         }
         args.push("--read-only".to_string());
         args.extend(["--user".to_string(), self.user()]);
-        args.extend(["--cap-drop".to_string(), "ALL".to_string()]);
-        args.extend([
-            "--security-opt".to_string(),
-            "no-new-privileges:true".to_string(),
-        ]);
+        for capability in self.cap_drop() {
+            args.extend(["--cap-drop".to_string(), capability]);
+        }
+        for option in self.security_options() {
+            args.extend(["--security-opt".to_string(), option]);
+        }
         args.extend(["--pids-limit".to_string(), self.pids_limit().to_string()]);
-        args.extend(["--cpus".to_string(), "1.0".to_string()]);
+        args.extend(["--cpus".to_string(), format!("{DOCKER_WORKER_CPUS:.1}")]);
         args.extend([
             "--tmpfs".to_string(),
             format!("/tmp:{}", self.tmpfs_options()),
@@ -134,5 +136,6 @@ mod tests {
                 "max-file=1",
             ]
         );
+        assert_eq!(DOCKER_WORKER_CPUS, 1.0);
     }
 }

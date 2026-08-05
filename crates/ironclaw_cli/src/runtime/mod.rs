@@ -2721,14 +2721,28 @@ regex_activation_enabled = false
     #[test]
     fn railway_sandbox_configuration_requires_exactly_one_token() {
         let _lock = super::test_env::lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
         let _project = EnvGuard::set("IRONCLAW_REBORN_RAILWAY_PROJECT_ID", "project-test");
         let _environment =
             EnvGuard::set("IRONCLAW_REBORN_RAILWAY_ENVIRONMENT_ID", "environment-test");
         let _project_token = EnvGuard::set("RAILWAY_TOKEN", "project-token");
         let _api_token = EnvGuard::set("RAILWAY_API_TOKEN", "api-token");
 
-        let error = super::railway_preview_config_from_env()
-            .expect_err("ambiguous Railway auth must fail closed");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            Some("hosted-single-tenant-volume-sandboxed-railway".into()),
+        )
+        .expect("boot config");
+
+        let error = match build_runtime_input(&config, RuntimeInputCaller::Run) {
+            Ok(_) => panic!("ambiguous Railway auth must fail startup closed"),
+            Err(error) => error,
+        };
         assert!(error.to_string().contains("exactly one"));
         assert!(!error.to_string().contains("project-token"));
         assert!(!error.to_string().contains("api-token"));
