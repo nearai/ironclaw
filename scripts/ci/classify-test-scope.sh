@@ -251,6 +251,26 @@ normalize_crate_path() {
       ;;
   esac
 
+  # A direct child file of a FAMILY directory (`crates/app/AGENTS.md`,
+  # `crates/kernel/AGENTS.md`, ...) is attributable but crate-less, exactly like
+  # a file sitting directly in `crates/` — the family dirs exist since WS7 and
+  # each carries its own guidance file. Recognized structurally: the parent
+  # directory is a prefix of at least one discovered crate dir, and the path
+  # has no further directory below it. Falls through to the same buckets as
+  # `crates/AGENTS.md` (code-adjacent, legacy suite) — conservative, never
+  # silent.
+  case "${tail}" in
+    */*/*) ;;
+    */*)
+      local family_seg="crates/${tail%%/*}/"
+      case "${crate_dirs}" in
+        *"${family_seg}"*)
+          return 0
+          ;;
+      esac
+      ;;
+  esac
+
   # Default arm: a path under crates/ that resolves to no crate, by tree or by
   # convention. Historically this silently fell through to "legacy tests only",
   # which is how a re-shaped crate tree drops the Reborn suite. Refuse instead.

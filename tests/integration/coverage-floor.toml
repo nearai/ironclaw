@@ -291,7 +291,7 @@ name = "ironclaw_extension_host"
 # entry did.
 #
 # Two units are in play and an earlier draft of this comment conflated them, so
-# both are stated. SOURCE lines: `crates/ironclaw_extension_host/src` fell
+# both are stated. SOURCE lines: `crates/extensions/ironclaw_extension_host/src` fell
 # 57,464 -> 47,794 across 92 -> 75 files (-9,670; `git diff --stat` over that
 # path reports 9,683 deletions / 13 insertions), and the new crate ships 9,979
 # across 19 files — the +309 is its `lib.rs`, `ironhub/mod.rs`, and module

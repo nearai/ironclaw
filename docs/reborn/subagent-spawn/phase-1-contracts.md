@@ -3,7 +3,7 @@
 **Status:** Implementation-ready
 **Date:** 2026-05-19
 **Parent:** [`README.md`](./README.md) (overarching design)
-**Scope:** `crates/ironclaw_turns`, `crates/ironclaw_agent_loop`, `crates/ironclaw_turn_runner`
+**Scope:** `crates/kernel/ironclaw_turns`, `crates/loop/ironclaw_agent_loop`, `crates/loop/ironclaw_turn_runner`
 
 > **Status: partially superseded (2026-07).** The contracts below (lineage fields,
 > `CapabilityOutcome`/gate-kind variants, `prepare_turn`) are partially live in
@@ -15,7 +15,7 @@
 > through §3.2/§3.3/§3.6** (direction files, the flavor table, and its tests —
 > the same scope §3's own intro note flags), which is historical: v1's two
 > flavors (`general`, `researcher`) shipped as four (`General`, `Explorer`,
-> `Coder`, `Planner`, `crates/ironclaw_turn_runner/src/subagent/flavors.rs`) —
+> `Coder`, `Planner`, `crates/loop/ironclaw_turn_runner/src/subagent/flavors.rs`) —
 > `thread-harness-design.md` §10 is canonical for the current flavor set and
 > naming.
 >
@@ -115,7 +115,7 @@ production.** Can be built in parallel with Phase 1 (no shared files).
 
 ### P0.1 — The gap this closes
 
-`block_run()` (`crates/ironclaw_turns/src/memory.rs:688-705`) only:
+`block_run()` (`crates/kernel/ironclaw_turns/src/memory.rs:688-705`) only:
 1. Updates the run's `TurnStatus` to `BlockedApproval` / `BlockedAuth` / `BlockedResource`.
 2. Pushes a `TurnLifecycleEvent { kind: Blocked, … }` to the turn event buffer
    scoped to `TurnScope`.
@@ -147,7 +147,7 @@ restart-safe; idempotent. No `block_run()` hook required.
 ### P0.3 — Contracts to add
 
 - **Neutral read-model sink** — define a Reborn-neutral projection target in
-  `crates/ironclaw_event_projections/` (for example
+  `crates/events/ironclaw_event_projections/` (for example
   `PendingGateProjectionSink`) with `upsert_pending_gate` /
   `remove_pending_gate` methods over neutral DTOs. The existing root
   `src/gate/pending.rs` store is adapted to that sink only from the
@@ -159,7 +159,7 @@ restart-safe; idempotent. No `block_run()` hook required.
   are metadata only; no raw prompts, tool input, secret material, host paths, or
   backend errors may enter the event. If a block event lacks this metadata, the
   projection fails closed for that row and emits a redacted projection error.
-- **Projection consumer** — lives in `crates/ironclaw_event_projections/`
+- **Projection consumer** — lives in `crates/events/ironclaw_event_projections/`
   (the Reborn read-model boundary). Consumes `TurnLifecycleEvent`. Per event:
   - `kind = Blocked` with `status` ∈ {`BlockedApproval`, `BlockedAuth`,
     `BlockedResource`, `BlockedDependentRun` (new — from P1.A)} →
@@ -181,7 +181,7 @@ restart-safe; idempotent. No `block_run()` hook required.
 Pseudo code (Rust-shaped):
 
 ```rust
-// crates/ironclaw_event_projections/src/pending_gate_projection.rs
+// crates/events/ironclaw_event_projections/src/pending_gate_projection.rs
 #[async_trait]
 pub trait PendingGateProjectionSink: Send + Sync {
     async fn upsert_pending_gate(&self, row: PendingGateProjectionRow) -> Result<(), ProjectionError>;
@@ -254,7 +254,7 @@ Land P0 with the writer surface narrowed to the projection consumer only.
 
 ### P0.7 — Owner
 
-Lives in `crates/ironclaw_event_projections/` (new module
+Lives in `crates/events/ironclaw_event_projections/` (new module
 `pending_gate_projection.rs`). Reader surface remains in `/src/gate/pending.rs`.
 
 ---
@@ -269,16 +269,16 @@ durable lineage fields on `TurnRunRecord`, and a `children_of` store query.
 
 | File | Change |
 |---|---|
-| `crates/ironclaw_turns/src/run_profile/host.rs` | + `CapabilityOutcome::{SpawnedChildRun, AwaitDependentRun}`; + `LoopGateKind::AwaitDependentRun`; update `CapabilityOutcome::is_suspension` |
-| `crates/ironclaw_turns/src/status.rs` | + `TurnStatus::BlockedDependentRun`; + `BlockedReason::DependentRun`; update `is_terminal`, `keeps_active_lock` (no behavior change, but re-verify); update `BlockedReason::status` / `gate_ref` |
-| `crates/ironclaw_turns/src/loop_exit.rs` | + `LoopBlockedKind::AwaitDependentRun`; update `LoopBlockedKind::to_blocked_reason` |
-| `crates/ironclaw_turns/src/request.rs` | + `requested_run_id`, `parent_run_id`, `subagent_depth`, `spawn_tree_root_run_id` on `SubmitTurnRequest` (all `#[serde(default)]`) |
-| `crates/ironclaw_turns/src/store.rs` | + `parent_run_id`, `subagent_depth`, `spawn_tree_root_run_id` on `TurnRunRecord`; + scoped `children_of`, scoped `get_run_record`, `reserve_tree_descendants`, `release_tree_descendants` on `TurnStateStore` trait |
-| `crates/ironclaw_turns/src/coordinator.rs` | + `prepare_turn(scope) -> TurnRunId` on `TurnCoordinator` trait + `DefaultTurnCoordinator` impl; + optional `TurnEventSink` on `DefaultTurnCoordinator`; publish submit/resume/cancel lifecycle events best-effort; `submit_turn` must honour `requested_run_id` (bind instead of mint) |
-| `crates/ironclaw_turns/src/memory.rs` | + `parent_run_id`/`subagent_depth`/`spawn_tree_root_run_id` on `RunRecord`; thread through `persistence_record`; impl scoped `children_of`, scoped `get_run_record`, `reserve_tree_descendants`, `release_tree_descendants`; honour `requested_run_id` in `submit_turn`; update blocked-status `match` arms (resume + cancel) |
-| `crates/ironclaw_turns/src/run_profile/milestones.rs` | no code change — `LoopHostMilestoneKind::GateBlocked` carries `LoopGateKind` opaquely; verify it still compiles |
-| `crates/ironclaw_turns/src/db.rs` | no schema change — `TurnRunRecord` is stored as a JSON payload; verify the round-trip test still passes |
-| `crates/ironclaw_turns/tests/…` | new unit + contract tests (§1.9) |
+| `crates/kernel/ironclaw_turns/src/run_profile/host.rs` | + `CapabilityOutcome::{SpawnedChildRun, AwaitDependentRun}`; + `LoopGateKind::AwaitDependentRun`; update `CapabilityOutcome::is_suspension` |
+| `crates/kernel/ironclaw_turns/src/status.rs` | + `TurnStatus::BlockedDependentRun`; + `BlockedReason::DependentRun`; update `is_terminal`, `keeps_active_lock` (no behavior change, but re-verify); update `BlockedReason::status` / `gate_ref` |
+| `crates/kernel/ironclaw_turns/src/loop_exit.rs` | + `LoopBlockedKind::AwaitDependentRun`; update `LoopBlockedKind::to_blocked_reason` |
+| `crates/kernel/ironclaw_turns/src/request.rs` | + `requested_run_id`, `parent_run_id`, `subagent_depth`, `spawn_tree_root_run_id` on `SubmitTurnRequest` (all `#[serde(default)]`) |
+| `crates/kernel/ironclaw_turns/src/store.rs` | + `parent_run_id`, `subagent_depth`, `spawn_tree_root_run_id` on `TurnRunRecord`; + scoped `children_of`, scoped `get_run_record`, `reserve_tree_descendants`, `release_tree_descendants` on `TurnStateStore` trait |
+| `crates/kernel/ironclaw_turns/src/coordinator.rs` | + `prepare_turn(scope) -> TurnRunId` on `TurnCoordinator` trait + `DefaultTurnCoordinator` impl; + optional `TurnEventSink` on `DefaultTurnCoordinator`; publish submit/resume/cancel lifecycle events best-effort; `submit_turn` must honour `requested_run_id` (bind instead of mint) |
+| `crates/kernel/ironclaw_turns/src/memory.rs` | + `parent_run_id`/`subagent_depth`/`spawn_tree_root_run_id` on `RunRecord`; thread through `persistence_record`; impl scoped `children_of`, scoped `get_run_record`, `reserve_tree_descendants`, `release_tree_descendants`; honour `requested_run_id` in `submit_turn`; update blocked-status `match` arms (resume + cancel) |
+| `crates/kernel/ironclaw_turns/src/run_profile/milestones.rs` | no code change — `LoopHostMilestoneKind::GateBlocked` carries `LoopGateKind` opaquely; verify it still compiles |
+| `crates/kernel/ironclaw_turns/src/db.rs` | no schema change — `TurnRunRecord` is stored as a JSON payload; verify the round-trip test still passes |
+| `crates/kernel/ironclaw_turns/tests/…` | new unit + contract tests (§1.9) |
 
 `request.rs` (`SubmitTurnRequest`) **is** modified in Phase 1. Without request
 fields, P2.A has no caller-level way to carry lineage into the store, so
@@ -558,7 +558,7 @@ impl BlockedReason {
 `TurnStatus` is `Copy`; `BlockedDependentRun` is a unit variant so `Copy` holds.
 
 **Exhaustive `match` sites on `TurnStatus` to update** — grep
-`TurnStatus::Blocked` in `crates/ironclaw_turns/src`:
+`TurnStatus::Blocked` in `crates/kernel/ironclaw_turns/src`:
 
 1. **`memory.rs` `resume_turn_once`** (lines 1215–1218) — the resume-eligibility
    guard. **Must add `BlockedDependentRun`:**
@@ -1265,7 +1265,7 @@ coordinator operation; the store remains the durable source of truth.
 
 ### 1.9 Unit tests to add (P1.A)
 
-Place in the existing `crates/ironclaw_turns/tests/` integration tests and/or
+Place in the existing `crates/kernel/ironclaw_turns/tests/` integration tests and/or
 `#[cfg(test)] mod tests` blocks. Required:
 
 1. **`CapabilityOutcome::SpawnedChildRun` serde round-trip** — serialize and
@@ -1344,11 +1344,11 @@ maps for the new gate/result outcomes.
 
 | File | Change |
 |---|---|
-| `crates/ironclaw_agent_loop/src/families/subagent.rs` | **new** — `subagent` family factory, fingerprint, digest |
-| `crates/ironclaw_agent_loop/src/families/mod.rs` | declare `subagent` module + re-export `subagent::subagent()` and `SUBAGENT_FAMILY_DIGEST` |
-| `crates/ironclaw_agent_loop/src/family.rs` | + `LoopFamilyId::SUBAGENT` associated const |
-| `crates/ironclaw_agent_loop/src/strategies/gate.rs` | + `GateKind::AwaitDependentRun` |
-| `crates/ironclaw_agent_loop/src/strategies/mod.rs` | no change — `GateKind` already re-exported |
+| `crates/loop/ironclaw_agent_loop/src/families/subagent.rs` | **new** — `subagent` family factory, fingerprint, digest |
+| `crates/loop/ironclaw_agent_loop/src/families/mod.rs` | declare `subagent` module + re-export `subagent::subagent()` and `SUBAGENT_FAMILY_DIGEST` |
+| `crates/loop/ironclaw_agent_loop/src/family.rs` | + `LoopFamilyId::SUBAGENT` associated const |
+| `crates/loop/ironclaw_agent_loop/src/strategies/gate.rs` | + `GateKind::AwaitDependentRun` |
+| `crates/loop/ironclaw_agent_loop/src/strategies/mod.rs` | no change — `GateKind` already re-exported |
 
 > **[CORRECTION]** `families/mod.rs` today is *not* a module-directory hub — it
 > contains the `default()` family inline (the directory only holds `mod.rs` +
@@ -1675,7 +1675,7 @@ no runtime wiring (those are Phase 2/3).
 
 **Flavor naming below is historical (v1 proposal: `general`/`researcher`,
 §3.2/§3.3/§3.6).** The shipped set is four flavors — `General`, `Explorer`,
-`Coder`, `Planner` (`crates/ironclaw_turn_runner/src/subagent/flavors.rs`,
+`Coder`, `Planner` (`crates/loop/ironclaw_turn_runner/src/subagent/flavors.rs`,
 `.../directions/{general,explorer,coder,planner}.md`) — per
 `thread-harness-design.md` §10, which is canonical for flavor naming. The
 goal-store contract (§3.4) is unaffected by this and remains accurate as
@@ -1685,13 +1685,13 @@ written.
 
 | File | Purpose |
 |---|---|
-| `crates/ironclaw_turn_runner/src/directions/mod.rs` | `DirectionId` newtype + static `direction_prompt(DirectionId) -> &'static str` |
-| `crates/ironclaw_turn_runner/src/directions/general.md` | direction prompt for the `general` flavor |
-| `crates/ironclaw_turn_runner/src/directions/researcher.md` | direction prompt for the `researcher` flavor |
-| `crates/ironclaw_turn_runner/src/subagent/mod.rs` | module hub: re-exports flavor table + goal store |
-| `crates/ironclaw_turn_runner/src/subagent/flavors.rs` | static built-in subagent flavor table |
-| `crates/ironclaw_turn_runner/src/subagent/goal_store.rs` | `SubagentGoalStore` trait, DB-backed production implementation, bounded in-memory test implementation |
-| `crates/ironclaw_turn_runner/src/lib.rs` | + `pub mod directions;` + `pub mod subagent;` |
+| `crates/loop/ironclaw_turn_runner/src/directions/mod.rs` | `DirectionId` newtype + static `direction_prompt(DirectionId) -> &'static str` |
+| `crates/loop/ironclaw_turn_runner/src/directions/general.md` | direction prompt for the `general` flavor |
+| `crates/loop/ironclaw_turn_runner/src/directions/researcher.md` | direction prompt for the `researcher` flavor |
+| `crates/loop/ironclaw_turn_runner/src/subagent/mod.rs` | module hub: re-exports flavor table + goal store |
+| `crates/loop/ironclaw_turn_runner/src/subagent/flavors.rs` | static built-in subagent flavor table |
+| `crates/loop/ironclaw_turn_runner/src/subagent/goal_store.rs` | `SubagentGoalStore` trait, DB-backed production implementation, bounded in-memory test implementation |
+| `crates/loop/ironclaw_turn_runner/src/lib.rs` | + `pub mod directions;` + `pub mod subagent;` |
 
 > **[NOTE]** `ironclaw_turn_runner/src` is currently a *flat* directory of modules
 > plus two subdirectories (`loop_exit_applier/`, `turn_runner/`). `directions/`
@@ -2035,7 +2035,7 @@ by path: `ironclaw_turn_runner::subagent::flavors::lookup_flavor`,
 `ironclaw_turn_runner::directions::direction_prompt`.
 
 `thiserror` must be available to `ironclaw_turn_runner` for `SubagentGoalStoreError`.
-Check `crates/ironclaw_turn_runner/Cargo.toml` `[dependencies]` — it is **not**
+Check `crates/loop/ironclaw_turn_runner/Cargo.toml` `[dependencies]` — it is **not**
 currently listed (the crate uses `serde`, `tracing`, etc.). **Add
 `thiserror = "1"`** to `[dependencies]` as part of P1.C (every other crate in
 the workspace pins `thiserror = "1"` per `error.rs` convention).

@@ -17,8 +17,8 @@ model: opus
 > new files in a directory layout the build does not know about.
 >
 > **This command needs rewriting onto the `ironclaw_webui` streaming path** —
-> the Reborn projection/SSE frame served by `crates/ironclaw_webui`, with the
-> client side in `crates/ironclaw_webui/frontend/`, over the event-stream
+> the Reborn projection/SSE frame served by `crates/product/ironclaw_webui`, with the
+> client side in `crates/product/ironclaw_webui/frontend/`, over the event-stream
 > substrate (`ironclaw_event_log` → `ironclaw_event_projections` →
 > `ironclaw_event_streams`). That rewrite has not been done: the correct
 > Reborn procedure is **not** written down here, and this banner deliberately
@@ -72,7 +72,7 @@ If the event carries structured data beyond a simple string, add a serializable 
 
 ## Step 4: Add frontend handler
 
-**File**: ~~`crates/ironclaw_gateway/static/js/core/sse.js`~~ — **deleted; do not create.** The Reborn client lives in `crates/ironclaw_webui/frontend/`.
+**File**: ~~`crates/ironclaw_gateway/static/js/core/sse.js`~~ — **deleted; do not create.** The Reborn client lives in `crates/product/ironclaw_webui/frontend/`.
 
 In the `connectSSE()` function, add a new `eventSource.addEventListener()` for the snake_case event name. Parse the JSON data and call a handler function.
 
@@ -83,7 +83,7 @@ Create the handler function that updates the DOM. Put it in the split file that 
 
 ## Step 5: Add CSS if needed
 
-**File**: ~~`crates/ironclaw_gateway/static/styles/`~~ — **deleted; do not create.** Reborn styling lives with the SPA under `crates/ironclaw_webui/frontend/`.
+**File**: ~~`crates/ironclaw_gateway/static/styles/`~~ — **deleted; do not create.** Reborn styling lives with the SPA under `crates/product/ironclaw_webui/frontend/`.
 
 If the event needs custom UI (cards, badges, etc.), add styles. Follow the existing naming conventions (`.approval-card`, `.log-entry`, etc.).
 

@@ -1,6 +1,6 @@
 [workspace]
-members = [".", "crates/ironclaw_common", "crates/ironclaw_observability", "crates/ironclaw_host_api", "crates/ironclaw_host_ingress", "crates/ironclaw_libsql_runtime", "crates/ironclaw_filesystem", "crates/ironclaw_attachments", "crates/ironclaw_extractors", "crates/ironclaw_memory", "crates/extensions/packages/memory-native", "crates/extensions/packages/mem0", "crates/ironclaw_event_log", "crates/ironclaw_event_projections", "crates/ironclaw_event_streams", "crates/ironclaw_event_store", "crates/ironclaw_extension_registry", "crates/ironclaw_extension_host", "crates/ironclaw_extension_manager", "crates/ironclaw_processes", "crates/ironclaw_sandbox", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_wasm_limiter", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_runtime_policy", "crates/ironclaw_authorization", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_auth", "crates/ironclaw_trust", "crates/ironclaw_turns", "crates/ironclaw_loop_contracts", "crates/ironclaw_extension_contracts", "crates/ironclaw_product_contracts", "crates/ironclaw_agent_loop", "crates/ironclaw_threads", "crates/ironclaw_prompt_envelope", "crates/ironclaw_hooks", "crates/ironclaw_loop_host", "crates/ironclaw_turn_runner", "crates/ironclaw_config", "crates/ironclaw_operator", "crates/ironclaw_composition", "crates/ironclaw_identity", "crates/extensions/ironclaw_extension_support", "crates/ironclaw_first_party_extension_ports", "crates/ironclaw_cli", "crates/ironclaw_trace_commons", "crates/ironclaw_webui", "crates/ironclaw_openai_compat", "crates/ironclaw_conversations", "crates/ironclaw_assistant", "crates/extensions/packages/telegram", "crates/extensions/packages/slack", "crates/ironclaw_outbound", "crates/ironclaw_triggers", "crates/ironclaw_projects", "crates/ironclaw_architecture_tests", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_llm", "tools/ironclaw_stress"]
-default-members = ["crates/ironclaw_cli"]
+members = [".", "crates/contracts/ironclaw_common", "crates/substrates/ironclaw_observability", "crates/contracts/ironclaw_host_api", "crates/product/ironclaw_host_ingress", "crates/substrates/ironclaw_libsql_runtime", "crates/substrates/ironclaw_filesystem", "crates/domains/ironclaw_attachments", "crates/domains/ironclaw_extractors", "crates/domains/ironclaw_memory", "crates/extensions/packages/memory-native", "crates/extensions/packages/mem0", "crates/events/ironclaw_event_log", "crates/events/ironclaw_event_projections", "crates/events/ironclaw_event_streams", "crates/events/ironclaw_event_store", "crates/extensions/ironclaw_extension_registry", "crates/extensions/ironclaw_extension_host", "crates/extensions/ironclaw_extension_manager", "crates/kernel/ironclaw_processes", "crates/lanes/ironclaw_sandbox", "crates/lanes/ironclaw_mcp", "crates/ironclaw_wasm", "crates/lanes/ironclaw_wasm_limiter", "crates/kernel/ironclaw_capabilities", "crates/substrates/ironclaw_secrets", "crates/substrates/ironclaw_network", "crates/kernel/ironclaw_host_runtime", "crates/kernel/ironclaw_runtime_policy", "crates/kernel/ironclaw_authorization", "crates/kernel/ironclaw_approvals", "crates/kernel/ironclaw_resources", "crates/domains/ironclaw_auth", "crates/kernel/ironclaw_trust", "crates/kernel/ironclaw_turns", "crates/contracts/ironclaw_loop_contracts", "crates/contracts/ironclaw_extension_contracts", "crates/contracts/ironclaw_product_contracts", "crates/loop/ironclaw_agent_loop", "crates/domains/ironclaw_threads", "crates/contracts/ironclaw_prompt_envelope", "crates/loop/ironclaw_hooks", "crates/loop/ironclaw_loop_host", "crates/loop/ironclaw_turn_runner", "crates/app/ironclaw_config", "crates/product/ironclaw_operator", "crates/app/ironclaw_composition", "crates/domains/ironclaw_identity", "crates/extensions/ironclaw_extension_support", "crates/ironclaw_first_party_extension_ports", "crates/app/ironclaw_cli", "crates/domains/ironclaw_trace_commons", "crates/product/ironclaw_webui", "crates/product/ironclaw_openai_compat", "crates/domains/ironclaw_conversations", "crates/product/ironclaw_assistant", "crates/extensions/packages/telegram", "crates/extensions/packages/slack", "crates/domains/ironclaw_outbound", "crates/domains/ironclaw_triggers", "crates/ironclaw_projects", "crates/app/ironclaw_architecture_tests", "crates/substrates/ironclaw_safety", "crates/domains/ironclaw_skills", "crates/domains/ironclaw_llm", "tools/ironclaw_stress"]
+default-members = ["crates/app/ironclaw_cli"]
 exclude = [
     "crates/ironclaw_silk_decoder",
     # The root `fuzz/` package was deleted in WS8: it declared
@@ -8,7 +8,7 @@ exclude = [
     # `ironclaw::tools`, but the root package has had no lib target since the
     # v1 monolith was removed, so it could not resolve. `ironclaw_safety/fuzz`
     # is a separate, live fuzz package and stays.
-    "crates/ironclaw_safety/fuzz",
+    "crates/substrates/ironclaw_safety/fuzz",
 ]
 
 [workspace.package]
@@ -107,13 +107,13 @@ libsql = { version = "0.9", default-features = false, features = ["core", "repli
 # witness-gated (WS1.5). Declared explicitly rather than inherited through a
 # sibling dev-dep's feature unification, so the suite still compiles when run
 # alone.
-ironclaw_host_api = { path = "crates/ironclaw_host_api", version = "0.1.0", features = ["test-support"] }
-ironclaw_memory = { path = "crates/ironclaw_memory", version = "0.1.0" }
-ironclaw_host_ingress = { path = "crates/ironclaw_host_ingress", version = "0.1.0" }
-ironclaw_runtime_policy = { path = "crates/ironclaw_runtime_policy", version = "0.1.0" }
-ironclaw_common = { path = "crates/ironclaw_common" }
-ironclaw_safety = { path = "crates/ironclaw_safety" }
-ironclaw_trace_commons = { path = "crates/ironclaw_trace_commons", version = "0.1.0" }
+ironclaw_host_api = { path = "crates/contracts/ironclaw_host_api", version = "0.1.0", features = ["test-support"] }
+ironclaw_memory = { path = "crates/domains/ironclaw_memory", version = "0.1.0" }
+ironclaw_host_ingress = { path = "crates/product/ironclaw_host_ingress", version = "0.1.0" }
+ironclaw_runtime_policy = { path = "crates/kernel/ironclaw_runtime_policy", version = "0.1.0" }
+ironclaw_common = { path = "crates/contracts/ironclaw_common" }
+ironclaw_safety = { path = "crates/substrates/ironclaw_safety" }
+ironclaw_trace_commons = { path = "crates/domains/ironclaw_trace_commons", version = "0.1.0" }
 # The Reborn integration harness provisions Postgres testcontainers in every
 # feature lane (StorageMode::Postgres skips at runtime when unavailable), so
 # the pool deps are unconditional dev-dependencies (the `postgres` feature is
@@ -132,44 +132,44 @@ tempfile = "3"
 insta = { version = "1.46.3", features = ["yaml"] }
 # Pull the LLM crate's `testing` feature in only for tests so `StubLlm` and
 # fault-injection helpers don't ship in release binaries.
-ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0", features = ["test-support"] }
-ironclaw_agent_loop = { path = "crates/ironclaw_agent_loop", version = "0.1.0", features = ["test-support"] }
-ironclaw_approvals = { path = "crates/ironclaw_approvals", version = "0.1.0", features = ["test-support"] }
+ironclaw_llm = { path = "crates/domains/ironclaw_llm", version = "0.1.0", features = ["test-support"] }
+ironclaw_agent_loop = { path = "crates/loop/ironclaw_agent_loop", version = "0.1.0", features = ["test-support"] }
+ironclaw_approvals = { path = "crates/kernel/ironclaw_approvals", version = "0.1.0", features = ["test-support"] }
 # Pull the auth crate's `test-support` feature in only for tests so the
 # `test_support::conformance` OAuth-flow suite (used by the
 # `reborn_integration_oauth_connect` test) doesn't ship in release binaries.
-ironclaw_auth = { path = "crates/ironclaw_auth", version = "0.1.0", features = ["test-support"] }
+ironclaw_auth = { path = "crates/domains/ironclaw_auth", version = "0.1.0", features = ["test-support"] }
 # C-ATTACH: `InboundAttachment` for `submit_turn_with_image_attachment`.
-ironclaw_attachments = { path = "crates/ironclaw_attachments", version = "0.1.0" }
+ironclaw_attachments = { path = "crates/domains/ironclaw_attachments", version = "0.1.0" }
 # `test-support` enables the in-memory-backed capability-lease store constructor
 # for the integration-test harness (cfg(test) does not propagate into deps).
-ironclaw_authorization = { path = "crates/ironclaw_authorization", version = "0.1.0", features = ["test-support"] }
+ironclaw_authorization = { path = "crates/kernel/ironclaw_authorization", version = "0.1.0", features = ["test-support"] }
 # Integration harness builds a fresh in-memory `ReplayPayloadStore`
 # fallback for harnesses without shared approval parts (§5.3 Stage 2a-i).
-ironclaw_capabilities = { path = "crates/ironclaw_capabilities", version = "0.1.0" }
-ironclaw_extension_registry = { path = "crates/ironclaw_extension_registry", version = "0.1.0" }
+ironclaw_capabilities = { path = "crates/kernel/ironclaw_capabilities", version = "0.1.0" }
+ironclaw_extension_registry = { path = "crates/extensions/ironclaw_extension_registry", version = "0.1.0" }
 # Extension-runtime P2: the invented-vendor fixture factory the integration
 # harness registers (`NativeExtensionFactory`), plus scripted channel fakes.
-ironclaw_extension_host = { path = "crates/ironclaw_extension_host", version = "0.1.0", features = ["test-support"] }
+ironclaw_extension_host = { path = "crates/extensions/ironclaw_extension_host", version = "0.1.0", features = ["test-support"] }
 # WS2.4: the lifecycle service bundle the hosted-MCP registration integration
 # test drives moved to the manager with the product face it builds.
-ironclaw_extension_manager = { path = "crates/ironclaw_extension_manager", version = "0.1.0", features = ["test-support"] }
-ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0" }
-ironclaw_mcp = { path = "crates/ironclaw_mcp", version = "0.1.0" }
+ironclaw_extension_manager = { path = "crates/extensions/ironclaw_extension_manager", version = "0.1.0", features = ["test-support"] }
+ironclaw_filesystem = { path = "crates/substrates/ironclaw_filesystem", version = "0.1.0" }
+ironclaw_mcp = { path = "crates/lanes/ironclaw_mcp", version = "0.1.0" }
 ironclaw_extension_support = { path = "crates/extensions/ironclaw_extension_support", version = "0.1.0" }
 # W6-COLD-SPOTS: `CommunicationPreferenceRecord`/`CommunicationPreferenceKey`
 # for the outbound-store-durability reopen test.
-ironclaw_outbound = { path = "crates/ironclaw_outbound", version = "0.1.0", features = ["test-support"] }
+ironclaw_outbound = { path = "crates/domains/ironclaw_outbound", version = "0.1.0", features = ["test-support"] }
 # Recording hook doubles + `HookDispatcherBuilderFactory` builders for the
 # C-HOOKS / E-HOOK-INFRA int-tier coverage (tests/integration/support/hooks.rs).
-ironclaw_hooks = { path = "crates/ironclaw_hooks", version = "0.1.0" }
-ironclaw_host_runtime = { path = "crates/ironclaw_host_runtime", version = "0.1.0" }
-ironclaw_network = { path = "crates/ironclaw_network", version = "0.1.0" }
-ironclaw_processes = { path = "crates/ironclaw_processes", version = "0.1.0", features = ["test-support"] }
-ironclaw_resources = { path = "crates/ironclaw_resources", version = "0.1.0", features = ["test-support"] }
-ironclaw_secrets = { path = "crates/ironclaw_secrets", version = "0.1.0" }
-ironclaw_assistant = { path = "crates/ironclaw_assistant", version = "0.1.0", features = ["test-support"] }
-ironclaw_turn_runner = { path = "crates/ironclaw_turn_runner", version = "0.1.0", features = ["test-support"] }
+ironclaw_hooks = { path = "crates/loop/ironclaw_hooks", version = "0.1.0" }
+ironclaw_host_runtime = { path = "crates/kernel/ironclaw_host_runtime", version = "0.1.0" }
+ironclaw_network = { path = "crates/substrates/ironclaw_network", version = "0.1.0" }
+ironclaw_processes = { path = "crates/kernel/ironclaw_processes", version = "0.1.0", features = ["test-support"] }
+ironclaw_resources = { path = "crates/kernel/ironclaw_resources", version = "0.1.0", features = ["test-support"] }
+ironclaw_secrets = { path = "crates/substrates/ironclaw_secrets", version = "0.1.0" }
+ironclaw_assistant = { path = "crates/product/ironclaw_assistant", version = "0.1.0", features = ["test-support"] }
+ironclaw_turn_runner = { path = "crates/loop/ironclaw_turn_runner", version = "0.1.0", features = ["test-support"] }
 # `ironclaw_webui` + `ironclaw_identity` sit on the int-tier coverage
 # lane (identity_resolution_smoke / webui_v2_router_smoke); they compile into
 # every int-tier build, behaviorally inert for suites that never call them.
@@ -178,42 +178,42 @@ ironclaw_turn_runner = { path = "crates/ironclaw_turn_runner", version = "0.1.0"
 # composing them in int-tier tests. All 17 of those modules are recompiled
 # into every int-tier test binary — a real, one-time build-time cost for the
 # lane, behaviorally inert for suites that never reference Slack types.
-ironclaw_composition = { path = "crates/ironclaw_composition", version = "0.1.0", features = ["test-support"] }
-ironclaw_loop_host = { path = "crates/ironclaw_loop_host", features = ["test-support"] }
+ironclaw_composition = { path = "crates/app/ironclaw_composition", version = "0.1.0", features = ["test-support"] }
+ironclaw_loop_host = { path = "crates/loop/ironclaw_loop_host", features = ["test-support"] }
 # Direct dev-dep: composition deliberately does NOT re-export the bare
 # `webui_v2_router`/`WebUiV2State` (facade-only rule), and the router smoke
 # drives the bare router, not the `webui_v2_app` wrapper. The v2 route surface
 # merged into `ironclaw_webui` (as its public `webui_v2` module).
-ironclaw_webui = { path = "crates/ironclaw_webui", version = "0.1.0" }
+ironclaw_webui = { path = "crates/product/ironclaw_webui", version = "0.1.0" }
 # Direct dev-dep for the same reason as ironclaw_webui above: composition's
 # facade-only rule means it re-exports no SLACK_V2_ADAPTER_ID/SLACK_USER_ACTOR_KIND-style
 # constants; Slack pairing/actor-resolution int-tier tests need them directly.
 ironclaw_slack_extension = { path = "crates/extensions/packages/slack", version = "0.1.0" }
 ironclaw_telegram_extension = { path = "crates/extensions/packages/telegram", version = "0.1.0" }
-ironclaw_config = { path = "crates/ironclaw_config", version = "0.1.0" }
-ironclaw_openai_compat = { path = "crates/ironclaw_openai_compat", version = "0.1.0"}
-ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
+ironclaw_config = { path = "crates/app/ironclaw_config", version = "0.1.0" }
+ironclaw_openai_compat = { path = "crates/product/ironclaw_openai_compat", version = "0.1.0"}
+ironclaw_threads = { path = "crates/domains/ironclaw_threads", version = "0.1.0" }
 # `test-support` unlocks the shared in-memory process-journal-backed turn
 # runtime used by integration tests. cfg(test) does not propagate from an
 # integration-test binary into its deps, so the feature is explicit here.
-ironclaw_loop_contracts = { path = "crates/ironclaw_loop_contracts", version = "0.1.0" }
-ironclaw_extension_contracts = { path = "crates/ironclaw_extension_contracts", version = "0.1.0" }
-ironclaw_product_contracts = { path = "crates/ironclaw_product_contracts", version = "0.1.0" }
-ironclaw_turns = { path = "crates/ironclaw_turns", version = "0.1.0", features = ["test-support"] }
+ironclaw_loop_contracts = { path = "crates/contracts/ironclaw_loop_contracts", version = "0.1.0" }
+ironclaw_extension_contracts = { path = "crates/contracts/ironclaw_extension_contracts", version = "0.1.0" }
+ironclaw_product_contracts = { path = "crates/contracts/ironclaw_product_contracts", version = "0.1.0" }
+ironclaw_turns = { path = "crates/kernel/ironclaw_turns", version = "0.1.0", features = ["test-support"] }
 # `InMemoryDurableEventLog` for the W5-WEBUI-API-1 SSE scenario's test-local
 # `ProjectionStream` wiring (`build_webui_event_stream_for_test`).
-ironclaw_event_log = { path = "crates/ironclaw_event_log", version = "0.1.0" }
+ironclaw_event_log = { path = "crates/events/ironclaw_event_log", version = "0.1.0" }
 # Binary Reborn E2E recovery scenarios replay the milestone-backed durable log
 # through the production event projection service.
-ironclaw_event_projections = { path = "crates/ironclaw_event_projections", version = "0.1.0" }
+ironclaw_event_projections = { path = "crates/events/ironclaw_event_projections", version = "0.1.0" }
 # `test-support` unlocks `TrustedTriggerSubmitRequest::new_for_test` (E-TRIGGERED-SUBMIT
 # harness seam) — cfg(test) does not propagate from an integration-test binary into its deps.
-ironclaw_triggers = { path = "crates/ironclaw_triggers", version = "0.1.0", features = ["test-support"] }
+ironclaw_triggers = { path = "crates/domains/ironclaw_triggers", version = "0.1.0", features = ["test-support"] }
 # Trigger-conversation binding/session services for the E-TRIGGERED-SUBMIT harness seam —
 # mirrors the conversation-services type production's own local-dev build wires for the
 # trusted-trigger submit path (ironclaw_composition::runtime.rs).
-ironclaw_conversations = { path = "crates/ironclaw_conversations", version = "0.1.0" }
-ironclaw_trust = { path = "crates/ironclaw_trust", version = "0.1.0" }
+ironclaw_conversations = { path = "crates/domains/ironclaw_conversations", version = "0.1.0" }
+ironclaw_trust = { path = "crates/kernel/ironclaw_trust", version = "0.1.0" }
 ironclaw_wasm = { path = "crates/ironclaw_wasm", version = "0.1.0" }
 # `ironclaw_outbound/test-support` provides the in-memory-backed
 # `OutboundStateStore` the triggered-delivery outcome-seam int-tier

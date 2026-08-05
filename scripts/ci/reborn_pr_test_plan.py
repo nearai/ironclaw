@@ -120,7 +120,7 @@ CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 # Asset trees that live outside every crate root but are compiled *into* a
 # workspace crate through a relative `include_bytes!` / `include_str!` that
 # escapes its own crate (the §11.2.7 reach-ins inventoried by
-# `crates/ironclaw_architecture_tests/tests/reborn_cross_crate_include_scan.rs`).
+# `crates/app/ironclaw_architecture_tests/tests/reborn_cross_crate_include_scan.rs`).
 # Cargo's package directories cannot see them, so the `crates/` arm below
 # resolves no package and the planner used to fail closed on every PR that
 # touched a first-party extension package.

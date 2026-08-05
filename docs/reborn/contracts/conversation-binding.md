@@ -25,7 +25,7 @@
 >    spelling changed: the durable record keeps `thread_id`, deliberately, so a
 >    rollback can still read it. See `ironclaw_conversations::stored_refs`.
 >
-> `crates/ironclaw_architecture_tests/tests/reborn_conversations_threads_attachments.rs`
+> `crates/app/ironclaw_architecture_tests/tests/reborn_conversations_threads_attachments.rs`
 > pins 1 and 2 — the first rule by discovery, not enumeration.
 
 ---
@@ -63,7 +63,7 @@ Reply-target binding is separate from external ingress identity. This contract b
 
 ## 3. Implemented semantic slice
 
-`crates/ironclaw_conversations` provides the first contract slice:
+`crates/domains/ironclaw_conversations` provides the first contract slice:
 
 - adapter-scoped typed refs it declares: `AdapterKind`, `AdapterInstallationId`, `ExternalEventId`
   (the external actor/conversation pair — `ExternalActorRef`, `ExternalConversationRef` —
@@ -111,7 +111,7 @@ This is not the final durable transcript store. The conversation contract stores
 Current semantic coverage lives in:
 
 ```text
-crates/ironclaw_conversations/tests/inbound_contract.rs
+crates/domains/ironclaw_conversations/tests/inbound_contract.rs
 ```
 
 Run:

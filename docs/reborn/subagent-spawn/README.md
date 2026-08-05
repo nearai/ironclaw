@@ -5,9 +5,9 @@
 > **Current status (2026-08):** the worker-side control plane is `TurnRunScheduler` plus `RebornTurnRunExecutor`, co-located in `ironclaw_turn_runner`. `builtin.spawn_subagent` is currently removed from all shipped model-facing surfaces by the resolved `CapabilitySurfacePolicy` (`TEMP(disable-spawn-subagents)`). The completion-delivery/durability layer for background mode is designed in [`thread-harness-design.md`](./thread-harness-design.md) (canonical, supersedes the prior durability spec) — background mode ships staged per that doc's §7.
 **Date:** 2026-05-19
 **Branch:** `subagent-spawn-design`
-**Scope:** `crates/ironclaw_agent_loop`, `crates/ironclaw_turns`,
-`crates/ironclaw_loop_host`, `crates/ironclaw_turn_runner`,
-`crates/ironclaw_composition`
+**Scope:** `crates/loop/ironclaw_agent_loop`, `crates/kernel/ironclaw_turns`,
+`crates/loop/ironclaw_loop_host`, `crates/loop/ironclaw_turn_runner`,
+`crates/app/ironclaw_composition`
 
 This is the **overarching design doc**. Per-phase implementation docs (detailed,
 with pseudo code) live alongside this file:
@@ -209,7 +209,7 @@ ironclaw_host_api                            + owns `CapabilitySurfacePolicy`; s
 
 ### 5.4 Considered alternative — why not `Process`
 
-A natural question is whether `crates/ironclaw_processes/` (the Reborn kernel's
+A natural question is whether `crates/kernel/ironclaw_processes/` (the Reborn kernel's
 existing `Process` abstraction, reachable today via `CapabilityHost::spawn_json`
 + `EffectKind::SpawnProcess` + `CapabilityOutcome::SpawnedProcess`) is the right
 substrate for a subagent. **It is not.**
@@ -279,7 +279,7 @@ spawn time and keyed by the coordinator-minted `TurnRunId`.
 | **Per-tree descendant atomicity** | The per-run-tree descendant cap (`MAX_TREE_DESCENDANTS`) is enforced via a **durable `SpawnTreeReservation` row keyed by scoped `spawn_tree_root_run_id`** — `reserve_tree_descendants(scope, root, delta, cap)` is atomic at the store, fails closed without mutation when over cap, and runs **before `submit_turn`**. Concurrent admit across subtrees cannot over-admit. (Concurrent parent turns on the *same* parent thread are impossible by the per-`TurnScope` active-run lock, but a single root can have many concurrent subtrees on different threads.) |
 | Loop family | One static `subagent` `LoopFamily` (`LoopFamilyId "subagent"`); default strategies + tighter `BudgetStrategy`. Bound to a dedicated `subagent` `PlannedDriver`. |
 | Flavors | Built-in static table — v1 proposal: `general`, `researcher`. Each: direction id, tool allowlist, model, iteration + token/cost budget, `allow_nesting`. **Historical naming** — shipped as four flavors (`General`/`Explorer`/`Coder`/`Planner`); `thread-harness-design.md` §10 is canonical. |
-| Direction prompt | Static `.md` per flavor (`include_str!`, shipped at `crates/ironclaw_turn_runner/src/subagent/directions/`), selected by static match. The system message. |
+| Direction prompt | Static `.md` per flavor (`include_str!`, shipped at `crates/loop/ironclaw_turn_runner/src/subagent/directions/`), selected by static match. The system message. |
 | Goal placement | The parent-injected goal + `Handoff` blob are the child's **first user message**, delimited as task data (`## Task (from parent)` / `## Context from parent`). **Never** the system message — the goal is model-generated and may carry upstream-tainted content. |
 | **Goal durability (DB-backed)** | Persisted in a **durable, DB-backed** subagent goal store keyed by the child `TurnRunId`. Implementation piggybacks on turn-state persistence (the same backend that stores `TurnRunRecord`). The child run id is **known before** `submit_turn` via `prepare_turn` — no staging key, no rekey. Survives process restart by construction. A store miss **fails the child run loudly**. |
 | Lineage | `parent_run_id`, `subagent_depth`, and `spawn_tree_root_run_id` fields on `SubmitTurnRequest` and `TurnRunRecord` (durable). `children_of` and `get_run_record` are store queries — no in-memory index as source of truth. |

@@ -112,5 +112,7 @@ crates/*/frontend/dist/
 mutants.out/
 mutants.out.old/
 
-# for a local typescript app, but don't want to push with main repo
+# Local TypeScript app directory — anchored to repo root so it does not
+# silently exclude nested `app/` directories (e.g. crates/*/frontend/src/app/).
+# Prefer .git/info/exclude for personal working directories.
 /app/

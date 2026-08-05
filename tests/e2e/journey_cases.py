@@ -418,13 +418,13 @@ PRODUCT_JOURNEY_CASES = (
             ObservableAssertion.RESTART_IDEMPOTENCY,
         ),
         evidence=CargoEvidence(
-            source=("crates/ironclaw_composition/tests/trigger_poller_e2e.rs"),
+            source=("crates/app/ironclaw_composition/tests/trigger_poller_e2e.rs"),
             test=(
                 "scheduled_trigger_results_reach_exact_slack_targets_once_"
                 "across_restart"
             ),
             target="trigger_poller_e2e",
-            manifest="crates/ironclaw_composition/Cargo.toml",
+            manifest="crates/app/ironclaw_composition/Cargo.toml",
         ),
         delivery_addresses=(
             DeliveryAddressEvidence(

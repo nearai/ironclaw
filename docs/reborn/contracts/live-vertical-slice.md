@@ -51,10 +51,10 @@ by default.
 
 ## 3. What this validates
 
-Implementation evidence: `crates/ironclaw_capabilities/src/dispatch.rs` implements the
+Implementation evidence: `crates/kernel/ironclaw_capabilities/src/dispatch.rs` implements the
 sealed `RuntimeDispatcher::dispatch_json(Authorized)` path, and
-`crates/ironclaw_capabilities/tests/runtime_dispatch_contract.rs` plus
-`crates/ironclaw_capabilities/tests/runtime_dispatch_event_contract.rs` validate the
+`crates/kernel/ironclaw_capabilities/tests/runtime_dispatch_contract.rs` plus
+`crates/kernel/ironclaw_capabilities/tests/runtime_dispatch_event_contract.rs` validate the
 dispatcher contracts that replaced the retired vertical-slice test.
 
 The dispatcher contract tests validate:

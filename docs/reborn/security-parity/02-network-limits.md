@@ -7,7 +7,7 @@ and `03-headers-errors.md` for headers + error sanitization.
 - **v1** lives in `src/channels/web/` (`platform/router.rs`,
   `platform/state.rs`, `features/chat/mod.rs`, `oauth/state_store.rs`).
 - **v2** controls are descriptor-driven middleware in
-  `crates/ironclaw_composition/src/` (`webui_serve.rs`,
+  `crates/app/ironclaw_composition/src/` (`webui_serve.rs`,
   `webui_ws_origin.rs`, `webui_rate_limit.rs`, `webui_body_limit.rs`),
   reading per-route policy from `ironclaw_webui::webui_v2_routes()`
   and the host SSO mount descriptors from
@@ -36,7 +36,7 @@ gaps on the host-owned public SSO surface plus the CORS fail-closed
 default.
 
 **This PR** —
-`crates/ironclaw_webui/tests/network_limits_contract.rs`:
+`crates/product/ironclaw_webui/tests/network_limits_contract.rs`:
 
 - `sso_login_enforces_per_ip_rate_limit` — `/auth/login/{provider}` →
   60× 307 then 429 (row 6, PerIp scope).

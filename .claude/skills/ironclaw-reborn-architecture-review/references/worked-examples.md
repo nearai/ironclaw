@@ -28,14 +28,14 @@ Why it's wrong: one production impl means the trait encodes no variation — it'
 
 | Exemplar | Variation behind it | Re-verify |
 | --- | --- | --- |
-| `RootFilesystem` (`crates/ironclaw_filesystem/src/root.rs`) | local / postgres / libsql / in-memory / composite / HSM / memory-adapter | `rg -n "impl RootFilesystem for" crates/ironclaw_filesystem/src crates/extensions/packages/memory-native/src` |
-| `PolicySource` (`crates/ironclaw_trust/src/sources.rs`) | AdminConfig / BundledRegistry / DevTrustOverride / SignedRegistry | `grep -n "impl PolicySource" crates/ironclaw_trust/src/sources.rs` |
+| `RootFilesystem` (`crates/substrates/ironclaw_filesystem/src/root.rs`) | local / postgres / libsql / in-memory / composite / HSM / memory-adapter | `rg -n "impl RootFilesystem for" crates/substrates/ironclaw_filesystem/src crates/extensions/packages/memory-native/src` |
+| `PolicySource` (`crates/kernel/ironclaw_trust/src/sources.rs`) | AdminConfig / BundledRegistry / DevTrustOverride / SignedRegistry | `grep -n "impl PolicySource" crates/kernel/ironclaw_trust/src/sources.rs` |
 
-**GOOD — one impl but a real boundary** (the acceptable exception): `SkillInferencePort` (`crates/ironclaw_skills/src/learning.rs`) has one production adapter — `SkillLearningInferenceAdapter` in `crates/ironclaw_extension_host/src/skill_learning.rs`, constructed by composition — because the port exists to keep LLM/runtime deps *out* of the skills domain crate. The justification is verifiable in Cargo.toml (`ironclaw_skills` has no LLM or runtime deps), not in a comment.
+**GOOD — one impl but a real boundary** (the acceptable exception): `SkillInferencePort` (`crates/domains/ironclaw_skills/src/learning.rs`) has one production adapter — `SkillLearningInferenceAdapter` in `crates/extensions/ironclaw_extension_host/src/skill_learning.rs`, constructed by composition — because the port exists to keep LLM/runtime deps *out* of the skills domain crate. The justification is verifiable in Cargo.toml (`ironclaw_skills` has no LLM or runtime deps), not in a comment.
 
 ## 2. Sealing a strategy trait
 
-When downstream code must be able to *hold* a strategy but never *implement or fork* it, copy the loop planner's shape (`crates/ironclaw_agent_loop/src/planner.rs`):
+When downstream code must be able to *hold* a strategy but never *implement or fork* it, copy the loop planner's shape (`crates/loop/ironclaw_agent_loop/src/planner.rs`):
 
 ```rust
 mod sealed { pub trait Sealed {} }
@@ -45,11 +45,11 @@ pub trait AgentLoopPlanner: sealed::Sealed + Send + Sync { /* ... */ }
 pub(crate) trait AgentLoopPlannerInternal: AgentLoopPlanner { /* ... */ }
 ```
 
-Use `crates/ironclaw_agent_loop/src/planner.rs` as the sealed-trait template, then pair the pattern with `#![warn(unreachable_pub)]` at the owning crate root and `pub(crate)` on strategy modules. Re-verify the template exists: `grep -n "mod sealed" crates/ironclaw_agent_loop/src/planner.rs`.
+Use `crates/loop/ironclaw_agent_loop/src/planner.rs` as the sealed-trait template, then pair the pattern with `#![warn(unreachable_pub)]` at the owning crate root and `pub(crate)` on strategy modules. Re-verify the template exists: `grep -n "mod sealed" crates/loop/ironclaw_agent_loop/src/planner.rs`.
 
 ## 3. Re-exports: facade vs laundering
 
-**GOOD — the house pattern**: a cross-crate re-export is legitimate exactly when a boundary test *closes the direct path*, and the re-export says so. From `crates/ironclaw_composition/src/lib.rs` (schematic):
+**GOOD — the house pattern**: a cross-crate re-export is legitimate exactly when a boundary test *closes the direct path*, and the re-export says so. From `crates/app/ironclaw_composition/src/lib.rs` (schematic):
 
 ```rust
 /// Re-exported so `reborn_cli` never depends on `ironclaw_host_api` directly;
@@ -65,11 +65,11 @@ Consumer named, enforcing test named, items listed explicitly. No test, no re-ex
 
 **BAD — precedent-by-pollution**: "Slack's host code lives in `ironclaw_composition`, so mine can too." Existing delivery observer, host state, setup, and channel route code there is composition debt — not precedent.
 
-**GOOD — the host-side product crate**: `ironclaw_webui` is the model. It owns WebChat's listener, auth, and serve loop as its *own crate*, entering through the same composition seams as everything else. A new channel gets: a protocol-pure adapter crate (parse/render only — the boundary test bans host auth/credentials/delivery from it) **plus** a host-side crate for serving/verification/delivery, **plus** its dependency rule added to `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs` in the same PR. Composition gets only `build_*`/`with_*` wiring.
+**GOOD — the host-side product crate**: `ironclaw_webui` is the model. It owns WebChat's listener, auth, and serve loop as its *own crate*, entering through the same composition seams as everything else. A new channel gets: a protocol-pure adapter crate (parse/render only — the boundary test bans host auth/credentials/delivery from it) **plus** a host-side crate for serving/verification/delivery, **plus** its dependency rule added to `crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs` in the same PR. Composition gets only `build_*`/`with_*` wiring.
 
 ## 5. File budget and `arch-exempt` annotations
 
-**GOOD** (from `crates/ironclaw_hooks/src/dispatch/mod.rs` — every over-limit allow carries the required annotation with a plan link):
+**GOOD** (from `crates/loop/ironclaw_hooks/src/dispatch/mod.rs` — every over-limit allow carries the required annotation with a plan link):
 
 ```rust
 // arch-exempt: too_many_args, needs HookInstallContext aggregation, plan #4088
@@ -80,4 +80,4 @@ Consumer named, enforcing test named, items listed explicitly. No test, no re-ex
 
 ## 6. Backend parity done right
 
-Dual-backend persistence is not copy-paste-twice. The exemplar lives inside `ironclaw_hooks`: `src/postgres_backend/` (advisory locks, deadlock-free eviction) and `src/libsql_backend/` (single-writer mutex, `BEGIN IMMEDIATE`) implement one contract with *deliberately different* concurrency designs — and `tests/parity_matrix.rs` (+ `tests/parity_matrix/`, `tests/multi_host_adversarial.rs`) drives all backends through one adversarial scripted sequence and asserts byte-identical outcomes. Copy that shape for any new dual-backend surface. Re-verify by running the equivalence proof, not just by looking for the files: `cargo test -p ironclaw_hooks --features integration --test parity_matrix --test multi_host_adversarial` (18 tests; the `integration` feature is required — the targets do not build without it). Optional path check: `ls crates/ironclaw_hooks/src crates/ironclaw_hooks/tests`. (These were once three separate crates — `ironclaw_hooks_postgres`/`_libsql`/`_parity`; they no longer exist.)
+Dual-backend persistence is not copy-paste-twice. The exemplar lives inside `ironclaw_hooks`: `src/postgres_backend/` (advisory locks, deadlock-free eviction) and `src/libsql_backend/` (single-writer mutex, `BEGIN IMMEDIATE`) implement one contract with *deliberately different* concurrency designs — and `tests/parity_matrix.rs` (+ `tests/parity_matrix/`, `tests/multi_host_adversarial.rs`) drives all backends through one adversarial scripted sequence and asserts byte-identical outcomes. Copy that shape for any new dual-backend surface. Re-verify by running the equivalence proof, not just by looking for the files: `cargo test -p ironclaw_hooks --features integration --test parity_matrix --test multi_host_adversarial` (18 tests; the `integration` feature is required — the targets do not build without it). Optional path check: `ls crates/loop/ironclaw_hooks/src crates/loop/ironclaw_hooks/tests`. (These were once three separate crates — `ironclaw_hooks_postgres`/`_libsql`/`_parity`; they no longer exist.)

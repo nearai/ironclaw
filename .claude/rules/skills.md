@@ -1,7 +1,7 @@
 ---
 paths:
-  - "crates/ironclaw_skills/**"
-  - "crates/ironclaw_composition/src/extension_host/bundled_skills.rs"
+  - "crates/domains/ironclaw_skills/**"
+  - "crates/app/ironclaw_composition/src/extension_host/bundled_skills.rs"
   - "skills/**"
 ---
 # Skills System
@@ -46,7 +46,7 @@ so older external skills must be migrated instead of relying on silent
 compatibility.
 
 The parser supports more than the example above shows (source of truth:
-`crates/ironclaw_skills/src/types.rs` and `selector.rs`):
+`crates/domains/ironclaw_skills/src/types.rs` and `selector.rs`):
 
 - `requires.bins`, `requires.env`, and **`requires.config`** are gating inputs.
 - **`requires.skills`** declares companion skills that should chain-load when
