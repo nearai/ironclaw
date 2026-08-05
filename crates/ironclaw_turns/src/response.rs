@@ -1,24 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
-    TurnActor, TurnRunId, TurnStatus,
-};
+use crate::{EventCursor, TurnActor, TurnRunId, TurnStatus};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SubmitTurnResponse {
-    Accepted {
-        turn_id: crate::TurnId,
-        run_id: TurnRunId,
-        status: TurnStatus,
-        resolved_run_profile_id: RunProfileId,
-        resolved_run_profile_version: RunProfileVersion,
-        event_cursor: EventCursor,
-        accepted_message_ref: AcceptedMessageRef,
-        reply_target_binding_ref: ReplyTargetBindingRef,
-    },
-}
-
+// `SubmitTurnResponse` used to live here. It descended to
+// `ironclaw_host_api::turn` (WS5): every field type was already that module's,
+// and `ironclaw_conversations` persists and replays the value from its inbound
+// idempotency ledger without holding a coordinator, so the ledger contract must
+// be able to name it without importing this crate. It is re-exported through
+// this crate's documented `host_api::turn` facade in `lib.rs`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadBusy {
     pub active_run_id: TurnRunId,

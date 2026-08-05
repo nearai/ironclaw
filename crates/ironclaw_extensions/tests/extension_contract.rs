@@ -1,4 +1,5 @@
 // arch-exempt: large_file, mechanical DiskFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_extensions::*;
 use ironclaw_filesystem::*;
 use ironclaw_host_api::trust::TrustPolicyInput;

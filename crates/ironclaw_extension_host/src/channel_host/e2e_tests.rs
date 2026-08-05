@@ -646,7 +646,7 @@ async fn configured_channel_config() -> Arc<ChannelConfigService> {
     let record = ExtensionManifestRecord::from_toml(
         slack_manifest_from_bundled_inventory(),
         ManifestSource::HostBundled,
-        &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"), // safety: default catalog is valid in tests.
+        &ironclaw_host_api::host_port::default_host_port_catalog().expect("catalog"), // safety: default catalog is valid in tests.
         None,
         &product_extension_host_api_contract_registry().expect("contracts"), // safety: default registry is valid in tests.
         None,
@@ -801,7 +801,8 @@ async fn slack_test_extension_host_with_manifest_commands(
     }
 
     let resolved = {
-        let host_ports = ironclaw_host_runtime::default_host_port_catalog().expect("host ports"); // safety: default catalog is valid in tests.
+        let host_ports =
+            ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"); // safety: default catalog is valid in tests.
         let contracts = product_extension_host_api_contract_registry().expect("contracts"); // safety: default registry is valid in tests.
         let mut manifest = slack_manifest_from_bundled_inventory();
         if let Some(commands) = manifest_commands {

@@ -632,9 +632,13 @@ impl LlmConfigService for RebornLlmConfigService {
         // retain an API key past the point the UI claims cleanup completed.
         self.keys.delete(&id).await.map_err(|error| {
             match error {
-                crate::llm_admin::llm_key_store::LlmKeyStoreError::Store(store_error) => {
+                crate::llm_admin::llm_key_store::LlmKeyStoreError::Store {
+                    operation,
+                    source: store_error,
+                } => {
                     tracing::error!(
                         provider_id = %id,
+                        secret_store_operation = operation,
                         secret_store_reason = store_error.stable_reason(),
                         "LLM provider delete: key cleanup failed"
                     );
@@ -1330,18 +1334,12 @@ fn map_admin_error(error: crate::RebornProviderAdminError) -> LlmConfigServiceEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_filesystem::{
-        Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
-        ScopedFilesystem,
-    };
-    use ironclaw_host_api::{
-        ids::{AgentId, ProjectId, TenantId, UserId},
-        mount::{MountGrant, MountPermissions, MountView},
-        path::{MountAlias, VirtualPath},
-    };
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
     use ironclaw_llm::NEARAI_CLOUD_DEFAULT_BASE_URL;
+    use ironclaw_product_contracts::test_support::fakes::{
+        FakeOperatorSecretValueStore, OperatorSecretValueOp,
+    };
     use ironclaw_reborn_config::{RebornHome, RebornProfile};
-    use ironclaw_secrets::{SecretMaterial, SecretStore};
 
     fn boot_for_home(reborn_home: &std::path::Path) -> RebornBootConfig {
         let home = RebornHome::resolve_from_env_parts(
@@ -1354,79 +1352,58 @@ mod tests {
     }
 
     fn key_store() -> LlmKeyStore {
-        LlmKeyStore::new(Arc::new(SecretStore::ephemeral()))
+        LlmKeyStore::new(Arc::new(FakeOperatorSecretValueStore::new()))
     }
 
-    fn secret_store_scoped<F>(root: Arc<F>) -> Arc<ScopedFilesystem<F>>
-    where
-        F: RootFilesystem,
-    {
-        Arc::new(ScopedFilesystem::with_fixed_view(
-            root,
-            MountView::new(vec![MountGrant::new(
-                MountAlias::new("/secrets").expect("valid secrets alias"),
-                VirtualPath::new("/engine/secrets").expect("valid secrets target"),
-                MountPermissions::read_write_list_delete(),
-            )])
-            .expect("valid secrets mount"),
+    /// A working store that counts the port calls made against it.
+    ///
+    /// ✎ WS3: this used to be the real `SecretStore` over a recording
+    /// [`FaultInjecting`] backend, and the batching assertion counted
+    /// *filesystem* ops (`Query` for the batched listing, `ReadFile` for a
+    /// per-handle probe) to infer which port call the service made. With
+    /// `LlmKeyStore` on the `OperatorSecretValueStore` port, that inference is
+    /// unnecessary: the distinction the test exists for — one batched listing
+    /// versus N per-provider probes — is now directly observable *at the port*,
+    /// so the assertion moved one layer up and stopped depending on how the
+    /// substrate happens to implement a metadata read.
+    fn recording_secret_store() -> Arc<FakeOperatorSecretValueStore> {
+        Arc::new(FakeOperatorSecretValueStore::new())
+    }
+
+    /// A store whose handle enumeration fails.
+    ///
+    /// ✎ WS3: this used to be the real `SecretStore` over a [`FaultInjecting`]
+    /// backend. `ironclaw_operator` no longer names a secret substrate
+    /// (PROPOSAL §8.2, §12.1b), so the substrate-error-mapping half — that a
+    /// backend fault becomes `SecretStoreError::StoreUnavailable` and then an
+    /// `OperatorSecretValueStoreError` carrying `"BackendUnavailable"` — is
+    /// pinned where it now lives, at the port's implementor
+    /// (`ironclaw_reborn_composition::operator_secret_store`). What this helper
+    /// drives is the half that is still this crate's: the service fails loud
+    /// rather than reporting a snapshot it could not verify.
+    fn metadata_unavailable_secret_store() -> Arc<FakeOperatorSecretValueStore> {
+        Arc::new(FakeOperatorSecretValueStore::failing_on(
+            [
+                OperatorSecretValueOp::Handles,
+                OperatorSecretValueOp::Contains,
+            ],
+            "BackendUnavailable",
         ))
     }
 
-    /// The real `SecretStore` over a plain recording [`FaultInjecting`]
-    /// backend, plus the fault handle. Replaces the former whole-trait
-    /// `CountingMetadataSecretStore` observer fake: the store now runs its
-    /// genuine `metadata`/`metadata_for_scope` path and tests count the backend
-    /// ops it produced (`ReadFile` for a per-handle `metadata`, `Query` for the
-    /// batched `metadata_for_scope`) instead of a bespoke `AtomicUsize` inside a
-    /// fake.
-    fn recording_secret_store() -> (
-        Arc<SecretStore<FaultInjecting<InMemoryBackend>>>,
-        Arc<FaultInjecting<InMemoryBackend>>,
-    ) {
-        let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
-        let store = Arc::new(SecretStore::ephemeral_over(backend.clone()));
-        (store, backend)
-    }
-
-    /// The real store over a [`FaultInjecting`] backend armed to fail the secret
-    /// metadata read paths. Replaces the former `MetadataUnavailableSecretStore`
-    /// fake: `metadata_for_scope` maps its backing `Query`, and `metadata` its
-    /// `ReadFile`, so injecting `FaultKind::Backend` on both makes the store's
-    /// real `FilesystemError::Backend -> SecretStoreError::StoreUnavailable`
-    /// mapping fire (a `NotFound` fault would instead surface as `Ok(empty)` /
-    /// `Ok(None)` and never error).
-    fn metadata_unavailable_secret_store() -> Arc<SecretStore<FaultInjecting<InMemoryBackend>>> {
-        let backend = Arc::new(
-            FaultInjecting::new(InMemoryBackend::new())
-                .with_fault(
-                    Fault::on(FilesystemOperation::Query)
-                        .path("secrets")
-                        .backend("metadata index unavailable"),
-                )
-                .with_fault(
-                    Fault::on(FilesystemOperation::ReadFile)
-                        .path("secrets")
-                        .backend("metadata index unavailable"),
-                ),
-        );
-        Arc::new(SecretStore::ephemeral_over(backend))
-    }
-
-    /// The real store over a [`FaultInjecting`] backend armed to fail every
-    /// secret `delete`. Replaces the former `DeleteUnavailableSecretStore` fake
-    /// (prove provider deletion fails closed when the stored key cannot be
-    /// removed): the injected backend fault flows through the store's real
-    /// `delete` -> `FilesystemError::Backend -> SecretStoreError::StoreUnavailable`
-    /// mapping.
-    fn delete_unavailable_secret_store() -> Arc<SecretStore<FaultInjecting<InMemoryBackend>>> {
-        let backend = Arc::new(
-            FaultInjecting::new(InMemoryBackend::new()).with_fault(
-                Fault::on(FilesystemOperation::Delete)
-                    .path("secrets")
-                    .backend("secret delete unavailable"),
-            ),
-        );
-        Arc::new(SecretStore::ephemeral_over(backend))
+    /// A store whose `delete` fails while every other operation works.
+    ///
+    /// Proves provider deletion fails closed when the stored key cannot be
+    /// removed. Per-operation on purpose: the test has to `put` the key and
+    /// `contains`-check it afterwards, so an all-failing store could not
+    /// express the case. ✎ WS3: same note as `metadata_unavailable_secret_store`
+    /// — the substrate's own `FilesystemError::Backend` mapping is pinned at the
+    /// port implementor now.
+    fn delete_unavailable_secret_store() -> Arc<FakeOperatorSecretValueStore> {
+        Arc::new(FakeOperatorSecretValueStore::failing_on(
+            [OperatorSecretValueOp::Delete],
+            "BackendUnavailable",
+        ))
     }
 
     fn caller() -> ProductSurfaceCaller {
@@ -2010,8 +1987,9 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
         let boot = boot_for_home(&reborn_home);
-        let (store, backend) = recording_secret_store();
-        let service = RebornLlmConfigService::new(boot, LlmKeyStore::new(store));
+        let store = recording_secret_store();
+        let service =
+            RebornLlmConfigService::new(boot, LlmKeyStore::new(Arc::clone(&store) as Arc<_>));
 
         let snapshot = service.snapshot(caller()).await.expect("snapshot");
 
@@ -2019,15 +1997,13 @@ mod tests {
             !snapshot.providers.is_empty(),
             "snapshot should include registry providers"
         );
-        // `metadata_for_scope` (the batched stored-key listing) is backed by one
-        // `Query` op; a per-handle `metadata` probe would be a `ReadFile`.
         assert_eq!(
-            backend.count(FilesystemOperation::Query),
+            store.call_count(OperatorSecretValueOp::Handles),
             1,
-            "snapshot must list stored key metadata once"
+            "snapshot must list stored key handles once"
         );
         assert_eq!(
-            backend.count(FilesystemOperation::ReadFile),
+            store.call_count(OperatorSecretValueOp::Contains),
             0,
             "snapshot must not probe stored keys one provider at a time"
         );
@@ -2212,7 +2188,7 @@ mod tests {
         let reborn_home = temp.path().join("reborn-home");
         let boot = boot_for_home(&reborn_home);
         let keys = key_store();
-        keys.put("nearai", SecretMaterial::from("sk-nearai-test"))
+        keys.put("nearai", SecretString::from("sk-nearai-test"))
             .await
             .expect("store nearai key");
         let service = RebornLlmConfigService::new(boot, keys);
@@ -2247,81 +2223,15 @@ mod tests {
         );
     }
 
-    /// Reproduction for issue #4673: saving the NEAR AI (builtin) provider
-    /// returns `service_unavailable` even though Test connection succeeds. This
-    /// wires the secret store EXACTLY as production `ironclaw-reborn serve` does
-    /// — the dynamic `invocation_mount_view` scoped filesystem behind a real
-    /// `SecretStore` — instead of the in-memory store the other tests
-    /// use, so a system-scope write/read regression in that path is caught.
-    #[tokio::test]
-    async fn upsert_builtin_nearai_with_production_secret_store_succeeds() {
-        use ironclaw_secrets::{SecretStore, SecretsCrypto};
+    // ✎ WS3: `upsert_builtin_nearai_with_production_secret_store_succeeds` (the
+    // #4673 system-scope write/read regression) moved to
+    // `crates/ironclaw_reborn_composition/tests/operator_llm_key_store_wiring.rs`.
+    // Its whole value is wiring the secret store *exactly as production serve
+    // does*, and after this crate lost its `ironclaw_secrets` edge (PROPOSAL
+    // §8.2, §12.1b) "exactly as production" means the real store behind the
+    // `OperatorSecretValueStore` adapter — a combination only the assembly layer
+    // can build. It travelled whole; nothing about it was weakened.
 
-        let temp = tempfile::tempdir().expect("tempdir");
-        let reborn_home = temp.path().join("reborn-home");
-        let boot = boot_for_home(&reborn_home);
-
-        let backend = Arc::new(ironclaw_filesystem::InMemoryBackend::default());
-        let scoped = secret_store_scoped(backend);
-        let crypto = Arc::new(
-            SecretsCrypto::new(SecretMaterial::from(
-                "0123456789abcdef0123456789abcdef".to_string(),
-            ))
-            .expect("valid master key"),
-        );
-        let keys = LlmKeyStore::new(Arc::new(SecretStore::new(scoped, crypto)));
-
-        let nearai_request = || UpsertLlmProviderRequest {
-            id: "nearai".to_string(),
-            client_action_id: None,
-            name: Some("NEAR AI".to_string()),
-            adapter: "near_ai".to_string(),
-            base_url: Some("https://cloud-api.near.ai".to_string()),
-            default_model: Some("deepseek-ai/DeepSeek-V4-Flash".to_string()),
-            api_key: Some(SecretString::from("sk-near-test")),
-            set_active: true,
-            model: Some("deepseek-ai/DeepSeek-V4-Flash".to_string()),
-        };
-
-        let service = RebornLlmConfigService::new(boot.clone(), keys.clone());
-        // First save persists the operator's NEAR AI key under the system scope.
-        let snapshot = service
-            .upsert_provider(caller(), nearai_request())
-            .await
-            .expect("saving the builtin NEAR AI provider must succeed");
-        let active = snapshot.active.expect("an active provider after save");
-        assert_eq!(active.provider_id, "nearai");
-        assert_eq!(
-            active.model.as_deref(),
-            Some("deepseek-ai/DeepSeek-V4-Flash")
-        );
-
-        // The stored system-scoped key must read back (the #4673 regression: the
-        // reserved system tenant id failed to deserialize, so any read-back of a
-        // system-scoped secret errored — including a second save, which reads the
-        // previous key first).
-        assert_eq!(
-            keys.read("nearai")
-                .await
-                .expect("system-scope key must read back")
-                .expect("a stored key")
-                .expose_secret(),
-            "sk-near-test"
-        );
-        service
-            .upsert_provider(caller(), nearai_request())
-            .await
-            .expect("re-saving an already-configured NEAR AI provider must succeed");
-    }
-
-    /// Integration coverage for the resolver path at the composition boundary
-    /// (review on #4673): an explicit `config.toml` selection is honored
-    /// end-to-end through the real `resolve_reborn_runtime_llm`. The env-vs-
-    /// selection PRECEDENCE itself is unit-tested in
-    /// `ironclaw_llm::resolution` (`explicit_selection_overrides_env_for_model_and_base_url`),
-    /// where the env can be set — this crate is `#![forbid(unsafe_code)]` and the
-    /// resolver reads raw `std::env::var`, so the env dimension cannot be driven
-    /// here; this thin wrapper only adds the config.toml read it is exercised on.
     #[tokio::test]
     async fn reborn_runtime_llm_honors_explicit_config_selection() {
         let temp = tempfile::tempdir().expect("tempdir");

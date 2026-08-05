@@ -24,6 +24,7 @@ mod filesystem_governor;
 mod gate;
 mod period;
 mod resource_store;
+mod runtime_budget;
 // arch-exempt: large_file, +test_support module decl for §4.3 budget-gate store consolidation (delete InMemoryBudgetGateStore), no logic change, plan #6168
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -42,6 +43,7 @@ pub use period::{
     period_has_rolled_over,
 };
 pub use resource_store::{BudgetGateStore, ResourceGovernorStore};
+pub use runtime_budget::GovernorRuntimeBudget;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};

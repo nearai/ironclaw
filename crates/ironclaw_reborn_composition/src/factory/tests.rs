@@ -1219,7 +1219,8 @@ async fn open_standalone_secret_store_opens_a_working_store_over_the_bare_root()
         .await
         .expect("opener must succeed over a bare root");
 
-    let keys = ironclaw_operator::LlmKeyStore::new(store);
+    let keys =
+        ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(store));
     keys.put(
         "nearai",
         ironclaw_secrets::SecretMaterial::from("sk-test-value"),
@@ -1249,7 +1250,7 @@ async fn open_standalone_secret_store_is_visible_across_reopens_of_the_same_root
     let first = open_standalone_secret_store(root)
         .await
         .expect("first open must succeed");
-    ironclaw_operator::LlmKeyStore::new(first)
+    ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(first))
         .put(
             "nearai",
             ironclaw_secrets::SecretMaterial::from("sk-reopen-value"),
@@ -1260,11 +1261,12 @@ async fn open_standalone_secret_store_is_visible_across_reopens_of_the_same_root
     let second = open_standalone_secret_store(root)
         .await
         .expect("second open (simulating `serve`) must succeed");
-    let read = ironclaw_operator::LlmKeyStore::new(second)
-        .read("nearai")
-        .await
-        .expect("read through the second open")
-        .expect("value written by the first open must be visible");
+    let read =
+        ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(second))
+            .read("nearai")
+            .await
+            .expect("read through the second open")
+            .expect("value written by the first open must be visible");
     assert_eq!(
         secrecy::ExposeSecret::expose_secret(&read),
         "sk-reopen-value"

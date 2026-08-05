@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
+import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "scripts/ci/reborn_pr_test_plan.py"
@@ -15,6 +18,89 @@ assert SPEC is not None and SPEC.loader is not None
 planner = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = planner
 SPEC.loader.exec_module(planner)
+
+sys.path.insert(0, str(ROOT / "scripts/ci/lib"))
+
+from crate_tree import crate_directories, owning_crate_directory  # noqa: E402
+
+# A literal `include_str!`/`include_bytes!` target. `concat!` forms are not
+# matched and do not need to be: this resolves *whether* a crate reaches into
+# an asset tree, and every tree in the table has literal sites.
+INCLUDE_LITERAL = re.compile(r"include_(?:str|bytes)!\s*\(\s*\"([^\"]+)\"")
+DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
+
+
+def _workspace_crate_directories() -> dict[str, Path]:
+    """Package name -> crate directory, from the repo's own crate inventory.
+
+    `crate_tree` rather than a `crates/**/Cargo.toml` glob so the workspace-
+    excluded `wasm-src/` guests stay out: they declare their own `[workspace]`,
+    no lane of this workspace compiles them, and counting them would make a
+    guest's include of its own sibling file look like a cross-tree reach-in.
+    """
+    directories: dict[str, Path] = {}
+    for relative in crate_directories(ROOT):
+        directory = ROOT / relative
+        manifest = tomllib.loads(
+            (directory / "Cargo.toml").read_text(encoding="utf-8")
+        )
+        name = manifest.get("package", {}).get("name")
+        if name:
+            directories[name] = directory
+    return directories
+
+
+def _crates_embedding(prefix: str, crate_dirs: dict[str, Path]) -> set[str]:
+    """Crates with an include of a *table-routed* file under `prefix`.
+
+    Table-routed means "owned by no crate": the planner resolves package
+    directories first, so `crates/extensions/packages/telegram/manifest.toml`
+    is its own crate's file and never reaches `EMBEDDED_ASSET_OWNERS`.
+    """
+    embedders: set[str] = set()
+    for name, directory in crate_dirs.items():
+        for source in directory.rglob("*.rs"):
+            if "target" in source.parts or name in embedders:
+                continue
+            text = source.read_text(encoding="utf-8", errors="replace")
+            for literal in INCLUDE_LITERAL.findall(text):
+                try:
+                    target = (
+                        (source.parent / literal).resolve().relative_to(ROOT).as_posix()
+                    )
+                except ValueError:
+                    continue
+                if target.startswith(prefix) and (
+                    owning_crate_directory(target, ROOT) is None
+                ):
+                    embedders.add(name)
+                    break
+    return embedders
+
+
+def _depends_on(package: str, target: str, crate_dirs: dict[str, Path]) -> bool:
+    """True when `package` reaches `target` through workspace dependencies."""
+    seen = {package}
+    pending = [package]
+    while pending:
+        directory = crate_dirs.get(pending.pop())
+        if directory is None:
+            continue
+        manifest = tomllib.loads(
+            (directory / "Cargo.toml").read_text(encoding="utf-8")
+        )
+        tables = [manifest.get(table, {}) for table in DEPENDENCY_TABLES]
+        for platform in manifest.get("target", {}).values():
+            tables.extend(platform.get(table, {}) for table in DEPENDENCY_TABLES)
+        for table in tables:
+            for key, value in table.items():
+                name = value.get("package", key) if isinstance(value, dict) else key
+                if name == target:
+                    return True
+                if name in crate_dirs and name not in seen:
+                    seen.add(name)
+                    pending.append(name)
+    return False
 
 
 def metadata() -> dict:
@@ -36,6 +122,62 @@ def metadata() -> dict:
                 {"id": "alpha", "deps": []},
                 {"id": "beta", "deps": [{"pkg": "alpha"}]},
                 {"id": "gamma", "deps": [{"pkg": "beta"}]},
+            ]
+        },
+    }
+
+
+def real_owner_metadata() -> dict:
+    """A workspace named after the crates `EMBEDDED_ASSET_OWNERS` routes to.
+
+    The rest of this file uses `metadata()`'s `alpha`/`beta`/`gamma`, which
+    cannot carry the real table: the planner rejects a changed package outside
+    the canonical set, so the real owners have to exist here to be routed to
+    at all. Manifest paths are the real ones, so `_workspace_packages` derives
+    the same package directories it does in CI — which is what makes
+    `crates/extensions/packages/slack/` resolve to its own crate rather than
+    to the asset table.
+
+    `ironclaw_extension_host` depends on `ironclaw_extension_support` (an
+    optional dependency plus a dev-dependency, both in its real manifest),
+    which is why routing a package asset to the support crate also schedules
+    the host that embeds three of those manifests itself.
+    """
+
+    def package(name: str, manifest: str, deps: tuple[str, ...] = ()) -> dict:
+        return {
+            "id": name,
+            "name": name,
+            "manifest_path": str(ROOT / manifest),
+            "deps": deps,
+        }
+
+    packages = [
+        package("ironclaw_reborn_integration_tests", "Cargo.toml"),
+        package(
+            "ironclaw_extension_support",
+            "crates/extensions/ironclaw_extension_support/Cargo.toml",
+        ),
+        package(
+            "ironclaw_extension_host",
+            "crates/ironclaw_extension_host/Cargo.toml",
+            ("ironclaw_extension_support",),
+        ),
+        package(
+            "ironclaw_slack_extension",
+            "crates/extensions/packages/slack/Cargo.toml",
+        ),
+    ]
+    return {
+        "workspace_members": [entry["id"] for entry in packages],
+        "packages": [
+            {key: value for key, value in entry.items() if key != "deps"}
+            for entry in packages
+        ],
+        "resolve": {
+            "nodes": [
+                {"id": entry["id"], "deps": [{"pkg": dep} for dep in entry["deps"]]}
+                for entry in packages
             ]
         },
     }
@@ -65,6 +207,20 @@ class RebornPrTestPlanTests(unittest.TestCase):
             metadata=metadata(),
             canonical_packages=self.canonical,
             lockfile_manifest_owned=lockfile_manifest_owned,
+        )
+
+    def plan_real_owners(self, paths: list[str]) -> dict:
+        """Plan a pull request through the real `EMBEDDED_ASSET_OWNERS`."""
+        metadata = real_owner_metadata()
+        return planner.build_plan(
+            event="pull_request",
+            changed_paths=paths,
+            metadata=metadata,
+            canonical_packages=[
+                package["name"]
+                for package in metadata["packages"]
+                if package["name"] != "ironclaw_reborn_integration_tests"
+            ],
         )
 
     def test_merge_queue_is_always_exhaustive(self) -> None:
@@ -168,14 +324,68 @@ class RebornPrTestPlanTests(unittest.TestCase):
             )
 
     def test_frontend_change_is_owned_by_code_style_with_baseline_qa_replay(self) -> None:
-        plan = self.plan(
-            "pull_request", ["crates/ironclaw_webui/frontend/src/app.tsx"]
-        )
+        # The frontend prefix is resolved through the crate inventory
+        # (scripts/ci/lib/crate_tree.py), not a hardcoded literal — deriving
+        # the test input from the same resolver keeps this correct regardless
+        # of whether ironclaw_webui sits flat or has already moved into a
+        # family directory (PROPOSAL §5). Sibling tests below pin the
+        # resolution mechanism itself (nested + fail-closed) against a mocked
+        # crate_directory rather than the live tree.
+        frontend_prefix = planner._webui_frontend_prefix()
+        plan = self.plan("pull_request", [f"{frontend_prefix}src/app.tsx"])
         self.assertEqual(plan["mode"], "none")
         self.assertNotIn("run_frontend", plan)
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["crate_buckets"], [])
         self.assertEqual(plan["integration_lanes"], [])
+
+    def test_frontend_prefix_resolves_through_crate_inventory_when_nested(self) -> None:
+        """WS10: a family-moved ironclaw_webui still routes to Code Style.
+
+        Mocks `crate_directory` (rather than relying on the live repo's
+        current crate layout, which the target-architecture restructure is
+        actively changing) to pin that the frontend-prefix resolution follows
+        the crate wherever it lives.
+        """
+        planner._webui_frontend_prefix.cache_clear()
+        try:
+            with mock.patch.object(
+                planner,
+                "crate_directory",
+                return_value="crates/substrates/ironclaw_webui",
+            ) as resolver:
+                plan = self.plan(
+                    "pull_request",
+                    ["crates/substrates/ironclaw_webui/frontend/src/app.tsx"],
+                )
+            resolver.assert_called_once_with("ironclaw_webui", planner.ROOT)
+            self.assertEqual(plan["mode"], "none")
+            self.assertEqual(plan["crate_buckets"], [])
+            self.assertEqual(plan["integration_lanes"], [])
+        finally:
+            planner._webui_frontend_prefix.cache_clear()
+
+    def test_frontend_prefix_resolution_failure_fails_closed(self) -> None:
+        """An unresolvable ironclaw_webui crate must raise, never fall back
+        to the literal — a silent fallback is exactly the WS10 failure mode
+        (a moved crate makes the prefix match nothing and the planner reports
+        "no Reborn test surface changed" for a real WebUI diff)."""
+        planner._webui_frontend_prefix.cache_clear()
+        try:
+            with mock.patch.object(
+                planner,
+                "crate_directory",
+                side_effect=planner.CrateTreeError("boom"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "cannot resolve the ironclaw_webui crate"
+                ):
+                    self.plan(
+                        "pull_request",
+                        ["crates/ironclaw_webui/frontend/src/app.tsx"],
+                    )
+        finally:
+            planner._webui_frontend_prefix.cache_clear()
 
     def test_nested_crate_markdown_remains_package_owned(self) -> None:
         plan = self.plan("pull_request", ["crates/alpha/README.md"])
@@ -239,6 +449,11 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "scripts/live-canary/README.md",
             "scripts/live-canary/notify_slack.py",
             "scripts/reborn_webui_v2_live_qa/run_live_qa.py",
+            # WS10 (2026-08-04): the QA surface-inventory auditor and its
+            # self-test are the same class of offline QA tooling, and were
+            # raising `unmapped test or CI path` until they were classified.
+            "scripts/reborn_qa_matrix/audit_surface_inventory.py",
+            "scripts/reborn_qa_matrix/test_audit_surface_inventory.py",
         ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])
@@ -448,13 +663,26 @@ class RebornPrTestPlanTests(unittest.TestCase):
             lane_runner,
         )
 
-    def test_unmapped_crate_path_fails_fast(self) -> None:
-        with self.assertRaisesRegex(ValueError, "unmapped crate path"):
-            self.plan("pull_request", ["crates/deleted/src/lib.rs"])
+    def test_unmapped_crate_path_widens_instead_of_refusing(self) -> None:
+        """A crate path with no owning package widens to the exhaustive plan.
+
+        This used to raise. It made every crate deletion or rename unplannable
+        — `git diff` reports the removed crate's old paths, and CI feeds the
+        planner that diff — which blocked the PR rather than protecting it.
+        Widening cannot under-select, so it is the safe resolution; genuinely
+        malformed input is still rejected by the unclassified-path branch.
+        """
+        plan = self.plan("pull_request", ["crates/deleted/src/lib.rs"])
+        self.assertEqual(plan["mode"], "full")
+        self.assertIn("deletion or rename", plan["reasons"][0])
 
     def test_unclassified_build_input_fails_fast(self) -> None:
+        # Was `Dockerfile` until that gained a decision (see
+        # `test_container_and_hook_inputs_are_owned_by_static_gates`). The arm
+        # itself must stay fail-closed, so this keeps a genuinely undecided
+        # repo-root build input pointed at it.
         with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
-            self.plan("pull_request", ["Dockerfile"])
+            self.plan("pull_request", ["Makefile"])
 
     def test_agent_guidance_is_classified_and_selects_no_rust_lane(self) -> None:
         """`.claude/**` is prose, like `docs/**`.
@@ -519,28 +747,302 @@ class RebornPrTestPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
             self.plan("pull_request", [".env.local"])
 
-    def test_decided_repo_root_script_paths_are_owned_by_other_workflows(self) -> None:
-        """Repo-root `scripts/` files that another workflow owns.
+    def test_decided_repo_root_paths_are_owned_by_other_workflows(self) -> None:
+        """Repo-root files another workflow owns outright.
 
         The `unmapped test or CI path` arm deliberately refuses `scripts/**`
         outside `scripts/ci/` so each file gets a decision rather than a
-        blanket prefix. These two have one, recorded beside the constant: the
-        panic baseline belongs to Code Style, and the E2E selector script
-        belongs to the `Reborn E2E` workflow's own scope detector. Neither
-        selects a lane in *this* planner — but the sibling that has no
+        blanket prefix. Each of these has one, recorded beside the constant:
+        the panic baseline belongs to Code Style, the E2E selector script
+        belongs to the `Reborn E2E` workflow's own scope detector,
+        `check-version-bumps.sh` is invoked only by `platform-and-compat.yml`,
+        `run-reborn-webui.sh` is a local launcher no workflow references, and
+        `.gitignore` is read by Code Style's `Reject tracked files that match
+        .gitignore` guard (#6965 — unclassified until 2026-08-04, which failed
+        the whole `Tests (Reborn)` roll-up on any PR that added an ignore
+        rule). None selects a lane in *this* planner — but the sibling that has no
         decision must still refuse, which the second half asserts.
+
+        The last two were added by WS10 (2026-08-04) after editing
+        `check-version-bumps.sh` failed `Detect Reborn test scope` outright and
+        skipped every downstream Reborn lane — the same fail-closed-with-no-rule
+        shape as the `.claude/` gap the CHECKLIST row already records.
         """
         for path in (
             "scripts/no_panics_reborn_baseline.txt",
             "scripts/reborn-e2e-rust.sh",
+            "scripts/check-version-bumps.sh",
+            "scripts/run-reborn-webui.sh",
+            ".gitignore",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none", path)
+                self.assertEqual(plan["crate_buckets"], [], path)
+                # The plan must say *why*, so a future reader sees the
+                # decision rather than a silent "nothing to run".
+                self.assertTrue(
+                    any(
+                        reason.startswith("static CI or workspace-policy checks own")
+                        and path in reason
+                        for reason in plan["reasons"]
+                    ),
+                    plan["reasons"],
+                )
+
+                # The decision is per-path, not per-PR: a real change riding
+                # along still selects its lane.
+                paired = self.plan("pull_request", [path, "crates/alpha/src/lib.rs"])
+                self.assertEqual(paired["mode"], "selected", path)
+                self.assertNotEqual(paired["crate_buckets"], [], path)
+
+        with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
+            self.plan("pull_request", ["scripts/some-undecided-helper.sh"])
+
+        # The two WASM build/ABI scripts are decided the same way: named in
+        # `platform-and-compat.yml`'s `has_direct_wasm_abi_risk` classifier,
+        # which scopes *and* runs them.
+        for path in (
+            "scripts/build-wasm-extensions.sh",
+            "scripts/check-version-bumps.sh",
         ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])
                 self.assertEqual(plan["mode"], "none", path)
                 self.assertEqual(plan["crate_buckets"], [], path)
 
-        with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
-            self.plan("pull_request", ["scripts/some-undecided-helper.sh"])
+    def test_container_and_hook_inputs_are_owned_by_static_gates(self) -> None:
+        """`Dockerfile`, `.dockerignore` and `.githooks/**` select no Rust lane.
+
+        Regression for the #7087 gap, the same class #7064 fixed for
+        `.claude/`: the planner had no rule for the container build inputs or
+        the git hooks, so its fail-closed arm rejected any PR that touched
+        them — which made a `Dockerfile` edit unmergeable even when the edit
+        was required (Wave 3's `wit/` move had to drop a `COPY wit/ wit/` that
+        no longer resolved, #7084). The image build belongs to
+        `platform-and-compat.yml`'s `has_docker_risk` lane and the hooks to
+        Code Style; no Reborn Rust lane builds an image or runs a hook.
+
+        Paired assertion, as in the `.claude/` regression: accepted AND
+        selecting nothing, so a later "classification" that quietly escalates
+        these to a full matrix fails here too.
+        """
+        for path in (
+            "Dockerfile",
+            ".dockerignore",
+            ".githooks/pre-commit",
+            ".githooks/commit-msg",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none", path)
+                self.assertEqual(plan["crate_buckets"], [], path)
+                self.assertEqual(plan["root_partitions"], [], path)
+                self.assertEqual(plan["integration_lanes"], [], path)
+
+    def test_embedded_package_assets_schedule_the_crate_that_compiles_them(
+        self,
+    ) -> None:
+        """Asset trees outside every crate root route to their embedding crate.
+
+        The other half of the #7087 gap. `crates/extensions/packages/<pkg>/`
+        and `test-tools/<tool>/` hold no `Cargo.toml`, so cargo's package
+        directories cannot see them and the `crates/` arm failed closed.
+
+        Classifying them as *ignored* would have been wrong in the dangerous
+        direction: a `wasm/*.wasm` under `crates/extensions/packages/` is a
+        shipped artifact that `ironclaw_extension_support` embeds with
+        `include_bytes!`, so ignoring it converts a loud failure into a silent
+        under-schedule of a change to production output. Hence the assertion
+        below is that the path *selects a lane*, not merely that it is
+        accepted — the inverse of the `.claude/` prose test.
+
+        Driven through the REAL `EMBEDDED_ASSET_OWNERS`, against a workspace
+        whose packages carry the real owners' names and real manifest paths.
+        The first cut substituted `alpha`/`beta` owners so it could reuse the
+        synthetic workspace, which exercised the prefix strings but left the
+        prefix→owner *pairing* — the table's entire semantic content —
+        asserted nowhere: swapping the two owners passed. Review caught it
+        (#7084). `test_embedded_asset_owner_mapping_is_not_stale` supplies the
+        other half, deriving the same pairing from the real `include_*!` sites
+        so agreeing with a wrong constant is not enough.
+        """
+        for path, owner in (
+            (
+                "crates/extensions/packages/github/wasm/github_tool.wasm",
+                "ironclaw_extension_support",
+            ),
+            (
+                "crates/extensions/packages/github/wasm-src/src/lib.rs",
+                "ironclaw_extension_support",
+            ),
+            (
+                "crates/extensions/packages/gmail/manifest.toml",
+                "ironclaw_extension_support",
+            ),
+            ("test-tools/market-data/manifest.toml", "ironclaw_extension_host"),
+            (
+                "test-tools/hacker-news/wasm-src/src/lib.rs",
+                "ironclaw_extension_host",
+            ),
+        ):
+            with self.subTest(path=path):
+                plan = self.plan_real_owners([path])
+                self.assertEqual(plan["mode"], "selected", path)
+                self.assertEqual(plan["changed_packages"], [owner], path)
+                # Routed as a *production* change, so the crates that
+                # consume the embedded artifact run too.
+                self.assertIn(owner, plan["affected_packages"], path)
+                self.assertNotEqual(plan["crate_buckets"], [], path)
+
+        # `ironclaw_extension_host` embeds package manifests too, and is
+        # covered because it depends on the routed owner — the property
+        # `test_embedded_asset_owner_mapping_is_not_stale` derives from the
+        # tree rather than assuming.
+        plan = self.plan_real_owners(["crates/extensions/packages/gmail/manifest.toml"])
+        self.assertIn("ironclaw_extension_host", plan["affected_packages"])
+
+        # A package that *is* a workspace crate still resolves to itself
+        # rather than falling through to the asset table, even though its
+        # path sits under a table prefix.
+        plan = self.plan_real_owners(["crates/extensions/packages/slack/src/lib.rs"])
+        self.assertEqual(plan["changed_packages"], ["ironclaw_slack_extension"])
+
+        # The arm never goes quiet for an asset tree with no owner. This
+        # raised `unmapped crate path` until #7065 replaced that fallback
+        # with the exhaustive plan; `full` is a superset of any narrowing, so
+        # the property pinned here — an unattributable asset path can never
+        # *under*-schedule — is now carried by the mode rather than a raise.
+        # It must never resolve to `none`, which is what "prose" would mean.
+        unowned = self.plan_real_owners(["crates/extensions/nowhere/thing.bin"])
+        self.assertEqual(unowned["mode"], "full")
+
+    def test_package_prompt_markdown_routes_to_its_compiler_not_to_prose(self) -> None:
+        """A shipped `.md` asset is owned by the asset table, not prose.
+
+        Regression for the ordering defect found in review of #7141. The
+        Markdown prose carve-out ran *before* `EMBEDDED_ASSET_OWNERS`, and a
+        prompt is a `.md` file that no package *directory* owns — so a change
+        to `packages/*/prompts/**.md`, which the asset table explicitly claims
+        ("manifests, prompts, schemas and built `wasm/*.wasm`") and which
+        `ironclaw_extension_support` compiles in, planned `mode=none` and
+        selected no lane at all. Its sibling `manifest.toml` in the same
+        package selected two. That is the exact "silent under-schedule of a
+        change to production output" the comment above the table forbids.
+
+        Both halves are pinned, because fixing this by making *all* crate-tree
+        `.md` route somewhere would be the opposite error.
+        """
+        prompt = "crates/extensions/packages/github/prompts/github/create_issue.md"
+        plan = self.plan_real_owners([prompt])
+        self.assertEqual(plan["mode"], "selected", prompt)
+        self.assertIn("ironclaw_extension_support", plan["affected_packages"])
+        self.assertIn(
+            f"asset compiled into ironclaw_extension_support changed: {prompt}",
+            plan["reasons"],
+        )
+
+        # The prompt and the manifest beside it must agree — the defect was
+        # that they disagreed.
+        manifest = self.plan_real_owners(
+            ["crates/extensions/packages/github/manifest.toml"]
+        )
+        self.assertEqual(manifest["mode"], plan["mode"])
+
+        # The `test-tools/` prompts are assets on the same rule, routed to the
+        # crate that embeds that tree.
+        fixture_prompt = "test-tools/hacker-news/prompts/hacker-news/top_stories.md"
+        fixture = self.plan_real_owners([fixture_prompt])
+        self.assertEqual(fixture["mode"], "selected", fixture_prompt)
+        self.assertIn("ironclaw_extension_host", fixture["affected_packages"])
+
+        # And the carve-out still carves. Markdown that is *not* a prompt stays
+        # prose even inside an asset tree — this is why the rule is keyed on the
+        # `prompts/` segment and not on the asset prefixes, which also cover
+        # documentation.
+        for prose in (
+            "crates/AGENTS.md",
+            "crates/extensions/AGENTS.md",
+            "test-tools/README.md",
+        ):
+            with self.subTest(prose=prose):
+                quiet = self.plan_real_owners([prose])
+                self.assertEqual(quiet["mode"], "none", prose)
+                self.assertEqual(quiet["crate_buckets"], [], prose)
+
+    def test_markdown_owned_by_no_crate_is_prose(self) -> None:
+        """`crates/AGENTS.md` and `test-tools/README.md` select no lane.
+
+        Nothing compiles a markdown file, so a doc that belongs to no crate is
+        prose in the same class as `docs/` and `.claude/`. The rule is keyed
+        on "no package owns this path", not on a literal, so it keeps holding
+        for a future `crates/<family>/AGENTS.md` after the WS7 family move.
+
+        The paired case is `test_nested_crate_markdown_remains_package_owned`:
+        a doc *inside* a crate still resolves to that crate and keeps
+        selecting its lane. This must not widen into that.
+        """
+        for path in ("crates/AGENTS.md", "test-tools/README.md"):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none", path)
+                self.assertEqual(plan["crate_buckets"], [], path)
+
+    def test_embedded_asset_owner_mapping_is_not_stale(self) -> None:
+        """Every prefix routes to a crate that really compiles the tree in.
+
+        The mapping is a hand-written bridge across a boundary cargo cannot
+        see, so it is exactly the kind of path-keyed constant CHECKLIST WS10
+        found silently rotting: if an asset tree or its owning crate moves,
+        the planner would resume failing closed (loud) or, worse, route to a
+        crate that no longer exists. Fail here first instead.
+
+        Existence is necessary and nowhere near sufficient, which is what
+        review caught on #7084: "the prefix is a directory and the owner is a
+        crate" also holds for a *wrong* owner, so the pairing has to come out
+        of the tree. It does, from the `include_str!`/`include_bytes!` sites
+        themselves. Routing a path to a package schedules that package and
+        everything that depends on it, so the invariant the planner needs is:
+
+          every crate that compiles a table-routed file under `prefix` into
+          itself is either the routed owner or a dependent of it.
+
+        Both halves of that bite. `crates/extensions/packages/` is embedded by
+        four crates, not one — `ironclaw_extension_host`,
+        `ironclaw_extension_manager` and `ironclaw_reborn_composition` reach
+        into it alongside `ironclaw_extension_support` — and they are covered
+        only because each depends on the support crate. Drop that edge and a
+        shipped-artifact change stops scheduling a crate that embeds it, which
+        is the silent under-schedule this table exists to prevent.
+        """
+        crate_dirs = _workspace_crate_directories()
+        self.assertGreater(len(crate_dirs), 20, "crate inventory looks truncated")
+
+        self.assertNotEqual(planner.EMBEDDED_ASSET_OWNERS, ())
+        for prefix, owner in planner.EMBEDDED_ASSET_OWNERS:
+            with self.subTest(prefix=prefix):
+                self.assertTrue(
+                    (ROOT / prefix).is_dir(),
+                    f"asset tree {prefix} no longer exists",
+                )
+                self.assertIn(
+                    owner,
+                    crate_dirs,
+                    f"{prefix} routes to {owner}, which is no longer a crate",
+                )
+                embedders = _crates_embedding(prefix, crate_dirs)
+                self.assertIn(
+                    owner,
+                    embedders,
+                    f"{prefix} routes to {owner}, which embeds nothing from it; "
+                    f"the crates that do are {sorted(embedders)}",
+                )
+                for embedder in sorted(embedders - {owner}):
+                    self.assertTrue(
+                        _depends_on(embedder, owner, crate_dirs),
+                        f"{embedder} compiles files from {prefix} but does not "
+                        f"depend on {owner}, so routing there never schedules it",
+                    )
 
     def test_agent_guidance_does_not_mask_a_real_lane_in_the_same_pr(self) -> None:
         """Classifying `.claude/` must not swallow its neighbours.
@@ -554,6 +1056,70 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
         self.assertEqual(plan["mode"], "selected")
         self.assertNotEqual(plan["crate_buckets"], [])
+
+    def test_agent_guidance_paths_are_prose_and_select_nothing(self) -> None:
+        """`.claude/**` is guidance, like `docs/**`.
+
+        Regression fixture: the planner used to fail closed on every
+        `.claude/` path, so any PR that updated a rule, skill, or command
+        alongside its code could not be planned at all.
+        """
+        for path in (
+            ".claude/commands/triage-prs.md",
+            ".claude/rules/safety-and-sandbox.md",
+            ".claude/skills/reborn-feature/SKILL.md",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                docs = self.plan("pull_request", ["docs/reborn/README.md"])
+                self.assertEqual(plan["mode"], "none")
+                self.assertEqual(plan, docs)
+
+    def test_crate_tree_prose_outside_any_package_selects_nothing(self) -> None:
+        """`crates/AGENTS.md` and friends belong to no package.
+
+        Regression fixture: the planner fail-closed with "unmapped crate path"
+        on the family-level guidance files, which the restructure edits in the
+        same PR as the crates they describe.
+        """
+        docs = self.plan("pull_request", ["docs/reborn/README.md"])
+        for path in ("crates/AGENTS.md", "crates/README.md", "crates/Architecture.md"):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                # `reasons` is human-facing narration; the selection must match.
+                self.assertEqual(
+                    {k: v for k, v in plan.items() if k != "reasons"},
+                    {k: v for k, v in docs.items() if k != "reasons"},
+                )
+
+    def test_crate_prose_stays_narrow_while_crate_code_widens(self) -> None:
+        """Negative probe: the prose carve-out must not swallow crate code.
+
+        `crates/AGENTS.md` selects nothing; a source file under the same
+        unmapped directory widens to `full`. If the Markdown check were
+        wrongly applied, the second case would also select nothing.
+        """
+        self.assertEqual(self.plan("pull_request", ["crates/AGENTS.md"])["mode"], "none")
+        self.assertEqual(
+            self.plan("pull_request", ["crates/not_a_package/src/lib.rs"])["mode"],
+            "full",
+        )
+
+    def test_unclassified_paths_outside_guidance_still_fail_closed(self) -> None:
+        """Negative probe: widening IGNORED_PREFIXES must not open the gate.
+
+        The build-input probe was `Dockerfile` until #7084 gave that path a
+        decision (see `test_container_and_hook_inputs_are_owned_by_static_gates`);
+        `Makefile` is the genuinely undecided repo-root build input that keeps
+        this arm exercised, matching `test_unclassified_build_input_fails_fast`.
+        """
+        for path in ("Makefile", "claude/rules/x.md", ".claudeignore"):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(
+                    ValueError, "unclassified pull-request path"
+                ):
+                    self.plan("pull_request", [path])
+
 
     def test_changed_integration_binary_selects_its_exact_lane(self) -> None:
         path, lane = next(iter(planner._integration_test_lanes().items()))

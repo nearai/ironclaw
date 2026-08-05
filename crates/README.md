@@ -49,7 +49,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | --- | --- | --- |
 | `ironclaw_capabilities` | `ironclaw_capabilities` | Caller-facing capability invocation host. Coordinates authorization, approvals, process transitions, and neutral runtime dispatch. |
 | `ironclaw_processes` | `ironclaw_processes` | Host-tracked background process lifecycle. Owns lifecycle mechanics, not capability policy. |
-| `ironclaw_scripts` | `ironclaw_scripts` | Script/CLI capability runner contracts. Executes declared commands through a host-selected backend. |
+| `ironclaw_sandbox` | `ironclaw_sandbox` | The sandboxed-process lane: `SandboxProcessPlan` validation, the Docker/broker/credential-firewall/CA machinery behind `SandboxCommandTransport`, and the script/CLI capability runner. |
 | `ironclaw_mcp` | `ironclaw_mcp` | Adapts manifest-declared MCP tools into IronClaw capabilities without granting ambient filesystem, secret, or network authority. |
 | `ironclaw_wasm` | `ironclaw_wasm` | Reborn WASM component runtime lane. Owns component-model/WIT runtime surface plus the folded domain-free `wasm_sandbox_core` primitives. |
 | `ironclaw_wasm_limiter` | `ironclaw_wasm_limiter` | Shared `wasmtime::ResourceLimiter` used by WASM tool and hook runtimes so memory/table/instance limits do not drift. |

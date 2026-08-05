@@ -17,12 +17,12 @@
 
 use ironclaw_extensions::{
     CapabilitySurfaceDeclV2, ExtensionManifestRecord, ExtensionRuntimeV2, MANIFEST_SCHEMA_VERSION,
-    MANIFEST_SCHEMA_VERSION_V3, ManifestSource,
+    MANIFEST_SCHEMA_VERSION_V3, ManifestSource, default_host_api_contract_registry,
 };
-use ironclaw_host_api::capability::{
-    RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource,
+use ironclaw_host_api::{
+    capability::{RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource},
+    host_port::default_host_port_catalog,
 };
-use ironclaw_host_runtime::{default_host_api_contract_registry, default_host_port_catalog};
 
 fn parse(toml: &str) -> ExtensionManifestRecord {
     ExtensionManifestRecord::from_toml(

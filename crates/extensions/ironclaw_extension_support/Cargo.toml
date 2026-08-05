@@ -36,6 +36,9 @@ tokio = { version = "1", features = ["rt", "sync"] }
 tracing = "0.1"
 unicode-normalization = "0.1"
 url = "2"
+# ZIP skill bundles fetched by `builtin.skill_install` from an HTTPS/GitHub
+# source are extracted here (WS3, moved from `ironclaw_host_runtime`).
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 ironclaw_filesystem = { path = "../../ironclaw_filesystem", features = ["test-support"] }

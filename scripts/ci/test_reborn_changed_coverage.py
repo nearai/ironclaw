@@ -306,6 +306,56 @@ class BaseCoverageDecisionTests(unittest.TestCase):
 
 
 class UninstrumentableScaffoldingTests(unittest.TestCase):
+    def test_enum_bodies_classify_whole_including_struct_variants(self) -> None:
+        source = (
+            "use thiserror::Error;\n"
+            "\n"
+            "#[derive(Debug, Error)]\n"
+            "pub enum InboundTurnError {\n"
+            "    #[error(\"busy\")]\n"
+            "    ThreadBusy,\n"
+            "    /// Doc on a data variant.\n"
+            "    #[error(\"turn submission failed: {error}\")]\n"
+            "    TurnSubmissionFailed { error: String },\n"
+            "    Multi {\n"
+            "        reason: String,\n"
+            "        code: u16,\n"
+            "    },\n"
+            "    Discriminantish = 4,\n"
+            "}\n"
+            "\n"
+            "pub fn executable_after_enum() -> u16 {\n"
+            "    7\n"
+            "}\n"
+        )
+        lines = gate.mechanically_uninstrumentable_lines(source)
+        # Every line of the enum item (4-16) classifies, including the
+        # struct-shaped variant declaration that used to defeat the escape.
+        for enum_line in range(4, 17):
+            self.assertIn(enum_line, lines, f"enum body line {enum_line} must classify")
+        # The function after the enum stays instrumentable — the classifier
+        # must exit the enum at its closing brace, not swallow the file. (Its
+        # bare closing brace on line 19 classifies via the pre-existing
+        # symbol-only rule, which is correct and not this feature's doing.)
+        self.assertNotIn(17, lines)
+        self.assertNotIn(18, lines)
+
+    def test_enum_with_where_clause_header_spanning_lines(self) -> None:
+        source = (
+            "pub enum Wrapped<T>\n"
+            "where\n"
+            "    T: Clone,\n"
+            "{\n"
+            "    Some(T),\n"
+            "    None,\n"
+            "}\n"
+            "fn after() {}\n"
+        )
+        lines = gate.mechanically_uninstrumentable_lines(source)
+        for enum_line in range(1, 8):
+            self.assertIn(enum_line, lines, f"line {enum_line} must classify")
+        self.assertNotIn(8, lines)
+
     """Lines LLVM cannot emit a coverage region for.
 
     Both cases below are move-PR regressions: a file whose ONLY changed lines

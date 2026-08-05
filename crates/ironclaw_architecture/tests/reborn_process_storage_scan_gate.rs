@@ -3,22 +3,29 @@ mod ratchet_support;
 
 use std::path::Path;
 
-use ratchet_support::workspace_root;
+// Crate paths are spelled flat (`crates/ironclaw_x/...`) and RESOLVED through
+// the crate inventory, so the family move (PROPOSAL section 5) repoints them
+// without editing the literals. Identity on today's tree - pinned by
+// `reborn_crate_inventory.rs` (CHECKLIST WS10).
+use ratchet_support::{crate_path, workspace_root};
 
 #[test]
 fn process_and_thread_request_storage_paths_do_not_enumerate_collections() {
     let root = workspace_root();
-    let process_store = scannable(&read(
-        &root.join("crates/ironclaw_processes/src/journal_store.rs"),
-    ));
-    let thread_index = scannable(&read(
-        &root.join("crates/ironclaw_threads/src/filesystem_service/thread_index.rs"),
-    ));
+    let process_store = scannable(&read(&crate_path(
+        &root,
+        "crates/ironclaw_processes/src/journal_store.rs",
+    )));
+    let thread_index = scannable(&read(&crate_path(
+        &root,
+        "crates/ironclaw_threads/src/filesystem_service/thread_index.rs",
+    )));
     // The transcript rebuild moved out of `thread_index` into its own module;
     // the enumeration it performs is still migration-only and is gated below.
-    let transcript_migration = scannable(&read(
-        &root.join("crates/ironclaw_threads/src/filesystem_service/transcript_migration.rs"),
-    ));
+    let transcript_migration = scannable(&read(&crate_path(
+        &root,
+        "crates/ironclaw_threads/src/filesystem_service/transcript_migration.rs",
+    )));
 
     assert_calls_are_confined_to(
         &process_store,

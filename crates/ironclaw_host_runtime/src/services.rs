@@ -22,7 +22,8 @@ use ironclaw_events::{
     InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
     SecurityAuditSink,
 };
-use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime, SharedExtensionRegistry};
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
+use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, RootFilesystem, ScopedFilesystem};
@@ -50,7 +51,7 @@ use ironclaw_reborn_event_store::{
     RebornEventStores, RebornProfile, build_reborn_event_stores,
 };
 use ironclaw_resources::{FilesystemResourceGovernor, InMemoryResourceGovernor, ResourceGovernor};
-use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
+use ironclaw_sandbox::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_secrets::{
     CredentialAccountStore, CredentialSessionStore, InMemoryCredentialBroker, SecretStore,
     SecretStoreError, SecretStorePort,

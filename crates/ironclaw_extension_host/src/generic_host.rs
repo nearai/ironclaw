@@ -817,9 +817,9 @@ input_schema_ref = "schemas/echo.input.json"
         let record = ExtensionManifestRecord::from_toml(
             fixture_manifest_toml(id),
             ManifestSource::HostBundled,
-            &ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
+            &ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
             None,
-            &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            &ironclaw_extensions::default_host_api_contract_registry().expect("contracts"),
             None,
         )
         .expect("fixture manifest resolves");
@@ -884,9 +884,9 @@ input_schema_ref = "schemas/echo.input.json"
         let record = ExtensionManifestRecord::from_toml(
             toml.to_string(),
             ManifestSource::HostBundled,
-            &ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
+            &ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
             None,
-            &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            &ironclaw_extensions::default_host_api_contract_registry().expect("contracts"),
             None,
         )
         .expect("fixture manifest resolves");
@@ -1045,7 +1045,7 @@ input_schema_ref = "schemas/echo.input.json"
             Arc::new(InMemoryBackend::new()),
             VirtualPath::new("/system/extensions/.installations/test").expect("valid test path"),
             HostPortCatalog::empty(),
-            ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            ironclaw_extensions::default_host_api_contract_registry().expect("contracts"),
         )
         .await
         .expect("filesystem extension installation store")
@@ -1220,7 +1220,7 @@ input_schema_ref = "schemas/{id}/web_search.input.v1.json"
         let record = ExtensionManifestRecord::from_toml_with_root_binding(
             toml,
             ManifestSource::HostBundled,
-            &ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
+            &ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
             None,
             &crate::product_extension_host_api_contract_registry().expect("test contracts"),
             ironclaw_extensions::PackageRootBinding::Materialized(root.clone()),

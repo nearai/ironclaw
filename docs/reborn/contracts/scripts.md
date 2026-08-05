@@ -2,14 +2,14 @@
 
 **Date:** 2026-04-25
 **Status:** V1 contract slice
-**Crate:** `crates/ironclaw_scripts`
+**Crate:** `crates/ironclaw_sandbox`
 **Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/extensions.md`, `docs/reborn/contracts/resources.md`, `docs/reborn/contracts/dispatcher.md`
 
 ---
 
 ## 1. Purpose
 
-`ironclaw_scripts` provides the native CLI/software execution lane without requiring every useful tool to be rebuilt in WASM.
+`ironclaw_sandbox` provides the native CLI/software execution lane without requiring every useful tool to be rebuilt in WASM.
 
 The public runtime kind is:
 
@@ -89,7 +89,12 @@ Rules:
 
 ## 4. Resource lifecycle
 
-The script runtime owns the script lane reserve/execute/reconcile/release protocol:
+The script runtime owns the script lane reserve/execute/reconcile/release protocol.
+It holds no budget authority of its own: it is handed
+`ironclaw_host_api::resource::RuntimeResourceBudget` — reserve / reconcile /
+release, and nothing else — which the kernel implements over its
+`ResourceGovernor` (`ironclaw_resources::GovernorRuntimeBudget`). The lane
+cannot set limits, read account state, or name an account (#7067).
 
 ```text
 validate package/capability/runtime
