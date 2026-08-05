@@ -21,7 +21,7 @@ use ironclaw_assistant::{
     ListPendingAuthInteractionsResponse, PendingApprovalInteractionView,
     PendingAuthInteractionView, ProductConversationBindingService, ProductInstallationKey,
     ProductInstallationScope, ProductSurfaceFailure, RebornFilesystemIdempotencyLedger,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResetBindingRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
     ResolvedBinding, StaticProductInstallationResolver, approval_gate_ref,
 };
@@ -3974,6 +3974,60 @@ async fn preconfigured_actor_binding_accepts_user_message_without_legacy_pairing
         submission.actor.user_id.as_str(),
         "user:preconfigured-slack"
     );
+}
+
+#[tokio::test]
+async fn product_binding_reset_rotates_the_route_and_preserves_canonical_scope() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    conversations
+        .pair_external_actor(
+            TenantId::new("tenant:alpha").expect("tenant"),
+            ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
+            ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+            UserId::new("user:alice").expect("user"),
+        )
+        .await;
+    let binding = product_binding_service(
+        conversations,
+        vec![(
+            "test_adapter",
+            "install_alpha",
+            "tenant:alpha",
+            "agent:alpha",
+            Some("project:alpha"),
+        )],
+    );
+    let initial_request = ResolveBindingRequest::from_envelope(&sample_envelope("reset-initial"));
+    let initial = binding
+        .resolve_binding(initial_request)
+        .await
+        .expect("initial binding");
+    let reset_request = ResolveBindingRequest::from_envelope(&sample_envelope("reset-command"));
+
+    let reset = binding
+        .reset_binding(ResetBindingRequest {
+            resolve_request: reset_request.clone(),
+            expected_thread_id: initial.thread_id.clone(),
+        })
+        .await
+        .expect("binding reset");
+
+    assert_eq!(reset.previous_thread_id, initial.thread_id);
+    assert_ne!(reset.binding.thread_id, reset.previous_thread_id);
+    assert_eq!(reset.binding.tenant_id, initial.tenant_id);
+    assert_eq!(reset.binding.actor_user_id, initial.actor_user_id);
+    assert_eq!(reset.binding.subject_user_id, initial.subject_user_id);
+    assert_eq!(reset.binding.agent_id, initial.agent_id);
+    assert_eq!(reset.binding.project_id, initial.project_id);
+    let replay = binding
+        .reset_binding(ResetBindingRequest {
+            resolve_request: reset_request,
+            expected_thread_id: reset.previous_thread_id.clone(),
+        })
+        .await
+        .expect("duplicate reset event replays");
+    assert_eq!(replay, reset);
 }
 
 #[tokio::test]

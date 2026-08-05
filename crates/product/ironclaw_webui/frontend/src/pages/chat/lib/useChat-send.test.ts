@@ -5873,8 +5873,9 @@ test("useChat.runCommand: fences the success notice to the thread it executed ag
       // navigation to `nextThreadId` while this request is still in flight.
       refs[0].current = nextThreadId;
       return {
-        command: "status",
-        result: { title: "Status", fields: [], lines: [] },
+        command: "new",
+        result: { title: "New conversation", fields: [], lines: [] },
+        effect: { type: "open_thread", thread_id: nextThreadId },
       };
     },
     renderCommandResultMarkdown: (response) => `**${response.result.title}**`,
@@ -5906,7 +5907,13 @@ test("useChat.runCommand: fences the success notice to the thread it executed ag
   runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat(threadId);
-  await chat.runCommand("/status");
+  const result = await chat.runCommand("/new");
+
+  assert.equal(
+    result.thread_id,
+    nextThreadId,
+    "an open-thread command effect selects the response destination without moving its notice",
+  );
 
   assert.equal(
     renderedMessages.length,
@@ -5920,7 +5927,7 @@ test("useChat.runCommand: fences the success notice to the thread it executed ag
     "the notice belongs to the thread the command actually executed against",
   );
   assert.equal(seeded[0].role, CHAT_MESSAGE_ROLES.SYSTEM);
-  assert.equal(seeded[0].content, "**Status**");
+  assert.equal(seeded[0].content, "**New conversation**");
 });
 
 test("useChat.runCommand: fences the failure notice to the thread it executed against", async () => {

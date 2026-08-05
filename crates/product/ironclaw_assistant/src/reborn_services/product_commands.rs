@@ -204,6 +204,7 @@ where
                     kind: ProductRejectionKind::AccessDenied,
                     message: "This command requires an admin account.".to_string(),
                 }),
+                effect: None,
             });
         }
 
@@ -214,6 +215,20 @@ where
                     command: command_name,
                     result: Some(result),
                     rejection: None,
+                    effect: None,
+                })
+            }
+            ProductCommand::New => {
+                let result = self
+                    .execute_webui_new_command(caller, request.thread_id)
+                    .await?;
+                Ok(RebornExecuteProductCommandResponse {
+                    command: command_name,
+                    result: Some(new_conversation_started_view()),
+                    rejection: None,
+                    effect: Some(RebornProductCommandEffect::OpenThread {
+                        thread_id: result.thread.thread_id.to_string(),
+                    }),
                 })
             }
             ProductCommand::Status => {
@@ -229,6 +244,24 @@ where
                     command: command_name,
                     result: Some(result),
                     rejection: None,
+                    effect: None,
+                })
+            }
+            ProductCommand::Stop { invocation } => {
+                let result = self
+                    .execute_product_stop_command(
+                        caller,
+                        ProductStopCommandInput {
+                            thread_id: request.thread_id,
+                            invocation,
+                        },
+                    )
+                    .await?;
+                Ok(RebornExecuteProductCommandResponse {
+                    command: command_name,
+                    result: Some(result),
+                    rejection: None,
+                    effect: None,
                 })
             }
             // The audience gate above already fenced this to an admin caller
@@ -244,6 +277,7 @@ where
                     command: command_name,
                     result: Some(result),
                     rejection: None,
+                    effect: None,
                 })
             }
             // An unrecognized command name is never executable, admin or
@@ -291,6 +325,7 @@ where
                 kind: ProductRejectionKind::InvalidRequest,
                 message,
             }),
+            effect: None,
         }
     }
 }

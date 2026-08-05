@@ -66,6 +66,20 @@ pub struct ResolveBindingRequest {
     pub auth_claim: VerifiedAuthClaim,
 }
 
+/// Atomically rotate an existing external conversation route to a fresh
+/// canonical thread. The expected id fences stale concurrent reset attempts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetBindingRequest {
+    pub resolve_request: ResolveBindingRequest,
+    pub expected_thread_id: ThreadId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResetBindingOutcome {
+    pub previous_thread_id: ThreadId,
+    pub binding: ResolvedBinding,
+}
+
 /// Stable route-access shape for product bindings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -168,6 +182,17 @@ pub trait ProductBindingResolver: Send + Sync {
         &self,
         request: ResolveBindingRequest,
     ) -> Result<ResolvedBinding, ProductOperationFailure>;
+
+    /// Reset is fail-closed by default so test doubles and custom hosts cannot
+    /// silently claim a route was rotated without durable binding support.
+    async fn reset_binding(
+        &self,
+        _request: ResetBindingRequest,
+    ) -> Result<ResetBindingOutcome, ProductOperationFailure> {
+        Err(ProductOperationFailure::BindingResolutionFailed {
+            reason: "conversation binding reset is not supported".to_string(),
+        })
+    }
 }
 
 #[async_trait]
@@ -187,6 +212,13 @@ where
         request: ResolveBindingRequest,
     ) -> Result<ResolvedBinding, ProductOperationFailure> {
         self.as_ref().lookup_binding(request).await
+    }
+
+    async fn reset_binding(
+        &self,
+        request: ResetBindingRequest,
+    ) -> Result<ResetBindingOutcome, ProductOperationFailure> {
+        self.as_ref().reset_binding(request).await
     }
 }
 

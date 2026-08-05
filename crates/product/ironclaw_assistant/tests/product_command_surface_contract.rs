@@ -6,18 +6,21 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_assistant::{
-    ActionDispatchKind, DefaultProductSurface, DirectConversationCommandAdmission,
-    FakeConversationBindingService, FakeIdempotencyLedger, FakeInboundTurnService,
-    PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID,
-    PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand, ProductCommandAdmission,
-    ProductCommandAdmissionService, ProductInboundAck, ProductRejectionKind,
+    ActionDispatchKind, CommandResultView, DefaultProductSurface,
+    DirectConversationCommandAdmission, FakeConversationBindingService, FakeIdempotencyLedger,
+    FakeInboundTurnService, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
+    PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_NEW_COMMAND_OPERATION_ID,
+    PRODUCT_STATUS_COMMAND_OPERATION_ID, PRODUCT_STOP_COMMAND_OPERATION_ID, ProductCommand,
+    ProductCommandAdmission, ProductCommandAdmissionService, ProductInboundAck,
+    ProductNewCommandOutput, ProductRejectionKind, ProductStopInvocation,
 };
 use ironclaw_assistant::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundCommandPayload, ProductAdapterId, ProductInboundEnvelope,
-    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence, ResolveBindingRequest,
-    ResolvedBinding, TrustedInboundContext,
+    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence, ResetBindingOutcome,
+    ResetBindingRequest, ResolveBindingRequest, ResolvedBinding, TrustedInboundContext,
 };
+use ironclaw_host_api::ids::ThreadId;
 use ironclaw_product_contracts::admin_users::AdminUserRole;
 use ironclaw_product_contracts::binding::ProductBindingResolver;
 use ironclaw_product_contracts::command::{CommandActorRoleResolver, ProductCommandContext};
@@ -241,6 +244,56 @@ impl ProductBindingResolver for FirstCommandBindingService {
     }
 }
 
+struct ResetRecordingBindingService {
+    inner: FakeConversationBindingService,
+    resets: Mutex<Vec<ResetBindingRequest>>,
+    replacement_thread_id: ThreadId,
+}
+
+impl ResetRecordingBindingService {
+    fn new() -> Self {
+        Self {
+            inner: FakeConversationBindingService::new(),
+            resets: Mutex::new(Vec::new()),
+            replacement_thread_id: ThreadId::new("thread:after-new").expect("replacement thread"),
+        }
+    }
+
+    fn resets(&self) -> Vec<ResetBindingRequest> {
+        self.resets.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl ProductBindingResolver for ResetRecordingBindingService {
+    async fn resolve_binding(
+        &self,
+        request: ResolveBindingRequest,
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
+        self.inner.resolve_binding(request).await
+    }
+
+    async fn lookup_binding(
+        &self,
+        request: ResolveBindingRequest,
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
+        self.inner.lookup_binding(request).await
+    }
+
+    async fn reset_binding(
+        &self,
+        request: ResetBindingRequest,
+    ) -> Result<ResetBindingOutcome, ProductOperationFailure> {
+        self.resets.lock().expect("lock").push(request.clone());
+        let mut binding = self.inner.lookup_binding(request.resolve_request).await?;
+        binding.thread_id = self.replacement_thread_id.clone();
+        Ok(ResetBindingOutcome {
+            previous_thread_id: request.expected_thread_id,
+            binding,
+        })
+    }
+}
+
 #[tokio::test]
 async fn first_command_after_pairing_resolves_a_conversation_binding() {
     let inbound = Arc::new(FakeInboundTurnService::new());
@@ -385,6 +438,131 @@ async fn status_command_maps_to_its_operation_with_the_bound_thread() {
             .and_then(serde_json::Value::as_str)
             .is_some_and(|thread_id| !thread_id.is_empty())
     );
+}
+
+#[tokio::test]
+async fn new_command_rotates_the_continuous_binding_after_idle_preflight() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(ResetRecordingBindingService::new());
+    let admission_service = Arc::new(RecordingProductCommandAdmissionService::allowing());
+    let command_surface = Arc::new(RecordingCommandSurface::output(
+        serde_json::to_value(ProductNewCommandOutput {
+            can_reset: true,
+            result: CommandResultView {
+                title: "New conversation".to_string(),
+                fields: Vec::new(),
+                lines: vec!["Started a fresh conversation.".to_string()],
+            },
+        })
+        .expect("new output"),
+    ));
+    let workflow = DefaultProductSurface::new(inbound, ledger, binding.clone())
+        .with_product_command_admission_service(admission_service)
+        .with_product_command_surface(command_surface.clone());
+    let envelope = sample_command_envelope("command-new", "new", "");
+    let expected_event_id = envelope.external_event_id().clone();
+
+    let ack = workflow
+        .submit_inbound(envelope)
+        .await
+        .expect("new command");
+
+    let ProductInboundAck::CommandResult { command, payload } = ack else {
+        panic!("expected new command result");
+    };
+    assert_eq!(command, "new");
+    assert_eq!(payload.as_value()["title"], "New conversation");
+    assert!(payload.as_value().get("can_reset").is_none());
+    let invokes = command_surface.invokes();
+    assert_eq!(invokes.len(), 1);
+    assert_eq!(
+        invokes[0].request.operation_id.as_str(),
+        PRODUCT_NEW_COMMAND_OPERATION_ID
+    );
+    let resets = binding.resets();
+    assert_eq!(resets.len(), 1);
+    assert_eq!(
+        resets[0].resolve_request.external_event_id,
+        expected_event_id
+    );
+    assert!(resets[0].expected_thread_id.as_str().starts_with("thread:"));
+}
+
+#[tokio::test]
+async fn new_command_keeps_the_binding_when_preflight_reports_an_active_run() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(ResetRecordingBindingService::new());
+    let admission_service = Arc::new(RecordingProductCommandAdmissionService::allowing());
+    let command_surface = Arc::new(RecordingCommandSurface::output(
+        serde_json::to_value(ProductNewCommandOutput {
+            can_reset: false,
+            result: CommandResultView {
+                title: "Conversation still running".to_string(),
+                fields: Vec::new(),
+                lines: vec!["Use /stop first, then try /new again.".to_string()],
+            },
+        })
+        .expect("new output"),
+    ));
+    let workflow = DefaultProductSurface::new(inbound, ledger, binding.clone())
+        .with_product_command_admission_service(admission_service)
+        .with_product_command_surface(command_surface);
+
+    let ack = workflow
+        .submit_inbound(sample_command_envelope("command-new-active", "new", ""))
+        .await
+        .expect("new active response");
+
+    let ProductInboundAck::CommandResult { payload, .. } = ack else {
+        panic!("expected command result");
+    };
+    assert_eq!(payload.as_value()["title"], "Conversation still running");
+    assert_eq!(
+        payload.as_value()["lines"][0],
+        "Use /stop first, then try /new again."
+    );
+    assert!(binding.resets().is_empty());
+}
+
+#[tokio::test]
+async fn stop_and_interrupt_share_the_stop_operation_with_explicit_invocation() {
+    for (suffix, command, invocation) in [
+        ("stop", "stop", ProductStopInvocation::Stop),
+        ("interrupt", "interrupt", ProductStopInvocation::Interrupt),
+    ] {
+        let inbound = Arc::new(FakeInboundTurnService::new());
+        let ledger = Arc::new(FakeIdempotencyLedger::new());
+        let binding = Arc::new(FakeConversationBindingService::new());
+        let admission_service = Arc::new(RecordingProductCommandAdmissionService::allowing());
+        let command_surface = Arc::new(RecordingCommandSurface::output(serde_json::json!({
+            "title": "Stop requested"
+        })));
+        let workflow = DefaultProductSurface::new(inbound, ledger, binding)
+            .with_product_command_admission_service(admission_service)
+            .with_product_command_surface(command_surface.clone());
+
+        let ack = workflow
+            .submit_inbound(sample_command_envelope(suffix, command, ""))
+            .await
+            .expect("stop family command");
+
+        assert!(matches!(
+            ack,
+            ProductInboundAck::CommandResult { ref command, .. } if command == invocation.command_name()
+        ));
+        let invokes = command_surface.invokes();
+        assert_eq!(invokes.len(), 1);
+        assert_eq!(
+            invokes[0].request.operation_id.as_str(),
+            PRODUCT_STOP_COMMAND_OPERATION_ID
+        );
+        assert_eq!(
+            invokes[0].request.input["invocation"],
+            serde_json::to_value(invocation).expect("invocation")
+        );
+    }
 }
 
 #[tokio::test]
