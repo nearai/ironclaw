@@ -425,6 +425,34 @@ impl InMemoryDiagnosticStore {
         }))
     }
 
+    pub fn prompt(
+        &self,
+        scope: &DiagnosticScope,
+    ) -> Result<Option<PromptDiagnostic>, DiagnosticStoreError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
+        Ok(state.run(scope).and_then(|run| run.prompt.clone()))
+    }
+
+    pub fn tool_execution(
+        &self,
+        scope: &DiagnosticScope,
+        activity_id: ironclaw_host_api::turn::CapabilityActivityId,
+    ) -> Result<Option<ToolExecutionDiagnostic>, DiagnosticStoreError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| DiagnosticStoreError::StateUnavailable)?;
+        Ok(state.run(scope).and_then(|run| {
+            run.tool_executions
+                .iter()
+                .find(|tool| tool.activity_id == activity_id)
+                .cloned()
+        }))
+    }
+
     pub fn updates_after(
         &self,
         scope: &DiagnosticScope,
