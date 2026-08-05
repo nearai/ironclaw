@@ -179,6 +179,16 @@ pub struct SkillActivationSelectorConfig {
     /// between an agent being able to reuse its own skills or not.
     pub activation_strategy: ironclaw_skills::activation_strategy::ActivationStrategy,
     pub injection_mode: SkillInjectionMode,
+    /// Whether this deployment can execute a process at all.
+    ///
+    /// `false` under `ProcessBackendKind::None` (hosted multi-tenant + secure default), where there is
+    /// no shell and no interpreter. A skill that says "run `scripts/foo.py`" is then instructing the
+    /// model to do something impossible, and the model does not degrade gracefully: measured on a
+    /// production-profile server, one deprived of execution hand-expanded Taylor series for `ln`/`exp`
+    /// and then POSTed the patient's creatinine and age to `api.mathjs.org` to do the arithmetic. So
+    /// when this is `false`, an execution instruction in a skill body gets an explicit note that it
+    /// cannot be followed here.
+    pub process_execution_available: bool,
 }
 
 /// How recorded user messages are allowed to activate skills.
@@ -214,6 +224,7 @@ impl Default for SkillActivationSelectorConfig {
             // `ironclaw_reborn_composition::runtime::skill_activation_selector_config`
             // and the `IRONCLAW_REBORN_SKILL_INJECTION` env switch).
             injection_mode: SkillInjectionMode::Full,
+            process_execution_available: true,
         }
     }
 }
@@ -617,14 +628,22 @@ where
         if self.config.injection_mode == SkillInjectionMode::Full
             && !plan.selection.activations.is_empty()
         {
-            return Ok(context_candidates_for_plan(&plan, candidates));
+            return Ok(context_candidates_for_plan(
+                &plan,
+                candidates,
+                self.config.process_execution_available,
+            ));
         }
         // Fall through to the listing when nothing is active -- including in `Full` mode, which
         // previously returned an empty candidate set here. That was survivable only while the
         // scorer auto-activated something; with model-decides it would mean the model is never
         // told a skill exists and so can never activate one. Blinding the agent is a strictly
         // worse failure than showing it a listing it may not need.
-        Ok(listing_context_candidates(&plan, candidates))
+        Ok(listing_context_candidates(
+            &plan,
+            candidates,
+            self.config.process_execution_available,
+        ))
     }
 
     async fn active_plan_candidates(
@@ -644,7 +663,11 @@ where
             let candidate_set = self
                 .load_active_plan_candidate_set(run_context, &plan)
                 .await?;
-            return Ok(context_candidates_for_plan(&plan, candidate_set.candidates));
+            return Ok(context_candidates_for_plan(
+                &plan,
+                candidate_set.candidates,
+                self.config.process_execution_available,
+            ));
         }
         // Listing mode: full bodies only for explicitly-mentioned or
         // model-selected activations; every other visible skill contributes a
@@ -666,7 +689,9 @@ where
             .load_activation_candidates(run_context, &eligible_descriptors)
             .await?
             .into_iter()
-            .map(ActivationCandidate::into_context_candidate)
+            .map(|candidate| {
+                candidate.into_context_candidate(self.config.process_execution_available)
+            })
             .collect();
         let entries = ranked_listing_entries(
             &ranked_bundles,
@@ -1202,10 +1227,43 @@ impl SystemActivationCandidateCacheKey {
     }
 }
 
+/// Appended to a skill body that tells the model to run something, in a deployment that cannot.
+///
+/// The last sentence is load-bearing, not decoration. Without it a model that cannot execute reaches
+/// for the network: measured on a production-profile server, it POSTed clinical values to
+/// `api.mathjs.org` three times to evaluate the equation it had been told to run as a script.
+const NO_PROCESS_EXECUTION_NOTE: &str = "\n\n---\n\nEnvironment note: this deployment cannot execute \
+processes -- there is no shell and no interpreter available to you. Any instruction above to run a \
+script or command cannot be followed here. Apply the documented method directly from the text of this \
+skill, and do not call an external service to perform the computation.\n";
+
+/// Does this skill body instruct the model to execute something?
+///
+/// Deliberately narrow. The note is only useful on a skill that actually promises execution, and
+/// appending it to every skill would spend context and teach the model to ignore it.
+fn skill_body_instructs_execution(skill_md: &str) -> bool {
+    const EXECUTION_MARKERS: [&str; 6] = [
+        "scripts/", "python3", "python ", "bash ", "./run", "npm run",
+    ];
+    let lowered = skill_md.to_lowercase();
+    EXECUTION_MARKERS
+        .iter()
+        .any(|marker| lowered.contains(marker))
+}
+
 impl ActivationCandidate {
-    fn into_context_candidate(self) -> HostSkillContextCandidate {
+    fn into_context_candidate(
+        self,
+        process_execution_available: bool,
+    ) -> HostSkillContextCandidate {
+        let skill_md =
+            if !process_execution_available && skill_body_instructs_execution(&self.skill_md) {
+                format!("{}{NO_PROCESS_EXECUTION_NOTE}", self.skill_md)
+            } else {
+                self.skill_md
+            };
         HostSkillContextCandidate::loaded(
-            self.skill_md,
+            skill_md,
             self.descriptor.trust().cloned(),
             self.descriptor.visibility().copied(),
         )
@@ -1226,6 +1284,7 @@ fn activation_plan_for_candidates(selection: SkillActivationSelection) -> SkillA
 fn context_candidates_for_plan(
     plan: &SkillActivationPlan,
     candidates: Vec<ActivationCandidate>,
+    process_execution_available: bool,
 ) -> Vec<HostSkillContextCandidate> {
     if plan.selection.activations.is_empty() {
         return Vec::new();
@@ -1239,7 +1298,7 @@ fn context_candidates_for_plan(
     candidates
         .into_iter()
         .filter(|candidate| active_bundles.contains(candidate.descriptor.id()))
-        .map(ActivationCandidate::into_context_candidate)
+        .map(|candidate| candidate.into_context_candidate(process_execution_available))
         .collect()
 }
 
@@ -1379,6 +1438,7 @@ fn ranked_listing_entries<'a>(
 fn listing_context_candidates(
     plan: &SkillActivationPlan,
     candidates: Vec<ActivationCandidate>,
+    process_execution_available: bool,
 ) -> Vec<HostSkillContextCandidate> {
     let body_eligible = body_eligible_bundle_ids(plan);
     let ranked_bundles = criteria_ranked_bundle_ids(plan);
@@ -1387,7 +1447,7 @@ fn listing_context_candidates(
         .partition(|candidate| body_eligible.contains(candidate.descriptor.id()));
     let mut loaded: Vec<HostSkillContextCandidate> = eligible
         .into_iter()
-        .map(ActivationCandidate::into_context_candidate)
+        .map(|candidate| candidate.into_context_candidate(process_execution_available))
         .collect();
     let entries = ranked_listing_entries(
         &ranked_bundles,
@@ -4398,5 +4458,55 @@ mod tests {
             vec!["skill.v2".to_string()]
         );
         assert!(ironclaw_skills::validate_skill_name("skill.v2"));
+    }
+}
+
+#[cfg(test)]
+mod no_process_execution_note_tests {
+    use super::*;
+
+    /// A skill that promises execution must be told when execution is impossible.
+    ///
+    /// Measured on a production-profile server: a skill body saying "execute it with
+    /// `python3 scripts/egfr.py`" under `ProcessBackendKind::None` led the model to read the script,
+    /// discover it had no way to run it, hand-expand Taylor series, and then POST the patient's
+    /// creatinine and age to `api.mathjs.org` to do the arithmetic. Telling a model to do something
+    /// impossible does not make it stop; it makes it improvise, and the improvisation was egress.
+    #[test]
+    fn a_body_promising_execution_is_flagged_when_no_process_backend_exists() {
+        assert!(skill_body_instructs_execution(
+            "Run it:\n\n```bash\npython3 scripts/egfr.py --creatinine 1.3\n```"
+        ));
+        assert!(skill_body_instructs_execution(
+            "see scripts/helper.py for the method"
+        ));
+        assert!(skill_body_instructs_execution("bash setup.sh"));
+    }
+
+    /// The note must not be appended to a skill that never mentions running anything: it costs context
+    /// and teaches the model to skim past it.
+    #[test]
+    fn a_prose_only_body_is_not_flagged() {
+        assert!(!skill_body_instructs_execution(
+            "# Lab units\n\nglucose mg/dL to mmol/L: multiply by 0.0555. Round at the end."
+        ));
+    }
+
+    /// The note has to say what to do instead, including not reaching for the network -- that clause is
+    /// the whole point.
+    #[test]
+    fn the_note_says_what_to_do_instead() {
+        assert!(NO_PROCESS_EXECUTION_NOTE.contains("cannot be followed here"));
+        assert!(NO_PROCESS_EXECUTION_NOTE.contains("Apply the documented method directly"));
+        assert!(
+            NO_PROCESS_EXECUTION_NOTE.contains("do not call an external service"),
+            "without this the model substitutes a third-party API for the script it cannot run"
+        );
+    }
+
+    /// Execution available is the default, so no existing shape gains a spurious note.
+    #[test]
+    fn execution_is_assumed_available_by_default() {
+        assert!(SkillActivationSelectorConfig::default().process_execution_available);
     }
 }

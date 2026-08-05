@@ -64,6 +64,17 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 PROFILE="${E2E_PROFILE:-local-dev}"
+# `production` was this script's original name for the strict shape; keep it working.
+[ "$PROFILE" = "production" ] && PROFILE=multi-tenant
+case "$PROFILE" in
+  local-dev|single-tenant|multi-tenant) ;;
+  *) echo "E2E_PROFILE must be local-dev, single-tenant or multi-tenant (got: $PROFILE)"; exit 2;;
+esac
+# Both DB-backed shapes need Postgres. See docs/skills/multi_tenant_enablement.md for the matrix.
+case "$PROFILE" in
+  single-tenant|multi-tenant) NEEDS_POSTGRES=1;;
+  *) NEEDS_POSTGRES=0;;
+esac
 POSTGRES_URL="${E2E_POSTGRES_URL:-postgres://postgres:reborn@127.0.0.1:55432/reborn}"
 PG_CONTAINER="${E2E_PG_CONTAINER:-reborn-pg}"
 PORT="${E2E_PORT:-3100}"
@@ -219,8 +230,8 @@ await_answer() {
 }
 
 db_paths() {
-  if [ "$PROFILE" = "production" ]; then
-    docker exec "$PG_CONTAINER" psql -U postgres -d reborn -tAc \
+  if [ "$NEEDS_POSTGRES" = "1" ]; then
+    docker exec "$PG_CONTAINER" psql -U postgres -d "$(basename "${POSTGRES_URL%%\?*}")" -tAc \
       "select path from root_filesystem_entries where path like '%$1%' order by path" 2>/dev/null \
       | sed 's/^ *//' | grep -v '^$'
     return
@@ -258,41 +269,43 @@ pkill -f "ironclaw serve --port ${PORT}" 2>/dev/null
 sleep 2
 rm -rf "$HOME_DIR"
 
-if [ "$PROFILE" = "production" ]; then
-  # A production build fails closed without durable Postgres storage and an explicit policy, so the
-  # config file is part of the fixture rather than something the operator must remember.
+if [ "$NEEDS_POSTGRES" = "1" ]; then
+  # Both DB-backed builds fail closed without durable storage, so the config file is part of the
+  # fixture rather than something the operator must remember.
+  #
+  #   single-tenant  IRONCLAW_REBORN_PROFILE=hosted-single-tenant. Postgres storage with the
+  #                  local-host runtime policy: a real process backend and a host-disk workspace. This
+  #                  is the shape most deployments run, and the only DB-backed shape where a skill
+  #                  script has any chance of executing.
+  #   multi-tenant   IRONCLAW_REBORN_PROFILE=production. Every root resolves to the database,
+  #                  including the workspace, and ProcessBackendKind::None strips builtin.shell.
   mkdir -p "$HOME_DIR"
-  cat > "$HOME_DIR/config.toml" <<CONFIG
-[llm]
-[llm.default]
-provider_id = "openrouter"
-model = "$MODEL"
-api_key_env = "OPENROUTER_API_KEY"
-
-[storage]
-backend = "postgres"
-url_env = "IRONCLAW_REBORN_POSTGRES_URL"
-secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
-pool_max_size = 4
-
-[policy]
-deployment_mode = "hosted_multi_tenant"
-default_profile = "secure_default"
-CONFIG
-  export IRONCLAW_REBORN_PROFILE=production
+  {
+    printf '[llm]\n[llm.default]\nprovider_id = "openrouter"\nmodel = "%s"\napi_key_env = "OPENROUTER_API_KEY"\n\n' "$MODEL"
+    printf '[storage]\nbackend = "postgres"\nurl_env = "IRONCLAW_REBORN_POSTGRES_URL"\nsecret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"\npool_max_size = 4\n'
+    if [ "$PROFILE" = "multi-tenant" ]; then
+      printf '\n[policy]\ndeployment_mode = "hosted_multi_tenant"\ndefault_profile = "secure_default"\n'
+    fi
+  } > "$HOME_DIR/config.toml"
+  if [ "$PROFILE" = "multi-tenant" ]; then
+    export IRONCLAW_REBORN_PROFILE=production
+  else
+    export IRONCLAW_REBORN_PROFILE=hosted-single-tenant
+  fi
   export IRONCLAW_REBORN_POSTGRES_URL="$POSTGRES_URL"
   export IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON=true
   export IRONCLAW_REBORN_SECRET_MASTER_KEY="${E2E_SECRET_MASTER_KEY:-$(openssl rand -hex 32)}"
-  # Fresh database, so "listed after a restart" cannot pass on a previous run's rows.
-  if ! docker exec "$PG_CONTAINER" psql -U postgres -c "DROP DATABASE IF EXISTS reborn;" >/dev/null 2>&1; then
+  # Fresh database, so "still listed after a restart" cannot pass on a previous run's rows.
+  PG_DB="$(basename "${POSTGRES_URL%%\?*}")"
+  if ! docker exec "$PG_CONTAINER" psql -U postgres -c "DROP DATABASE IF EXISTS $PG_DB;" >/dev/null 2>&1; then
     echo "cannot reach the Postgres container '$PG_CONTAINER'; start it or set E2E_PG_CONTAINER"
     exit 2
   fi
-  docker exec "$PG_CONTAINER" psql -U postgres -c "CREATE DATABASE reborn;" >/dev/null 2>&1
-  echo "  postgres  : $POSTGRES_URL (database recreated)"
+  docker exec "$PG_CONTAINER" psql -U postgres -c "CREATE DATABASE $PG_DB;" >/dev/null 2>&1
+  echo "  postgres  : $POSTGRES_URL (database $PG_DB recreated)"
 fi
 
-if [ "$PROFILE" != "production" ]; then
+if [ "$NEEDS_POSTGRES" != "1" ]; then
   IRONCLAW_REBORN_HOME="$HOME_DIR" "$BIN" models set-provider openrouter --model "$MODEL" >/dev/null 2>&1
 fi
 
@@ -444,7 +457,7 @@ for m in d.get("messages") or []:
 print("yes" if ran else "no")
 PY
 )
-  if [ "$PROFILE" = "production" ]; then
+  if [ "$PROFILE" = "multi-tenant" ]; then
     # No host process backend exists here, so the question is not whether the script ran but whether
     # the shell was correctly withheld. A shell call appearing under HostedMultiTenant would be a
     # policy escape, which matters far more than the script.

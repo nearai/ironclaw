@@ -4425,6 +4425,7 @@ fn skill_activation_selector_config(
     regex_skill_activation_enabled: bool,
     injection_mode: SkillInjectionMode,
     activation_strategy: ironclaw_skills::activation_strategy::ActivationStrategy,
+    process_execution_available: bool,
 ) -> SkillActivationSelectorConfig {
     SkillActivationSelectorConfig {
         max_context_tokens: MAX_SKILL_CONTEXT_TOKENS,
@@ -4449,6 +4450,7 @@ fn skill_activation_selector_config(
         regex_activation_enabled: regex_skill_activation_enabled,
         injection_mode,
         activation_strategy,
+        process_execution_available,
         ..SkillActivationSelectorConfig::default()
     }
 }
@@ -4600,10 +4602,27 @@ fn filesystem_skill_context_source(
     .map_err(|reason| RebornRuntimeError::InvalidArgument {
         reason: format!("first-party skills extension source: {reason}"),
     })?;
+    // Whether this deployment can execute a process at all. Under `ProcessBackendKind::None` (hosted
+    // multi-tenant + secure default) a skill that says "run scripts/foo.py" is instructing the model to
+    // do something impossible, and it does not degrade gracefully -- see
+    // `SkillActivationSelectorConfig::process_execution_available`.
+    //
+    // MULTI-TENANT ENABLEMENT: this is one of the two places that change when the tenant sandbox
+    // lands. Once `HostedMultiTenant` + `SecureDefault` resolves to `ProcessBackendKind::TenantSandbox`
+    // instead of `None`, this returns true on its own and skills stop being told they cannot run
+    // anything. See docs/skills/multi_tenant_enablement.md.
+    let process_execution_available = runtime
+        .runtime_policy
+        .as_ref()
+        .map(|policy| {
+            policy.process_backend != ironclaw_host_api::runtime_policy::ProcessBackendKind::None
+        })
+        .unwrap_or(true);
     let selector_config = skill_activation_selector_config(
         regex_skill_activation_enabled,
         skill_injection_mode_env()?,
         skill_activation_env()?,
+        process_execution_available,
     );
     let selectable_skills = extension.selectable_skill_runtime_with_setup_markers(
         selector_config,
