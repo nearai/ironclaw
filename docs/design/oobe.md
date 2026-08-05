@@ -5,6 +5,12 @@
 browser, pick a **Version** (Vision / Foundational) and a **Scene** (First run / Thread / Plan),
 and on Vision → First run press **Play** to watch the journey. Toggle **Flags** and the theme.
 
+> **Integration proposal & plan:** this brief is the design "what/why." The plan to phase it into
+> production — **Foundational** (near-term, extends shipped code) then **Vision** (north-star),
+> with the shipped-vs-net-new scope, dependencies, and code-integration map — lives in the
+> [`oobe/`](./oobe/) package: [README](./oobe/README.md) · [PROPOSAL](./oobe/PROPOSAL.md) ·
+> [PLAN](./oobe/PLAN.md) · [CHECKLIST](./oobe/CHECKLIST.md).
+
 > File/symbol references are a point-in-time trace of `webui_v2`. Verify against live code
 > before relying on them — prefer the codebase knowledge graph / `openwiki/`.
 
