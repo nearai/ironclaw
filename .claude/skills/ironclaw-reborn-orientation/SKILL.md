@@ -14,6 +14,7 @@ The corrected map, verified against HEAD on 2026-07-02 by a full architecture au
 - **Current runner/lease names**: turn claims and execution use `TurnRunScheduler` + `RebornTurnRunExecutor`; expired lease is terminal `Failed{lease_expired}` (`RecoveryRequired` is a legacy status).
 - **Host-side product code** (serve/delivery/setup for a channel): the model is `ironclaw_webui` for WebChat. Do **not** default it into `ironclaw_composition` — that crate is for assembly.
 - **New prompt templates**: a `.md` file inside the **owning Reborn crate**, loaded via `include_str!` (the crates that own prompt files today: `ls -d crates/*/prompts` → `agent_loop`, `first_party_extension_ports`, `loop_host`, `skills`, `turns`).
+- **New internal engineering docs** (design notes, research, plans, QA maps): `docs/internal/` — the only growing internal home under `docs/`. The rest of `docs/` is the public Mintlify site; a page missing from `docs.json` navigation is still published (hidden pages stay URL-reachable), and the `docs/.mintignore` fence is frozen — never add entries. Verify placement: `python3 scripts/ci/docs_publication_boundary.py`.
 
 ## There is no legacy enclave any more
 

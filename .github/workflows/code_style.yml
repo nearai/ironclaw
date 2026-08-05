@@ -40,6 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       has_code: ${{ steps.non_pr.outputs.has_code || steps.diff.outputs.has_code }}
+      has_docs: ${{ steps.non_pr.outputs.has_docs || steps.diff.outputs.has_docs }}
       has_reborn_cli: ${{ steps.non_pr.outputs.has_reborn_cli || steps.diff.outputs.has_reborn_cli }}
       has_clippy: ${{ steps.non_pr.outputs.has_clippy || steps.diff.outputs.has_clippy }}
       clippy_packages: ${{ steps.non_pr.outputs.clippy_packages || steps.diff.outputs.clippy_packages }}
@@ -49,6 +50,7 @@ jobs:
         if: github.event_name == 'push'
         run: |
           echo "has_code=true" >> "$GITHUB_OUTPUT"
+          echo "has_docs=true" >> "$GITHUB_OUTPUT"
           echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
           echo "has_clippy=true" >> "$GITHUB_OUTPUT"
           echo 'clippy_packages=[]' >> "$GITHUB_OUTPUT"
@@ -83,6 +85,17 @@ jobs:
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
             echo "No code changes — style checks will be skipped"
+          fi
+
+          # docs/ is deliberately NOT in the has_code scope above, so a
+          # docs-only PR skips every Rust lane — the publication-boundary gate
+          # needs its own trigger. The gate's own files are in scope so the
+          # guardrail runs when it changes (review-discipline.md: "Guardrails
+          # are code").
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(docs/|scripts/ci/docs_publication_boundary\.py$|scripts/ci/test_docs_publication_boundary\.py$|\.github/workflows/code_style\.yml$)'; then
+            echo "has_docs=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_docs=false" >> "$GITHUB_OUTPUT"
           fi
 
           # Crate scopes are matched by NAME at any depth: `crates/([^/]+/)*<name>/`
@@ -447,6 +460,33 @@ jobs:
       - name: Test Reborn architecture boundaries
         run: cargo test -p ironclaw_architecture_tests reborn
 
+  # docs/ mixes the public Mintlify site with internal engineering docs.
+  # Omission from docs.json navigation is NOT a publication boundary — a page
+  # left out of navigation is still deployed, reachable by URL, and indexable.
+  # This gate fails when a .md/.mdx under docs/ is neither in navigation nor
+  # fenced by docs/.mintignore (nor explicitly marked `hidden: true`), when
+  # navigation references a page with no source file, and when .mintignore
+  # grows a new entry — the fence list is frozen; new internal docs belong
+  # under docs/internal/.
+  docs-publication-boundary:
+    name: Docs publication boundary
+    needs: changes
+    if: needs.changes.outputs.has_docs == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Self-test the publication boundary check
+        run: python3 scripts/ci/test_docs_publication_boundary.py
+      - name: Check every docs/ page is published or fenced
+        run: python3 scripts/ci/docs_publication_boundary.py
+
   code-style:
     name: Code Style (fmt + clippy)
     runs-on: ubuntu-latest
@@ -458,12 +498,20 @@ jobs:
       - clippy-windows
       - reborn-cli-smoke
       - webui-v2-js-lint
+      - docs-publication-boundary
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
       - run: |
+          # A docs-only PR has has_code=false, so the boundary gate must be
+          # checked before the early exit below or it could never block.
+          if [[ "${{ needs.changes.outputs.has_docs }}" == "true" && "${{ needs.docs-publication-boundary.result }}" != "success" ]]; then
+            echo "Docs publication boundary failed: ${{ needs.docs-publication-boundary.result }}"
+            exit 1
+          fi
+
           if [[ "${{ needs.changes.outputs.has_code }}" == "false" ]]; then
             if [[ "${{ needs.changes.outputs.has_reborn_cli }}" == "true" && "${{ needs.reborn-cli-smoke.result }}" != "success" ]]; then
               echo "Reborn CLI smoke failed: ${{ needs.reborn-cli-smoke.result }}"

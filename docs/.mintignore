@@ -6,16 +6,23 @@
 drafts/
 *.draft.mdx
 
-# Internal engineering docs. These live here so they version with the code and
-# stay reachable by the knowledge graph, but they are NOT part of the public
-# docs site. Everything below must stay unpublished — architecture contracts,
-# implementation plans, and QA maps are internal-only.
+# Internal engineering docs. These live under docs/ so they version with the
+# code and stay reachable by the knowledge graph, but they are NOT part of the
+# public docs site. Everything matched below must stay unpublished —
+# architecture contracts, implementation plans, and QA maps are internal-only.
 #
 # Omission from docs.json navigation is NOT a publication boundary. A page left
 # out of navigation is only hidden from the sidebar — it stays reachable by URL
 # and can still be indexed. This file is the only thing that stops Mintlify from
-# processing and serving a page. Any new internal directory under docs/ must be
-# added to the list below before it is committed.
+# processing and serving a page.
+#
+# THE RULE: all new internal material goes under internal/. This list is frozen
+# — scripts/ci/docs_publication_boundary.py (Code Style workflow) rejects any
+# entry added to it. The other directories below are legacy locations kept
+# until they are consolidated into internal/; entries may be removed as that
+# happens, never added. The same check requires every .md/.mdx under docs/ to
+# be in docs.json navigation, matched here, or carrying `hidden: true`
+# frontmatter marking a deliberately unlisted public page.
 plans/
 internal/
 reborn/
