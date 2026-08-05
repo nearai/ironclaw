@@ -1282,8 +1282,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
     def test_golden_payload_snapshots_select_their_owning_integration_lane(
         self,
     ) -> None:
-        prefix, owner = next(iter(planner.INTEGRATION_ARTIFACT_PREFIX_OWNERS.items()))
-        self.assertEqual(prefix, "tests/snapshots/golden_payload__")
+        prefix = "tests/snapshots/golden_payload__"
+        owner = planner.INTEGRATION_ARTIFACT_PREFIX_OWNERS[prefix]
         self.assertEqual(owner, "tests/integration/golden_payload.rs")
         expected_lane = planner._integration_test_lanes()[owner]
 
