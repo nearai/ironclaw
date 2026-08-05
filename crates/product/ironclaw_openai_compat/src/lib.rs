@@ -22,10 +22,14 @@ mod identity;
 mod model_validation;
 mod models;
 mod models_catalog;
+mod mount;
 mod projection_helpers;
 mod refs;
-// Durable filesystem-backed ref store. Gated behind `storage` so the
-// contract-only surface stays free of the `ironclaw_filesystem` dependency.
+// Durable filesystem-backed ref store, over the universal `RootFilesystem`
+// port. Unconditional: this crate declares no cargo features, and WS5
+// collapsed the LibSql/Postgres ref-store newtypes onto that one
+// backend-neutral form. (It carried a "gated behind `storage`" note until
+// 2026-08-05; there has been no such feature here for some time.)
 mod refs_storage;
 mod responses;
 mod responses_workflow;
@@ -74,6 +78,10 @@ pub use identity::{
 };
 pub use models::{OpenAiModelListResponse, OpenAiModelObject};
 pub use models_catalog::{OpenAiCompatModelCatalog, OpenAiCompatModelEntry};
+pub use mount::{
+    OpenAiCompatRouteMountPorts, openai_compat_route_mount,
+    product_surface_caller_from_openai_scope,
+};
 pub use refs::{
     OpenAiChatCompletionId, OpenAiCompatActorScope, OpenAiCompatBindInternalRefs,
     OpenAiCompatIdempotencyConflict, OpenAiCompatIdempotencyKey, OpenAiCompatInternalRefs,

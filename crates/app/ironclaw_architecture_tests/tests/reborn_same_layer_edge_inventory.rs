@@ -938,11 +938,22 @@ const DOWNGRADE_PINS: &[DowngradePin] = &[
         // runtimes, kernel and loops crate with nothing objecting — the matrix
         // reads the widening as an improvement. Frozen at the four consumers
         // that existed when it merged; a fifth is a reviewed decision.
+        //
+        // ✎ The fifth landed 2026-08-05 and is that reviewed decision, taken
+        // where the rule asks for it: `ironclaw_openai_compat` takes the edge
+        // for CHECKLIST WS6's OpenAI-compat eviction clause, which names
+        // `product_contracts` + `host_ingress` as exactly the two crates the
+        // movable residue is reachable with. The edge carries one type
+        // (`ProtectedRouteMount`) into `src/mount.rs`, the crate's own
+        // route-mount assembly; it is the same shape as `ironclaw_webui`'s and
+        // `ironclaw_operator`'s, a transport naming the carrier it hands back
+        // to composition.
         permitted_consumers: &[
             "ironclaw_extension_host",
             "ironclaw_operator",
             "ironclaw_composition",
             "ironclaw_webui",
+            "ironclaw_openai_compat",
         ],
     },
 ];
