@@ -253,7 +253,7 @@ h1,h2,h3,p{margin:0}
 .attchip .attx:hover{background:var(--v2-surface);color:var(--v2-text-strong)}
 .attchip .attx svg{width:11px;height:11px}
 /* modify modal */
-.modal{position:absolute;inset:0;z-index:60;display:none;align-items:center;justify-content:center;padding:24px}
+.modal{position:fixed;inset:0;z-index:200;display:none;align-items:center;justify-content:center;padding:24px}
 .modal.on{display:flex}
 .modalback{position:absolute;inset:0;background:color-mix(in srgb,var(--v2-canvas-strong) 55%,transparent);backdrop-filter:blur(2px)}
 .modalcard{position:relative;width:min(420px,100%);background:var(--v2-surface);border:1px solid var(--v2-panel-border);border-radius:16px;box-shadow:0 24px 60px -20px rgba(15,18,25,.5);overflow:hidden}
@@ -271,6 +271,40 @@ h1,h2,h3,p{margin:0}
 .modalcard .mbtn.ghost{background:transparent;border-color:var(--v2-panel-border);color:var(--v2-text-strong)}
 .modalcard .mbtn.ghost:hover{border-color:var(--v2-accent)}
 .modalcard .mbtn.primary{color:#fff;border-color:rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
+/* auth "browser" dialog */
+.authwin{position:relative;width:min(440px,100%);background:var(--v2-surface);border:1px solid var(--v2-panel-border);border-radius:14px;box-shadow:0 24px 60px -20px rgba(15,18,25,.55);overflow:hidden}
+.authwin .bbar{display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--v2-surface-soft);border-bottom:1px solid var(--v2-panel-border)}
+.authwin .bdots{display:inline-flex;gap:5px;flex:none}
+.authwin .bdots i{width:9px;height:9px;border-radius:999px;background:var(--v2-panel-border)}
+.authwin .burl{flex:1;min-width:0;display:inline-flex;align-items:center;gap:6px;justify-content:center;font-size:11.5px;color:var(--v2-text-muted);background:var(--v2-canvas-strong);border:1px solid var(--v2-panel-border);border-radius:8px;padding:4px 10px;font-family:var(--font-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.authwin .burl svg{width:11px;height:11px;flex:none;color:var(--v2-positive-text)}
+.authwin .mx{width:26px;height:26px;flex:none;display:grid;place-items:center;border:0;background:transparent;color:var(--v2-text-muted);cursor:pointer;border-radius:6px}
+.authwin .mx:hover{background:var(--v2-surface)}
+.authwin .mx svg{width:15px;height:15px}
+.abody{padding:26px 26px 22px;display:flex;flex-direction:column;align-items:center;text-align:center}
+.abody .astep{font-size:11px;color:var(--v2-text-faint);margin-bottom:14px;font-family:var(--font-mono)}
+.abody .alogo{width:40px;height:40px;display:grid;place-items:center;margin-bottom:14px;color:var(--v2-text-strong)}
+.abody .alogo svg{width:100%;height:100%}
+.abody .atitle{font-size:18px;font-weight:600;color:var(--v2-text-strong);line-height:1.3}
+.abody .asub{font-size:13px;color:var(--v2-text-muted);margin-top:4px}
+.abody .acct{margin-top:18px;display:flex;align-items:center;gap:10px;width:100%;border:1px solid var(--v2-panel-border);border-radius:10px;padding:10px 12px;background:var(--v2-surface);cursor:pointer;font:inherit;text-align:left}
+.abody .acct:hover{border-color:var(--v2-accent);background:var(--v2-surface-soft)}
+.abody .aav{width:30px;height:30px;flex:none;border-radius:999px;background:var(--v2-accent-soft);color:var(--v2-accent-text);display:grid;place-items:center;font-size:12px;font-weight:700}
+.abody .acol{display:flex;flex-direction:column;min-width:0}
+.abody .anm{font-size:13px;font-weight:600;color:var(--v2-text-strong)}
+.abody .aem{font-size:12px;color:var(--v2-text-muted)}
+.abody .scopes{margin-top:16px;width:100%;display:flex;flex-direction:column;gap:8px;text-align:left}
+.abody .ascope{display:flex;align-items:flex-start;gap:8px;font-size:12.5px;color:var(--v2-text)}
+.abody .ascope svg{width:15px;height:15px;flex:none;color:var(--v2-positive-text);margin-top:1px}
+.abody .afoot{margin-top:22px;display:flex;justify-content:flex-end;gap:8px;width:100%}
+.abody .abtn{font:inherit;font-size:13px;font-weight:600;height:36px;padding:0 16px;border-radius:9px;cursor:pointer;border:1px solid transparent}
+.abody .abtn.ghost{background:transparent;border-color:var(--v2-panel-border);color:var(--v2-text-strong)}
+.abody .abtn.ghost:hover{border-color:var(--v2-accent)}
+.abody .abtn.primary{color:#fff;border-color:rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
+/* connect-panel selected pill (pending authorization) */
+.cpill.sel{border-color:color-mix(in srgb,var(--v2-accent) 55%,var(--v2-panel-border));background:var(--v2-accent-soft)}
+.cpill.sel .cstate{background:var(--v2-accent);border-color:var(--v2-accent);color:#fff}
+.cpill[disabled]{cursor:default}
 
 /* automation task card (faithful to automation-task-card.tsx) */
 .tcard{flex:none;width:258px;position:relative;display:flex;flex-direction:column;border:1px solid var(--v2-panel-border);border-radius:16px;background:var(--v2-card-bg);padding:12px;text-align:left;box-shadow:0 1px 2px rgba(15,18,25,.04),0 12px 26px -12px rgba(15,18,25,.12)}
@@ -669,6 +703,13 @@ h1,h2,h3,p{margin:0}
         <div class="mf"><button class="mbtn ghost" id="modifyCancel2" type="button">Cancel</button><button class="mbtn primary" id="modifySave" type="button">Save changes</button></div>
       </div>
     </div>
+    <div class="modal" id="authModal" aria-hidden="true">
+      <div class="modalback" id="authBack"></div>
+      <div class="authwin" role="dialog" aria-modal="true">
+        <div class="bbar"><span class="bdots"><i></i><i></i><i></i></span><span class="burl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><span id="authUrl">accounts.google.com</span></span><button class="mx" id="authClose" type="button" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+        <div class="abody" id="authBody"></div>
+      </div>
+    </div>
   </section>
 
   <div class="foot">
@@ -741,32 +782,36 @@ h1,h2,h3,p{margin:0}
     {key:'github',label:'GitHub',icon:'code',accent:'#7d5bed'}
   ];
   var appRow=document.getElementById('appRow'),connectSub=document.getElementById('connectSub');
-  var connSet=[], connectState='open'; // 'open' | 'pill' | 'gone'
+  var connSet=[], selSet=[], connectState='open'; // 'open' | 'pill' | 'gone'
   function isConn(k){return connSet.indexOf(k)>=0;}
+  function isSel(k){return selSet.indexOf(k)>=0;}
   function appChip(a){return '<span class="appchip">'+brandLogo(a.key)+'</span>';}
   function advanceFromConnect(){ if(step<1){ step=1; render(); if(playing){clearTimeout(timer);timer=setTimeout(advance,1100);} } }
-  function connectAll(){ connSet=APPS.map(function(a){return a.key;}); renderConnect(); advanceFromConnect(); }
+  // authorize the selected tools (or all remaining) via the queued OAuth modal, then advance
+  function startConnect(){
+    var queue = selSet.length ? selSet.slice() : APPS.filter(function(a){return !isConn(a.key);}).map(function(a){return a.key;});
+    if(!queue.length) return;
+    openAuth(queue, function(k){ if(!isConn(k)) connSet.push(k); var i=selSet.indexOf(k); if(i>=0) selSet.splice(i,1); }, function(){ renderConnect(); setTimeout(advanceFromConnect,500); });
+  }
   function renderConnect(){
     var all=APPS.length,n=connSet.length;
-    connectSub.textContent='one tap each · add more anytime';
+    connectSub.textContent = n>=all ? 'all connected' : 'select tools, then authorize each';
     var html=APPS.map(function(a){
-      var on=isConn(a.key);
-      return '<button class="cpill'+(on?' on':'')+'" data-app="'+a.key+'" type="button" aria-pressed="'+on+'">'
+      var on=isConn(a.key), sel=isSel(a.key);
+      return '<button class="cpill'+(on?' on':'')+(sel?' sel':'')+'" data-app="'+a.key+'" type="button" aria-pressed="'+(on||sel)+'"'+(on?' disabled':'')+'>'
         +appChip(a)+'<span class="an">'+a.label+'</span>'
         +'<span class="cstate">'+svg('check',3)+'</span></button>';
     }).join('');
-    // connect action rides the end of the pill flow (right-aligned) — no wasted footer row
-    if(n<all) html+='<button class="connectbtn" id="connectAllBtn" type="button">'+(n>=1?'Connect':'Connect all')+'</button>';
+    if(n<all) html+='<button class="connectbtn" id="connectAllBtn" type="button">'+(selSet.length?('Connect '+selSet.length):'Connect all')+'</button>';
     appRow.innerHTML=html;
     appRow.querySelectorAll('.cpill').forEach(function(b){
       b.onclick=function(){
-        var k=b.getAttribute('data-app'),i=connSet.indexOf(k);
-        if(i>=0) connSet.splice(i,1); else connSet.push(k);
+        var k=b.getAttribute('data-app'); if(isConn(k)) return;
+        var i=selSet.indexOf(k); if(i>=0) selSet.splice(i,1); else selSet.push(k);
         renderConnect();
-        if(connSet.length===all){ setTimeout(advanceFromConnect,600); }
       };
     });
-    var cbtn=document.getElementById('connectAllBtn'); if(cbtn) cbtn.onclick=connectAll;
+    var cbtn=document.getElementById('connectAllBtn'); if(cbtn) cbtn.onclick=startConnect;
   }
   // dismiss the connect panel ↔ show a "Connect your tools" pill in the composer
   var connCloseBtn=document.getElementById('connCloseBtn'),connPill=document.getElementById('connPill'),connPillX=document.getElementById('connPillX');
@@ -794,17 +839,23 @@ h1,h2,h3,p{margin:0}
   var ICO_SPARK='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 4.7L18 9l-4 2.7L15.5 17 12 14.4 8.5 17l1.5-5.3L6 9l4.1-1.3z"/></svg>';
   var ICO_REFRESH='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>';
   var CARD_X='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+  var CONNECT_ICO='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg>';
   function cardHTML(c,idx,state,opts){
     opts=opts||{};
     var v=(state==='completed')?c.done:c.sug;
-    var m=v.metrics.map(function(x){return '<span><b>'+x[0]+'</b> '+x[1]+'</span>';}).join('');
     var head='<div class="thd"><span class="appchip">'+brandLogo(c.brand)+'</span><b class="ttl">'+v.title+'</b></div>';
-    var body='<div class="metrics">'+m+'</div><div class="tprov">From '+c.label+(state==='completed'?' · '+c.when:'')+'</div>';
-    var acts;
-    if(state==='running') acts='<div class="acts runrow"><span class="runstat"><span class="spin">'+ICO_REFRESH+'</span>Automating…</span></div>';
-    else if(state==='completed') acts='<div class="acts"><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button><button class="txt revert" data-act="revert" data-i="'+idx+'">'+svg('undo')+'Revert</button></div>';
-    else acts='<div class="acts"><button class="approve" data-act="approve" data-i="'+idx+'">Approve</button><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button></div>';
     var xbtn='<button class="cardx" data-act="cancel" data-i="'+idx+'" type="button" title="Dismiss" aria-label="Dismiss">'+CARD_X+'</button>';
+    var body,acts;
+    if(state==='unconnected'){
+      body='<div class="tprov conhint">Connect '+c.label+' to run this suggestion.</div>';
+      acts='<div class="acts"><button class="approve" data-act="connect" data-i="'+idx+'">'+CONNECT_ICO+'Connect '+c.label+'</button></div>';
+    } else {
+      var m=v.metrics.map(function(x){return '<span><b>'+x[0]+'</b> '+x[1]+'</span>';}).join('');
+      body='<div class="metrics">'+m+'</div><div class="tprov">From '+c.label+(state==='completed'?' · '+c.when:'')+'</div>';
+      if(state==='running') acts='<div class="acts runrow"><span class="runstat"><span class="spin">'+ICO_REFRESH+'</span>Automating…</span></div>';
+      else if(state==='completed') acts='<div class="acts"><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button><button class="txt revert" data-act="revert" data-i="'+idx+'">'+svg('undo')+'Revert</button></div>';
+      else acts='<div class="acts"><button class="approve" data-act="approve" data-i="'+idx+'">Approve</button><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button></div>';
+    }
     var cls='tcard'+(opts.ghost?' ghost':'')+(opts.first?' first':'');
     var spark=opts.first?'<div class="aispark" aria-hidden="true"><div class="aispin"></div></div>':'';
     return '<div class="'+cls+'" data-i="'+idx+'">'+xbtn+head+body+acts+spark+'</div>';
@@ -832,6 +883,7 @@ h1,h2,h3,p{margin:0}
         var a=b.getAttribute('data-act');
         if(a==='refresh'){ resetCardStates(); render(); return; }
         var i=+b.getAttribute('data-i');
+        if(a==='connect'){ openAuth([CARDS[i].brand], null, function(){ cardStates[i]='suggested'; render(); }); return; }
         if(a==='modify'){ openModify(CARDS[i].sug.title); return; }
         if(a==='approve'){ cardStates[i]='running'; render(); setTimeout(function(){ if(cardStates[i]==='running'){ cardStates[i]='completed'; render(); } },950); return; }
         if(a==='cancel') cardStates[i]='dismissed';
@@ -912,18 +964,18 @@ h1,h2,h3,p{margin:0}
   };
   // Foundational first-run journey (Suggest/Plan): approve -> automate -> complete, across the beats
   var FOUND_BEATS=[
-    ['suggested','suggested','suggested'],
-    ['running','suggested','suggested'],
-    ['completed','suggested','suggested'],
-    ['completed','running','suggested'],
+    ['unconnected','unconnected','unconnected'],
+    ['suggested','unconnected','unconnected'],
+    ['running','unconnected','unconnected'],
+    ['completed','suggested','unconnected'],
     ['completed','completed','completed']
   ];
   var FOUND_CAP=[
-    '<b>Foundational</b> — the first screen. Tools are admin-preconnected, so suggested tasks are here immediately. Approve, tweak, dismiss (×), or type your own.',
-    'You <b>approve</b> the top task — it moves to <b>Automating…</b> while the agent runs it.',
-    'The task <b>completes</b>; its card flips to the done state (Modify / Revert).',
-    'Approve the next one — it automates while the first stays done.',
-    'All suggestions <b>handled</b>. Dismiss any (×), or type to ask for more.'
+    '<b>Foundational</b> — the first screen. Admin has whitelisted these tools; each card needs its tool <b>authorized</b>. Tap <b>Connect</b> to sign in and approve access.',
+    'Gmail is <b>connected</b> — the task becomes a suggestion you can approve.',
+    'You <b>approve</b> it — the task moves to <b>Automating…</b> while the agent runs it.',
+    'It <b>completes</b>; connect the next tool to keep going.',
+    'All connected and <b>handled</b>. Dismiss any (×), or type to ask for more.'
   ];
   var nearStart=0,elTimer=null;
   function fmt(ms){var s=Math.floor(ms/1000);return Math.floor(s/60)+':'+String(s%60).padStart(2,'0');}
@@ -950,7 +1002,7 @@ h1,h2,h3,p{margin:0}
     var carouselActive = isVision ? (step>=2) : true;
     show(carouselBlock, carouselActive);
     connPill.style.display = (empty && connectState==='pill' && isVision) ? '' : 'none';
-    if(isVision){ if(step===0){ connSet=[]; renderConnect(); } else if(step===1){ connSet=APPS.map(function(a){return a.key;}); renderConnect(); } }
+    if(isVision){ if(step===0){ connSet=[]; selSet=[]; renderConnect(); } else if(step===1){ connSet=APPS.map(function(a){return a.key;}); selSet=[]; renderConnect(); } }
     if(carouselActive){
       if(working){
         carTtl.textContent = prop ? 'Looking for things to suggest' : 'Working on your first automations';
@@ -1009,6 +1061,40 @@ h1,h2,h3,p{margin:0}
   function openModify(t){ if(!modifyModal)return; modifyTitle.textContent='Modify — '+t; modifyField.value=''; modifyModal.classList.add('on'); }
   function closeModify(){ if(modifyModal) modifyModal.classList.remove('on'); }
   ['modifyBack','modifyCancel','modifyCancel2','modifySave'].forEach(function(id){ var el=document.getElementById(id); if(el) el.onclick=closeModify; });
+  // ===== 3rd-party auth: a modal "browser" dialog, queued across the selected tools =====
+  var AUTHMETA={
+    gmail:{name:'Gmail',domain:'accounts.google.com',scope:'Read, send, and organise your email'},
+    calendar:{name:'Google Calendar',domain:'accounts.google.com',scope:'View and manage your calendars and events'},
+    docs:{name:'Google Docs',domain:'accounts.google.com',scope:'View and manage your Google Docs'},
+    drive:{name:'Google Drive',domain:'accounts.google.com',scope:'See, edit, and organise your Drive files'},
+    slack:{name:'Slack',domain:'slack.com',scope:'Read and send messages on your behalf'},
+    notion:{name:'Notion',domain:'www.notion.so',scope:'Read and edit the pages you choose'},
+    github:{name:'GitHub',domain:'github.com',scope:'Access your repositories and issues'}
+  };
+  var authModal=document.getElementById('authModal'),authBody=document.getElementById('authBody'),authUrl=document.getElementById('authUrl');
+  var authQueue=[],authPos=0,authPhase='signin',authOnEach=null,authOnDone=null;
+  function openAuth(keys,onEach,onDone){ authQueue=(keys||[]).slice(); authPos=0; authPhase='signin'; authOnEach=onEach||null; authOnDone=onDone||null; if(!authQueue.length){ if(authOnDone)authOnDone(); return; } renderAuth(); if(authModal)authModal.classList.add('on'); }
+  function closeAuth(){ if(authModal)authModal.classList.remove('on'); }
+  function renderAuth(){
+    var k=authQueue[authPos],meta=AUTHMETA[k]||{name:k,domain:'',scope:''};
+    if(authUrl)authUrl.textContent=meta.domain;
+    var pos=(authQueue.length>1)?'<div class="astep">Connecting '+(authPos+1)+' of '+authQueue.length+' · '+meta.name+'</div>':'';
+    var logo='<span class="alogo">'+brandLogo(k)+'</span>';
+    if(authPhase==='signin'){
+      authBody.innerHTML=pos+logo+'<div class="atitle">Sign in</div><div class="asub">to continue to <b>IronClaw</b></div>'
+        +'<button class="acct" id="authAcct" type="button"><span class="aav">A</span><span class="acol"><span class="anm">Ada Lovelace</span><span class="aem">ada@acme.com</span></span></button>'
+        +'<div class="afoot"><button class="abtn ghost" id="authCancelB" type="button">Cancel</button></div>';
+    } else {
+      authBody.innerHTML=pos+logo+'<div class="atitle"><b>IronClaw</b> wants access</div><div class="asub">to your '+meta.name+' · signed in as ada@acme.com</div>'
+        +'<div class="scopes"><div class="ascope">'+svg('check',2.6)+'<span>'+meta.scope+'</span></div><div class="ascope">'+svg('check',2.6)+'<span>See your name and email address</span></div></div>'
+        +'<div class="afoot"><button class="abtn ghost" id="authCancelB" type="button">Cancel</button><button class="abtn primary" id="authAllow" type="button">Allow</button></div>';
+    }
+    var acct=document.getElementById('authAcct'); if(acct)acct.onclick=function(){ authPhase='consent'; renderAuth(); };
+    var allow=document.getElementById('authAllow'); if(allow)allow.onclick=authAdvance;
+    var cb=document.getElementById('authCancelB'); if(cb)cb.onclick=closeAuth;
+  }
+  function authAdvance(){ var k=authQueue[authPos]; if(authOnEach)authOnEach(k); authPos++; if(authPos>=authQueue.length){ closeAuth(); if(authOnDone)authOnDone(); } else { authPhase='consent'; renderAuth(); } }
+  if(authModal){ var ac=document.getElementById('authClose'),ab=document.getElementById('authBack'); if(ac)ac.onclick=closeAuth; if(ab)ab.onclick=closeAuth; }
   // Vision drawer controls: collapse/expand + dismiss (with a restore bar)
   var drawerToggle=document.getElementById('drawerToggle');
   if(drawerToggle) drawerToggle.onclick=function(){ if(drawerState==='collapsed'){ drawerState='open'; autoCollapseSuppressed=true; } else { drawerState='collapsed'; } applyDrawer(); };

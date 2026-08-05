@@ -26,11 +26,15 @@ keeping the aspirational target visible:
 Scoped to what is feasible and lightweight on top of today's v2 system, for a **multi-tenant
 enterprise** deployment:
 
-- **Tools are admin-preconfigured** — there is no user-facing connect step. The first screen goes
-  straight to suggestions.
-- **Suggested task cards are present at the first step** — because tools are already connected, the
-  agent surfaces its first suggestions immediately (no empty cold start to earn). Single-state first
-  run; approve / modify / dismiss inline, or type your own.
+- **Tools are admin-whitelisted, user-authorized** — the admin decides which tools are available,
+  but the user still authorizes their own account per tool. So there is no separate connect *panel*;
+  instead each suggested task card carries a **"Connect <Tool>"** CTA, and authorizing runs a modal
+  OAuth "browser" dialog (sign in → approve scopes). Once connected, the card becomes an actionable
+  suggestion.
+- **Suggested task cards are present at the first step** — the agent surfaces its first suggestions
+  immediately (no empty cold start to earn); each starts in a *connect* state and becomes
+  approve/modify/dismiss once its tool is authorized. Cards read as proposals ("Triage your inbox")
+  and flip to results ("Triaged your inbox") once run.
 - **No username** unless it can be derived from a deterministic source (admin preconfig, email/Slack
   profile). Default is a nameless greeting ("Welcome to IronClaw.") and a plain account chip.
 - **Agent modes scoped to three**, default **Suggest**:
@@ -44,8 +48,10 @@ enterprise** deployment:
 ### Vision — north-star
 Everything in Foundational plus the aspirational first-run experience:
 
-- **Cold-start connect flow** (connect-your-tools panel → one-tap connect → anticipatory beat →
-  first card reveal), named greeting, and the four-mode set (Suggest / Plan / Auto / Bypass).
+- **Cold-start connect flow** — a connect-your-tools panel where the user selects tools, then a
+  queued modal OAuth "browser" dialog walks each one (sign in once, approve scopes per tool) until
+  all are authorized; then the anticipatory beat → first card reveal. Named greeting, and the
+  four-mode set (Suggest / Plan / Auto / Bypass).
 - **First-automation reveal** — the emotional peak: a brief anticipatory beat (branded **NEAR
   process indicator** + skeleton tiles) then the first "Done for you" card is **conjured** in with a
   Gemini-style *ai-spark* border sweep. Honored under `prefers-reduced-motion`.
