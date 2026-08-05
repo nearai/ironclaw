@@ -44,11 +44,11 @@ Verdicts: **KEEP** (as-is) · **INTERNAL** (decompose/repair inside the crate) �
 | ironclaw_host_api | 270 | 6.3k | KEEP — universal vocabulary |
 | ironclaw_filesystem | 155 | 9.8k | KEEP |
 | ironclaw_turns | 110 | 23.9k | **SPLIT-TYPES (JIT):** carve `turns` type surface into a tiny stable crate if/when rebuild ripple hurts; behavior keeps low fan-in. Do not merge anything into it. |
-| ironclaw_events | 70 | 2.5k | KEEP |
+| ironclaw_event_log | 70 | 2.5k | KEEP |
 | ironclaw_common | 64 | 4.5k | KEEP |
 | ironclaw_safety | 64 | 6.7k | KEEP |
 | ironclaw_resources | 55 | 4.7k | KEEP |
-| ironclaw_extensions | 54 | 4.7k | KEEP |
+| ironclaw_extension_registry | 54 | 4.7k | KEEP |
 | ironclaw_product_adapters | 54 | 6.5k | KEEP |
 | ironclaw_trust | 44 | 3.7k | KEEP |
 | ironclaw_skills | 44 | 10.0k | KEEP |
@@ -59,11 +59,11 @@ Verdicts: **KEEP** (as-is) · **INTERNAL** (decompose/repair inside the crate) �
 | ironclaw_processes | 29 | 2.8k | KEEP |
 | ironclaw_llm | 25 | 42.9k | KEEP boundary; **INTERNAL health OK** (36 top mods, biggest file 4.4k) — no action |
 | ironclaw_hooks | 25 | 22.6k | KEEP; internal OK (21 mods, biggest 5.0k) |
-| ironclaw_reborn_event_store | 25 | 3.0k | KEEP |
+| ironclaw_event_store | 25 | 3.0k | KEEP |
 | ironclaw_host_runtime | 24 | 35.2k | KEEP boundary; internal OK (21 mods, biggest 2.9k) |
 | ironclaw_loop_host | 24 | 29.6k | KEEP; **INTERNAL:** `capability_port.rs` (8.2k) is a god-file — split by capability family when next touched (JIT) |
-| ironclaw_product | 24 | 23.8k | KEEP; **INTERNAL/JIT:** `reborn_services.rs` (6.0k) holds the 70-method `RebornServicesApi` god interface — split by domain (threads/turns/gates/extensions/llm/…) as features demand slices; storage fold-in from tail (below) |
-| ironclaw_reborn_traces | 24 | 17.7k | KEEP; **INTERNAL:** `contribution.rs` = **14.5k lines in one file** — worst god-file in the workspace after composition; dissect into submodules |
+| ironclaw_assistant | 24 | 23.8k | KEEP; **INTERNAL/JIT:** `reborn_services.rs` (6.0k) holds the 70-method `RebornServicesApi` god interface — split by domain (threads/turns/gates/extensions/llm/…) as features demand slices; storage fold-in from tail (below) |
+| ironclaw_trace_commons | 24 | 17.7k | KEEP; **INTERNAL:** `contribution.rs` = **14.5k lines in one file** — worst god-file in the workspace after composition; dissect into submodules |
 | ironclaw_approvals | 24 | 3.2k | KEEP |
 | ironclaw_memory | 24 | 1.7k | KEEP |
 
@@ -71,12 +71,12 @@ Verdicts: **KEEP** (as-is) · **INTERNAL** (decompose/repair inside the crate) �
 
 triggers (19), secrets (19), auth (19), extractors (19), prompt_envelope (15),
 dispatcher (15), attachments (15), outbound (15), product_context (15), reborn_config (14),
-network (14), runtime_policy (14), first_party_extensions (14), ironclaw_runner (14 —
+network (14), runtime_policy (14), first_party_extensions (14), ironclaw_turn_runner (14 —
 internal OK: 21 mods, biggest 4.7k), mcp (13), memory_native (10), conversations (10),
 capabilities (10), reborn_openai_compat (10), process_sandbox (10), scripts (10),
 product_adapter_registry (10), wasm_limiter (10), wasm (9).
 
-**ironclaw_reborn_composition (19, 153k) → INTERNAL — the centerpiece. See §3.**
+**ironclaw_composition (19, 153k) → INTERNAL — the centerpiece. See §3.**
 
 ### 2.3 Low fan-in tail (4–5) — mostly deliberate boundaries, KEEP
 
@@ -97,18 +97,18 @@ Optional; schedule when loop work next opens both crates anyway.
 | ironclaw_oauth | 439 | its consumer (ironclaw_auth) |
 | ironclaw_skill_learning | 356 | ironclaw_skills (or consumer) |
 | ironclaw_wasm_sandbox_core | 357 | ironclaw_wasm |
-| ironclaw_reborn_openai_compat_storage | 673 | ironclaw_reborn_openai_compat |
-| ironclaw_projects | 842 | **KEEP in W2**; substrate entity/repository. If revisited later, the only acceptable consumer-side target is `ironclaw_product`, never composition. |
-| ironclaw_product_storage | 946 | ironclaw_product |
+| ironclaw_reborn_openai_compat_storage | 673 | ironclaw_openai_compat |
+| ironclaw_projects | 842 | **KEEP in W2**; substrate entity/repository. If revisited later, the only acceptable consumer-side target is `ironclaw_assistant`, never composition. |
+| ironclaw_product_storage | 946 | ironclaw_assistant |
 
 ### 2.5 Zero fan-in — KEEP all (correction: none are dead)
 
 | Crate | What it actually is |
 |---|---|
-| ironclaw_architecture | **tests-only crate** — boundary tests (`reborn_dependency_boundaries.rs`, `reborn_composition_boundaries.rs`, 3.8k test lines). Load-bearing for this refactor's eval. |
+| ironclaw_architecture_tests | **tests-only crate** — boundary tests (`reborn_dependency_boundaries.rs`, `reborn_composition_boundaries.rs`, 3.8k test lines). Load-bearing for this refactor's eval. |
 | ironclaw_hooks_parity | **tests-only crate** — postgres/libsql parity oracle + adversarial matrix (2.1k test lines) |
-| ironclaw_silk_decoder | standalone binary |
-| ironclaw_reborn_cli | binary (12.4k + 3.7k tests) |
+| ironclaw_silk_decoder (now `tools/`) | standalone binary |
+| ironclaw_cli | binary (12.4k + 3.7k tests) |
 
 ## 3. Composition dissection — 10 internal modules, 11 PRs
 
@@ -159,15 +159,15 @@ cargo fmt --check
 # G2 lint, zero warnings
 cargo clippy --all --benches --tests --examples --all-features
 # G3 full-feature build+test of the crate and its consumers
-cargo test -p ironclaw_reborn_composition --features "webui-v2-beta,slack-v2-host-beta,openai-compat-beta,root-llm-provider,test-support,postgres"
+cargo test -p ironclaw_composition --features "webui-v2-beta,slack-v2-host-beta,openai-compat-beta,root-llm-provider,test-support,postgres"
 cargo test -p ironclaw_reborn_webui_ingress
-cargo build -p ironclaw_reborn_cli
+cargo build -p ironclaw_cli
 # G4 boundary tests (the load-bearing architectural contract)
-cargo test -p ironclaw_architecture
+cargo test -p ironclaw_architecture_tests
 # G5 cfg-matrix (catches mis-hung feature gates — the #1 hazard)
-cargo check -p ironclaw_reborn_composition --no-default-features
-cargo check -p ironclaw_reborn_composition            # default features
-cargo check -p ironclaw_reborn_composition --all-features
+cargo check -p ironclaw_composition --no-default-features
+cargo check -p ironclaw_composition            # default features
+cargo check -p ironclaw_composition --all-features
 # G6 workspace unit tier
 cargo test
 ```
@@ -184,16 +184,16 @@ lever on hermetic tests. Do not adopt `--test-threads=1` as the default runner.
 ```bash
 # S1 flat-module count in lib.rs must be ≤ the step's target
 # (final target ≤ 12: root + 10 domain modules per §3/§6.2, plus test_support)
-grep -cE '^\s*(pub )?mod [a-z_0-9]+;' crates/ironclaw_reborn_composition/src/lib.rs
+grep -cE '^\s*(pub )?mod [a-z_0-9]+;' crates/ironclaw_composition/src/lib.rs
 # S2 god-file ceiling: no src file (tests excluded) over 4,000 lines by PR #11
-find crates/ironclaw_reborn_composition/src -name '*.rs' ! -name '*tests*' -exec wc -l {} + | sort -rn | head -5
+find crates/ironclaw_composition/src -name '*.rs' ! -name '*tests*' -exec wc -l {} + | sort -rn | head -5
 # S3 no new crates: workspace member count unchanged (76)
 grep -c '^    "' Cargo.toml   # or: cargo metadata | jq '.workspace_members | length'
 # S4 public-surface freeze: the pub-use snapshot diff must be EMPTY.
 # Captures each `pub use` block AND any #[cfg(...)]/attributes immediately above it,
 # so a silently dropped/changed feature gate on an export is caught, not missed.
 awk '/^#\[/{attr=(attr ? attr "\n" : "") $0; next} /^pub use/{p=1; if(attr){print attr; attr=""}} p{print; if(/;/){p=0}} !p{attr=""}' \
-  crates/ironclaw_reborn_composition/src/lib.rs > "$TMPDIR/pubuse.after"
+  crates/ironclaw_composition/src/lib.rs > "$TMPDIR/pubuse.after"
 diff docs/plans/composition-pubuse.snapshot "$TMPDIR/pubuse.after"
 # S5 move-purity: diff must be ≥90% renames/moves (logic changes ≈ 0)
 git diff --find-renames=90% --stat main...HEAD
@@ -252,7 +252,7 @@ Consolidation rule applies: where an existing test already drives the caller (se
 adding a new test. T1–T8 name the behavior to pin, not necessarily eight new files.
 
 Beyond composition (later, JIT): a characterization suite for
-`ironclaw_reborn_traces::contribution` before dissecting the 14.5k-line file, and
+`ironclaw_trace_commons::contribution` before dissecting the 14.5k-line file, and
 snapshot tests on `RebornServicesApi` wire DTOs before any interface split.
 
 ## 6. Final architecture — the whole-reborn target map
@@ -281,7 +281,7 @@ L6  COMPOSITION & BINARIES
     reborn_composition ▣ (11 modules: root, slack, webui, automation,
       extension_host, projection, llm_admin, product_auth, observability,
       outbound, support::fs)          reborn_cli
-    [tests-only: ironclaw_architecture, ironclaw_hooks_parity]
+    [tests-only: ironclaw_architecture_tests, ironclaw_hooks_parity]
 
 L5  INGRESS / CHANNEL ADAPTERS        ← new crates allowed HERE ONLY
     webui_v2, webui_v2_static, reborn_webui_ingress,

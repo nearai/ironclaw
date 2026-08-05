@@ -1,7 +1,7 @@
 //! E-HOOK-INFRA: recording hook doubles + per-run `HookDispatcherBuilderFactory`
 //! builders so C-HOOKS can observe hook dispatch on a coordinator-path turn.
 //! Hand-built test hooks, not composition activation coverage — that's covered
-//! at crate tier in `ironclaw_reborn_composition::hooks::tests`; this fills the
+//! at crate tier in `ironclaw_composition::hooks::tests`; this fills the
 //! end-to-end coordinator → loop → host turn-wire gap only.
 
 // Shared integration-test support: not every binary that mounts the
@@ -20,7 +20,9 @@ use ironclaw_hooks::registry::{HookPointSpec, HookRegistry};
 use ironclaw_hooks::sink::{
     ObserverHook, ObserverSink, PrivilegedBeforeCapabilityHook, PrivilegedGateSink,
 };
-use ironclaw_runner::loop_driver_host::{HookDispatcherBuilderFactory, RebornLoopDriverHostError};
+use ironclaw_turn_runner::loop_driver_host::{
+    HookDispatcherBuilderFactory, RebornLoopDriverHostError,
+};
 
 /// Distinct identity paths so a `BeforeCapability` hook and an `AfterModel`
 /// observer can coexist in one dispatcher.

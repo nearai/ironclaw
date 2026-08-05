@@ -6,13 +6,13 @@
 
 **Architecture:** Registry descriptors gain presentation metadata (`title`/`description`/`usage`). Two new product-surface operations (`product.commands.list`, `product.commands.execute`) back `GET /api/webchat/v2/commands` and `POST /api/webchat/v2/threads/{thread_id}/commands`; both resolve the caller's role by direct `AdminUserService::get_user` (env-bearer operator = implicit admin, matching `authorize_admin`), and execute applies the same `required_audience` function channel admission uses. The frontend salvages #6678's server-driven matcher/hook/renderer (aliases deleted), fixes its two latent bugs, and upgrades the composer menu to the design's keyboard-driven bar. Branch: `pr2-webui-command-palette` off `origin/main` (`c5f6c4319`); PR targets `main`. Spec: `docs/superpowers/specs/2026-07-29-product-command-train-design.md` (PR-2 section). Salvage sources verified against `origin/alpine-fight` (`b131a2565`).
 
-**Tech Stack:** Rust 2024 workspace (`ironclaw_product`, `ironclaw_extension_host`, `ironclaw_webui`), Axum, React frontend under `crates/ironclaw_webui/frontend` (vitest, no TS in these files — plain JS/JSX conventions), root integration harness.
+**Tech Stack:** Rust 2024 workspace (`ironclaw_assistant`, `ironclaw_extension_host`, `ironclaw_webui`), Axum, React frontend under `crates/ironclaw_webui/frontend` (vitest, no TS in these files — plain JS/JSX conventions), root integration harness.
 
 ## Global Constraints
 
 - No `.unwrap()` / `.expect()` in production Rust (tests fine). No new dependencies.
 - Aliases stay dead (Decision 8): no `aliases` field anywhere — not in descriptors, DTOs, frontend matchers, or tests.
-- Role policy parity: execute uses `ironclaw_product::commands::required_audience`; listing filters by descriptor `audience`; env-bearer operator (`caller.operator_config` set) is an implicit admin exactly like `RebornServices::authorize_admin`; directory records (any status) govern over the implicit rule when present for channel actors.
+- Role policy parity: execute uses `ironclaw_assistant::commands::required_audience`; listing filters by descriptor `audience`; env-bearer operator (`caller.operator_config` set) is an implicit admin exactly like `RebornServices::authorize_admin`; directory records (any status) govern over the implicit rule when present for channel actors.
 - A Member's `POST /model set …` must produce an `AccessDenied`-kind rejection and never reach `execute_product_model_command` / `invoke_llm_active_set`.
 - Rejection help shown to a caller lists only commands their audience may see (no admin names/usage leak to Members).
 - WebUI results are ephemeral system notices (no durable timeline events).
@@ -22,20 +22,20 @@
 
 ## File Structure
 
-- `crates/ironclaw_product/src/commands.rs` — metadata fields + lifecycle metadata table.
+- `crates/ironclaw_assistant/src/commands.rs` — metadata fields + lifecycle metadata table.
 - `crates/ironclaw_extension_host/src/channel_command_roles.rs` — implicit-owner rule (audit fix).
-- `crates/ironclaw_product/src/reborn_services/types.rs` — new DTOs; `reborn_services.rs` — operation consts + facade module decl; NEW `crates/ironclaw_product/src/reborn_services/product_commands.rs` — list/execute facade; `reborn_services/product_capability_handlers.rs` — handler variants.
+- `crates/ironclaw_assistant/src/reborn_services/types.rs` — new DTOs; `reborn_services.rs` — operation consts + facade module decl; NEW `crates/ironclaw_assistant/src/reborn_services/product_commands.rs` — list/execute facade; `reborn_services/product_capability_handlers.rs` — handler variants.
 - `crates/ironclaw_webui/src/webui_v2/{descriptors,router,mod,handlers}.rs` — routes.
 - Frontend NEW: `pages/chat/lib/chat-commands.ts` + test, `pages/chat/hooks/useChatCommands.ts`. Frontend MODIFY: `lib/api.ts`, `pages/chat/hooks/useChat.ts`, `pages/chat/chat.tsx`, `pages/chat/components/chat-input.tsx`, `pages/chat/components/empty-state.tsx`, `i18n/*.ts` (11 files), `pages/chat/lib/{chat-input,chat,useChat-send}.test.ts`.
-- Tests: `crates/ironclaw_product/tests/product_commands_contract.rs`, `crates/ironclaw_webui/tests/webui_v2_descriptors_contract.rs`, `tests/integration/webui_v2_product_api.rs`, extension_host resolver unit tests.
+- Tests: `crates/ironclaw_assistant/tests/product_commands_contract.rs`, `crates/ironclaw_webui/tests/webui_v2_descriptors_contract.rs`, `tests/integration/webui_v2_product_api.rs`, extension_host resolver unit tests.
 
 ---
 
 ### Task 1: Registry presentation metadata
 
 **Files:**
-- Modify: `crates/ironclaw_product/src/commands.rs`
-- Test: `crates/ironclaw_product/tests/product_commands_contract.rs`
+- Modify: `crates/ironclaw_assistant/src/commands.rs`
+- Test: `crates/ironclaw_assistant/tests/product_commands_contract.rs`
 
 **Interfaces:**
 - Produces: `ProductCommandDescriptor { pub name: &'static str, pub audience: CommandAudience, pub title: &'static str, pub description: &'static str, pub usage: &'static str }`. Later tasks read these fields verbatim.
@@ -44,7 +44,7 @@
   - New test `every_descriptor_has_presentation_metadata`: iterate `product_command_descriptors()`; assert `title`, `description`, `usage` are non-empty; assert `usage.starts_with(&format!("/{}", descriptor.name))`.
   - New test `command_audience_serializes_snake_case`: `assert_eq!(serde_json::to_string(&CommandAudience::User).unwrap(), "\"user\"");` and `"\"admin\""` for Admin (kills a PR-1 deferral).
   - Extend the model-descriptor test with `assert_eq!(model.title, "Model");` and rename it `command_registry_declares_model_with_user_audience_and_metadata` (kills the stale-name deferral).
-- [ ] **Step 2: Run to verify red.** Run: `cargo test -p ironclaw_product --test product_commands_contract --no-fail-fast`
+- [ ] **Step 2: Run to verify red.** Run: `cargo test -p ironclaw_assistant --test product_commands_contract --no-fail-fast`
 Expected: compile FAIL (`title` unknown field).
 - [ ] **Step 3: Implement.** Add the three `&'static str` fields. Populate `COMMAND_SPECS`:
   - `model`: title `Model`, description `Show or switch the active LLM provider and model`, usage `/model [<model> | set-provider <provider> [--model <model>]]`
@@ -61,7 +61,7 @@ Expected: compile FAIL (`title` unknown field).
   - SkillInstall: `Install skill` / `Install a skill from JSON content` / `/skill_install <json>`
   - SkillRemove: `Remove skill` / `Remove an installed skill` / `/skill_remove <id or name>`
   Wire into the lifecycle `.map(...)` closure in `product_command_descriptors()`.
-- [ ] **Step 4: Green.** Run: `cargo test -p ironclaw_product --no-fail-fast`
+- [ ] **Step 4: Green.** Run: `cargo test -p ironclaw_assistant --no-fail-fast`
 - [ ] **Step 5: Commit** `feat(commands): add presentation metadata to command descriptors`.
 
 ---
@@ -107,9 +107,9 @@ when present.`
 ### Task 3: WebUI facade — list/execute operations (audience-aware, written fresh)
 
 **Files:**
-- Modify: `crates/ironclaw_product/src/reborn_services/types.rs`, `crates/ironclaw_product/src/reborn_services.rs`, `crates/ironclaw_product/src/reborn_services/product_capability_handlers.rs`, `crates/ironclaw_product/src/lib.rs`
-- Create: `crates/ironclaw_product/src/reborn_services/product_commands.rs`
-- Test: `crates/ironclaw_product/tests/product_command_surface_contract.rs` (or the reborn_services contract file if the facade tests fit better there — extend, don't duplicate)
+- Modify: `crates/ironclaw_assistant/src/reborn_services/types.rs`, `crates/ironclaw_assistant/src/reborn_services.rs`, `crates/ironclaw_assistant/src/reborn_services/product_capability_handlers.rs`, `crates/ironclaw_assistant/src/lib.rs`
+- Create: `crates/ironclaw_assistant/src/reborn_services/product_commands.rs`
+- Test: `crates/ironclaw_assistant/tests/product_command_surface_contract.rs` (or the reborn_services contract file if the facade tests fit better there — extend, don't duplicate)
 
 **Interfaces:**
 - Consumes: Task 1 metadata fields; `required_audience`; `AdminUserService::get_user`; `AdminUserStatus`; `caller.operator_config`; existing `execute_product_model_command` / `execute_product_status_command`; `parse_product_slash_command`; `ProductCommand::from_payload`; `EmptyProductCommandInput`; `ProductSurfaceCommandDescriptor`.
@@ -181,7 +181,7 @@ impl RebornServices {
     - `ProductCommand::Status` → `self.execute_product_status_command(caller, ProductStatusCommandInput { thread_id: request.thread_id }).await?`.
     - `ProductCommand::Lifecycle { .. } | ProductCommand::Unknown { .. }` → rejection `{ kind: InvalidRequest, message: caller_command_help_text(...) }` (lifecycle stays non-executable from the composer in PR-2 even for admins — listing-only, per the spec).
   - Handler wiring in `product_capability_handlers.rs`: `ProductCommandList` / `ProductCommandExecute` variants, `parse` arms on the two const IDs, `invoke` arms calling the facade methods (`command_output(...)` idiom). Add a pinning test for `ProductCommandHandler::parse` covering ALL its ids (none exists today).
-- [ ] **Step 4: Green + crate suite.** Run: `cargo test -p ironclaw_product --no-fail-fast`
+- [ ] **Step 4: Green + crate suite.** Run: `cargo test -p ironclaw_assistant --no-fail-fast`
 - [ ] **Step 5: Commit** `feat(webui): add role-filtered command list and execute operations`.
 
 ---
@@ -209,7 +209,7 @@ impl RebornServices {
 pub async fn list_commands(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
-) -> Result<Json<ironclaw_product::RebornProductCommandListResponse>, WebUiV2HttpError> {
+) -> Result<Json<ironclaw_assistant::RebornProductCommandListResponse>, WebUiV2HttpError> {
     let response = invoke_product_command(state.services(), caller, PRODUCT_COMMAND_LIST_COMMAND, EmptyProductCommandInput {}).await?;
     Ok(Json(response))
 }
@@ -223,15 +223,15 @@ pub async fn execute_command(
     Extension(caller): Extension<ProductSurfaceCaller>,
     Path(thread_id): Path<String>,
     Json(body): Json<ExecuteCommandBody>,
-) -> Result<Json<ironclaw_product::RebornExecuteProductCommandResponse>, WebUiV2HttpError> {
+) -> Result<Json<ironclaw_assistant::RebornExecuteProductCommandResponse>, WebUiV2HttpError> {
     let response = invoke_product_command(state.services(), caller, PRODUCT_COMMAND_EXECUTE_COMMAND,
-        ironclaw_product::RebornExecuteProductCommandRequest { thread_id, text: body.text }).await?;
+        ironclaw_assistant::RebornExecuteProductCommandRequest { thread_id, text: body.text }).await?;
     Ok(Json(response))
 }
 ```
 
   (Match the surrounding handlers' exact extractor ordering/idioms if they differ from the above.)
-- [ ] **Step 4: Green.** Run webui crate + the integration target; then `cargo test -p ironclaw_architecture --no-fail-fast`.
+- [ ] **Step 4: Green.** Run webui crate + the integration target; then `cargo test -p ironclaw_architecture_tests --no-fail-fast`.
 - [ ] **Step 5: Commit** `feat(webui): mount the command list and execute routes`.
 
 ---
@@ -286,7 +286,7 @@ Design bar (spec PR-2): anchored popover above the input; rows render `/name` �
 ### Task 7: Gauntlet + spec sync + PR
 
 - [ ] **Step 1:** `cargo fmt`; both clippy lanes (`cargo clippy --all --tests --examples -- -D warnings`, same `--all-features`) + `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
-- [ ] **Step 2:** `cargo test -p ironclaw_product -p ironclaw_extension_host -p ironclaw_webui -p ironclaw_architecture --no-fail-fast`; `scripts/pre-commit-safety.sh`; integration target(s) from Task 4; `RUST_MIN_STACK=67108864 bash scripts/reborn-e2e-rust.sh`.
+- [ ] **Step 2:** `cargo test -p ironclaw_assistant -p ironclaw_extension_host -p ironclaw_webui -p ironclaw_architecture_tests --no-fail-fast`; `scripts/pre-commit-safety.sh`; integration target(s) from Task 4; `RUST_MIN_STACK=67108864 bash scripts/reborn-e2e-rust.sh`.
 - [ ] **Step 3:** Frontend: `npx vitest run` + lint from `crates/ironclaw_webui/frontend`.
 - [ ] **Step 4: Spec sync.** Update the spec's PR-2 section for: the implicit-owner rule (now implemented, both doors); lifecycle commands are listing-only in the WebUI (execute rejects them, admins manage via Extensions page); the landing-composer fix; `chat.commandFailed` addition. Fix any other drift found re-reading the section against the diff.
 - [ ] **Step 5: Commit** `chore(webui): gauntlet fixes and spec sync for the command palette`, then push `pr2-webui-command-palette` and open the PR against `main` titled `feat(webui): role-filtered command palette (PR-2 of command train)` — body summarizes: endpoints + policy parity, implicit-owner audit fix, #6678 salvage with its two bug fixes, palette UX, ephemeral results; follow-ups: PR-3 Slack-native, durable results, #6875. End the body with the standard generation footer.
