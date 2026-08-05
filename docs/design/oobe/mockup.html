@@ -325,6 +325,8 @@ h1,h2,h3,p{margin:0}
 .tcard .metrics b{font-weight:660;color:var(--v2-text-strong)}
 .tcard .metrics span+span::before{content:"·";margin-right:8px;color:var(--v2-text-faint)}
 .tcard .tprov{margin-top:7px;font-size:11px;color:var(--v2-text-faint)}
+.tcard .tdesc{font-size:12.5px;line-height:1.45;color:var(--v2-text-muted)}
+.tcard .tdesc b{font-weight:660;color:var(--v2-text-strong)}
 .tcard .acts{margin-top:auto;padding-top:11px;display:flex;align-items:center;gap:3px}
 .tcard .acts button{display:inline-flex;align-items:center;justify-content:center;gap:5px;font:inherit;font-size:11.5px;font-weight:560;height:28px;padding:0 9px;border-radius:8px;cursor:pointer;border:1px solid transparent;background:transparent;color:var(--v2-text-muted)}
 .tcard .acts button svg{width:13px;height:13px}
@@ -767,7 +769,8 @@ h1,h2,h3,p{margin:0}
     drive:'<svg viewBox="0 0 48 48" fill="none"><path fill="#FFC107" d="M17 6h14l14 24H31z"/><path fill="#1976D2" d="M9.875 42L16.938 30H45l-7 12z"/><path fill="#4CAF50" d="M3 30.125L9.875 42 24 18 17 6z"/></svg>',
     slack:'<svg viewBox="0 0 48 48" fill="none"><path fill="#33d375" d="M33 8c0-2.209-1.791-4-4-4s-4 1.791-4 4v11c0 2.209 1.791 4 4 4s4-1.791 4-4z"/><path fill="#33d375" d="M43 19c0 2.209-1.791 4-4 4h-4v-4c0-2.209 1.791-4 4-4s4 1.791 4 4z"/><path fill="#40c4ff" d="M8 14c-2.209 0-4 1.791-4 4s1.791 4 4 4h11c2.209 0 4-1.791 4-4s-1.791-4-4-4z"/><path fill="#40c4ff" d="M19 4c2.209 0 4 1.791 4 4v4h-4c-2.209 0-4-1.791-4-4s1.791-4 4-4z"/><path fill="#e91e63" d="M14 40c0 2.209 1.791 4 4 4s4-1.791 4-4V29c0-2.209-1.791-4-4-4s-4 1.791-4 4z"/><path fill="#e91e63" d="M4 29c0-2.209 1.791-4 4-4h4v4c0 2.209-1.791 4-4 4s-4-1.791-4-4z"/><path fill="#ffc107" d="M40 34c2.209 0 4-1.791 4-4s-1.791-4-4-4H29c-2.209 0-4 1.791-4 4s1.791 4 4 4z"/><path fill="#ffc107" d="M29 44c-2.209 0-4-1.791-4-4v-4h4c2.209 0 4 1.791 4 4s-1.791 4-4 4z"/></svg>',
     notion:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M4.459 4.208c.746.606 1.026.56 2.428.466l13.215-.793c.28 0 .047-.28-.046-.326L17.86 1.968c-.42-.326-.981-.7-2.055-.607L3.01 2.295c-.466.046-.56.28-.374.466zm.793 3.08v13.904c0 .747.373 1.027 1.214.98l14.523-.84c.841-.046.935-.56.935-1.167V6.354c0-.606-.233-.933-.748-.887l-15.177.887c-.56.047-.747.327-.747.933zm14.337.745c.093.42 0 .84-.42.888l-.7.14v10.264c-.608.327-1.168.514-1.635.514-.748 0-.935-.234-1.495-.933l-4.577-7.186v6.952l1.448.327s0 .84-1.168.84l-3.222.186c-.093-.186 0-.653.327-.746l.84-.233V9.854L7.822 9.76c-.094-.42.14-1.026.793-1.073l3.456-.233 4.764 7.279v-6.44l-1.215-.139c-.093-.514.28-.887.747-.933zM3.01 1.336l13.31-.98c1.634-.14 2.055-.047 3.082.7l4.249 2.986c.7.513.934.653.934 1.213v16.378c0 1.026-.373 1.634-1.68 1.726l-15.458.933c-.98.047-1.448-.093-1.962-.746l-3.129-4.06c-.56-.747-.793-1.306-.793-1.96V3.354c0-.839.374-1.54 1.447-1.632z"/></svg>',
-    github:'<svg viewBox="0 0 98 96" fill="none"><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M41.4395 69.3848C28.8066 67.8535 19.9062 58.7617 19.9062 46.9902C19.9062 42.2051 21.6289 37.0371 24.5 33.5918C23.2559 30.4336 23.4473 23.7344 24.8828 20.959C28.7109 20.4805 33.8789 22.4902 36.9414 25.2656C40.5781 24.1172 44.4062 23.543 49.0957 23.543C53.7852 23.543 57.6133 24.1172 61.0586 25.1699C64.0254 22.4902 69.2891 20.4805 73.1172 20.959C74.457 23.543 74.6484 30.2422 73.4043 33.4961C76.4668 37.1328 78.0937 42.0137 78.0937 46.9902C78.0937 58.7617 69.1934 67.6621 56.3691 69.2891C59.623 71.3945 61.8242 75.9883 61.8242 81.252V91.2051C61.8242 94.0762 64.2168 95.7031 67.0879 94.5547C84.4102 87.9512 98 70.6289 98 49.1914C98 22.1074 75.9883 0 48.9043 0C21.8203 0 0 22.1074 0 49.1914C0 70.4375 13.4941 88.0469 31.6777 94.6504C34.2617 95.6074 36.75 93.8848 36.75 91.3008V83.6445C35.4102 84.2188 33.6875 84.6016 32.1562 84.6016C25.8398 84.6016 22.1074 81.1563 19.4277 74.7441C18.375 72.1602 17.2266 70.6289 15.0254 70.3418C13.877 70.2461 13.4941 69.7676 13.4941 69.1934C13.4941 68.0449 15.4082 67.1836 17.3223 67.1836C20.0977 67.1836 22.4902 68.9063 24.9785 72.4473C26.8926 75.2227 28.9023 76.4668 31.2949 76.4668C33.6875 76.4668 35.2187 75.6055 37.4199 73.4043C39.0469 71.7773 40.291 70.3418 41.4395 69.3848Z"/></svg>'
+    github:'<svg viewBox="0 0 98 96" fill="none"><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M41.4395 69.3848C28.8066 67.8535 19.9062 58.7617 19.9062 46.9902C19.9062 42.2051 21.6289 37.0371 24.5 33.5918C23.2559 30.4336 23.4473 23.7344 24.8828 20.959C28.7109 20.4805 33.8789 22.4902 36.9414 25.2656C40.5781 24.1172 44.4062 23.543 49.0957 23.543C53.7852 23.543 57.6133 24.1172 61.0586 25.1699C64.0254 22.4902 69.2891 20.4805 73.1172 20.959C74.457 23.543 74.6484 30.2422 73.4043 33.4961C76.4668 37.1328 78.0937 42.0137 78.0937 46.9902C78.0937 58.7617 69.1934 67.6621 56.3691 69.2891C59.623 71.3945 61.8242 75.9883 61.8242 81.252V91.2051C61.8242 94.0762 64.2168 95.7031 67.0879 94.5547C84.4102 87.9512 98 70.6289 98 49.1914C98 22.1074 75.9883 0 48.9043 0C21.8203 0 0 22.1074 0 49.1914C0 70.4375 13.4941 88.0469 31.6777 94.6504C34.2617 95.6074 36.75 93.8848 36.75 91.3008V83.6445C35.4102 84.2188 33.6875 84.6016 32.1562 84.6016C25.8398 84.6016 22.1074 81.1563 19.4277 74.7441C18.375 72.1602 17.2266 70.6289 15.0254 70.3418C13.877 70.2461 13.4941 69.7676 13.4941 69.1934C13.4941 68.0449 15.4082 67.1836 17.3223 67.1836C20.0977 67.1836 22.4902 68.9063 24.9785 72.4473C26.8926 75.2227 28.9023 76.4668 31.2949 76.4668C33.6875 76.4668 35.2187 75.6055 37.4199 73.4043C39.0469 71.7773 40.291 70.3418 41.4395 69.3848Z"/></svg>',
+    telegram:'<svg viewBox="0 0 48 48" fill="none"><circle cx="24" cy="24" r="22" fill="#29a9eb"/><path fill="#fff" d="M35.24 14.28c.42-.1.9.12.6 1.3l-4.02 18.92c-.3 1.32-1.1 1.63-2.1 1.02L23 31.5l-3.28 3.16c-.36.36-.67.66-1.37.66l.5-6.9 12.43-11.22c.54-.48-.12-.6-.83-.16L16.62 24l-6.42-2c-1.4-.44-1.42-1.4.3-2.07z"/></svg>'
   };
   function brandLogo(k){return BRAND[k]||'';}
   function nearBusy(label){return '<div class="livestat busy" style="padding:2px"><svg class="near" viewBox="0 0 24 24" aria-hidden="true"><path class="near-base" d="'+NEAR_D+'"/></svg><span class="verb">'+label+'</span></div>';}
@@ -819,17 +822,27 @@ h1,h2,h3,p{margin:0}
   connCloseBtn.onclick=function(){ setConnectState('pill'); };
   connPill.onclick=function(){ setConnectState('open'); };
   connPillX.onclick=function(e){ e.stopPropagation(); setConnectState('gone'); };
-  // each card carries a suggested (proposal) phrasing and a completed (result) phrasing
+  // custom (non-brand) glyphs for the agent/meta tasks
+  var ICO_PROFILE='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.6"/><path d="M5.5 20a6.5 6.5 0 0 1 13 0"/></svg>';
+  var ICO_DIGEST='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2.5"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>';
+  var ICO_WAND='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/><path d="M18.4 15.4l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7z"/></svg>';
+  // each card carries a suggested (proposal) phrasing + a completed (result) phrasing, and the tool(s) it needs authorized
   var CARDS=[
-    {app:'gmail',brand:'gmail',label:'Gmail',accent:'#ea4335',when:'2m ago',
-      sug:{title:'Triage your inbox',metrics:[['40','unread'],['12','need replies']]},
-      done:{title:'Triaged your inbox',metrics:[['12','replied'],['40','archived']]}},
-    {app:'calendar',brand:'calendar',label:'Calendar',accent:'#4285f4',when:'just now',
-      sug:{title:'Accept 3 invites',metrics:[['3','invites'],['0','conflicts']]},
-      done:{title:'Accepted 3 invites',metrics:[['3','accepted'],['0','conflicts']]}},
-    {app:'file',brand:'docs',label:'Google Docs',accent:'#3b82f6',when:'just now',
-      sug:{title:'Summarize 2 docs',metrics:[['2','docs'],['5','key points']]},
-      done:{title:'Doc insights ready',metrics:[['5','insights'],['2','docs']]}}
+    {brand:'gmail',label:'Gmail',accent:'#ea4335',when:'2m ago',conn:['gmail'],
+      sug:{title:'Triage your inbox',desc:'Archive marketing → <b>IronClaw Archive</b>, flag urgent for reply'},
+      done:{title:'Triaged your inbox',desc:'<b>40</b> archived · <b>6</b> flagged urgent'}},
+    {brand:'calendar',label:'Google Calendar',accent:'#4285f4',when:'just now',conn:['calendar'],
+      sug:{title:'Tidy your calendar',desc:'Accept free invites, propose new times for conflicts'},
+      done:{title:'Tidied your calendar',desc:'<b>3</b> accepted · <b>2</b> new times proposed'}},
+    {ico:ICO_PROFILE,label:'Gmail, Slack & Telegram',accent:'#7d5bed',when:'just now',conn:['gmail','slack','telegram'],
+      sug:{title:'Build your profile',desc:'Learn how you work across <b>Gmail</b>, <b>Slack</b> & <b>Telegram</b>'},
+      done:{title:'Built your profile',desc:'Profiled <b>Gmail</b> · <b>Slack</b> · <b>Telegram</b>'}},
+    {ico:ICO_DIGEST,label:'Drive & Notion',accent:'#0f9d58',when:'just now',conn:['drive','notion'],
+      sug:{title:'Catch you up (24h)',desc:'Summarize your org, flag replies, propose priorities'},
+      done:{title:'Caught you up (24h)',desc:'<b>12</b> updates · <b>3</b> to reply · <b>4</b> priorities'}},
+    {ico:ICO_WAND,label:'IronClaw',accent:'#2882c8',when:'just now',conn:[],
+      sug:{title:'Suggest 5 automations',desc:'Draft the top <b>5</b> automations I can run for you'},
+      done:{title:'5 automations ready',desc:'<b>5</b> proposed · approve or auto-run'}}
   ];
   function badgeFor(state){
     if(state==='suggested') return '<span class="badge accent">Suggested</span>';
@@ -843,15 +856,16 @@ h1,h2,h3,p{margin:0}
   function cardHTML(c,idx,state,opts){
     opts=opts||{};
     var v=(state==='completed')?c.done:c.sug;
-    var head='<div class="thd"><span class="appchip">'+brandLogo(c.brand)+'</span><b class="ttl">'+v.title+'</b></div>';
+    var logo=c.ico?('<span class="appchip" style="color:'+c.accent+'">'+c.ico+'</span>'):('<span class="appchip">'+brandLogo(c.brand)+'</span>');
+    var head='<div class="thd">'+logo+'<b class="ttl">'+v.title+'</b></div>';
     var xbtn='<button class="cardx" data-act="cancel" data-i="'+idx+'" type="button" title="Dismiss" aria-label="Dismiss">'+CARD_X+'</button>';
+    var connectable=c.conn&&c.conn.length;
     var body,acts;
-    if(state==='unconnected'){
-      body='<div class="tprov conhint">Connect '+c.label+' to run this suggestion.</div>';
-      acts='<div class="acts"><button class="approve" data-act="connect" data-i="'+idx+'">'+CONNECT_ICO+'Connect '+c.label+'</button></div>';
+    if(state==='unconnected'&&connectable){
+      body='<div class="tdesc conhint">Connect '+c.label+' to run this suggestion.</div>';
+      acts='<div class="acts"><button class="approve" data-act="connect" data-i="'+idx+'">'+CONNECT_ICO+(c.conn.length===1?('Connect '+c.label):('Connect '+c.conn.length+' tools'))+'</button></div>';
     } else {
-      var m=v.metrics.map(function(x){return '<span><b>'+x[0]+'</b> '+x[1]+'</span>';}).join('');
-      body='<div class="metrics">'+m+'</div><div class="tprov">From '+c.label+(state==='completed'?' · '+c.when:'')+'</div>';
+      body='<div class="tdesc">'+v.desc+'</div><div class="tprov">From '+c.label+(state==='completed'?' · '+c.when:'')+'</div>';
       if(state==='running') acts='<div class="acts runrow"><span class="runstat"><span class="spin">'+ICO_REFRESH+'</span>Automating…</span></div>';
       else if(state==='completed') acts='<div class="acts"><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button><button class="txt revert" data-act="revert" data-i="'+idx+'">'+svg('undo')+'Revert</button></div>';
       else acts='<div class="acts"><button class="approve" data-act="approve" data-i="'+idx+'">Approve</button><button class="txt" data-act="modify" data-i="'+idx+'">'+svg('edit')+'Modify</button></div>';
@@ -883,7 +897,7 @@ h1,h2,h3,p{margin:0}
         var a=b.getAttribute('data-act');
         if(a==='refresh'){ resetCardStates(); render(); return; }
         var i=+b.getAttribute('data-i');
-        if(a==='connect'){ openAuth([CARDS[i].brand], null, function(){ cardStates[i]='suggested'; render(); }); return; }
+        if(a==='connect'){ openAuth(CARDS[i].conn, null, function(){ cardStates[i]='suggested'; render(); }); return; }
         if(a==='modify'){ openModify(CARDS[i].sug.title); return; }
         if(a==='approve'){ cardStates[i]='running'; render(); setTimeout(function(){ if(cardStates[i]==='running'){ cardStates[i]='completed'; render(); } },950); return; }
         if(a==='cancel') cardStates[i]='dismissed';
@@ -896,7 +910,8 @@ h1,h2,h3,p{margin:0}
   // condensed pill for the collapsed drawer (typing / returning user); each pill carries an X to dismiss
   function pillHTML(c,i,state){
     var v=(state==='completed')?c.done:c.sug;
-    return '<div class="tpill" data-i="'+i+'"><span class="tplogo">'+brandLogo(c.brand)+'</span><span class="tpt">'+v.title+'</span><button class="pillx" data-act="cancel" data-i="'+i+'" type="button" title="Dismiss" aria-label="Dismiss">'+CARD_X+'</button></div>';
+    var logo=c.ico?('<span class="tplogo" style="color:'+c.accent+'">'+c.ico+'</span>'):('<span class="tplogo">'+brandLogo(c.brand)+'</span>');
+    return '<div class="tpill" data-i="'+i+'">'+logo+'<span class="tpt">'+v.title+'</span><button class="pillx" data-act="cancel" data-i="'+i+'" type="button" title="Dismiss" aria-label="Dismiss">'+CARD_X+'</button></div>';
   }
   function bindDrawer(){
     taskDrawer.querySelectorAll('.pillx,.tpill.fallback').forEach(function(b){
@@ -964,11 +979,11 @@ h1,h2,h3,p{margin:0}
   };
   // Foundational first-run journey (Suggest/Plan): approve -> automate -> complete, across the beats
   var FOUND_BEATS=[
-    ['unconnected','unconnected','unconnected'],
-    ['suggested','unconnected','unconnected'],
-    ['running','unconnected','unconnected'],
-    ['completed','suggested','unconnected'],
-    ['completed','completed','completed']
+    ['unconnected','unconnected','unconnected','unconnected','suggested'],
+    ['suggested','unconnected','unconnected','unconnected','suggested'],
+    ['running','suggested','unconnected','unconnected','suggested'],
+    ['completed','running','suggested','unconnected','suggested'],
+    ['completed','completed','completed','completed','completed']
   ];
   var FOUND_CAP=[
     '<b>Foundational</b> — the first screen. Admin has whitelisted these tools; each card needs its tool <b>authorized</b>. Tap <b>Connect</b> to sign in and approve access.',
@@ -989,8 +1004,8 @@ h1,h2,h3,p{margin:0}
     if(!isVision && prop){ if(step!==lastFoundStep){ cardStates=FOUND_BEATS[step].slice(); lastFoundStep=step; } } else lastFoundStep=-1;
     var h;
     if(!isVision) h = prop
-      ? ['Welcome to IronClaw.',"Your tools are connected — here's what I'd take off your plate. Approve, tweak, or dismiss any, or just tell me what else."]
-      : ['Welcome to IronClaw.',"Your tools are connected — here's what I've already handled. Review or undo anything, or tell me what else to take on."];
+      ? ['Welcome to IronClaw.',"Here are a few things I can take off your plate — connect each tool to enable it, then approve, tweak, or dismiss."]
+      : ['Welcome to IronClaw.',"Here's what I'll handle once your tools are connected. Review or undo anything, or tell me what else to take on."];
     else if(step>=3 && prop && HERO_PROP[step]) h=HERO_PROP[step];
     else h=HERO[step];
     heroTitle.textContent=h[0];heroSub.textContent=h[1];
@@ -1069,7 +1084,8 @@ h1,h2,h3,p{margin:0}
     drive:{name:'Google Drive',domain:'accounts.google.com',scope:'See, edit, and organise your Drive files'},
     slack:{name:'Slack',domain:'slack.com',scope:'Read and send messages on your behalf'},
     notion:{name:'Notion',domain:'www.notion.so',scope:'Read and edit the pages you choose'},
-    github:{name:'GitHub',domain:'github.com',scope:'Access your repositories and issues'}
+    github:{name:'GitHub',domain:'github.com',scope:'Access your repositories and issues'},
+    telegram:{name:'Telegram',domain:'oauth.telegram.org',scope:'Read your messages and contacts'}
   };
   var authModal=document.getElementById('authModal'),authBody=document.getElementById('authBody'),authUrl=document.getElementById('authUrl');
   var authQueue=[],authPos=0,authPhase='signin',authOnEach=null,authOnDone=null;
