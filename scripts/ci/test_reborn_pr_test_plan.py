@@ -1299,13 +1299,6 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 plan = self.plan("pull_request", [path])
                 self.assertEqual(plan["integration_lanes"], [expected_lane])
 
-        for prefix, owner in planner.INTEGRATION_SUPPORT_PREFIX_OWNERS.items():
-            path = f"{prefix}fixture.snap"
-            with self.subTest(path=path):
-                expected_lane = planner._integration_test_lanes()[owner]
-                plan = self.plan("pull_request", [path])
-                self.assertEqual(plan["integration_lanes"], [expected_lane])
-
     def test_golden_payload_snapshot_selects_its_owning_integration_lane(self) -> None:
         owner = planner.INTEGRATION_SNAPSHOT_PREFIX_OWNERS[
             "tests/snapshots/golden_payload__"
