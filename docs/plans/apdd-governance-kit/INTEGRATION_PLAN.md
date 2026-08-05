@@ -190,16 +190,27 @@ not disturb the job's existing `pnpm test` / `pnpm build` steps or the shared
 those rules auto-loading, which is the intended effect. Each phase is
 independently revertible in this way.
 
-**After any rollback, verify no dangling references remain** — use a
-**hidden-file-aware** search, because plain `rg` skips dotfiles/dirs and
-gitignored paths by default and would miss exactly the `.claude/` and `.github/`
-locations the rollback touches. Search for **every exact path in the rollback
-lists** (including the lower-case rule files and the workflow):
+**After any rollback, verify nothing stale survives** — two checks:
+
+1. **No reference to a *deleted* file remains** — search for each removed path.
+2. **No reference to a *reverted config/dep* remains** — after reverting the
+   hunks in the edited files (`vite.config.ts`, `package.json`, `code_style.yml`,
+   `CLAUDE.md`), confirm no Storybook / Vitest-browser leftovers linger (a
+   half-reverted `vite.config.ts` still naming the browser project is the
+   likeliest miss).
+
+Use a search that is **hidden-file-aware and ignore-disabled**, because plain
+`rg` skips dotfiles/dirs (`.claude/`, `.github/`) *and* gitignored build output
+by default:
 
 ```bash
-rg --hidden --glob '!.git' -n \
-  'DESIGN\.md|CRITICAL_FLOWS|docs/features|\.storybook|design\.md|design-a11y\.md|feature-workflow\.md|critical-flows\.md'
+rg -uu --glob '!.git' -n \
+  'DESIGN\.md|CRITICAL_FLOWS|docs/features|\.storybook|design\.md|design-a11y\.md|feature-workflow\.md|critical-flows\.md|@vitest/browser|playwright|storybook'
 ```
+
+(`-uu` = search hidden and gitignored files.) The edited files themselves are
+**not** deleted, so they are not search *targets* — check them by confirming
+their reverted diff is clean, not by grepping for their names.
 
 Then strip any pointer left in `CLAUDE.md`, other `.claude/rules/*`, the CI
 workflows, or docs, so a deleted file is never still referenced as authoritative.
