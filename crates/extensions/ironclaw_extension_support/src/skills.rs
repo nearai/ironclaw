@@ -147,13 +147,18 @@ pub async fn resolve_install_input(
     // authority on what a fetched skill contains, and dropping is what the
     // rebuild already does.
     //
-    // `files` is NOT in that set, and the review on #7141 that grouped it with
-    // them was reversed on evidence in #6745. It is ordinary caller content: an
-    // agent authoring a skill has to be able to attach the script the skill
-    // exists to preserve. Refusing it did not drop the file, it failed the whole
-    // install — measured on the 31-task SkillsBench subset (nearai/benchmarks#287),
-    // 18 correctly-shaped `{path, text}` entries across 9 calls were all refused,
-    // and 0 of 27 agent-authored skills shipped a resource file against 18 of 31
+    // `files` is NOT in that set. It sat here because the pre-move host-runtime
+    // copy of this resolver refused it, and #7141 carried that refusal across the
+    // move to this crate verbatim — correctly, since a move-only refactor is the
+    // wrong place to change behavior, which is also why it declined a reviewer's
+    // suggestion to relax the arm there. This is that change, made on purpose.
+    //
+    // `files` is ordinary caller content: an agent authoring a skill has to be
+    // able to attach the script the skill exists to preserve. Refusing it did not
+    // drop the file, it failed the WHOLE install — measured on the 31-task
+    // SkillsBench subset (nearai/benchmarks#287), 18 correctly-shaped
+    // `{path, text}` entries across 9 calls were all refused, and 0 of 27
+    // agent-authored skills shipped a resource file against 18 of 31
     // human-curated ones. Pinned by
     // `builtin_skill_install_accepts_an_agent_authored_bundle_with_scripts`. What
     // makes it safe is not the shape check: each entry's path is normalized and
