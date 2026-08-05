@@ -21,7 +21,6 @@ use axum::body::{Body, to_bytes};
 use axum::http::StatusCode;
 use axum::http::{Method, Request};
 use chrono::{DateTime, Utc};
-use ironclaw_assistant::{ProductOutboundEnvelope, ProductOutboundPayload};
 use ironclaw_assistant::{RebornServices, RebornStreamEventsRequest};
 use ironclaw_composition::test_support::BudgetTestGateway;
 use ironclaw_composition::{
@@ -45,6 +44,7 @@ use ironclaw_product_contracts::admin_users::{
 use ironclaw_product_contracts::operator_tools::{
     RebornOperatorToolCatalog, RebornOperatorToolInfo,
 };
+use ironclaw_product_contracts::outbound::{ProductOutboundEnvelope, ProductOutboundPayload};
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceStreamRequest,
 };

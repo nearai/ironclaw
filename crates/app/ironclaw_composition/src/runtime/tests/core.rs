@@ -577,14 +577,11 @@ fn production_scheduler_wake_guard_passes_standalone_with_absent_wiring() {
 
 use ironclaw_assistant::{
     CREATE_THREAD_COMMAND, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
-    LifecycleReadinessBlocker, ProductCreateThreadRequest, ProductListAutomationsRequest,
-    ProductResolveGateRequest, ProductSetupExtensionRequest, ProductSubmitTurnRequest,
-    ProductSurfaceCommandDescriptor, RESOLVE_GATE_COMMAND, RebornExtensionCredentialSetup,
-    RebornOutboundPreferencesResponse, RebornSetupExtensionResponse, RebornSkillListResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    SUBMIT_TURN_COMMAND, approval_gate_ref,
+    LifecycleReadinessBlocker, ProductSurfaceCommandDescriptor, RESOLVE_GATE_COMMAND,
+    RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse,
+    RebornSetupExtensionResponse, RebornSkillListResponse, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, RebornSubmitTurnResponse, SUBMIT_TURN_COMMAND, approval_gate_ref,
 };
-use ironclaw_assistant::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_extension_contracts::state::{InstallationState, LifecyclePublicState};
 use ironclaw_host_api::ids::ProjectId;
 use ironclaw_host_api::turn::{
@@ -616,6 +613,11 @@ use ironclaw_loop_host::{
     HostSkillContextCandidate, HostSkillContextSource, ModelCost, SpawnSubagentMode,
     SubagentKindId, SubagentThreadKind, SubagentThreadMetadata,
 };
+use ironclaw_product_contracts::inbound_requests::{
+    ProductCreateThreadRequest, ProductListAutomationsRequest, ProductResolveGateRequest,
+    ProductSetupExtensionRequest, ProductSubmitTurnRequest,
+};
+use ironclaw_product_contracts::outbound::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };

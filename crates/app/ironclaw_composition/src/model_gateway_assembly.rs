@@ -188,9 +188,9 @@ mod tests {
     use super::*;
 
     use ironclaw_assistant::projection::build_reborn_projection_services;
-    use ironclaw_assistant::{ProductOutboundPayload, ProductProjectionItem};
     use ironclaw_event_log::{DurableEventLog, InMemoryDurableEventLog};
     use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId};
+    use ironclaw_product_contracts::outbound::{ProductOutboundPayload, ProductProjectionItem};
     use ironclaw_product_contracts::projection::ProjectionSubscriptionRequest;
     use ironclaw_turns::{ReplyTargetBindingRef, TurnActor};
 

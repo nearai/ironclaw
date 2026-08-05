@@ -7,14 +7,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::AutoApproveSettingInput;
 use ironclaw_assistant::{
-    AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, ParsedProductInbound, ProductAdapterId, ProductInboundEnvelope,
-    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext,
-    UserMessagePayload,
-};
-use ironclaw_assistant::{
     DefaultInboundTurnService, FakeConversationBindingService, InboundTurnOutcome,
-    InboundTurnService, ResolvedBinding,
+    InboundTurnService,
 };
 use ironclaw_composition::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
@@ -22,7 +16,13 @@ use ironclaw_composition::{
     ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig, RebornRuntime,
     RebornRuntimeInput, build_runtime, capability_allowlist,
 };
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId,
+};
 use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
+use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
 use ironclaw_host_api::{
     action::NetworkPolicy,
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
@@ -55,6 +55,11 @@ use ironclaw_loop_host::{
 };
 use ironclaw_loop_host::{
     ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
+};
+use ironclaw_product_contracts::binding::ResolvedBinding;
+use ironclaw_product_contracts::inbound::{
+    ParsedProductInbound, ProductInboundEnvelope, ProductInboundPayload, TrustedInboundContext,
+    UserMessagePayload,
 };
 use ironclaw_threads::{
     InMemorySessionThreadService, SessionThreadService, ThreadHistoryRequest, ThreadMessageRecord,

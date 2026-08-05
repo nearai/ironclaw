@@ -36,10 +36,6 @@ use ironclaw_product_contracts::operator_tools::{
 use ironclaw_product_contracts::projection::ProjectionStream;
 use ironclaw_product_contracts::views::{RebornViewPage, RebornViewProvider, RebornViewQuery};
 
-use crate::{
-    ProductAdapterError, ProductSurfaceRejectionKind, ProjectionCursor,
-    ProjectionSubscriptionRequest,
-};
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::future::try_join_all;
@@ -48,6 +44,7 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, ChannelConnectionService, CredentialAccountId,
     CredentialAccountProjection, CredentialAccountUpdateBinding, ProviderScope,
 };
+use ironclaw_host_api::product_adapter::{ProductAdapterError, ProductSurfaceRejectionKind};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, IdempotencyKey, SanitizedCancelReason, TurnActor, TurnGateRef, TurnRunId,
     TurnScope, TurnStatus,
@@ -65,6 +62,8 @@ use ironclaw_host_api::{
     scope::Principal,
 };
 use ironclaw_loop_host::{HostInputEnqueuePort, RejectingInputEnqueue};
+use ironclaw_product_contracts::outbound::ProjectionCursor;
+use ironclaw_product_contracts::projection::ProjectionSubscriptionRequest;
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     ProductSurfaceValidationCode,
@@ -92,10 +91,10 @@ use crate::{
     ListPendingApprovalsRequest, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
     PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand,
     ProductCommandDescriptor, ProductInboundCommand, ProductLifecycleCommandInput,
-    ProductModelCommand, ProductModelCommandInput, ProductRejectionKind, ProductStatusCommandInput,
-    ProductSurfaceFailure, ProductTriggerReason, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, UnsupportedLifecycleProductService,
+    ProductModelCommand, ProductModelCommandInput, ProductStatusCommandInput,
+    ProductSurfaceFailure, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
+    UnsupportedLifecycleProductService,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -103,9 +102,10 @@ use crate::{
         bounded_source_binding_ref,
     },
     declared_command_help_text, is_approval_gate_ref, is_auth_gate_ref,
-    parse_product_slash_command, product_command_descriptors, required_audience,
-    thread_metadata_is_automation_trigger,
+    product_command_descriptors, required_audience, thread_metadata_is_automation_trigger,
 };
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_product_contracts::inbound::{ProductRejectionKind, parse_product_slash_command};
 use ironclaw_product_contracts::inbound_requests::{
     ProductCancelRunRequest, ProductCreateThreadRequest, ProductGateResolution,
     ProductListAutomationsRequest, ProductListThreadsRequest, ProductRenameAutomationRequest,

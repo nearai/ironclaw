@@ -7,12 +7,6 @@ use std::{
     time::Duration,
 };
 
-use crate::{
-    CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
-    PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
-    PROJECTION_SKILL_NAME_MAX_BYTES, PROJECTION_TEXT_MAX_BYTES, ProductProjectionItem,
-    ProductWorkSummaryPhase,
-};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_event_log::{EventCursor, EventStreamKey, ReadScope, sanitize_error_summary};
@@ -33,6 +27,12 @@ use ironclaw_loop_contracts::{
     LoopHostMilestoneSink, LoopSafeSummary, sanitize_model_visible_text,
 };
 use ironclaw_loop_host::{SkillActivationObservedEvent, SkillActivationObserver};
+use ironclaw_product_contracts::outbound::{
+    CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
+    PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
+    PROJECTION_SKILL_NAME_MAX_BYTES, PROJECTION_TEXT_MAX_BYTES, ProductProjectionItem,
+    ProductWorkSummaryPhase,
+};
 use ironclaw_turns::{TurnRunId, TurnScope};
 
 // Live progress uses a synthetic cursor because it is an ephemeral UI hint,

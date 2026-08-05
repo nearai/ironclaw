@@ -1207,9 +1207,10 @@ impl RebornRuntime {
         else {
             return Ok(None);
         };
-        let installation_id =
-            ironclaw_assistant::AdapterInstallationId::new(authenticated_installation_id)
-                .map_err(|error| error.to_string())?;
+        let installation_id = ironclaw_host_api::product_adapter::AdapterInstallationId::new(
+            authenticated_installation_id,
+        )
+        .map_err(|error| error.to_string())?;
         let outcome = service
             .consume(
                 &installation_id,

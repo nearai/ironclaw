@@ -1,8 +1,4 @@
 use super::*;
-use ironclaw_assistant::{
-    PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
-    PROJECTION_SKILL_NAME_MAX_BYTES, ProductWorkSummaryPhase,
-};
 use ironclaw_host_api::dispatch::INPUT_ENCODE_HUMAN_SUMMARY;
 use ironclaw_loop_contracts::{
     CapabilityInputRef, InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopDriverId,
@@ -11,6 +7,10 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_loop_host::{
     SkillActivationMode, SkillActivationObservedEvent, SkillActivationRequest,
+};
+use ironclaw_product_contracts::outbound::{
+    PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
+    PROJECTION_SKILL_NAME_MAX_BYTES, ProductWorkSummaryPhase,
 };
 use ironclaw_turns::TurnId;
 

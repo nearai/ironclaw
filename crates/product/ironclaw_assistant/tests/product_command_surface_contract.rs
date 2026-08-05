@@ -10,18 +10,23 @@ use ironclaw_assistant::{
     FakeConversationBindingService, FakeIdempotencyLedger, FakeInboundTurnService,
     PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID,
     PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand, ProductCommandAdmission,
-    ProductCommandAdmissionService, ProductInboundAck, ProductRejectionKind,
+    ProductCommandAdmissionService,
 };
-use ironclaw_assistant::{
-    AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, InboundCommandPayload, ProductAdapterId, ProductInboundEnvelope,
-    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence, ResolveBindingRequest,
-    ResolvedBinding, TrustedInboundContext,
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
+use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
+use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
 use ironclaw_product_contracts::admin_users::AdminUserRole;
 use ironclaw_product_contracts::binding::ProductBindingResolver;
+use ironclaw_product_contracts::binding::{ResolveBindingRequest, ResolvedBinding};
 use ironclaw_product_contracts::command::{CommandActorRoleResolver, ProductCommandContext};
 use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::inbound::{
+    InboundCommandPayload, ProductInboundEnvelope, ProductInboundPayload, TrustedInboundContext,
+};
+use ironclaw_product_contracts::inbound::{ProductInboundAck, ProductRejectionKind};
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
     ProductSurfaceInvokeRequest, ProductSurfaceInvokeResponse,
@@ -61,7 +66,7 @@ fn sample_command_envelope_with_trigger(
         &evidence,
     )
     .expect("verified");
-    let parsed = ironclaw_assistant::ParsedProductInbound::new(
+    let parsed = ironclaw_product_contracts::inbound::ParsedProductInbound::new(
         ExternalEventId::new(format!("evt:{event_suffix}")).expect("valid event"),
         ExternalActorRef::new("test", "user1", Option::<String>::None).expect("valid actor"),
         ExternalConversationRef::new(None, "conv1", None, None).expect("valid conversation"),
@@ -404,7 +409,7 @@ async fn malformed_known_lifecycle_command_rejects_before_admission() {
     assert!(matches!(
         ack,
         ProductInboundAck::Rejected(rejection)
-            if rejection.kind == ironclaw_assistant::ProductRejectionKind::InvalidRequest
+            if rejection.kind == ironclaw_product_contracts::inbound::ProductRejectionKind::InvalidRequest
     ));
     assert!(admission_service.records().is_empty());
     assert!(command_surface.invokes().is_empty());
@@ -854,7 +859,7 @@ async fn default_command_surface_rejects_when_admission_is_supplied() {
     assert!(matches!(
         ack,
         ProductInboundAck::Rejected(rejection)
-            if rejection.kind == ironclaw_assistant::ProductRejectionKind::PolicyDenied
+            if rejection.kind == ironclaw_product_contracts::inbound::ProductRejectionKind::PolicyDenied
     ));
     assert_eq!(inbound.accepted_count(), 0);
     assert_eq!(ledger.settled_count(), 1);

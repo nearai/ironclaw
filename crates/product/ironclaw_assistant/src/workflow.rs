@@ -9,24 +9,30 @@ use std::sync::Arc;
 use ironclaw_product_contracts::action::{ActionFingerprintKey, ProductActionId, SourceBindingKey};
 use ironclaw_product_contracts::command::ProductCommandContext;
 
-use crate::{
-    ApprovalDecision, ExternalConversationRef, ParsedProductInbound, ProductAdapterError,
-    ProductCommandResultPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,
-    ProductRejection, ProductRejectionKind, ProductSurfaceRejectionKind, ProjectionReadRequest,
-    ProjectionSubscriptionRequest, RedactedString, TrustedInboundContext, UserMessagePayload,
-};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
+use ironclaw_host_api::product_adapter::{
+    ProductAdapterError, ProductSurfaceRejectionKind, RedactedString,
+};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, IdempotencyKey, TurnActor, TurnGateRef, TurnRunId, TurnScope,
 };
 use ironclaw_host_api::{
     attachment::InboundAttachment,
     ids::{ActivityId, CapabilityId, ThreadId, UserId},
+};
+use ironclaw_product_contracts::inbound::{
+    ApprovalDecision, ParsedProductInbound, ProductCommandResultPayload, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductRejectionKind,
+    TrustedInboundContext, UserMessagePayload,
+};
+use ironclaw_product_contracts::projection::{
+    ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,
+    ProjectionReadRequest, ProjectionSubscriptionRequest,
 };
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
@@ -400,7 +406,9 @@ impl DefaultProductSurface {
                     });
                 }
                 Err(ProductAdapterError::Internal {
-                    detail: crate::RedactedString::new("settled action missing outcome"),
+                    detail: ironclaw_host_api::product_adapter::RedactedString::new(
+                        "settled action missing outcome",
+                    ),
                 })
             }
             IdempotencyDecision::New(mut action) => {
@@ -1277,7 +1285,7 @@ async fn dispatch_payload(
 
 async fn dispatch_approval_resolution(
     envelope: &ProductInboundEnvelope,
-    payload: &crate::ApprovalResolutionPayload,
+    payload: &ironclaw_product_contracts::inbound::ApprovalResolutionPayload,
     action_fingerprint: ActionFingerprintKey,
     binding_service: &dyn ProductBindingResolver,
     approval_interaction_service: &dyn ApprovalInteractionService,
@@ -1335,7 +1343,7 @@ async fn dispatch_approval_resolution(
 
 async fn dispatch_scoped_approval_resolution(
     envelope: &ProductInboundEnvelope,
-    payload: &crate::ScopedApprovalResolutionPayload,
+    payload: &ironclaw_product_contracts::inbound::ScopedApprovalResolutionPayload,
     action_fingerprint: ActionFingerprintKey,
     binding_service: &dyn ProductBindingResolver,
     approval_interaction_service: &dyn ApprovalInteractionService,
@@ -1432,24 +1440,26 @@ fn approval_interaction_decision(
 
 async fn dispatch_auth_resolution(
     envelope: &ProductInboundEnvelope,
-    payload: &crate::AuthResolutionPayload,
+    payload: &ironclaw_product_contracts::inbound::AuthResolutionPayload,
     action_fingerprint: ActionFingerprintKey,
     binding_service: &dyn ProductBindingResolver,
     auth_interaction_service: &dyn AuthInteractionService,
     delivered_gate_routes: &dyn ironclaw_outbound::DeliveredGateRouteStore,
 ) -> Result<DispatchedAction, ProductSurfaceFailure> {
     let decision = match &payload.result {
-        crate::AuthResolutionResult::CredentialProvided { credential_ref } => {
-            AuthInteractionDecision::CredentialProvided {
-                credential_ref: parse_credential_account_id(credential_ref)?,
-            }
+        ironclaw_product_contracts::inbound::AuthResolutionResult::CredentialProvided {
+            credential_ref,
+        } => AuthInteractionDecision::CredentialProvided {
+            credential_ref: parse_credential_account_id(credential_ref)?,
+        },
+        ironclaw_product_contracts::inbound::AuthResolutionResult::CallbackCompleted {
+            callback_ref,
+        } => AuthInteractionDecision::CallbackCompleted {
+            callback_ref: parse_auth_flow_id(callback_ref)?,
+        },
+        ironclaw_product_contracts::inbound::AuthResolutionResult::Denied => {
+            AuthInteractionDecision::Deny
         }
-        crate::AuthResolutionResult::CallbackCompleted { callback_ref } => {
-            AuthInteractionDecision::CallbackCompleted {
-                callback_ref: parse_auth_flow_id(callback_ref)?,
-            }
-        }
-        crate::AuthResolutionResult::Denied => AuthInteractionDecision::Deny,
     };
     let binding = match lookup_interaction_binding(envelope, binding_service).await {
         Ok(binding) => binding,
@@ -1981,12 +1991,16 @@ fn rejection_kind_for_approval_interaction(
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
-        ExternalEventId, ParsedProductInbound, ProductAdapterId, ProductInboundAck,
-        ProductInboundEnvelope, ProductInboundPayload, ProtocolAuthEvidence, TrustedInboundContext,
-    };
     use chrono::Utc;
+    use ironclaw_extension_contracts::external::{
+        ExternalActorRef, ExternalConversationRef, ExternalEventId,
+    };
+    use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
+    use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
+    use ironclaw_product_contracts::inbound::{
+        ParsedProductInbound, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+        TrustedInboundContext,
+    };
     use ironclaw_turns::{AcceptedMessageRef, AdmissionRejection, TurnRunId};
 
     use super::*;
@@ -2089,7 +2103,7 @@ mod tests {
             ProductInboundAck::Rejected(rejection)
                 if rejection.kind == ProductRejectionKind::PolicyDenied
                     && rejection.disposition()
-                        == crate::ProductRejectionDisposition::Permanent
+                        == ironclaw_product_contracts::inbound::ProductRejectionDisposition::Permanent
         ));
     }
 
@@ -2110,7 +2124,7 @@ mod tests {
                 assert_eq!(rejection.kind, ProductRejectionKind::PolicyDenied);
                 assert_eq!(
                     rejection.disposition(),
-                    crate::ProductRejectionDisposition::Permanent
+                    ironclaw_product_contracts::inbound::ProductRejectionDisposition::Permanent
                 );
                 assert_eq!(rejection.reason, RedactedString::new(reason));
             }
@@ -2211,7 +2225,7 @@ mod tests {
             ProductInboundAck::Rejected(rejection)
                 if rejection.kind == ProductRejectionKind::InvalidRequest
                     && rejection.disposition()
-                        == crate::ProductRejectionDisposition::Permanent
+                        == ironclaw_product_contracts::inbound::ProductRejectionDisposition::Permanent
         ));
     }
 

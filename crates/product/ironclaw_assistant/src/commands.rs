@@ -4,9 +4,11 @@
 //! command payloads so command parsing does not depend on v1 agent routing or on
 //! the product surface that produced the command.
 
-use crate::{InboundCommandPayload, ProductRejection, ProductRejectionKind};
 use ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest;
 use ironclaw_host_api::error::HostApiError;
+use ironclaw_product_contracts::inbound::{
+    InboundCommandPayload, ProductRejection, ProductRejectionKind,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;

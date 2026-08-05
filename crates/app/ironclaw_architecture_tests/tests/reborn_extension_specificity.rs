@@ -549,6 +549,52 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "trace payload-redaction safety classifier keyed off tool-name keywords \
          (issue-tracker profile); a safety denylist, not extension routing",
     ),
+    // Manifest inline-secret guard (`looks_like_inline_secret`,
+    // `ironclaw_extension_registry::host_api::product_adapter`): the vendor
+    // token *prefixes* a manifest field value is rejected for carrying.
+    //
+    // **Carved, not allowlisted, and CHECKLIST WS5's "slack/telegram token
+    // heuristics → the packages that own them" clause is REFUTED by the same
+    // measurement.** Two independent reasons, both mechanical:
+    //
+    // 1. It is a **superset of the bundled inventory**, exactly like the
+    //    trace-redaction classifier above. Of the eleven prefixes it carries,
+    //    five belong to no installed package at all — `sk-` (OpenAI/Anthropic
+    //    API keys), AWS `AKIA`/`ASIA`, JWTs (`eyJ…`), PEM private-key headers,
+    //    and URI userinfo — so sourcing the set from the packages would
+    //    *shrink* it and stop rejecting inline secrets the guard catches today.
+    //    A guard that only knows the vendors currently installed is a guard
+    //    that fails open on the next one.
+    // 2. The move is **layer-illegal in the named direction**.
+    //    `ironclaw_extension_registry` is `layer = "substrates"` and
+    //    `crates/extensions/packages/{slack,telegram}` are `layer = "products"`,
+    //    so `registry → package` is upward and needs a
+    //    `LAYER_MATRIX_EXCEPTION` the ratchet forbids. The only legal shape is
+    //    inversion — a package registers its prefixes with the parser — and
+    //    that is strictly worse here: the guard runs while parsing an
+    //    *arbitrary* manifest, including before any package is loaded, so a
+    //    registration-sourced list is unpopulated exactly when it matters.
+    //
+    // Pinned by `inline_secret_guard_is_a_safety_denylist_not_package_inventory`
+    // in `crates/ironclaw_extension_registry/tests/product_adapter_manifest_ingestion.rs`.
+    (
+        "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
+        "github",
+        "manifest inline-secret guard token prefixes (`ghp_`/`gho_`/…); a safety \
+         denylist that is a superset of the package inventory, not extension routing",
+    ),
+    (
+        "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
+        "slack",
+        "manifest inline-secret guard token prefixes (`xoxb-`/`xoxp-`/…); a safety \
+         denylist that is a superset of the package inventory, not extension routing",
+    ),
+    (
+        "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
+        "telegram",
+        "manifest inline-secret guard bot-token shape (`looks_like_telegram_token`); a \
+         safety denylist that is a superset of the package inventory, not extension routing",
+    ),
     (
         "crates/ironclaw_webui/frontend/src/i18n/",
         "google",
@@ -1123,25 +1169,12 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_webui/frontend/src/pages/chat/components/auth-oauth-card.tsx",
         "github",
     ),
-    // The inline-secret guard's vendor token prefixes. Repointed (not added)
-    // when CHECKLIST WS5's `product` narrows row moved `adapter_registry` to
-    // `ironclaw_extension_registry::host_api::product_adapter`; the guard stayed with
-    // the raw-TOML parse stage, so the entries moved file and nothing else.
-    // The schema half that went to `ironclaw_extension_contracts` carries no
-    // vendor name — its fixtures were rewritten generically rather than carved,
-    // the same disposition PROPOSAL §6.1.3 records for `ProductConversationRouteKey`.
-    (
-        "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
-        "github",
-    ),
-    (
-        "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_extension_registry/src/host_api/product_adapter.rs",
-        "telegram",
-    ),
+    // The inline-secret guard's vendor token prefixes moved OUT of this list
+    // 2026-08-05 and into `PATH_TERM_COLLISIONS`, where the trace-redaction
+    // classifier already sits. They are a safety denylist, not extension
+    // routing, and CHECKLIST WS5's "slack/telegram token heuristics → the
+    // packages that own them" clause is refuted rather than owed — see the
+    // carve-out's own reason text for the measurement.
     (
         "crates/ironclaw_host_api/src/product_adapter/identity.rs",
         "slack",
@@ -1629,7 +1662,20 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// only entries either side removed, and this branch's renames repoint entries
 /// in place without adding any. So the union is the batch's number, not ours —
 /// which is exactly why it is measured rather than reasoned.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 122;
+///
+/// **122 → 119, 2026-08-05 (WS5 `product` narrows, token-heuristics clause).**
+/// The three `ironclaw_extension_registry/src/host_api/product_adapter.rs`
+/// rows left the allowlist and became `PATH_TERM_COLLISIONS` carve-outs with
+/// reasons. That is a re-classification, not a payment: allowlist entries are
+/// *debt* — vendor names that ought to leave — and the measurement on that row
+/// showed these three never can, because the guard they belong to is a safety
+/// denylist that is a superset of the package inventory and the move its clause
+/// named is layer-illegal besides. Keeping them in the debt column would have
+/// left a permanent entry the shrink ratchet can never retire; the carve-out
+/// list is where the trace-redaction classifier already records the identical
+/// disposition. Net vendor-name surface is unchanged: three rows moved list,
+/// zero terms appeared or vanished.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 119;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///

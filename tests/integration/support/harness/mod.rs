@@ -23,7 +23,7 @@ use std::{
 
 use super::{filesystem::BlockingTurnStatePutFilesystem, product_surface::resource_scope};
 use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, DenyApproval, LeaseApproval};
-use ironclaw_assistant::{ProjectService, ResolvedBinding};
+use ironclaw_assistant::ProjectService;
 use ironclaw_auth::RebornProductAuthServices;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
@@ -62,6 +62,7 @@ use ironclaw_loop_host::{
     LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
+use ironclaw_product_contracts::binding::ResolvedBinding;
 use ironclaw_trust::EffectiveTrustClass;
 
 pub(crate) use super::doubles::{

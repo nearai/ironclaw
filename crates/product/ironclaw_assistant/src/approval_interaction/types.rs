@@ -1,5 +1,5 @@
-use crate::ProductSurfaceRejectionKind;
 use ironclaw_approvals::ApprovalStatus;
+use ironclaw_host_api::product_adapter::ProductSurfaceRejectionKind;
 use ironclaw_host_api::turn::{IdempotencyKey, TurnActor, TurnGateRef, TurnRunId, TurnScope};
 use ironclaw_host_api::{
     action::Action,

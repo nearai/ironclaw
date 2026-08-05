@@ -13,19 +13,39 @@
 //!   `extension_host`, `composition`, and `product` each ended up with their own
 //!   name for `ChannelAdapter` before WS1.3/WS1.4 deleted the chain.
 //!
-//! **Scope note — what the import-path half deliberately does not govern, and
-//! why.** `ironclaw_assistant` re-exports roughly 120 product *value* DTOs
-//! (`ProductInboundEnvelope`, `ProductProjectionState`, the `Lifecycle*`
-//! projection set, …) as its own public product API. Those re-exports are a
-//! second import path in the literal sense, but repointing ~13 crates off them
-//! is a mechanical rename with no architectural content, and folding it into
-//! the extraction PR would bury the parts that do have content. What the rule
-//! exists to protect is the *ports* — the traits whose implementation site is
-//! the whole reason the crate exists — and those are governed here with zero
-//! exemptions: `ProductSurface`, `ChannelInboundProductSurface`, and
-//! `ProjectionStream` each had exactly one re-export chain at WS1.4, and all
-//! three are deleted. The DTO re-export sweep belongs with WS2/WS6, which
-//! repoint those crates for their own reasons.
+//! **Scope note — superseded 2026-08-05 by the WS5 `product` narrows row, and
+//! kept because the deferral it records is now discharged in part.** It used to
+//! read: *"`ironclaw_assistant` re-exports roughly 120 product value DTOs … the
+//! DTO re-export sweep belongs with WS2/WS6, which repoint those crates for
+//! their own reasons."* WS2 and WS6 both landed and neither took it; §6.9.1's
+//! `product` narrowing row owns it, and its facade half is **executed**:
+//! `crates/ironclaw_assistant/src/lib.rs` now declares **zero** foreign
+//! `pub use` statements, pinned below by
+//! [`product_declares_no_foreign_re_export_facade`]. What went was the block the
+//! row names — the 148 symbols (19 `host_api::product_adapter`, 42
+//! `extension_contracts`, 87 `product_contracts`) that the WS1.3/WS1.4/WS1.5
+//! splits left behind when the single `host_api::product_adapter` module they
+//! all came from was divided across three crates.
+//!
+//! **What is deliberately still not governed, and by whose ruling.** 193 further
+//! foreign re-exports live in this crate's *private* modules (`reborn_services`,
+//! `lifecycle`, `auth_continuation`) and reach the outside only through
+//! `lib.rs`'s re-exports of those modules. They are a different population — the
+//! `product_wire` / `workspace_views` / `admin_users` / `descriptors` /
+//! `package_lifecycle` WebUI DTOs, none of which ever lived in
+//! `host_api::product_adapter` — and they belong to a decided carve-out:
+//! PROPOSAL §12.11 D-B keeps the frozen operation inventory in
+//! `ironclaw_assistant` because its constants are *generic over* these DTOs, and
+//! the residue is already pinned shrink-only as
+//! `WEBUI_PRODUCT_SYMBOL_BASELINE` in `reborn_transport_product_boundary.rs`
+//! (the `webui` row's residue, with its own owner). Widening this scan onto them
+//! would contradict D-B rather than enforce it.
+//!
+//! What the import-path rule exists to protect is the *ports* — the traits whose
+//! implementation site is the whole reason the crate exists — and those are
+//! governed here with zero exemptions: `ProductSurface`,
+//! `ChannelInboundProductSurface`, and `ProjectionStream` each had exactly one
+//! re-export chain at WS1.4, and all three are deleted.
 //!
 //! **A collision this scan can see and the extension tier's cannot.**
 //! `ProductSurfaceKind` and `ProductAdapterError` stay in `ironclaw_host_api`
@@ -405,6 +425,76 @@ fn the_import_path_half_governs_ports_and_the_membrane_types_only() {
     // Macro-generated lifecycle refs are out of both halves: they are not
     // visible to a `pub struct` walk at all.
     assert!(!governed.contains("LifecyclePackageRef"));
+}
+
+/// The crate that owns the product tier's *implementation*. Its `lib.rs` is the
+/// file the §6.9.1 facade lived in.
+const PRODUCT: &str = "ironclaw_assistant";
+
+/// `ironclaw_assistant/src/lib.rs` declares **no** foreign `pub use`.
+///
+/// This is the executable half of §6.9.1's *"its ~120-symbol re-export facade
+/// over `host_api::product_adapter` dissolves; consumers import contracts"*.
+/// The rule is a crate-root property rather than a name list on purpose: a name
+/// list would have to be maintained alongside three contracts crates and would
+/// go stale the first time one of them gained a type, while "this file re-exports
+/// only what this crate declares" is the invariant the row actually bought and
+/// cannot be satisfied by adding one more name.
+///
+/// Scoped to `lib.rs`, deliberately. The 193 foreign re-exports inside this
+/// crate's private modules are §12.11 D-B's inventory carve-out and are pinned
+/// shrink-only elsewhere (`WEBUI_PRODUCT_SYMBOL_BASELINE`); see the module doc.
+/// Widening this test to the whole `src` tree would go red on a decided ruling
+/// the day it landed.
+#[test]
+fn product_declares_no_foreign_re_export_facade() {
+    let root = workspace_root();
+    let lib = crate_dir(&root, PRODUCT).join("src/lib.rs");
+    let source = std::fs::read_to_string(&lib)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", lib.display()));
+
+    let mut offenders = Vec::new();
+    let mut statement = String::new();
+    let mut statement_line = 0usize;
+    for (index, raw) in source.lines().enumerate() {
+        let line = match raw.split_once("//") {
+            Some((code, _)) => code,
+            None => raw,
+        };
+        if statement.is_empty() {
+            if !line.trim_start().starts_with("pub use ") {
+                continue;
+            }
+            statement_line = index + 1;
+        }
+        statement.push_str(line);
+        if !line.contains(';') {
+            continue;
+        }
+        let stmt = std::mem::take(&mut statement);
+        let path = stmt.trim().trim_start_matches("pub use ").trim();
+        if path.starts_with("ironclaw_") {
+            let named: String = path.chars().take(72).collect();
+            offenders.push(format!(
+                "    {PRODUCT}/src/lib.rs:{statement_line}: {named}"
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "{}/src/lib.rs re-exports {} foreign path(s). PROPOSAL §6.9.1 dissolved that \
+         facade (WS5): this crate's root re-exports only what this crate DECLARES, and \
+         a consumer imports every other name from the crate that owns it \
+         (`ironclaw_product_contracts`, `ironclaw_extension_contracts`, \
+         `ironclaw_host_api::product_adapter`). A second import path is the defect \
+         §11.2.4 exists to prevent — it is how `ironclaw_extension_host` and \
+         `ironclaw_webui` reached the protocol-auth mint family through product before \
+         WS1.5:\n{}",
+        PRODUCT,
+        offenders.len(),
+        offenders.join("\n")
+    );
 }
 
 /// The collision exemptions are a documented carve-out, not a hole: each one

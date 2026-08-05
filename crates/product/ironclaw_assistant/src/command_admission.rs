@@ -20,8 +20,9 @@ use crate::commands::{
     CommandAudience, ProductCommand, UnknownProductCommandName, declared_command_help_text,
     required_audience, validate_declared_product_command,
 };
-use crate::{ProductConversationRouteKind, ProductRejection, ProductRejectionKind};
+use ironclaw_product_contracts::binding::ProductConversationRouteKind;
 use ironclaw_product_contracts::binding::route_kind_for_trigger;
+use ironclaw_product_contracts::inbound::{ProductRejection, ProductRejectionKind};
 
 /// Admit only manifest-enabled commands from direct conversations, then gate
 /// admin-audience commands on the actor's admin-users role.
