@@ -106,10 +106,13 @@ class Exception_:
 # a workspace member, and this gate said so by name: *"EXCEPTIONS carries a row
 # for a delta that no longer exists … Delete the row."* That is the table
 # working as designed — a row cannot outlive what it excuses — and it is why
-# closing a disposition is a deletion here rather than a rewrite. One row left.
-EXCEPTIONS: tuple[Exception_, ...] = (
-    Exception_(
-)
+# closing a disposition is a deletion here rather than a rewrite. ✎ 2026-08-05:
+# the last two rows closed together in the tail batch — `ironclaw_projects`
+# dissolved into `identity::projects` and `ironclaw_first_party_extension_ports`
+# into `loop_host::skill_activation` — so the table is EMPTY, which is the §5
+# steady state. A new flat crate or undocumented delta now fails with no
+# escape hatch short of adding a row here, in review.
+EXCEPTIONS: tuple[Exception_, ...] = ()
 
 
 # ---------------------------------------------------------------------------

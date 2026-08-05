@@ -718,7 +718,7 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 /// `ironclaw_first_party_extension_ports` into `ironclaw_loop_host` removed the
 /// `loops` pair the two of them formed. No edge was re-plumbed and none was
 /// added: the crate's five workspace dependencies were already `loop_host`'s.
-const SAME_LAYER_EDGE_BASELINE: usize = 71;
+const SAME_LAYER_EDGE_BASELINE: usize = 70;
 
 /// Sanity floors for the metadata walk. A gate that scans nothing must never
 /// read as success; these are deliberately far below the live values (✎ **65**
