@@ -523,9 +523,6 @@ def build_plan(
         if path.startswith(_webui_frontend_prefix()):
             reasons.append("Code Style owns WebUI lint, tests, and production build")
             continue
-        if path.startswith("tests/e2e/"):
-            reasons.append(f"Reborn E2E workflow owns: {path}")
-            continue
         if path in root_inventory:
             root_partitions.add(root_inventory[path])
             reasons.append(f"root test changed: {path}")

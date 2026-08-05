@@ -339,22 +339,6 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["crate_buckets"], [])
         self.assertEqual(plan["integration_lanes"], [])
 
-    def test_e2e_change_is_owned_by_dedicated_workflow(self) -> None:
-        paths = [
-            "tests/e2e/helpers.py",
-            "tests/e2e/scenarios/test_reborn_webui_v2_smoke.py",
-        ]
-        plan = self.plan("pull_request", paths)
-
-        self.assertEqual(plan["mode"], "none")
-        self.assertTrue(plan["run_qa_replay"])
-        self.assertEqual(plan["crate_buckets"], [])
-        self.assertEqual(plan["integration_lanes"], [])
-        self.assertEqual(
-            plan["reasons"],
-            [f"dedicated Reborn E2E workflow owns: {path}" for path in paths],
-        )
-
     def test_frontend_prefix_resolves_through_crate_inventory_when_nested(self) -> None:
         """WS10: a family-moved ironclaw_webui still routes to Code Style.
 
