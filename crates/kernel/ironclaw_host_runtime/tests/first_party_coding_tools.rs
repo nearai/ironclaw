@@ -1543,7 +1543,7 @@ async fn builtin_edit_tools_run_post_edit_check_in_user_sandbox_not_on_local_hos
     // port. Running the configured check through it would escape the sandbox onto
     // the shared provider host under a user-sandbox policy. The resolver instead
     // bundles the check with the port matching the plan's process backend, so
-    // under a user-sandbox policy the check runs ISOLATED in the tenant's own
+    // under a user-sandbox policy the check runs ISOLATED in the user's own
     // sandbox — never on the local host port.
     let temp = tempfile::tempdir().unwrap();
 

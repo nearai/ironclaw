@@ -488,6 +488,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
         for path in (
             "Dockerfile.sandbox-worker",
             "docker/reborn/entrypoint.sh",
+            "crates/lanes/ironclaw_sandbox/Cargo.toml",
+            "crates/lanes/ironclaw_sandbox/src/lib.rs",
             "crates/app/ironclaw_cli/src/runtime/mod.rs",
             "crates/lanes/ironclaw_sandbox/src/sandbox_process.rs",
             "crates/lanes/ironclaw_sandbox/tests/support/docker_gate.rs",

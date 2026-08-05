@@ -13,30 +13,56 @@ use ironclaw_sandbox::{
 
 use crate::{RebornBuildError, RebornRuntimeProcessBinding};
 
-/// Factory for the concrete transport selected by an explicit sandbox profile.
-pub struct UserSandboxFactory;
+/// Connect the existing local Docker transport and return the complete runtime
+/// process binding. Profile boot fails if the daemon is unavailable; no caller
+/// receives an unsandboxed fallback or a provider assembly handle.
+pub async fn build_local_docker_user_sandbox_binding(
+    workspace_root: PathBuf,
+) -> Result<RebornRuntimeProcessBinding, RebornBuildError> {
+    let transport =
+        RebornScopedSandboxCommandTransport::connect(RebornSandboxConfig::new(workspace_root))
+            .await
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "user-sandbox process backend requires a reachable Docker daemon: {error}"
+                ),
+            })?;
+    Ok(binding(Arc::new(transport)))
+}
 
-impl UserSandboxFactory {
-    /// Connect the existing local Docker transport and fail profile boot if the
-    /// daemon is unavailable. No caller receives an unsandboxed fallback.
-    pub async fn local_docker(
-        workspace_root: PathBuf,
-    ) -> Result<RebornRuntimeProcessBinding, RebornBuildError> {
-        let transport =
-            RebornScopedSandboxCommandTransport::connect(RebornSandboxConfig::new(workspace_root))
-                .await
-                .map_err(|error| RebornBuildError::InvalidConfig {
-                    reason: format!(
-                        "user-sandbox process backend requires a reachable Docker daemon: {error}"
-                    ),
-                })?;
-        Ok(binding(Arc::new(transport)))
+/// Build the complete lazy Railway runtime process binding without exposing
+/// Railway's transport configuration through composition's public API. The
+/// first shell invocation provisions the caller's remote sandbox.
+pub fn build_railway_user_sandbox_binding(
+    project_id: String,
+    environment_id: String,
+    cli_path: Option<PathBuf>,
+    idle_timeout_minutes: Option<u16>,
+    worker_image: Option<String>,
+) -> Result<RebornRuntimeProcessBinding, RebornBuildError> {
+    let mut config = RailwayPreviewSandboxConfig::new(project_id, environment_id)
+        .map_err(invalid_railway_config)?;
+    if let Some(cli_path) = cli_path {
+        config = config.with_cli_path(cli_path);
     }
+    if let Some(minutes) = idle_timeout_minutes {
+        config = config
+            .with_idle_timeout_minutes(minutes)
+            .map_err(invalid_railway_config)?;
+    }
+    if let Some(worker_image) = worker_image {
+        config = config
+            .with_worker_image(worker_image)
+            .map_err(invalid_railway_config)?;
+    }
+    Ok(binding(Arc::new(RailwayPreviewSandboxTransport::new(
+        config,
+    ))))
+}
 
-    /// Build the lazy Railway preview transport without contacting Railway.
-    /// The first shell invocation provisions the caller's remote sandbox.
-    pub fn railway_preview(config: RailwayPreviewSandboxConfig) -> RebornRuntimeProcessBinding {
-        binding(Arc::new(RailwayPreviewSandboxTransport::new(config)))
+fn invalid_railway_config(error: impl std::fmt::Display) -> RebornBuildError {
+    RebornBuildError::InvalidConfig {
+        reason: format!("Railway preview sandbox configuration is invalid: {error}"),
     }
 }
 

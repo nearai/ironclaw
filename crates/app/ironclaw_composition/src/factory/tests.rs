@@ -71,9 +71,12 @@ async fn production_backend_projects_user_sandbox_shell_constraints() {
     );
     let runtime =
         Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(database).expect("libSQL runtime"));
-    let railway = ironclaw_sandbox::RailwayPreviewSandboxConfig::new(
-        "sandbox-policy-project",
-        "sandbox-policy-environment",
+    let railway_binding = crate::sandbox::build_railway_user_sandbox_binding(
+        "sandbox-policy-project".to_string(),
+        "sandbox-policy-environment".to_string(),
+        None,
+        None,
+        None,
     )
     .expect("valid Railway fixture config");
     let services = build_runtime_substrate(
@@ -98,7 +101,7 @@ async fn production_backend_projects_user_sandbox_shell_constraints() {
             approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
             audit_mode: ironclaw_host_api::runtime_policy::AuditMode::Standard,
         })
-        .with_runtime_process_binding(crate::sandbox::UserSandboxFactory::railway_preview(railway)),
+        .with_runtime_process_binding(railway_binding),
     )
     .await
     .expect("production-shaped sandbox services build");

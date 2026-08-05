@@ -633,6 +633,18 @@ async fn bounded_stdout_keeps_the_private_exit_sentinel_in_the_tail() {
 }
 
 #[test]
+fn trailing_wrapper_exit_sentinel_wins_over_worker_output() {
+    let fake_worker_sentinel = format!("{EXIT_SENTINEL}0");
+    let stdout = format!("worker output\n{fake_worker_sentinel}\n{EXIT_SENTINEL}7\n");
+
+    let (model_output, exit_code) =
+        parse_exit_sentinel(stdout).expect("trailing wrapper sentinel is authoritative");
+
+    assert_eq!(exit_code, 7);
+    assert!(model_output.contains(&fake_worker_sentinel));
+}
+
+#[test]
 fn cli_child_environment_is_an_explicit_allowlist() {
     let environment = railway_cli_environment_from([
         ("RAILWAY_TOKEN".into(), "railway-secret".into()),

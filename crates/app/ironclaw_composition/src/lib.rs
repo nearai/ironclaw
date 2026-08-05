@@ -128,9 +128,7 @@ pub use memory_provider_factory::{
 // consumer: composition's operator LLM-key wiring test · pinned by: `composition/tests/operator_llm_key_store_wiring.rs`
 pub use operator_secret_store::RuntimeOperatorSecretValueStore;
 // consumer: `ironclaw_cli` explicit sandbox-profile boot wiring · pinned by: `ironclaw_cli` runtime build + profile tests
-pub use sandbox::UserSandboxFactory;
-// consumer: `ironclaw_cli` Railway profile config · pinned by: `ironclaw_cli` runtime build + Railway profile tests
-pub use ironclaw_sandbox::RailwayPreviewSandboxConfig;
+pub use sandbox::{build_local_docker_user_sandbox_binding, build_railway_user_sandbox_binding};
 // consumer: `ironclaw_cli` serve + runtime, `harness/latency/runner`, root QA suites · pinned by: `composition/tests/profile_acceptance.rs`
 // (`RebornRuntimeProfileError` left: `deployment` is a `pub mod`, so it stays nameable there.)
 pub use deployment::{

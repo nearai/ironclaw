@@ -733,7 +733,7 @@ impl HostRuntimeCapabilityHarness {
             )?
             .with_local_runtime_confirmed_host_home_root(host_home_root)
         } else if sandboxed_shell {
-            let user_sandbox = ironclaw_composition::UserSandboxFactory::local_docker(
+            let user_sandbox = ironclaw_composition::build_local_docker_user_sandbox_binding(
                 storage_root.join("sandbox-workspaces"),
             )
             .await?;

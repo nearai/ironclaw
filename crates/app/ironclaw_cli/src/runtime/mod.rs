@@ -785,8 +785,8 @@ const RAILWAY_SANDBOX_CLI_PATH_ENV: &str = "IRONCLAW_REBORN_RAILWAY_CLI_PATH";
 const RAILWAY_SANDBOX_IDLE_TIMEOUT_ENV: &str = "IRONCLAW_REBORN_RAILWAY_IDLE_TIMEOUT_MINUTES";
 const RAILWAY_SANDBOX_WORKER_IMAGE_ENV: &str = "IRONCLAW_REBORN_RAILWAY_WORKER_IMAGE";
 
-fn railway_preview_config_from_env()
--> Result<ironclaw_composition::RailwayPreviewSandboxConfig, SandboxProcessBootError> {
+fn railway_preview_process_binding_from_env()
+-> Result<ironclaw_composition::RebornRuntimeProcessBinding, SandboxProcessBootError> {
     let project_id =
         required_railway_sandbox_env(RAILWAY_SANDBOX_PROJECT_ENV, "RAILWAY_PROJECT_ID")?;
     let environment_id =
@@ -807,36 +807,31 @@ fn railway_preview_config_from_env()
         _ => {}
     }
 
-    let mut config =
-        ironclaw_composition::RailwayPreviewSandboxConfig::new(project_id, environment_id)
-            .map_err(|error| SandboxProcessBootError::RailwayUnavailable {
-                reason: error.to_string(),
-            })?;
-    if let Some(cli_path) = sandbox_env_value(RAILWAY_SANDBOX_CLI_PATH_ENV)? {
-        config = config.with_cli_path(cli_path);
-    }
-    if let Some(raw) = sandbox_env_value(RAILWAY_SANDBOX_IDLE_TIMEOUT_ENV)? {
-        let minutes =
-            raw.parse::<u16>()
-                .map_err(|_| SandboxProcessBootError::RailwayUnavailable {
-                    reason: format!(
-                        "{RAILWAY_SANDBOX_IDLE_TIMEOUT_ENV} must be an integer from 1 to 65535"
-                    ),
-                })?;
-        config = config.with_idle_timeout_minutes(minutes).map_err(|error| {
-            SandboxProcessBootError::RailwayUnavailable {
-                reason: error.to_string(),
-            }
-        })?;
-    }
-    if let Some(worker_image) = sandbox_env_value(RAILWAY_SANDBOX_WORKER_IMAGE_ENV)? {
-        config = config.with_worker_image(worker_image).map_err(|error| {
-            SandboxProcessBootError::RailwayUnavailable {
-                reason: error.to_string(),
-            }
-        })?;
-    }
-    Ok(config)
+    let cli_path = sandbox_env_value(RAILWAY_SANDBOX_CLI_PATH_ENV)?.map(PathBuf::from);
+    let idle_timeout_minutes =
+        if let Some(raw) = sandbox_env_value(RAILWAY_SANDBOX_IDLE_TIMEOUT_ENV)? {
+            let minutes =
+                raw.parse::<u16>()
+                    .map_err(|_| SandboxProcessBootError::RailwayUnavailable {
+                        reason: format!(
+                            "{RAILWAY_SANDBOX_IDLE_TIMEOUT_ENV} must be an integer from 1 to 65535"
+                        ),
+                    })?;
+            Some(minutes)
+        } else {
+            None
+        };
+    let worker_image = sandbox_env_value(RAILWAY_SANDBOX_WORKER_IMAGE_ENV)?;
+    ironclaw_composition::build_railway_user_sandbox_binding(
+        project_id,
+        environment_id,
+        cli_path,
+        idle_timeout_minutes,
+        worker_image,
+    )
+    .map_err(|error| SandboxProcessBootError::RailwayUnavailable {
+        reason: error.to_string(),
+    })
 }
 
 fn required_railway_sandbox_env(
@@ -888,18 +883,16 @@ fn build_sandboxed_local_runtime_services_input(
         RebornProfile::HostedSingleTenantVolumeSandboxed => {
             let workspace_root =
                 local_runtime_storage_root(config, profile).join(SANDBOX_WORKSPACES_SUBDIR);
-            block_on_cli(ironclaw_composition::UserSandboxFactory::local_docker(
-                workspace_root,
-            ))
+            block_on_cli(
+                ironclaw_composition::build_local_docker_user_sandbox_binding(workspace_root),
+            )
             .map_err(|error| SandboxProcessBootError::DockerUnreachable {
                 profile,
                 reason: error.to_string(),
             })?
         }
         RebornProfile::HostedSingleTenantVolumeSandboxedRailway => {
-            ironclaw_composition::UserSandboxFactory::railway_preview(
-                railway_preview_config_from_env()?,
-            )
+            railway_preview_process_binding_from_env()?
         }
         _ => return Err(SandboxProcessBootError::UnsupportedProfile { profile }.into()),
     };

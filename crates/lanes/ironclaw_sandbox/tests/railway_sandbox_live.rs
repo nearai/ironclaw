@@ -129,6 +129,8 @@ async fn railway_workspace_survives_transport_restart_without_credentials() {
                  assert not Path('/var/run/docker.sock').exists()\n\
                  root = next(line.split() for line in Path('/proc/mounts').read_text().splitlines() if line.split()[1] == '/')\n\
                  assert 'ro' in root[3].split(',')\n\
+                 # Validate the inner Docker worker's --network none posture;\n\
+                 # Railway's outer ISOLATED sandbox may still have NAT egress.\n\
                  routes = [line.split() for line in Path('/proc/net/route').read_text().splitlines()[1:]]\n\
                  assert not any(route[1] == '00000000' for route in routes)\n\
                  Path('/tmp/ironclaw-write-probe').write_text('tmpfs-ok')\n\

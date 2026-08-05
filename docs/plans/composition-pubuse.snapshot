@@ -28,8 +28,7 @@ pub use memory_provider_factory::{
     memory_lifecycle_consumers, resolve_memory_provider,
 };
 pub use operator_secret_store::RuntimeOperatorSecretValueStore;
-pub use sandbox::UserSandboxFactory;
-pub use ironclaw_sandbox::RailwayPreviewSandboxConfig;
+pub use sandbox::{build_local_docker_user_sandbox_binding, build_railway_user_sandbox_binding};
 pub use deployment::{
     RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
     hosted_single_tenant_volume_runtime_policy,

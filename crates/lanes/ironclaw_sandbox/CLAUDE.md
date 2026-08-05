@@ -73,7 +73,7 @@ through `SandboxCommandTransport`; the script-runtime lane remains separate.
   makes that possible but did **not** perform the rewiring, because that is a
   behavior change and this was a move.
 - **The Docker fail-closed switch is lane-specific — follow-up to issue #7081.**
-  `tests/support/docker_gate.rs` says
+  `tests/integration/support/docker_gate.rs` says
   `IRONCLAW_REQUIRE_DOCKER_TESTS=1` is what turns a missing daemon or image from
   a visible skip into a hard failure. The `sandbox-docker-tests` CI job now sets
   the switch and provisions the worker image, so that lane fails closed. Other
