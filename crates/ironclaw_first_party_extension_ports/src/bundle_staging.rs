@@ -1,23 +1,11 @@
 //! Copying an activated skill's files somewhere a host process can open them.
 //!
-//! A skill bundle lives in the database (`/tenants/<t>/users/<u>/skills/<name>/…`). `builtin.shell`
-//! is a host process, so it can only open real host paths — it can never open a database row. The
-//! consequence was measured three times, on three deployment shapes, always the same shape:
-//!
-//! ```text
-//! glob scripts/egfr*        -> found
-//! read_file scripts/egfr.py -> 2503 bytes
-//! shell: python3 scripts/egfr.py -> No such file or directory
-//! shell: python3 -c "<the whole algorithm re-typed inline>"
-//! ```
-//!
-//! The agent can read its own script and cannot run it, so it re-derives the method the skill exists
-//! to preserve — which is the precise failure a skill carrying a script is supposed to prevent.
-//!
-//! Staging closes that by writing the bundle's non-manifest files into the workspace, which IS
-//! host-backed wherever a shell exists, and telling the model the path. `SKILL.md` is deliberately
-//! not staged: it is already delivered as model context, and a second copy on disk invites edits that
-//! discovery never reads.
+//! A bundle lives in the database, and `builtin.shell` is a host process that can only open real
+//! host paths. So an agent could read its own script and not run it, and re-derived the method the
+//! skill existed to preserve. Staging writes the bundle's non-manifest files into the workspace,
+//! which is host-backed wherever a shell exists, and tells the model the path. `SKILL.md` is not
+//! staged: it already arrives as model context, and a second copy invites edits discovery never
+//! reads.
 
 use std::sync::Arc;
 
@@ -27,8 +15,9 @@ use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
 
 /// Workspace-relative directory holding staged skill bundles.
 ///
-/// Dot-prefixed and listed in the coding tools' `DEFAULT_EXCLUDED_DIRS`, so staged copies never show
-/// up in a workspace `glob`/`list_dir`/`grep` and cannot be mistaken for the user's own files.
+/// Dot-prefixed so it reads as machine-managed, but deliberately NOT in the coding tools'
+/// `DEFAULT_EXCLUDED_DIRS`: excluding it hides staged files from `glob`/`grep`/`list_dir`, and a
+/// model that looks for its skill's script instead of using the injected path would not find it.
 pub const STAGED_SKILLS_DIRNAME: &str = ".skills";
 
 /// One file of a bundle, ready to stage.
@@ -48,9 +37,8 @@ pub struct StagedBundleFile {
 pub trait SkillBundleStager: Send + Sync + std::fmt::Debug {
     /// Stages `files` for `skill_name` and returns the directory the model should run them from.
     ///
-    /// Returning `None` means staging did not happen and the caller must not promise a path. This is
-    /// never an error the turn should fail on: a skill whose scripts could not be staged is still a
-    /// usable skill, whereas a turn that dies because a copy failed is not.
+    /// `None` means staging did not happen, so the caller must not promise a path. Never fatal: a
+    /// skill without its scripts is still usable; a turn that dies over a failed copy is not.
     async fn stage_bundle(
         &self,
         scope: &ResourceScope,
@@ -82,11 +70,8 @@ impl<F> WorkspaceSkillBundleStager<F>
 where
     F: RootFilesystem + 'static,
 {
-    /// Takes a READ-WRITE workspace handle.
-    ///
-    /// The read-only workspace handle the activation path already holds (it backs setup-marker reads)
-    /// fails closed on write, so it cannot be reused here. Composition supplies
-    /// `read_write_workspace_filesystem`, which is the documented single owner of that recipe.
+    /// Takes a READ-WRITE handle: the activation path's own workspace handle is read-only (it backs
+    /// setup-marker reads) and fails closed on write.
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self { filesystem }
     }
@@ -134,9 +119,8 @@ where
                 );
                 continue;
             };
-            // Written unconditionally rather than compared first: the write is one round trip, a
-            // stat-then-write is two, and a stale staged copy is worse than a redundant write. The
-            // filesystem is the authority on whether the bytes changed.
+            // Unconditional: one round trip beats stat-then-write, and a stale copy is worse than
+            // a redundant one.
             match self
                 .filesystem
                 .write_file(scope, &path, &file.contents)
@@ -164,19 +148,12 @@ impl<F> WorkspaceSkillBundleStager<F>
 where
     F: RootFilesystem + 'static,
 {
-    /// The path the model uses as a working directory for this skill's own commands.
+    /// The working directory the model runs this skill's commands from.
     ///
-    /// Plainly `/workspace/.skills/<name>`, and that is only correct because the shell and the file
-    /// tools now resolve `/workspace` to the same directory (`HostProcessPort` applies the caller
-    /// scoping the mount view applies).
-    ///
-    /// An earlier version derived this by measuring the staged directory against the shell's
-    /// workspace root and expressing one relative to the other. That was right while the two roots
-    /// differed and became actively wrong the moment they were unified: it emitted
-    /// `/workspace/tenants/<t>/users/<u>/.skills/<name>`, which both tools then resolved beneath the
-    /// per-caller root again -- a doubled path. The shell got a working directory that did not exist
-    /// and every command failed with `Failed to spawn command: No such file or directory`, which reads
-    /// like a missing interpreter and is not.
+    /// Plainly `/workspace/.skills/<name>`, correct only because the shell and the file tools now
+    /// resolve `/workspace` to the same directory. Deriving it instead (measuring the staged dir
+    /// against the shell's root) emitted a doubled per-caller segment that both tools resolved
+    /// twice, so every command failed with a spawn error that read like a missing interpreter.
     fn runnable_dir(&self, _scope: &ResourceScope, skill_name: &str) -> String {
         format!("/workspace/{STAGED_SKILLS_DIRNAME}/{skill_name}")
     }
@@ -192,14 +169,9 @@ mod runnable_dir_tests {
         path::{MountAlias, VirtualPath},
     };
 
-    /// The path handed to the model must be the plain workspace spelling.
-    ///
-    /// This is the assertion that was missing when a derived version shipped: it emitted
-    /// `/workspace/tenants/<t>/users/<u>/.skills/<name>`, which the shell and the file tools -- both
-    /// already resolving `/workspace` beneath the per-caller root -- resolved a second time. The
-    /// doubled directory did not exist, so every shell command failed with
-    /// `Failed to spawn command: No such file or directory`, and an agent following its own skill's
-    /// instructions could not run anything.
+    /// The path handed to the model must be the plain workspace spelling; a per-caller segment here
+    /// is applied a second time by both the shell and the file tools, and the doubled directory
+    /// does not exist.
     #[test]
     fn the_runnable_directory_is_the_plain_workspace_spelling() {
         let view = MountView::new(vec![MountGrant::new(

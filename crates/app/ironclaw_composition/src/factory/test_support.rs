@@ -1139,11 +1139,8 @@ pub(crate) fn workspace_mounts_for_test(stores: &RebornRuntimeStores) -> &MountV
         .expect("test runtime uses a shared workspace mount policy")
 }
 
-/// The skill view a lease-terms assertion must use: derived from the invocation's own scope.
-///
-/// There is deliberately no runtime field to read here. A pre-built, scope-free skill view is what
-/// let these assertions pass against `/projects/skills` while every skill capability wrote to
-/// `/tenants/<t>/users/<u>/skills`; production derives it per gate in
+/// The skill view a lease-terms assertion must use, from the invocation's own scope. There is
+/// deliberately no runtime field to read: production derives it per gate in
 /// `PolicyApprovalLeaseTermsProvider::skill_mounts_for`, so a test must too.
 #[cfg(test)]
 pub(crate) fn skill_mounts_for_test(

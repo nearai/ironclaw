@@ -248,21 +248,13 @@ struct RefreshingLoopCapabilityPortFactory {
 
 /// Make skill files readable by the ordinary filesystem tools, read-only.
 ///
-/// Skill mounts are granted to the skill capabilities only, so `read_file` saw nothing but
-/// `workspace` and a model reaching for `skills/<name>/SKILL.md` got "does not resolve inside an
-/// available scoped root (available roots: workspace)". Observed on a real turn: the model installed a
-/// skill, then tried to read it back to check it, burned a tool call on that error, and had to fall
-/// back to `skill_activate`.
+/// Skill mounts went to the skill capabilities only, so a model reaching for
+/// `skills/<name>/SKILL.md` was told the path resolves in no available root. That is a parity gap,
+/// not just a bad message: in Claude Code a SKILL.md *is* a file, and skills reference siblings
+/// (`references/*.md`, `scripts/*.py`) progressive disclosure expects the agent to open.
 ///
-/// It is a parity gap, not just a bad error message. In Claude Code a SKILL.md *is* a file, so models
-/// are trained to read it, and skills routinely reference sibling files (`references/policy.md`,
-/// `scripts/*.py`) that progressive disclosure expects the agent to open on demand. Without a
-/// readable path those references are dead ends.
-///
-/// Read-only and additive: the write path stays exclusively the skill capabilities
-/// (`skill_install`/`skill_update`), so a skill can still only be changed through the port that
-/// validates its manifest. Aliases already present are left untouched, so this can never widen or
-/// downgrade an existing grant.
+/// Read-only and additive: writes stay with `skill_install`/`skill_update`, and existing aliases are
+/// left untouched, so this can never widen or downgrade a grant.
 fn with_read_only_skill_paths(
     workspace_mounts: MountView,
     scope: &ResourceScope,
@@ -295,9 +287,8 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let resource_scope = resource_scope_for_run(run_context, &self.fallback_user_id);
-        // Database-backed, same tree the reader and Settings use. This port is where an agent's
-        // own `skill_install` lands, and it used to write to the host disk while everything else
-        // read the database (nearai/ironclaw#7168).
+        // Database-backed, same tree the reader and Settings use. This port is where an agent's own
+        // `skill_install` lands, and it used to write host disk instead (nearai/ironclaw#7168).
         let skill_mounts = db_backed_skill_management_mount_view(&resource_scope)
             .map_err(host_api_agent_loop_error)?;
         // Same scope the skill mounts key off, so a run's workspace grants and

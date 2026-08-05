@@ -1,34 +1,16 @@
 //! Skills on the PRODUCTION composition, not local-dev.
 //!
-//! Everything else validating this work runs against local-dev or the benchmark harness, and both
-//! reach production behaviour through seams production does not use: disk-mounted skill roots, env
-//! overrides, a workspace `.skills` directory. That is how a whole class of problem stayed hidden —
-//! agent-authored skills escaping to the host's `~/.claude/skills`, a copy-out scanning disk while
-//! the store is libSQL, a benchmark scoring only what the model requested while the host picked
-//! freely. Each was an artifact of the instrument, not the system.
+//! Everything else validating this work reaches production behaviour through seams production does
+//! not use -- disk-mounted skill roots, env overrides -- which is how a class of problem stayed
+//! hidden. So this builds `RebornCompositionProfile::Production` over libSQL under the hosted
+//! multi-tenant policy, with no mounts and no env switches, seeds the DB-backed
+//! `/tenants/<t>/users/<u>/skills/` tree the product actually reads, and asserts a skill there is
+//! activatable by name and still activatable after a restart.
 //!
-//! So this builds the real thing: `RebornCompositionProfile::Production` over libSQL, with the
-//! hosted multi-tenant runtime policy — scoped-virtual filesystem, brokered secrets, network deny,
-//! ask-always approvals. No mounts, no env switches.
-//!
-//! **What these tests establish.**
-//!
-//! Production resolves the skill store through the scoped-virtual filesystem (libSQL), not the host
-//! filesystem, so these seed the DB-backed `/tenants/<t>/users/<u>/skills/` tree — the tree the
-//! product actually reads — and assert a skill there is activatable by name, and still activatable
-//! after a restart. Seeding disk instead activates nothing, which is what an earlier version of this
-//! file measured and recorded as a gap.
-//!
-//! The mount-parity tests below are the guard for nearai/ironclaw#7168. Skill mounts were three
-//! separate views over two trees: the agent's in-run port and discovery both resolved `/skills` to
-//! `/projects/...` on the host disk, while Settings → Skills resolved it to `/tenants/...` in the
-//! database. Every view now derives from `db_backed_skill_grants`, and both readers are pinned
-//! against the writer here — separately, because the first fix corrected only the branch hosted
-//! multi-tenant Postgres takes and left local-dev reading the disk.
-//!
-//! End to end on a live local-dev server with a real model, after the fix: the agent authored a skill
-//! mid-turn, it appeared in Settings → Skills, survived a server restart, and a fresh conversation
-//! activated it with zero `skipping skill bundle` warnings.
+//! The mount-parity tests are the guard for nearai/ironclaw#7168, where three views over two trees
+//! meant an installed skill could never be found again. Both readers are pinned against the writer
+//! separately, because the first fix corrected only the multi-tenant Postgres branch and left
+//! local-dev reading the disk.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,12 +24,9 @@ use ironclaw_host_api::runtime_policy::{
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
 
-/// The hosted multi-tenant policy, which is what a real tenant gets.
-///
-/// `ProcessBackendKind::None` is deliberate and load-bearing: it is what `HostedMultiTenant` +
-/// `SecureDefault` resolves to today, and it is why a skill's `scripts/*.py` cannot execute for a
-/// tenant. Asserting skills work *under this policy* is the point — a skill that only works with a
-/// process backend is not a multi-tenant feature.
+/// The hosted multi-tenant policy a real tenant gets. `ProcessBackendKind::None` is load-bearing:
+/// it is why a skill's `scripts/*.py` cannot execute for a tenant, and a skill that only works with
+/// a process backend is not a multi-tenant feature.
 fn hosted_multi_tenant_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::HostedMultiTenant,
@@ -76,14 +55,9 @@ fn skill_md(name: &str, description: &str, keywords: &[&str], body: &str) -> Str
 
 /// A skill written into production's DB-backed store is activatable by name, same session.
 ///
-/// Two things at once, because the second is what a reader needs and the first is what makes it
-/// credible: the production runtime really is built and driven here (it opens a conversation and
-/// completes `execute_skill_message`), and under it a skill written to
-/// `tenants/<t>/users/<u>/skills/` on the host filesystem activates nothing.
-///
-/// The value is negative and deliberate: it draws the boundary of what disk-seeded validation can
-/// claim. Every other check in this work seeds skills on disk, so none of them speaks to
-/// production's storage path.
+/// The production runtime really is built and driven here, and under it a skill written to the HOST
+/// `tenants/<t>/users/<u>/skills/` activates nothing -- which bounds what disk-seeded validation
+/// elsewhere in this work can claim.
 #[tokio::test]
 async fn a_skill_in_the_production_virtual_filesystem_is_activatable_by_name() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -227,10 +201,8 @@ async fn build_production(
 /// The full production loop: a skill in the DB-backed store is activatable by a runtime that starts
 /// with it present.
 ///
-/// The sibling test above shows a skill written mid-session is not discovered. This distinguishes
-/// the two possible causes -- wrong scoped root versus build-time enumeration -- by seeding and then
-/// building a SECOND runtime over the same libSQL database. If discovery happens at build time, this
-/// passes and the path is right; if it fails too, the scoped root is wrong.
+/// Distinguishes the two causes of the sibling test's miss -- wrong scoped root versus build-time
+/// enumeration -- by seeding and then building a SECOND runtime over the same libSQL database.
 ///
 /// It is also the realistic shape. A tenant installs a skill in one session and uses it in a later
 /// one, against the same database, which is exactly a rebuild.
@@ -375,15 +347,9 @@ async fn production_skill_read_and_write_mounts_resolve_to_the_same_tree() {
 
 /// `/tenant-shared/skills` must land where every other tenant-shared root lands.
 ///
-/// The read view adds this grant so an operator-placed shared skill is discoverable. Its target was
-/// first written `/tenants/<t>/tenant-shared/skills`, repeating the alias inside the target. That is
-/// not where tenant-shared state lives: `invocation_mount_view` resolves `/tenant-shared` to
-/// `/tenants/<t>/shared`, and `/tenant-shared/reborn-projects` and `/tenant-shared/reborn-identity`
-/// both follow it. Nothing writes or migrates the misspelled subtree, so the failure mode is silent
-/// and total -- a tenant with shared skills simply stops discovering them, with no error anywhere.
-///
-/// Asserted by resolving through the view, and against the sibling root rather than a hardcoded
-/// string, so the two cannot drift apart later without this failing.
+/// `invocation_mount_view` resolves `/tenant-shared` to `/tenants/<t>/shared`, and every sibling
+/// follows. Repeating the alias inside the target pointed at a subtree nothing writes or migrates,
+/// which fails silently: a tenant with shared skills just stops discovering them.
 #[tokio::test]
 async fn tenant_shared_skills_resolve_under_the_canonical_shared_subtree() {
     use ironclaw_host_api::{
@@ -416,15 +382,12 @@ async fn tenant_shared_skills_resolve_under_the_canonical_shared_subtree() {
     );
     assert_eq!(
         resolved, expected,
-        "tenant-shared skills resolved to {resolved}, but tenant-shared state lives under \
-         /tenants/<t>/shared (see `invocation_mount_view` and its reborn-projects/reborn-identity \
-         siblings). Nothing populates any other subtree, so a tenant's shared skills would go \
-         undiscoverable with no error."
+        "tenant-shared state lives under /tenants/<t>/shared; nothing populates any other subtree, \
+         so shared skills would go undiscoverable with no error. Got {resolved}"
     );
     assert!(
         !resolved.contains("/tenant-shared/"),
-        "the alias must not appear inside the resolved target -- that is the doubling that made \
-         this wrong: {resolved}"
+        "the alias must not reappear inside the target: {resolved}"
     );
 }
 

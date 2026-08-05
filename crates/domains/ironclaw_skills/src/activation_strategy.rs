@@ -1,28 +1,12 @@
-//! Hot-swappable skill-activation strategies.
+//! Hot-swappable skill-activation strategies, following the memory-provider pattern: a named set,
+//! a fail-closed binding, and a default that preserves existing behavior.
 //!
-//! Mirrors the memory-provider pattern (`ironclaw_host_runtime::memory_binding`):
-//! a host-defined profile, a set of named providers, and a fail-closed binding
-//! policy whose default preserves existing behavior. Composition binds one
-//! strategy; nothing downstream names a concrete implementation.
-//!
-//! # Why this exists
-//!
-//! Reborn scores a candidate skill **only** from `activation.keywords`,
-//! `activation.tags` and `activation.patterns`, then keeps it `if score > 0`
-//! (see [`crate::selector::score_skill`]). A skill's `name` and `description`
-//! contribute nothing.
-//!
-//! That is fine for curated skills, which ship an `activation` block. It is fatal
-//! for skills an agent writes for **itself**: measured across the 31-task
-//! SkillsBench/SkillLearnBench subset in nearai/benchmarks#287, **0 of 30**
-//! agent-authored skills contained an `activation` block, so every one of them
-//! scored 0 and could never be selected again. Self-improvement was structurally
-//! impossible — the agent could create a skill, but never reuse it.
-//!
-//! Claude Code has no such requirement: a skill is selectable from its name and
-//! description alone. [`ActivationStrategy::NameAndDescription`] ports that
-//! behavior, so a skill remains usable whether or not its author filled in
-//! activation metadata.
+//! Scoring reads only `activation.keywords`/`tags`/`patterns`, so `name` and `description`
+//! contribute nothing. That is fine for curated skills and fatal for self-authored ones: on the
+//! 31-task subset in nearai/benchmarks#287, **0 of 30** agent-authored skills carried an
+//! `activation` block, so each scored 0 and could never be selected again.
+//! [`ActivationStrategy::NameAndDescription`] ports Claude Code's contract, where name and
+//! description alone make a skill selectable.
 
 use crate::types::SkillManifest;
 

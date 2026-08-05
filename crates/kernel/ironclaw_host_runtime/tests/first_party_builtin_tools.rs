@@ -5225,17 +5225,11 @@ async fn builtin_skill_install_accepts_and_replays_named_plain_markdown_content(
     );
 }
 
-/// An agent must not be able to forge install provenance.
+/// An agent must not be able to forge install provenance: `source`/`source_url` are set by the
+/// URL-fetch path, so accepting them inline would let an agent label its own output as fetched.
 ///
-/// `source` and `source_url` are set by the URL-fetch path to record where a skill came from, so
-/// accepting them on a direct `content` install would let an agent label its own output as fetched
-/// from a trusted URL.
-///
-/// A `content` + `files` install was also rejected here before this PR, and that case is removed
-/// deliberately rather than by accident: rejecting it WAS the bug. An agent attaching
-/// `scripts/analyze.py` had its whole install refused, which is why 0 of 27 agent-authored skills
-/// shipped a resource file while 18 of 31 human-curated ones do. A skill that cannot carry a script
-/// is a prose description.
+/// A `content` + `files` case was removed from here deliberately, not by accident -- rejecting it
+/// was the bug this PR fixes.
 #[tokio::test]
 async fn builtin_skill_install_rejects_forged_provenance_fields() {
     let cases = [
@@ -5272,32 +5266,16 @@ async fn builtin_skill_install_rejects_forged_provenance_fields() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The direct-install input contract.
-//
-// These four cases pin the whole of what a CALLER may and may not put in a
-// `builtin.skill_install` input, at the capability boundary rather than against
-// whichever helper currently normalizes the input. That matters because the
-// normalizer has already moved once (host runtime -> `ironclaw_extension_support`,
-// WS3) and the contract has to survive the move: they were written to pass both
-// before and after that merge, and a resolution that quietly re-tightens the
-// inline arm fails the first one.
-//
-// The dividing line is provenance, not shape. `files` is content the caller is
-// entitled to send. `source`/`source_url` are recorded by the URL-fetch path to
-// say WHERE a skill came from, so a caller supplying them is claiming its own
-// output was fetched from somewhere trusted.
-// ---------------------------------------------------------------------------
+// The direct-install input contract, asserted at the capability boundary rather than against
+// whichever helper currently normalizes the input -- the normalizer has already moved crates once,
+// and these were written to pass on both sides of that move. The dividing line is provenance, not
+// shape: `files` is caller content, `source`/`source_url` are not.
 
 /// A direct install may carry the rest of the bundle, not just prose.
 ///
-/// This was refused before nearai/ironclaw#6745: `content` + `files` matched no arm of the
-/// normalizer and fell through to `InputEncode`, so an agent attaching `scripts/analyze.py` had its
-/// ENTIRE install rejected -- not the file dropped, the whole call failed. Measured on the 31-task
-/// SkillsBench subset (nearai/benchmarks#287): the model sent 18 correctly-shaped `{path, text}`
-/// entries across 9 calls and every one was refused, which is why 0 of 27 agent-authored skills
-/// shipped a resource file while 18 of 31 human-curated ones do. A skill that cannot carry a script
-/// is a prose description.
+/// Refused before nearai/ironclaw#6745, and it failed the ENTIRE install rather than dropping the
+/// file: on the 31-task SkillsBench subset (nearai/benchmarks#287) 18 correctly-shaped entries
+/// across 9 calls were all refused. A skill that cannot carry a script is a prose description.
 #[tokio::test]
 async fn builtin_skill_install_accepts_an_agent_authored_bundle_with_scripts() {
     let temp = tempfile::tempdir().unwrap();
@@ -5353,11 +5331,8 @@ async fn builtin_skill_install_accepts_an_agent_authored_bundle_with_scripts() {
     assert_eq!(listed["skills"][0]["source"], json!("user"));
 }
 
-/// Binary bundle files are additive, not a replacement for `text`.
-///
-/// `bytes_base64` is the shape the URL-fetch path constructs for itself, so it has to keep working
-/// on the direct arm too: the two arms converge on one install request, and a normalizer that
-/// accepted only `text` inline would make the rewritten URL payload the odd one out.
+/// `bytes_base64` is the shape the URL-fetch path constructs, so the direct arm must accept it too;
+/// both arms converge on one install request.
 #[tokio::test]
 async fn builtin_skill_install_accepts_base64_bundle_files_on_a_direct_install() {
     let temp = tempfile::tempdir().unwrap();
@@ -5387,12 +5362,8 @@ async fn builtin_skill_install_accepts_base64_bundle_files_on_a_direct_install()
     );
 }
 
-/// Carrying `files` does not buy the right to forge provenance.
-///
-/// The security invariant is narrower than the shape check that used to enforce it. Relaxing
-/// `content` + `files` must not relax `content` + `source`/`source_url`, and this case exists so the
-/// two cannot be conflated again: it sends BOTH, and the install must be refused whole with nothing
-/// written -- not accepted with the provenance ignored.
+/// Carrying `files` does not buy the right to forge provenance. Sends both, and the install must be
+/// refused whole rather than accepted with the provenance ignored.
 #[tokio::test]
 async fn builtin_skill_install_rejects_a_bundle_that_also_forges_provenance() {
     let cases = [
@@ -5434,11 +5405,8 @@ async fn builtin_skill_install_rejects_a_bundle_that_also_forges_provenance() {
     }
 }
 
-/// A bundle-relative path may not climb out of its own skill directory.
-///
-/// Accepting `files` from a caller means the path in each entry is caller-controlled, so this is the
-/// case that has to hold for that to be safe: the install fails and nothing is written, rather than
-/// a file landing beside the skill root or above it.
+/// A bundle-relative path may not climb out of its own skill directory. Accepting caller `files`
+/// means each path is caller-controlled, so this is what makes that safe.
 #[tokio::test]
 async fn builtin_skill_install_rejects_a_bundle_file_escaping_its_skill_directory() {
     let temp = tempfile::tempdir().unwrap();

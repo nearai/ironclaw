@@ -453,19 +453,11 @@ fn standalone_selector_config_propagates_injection_mode() {
     }
 }
 
-/// Skill selection on the Reborn path must be the model's decision, not a host-side
-/// keyword guess.
+/// Skill selection must be the model's decision, not a host-side keyword guess.
 ///
-/// This exists because changing the default in `activation.rs` was, on its own, a
-/// no-op here: `skill_activation_selector_config` used to pin
-/// `ExplicitAndCriteria` at the call site, so no real Reborn user could ever see
-/// `ExplicitOnly` however the default was written. The bug was invisible to every
-/// test in `ironclaw_first_party_extension_ports`, because those construct their own
-/// config — only a test at the composition layer, on the value this function
-/// actually returns, can catch it.
-///
-/// If a later change re-pins the mode here, this fails rather than silently
-/// reinstating host-side matching.
+/// Changing the default in `activation.rs` was a no-op on its own: this call site pinned
+/// `ExplicitAndCriteria`, so no real user saw `ExplicitOnly`. Tests in
+/// `ironclaw_first_party_extension_ports` build their own config and cannot catch that.
 #[test]
 fn reborn_skill_selection_is_model_decided() {
     let cfg = super::skill_activation_selector_config(
@@ -483,18 +475,9 @@ fn reborn_skill_selection_is_model_decided() {
     );
 }
 
-/// Guards the injection default.
-///
-/// Currently `Listing`. The measurement argues for `Full` (79.8% -> 85.6% on the
-/// 31-task SkillsBench subset, nearai/benchmarks#287, because the model reads the
-/// one-line listing and then opens a skill in 0 of 30 runs), but three local-dev
-/// tests HANG under `Full` — they drive a mock that expects the listing candidate —
-/// so the flip is a maintainer call and `Full` ships as an opt-in switch.
-///
-/// If you flip `DEFAULT_SKILL_INJECTION_MODE`, update those three tests too:
-/// `local_dev_skill_activate_tool_loads_selected_skill_context`,
-/// `local_dev_webui_bundle_records_selectable_filesystem_skill_context`,
-/// `local_dev_runtime_wires_filesystem_skills_by_default_to_model_calls`.
+/// Guards the injection default, currently `Listing`. If you flip
+/// `DEFAULT_SKILL_INJECTION_MODE`, update the three `local_dev_*` tests that drive a mock
+/// expecting the listing candidate and hang under `Full`.
 #[test]
 fn skill_injection_mode_default_is_documented_and_guarded() {
     assert_eq!(

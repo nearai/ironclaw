@@ -64,36 +64,17 @@ pub(crate) fn ambient_workspace_mount_view(
     MountView::new(mounts)
 }
 
-/// The single decision about where skills live. Every skill mount view is built from this.
+/// The single decision about where skills live. Every skill mount view derives from this.
 ///
-/// There were three views over two different trees, which is the whole of nearai/ironclaw#7168
-/// (the two `scoped_*` names below no longer exist — they were deleted into this function):
+/// nearai/ironclaw#7168 was three views over two trees: the agent's in-run port and discovery
+/// resolved `/skills` to host disk while Settings → Skills resolved it to the database. So an
+/// install reported success, showed in `skill_list` for that turn, never appeared in Settings, and
+/// could not be activated again. Anything built from this function agrees by construction.
 ///
-/// | view | used by | `/skills` resolved to |
-/// |---|---|---|
-/// | `scoped_skill_management_mount_view` | the agent's in-run skill port | `/projects/...` = host disk |
-/// | `production_skill_management_mount_view` | Settings → Skills, product capabilities | `/tenants/...` = database |
-/// | `scoped_skill_context_mount_view` | discovery and activation | `/projects/...` = host disk |
-///
-/// So `skill_install` inside a turn wrote to the host disk, Settings → Skills listed the database
-/// and never showed the skill, and a later session's discovery scanned a root that the agent's own
-/// writes had populated under a different scope. The reported symptom was the union of all of it:
-/// `installed: true`, present in `skill_list` for the rest of that turn, absent from Settings, and
-/// unactivatable in every later conversation. Reproduced by hand on the WebUI in local-dev.
-///
-/// Skills belong wholly in the database-backed virtual filesystem. Anything derived from this
-/// function agrees by construction, and no reader can drift from a writer again.
-///
-/// `/system/skills` is spelled alias-equals-target on purpose, and which world it lands in is
-/// decided by the composite rather than here — that is the point of routing through one function.
-/// On the shapes that have a host disk (local-dev, hosted-single-tenant) the composite mounts
-/// `/system/skills` onto the same host directory `ensure_bundled_reborn_skills_installed` writes
-/// through `/projects/system/skills`; verified by a local-dev server listing all 32 through this
-/// exact target. On hosted multi-tenant there is no tenant host disk to seed, so
-/// `production_database_root_filesystem` routes the same root to Postgres and
-/// `build_postgres_production` seeds the bundle into it with
-/// `ensure_bundled_reborn_skills_installed_in`. Either way the alias resolves to wherever the
-/// bundle actually is, and neither reader nor writer has to know which.
+/// `/system/skills` is alias-equals-target on purpose: the composite decides which world it lands
+/// in, so the bundle is reachable whether it was seeded to a host disk (local-dev, single-tenant)
+/// or into Postgres (multi-tenant, where no tenant disk exists), and neither reader nor writer has
+/// to know which.
 fn db_backed_skill_grants(
     scope: &ResourceScope,
     user_skill_permissions: MountPermissions,
@@ -118,16 +99,10 @@ fn db_backed_skill_grants(
 
 /// Read-side skill mounts: discovery, listing, and activation.
 ///
-/// Adds the tenant-shared root, which has no writer — a user cannot install into it.
-///
-/// The target is `/tenants/<t>/shared/skills`, which is where the rest of the system already puts
-/// tenant-shared state: `invocation_mount_view` resolves the `/tenant-shared` alias to
-/// `/tenants/<t>/shared`, and every sibling follows (`/tenant-shared/reborn-projects` ->
-/// `/tenants/<t>/shared/reborn-projects`, `/tenant-shared/reborn-identity` ->
-/// `/tenants/<t>/shared/reborn-identity`). Spelling this one `/tenants/<t>/tenant-shared/skills`
-/// -- repeating the alias inside the target -- pointed it at a subtree nothing writes and no
-/// migration populates, so a tenant that HAD shared skills would silently stop discovering them.
-/// Pinned by `tenant_shared_skills_resolve_under_the_canonical_shared_subtree`.
+/// Adds the tenant-shared root, which has no writer. Its target is `/tenants/<t>/shared/skills`,
+/// matching where `invocation_mount_view` puts every other tenant-shared root; repeating the alias
+/// inside the target instead pointed at a subtree nothing populates. Pinned by
+/// `tenant_shared_skills_resolve_under_the_canonical_shared_subtree`.
 pub(crate) fn db_backed_skill_context_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, HostApiError> {
@@ -140,12 +115,10 @@ pub(crate) fn db_backed_skill_context_mount_view(
     MountView::new(grants)
 }
 
-/// Write-side skill mounts: `skill_install`, `skill_update`, `skill_remove`, from either the agent's
-/// in-run port or a product capability.
+/// Write-side skill mounts: `skill_install`, `skill_update`, `skill_remove`.
 ///
-/// Resolves `/skills` to the same target as [`db_backed_skill_context_mount_view`]. A test pins
-/// that, because a divergence here is not a degraded feature — it is a skill that exists and can
-/// never be found again.
+/// Resolves `/skills` to the same target as [`db_backed_skill_context_mount_view`]; a test pins
+/// that, because divergence means a skill that exists and can never be found.
 pub(crate) fn db_backed_skill_management_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, HostApiError> {

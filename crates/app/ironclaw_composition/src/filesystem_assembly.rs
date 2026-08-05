@@ -22,10 +22,8 @@ pub fn standalone_db_path(root: &Path) -> PathBuf {
 }
 
 /// Read a file back out of the standalone database, for tests that assert WHERE a skill landed.
-///
-/// Skill writes go to the DB-backed virtual filesystem, so `storage_root.join("tenants/...").exists()`
-/// is no longer the right question — it was the question while writers and readers disagreed about
-/// which tree skills live in (nearai/ironclaw#7168).
+/// Skill writes go to the DB-backed filesystem, so a `storage_root.join(...).exists()` check asks
+/// the wrong question (nearai/ironclaw#7168).
 #[cfg(test)]
 pub(crate) async fn database_file_bytes(
     storage_root: &Path,

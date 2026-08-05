@@ -27,16 +27,9 @@ use thiserror::Error;
 /// Maximum number of first-party skills selected for one turn by default.
 /// How many skills may be active at once.
 ///
-/// Raised from 4 to 8. Four was low enough to make correct routing IMPOSSIBLE on real tasks:
-/// on the SkillsBench routing set, 3 of 31 tasks expect five skills and 4 more expect four, so
-/// a perfectly-routing agent could not satisfy them and recall was capped below 100% by the
-/// constant rather than by anything the model did. Measuring against a ceiling you imposed
-/// yourself tells you nothing.
-///
-/// The real guard on skill context is `max_context_tokens`, which bounds how much body text
-/// can load regardless of how many skills are named -- a large skill still consumes the budget
-/// and pushes the effective count back down. This constant only stops a model from naming an
-/// unbounded list.
+/// 4 -> 8: on the SkillsBench routing set 7 of 31 tasks expect four or more skills, so the old
+/// constant capped recall below 100% regardless of the model. `max_context_tokens` is the real
+/// guard; this only stops a model naming an unbounded list.
 pub const DEFAULT_MAX_ACTIVE_SKILLS: usize = 8;
 
 /// Maximum estimated skill prompt tokens selected for one turn by default.
@@ -57,33 +50,11 @@ const SKILL_LISTING_ORDERING_KEY: &str = "~available-skills";
 const SKILL_LISTING_HEADER: &str = include_str!("../prompts/skill_listing_header.md");
 /// Total character budget for the rendered listing, excluding its header.
 ///
-/// This replaces a flat `MAX_LISTED_SKILLS = 100` cap. The cap was the wrong shape:
-/// it dropped whole alphabetical tails, because the listing is source-then-name
-/// ordered. Measured on a 227-skill catalog, `pdf`, `pptx`, `xlsx` and
-/// `timeseries-detrending` all sorted past position 100, so those skills could not
-/// be discovered at all — and since a skill the model cannot see is a skill it
-/// cannot request, that is indistinguishable from not having installed it.
-///
-/// The budget is deliberately the *same* prompt cost the old cap already permitted
-/// (`100 * (250 + 64)`), so this is not a context-size increase. What changes is how
-/// the budget is spent: on **every** skill's name with a shorter description, rather
-/// than on a long description for the alphabetically-lucky first 100. Names are what
-/// make a skill reachable; descriptions only help rank it, and the model can always
-/// activate a skill to read its body.
-/// Total character budget for the rendered listing, excluding its header.
-///
-/// Sized so a real catalog lists in FULL, because that is what claude-code does and what the
-/// measurement says matters. An earlier version of this kept the old 100-skill cap's budget
-/// (`100 * (250 + 64)`) and shrank per-entry descriptions to fit more names in -- 90 chars each
-/// at 227 skills. That traded the wrong thing away: the model activated on 52% of tasks with 88
-/// full-length entries and on 0% with 227 shrunken ones. Names make a skill addressable;
-/// descriptions are what let the model judge relevance, and a 90-char description does not.
-///
-/// claude-code pays this cost outright -- it lists every skill with its whole one-line
-/// description and no cap -- and reaches 60% correct activation on the same tasks and catalog.
-/// 512 entries at full length is ~160k chars (~40k tokens) worst case, which is why the
-/// per-entry cap and the enumeration cap (512) both still exist: this is a budget for a real
-/// catalog, not a licence for an unbounded one. Past that, `skill_search` (#4428).
+/// Replaces a flat 100-skill cap, which dropped whole alphabetical tails (the listing is
+/// source-then-name ordered), and sized so a real catalog lists in FULL at full description length.
+/// Shrinking descriptions to fit more names in was measured worse: 52% activation with 88
+/// full-length entries against 0% with 227 shrunken ones. The per-entry and 512-enumeration caps
+/// still bound the worst case; past that, `skill_search` (#4428).
 const LISTING_CHAR_BUDGET: usize = 512 * (MAX_LISTING_DESCRIPTION_CHARS + 64);
 /// Longest description rendered for a single entry, when the catalog is small enough
 /// to afford it. Preserves the previous rendering for ordinary catalogs.
@@ -382,12 +353,9 @@ where
     bundle_stager: Option<Arc<dyn crate::SkillBundleStager>>,
     /// Bundles already staged in this process, keyed by caller + bundle + content hash.
     ///
-    /// `body_context` runs on the activation path of EVERY turn, and without this each turn
-    /// re-walked the bundle directory, re-read every file, and re-wrote all of them -- for a skill
-    /// that had not changed since the previous turn. The value is the runnable directory, so a cache
-    /// hit still answers the question the caller asked. Keyed by content hash so an updated bundle
-    /// re-stages rather than serving a stale copy; a bundle whose source reports no hash is never
-    /// cached, because there is then no way to know it is unchanged.
+    /// `body_context` runs on every turn's activation path; without this it re-walked, re-read and
+    /// re-wrote an unchanged bundle each time. Keyed by content hash so an updated bundle re-stages;
+    /// a source reporting no hash is never cached.
     staged_bundles: Mutex<HashMap<String, String>>,
     activation_observer: Mutex<Option<Arc<dyn SkillActivationObserver>>>,
     messages_by_run: Mutex<HashMap<SkillActivationMessageKey, SkillActivationMessage>>,
@@ -777,9 +745,8 @@ where
         // Same rule on the active-plan path: only short-circuit to bodies when something is
         // actually active, otherwise fall through to the listing so the model can still see
         // what it could activate.
-        // Bound by pattern rather than re-`expect`ed after an `is_some_and` guard: the two forms
-        // are equivalent today, and only one of them stays correct if the condition is ever
-        // edited. `check_no_panics.py` flags the other for exactly that reason.
+        // Bound by pattern, not re-`expect`ed after an `is_some_and` guard: only this form stays
+        // correct if the condition is edited, which is why `check_no_panics.py` flags the other.
         let active_full_plan = plan.as_ref().filter(|plan| {
             self.config.injection_mode == SkillInjectionMode::Full
                 && !plan.selection.activations.is_empty()
@@ -1375,12 +1342,10 @@ struct SkillBodyContext {
 
 /// Appended to a staged skill's body so its own commands work verbatim.
 ///
-/// Names the shell's `workdir` parameter explicitly. Measured: with the directory merely stated, the
-/// model ran the body's `python3 scripts/egfr.py` with no working directory at all, from the shell's
-/// default cwd, and missed the file — then re-typed the whole algorithm into `python3 -c`, losing the
-/// exact thing a shipped script exists to preserve. The relative paths in a skill body are only
-/// meaningful from the skill's own directory, and which directory that is depends on the deployment,
-/// so it is the one fact the body cannot carry itself.
+/// Names the shell's `workdir` parameter explicitly: with the directory merely stated, the model ran
+/// `python3 scripts/egfr.py` from the shell's default cwd, missed the file, and re-typed the
+/// algorithm inline. A body's relative paths only mean anything from the skill's own directory, and
+/// which directory that is depends on the deployment.
 fn staged_files_note(runnable_dir: &str) -> String {
     format!(
         "\n\n---\n\nThis skill's files are staged at `{runnable_dir}`. When running any command from \
@@ -1496,9 +1461,8 @@ fn single_line_truncated(text: &str, max_chars: usize) -> String {
 /// Compose the one-line available-skills listing as a single discoverable
 /// candidate. Trust is pinned to `Installed` so downstream snapshot
 /// construction can never disclose prompt content through this entry.
-/// Hidden-entry count the truncation warning last reported, so it fires on a change
-/// rather than on every prompt build. See the warning site in
-/// [`skill_listing_candidate`] for why a per-build `warn!` is the wrong shape.
+/// Hidden-entry count the truncation warning last reported, so it fires on a change rather than on
+/// every prompt build.
 static LAST_WARNED_HIDDEN_LISTING_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 fn skill_listing_candidate(entries: &[SkillListingEntry]) -> Option<HostSkillContextCandidate> {
@@ -1536,12 +1500,10 @@ fn skill_listing_candidate(entries: &[SkillListingEntry]) -> Option<HostSkillCon
              listing does not fit its character budget. Activating one by exact name still \
              works if you already know it.)"
         ));
-        // Warned once per hidden count, not once per prompt build. This function runs on
-        // every context construction, and a catalog that is over the budget stays over it,
-        // so an unconditional `warn!` would repeat the same line for the rest of the
-        // process and bury everything else. The count changing is the only new
-        // information, and it is what an operator would act on. The model-visible message
-        // above is unconditional -- it must never be rate-limited.
+        // Once per hidden count, not per prompt build: this runs on every context
+        // construction and an over-budget catalog stays over budget, so an unconditional
+        // `warn!` repeats for the life of the process. The model-visible message above is
+        // deliberately unconditional.
         if LAST_WARNED_HIDDEN_LISTING_COUNT.swap(hidden, Ordering::Relaxed) != hidden {
             tracing::warn!(
                 listed,
@@ -1551,8 +1513,7 @@ fn skill_listing_candidate(entries: &[SkillListingEntry]) -> Option<HostSkillCon
             );
         }
     } else {
-        // Reset so a catalog that drops back under the budget and later exceeds it again
-        // warns rather than being silenced by the stale count.
+        // Reset, so a catalog that drops under budget and exceeds it again still warns.
         LAST_WARNED_HIDDEN_LISTING_COUNT.store(0, Ordering::Relaxed);
     }
     Some(
@@ -1739,18 +1700,9 @@ fn select_skill_activations(
 
         for skill in outcome.selected {
             let candidate = candidate_for_loaded_skill(skill, &active_candidates)?;
-            // Same gate as the explicit-mention loop above, and it has to be here too: a
-            // criteria-selected skill is the one the USER never asked for by name, so
-            // activating it with an unmet requirement is the case where nothing at all
-            // connects the later shell failure back to the missing binary. Reaching this
-            // path without the gate was how a skill declaring `requires.bins` still
-            // "activated cleanly".
-            // Same gate as the explicit-mention loop above, and it has to be here too: a
-            // criteria-selected skill is the one the USER never asked for by name, so
-            // activating it with an unmet requirement is the case where nothing at all
-            // connects the later shell failure back to the missing binary. Reaching this
-            // path without the gate was how a skill declaring `requires.bins` still
-            // "activated cleanly".
+            // Same gate as the explicit loop: a criteria selection is the one the user never
+            // asked for, so an unmet requirement here leaves nothing connecting the later shell
+            // failure to the missing binary.
             if let Some(reason) = unmet_requirements_refusal(candidate) {
                 feedback.push(reason);
                 continue;
@@ -1780,19 +1732,10 @@ fn select_skill_activations(
 
 /// Refuse a skill whose declared requirements are not met, and say which ones.
 ///
-/// `requires.bins`, `requires.env` and `requires.config` were parsed into the manifest and
-/// then never consulted on the activation path -- `check_requirements` existed but its only
-/// callers were inside `SkillRegistry`, which has no consumers outside its own crate. So a
-/// skill declaring a binary it needs was offered, activated cleanly, and failed later in the
-/// shell with nothing connecting the failure back to the unmet requirement.
-///
-/// Gated at ACTIVATION time, not listing time. Listing-time gating would probe the filesystem
-/// and environment once per visible skill on every prompt build -- three probes across every
-/// candidate -- and needs a caching design first. At activation it runs only for the handful
-/// of skills actually being loaded, so the cost argument does not apply.
-///
-/// Staying unusable is the correct outcome; the fix is that the model now learns why and can
-/// adapt, instead of meeting it as an unexplained shell failure several steps later.
+/// `requires.bins`/`env`/`config` were parsed and never consulted on this path, so a skill
+/// declaring a binary it needs activated cleanly and failed later in the shell with nothing
+/// connecting the two. Gated at activation, not listing: listing-time probes would run three
+/// filesystem/env checks per visible skill on every prompt build.
 fn unmet_requirements_refusal(candidate: &ActivationCandidate) -> Option<String> {
     let gating = ironclaw_skills::check_requirements_sync(&candidate.loaded.manifest.requires);
     if gating.passed {
@@ -1807,32 +1750,17 @@ fn unmet_requirements_refusal(candidate: &ActivationCandidate) -> Option<String>
 
 /// Explain why a requested skill could not be activated, in terms the model can act on.
 ///
-/// Two outcomes are distinguishable and were previously collapsed into one string:
-///
-/// * the name resolved to a real skill that is not `Trusted` -- retrying with a different
-///   name will never work, the skill needs promoting, so say that;
-/// * the name resolved to nothing at all -- the only case where "not available" was accurate.
-///
-/// The distinction matters because the first case is the routine outcome of the model doing
-/// exactly what the listing told it to: the listing filters on visibility only, while
-/// activation requires `Trusted`, and tenant-shared and URL-installed skills are `Installed`.
-/// The model was told to activate a skill and then refused with no way to tell whether it had
-/// picked a bad name or hit a permission wall.
-///
-/// Deliberately does NOT enumerate available alternatives, tempting as that is:
-/// `load_named_activation_candidate_set` scopes the candidate set to the requested names, so
-/// at this point nothing else has been loaded and any "available: ..." list would be empty.
-/// Offering alternatives needs a wider descriptor load, which belongs with the `skill_search`
-/// work in #4428 rather than being smuggled in here.
+/// "Not trusted" and "no such name" need opposite responses and were one string. The first is the
+/// routine outcome of following the listing, which filters on visibility while activation requires
+/// `Trusted`. Does not enumerate alternatives: the candidate set is scoped to the requested names,
+/// so any "available: ..." list here would be empty (that needs `skill_search`, #4428).
 fn refusal_reason(name: &str, eligible: &[&ActivationCandidate]) -> String {
     let display = feedback_skill_name(name);
     match eligible
         .iter()
         .find(|candidate| candidate.loaded.manifest.name.eq_ignore_ascii_case(name))
     {
-        // `{}` not `{:?}`: this string goes to the model, so it renders through
-        // `SkillTrust`'s `Display` (`installed`/`trusted`) rather than a debug spelling
-        // that would drift the moment a variant is renamed or gains a field.
+        // `{}` not `{:?}`: model-visible, so it renders through `SkillTrust`'s `Display`.
         Some(candidate) => format!(
             "{display}: found, but its trust is {} and activation requires trusted; it must be \
              promoted before it can be used",

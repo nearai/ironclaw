@@ -127,44 +127,23 @@ pub async fn resolve_install_input(
         .get("url")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty());
-    // `source` and `source_url` are PROVENANCE fields this resolver sets itself
-    // on the url path. A caller may never supply them, on either arm, and the two
-    // arms refuse them differently on purpose:
+    // `source`/`source_url` are provenance this resolver sets itself on the url path, so a caller
+    // supplying them is claiming its own output was fetched from somewhere trusted. Refused on the
+    // inline arm; on the url arm the rebuild below simply does not carry them over, which also
+    // drops any caller-supplied `files`. Do not make the url arm reject instead: a fetch is the
+    // authority on what a fetched skill contains.
     //
-    //   * inline `content` + either of them -> hard `InputEncode`, nothing
-    //     written. Accepting them would let a caller forge provenance: claim its
-    //     own output was fetched from a trusted URL. Pinned by
-    //     `builtin_skill_install_rejects_forged_provenance_fields` and, with a
-    //     bundle attached as well, by
-    //     `builtin_skill_install_rejects_a_bundle_that_also_forges_provenance`.
-    //   * `url` + either of them, or `url` + `files` -> the url arm below
-    //     rebuilds a fresh object from the fetched payload and simply does not
-    //     carry them over, so the install succeeds with the caller's files
-    //     DROPPED (`files_installed` is 0). Pinned by
-    //     `builtin_skill_install_url_path_ignores_caller_supplied_hidden_bundle_files`.
+    // `files` is NOT provenance, it is ordinary caller content, and an agent authoring a skill has
+    // to be able to attach the script the skill exists to preserve. Refusing it failed the WHOLE
+    // install, not just the file: on the 31-task SkillsBench subset (nearai/benchmarks#287) 18
+    // correctly-shaped entries across 9 calls were all refused. The refusal predates #7141, which
+    // moved it here verbatim and rightly declined to relax it inside a move-only refactor. What
+    // makes accepting it safe is not this shape check but `normalize_safe_relative_path`
+    // downstream, which confines each entry to the skill's own directory.
     //
-    // Do not "fix" that asymmetry by making the url arm reject; a fetch is the
-    // authority on what a fetched skill contains, and dropping is what the
-    // rebuild already does.
-    //
-    // `files` is NOT in that set. It sat here because the pre-move host-runtime
-    // copy of this resolver refused it, and #7141 carried that refusal across the
-    // move to this crate verbatim — correctly, since a move-only refactor is the
-    // wrong place to change behavior, which is also why it declined a reviewer's
-    // suggestion to relax the arm there. This is that change, made on purpose.
-    //
-    // `files` is ordinary caller content: an agent authoring a skill has to be
-    // able to attach the script the skill exists to preserve. Refusing it did not
-    // drop the file, it failed the WHOLE install — measured on the 31-task
-    // SkillsBench subset (nearai/benchmarks#287), 18 correctly-shaped
-    // `{path, text}` entries across 9 calls were all refused, and 0 of 27
-    // agent-authored skills shipped a resource file against 18 of 31
-    // human-curated ones. Pinned by
-    // `builtin_skill_install_accepts_an_agent_authored_bundle_with_scripts`. What
-    // makes it safe is not the shape check: each entry's path is normalized and
-    // confined to the skill's own directory downstream
-    // (`install_bundle::normalize_safe_relative_path`), pinned by
-    // `builtin_skill_install_rejects_a_bundle_file_escaping_its_skill_directory`.
+    // Pinned by `builtin_skill_install_{accepts_an_agent_authored_bundle_with_scripts,
+    // rejects_a_bundle_that_also_forges_provenance,
+    // rejects_a_bundle_file_escaping_its_skill_directory}`.
     match (has_content, url) {
         (true, None) if !object.contains_key("source") && !object.contains_key("source_url") => {
             Ok(input.clone())
@@ -686,12 +665,11 @@ mod install_files_encoding_tests {
     }
 }
 
-/// Which inline inputs [`resolve_install_input`] admits, tested on the function itself.
+/// Which inline inputs [`resolve_install_input`] admits.
 ///
-/// The fetch context deliberately carries no egress port, so a case that wrongly routes to the url
-/// arm fails closed instead of passing for the wrong reason. The same contract is asserted end to end
-/// through runtime dispatch in `ironclaw_host_runtime/tests/first_party_builtin_tools.rs`; these are
-/// the cheap version that runs in this crate's own suite.
+/// The fetch context carries no egress port, so a case that wrongly routes to the url arm fails
+/// closed rather than passing for the wrong reason. Asserted end to end in
+/// `ironclaw_host_runtime/tests/first_party_builtin_tools.rs`.
 #[cfg(test)]
 mod resolve_install_input_tests {
     use ironclaw_host_api::{

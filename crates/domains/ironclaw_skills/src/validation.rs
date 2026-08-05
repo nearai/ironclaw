@@ -315,17 +315,11 @@ const NON_SPECIFIC_TERMS: &[&str] = &[
 /// dead weight. The catalog's longest is 338.
 const MAX_DESCRIPTION_CHARS: usize = 250;
 
-/// Lint a skill's routing metadata, returning one message per problem (empty = clean).
+/// Lint a skill's routing metadata, one message per problem (empty = clean).
 ///
-/// This is the discipline half of skill routing, and on the measured evidence it matters more
-/// than the scorer: over 328 real prompts, boundary matching cut false activations by 18%
-/// while fixing the catalog cut them by 68%. Hermes -- the reference bar in epic #6565 --
-/// gets its routing accuracy from exactly this, "metadata discipline and eligibility
-/// filtering, not retrieval and reranking".
-///
-/// Deliberately advisory in shape (`Vec<String>`, like `validate_credential_spec`) rather than
-/// a hard parse error: the caller decides whether a lint failure blocks a write. A learned
-/// skill that fails should not be written; a checked-in skill that fails should fail CI.
+/// Matters more than the scorer on the measured evidence: over 328 real prompts, boundary matching
+/// cut false activations by 18% where fixing the catalog cut them by 68%. Advisory in shape so the
+/// caller decides whether a failure blocks the write.
 pub fn lint_skill_routing_metadata(manifest: &SkillManifest) -> Vec<String> {
     let mut problems = lint_skill_routing_metadata_blocking(manifest);
     problems.extend(lint_skill_routing_metadata_advisory(manifest));
@@ -334,14 +328,9 @@ pub fn lint_skill_routing_metadata(manifest: &SkillManifest) -> Vec<String> {
 
 /// The subset that may REFUSE a write, because it poisons routing for *other* skills.
 ///
-/// A generic keyword is not merely low quality: `coding` declares `file` and `change`, and on the
-/// reviewed baseline corpus it was being selected for security audits, QA plans and commit
-/// staging. That cost is paid by every later request, not by the skill that declared it, so
-/// refusing to write it is proportionate.
-///
-/// Measured against the skills agents actually write: 26 authored skills from the self-creation
-/// runs, of which only 4 declare keywords or tags at all — so this can gate the write path
-/// without blocking self-creation, while still stopping a model that tries to declare `file`.
+/// `coding` declaring `file` and `change` was selected for security audits, QA plans and commit
+/// staging; that cost lands on every later request, not on the skill that declared it. Safe to gate
+/// on: of 26 self-authored skills only 4 declare keywords or tags at all.
 pub fn lint_skill_routing_metadata_blocking(manifest: &SkillManifest) -> Vec<String> {
     let mut problems = Vec::new();
     let activation = &manifest.activation;

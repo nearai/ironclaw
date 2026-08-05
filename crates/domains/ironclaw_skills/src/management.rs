@@ -515,11 +515,9 @@ fn ensure_manifest_description(
 /// Placed directly after the opening delimiter so it survives any ordering of the remaining keys, and
 /// the rest of the document is passed through untouched.
 fn insert_frontmatter_description(content: &str, description: &str) -> String {
-    // The leading newlines are preserved rather than skipped past, because `parse_skill_md_impl`
-    // tolerates them (`trim_start_matches(['\n', '\r'])`) and this repair has to agree with the
-    // parser about where the frontmatter starts. Taking `lines().next()` unconditionally treated a
-    // leading blank line as the `---` delimiter and inserted `description:` above it, producing a
-    // document the parser then rejected -- turning a repairable skill into a failed install.
+    // Leading newlines are preserved, not skipped: the parser tolerates them, so this repair has to
+    // agree with it about where the frontmatter starts. Taking `lines().next()` treated a leading
+    // blank line as the `---` and inserted above it, which the parser then rejected.
     let leading = content.len() - content.trim_start_matches(['\n', '\r']).len();
     let (prefix, body) = content.split_at(leading);
     let mut lines = body.lines();

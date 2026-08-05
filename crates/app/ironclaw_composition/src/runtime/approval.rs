@@ -50,10 +50,9 @@ impl PolicyApprovalLeaseTermsProvider {
 
     /// The skill view this gate's lease terms are minted from.
     ///
-    /// Derived per gate from the gate's own scope, for the same reason the workspace view is: the
-    /// terms have to name the paths the capability will actually touch. A pre-built, scope-free view
-    /// cannot -- skills live at `/tenants/<t>/users/<u>/skills`, so a fixed view named
-    /// `/projects/skills` and the lease it minted described a tree the install never writes.
+    /// Per gate, from the gate's own scope, for the same reason the workspace view is: the terms
+    /// have to name the paths the capability will touch. A fixed, scope-free view named
+    /// `/projects/skills` minted leases describing a tree the install never writes.
     fn skill_mounts_for(
         &self,
         gate: &ApprovalGateRecord,
