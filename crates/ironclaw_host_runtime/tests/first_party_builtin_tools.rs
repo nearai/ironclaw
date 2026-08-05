@@ -4286,6 +4286,37 @@ async fn builtin_json_queries_authorized_workspace_file_with_adjacent_indices() 
 }
 
 #[tokio::test]
+async fn builtin_json_file_query_accepts_eight_mib_and_rejects_one_byte_over() {
+    const MAX_JSON_FILE_BYTES: usize = 8 * 1_024 * 1_024;
+    let root = tempfile::tempdir().unwrap();
+    let file_path = root.path().join("source.json");
+    let mut exact_limit_json = br#"{"value":"ok"}"#.to_vec();
+    exact_limit_json.resize(MAX_JSON_FILE_BYTES, b' ');
+    std::fs::write(&file_path, exact_limit_json).unwrap();
+    let (filesystem, mounts) = mounted_filesystem(root.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts([JSON_CAPABILITY_ID], mounts);
+    let input = json!({
+        "operation": "query",
+        "file_path": "/workspace/source.json",
+        "path": "value"
+    });
+
+    let queried = invoke_with_context(&runtime, JSON_CAPABILITY_ID, input.clone(), context.clone())
+        .await
+        .unwrap();
+    assert_eq!(queried, json!("ok"));
+
+    std::fs::write(&file_path, vec![b' '; MAX_JSON_FILE_BYTES + 1]).unwrap();
+    let failure = invoke_failure_with_context(&runtime, JSON_CAPABILITY_ID, input, context).await;
+    assert_eq!(failure.kind, FailureKind::Resource);
+    assert_eq!(
+        failure.safe_summary().as_deref(),
+        Some("JSON query file exceeds the 8388608-byte limit")
+    );
+}
+
+#[tokio::test]
 async fn builtin_json_file_query_denies_unmounted_workspace_path() {
     let failure = invoke_failure_with_context(
         &runtime(),

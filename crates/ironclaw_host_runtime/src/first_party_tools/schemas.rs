@@ -86,7 +86,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "file_path": {
                     "type": "string",
                     "maxLength": 4096,
-                    "description": "Scoped JSON file below /workspace to read for a query; mutually exclusive with data and bounded to 1048576 bytes"
+                    "description": "Scoped JSON file below /workspace to read for a query; mutually exclusive with data and bounded to 8388608 bytes"
                 },
                 "path": {
                     "type": "string",
@@ -1025,6 +1025,11 @@ mod tests {
                 && branch["not"]["required"] == serde_json::json!(["data"])
         }));
         assert_eq!(schema["properties"]["file_path"]["maxLength"], 4096);
+        assert!(
+            schema["properties"]["file_path"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("8388608 bytes"))
+        );
         assert_eq!(schema["properties"]["path"]["maxLength"], 4096);
         assert!(
             schema["properties"]["path"]["description"]

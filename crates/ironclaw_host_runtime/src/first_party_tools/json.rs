@@ -12,7 +12,7 @@ use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
 use super::{first_party_capability_manifest, input_error, operation_error, resource_profile};
 
 pub const JSON_CAPABILITY_ID: &str = "builtin.json";
-const MAX_JSON_FILE_BYTES: usize = 1_048_576;
+const MAX_JSON_FILE_BYTES: usize = 8 * 1_024 * 1_024;
 const MAX_QUERY_PATH_BYTES: usize = 4_096;
 const MAX_QUERY_PATH_COMPONENTS: usize = 256;
 
@@ -354,8 +354,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        JSON_CAPABILITY_ID, MAX_JSON_FILE_BYTES, MAX_QUERY_PATH_BYTES, MAX_QUERY_PATH_COMPONENTS,
-        dispatch, parse_query_path, query_json,
+        JSON_CAPABILITY_ID, MAX_QUERY_PATH_BYTES, MAX_QUERY_PATH_COMPONENTS, dispatch,
+        parse_query_path, query_json,
     };
     use crate::FirstPartyCapabilityRequest;
 
@@ -604,15 +604,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_query_rejects_oversized_file_before_materializing_it() {
+    async fn file_query_accepts_eight_mib_and_rejects_one_byte_over_before_materializing() {
+        const EXPECTED_JSON_FILE_BYTES: usize = 8 * 1_024 * 1_024;
         let root = Arc::new(InMemoryBackend::new());
+        let mut exact_limit_json = br#"{"value":"ok"}"#.to_vec();
+        exact_limit_json.resize(EXPECTED_JSON_FILE_BYTES, b' ');
+        root.put(
+            &VirtualPath::new(format!("{WORKSPACE_TARGET}/exact-limit.json"))
+                .expect("exact-limit file target"),
+            Entry::bytes(exact_limit_json),
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("seed exact-limit file");
         root.put(
             &VirtualPath::new(format!("{WORKSPACE_TARGET}/large.json")).expect("file target"),
-            Entry::bytes(vec![b' '; MAX_JSON_FILE_BYTES + 1]),
+            Entry::bytes(vec![b' '; EXPECTED_JSON_FILE_BYTES + 1]),
             CasExpectation::Absent,
         )
         .await
         .expect("seed oversized file");
+
+        let mut exact_limit_request = request(json!({
+            "operation": "query",
+            "file_path": "/workspace/exact-limit.json",
+            "path": "value"
+        }));
+        exact_limit_request.mounts = Some(workspace_mount(MountPermissions::read_only()));
+        exact_limit_request.services.filesystem = root.clone();
+        assert_eq!(
+            dispatch(&exact_limit_request)
+                .await
+                .expect("an eight MiB JSON file remains queryable"),
+            json!("ok")
+        );
+
         let mut request = request(json!({
             "operation": "query",
             "file_path": "/workspace/large.json",
@@ -627,7 +653,7 @@ mod tests {
         assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::Resource));
         assert_eq!(
             error.safe_summary(),
-            Some("JSON query file exceeds the 1048576-byte limit")
+            Some("JSON query file exceeds the 8388608-byte limit")
         );
     }
 }
