@@ -173,7 +173,7 @@ fn extract_text(
 
         // Fallback: try to infer from filename extension
         _ => {
-            return match try_extract_by_extension(data, filename) {
+            return match try_extract_by_extension(data, filename)? {
                 Some(text) => Ok(text),
                 None => Err(ExtractionError::UnsupportedType { mime: base_mime }),
             };
@@ -361,14 +361,18 @@ fn extract_pptx(data: &[u8]) -> Result<String, String> {
 
     let mut all_text = Vec::new();
     let mut total_decompressed: u64 = 0;
+    let mut rejected: Option<String> = None;
     for name in &slide_names {
         let Ok(mut file) = archive.by_name(name) else {
+            rejected.get_or_insert_with(|| format!("could not open PPTX slide {name}"));
             continue;
         };
-        let Ok(xml) =
-            bounded_read_zip_entry(&mut file, &mut total_decompressed).map_err(|e| e.to_string())
-        else {
-            continue;
+        let xml = match bounded_read_zip_entry(&mut file, &mut total_decompressed) {
+            Ok(xml) => xml,
+            Err(error) => {
+                rejected.get_or_insert_with(|| error.to_string());
+                continue;
+            }
         };
         let text = strip_xml_tags(&xml);
         if !text.is_empty() {
@@ -376,9 +380,22 @@ fn extract_pptx(data: &[u8]) -> Result<String, String> {
         }
     }
 
-    if all_text.is_empty() {
-        return Err("no text found in PPTX slides".to_string());
+    // …but "no text" is only the truth when nothing was *refused*. Entries that
+    // trip the decompression bounds are skipped silently, and before #7104 the
+    // empty-result error was the only thing that surfaced them. Keep that
+    // signal: if the guard rejected an entry and nothing else yielded text, the
+    // file failed — it is not text-free.
+    if all_text.is_empty()
+        && let Some(reason) = rejected
+    {
+        return Err(reason);
     }
+
+    // Ran fine, found nothing. `Ok(String::new())` so `extract_document`'s
+    // trim-and-classify produces `Empty`, which renders "[No extractable text
+    // found …]" — the truth. Returning `Err` here made a well-formed, image-only
+    // file read as "[Could not extract text …]", inviting a retry that cannot
+    // help (#7104).
     Ok(all_text.join("\n\n---\n\n"))
 }
 
@@ -411,14 +428,18 @@ fn extract_xlsx(data: &[u8]) -> Result<String, String> {
     sheet_names.sort();
 
     let mut all_text = Vec::new();
+    let mut rejected: Option<String> = None;
     for name in &sheet_names {
         let Ok(mut file) = archive.by_name(name) else {
+            rejected.get_or_insert_with(|| format!("could not open XLSX sheet {name}"));
             continue;
         };
-        let Ok(xml) =
-            bounded_read_zip_entry(&mut file, &mut total_decompressed).map_err(|e| e.to_string())
-        else {
-            continue;
+        let xml = match bounded_read_zip_entry(&mut file, &mut total_decompressed) {
+            Ok(xml) => xml,
+            Err(error) => {
+                rejected.get_or_insert_with(|| error.to_string());
+                continue;
+            }
         };
         let text = parse_xlsx_sheet(&xml, &shared_strings);
         if !text.is_empty() {
@@ -431,9 +452,22 @@ fn extract_xlsx(data: &[u8]) -> Result<String, String> {
         return Ok(shared_strings.join("\n"));
     }
 
-    if all_text.is_empty() {
-        return Err("no text found in XLSX".to_string());
+    // …but "no text" is only the truth when nothing was *refused*. Entries that
+    // trip the decompression bounds are skipped silently, and before #7104 the
+    // empty-result error was the only thing that surfaced them. Keep that
+    // signal: if the guard rejected an entry and nothing else yielded text, the
+    // file failed — it is not text-free.
+    if all_text.is_empty()
+        && let Some(reason) = rejected
+    {
+        return Err(reason);
     }
+
+    // Ran fine, found nothing. `Ok(String::new())` so `extract_document`'s
+    // trim-and-classify produces `Empty`, which renders "[No extractable text
+    // found …]" — the truth. Returning `Err` here made a well-formed, image-only
+    // file read as "[Could not extract text …]", inviting a retry that cannot
+    // help (#7104).
     Ok(all_text.join("\n\n"))
 }
 
@@ -451,9 +485,12 @@ fn extract_office_xml(data: &[u8], content_path: &str) -> Result<String, String>
         .map_err(|e| format!("failed to read content: {e}"))?;
 
     let text = strip_xml_tags(&xml);
-    if text.is_empty() {
-        return Err("no text content found".to_string());
-    }
+    // Ran fine, found nothing. `Ok(String::new())` so `extract_document`'s
+    // trim-and-classify produces `Empty`, which renders "[No extractable text
+    // found …]" — the truth. Returning `Err` here made a well-formed, image-only
+    // file read as "[Could not extract text …]", inviting a retry that cannot
+    // help (#7104).
+
     Ok(text)
 }
 
@@ -515,9 +552,11 @@ fn extract_rtf(data: &[u8]) -> Result<String, String> {
     }
 
     let trimmed = result.trim().to_string();
-    if trimmed.is_empty() {
-        return Err("no text found in RTF".to_string());
-    }
+    // Ran fine, found nothing. `Ok(String::new())` so `extract_document`'s
+    // trim-and-classify produces `Empty`, which renders "[No extractable text
+    // found …]" — the truth. Returning `Err` here made a well-formed, image-only
+    // file read as "[Could not extract text …]", inviting a retry that cannot
+    // help (#7104).
     Ok(trimmed)
 }
 
@@ -540,9 +579,11 @@ fn extract_binary_strings(data: &[u8]) -> Result<String, String> {
         strings.push(current);
     }
 
-    if strings.is_empty() {
-        return Err("no readable text in binary document".to_string());
-    }
+    // Ran fine, found nothing. `Ok(String::new())` so `extract_document`'s
+    // trim-and-classify produces `Empty`, which renders "[No extractable text
+    // found …]" — the truth. Returning `Err` here made a well-formed, image-only
+    // file read as "[Could not extract text …]", inviting a retry that cannot
+    // help (#7104).
     Ok(strings.join(" "))
 }
 
@@ -709,19 +750,35 @@ fn parse_xlsx_sheet(xml: &str, shared_strings: &[String]) -> String {
 }
 
 /// Try to extract text based on filename extension when MIME type is generic.
-fn try_extract_by_extension(data: &[u8], filename: Option<&str>) -> Option<String> {
-    if let Ok(Some(text)) = extract_document_text_by_filename(data, filename) {
-        return Some(text);
+///
+/// Propagates a real extraction failure instead of swallowing it. Discarding it
+/// dropped the caller into the "unsupported document type" arm, which by
+/// contract means *no extractor was attempted* — so a corrupt `.docx` arriving
+/// under a generic MIME type was reported as an unknown format rather than a
+/// broken file, and the actual parse error never reached the log (#7144).
+fn try_extract_by_extension(
+    data: &[u8],
+    filename: Option<&str>,
+) -> Result<Option<String>, ExtractionError> {
+    if let Some(text) = extract_document_text_by_filename(data, filename)? {
+        return Ok(Some(text));
     }
-    let ext = filename?.rsplit('.').next()?.to_ascii_lowercase();
+    let Some(ext) = filename
+        .and_then(|filename| filename.rsplit('.').next())
+        .map(str::to_ascii_lowercase)
+    else {
+        return Ok(None);
+    };
 
-    match ext.as_str() {
+    Ok(match ext.as_str() {
         "txt" | "csv" | "tsv" | "json" | "xml" | "yaml" | "yml" | "toml" | "md" | "markdown"
         | "py" | "js" | "ts" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "hpp" | "rb" | "sh"
         | "bash" | "zsh" | "fish" | "css" | "html" | "htm" | "sql" | "log" | "ini" | "cfg"
-        | "conf" | "env" | "gitignore" | "dockerfile" => extract_utf8(data).ok(),
+        | "conf" | "env" | "gitignore" | "dockerfile" => {
+            Some(extract_utf8(data).map_err(ExtractionError::not_extractable)?)
+        }
         _ => None,
-    }
+    })
 }
 
 /// Marker appended to extracted text that was truncated for length.
@@ -833,6 +890,105 @@ mod tests {
         assert_eq!(outcome, DocumentExtraction::Empty);
     }
 
+    /// #7104: five extractors returned `Err` for the *succeeded but produced no
+    /// text* case, and `extract_document` maps every `Err` to `Failed`. So a
+    /// well-formed slide deck of images, an empty spreadsheet, a picture-only
+    /// `.docx` or a text-free `.rtf` told the model "[Could not extract text …]"
+    /// when the file had been processed fine and simply had no text. The two
+    /// markers mean different things to a reader — one invites a retry that
+    /// cannot help.
+    ///
+    /// Driven through `extract_document`, the public classifier, not through the
+    /// private extractors: the `Err -> Failed` mapping is the wrapper that turns
+    /// the wrong return value into the wrong model-facing text.
+    #[test]
+    fn text_free_but_valid_documents_classify_as_empty_not_failed() {
+        use std::io::{Cursor, Write};
+
+        fn pptx_with_slides(slides: &[&str]) -> Vec<u8> {
+            let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for (index, xml) in slides.iter().enumerate() {
+                writer
+                    .start_file(format!("ppt/slides/slide{}.xml", index + 1), options)
+                    .expect("start slide");
+                writer.write_all(xml.as_bytes()).expect("write slide");
+            }
+            writer.finish().expect("finish zip").into_inner()
+        }
+
+        // A valid deck whose slides carry only markup — an image-only deck.
+        let image_only_deck = pptx_with_slides(&["<p:sld><p:cSld><p:spTree/></p:cSld></p:sld>"]);
+        assert_eq!(
+            extract_document(
+                &image_only_deck,
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                Some("deck.pptx"),
+            ),
+            DocumentExtraction::Empty,
+            "an image-only deck was processed fine and simply has no text"
+        );
+
+        // A structurally valid RTF document with no text runs.
+        assert_eq!(
+            extract_document(br"{\rtf1\ansi}", "application/rtf", Some("empty.rtf")),
+            DocumentExtraction::Empty
+        );
+
+        // Legacy binary with no printable run long enough to be text.
+        assert_eq!(
+            extract_document(&[0x00, 0x01, 0x02, 0x03, 0x04], "application/msword", None),
+            DocumentExtraction::Empty
+        );
+
+        // The distinction still holds in the other direction: a deck whose only
+        // slide is refused by the decompression bound is a *failure*, not a
+        // text-free file. Without this the #7104 fix would have downgraded the
+        // zip-bomb guard's observable outcome to "no text found".
+        let bomb_deck =
+            pptx_with_slides(&[&format!("<a:t>{}</a:t>", "x".repeat(60 * 1024 * 1024))]);
+        assert!(
+            matches!(
+                extract_document(
+                    &bomb_deck,
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    Some("bomb.pptx"),
+                ),
+                DocumentExtraction::Failed(_)
+            ),
+            "an entry refused by the size guard must stay Failed"
+        );
+    }
+
+    /// #7144: `try_extract_by_extension` discarded the extraction error, so a
+    /// corrupt `.docx` arriving under a generic MIME type fell through to the
+    /// "unsupported document type" arm — which by contract means *no extractor
+    /// was attempted*. The real parse error never reached the caller or the log.
+    #[test]
+    fn corrupt_document_under_generic_mime_reports_the_real_failure() {
+        let corrupt_docx = b"PK\x03\x04 not actually a zip";
+
+        let outcome = extract_document(
+            corrupt_docx,
+            "application/octet-stream",
+            Some("report.docx"),
+        );
+        let DocumentExtraction::Failed(error) = outcome else {
+            panic!("a corrupt .docx must classify as Failed");
+        };
+        let ExtractionError::NotExtractable { detail } = error else {
+            panic!(
+                "an extractor ran and failed; classifying as {error:?} claims none \
+                 was attempted"
+            );
+        };
+        assert!(
+            detail.contains("archive"),
+            "the (log-only) detail must name the real failure: {detail}"
+        );
+    }
+
     #[test]
     fn extract_document_classifies_failed() {
         // An unsupported/opaque binary (PNG header bytes under image/png) is not
@@ -898,10 +1054,12 @@ mod tests {
                 .expect_err("a corrupt XLSX archive must fail"),
             extract_document_text_by_filename(corrupt_zip, Some("doc.docx"))
                 .expect_err("a corrupt DOCX archive must fail"),
-            extract_document_text_by_filename(&[0x00, 0x01], Some("old.doc"))
-                .expect_err("a binary with no readable runs must fail"),
-            extract_document_text_by_filename(b"{}", Some("note.rtf"))
-                .expect_err("an RTF with no text must fail"),
+            // `extract_binary_strings` and `extract_rtf` no longer appear here:
+            // since #7104 their "ran fine, found nothing" outcome is `Ok` (it
+            // classifies as `Empty`, pinned by
+            // `text_free_but_valid_documents_classify_as_empty_not_failed`),
+            // and neither has any remaining failure path — so they no longer
+            // speak a diagnostic that could leak.
         ];
 
         for failure in &failures {
@@ -916,7 +1074,7 @@ mod tests {
 
     #[test]
     fn extract_by_extension_txt() {
-        let result = try_extract_by_extension(b"content", Some("notes.txt"));
+        let result = try_extract_by_extension(b"content", Some("notes.txt")).expect("txt");
         assert_eq!(result, Some("content".to_string()));
     }
 
@@ -954,12 +1112,13 @@ mod tests {
             "a non-ASCII extension must not be folded into an ASCII key"
         );
         assert_eq!(
-            try_extract_by_extension(b"content", Some("notes.MARKDOWN")),
+            try_extract_by_extension(b"content", Some("notes.MARKDOWN")).expect("ascii uppercase"),
             Some("content".to_string()),
             "ASCII case-insensitivity must survive the switch"
         );
         assert_eq!(
-            try_extract_by_extension(b"content", Some("notes.MAR\u{212A}DOWN")),
+            try_extract_by_extension(b"content", Some("notes.MAR\u{212A}DOWN"))
+                .expect("kelvin-sign extension"),
             None,
             "U+212A must not fold into the `markdown` key"
         );
@@ -991,13 +1150,13 @@ mod tests {
 
     #[test]
     fn extract_by_extension_unknown() {
-        let result = try_extract_by_extension(b"data", Some("file.xyz"));
+        let result = try_extract_by_extension(b"data", Some("file.xyz")).expect("unknown ext");
         assert!(result.is_none());
     }
 
     #[test]
     fn extract_by_extension_no_filename() {
-        let result = try_extract_by_extension(b"data", None);
+        let result = try_extract_by_extension(b"data", None).expect("no filename");
         assert!(result.is_none());
     }
 

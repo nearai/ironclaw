@@ -156,6 +156,18 @@ pub struct PrivacyMetadata {
     pub redaction_hash: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Set when scrubbing left secret-like content behind, i.e. this trace must
+    /// not reach a dataset until a human has reviewed it.
+    ///
+    /// Typed on purpose. Dataset eligibility used to be decided by scanning
+    /// `warnings` for the substring `"quarantined"`, whose sole producer is one
+    /// English sentence — so rewording, translating or localising that sentence
+    /// silently opened the gate, quietly and in the permissive direction
+    /// (#7144). `#[serde(default)]` keeps envelopes written before this field
+    /// existed loading; for those the typed `residual_pii_risk` check is what
+    /// closes the gate, exactly as it did before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quarantined: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -637,6 +649,26 @@ pub enum CanonicalRepresentationKind {
     Correction,
 }
 
+impl CanonicalRepresentationKind {
+    /// Discriminator segment for the durable `vector_key`.
+    ///
+    /// Frozen at the exact strings `format!("{:?}")` + `to_ascii_lowercase()`
+    /// produced, so no key already in a vector store moves. They deliberately
+    /// differ from the serde wire tags (`wholetrace` vs `whole_trace`): keeping
+    /// the existing keys addressable matters more than making the two spellings
+    /// agree, and the point of the change is that a variant rename can no longer
+    /// silently re-key anything (#7144).
+    pub fn vector_key_segment(self) -> &'static str {
+        match self {
+            Self::WholeTrace => "wholetrace",
+            Self::Turn => "turn",
+            Self::ToolSequence => "toolsequence",
+            Self::ErrorOutcome => "erroroutcome",
+            Self::Correction => "correction",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CanonicalTraceRepresentation {
     pub kind: CanonicalRepresentationKind,
@@ -688,6 +720,14 @@ impl HindsightRelabelingCandidate {
     }
 }
 
+/// Credit-event discriminator.
+///
+/// No `#[serde(rename_all = "snake_case")]`, unlike every sibling enum in this
+/// file — and it must stay that way. Its PascalCase tags are already written
+/// into `submissions.json`, which carries no schema version and has no
+/// migration, so flipping the wire form would make every existing file fail to
+/// deserialize (#7144). The inconsistency is load-bearing; [`Self::as_str`] is
+/// what decouples durable identity from `Debug`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TraceCreditEventKind {
     Accepted,
@@ -703,6 +743,30 @@ pub enum TraceCreditEventKind {
     UsedForTrainingOrRanking,
     ReviewerBonus,
     AbusePenalty,
+}
+
+impl TraceCreditEventKind {
+    /// Stable identity for persisted fingerprints. Frozen at the strings
+    /// `Debug` produced, so no `submissions.json` already on disk changes
+    /// meaning; a variant rename now moves this `match` instead of silently
+    /// re-fingerprinting every acknowledged notice.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accepted => "Accepted",
+            Self::RejectedPrivacy => "RejectedPrivacy",
+            Self::RejectedDuplicate => "RejectedDuplicate",
+            Self::CreditSynced => "CreditSynced",
+            Self::Replayable => "Replayable",
+            Self::NovelCluster => "NovelCluster",
+            Self::UnderrepresentedCoverage => "UnderrepresentedCoverage",
+            Self::UserCorrectionIncluded => "UserCorrectionIncluded",
+            Self::ConvertedToBenchmark => "ConvertedToBenchmark",
+            Self::CaughtRegression => "CaughtRegression",
+            Self::UsedForTrainingOrRanking => "UsedForTrainingOrRanking",
+            Self::ReviewerBonus => "ReviewerBonus",
+            Self::AbusePenalty => "AbusePenalty",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

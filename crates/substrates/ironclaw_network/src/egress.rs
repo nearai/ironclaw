@@ -131,9 +131,9 @@ where
             // client (which is pinned to `Policy::none()`): every hop re-runs the
             // full policy authorization above against the redirect destination,
             // so an untrusted `Location` can never reach a host the caller's
-            // network policy does not already allow. Credential-bearing headers
-            // are stripped before the next hop so a host-injected token never
-            // follows a redirect off its audience host.
+            // network policy does not already allow. No header follows a hop, so
+            // a host-injected credential can never travel off its audience host
+            // — see `clear_headers_for_next_hop`.
             if redirects_remaining == 0 || !is_redirect_status(response.status) {
                 return Ok(response);
             }
@@ -155,7 +155,7 @@ where
                 request.method = NetworkMethod::Get;
                 request.body = Vec::new();
             }
-            strip_credential_headers(&mut request.headers);
+            clear_headers_for_next_hop(&mut request.headers);
         }
     }
 }
@@ -173,15 +173,27 @@ fn preserves_method_on_redirect(status: u16) -> bool {
     matches!(status, 307 | 308)
 }
 
-/// Header names carrying host-injected or caller credential material that must
-/// never follow a redirect to a different destination.
-fn strip_credential_headers(headers: &mut Vec<(String, String)>) {
-    headers.retain(|(name, _)| {
-        !matches!(
-            name.to_ascii_lowercase().as_str(),
-            "authorization" | "cookie" | "proxy-authorization"
-        )
-    });
+/// Drops every header before the next redirect hop.
+///
+/// This replaced a three-name denylist (`authorization` / `cookie` /
+/// `proxy-authorization`) that was **inert**: `request.headers` is moved into
+/// the transport request by `mem::take` above, so the `retain` only ever ran
+/// over an empty vector. Its contract test passed because *no* header survived
+/// a hop, not because credentials were filtered — asserting `headers.is_empty()`
+/// on entry to the old function left every redirect test green (#7144).
+///
+/// Keeping the behaviour and dropping the pretence is the right way round. A
+/// denylist could not have been made correct anyway: the host runtime's
+/// `RuntimeCredentialTarget::Header` lets a manifest inject a secret under any
+/// name it chooses, so `x-api-key` and anything else a package invents would
+/// have ridden along. "Nothing follows a hop" needs no enumeration.
+///
+/// The `clear` is therefore defensive rather than load-bearing — it keeps the
+/// guarantee if a future change stops moving the buffer. The falsifiable part
+/// lives in `http_egress_follows_allowlisted_redirect_and_strips_credentials`,
+/// which asserts the *observed* hop carries no headers at all.
+fn clear_headers_for_next_hop(headers: &mut Vec<(String, String)>) {
+    headers.clear();
 }
 
 fn find_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {

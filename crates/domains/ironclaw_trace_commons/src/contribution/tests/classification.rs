@@ -157,6 +157,259 @@ async fn dataset_eligibility_gates_consent_revocation_and_privacy_risk() {
             .any(|reason| reason.contains("high residual privacy risk"))
     );
 }
+/// Durable identifiers must not be derived from `Debug` (#7144). Both of
+/// these cross a persistence boundary — `vector_key` addresses rows in a
+/// vector store, the credit fingerprint is written into `submissions.json`
+/// and compared on every load to keep an acknowledged notice suppressed —
+/// and a `{:?}` derivation meant a variant rename silently re-keyed the
+/// first and resurfaced every dismissed notice for the second.
+///
+/// Frozen at the values `Debug` produced, so nothing already persisted
+/// moves. A rename now has to come here.
+#[test]
+fn durable_identifier_segments_are_frozen_against_variant_renames() {
+    assert_eq!(
+        [
+            CanonicalRepresentationKind::WholeTrace,
+            CanonicalRepresentationKind::Turn,
+            CanonicalRepresentationKind::ToolSequence,
+            CanonicalRepresentationKind::ErrorOutcome,
+            CanonicalRepresentationKind::Correction,
+        ]
+        .map(CanonicalRepresentationKind::vector_key_segment),
+        [
+            "wholetrace",
+            "turn",
+            "toolsequence",
+            "erroroutcome",
+            "correction"
+        ],
+        "vector keys are durable and cross-service; changing a segment \
+         orphans every embedding already indexed under the old key"
+    );
+
+    assert_eq!(
+        [
+            TraceCreditEventKind::Accepted,
+            TraceCreditEventKind::RejectedPrivacy,
+            TraceCreditEventKind::RejectedDuplicate,
+            TraceCreditEventKind::CreditSynced,
+            TraceCreditEventKind::Replayable,
+            TraceCreditEventKind::NovelCluster,
+            TraceCreditEventKind::UnderrepresentedCoverage,
+            TraceCreditEventKind::UserCorrectionIncluded,
+            TraceCreditEventKind::ConvertedToBenchmark,
+            TraceCreditEventKind::CaughtRegression,
+            TraceCreditEventKind::UsedForTrainingOrRanking,
+            TraceCreditEventKind::ReviewerBonus,
+            TraceCreditEventKind::AbusePenalty,
+        ]
+        .iter()
+        .map(TraceCreditEventKind::as_str)
+        .collect::<Vec<_>>(),
+        vec![
+            "Accepted",
+            "RejectedPrivacy",
+            "RejectedDuplicate",
+            "CreditSynced",
+            "Replayable",
+            "NovelCluster",
+            "UnderrepresentedCoverage",
+            "UserCorrectionIncluded",
+            "ConvertedToBenchmark",
+            "CaughtRegression",
+            "UsedForTrainingOrRanking",
+            "ReviewerBonus",
+            "AbusePenalty",
+        ],
+        "credit-notice fingerprints are persisted in submissions.json with \
+         no schema version and no migration; changing a spelling resurfaces \
+         every acknowledged notice and duplicates its outbox item"
+    );
+
+    // The serde wire tags are the *other* durable form and must also stay
+    // PascalCase: `submissions.json` already holds them, so adding
+    // `rename_all = "snake_case"` for consistency with the sibling enums
+    // would make every existing file fail to deserialize.
+    assert_eq!(
+        serde_json::to_string(&TraceCreditEventKind::RejectedPrivacy).expect("serializes"),
+        "\"RejectedPrivacy\""
+    );
+}
+
+/// #7144: the trace card stamped `private_corpus_revocable` unconditionally
+/// while `retention_policy_for_trace` ranked `allowed_uses` — and they
+/// disagree for three of the five consent scopes. The card is what crosses
+/// the wire, so the wrong value was the one that shipped.
+#[tokio::test]
+async fn trace_card_retention_matches_the_ranked_derivation() {
+    for (scope, expected) in [
+        (
+            ConsentScope::DebuggingEvaluation,
+            "private_corpus_revocable",
+        ),
+        (ConsentScope::BenchmarkOnly, "benchmark_revocable"),
+        (ConsentScope::ModelTraining, "training_revocable"),
+    ] {
+        let raw = RawTraceContribution::from_recorded_trace(
+            &sample_trace(),
+            RecordedTraceContributionOptions::default().set_consent_scopes(vec![scope]),
+        );
+        let envelope = DeterministicTraceRedactor::default()
+            .redact_trace(raw)
+            .await
+            .expect("redaction should succeed");
+
+        assert_eq!(
+            envelope.trace_card.retention_policy, expected,
+            "the card must carry the policy the allowed uses imply for {scope:?}"
+        );
+        assert_eq!(
+            envelope.trace_card.retention_policy,
+            retention_policy_for_trace(&envelope).name,
+            "the card and the ranked derivation must not disagree for {scope:?}"
+        );
+    }
+}
+
+/// #7144: `novelty_score` is an unvalidated `Option<f32>` that is re-scored
+/// off the on-disk queue, and only its upper bound was enforced — so a
+/// negative value from a downstream embedding job passed straight through
+/// while its sibling `duplicate_score` was clamped both ways.
+#[tokio::test]
+async fn novelty_score_is_clamped_at_both_ends() {
+    let raw = RawTraceContribution::from_recorded_trace(
+        &sample_trace(),
+        RecordedTraceContributionOptions::default(),
+    );
+    let mut envelope = DeterministicTraceRedactor::default()
+        .redact_trace(raw)
+        .await
+        .expect("redaction should succeed");
+
+    envelope.embedding_analysis = Some(EmbeddingAnalysisMetadata {
+        embedding_model: None,
+        canonical_summary_hash: String::new(),
+        trace_vector_id: None,
+        nearest_trace_ids: Vec::new(),
+        cluster_id: None,
+        nearest_cluster_id: None,
+        novelty_score: Some(-4.0),
+        duplicate_score: None,
+        coverage_tags: Vec::new(),
+    });
+    let low = compute_value_scorecard(&envelope);
+    assert!(
+        low.novelty >= 0.0,
+        "a negative novelty must be clamped, got {}",
+        low.novelty
+    );
+
+    envelope.embedding_analysis = Some(EmbeddingAnalysisMetadata {
+        embedding_model: None,
+        canonical_summary_hash: String::new(),
+        trace_vector_id: None,
+        nearest_trace_ids: Vec::new(),
+        cluster_id: None,
+        nearest_cluster_id: None,
+        novelty_score: Some(99.0),
+        duplicate_score: None,
+        coverage_tags: Vec::new(),
+    });
+    let high = compute_value_scorecard(&envelope);
+    assert_eq!(high.novelty, 0.85, "the upper cap must still hold");
+}
+
+/// #7144: dataset eligibility used to be decided by scanning `warnings` for
+/// the substring `"quarantined"`, whose sole producer is one English
+/// sentence in `privacy_warnings`. Rewording, translating or localising that
+/// sentence silently opened the gate — quietly, and in the permissive
+/// direction.
+///
+/// The sabotage the old gate could not survive is the first case here: the
+/// prose is replaced wholesale and the gate must still hold.
+#[tokio::test]
+async fn quarantine_gate_survives_rewording_the_operator_warning() {
+    let raw = RawTraceContribution::from_recorded_trace(
+        &sample_trace(),
+        RecordedTraceContributionOptions::default()
+            .set_consent_scopes(vec![ConsentScope::ModelTraining]),
+    );
+    let mut envelope = DeterministicTraceRedactor::default()
+        .redact_trace(raw)
+        .await
+        .expect("redaction should succeed");
+
+    // A high-risk trace carries the typed flag from the producer.
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::High;
+    envelope.privacy.quarantined = true;
+    envelope.privacy.warnings =
+        vec!["Sekretartige Inhalte gefunden; bitte zuruckhalten.".to_string()];
+    let localised = trace_dataset_eligibility(&envelope, TraceAllowedUse::ModelTraining, false);
+    assert!(!localised.eligible);
+    assert!(
+        localised
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("quarantined")),
+        "the gate must key on the typed flag, not the sentence: {:?}",
+        localised.reasons
+    );
+
+    // An envelope persisted before the flag existed deserializes it as
+    // `false`; the typed risk check is what has to close the gate there.
+    envelope.privacy.quarantined = false;
+    let legacy = trace_dataset_eligibility(&envelope, TraceAllowedUse::ModelTraining, false);
+    assert!(
+        !legacy.eligible,
+        "a pre-flag high-risk envelope must still be held: {:?}",
+        legacy.reasons
+    );
+
+    // And prose alone must not close it on a low-risk trace: the substring
+    // used to be sufficient, so an unrelated warning that happened to
+    // contain the word blocked an eligible trace.
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    envelope.privacy.warnings = vec!["Downstream job quarantined a sibling trace.".to_string()];
+    let prose_only = trace_dataset_eligibility(&envelope, TraceAllowedUse::ModelTraining, false);
+    assert!(
+        prose_only.eligible,
+        "warning prose must not decide eligibility either way: {:?}",
+        prose_only.reasons
+    );
+}
+
+/// The producer and the gate must agree, driven through `redact_trace`
+/// rather than by setting the field by hand: an envelope has to arrive from
+/// redaction already carrying the typed flag that matches its typed risk,
+/// or the gate is reading a value nothing maintains.
+#[tokio::test]
+async fn redaction_flags_quarantine_on_the_envelope_it_produces() {
+    let raw = RawTraceContribution::from_recorded_trace(
+        &sample_trace(),
+        RecordedTraceContributionOptions::default(),
+    );
+    let mut envelope = DeterministicTraceRedactor::default()
+        .redact_trace(raw)
+        .await
+        .expect("redaction should succeed");
+    assert_eq!(
+        envelope.privacy.quarantined,
+        envelope.privacy.residual_pii_risk == ResidualPiiRisk::High,
+        "the typed flag must track the typed risk the producer computed"
+    );
+
+    // A server-side re-scrub raises risk monotonically, so it must be able
+    // to raise the flag — and must never clear one already set.
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::High;
+    envelope.privacy.quarantined = false;
+    rescrub_trace_envelope(&mut envelope).expect("re-scrub should succeed");
+    assert!(
+        envelope.privacy.quarantined,
+        "a re-scrub that sees High risk must raise the quarantine flag"
+    );
+}
+
 #[tokio::test]
 async fn medium_pii_tool_trace_auto_submits_while_high_is_held() {
     // Below-High residual PII risk must auto-submit: the manual-approval

@@ -548,11 +548,28 @@ pub(crate) fn trace_scope_mutation_lock(scope: Option<&str>) -> Arc<tokio::sync:
         Ok(locks) => locks,
         Err(poisoned) => poisoned.into_inner(),
     };
+    // Drop entries nobody holds or is waiting on. Without this the map grew one
+    // entry per distinct (tenant, user) for the lifetime of the process — on a
+    // hosted instance, the lifetime count of distinct users (#7144).
+    //
+    // NOT the wholesale `clear()` that bounds `CREDIT_VIEW_CACHE`: these `Arc`s
+    // *are* the mutual-exclusion identity. Evicting one while a guard is alive
+    // would hand the next caller a fresh, uncontended mutex and silently break
+    // the serialization `trace_scope_flushes_serialize_same_scope_...` pins. A
+    // strong count of 1 means the map is the only owner, so no guard exists and
+    // no waiter can be queued.
+    if locks.len() > TRACE_SCOPE_MUTATION_LOCK_HIGH_WATER {
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+    }
     locks
         .entry(key)
         .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
         .clone()
 }
+
+/// Size at which [`trace_scope_mutation_lock`] sweeps unheld entries. A sweep is
+/// O(len) under the map lock, so it is amortized rather than run per call.
+const TRACE_SCOPE_MUTATION_LOCK_HIGH_WATER: usize = 1024;
 
 pub(crate) async fn lock_trace_scope_for_mutation(scope: Option<&str>) -> OwnedMutexGuard<()> {
     trace_scope_mutation_lock(scope).lock_owned().await

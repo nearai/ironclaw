@@ -491,6 +491,176 @@ async fn host_http_egress_helper_injects_staged_credentials_from_handoff_store()
     );
 }
 
+/// #7144: only the `PathPlaceholder` injection kind checked the URL scheme, so
+/// `Header`, `QueryParam` and `BodyJsonPointer` would happily attach a bearer
+/// token to a plaintext `http://` URL. Transport confidentiality rested entirely
+/// on upstream validators, and `host_port::stage_credentials` performs no
+/// audience match at all — so nothing guaranteed it.
+///
+/// The host under test is a **non-loopback** public name on purpose: the guard
+/// carries a literal-loopback exception (PROPOSAL §12.13 D-R, pinned by
+/// `host_http_egress_attaches_a_credential_over_literal_loopback_http` below),
+/// so this test is what freezes the refusal side of that perimeter — for every
+/// injection target shape the machinery has.
+///
+/// Driven through the configured egress port rather than
+/// `apply_credential_injection`: the injection sits behind policy authorization
+/// and the staged-obligation lookup, and the assertion that matters is that the
+/// *network* never saw the secret.
+#[tokio::test]
+async fn host_http_egress_refuses_to_attach_a_credential_over_plaintext_http() {
+    for target in [
+        RuntimeCredentialTarget::Header {
+            name: "authorization".to_string(),
+            prefix: Some("Bearer ".to_string()),
+        },
+        RuntimeCredentialTarget::QueryParam {
+            name: "access_token".to_string(),
+        },
+        RuntimeCredentialTarget::PathPlaceholder {
+            placeholder: "api_key".to_string(),
+        },
+        RuntimeCredentialTarget::BodyJsonPointer {
+            pointer: "/auth/token".to_string(),
+            post_injection_body_limit_bytes: None,
+        },
+    ] {
+        let scope = sample_scope();
+        let capability_id = sample_capability_id();
+        let handle = SecretHandle::new("api-token").unwrap();
+
+        let network = RecordingNetwork::ok();
+        let recorded_requests = Arc::clone(&network.requests);
+        let services = test_services()
+            .with_secret_store(Arc::new(SecretStore::ephemeral()))
+            .try_with_host_http_egress(network)
+            .expect("host HTTP egress should wire with graph secret store");
+        let mut policy = staged_policy();
+        // Let the *policy* admit plaintext http, so the refusal under test is
+        // the credential guard and not the network allowlist.
+        policy.allowed_targets = vec![NetworkTargetPattern {
+            scheme: None,
+            host_pattern: "api.example.test".to_string(),
+            port: None,
+        }];
+        services
+            .network_policy_store
+            .insert(&scope, &capability_id, policy.clone());
+        services
+            .secret_injection_store
+            .insert(
+                &scope,
+                &capability_id,
+                &handle,
+                SecretMaterial::from("staged-secret"),
+            )
+            .expect("staged credential should be seeded");
+        let egress = configured_egress(&services);
+
+        let mut request =
+            request_with_staged_credential(scope, capability_id.clone(), handle.clone());
+        // Each shape gets a well-formed request for it, so the refusal below is
+        // attributable to the scheme guard and not to a shape validation error:
+        // the path carries the placeholder segment, the body carries the
+        // pointer's parent object.
+        request.url = match target {
+            RuntimeCredentialTarget::PathPlaceholder { .. } => {
+                "http://api.example.test/v1/api_key/run".to_string()
+            }
+            _ => "http://api.example.test/v1/run".to_string(),
+        };
+        if matches!(target, RuntimeCredentialTarget::BodyJsonPointer { .. }) {
+            request.body = br#"{"auth":{}}"#.to_vec();
+        }
+        request.network_policy = policy;
+        request.credential_injections = vec![RuntimeCredentialInjection {
+            handle,
+            source: RuntimeCredentialSource::StagedObligation { capability_id },
+            target: target.clone(),
+            required: true,
+        }];
+
+        let error = egress
+            .execute(request)
+            .await
+            .expect_err("a credential must never be attached to a plaintext URL");
+        assert!(
+            matches!(
+                &error,
+                ironclaw_host_api::http::RuntimeHttpEgressError::Credential { reason }
+                    if reason.contains("HTTPS")
+            ),
+            "expected an HTTPS credential refusal for {target:?}, got {error:?}"
+        );
+        assert!(
+            recorded_requests.lock().unwrap().is_empty(),
+            "the request must not reach the network at all for {target:?}"
+        );
+    }
+}
+
+/// The other side of the D-R perimeter (PROPOSAL §12.13, 2026-08-05): a
+/// **literal loopback** host may take a credential over plaintext HTTP —
+/// standalone Trace Commons runs on `http://127.0.0.1` and its login-link mint
+/// pushes a bearer through this exact chokepoint
+/// (`trace_commons_dispatch_e2e::account_login_link_through_dispatch` drives
+/// the full path; this pins the seam directly). The exception uses the same
+/// `is_loopback_host` predicate the trace-commons ingest validator documents,
+/// so the validator and the chokepoint cannot drift.
+#[tokio::test]
+async fn host_http_egress_attaches_a_credential_over_literal_loopback_http() {
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+
+    let network = RecordingNetwork::ok();
+    let recorded_requests = Arc::clone(&network.requests);
+    let services = test_services()
+        .with_secret_store(Arc::new(SecretStore::ephemeral()))
+        .try_with_host_http_egress(network)
+        .expect("host HTTP egress should wire with graph secret store");
+    let mut policy = staged_policy();
+    // The loopback host must be admitted by the *allowlist* too — the D-R
+    // rationale leans on exactly this: a credential can only reach the
+    // chokepoint toward a host the declared egress policy already names.
+    policy.allowed_targets = vec![NetworkTargetPattern {
+        scheme: None,
+        host_pattern: "127.0.0.1".to_string(),
+        port: None,
+    }];
+    policy.deny_private_ip_ranges = false;
+    services
+        .network_policy_store
+        .insert(&scope, &capability_id, policy.clone());
+    services
+        .secret_injection_store
+        .insert(
+            &scope,
+            &capability_id,
+            &handle,
+            SecretMaterial::from("staged-secret"),
+        )
+        .expect("staged credential should be seeded");
+    let egress = configured_egress(&services);
+
+    let mut request = request_with_staged_credential(scope, capability_id, handle);
+    request.url = "http://127.0.0.1:8080/v1/login-link".to_string();
+    request.network_policy = policy;
+
+    egress
+        .execute(request)
+        .await
+        .expect("literal loopback plaintext must pass the credential guard");
+    let recorded = recorded_requests.lock().unwrap();
+    assert_eq!(recorded.len(), 1, "the request must reach the network once");
+    assert!(
+        recorded[0].headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("authorization") && value == "Bearer staged-secret"
+        }),
+        "the credential must actually be injected on the loopback request"
+    );
+}
+
 #[tokio::test]
 async fn host_http_egress_helper_consumes_staged_credentials_after_first_egress() {
     let scope = sample_scope();

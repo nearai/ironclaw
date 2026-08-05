@@ -203,6 +203,18 @@ Slack extension, and complete its setup. Slack app ids, the bot token, the
 signing secret, and channel mappings are all configured there after the
 container starts.
 
+There is no `IRONCLAW_REBORN_SLACK_ENABLED` toggle — the enablement gate it fed
+was removed in #6116, and nothing has read the variable since. Do not add a
+`[slack]` section either: the retired setup keys (`signing_secret_env`,
+`bot_token_env`, `installation_id`, `team_id`, `api_app_id`, `channel_routes`,
+…) make `ironclaw serve` **refuse to start**.
+
+A volume seeded before #6116 may still carry a `[slack]` section. `enabled` on
+its own is inert and keeps booting; the entrypoint strips the retired setup keys
+from a `enabled = false` section on start. A section with `enabled = true` *and*
+retired keys is left alone deliberately and fails startup with a migration
+pointer, rather than a live channel config being rewritten underneath you.
+
 Set the WebUI identity environment variables as usual.
 
 Do not store OAuth, Slack, or LLM secrets in `config.toml`. Slack bot tokens

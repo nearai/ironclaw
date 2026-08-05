@@ -93,14 +93,20 @@ pub(crate) async fn submit_trace_envelope_to_endpoint_with_token(
         ));
     }
 
-    Ok(
-        parse_trace_submission_receipt(&body).unwrap_or_else(|| TraceSubmissionReceipt {
-            status: "submitted".to_string(),
-            credit_points_pending: Some(envelope.value.credit_points_pending),
-            credit_points_final: None,
-            explanation: envelope.value.explanation.clone(),
-        }),
-    )
+    // A 2xx whose body does not parse is not a receipt. Synthesizing
+    // `status: "submitted"` with a *locally estimated* credit told the user the
+    // server had accepted something it may never have seen — and the caller then
+    // recorded it as Submitted and deleted the queued envelope, destroying the
+    // only retryable copy (#7144). Every field of `TraceSubmissionReceipt` has a
+    // serde default, so `{}` already parses; reaching this branch means the body
+    // was not a JSON object at all (proxy HTML, a truncated read), which is
+    // exactly when inventing success is least defensible.
+    parse_trace_submission_receipt(&body).ok_or_else(|| {
+        TraceRemoteRequestFailure::response_invalid(
+            "trace submission",
+            "server returned success with a body that is not a submission receipt",
+        )
+    })
 }
 
 pub fn record_submitted_trace_envelope_for_scope(

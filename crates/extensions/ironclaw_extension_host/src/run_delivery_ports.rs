@@ -75,7 +75,7 @@ impl AuthChallengeProvider for RecipeAuthChallengeProvider {
                 .await
                 .map_err(|error| {
                     tracing::debug!(
-                        target = "ironclaw::reborn::channel_pairing",
+                        target: "ironclaw::reborn::channel_pairing",
                         %error,
                         "pairing challenge materialization failed"
                     );

@@ -119,7 +119,12 @@ pub fn compute_value_scorecard(envelope: &TraceContributionEnvelope) -> TraceVal
         .as_ref()
         .and_then(|analysis| analysis.novelty_score)
         .unwrap_or_else(|| (event_count / 12.0).clamp(0.15, 0.6))
-        .min(0.85);
+        // `.clamp`, not `.min`: `novelty_score` is an unvalidated
+        // `Option<f32>` off `embedding_analysis`, which is re-scored from the
+        // on-disk queue, so a negative value from a downstream embedding job
+        // used to pass straight through while its sibling `duplicate_score` was
+        // clamped both ways (#7144).
+        .clamp(0.0, 0.85);
     let duplicate_penalty = envelope
         .embedding_analysis
         .as_ref()
