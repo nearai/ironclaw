@@ -214,6 +214,12 @@ owned evidence and a green portable smoke must not be read as proof of them.
 
 ## Deep tier (nightly)
 
+`codebase-graph-refresh.yml` runs at 02:30 UTC, regenerates the committed
+`.codebase-memory/graph.db.zst` bootstrap snapshot from the default branch with
+a checksum-pinned `codebase-memory-mcp`, and opens or updates a normal review
+PR through the repository GitHub App. It never pushes generated state directly
+to `main`; required checks and human approval remain in the path.
+
 `nightly-deep-ci.yml` (04:00 UTC) reuses `platform-and-compat.yml`,
 `reborn-tests.yml`, and `reborn-e2e.yml` via `workflow_call` at full scope.
 `reborn-e2e.yml` owns the deterministic Reborn surface coverage used by pull
@@ -271,7 +277,8 @@ the configuration:
 ### Nightly alerting
 
 One path only: `nightly-watchdog.yml` (08:00 UTC) checks the latest scheduled
-run of each nightly — Nightly Deep CI, Reborn Playwright, IronClaw Stress. A
+run of each nightly — Codebase Graph Refresh, Nightly Deep CI, Reborn
+Playwright, IronClaw Stress. A
 run that is missing, stale (>26h: the cron didn't fire),
 or concluded anything but success posts a failure line (workflow, conclusion,
 failed job names, run link) to the Slack channel behind
