@@ -27,8 +27,8 @@ use sha2::{Digest, Sha256};
 
 use crate::error::LlmError;
 use crate::provider::{
-    CompletionRequest, CompletionResponse, FALLBACK_INDEX_METADATA_KEY, LlmProvider, ModelMetadata,
-    ToolCompletionRequest, ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, CompletionStreamSink, FALLBACK_INDEX_METADATA_KEY,
+    LlmProvider, ModelMetadata, ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// How often (in requests) to emit a cache statistics log line.
@@ -275,12 +275,33 @@ impl LlmProvider for CachedProvider {
         }
     }
 
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        // A cached response has no provider deltas to replay with their original
+        // timing. Keep the streaming contract honest by using the live provider
+        // path instead of silently returning a buffered cache hit.
+        self.inner.complete_streaming(request, sink).await
+    }
+
     async fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         // Never cache tool calls; they can trigger side effects.
         self.inner.complete_with_tools(request).await
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.inner
+            .complete_with_tools_streaming(request, sink)
+            .await
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {

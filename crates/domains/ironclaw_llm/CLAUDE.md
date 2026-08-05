@@ -347,7 +347,9 @@ Providers in this crate import it as `use ironclaw_common::llm_costs as costs;`
 
 ## Streaming Support
 
-`LlmProvider` exposes `complete_streaming()` and `complete_with_tools_streaming()` for provider text deltas. Providers that do not override these methods inherit the blocking `complete()` / `complete_with_tools()` fallback, so callers must treat streaming as opportunistic. The NEAR AI chat provider currently implements OpenAI-compatible SSE streaming for live assistant text; the final response remains authoritative for finish reason, tool calls, and usage accounting.
+`LlmProvider` exposes `complete_streaming()` and `complete_with_tools_streaming()` for provider text deltas. Native streaming is enabled only where IronClaw can observe an authoritative terminal event: NEAR AI, Anthropic OAuth, and Codex Responses. Rig-backed OpenAI Chat Completions and Anthropic API-key providers retain the buffered trait fallback because rig-core 0.33 synthesizes its final response after EOF, so IronClaw cannot distinguish completion from truncation. Other unvalidated providers also remain buffered, including custom OpenAI-compatible endpoints, Gemini OAuth, GitHub Copilot, Bedrock, and Rig-backed Ollama, DeepSeek, OpenRouter, and native Gemini.
+
+Text deltas are advisory UI progress; the returned response remains authoritative for text, tool calls, finish reason, reasoning artifacts, and usage. Provider decorators must forward both streaming methods. Retry or failover must not append a replacement after visible partial text unless the sink advertises atomic text-replacement support. The response cache bypasses lookup for streaming calls because a stored response cannot reproduce provider deltas honestly.
 
 ## Trace Recording
 

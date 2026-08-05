@@ -60,8 +60,8 @@ PATH_ATTR_PATTERN = re.compile(
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 REBORN_BASELINE_PATH = REPO_ROOT / "scripts" / "no_panics_reborn_baseline.txt"
 # The scope anchor is the shipping package's *name*, not its directory. The
-# package is `ironclaw` whether its manifest sits at crates/ironclaw_cli/
-# (today) or at crates/ironclaw_cli/ (the target layout, which keeps the
+# package is `ironclaw` wherever its manifest sits (crates/app/ironclaw_cli/
+# since the WS7 family move, which keeps the
 # package name and only renames the directory — PROPOSAL §5.1). Keying on the
 # path meant a move turned the whole gate into a crash or, worse, a shrunken
 # scan. See docs/reborn/target-architecture/CHECKLIST.md WS10.
@@ -1689,7 +1689,7 @@ class CheckNoPanicsTests(unittest.TestCase):
     def _shipping_metadata(
         normal_dependency_dir: str = "crates/normal_dependency",
         members: tuple[str, ...] | None = None,
-        shipping_dir: str = "crates/ironclaw_cli",
+        shipping_dir: str = "crates/app/ironclaw_cli",
     ) -> dict:
         shipping_id = "shipping"
         normal_id = "normal"
@@ -1759,8 +1759,8 @@ class CheckNoPanicsTests(unittest.TestCase):
             roots,
             sorted(
                 [
-                    (REPO_ROOT / "crates/ironclaw_cli/src/lib.rs").resolve(),
-                    (REPO_ROOT / "crates/ironclaw_cli/src/main.rs").resolve(),
+                    (REPO_ROOT / "crates/app/ironclaw_cli/src/lib.rs").resolve(),
+                    (REPO_ROOT / "crates/app/ironclaw_cli/src/main.rs").resolve(),
                     (REPO_ROOT / "crates/normal_dependency/src/lib.rs").resolve(),
                     (REPO_ROOT / "crates/normal_dependency/src/main.rs").resolve(),
                 ]
@@ -1786,7 +1786,7 @@ class CheckNoPanicsTests(unittest.TestCase):
         )
 
     def test_shipping_package_is_found_by_name_after_a_directory_rename(self) -> None:
-        """The scope anchor survives `crates/ironclaw_cli` -> `crates/ironclaw_cli`.
+        """The scope anchor survives `crates/app/ironclaw_cli` -> `crates/app/ironclaw_cli`.
 
         The package keeps its name (`ironclaw`) across that rename, so resolving
         by name keeps the whole gate pointed at the right dependency closure.

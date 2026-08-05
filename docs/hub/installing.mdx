@@ -1,0 +1,100 @@
+---
+title: "Installing skills & tools"
+description: "Install skills and tools from the IronHub catalog"
+---
+
+Packages from IronHub can be installed through the CLI or by asking your agent in chat.
+
+---
+
+## CLI
+
+### Search
+
+Filter the catalog by keyword:
+
+```bash
+ironclaw ironhub search github
+```
+
+### List
+
+Browse all entries, optionally filtered by kind:
+
+```bash
+# All entries
+ironclaw ironhub list
+
+# Tools only
+ironclaw ironhub list --kind tool
+
+# Skills only
+ironclaw ironhub list --kind skill
+```
+
+### Inspect an entry
+
+```bash
+ironclaw ironhub info <name> --kind tool
+ironclaw ironhub info <name> --kind skill
+```
+
+Prints the entry's provenance, version, and SHA-256 artifact digest. Use the digest to pin an exact version during install.
+
+### Install
+
+```bash
+ironclaw ironhub install <name> --kind tool
+ironclaw ironhub install <name> --kind skill
+```
+
+<Note>
+Community entries (provenance `New`) require explicit acknowledgement from the operator. The agent cannot install them autonomously.
+</Note>
+
+#### Pin to a version or digest
+
+By default IronClaw installs the version in the current manifest. To require a specific version or digest:
+
+```bash
+ironclaw ironhub install <name> --kind tool --expected-version "1.2.3"
+ironclaw ironhub install <name> --kind skill --expected-artifact-digest "sha256:abc123..."
+```
+
+#### Force reinstall
+
+```bash
+ironclaw ironhub install <name> --kind tool --force
+```
+
+---
+
+## Via chat
+
+Ask your agent to search IronHub, inspect an entry, or install a package. It will fetch the catalog, present matching results, and ask your approval before installing anything.
+
+---
+
+## Where things are installed
+
+| Package | Destination                                       |
+|---------|---------------------------------------------------|
+| Skills  | `~/.ironclaw/installed_skills/<name>/`            |
+| Tools   | Active as an agent tool immediately after install |
+
+---
+
+## Trust and tool access
+
+Packages installed from IronHub are **attenuated** — they have reduced tool access compared to packages you place directly in your skills directory:
+
+| Source                                        | Trust     | Tool access                                       |
+|-----------------------------------------------|-----------|---------------------------------------------------|
+| `~/.ironclaw/skills/` or workspace `skills/`  | Trusted   | Full — same access as the agent                   |
+| IronHub install                               | Installed | Read-only — no shell, no file write, no HTTP      |
+
+If you fully trust an IronHub skill, move it to `~/.ironclaw/skills/` after reviewing its contents.
+
+<Warning>
+Never move a skill you haven't reviewed into the trusted directory. A skill in `~/.ironclaw/skills/` has the same execution power as you do.
+</Warning>

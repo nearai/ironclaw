@@ -59,7 +59,16 @@ FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "sch
 # (its prose names crate directories), which is how the gap surfaced. Same fix
 # as the `.claude/` and `.env.example` gaps above: classify it, rather than
 # loosen the arm that catches genuinely unknown paths.
-IGNORED_PREFIXES = ("docs/", "openwiki/", ".claude/", ".github/ISSUE_TEMPLATE/")
+IGNORED_PREFIXES = (
+    "docs/",
+    "openwiki/",
+    ".claude/",
+    ".github/ISSUE_TEMPLATE/",
+    # Agent bootstrap data only. The compressed graph and its attributes do
+    # not change an Ironclaw crate, test, or runtime surface. (#7215 commits
+    # the artifact; ported from main's planner at the #7152 refresh.)
+    ".codebase-memory/",
+)
 IGNORED_GUIDANCE_PATHS = {
     "tests/CLAUDE.md",
     "tests/integration/CLAUDE.md",
@@ -111,7 +120,7 @@ CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 # Asset trees that live outside every crate root but are compiled *into* a
 # workspace crate through a relative `include_bytes!` / `include_str!` that
 # escapes its own crate (the §11.2.7 reach-ins inventoried by
-# `crates/ironclaw_architecture_tests/tests/reborn_cross_crate_include_scan.rs`).
+# `crates/app/ironclaw_architecture_tests/tests/reborn_cross_crate_include_scan.rs`).
 # Cargo's package directories cannot see them, so the `crates/` arm below
 # resolves no package and the planner used to fail closed on every PR that
 # touched a first-party extension package.
@@ -205,6 +214,9 @@ PR_STATIC_CONTROL_PATHS = {
     "scripts/build-wasm-extensions.sh",
     "scripts/check-version-bumps.sh",
     "scripts/run-reborn-webui.sh",
+    # `codebase-graph.sh` inspects agent-only graph metadata. It does not
+    # execute or select a Reborn product test surface. (Arrived with #7215.)
+    "scripts/codebase-graph.sh",
     # Container build inputs. `platform-and-compat.yml` keys `has_docker_risk`
     # off exactly this pair and owns the image build; Code Style additionally
     # proves every `include_str!` target is inside each build context
