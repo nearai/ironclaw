@@ -464,7 +464,91 @@ where
         self.read_bounded(&scope, &scoped_path, self.max_bundle_file_bytes)
             .await
     }
+
+    async fn list_skill_bundle_files(
+        &self,
+        run_context: &LoopRunContext,
+        bundle_id: &SkillBundleId,
+    ) -> Result<Vec<SkillFilePath>, SkillBundleSourceError> {
+        let root = self
+            .roots
+            .iter()
+            .filter(|root| root_visible_for_run(root, run_context))
+            .find(|root| root.source_kind() == bundle_id.source_kind())
+            .ok_or(SkillBundleSourceError::BundleNotFound)?;
+        let scope = resource_scope_for_run(run_context);
+        let bundle_root = ScopedPath::new(format!(
+            "{}/{}",
+            root.root().as_str().trim_end_matches('/'),
+            bundle_id.name()
+        ))
+        .map_err(|_| SkillBundleSourceError::InvalidFilePath)?;
+
+        let mut files = Vec::new();
+        let mut pending = vec![(bundle_root.clone(), String::new())];
+        // Bounded on both axes. A bundle is authored by a model, so neither its file count nor its
+        // depth is trustworthy, and enumeration runs on the activation path of every turn.
+        let mut remaining = MAX_BUNDLE_FILES_LISTED;
+        let mut depth_budget = MAX_BUNDLE_DEPTH_LISTED;
+        while let Some((directory, prefix)) = pending.pop() {
+            if remaining == 0 {
+                break;
+            }
+            let entries = match self.filesystem.list_dir(&scope, &directory).await {
+                Ok(entries) => entries,
+                // A missing or unreadable subdirectory is not a reason to fail activation.
+                Err(error) if is_not_found(&error) => continue,
+                Err(error) => return Err(map_filesystem_error(error)),
+            };
+            for entry in entries {
+                if remaining == 0 {
+                    break;
+                }
+                let relative = if prefix.is_empty() {
+                    entry.name.clone()
+                } else {
+                    format!("{prefix}/{}", entry.name)
+                };
+                match entry.file_type {
+                    FileType::Directory if depth_budget > 0 => {
+                        let Ok(child) = ScopedPath::new(format!(
+                            "{}/{}",
+                            directory.as_str().trim_end_matches('/'),
+                            entry.name
+                        )) else {
+                            continue;
+                        };
+                        pending.push((child, relative));
+                    }
+                    FileType::Directory => {}
+                    _ => {
+                        // The manifest is already model context; a staged copy would be a second
+                        // source of truth that discovery never reads.
+                        if relative == SkillFilePath::skill_md().as_str() {
+                            continue;
+                        }
+                        // Host-written bookkeeping, not part of the authored bundle.
+                        if entry.name.starts_with('.') {
+                            continue;
+                        }
+                        if let Ok(path) = SkillFilePath::new(&relative) {
+                            files.push(path);
+                            remaining -= 1;
+                        }
+                    }
+                }
+            }
+            depth_budget = depth_budget.saturating_sub(1);
+        }
+        files.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        Ok(files)
+    }
 }
+
+/// Caps on bundle enumeration. A bundle is model-authored, so its shape is untrusted, and this runs
+/// on the activation path of every turn.
+const MAX_BUNDLE_FILES_LISTED: usize = 64;
+const MAX_BUNDLE_DEPTH_LISTED: usize = 4;
 
 fn resource_scope_for_run(run_context: &LoopRunContext) -> ResourceScope {
     let mut scope = run_context.scope.to_resource_scope();

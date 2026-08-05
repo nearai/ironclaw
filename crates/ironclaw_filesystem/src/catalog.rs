@@ -216,6 +216,13 @@ impl RootFilesystem for CompositeRootFilesystem {
         BackendCapabilities::default()
     }
 
+    fn host_path_for(&self, path: &VirtualPath) -> Option<std::path::PathBuf> {
+        // Routes exactly like every read and write: longest-prefix mount, then ask that backend. A
+        // database-backed mount answers `None` by the trait default, so host reachability is reported
+        // by the same table that serves the data rather than by a parallel list that can disagree.
+        self.matching_mount(path).ok()?.backend.host_path_for(path)
+    }
+
     // ── Unified entry plane ──
 
     async fn put(

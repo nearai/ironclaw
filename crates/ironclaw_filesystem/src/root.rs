@@ -45,6 +45,27 @@ pub trait RootFilesystem: Send + Sync {
         BackendCapabilities::default()
     }
 
+    /// The host path backing `path`, if any backend under it is a real directory on disk.
+    ///
+    /// `None` means "no host process can ever open this" — a database-backed root. This is the single
+    /// authority on host reachability, and it exists because there were three of them: the composite's
+    /// mount table, `DiskFilesystem`'s own `mount_local` table, and `HostProcessPort`'s separate
+    /// `workdir_aliases` list built at composition time from a different value.
+    ///
+    /// They disagreed, silently. Under hosted single-tenant the file tools resolved `/workspace` to
+    /// `<workspace_root>/tenants/<t>/users/<u>` (per-caller scoping) while the shell's alias resolved
+    /// the same string to `<workspace_root>`, so an agent wrote `scripts/egfr.py` with `write_file`,
+    /// ran `cd /workspace && python3 scripts/egfr.py`, and landed three directories above its own
+    /// file. Nothing errored; the script simply was not there.
+    ///
+    /// Returning the joined path without requiring it to exist is deliberate: a working directory or
+    /// an output path that has not been created yet is still correctly *backed*, and existence is the
+    /// caller's question, not this one's.
+    fn host_path_for(&self, path: &VirtualPath) -> Option<std::path::PathBuf> {
+        let _ = path;
+        None
+    }
+
     // ─── Unified entry plane ──────────────────────────────────────────────
 
     /// Write an [`Entry`] at `path` with a compare-and-swap precondition.
