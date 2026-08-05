@@ -35,7 +35,7 @@ frontend edit. This is the single biggest gap and the clearest win.
 | Step | Action | Target |
 |---|---|---|
 | 1.1 | Seed `DESIGN.md` from `apdd-kit/templates/DESIGN.template.md`; fill §1 principles, §2 theming (map to `src/design-system/theme.ts` light/dark), §3 typography, §4 a11y governance, §6 taxonomy tiers, **§7 REJECT list**. | `docs/design/DESIGN.md` |
-| 1.2 | Write `.claude/rules/design.md` (adapted from `apdd-kit/rules/design.md`): `paths:` → `crates/ironclaw_webui/frontend/src/**`; content = styling/theming/a11y/taxonomy + "read DESIGN.md first" + REJECT gate. | `.claude/rules/design.md` |
+| 1.2 | Write `.claude/rules/design.md` (adapted from `apdd-kit/rules/design.md`): `paths:` → `crates/product/ironclaw_webui/frontend/src/**`; content = styling/theming/a11y/taxonomy + "read DESIGN.md first" + REJECT gate. | `.claude/rules/design.md` |
 | 1.3 | Codify the **token rule**: no raw hex at call sites; every custom color ships light+dark; `ironclaw`-prefixed semantic tokens. Reconcile with the existing `theme-colors.test.ts`. | `DESIGN.md` §2 + rule |
 | 1.4 | Add a CLAUDE.md pointer: "UI work conforms to `docs/design/DESIGN.md`; its REJECT list is a hard gate." | `CLAUDE.md` |
 | 1.5 | Consolidate the **embedded-AI-agent invariants** into a single referenced "What NOT to do" list, mapping **every** invariant named in EVALUATION §1 to its IronClaw home so none is lost: **keys encrypted at rest** (secrets/credential-storage path), **per-agent config in the DB not env vars** (`RootFilesystem`-persisted config), **tenant/scoped context on every LLM call** (capability-dispatch + scoped-filesystem isolation), **LLM-data-never-deleted**, and **credential/extension identity** — cross-linking existing CLAUDE.md/safety rules, not duplicating them. | `CLAUDE.md` / `.claude/rules/` |
@@ -57,7 +57,7 @@ hallucinates props), and a11y/token/interaction tests in the existing Vitest.
 
 | Step | Action | Target |
 |---|---|---|
-| 2.1 | Add Storybook via **pnpm** (`pnpm@11.7.0`, the repo's declared package manager) as **pinned `devDependencies`** — `storybook` + the addons in 2.2 — commit the updated `pnpm-lock.yaml`, then run init/config. Storybook is a declared dependency of **neither `package.json` nor the lockfile** today, so treat this as a fresh, pinned install and **verify from a clean `pnpm install --frozen-lockfile`** — do not rely on any stray copy in the local (gitignored) `node_modules`. | `crates/ironclaw_webui/frontend` |
+| 2.1 | Add Storybook via **pnpm** (`pnpm@11.7.0`, the repo's declared package manager) as **pinned `devDependencies`** — `storybook` + the addons in 2.2 — commit the updated `pnpm-lock.yaml`, then run init/config. Storybook is a declared dependency of **neither `package.json` nor the lockfile** today, so treat this as a fresh, pinned install and **verify from a clean `pnpm install --frozen-lockfile`** — do not rely on any stray copy in the local (gitignored) `node_modules`. | `crates/product/ironclaw_webui/frontend` |
 | 2.2 | Configure `.storybook/main.ts` with addons: `@storybook/addon-vitest`, `-a11y`, `-docs`, `-mcp` (+ `@chromatic-com/storybook` deferred to Phase 4). | `.storybook/` |
 | 2.3 | `.storybook/preview.ts`: import the global stylesheet (tokens load), wrap stories in the app theme provider decorator, set a11y test mode `'todo'` initially. | `.storybook/preview.ts` |
 | 2.4 | Author stories for **Tier-2 primitives first** (buttons, inputs, the items in `src/components/`): a smoke play test, a **token/CSS check** (computed style == token), and variant stories per visual state. | `src/**/*.stories.tsx` |
@@ -87,7 +87,7 @@ Rule 1 discoverability — without bureaucratizing backend work.
 |---|---|---|
 | 3.1 | Create `docs/features/_templates/` from the kit's `FEATURE_SPEC` / `IMPLEMENTATION_PLAN` / `TEST_PLAN` / `FEATURE_LITE` / `FEATURE_REGISTRY` templates (substitute IronClaw terms). | `docs/features/_templates/` |
 | 3.2 | Pilot with **one real WebUI feature** — e.g. adopt an existing surface (onboarding, chat, or the agent-activity-streaming work) into a `docs/features/<slug>/FEATURE.md` (lightweight tier) to prove the flow end-to-end. | `docs/features/<slug>/` |
-| 3.3 | Add a **`feature-workflow` design-scoped rule** (adapted from `apdd-kit/rules/feature-workflow.md`) with `paths:` limited to `crates/ironclaw_webui/frontend/src/**` (+ product-surface crates if desired) — so Rule 1 fires only where a spec pays for itself. | `.claude/rules/` |
+| 3.3 | Add a **`feature-workflow` design-scoped rule** (adapted from `apdd-kit/rules/feature-workflow.md`) with `paths:` limited to `crates/product/ironclaw_webui/frontend/src/**` (+ product-surface crates if desired) — so Rule 1 fires only where a spec pays for itself. | `.claude/rules/` |
 | 3.4 | Add lightweight `// Feature: <slug>` headers to **frontend** feature files only; keep backend discovery on the knowledge graph + `openwiki/`. | frontend `src/**` |
 | 3.5 | Seed the registry; document that the feature-doc header `Status` is canonical and the registry mirrors it. | `docs/features/_templates/README.md` |
 

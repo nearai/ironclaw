@@ -132,7 +132,7 @@ Where IronClaw diverges from the kit:
 
 ### The frontend is a near-perfect fit for the kit's design half
 
-The WebUI frontend ([`crates/ironclaw_webui/frontend`](../../../crates/ironclaw_webui/frontend))
+The WebUI frontend ([`crates/product/ironclaw_webui/frontend`](../../../crates/product/ironclaw_webui/frontend))
 is **React 19 + Vite + Tailwind v4 + TypeScript + Vitest** — precisely the stack
 the design track targets. It already has:
 

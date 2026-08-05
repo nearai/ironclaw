@@ -56,7 +56,7 @@ is additive and copy-in; nothing forces a rewrite of existing crates or CI.
 | Component | Why | IronClaw target |
 |---|---|---|
 | **`DESIGN.md` constitution** | Highest-leverage gap; agentic UI without it invites hallucinated props/hex and skipped a11y. | New root or `docs/design/DESIGN.md`, seeded from `templates/DESIGN.template.md`; substitute React/Tailwind/`ironclaw` token prefix. |
-| **Design/UX `.claude/rules/`** (styling, theming, a11y, taxonomy, handoff) | Auto-load on frontend edits — the mechanism IronClaw already trusts, applied to a surface that has none. | `.claude/rules/design.md` (+ optional `design-a11y.md`), `paths:` scoped to `crates/ironclaw_webui/frontend/src/**`. |
+| **Design/UX `.claude/rules/`** (styling, theming, a11y, taxonomy, handoff) | Auto-load on frontend edits — the mechanism IronClaw already trusts, applied to a surface that has none. | `.claude/rules/design.md` (+ optional `design-a11y.md`), `paths:` scoped to `crates/product/ironclaw_webui/frontend/src/**`. |
 | **Storybook workbench + MCP + stories-as-tests** | Isolated component dev, `get-documentation` prop-grounding, and a11y/token/interaction tests in the existing Vitest. Storybook is *not* a declared dependency today (absent from `package.json` and `pnpm-lock.yaml`), so adoption is an explicit, pinned install — not "already there." | Add pinned `storybook` + `@storybook/addon-{vitest,a11y,docs,mcp}` as `devDependencies` via **pnpm**, commit the lockfile, configure `.storybook/`, and author stories per Tier-2/3 component. |
 | **Component taxonomy (5-tier purity model)** | Codifies the implicit `components/` (pure) vs `pages/` (bound) split so Tiers 2–3 stay renderable in isolation. | Section in `DESIGN.md`; enforced by the design rule + REJECT list. |
 | **Critical User Journeys registry + `critical-flows` rule** | Turns IronClaw's e2e/Playwright coverage into a named regression baseline with a hot-path auto-load trigger. | `docs/_reference/CRITICAL_FLOWS.md` (or `docs/qa/CRITICAL_FLOWS.md`) + `.claude/rules/critical-flows.md`. |
@@ -86,7 +86,7 @@ is additive and copy-in; nothing forces a rewrite of existing crates or CI.
 
 - A **`DESIGN.md`** exists and is referenced from CLAUDE.md as a hard gate for
   UI work; its REJECT list is concrete and testable.
-- Editing any `crates/ironclaw_webui/frontend/src/**` file **auto-loads a design
+- Editing any `crates/product/ironclaw_webui/frontend/src/**` file **auto-loads a design
   rule** (tokens, a11y, taxonomy, handoff) — verified by inspection.
 - **Storybook runs** in the frontend with the MCP addon, and at least the
   **atoms/primitives** ship stories with a smoke play test, a token/CSS check,
