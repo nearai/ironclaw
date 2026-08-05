@@ -177,6 +177,12 @@ pub async fn discover_rc1_channel_migration_scopes(
         Err(error) => return Err(log_unavailable(error)),
     };
     if tenant_entries.len() > MAX_RC1_CHANNEL_TENANTS {
+        tracing::debug!(
+            root = %tenants_root,
+            limit = MAX_RC1_CHANNEL_TENANTS,
+            observed = tenant_entries.len(),
+            "rc1 channel migration tenant discovery bound exceeded"
+        );
         return Err(Rc1ChannelStateMigrationError::Unavailable);
     }
     let mut scopes = Vec::new();
@@ -404,6 +410,12 @@ async fn bounded_directory_names(
         Err(error) => return Err(log_unavailable(error)),
     };
     if entries.len() > limit {
+        tracing::debug!(
+            root = %root,
+            limit,
+            observed = entries.len(),
+            "rc1 channel migration directory discovery bound exceeded"
+        );
         return Err(Rc1ChannelStateMigrationError::Unavailable);
     }
     Ok(entries
@@ -424,6 +436,12 @@ async fn probe_secret_scope(
 ) -> Result<(), Rc1ChannelStateMigrationError> {
     *scope_candidates = scope_candidates.saturating_add(1);
     if *scope_candidates > MAX_RC1_CHANNEL_SECRET_SCOPE_CANDIDATES {
+        tracing::debug!(
+            root = secret_root,
+            limit = MAX_RC1_CHANNEL_SECRET_SCOPE_CANDIDATES,
+            observed = *scope_candidates,
+            "rc1 channel migration secret-scope discovery bound exceeded"
+        );
         return Err(Rc1ChannelStateMigrationError::Unavailable);
     }
     for handle in handles {
@@ -1606,6 +1624,12 @@ async fn query_all(
         };
         let count = page.len();
         if rows.len().saturating_add(count) > MAX_RC1_CHANNEL_ROWS_PER_ROOT {
+            tracing::debug!(
+                root = %prefix,
+                limit = MAX_RC1_CHANNEL_ROWS_PER_ROOT,
+                observed = rows.len().saturating_add(count),
+                "rc1 channel migration row discovery bound exceeded"
+            );
             return Err(Rc1ChannelStateMigrationError::Unavailable);
         }
         rows.extend(page);
