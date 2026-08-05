@@ -10,9 +10,9 @@ to the sealed `ironclaw_agent_loop` crate**. Demo value is the top priority.
 
 - Two parallel stacks: **engine v2** (`ironclaw_engine`) already has the full learning
   system but is **not** wired into the demo runtime; the demo binary `ironclaw-reborn`
-  (crate `ironclaw_reborn_cli`) has **zero dependency on `ironclaw_engine`**. Engine v2 is a
+  (crate `ironclaw_cli`) has **zero dependency on `ironclaw_engine`**. Engine v2 is a
   **blueprint to port**, not a runtime to enable.
-- The runtime is the **Reborn stack** (`ironclaw_runner` + `ironclaw_agent_loop` +
+- The runtime is the **Reborn stack** (`ironclaw_turn_runner` + `ironclaw_agent_loop` +
   `ironclaw_turns` + `ironclaw_webui_v2`), WebChat v2 @ `:3000/v2`, provider NEAR AI,
   live model `deepseek-ai/DeepSeek-V4-Flash`.
 - The skill closed-loop already exists in Reborn: `ironclaw_skills::{install_skill,update_skill}`
@@ -37,7 +37,7 @@ to the sealed `ironclaw_agent_loop` crate**. Demo value is the top priority.
 2. **`install_skill` is create-only.** Re-learn/evolve must use `update_skill` with a
    **byte-stable frontmatter `name`** (slugified, deterministic). Name must pass
    `validate_skill_name` (alnum/`._-`, no leading dash/dot, no spaces).
-3. **Module lives inside `ironclaw_reborn_composition`** (`RebornLocalSkillManagementPort`
+3. **Module lives inside `ironclaw_composition`** (`RebornLocalSkillManagementPort`
    is `pub(crate)`).
 4. **Post-run work is detached.** Inside `TurnEventSink::publish`, `tokio::spawn` and return
    `Ok(())` immediately — never await the LLM inline (would stall turn-completion publication).
@@ -71,7 +71,7 @@ to the sealed `ironclaw_agent_loop` crate**. Demo value is the top priority.
 - Add a `learning` model slot config pinned to a strong model.
 
 ### Phase 1 — Extraction loop (core; Day 1)
-1. New `extraction` module in `ironclaw_reborn_composition` exposing
+1. New `extraction` module in `ironclaw_composition` exposing
    `async fn extract_skill_from_run(scope, thread_id, run_id, models, skill_port)`.
 2. Read transcript + substantive gate (≥N steps & ≥M tool results).
 3. One strong-model call (port of `mission_skill_extraction.md`) → SKILL.md
@@ -130,13 +130,13 @@ for scoring (single-LLM-call proxy only — disclose the metric difference vs Ph
 Branch `feat/skill-evolution` off `origin/main`.
 
 ### Increment 1 — turn-end seam (DONE, compiles clean)
-- `crates/ironclaw_reborn_composition/src/skill_learning.rs`: `SkillLearningTurnEventSink`
+- `crates/ironclaw_composition/src/skill_learning.rs`: `SkillLearningTurnEventSink`
   (on `TurnEventKind::Completed`, reads the run transcript via
   `SessionThreadService::load_context_window`, gates >=3 tool actions & >=5 messages) +
   `CompositeTurnEventSink` (fans the single `turn_event_sink` slot to both trace-capture and
   skill-learning — additive, no change to existing behavior).
 - Wired at `runtime.rs` (composed at the trace-capture site; `turn_event_sink: Some(turn_event_sink)`);
-  module registered in `lib.rs`. `cargo check -p ironclaw_reborn_composition` green.
+  module registered in `lib.rs`. `cargo check -p ironclaw_composition` green.
 - Modeled on `trace_capture.rs` (the existing non-run post-completion sink).
 
 ### Increment 2 — distillation logic crate (DONE)

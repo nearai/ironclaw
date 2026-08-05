@@ -13,7 +13,7 @@ profile / account in the web UI), routed through host network egress.
 
 **Architecture:** New capability mirrors `trace_commons.profile_token`: consent
 gate → enrollment pre-check via `resolve_trace_credentials` → `HostEgressContributionSink`
-→ a new `ironclaw_reborn_traces` sink call that POSTs `/v1/account/login-links`
+→ a new `ironclaw_trace_commons` sink call that POSTs `/v1/account/login-links`
 with the per-user subject and returns the `{ account_id, url }` response. The raw
 URL is returned to the user (it is a one-time, user-facing link, not a stored
 bearer credential).
@@ -31,7 +31,7 @@ bearer credential).
   `confirmed == true`.
 - Capability id: `builtin.trace_commons.account_login_link`. Schema file:
   `schemas/builtin/trace_commons-account_login_link.input.v1.json`.
-- Tests: `cargo test -p ironclaw_reborn_traces` (sink call) and
+- Tests: `cargo test -p ironclaw_trace_commons` (sink call) and
   `cargo test --package ironclaw_host_runtime --test trace_commons_dispatch_e2e`
   (dispatch caller).
 
@@ -40,7 +40,7 @@ bearer credential).
 ### Task 1: `mint_account_login_link_for_scope_via_sink` in reborn_traces
 
 **Files:**
-- Modify: `crates/ironclaw_reborn_traces/src/contribution.rs` (add near
+- Modify: `crates/ironclaw_trace_commons/src/contribution.rs` (add near
   `mint_profile_attribution_token_for_scope_via_sink` at line 5546)
 - Test: same file, test module (mirror the mock-issuer pattern at 12558).
 
@@ -115,7 +115,7 @@ async fn mint_account_login_link_posts_subject_and_returns_url() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p ironclaw_reborn_traces mint_account_login_link_posts_subject`
+Run: `cargo test -p ironclaw_trace_commons mint_account_login_link_posts_subject`
 Expected: FAIL — function not found.
 
 - [ ] **Step 3: Implement the sink call**
@@ -204,13 +204,13 @@ one mirroring `for_envelope` but with `trace_id/submission_id = None`.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p ironclaw_reborn_traces mint_account_login_link_posts_subject`
+Run: `cargo test -p ironclaw_trace_commons mint_account_login_link_posts_subject`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/ironclaw_reborn_traces/src/contribution.rs
+git add crates/ironclaw_trace_commons/src/contribution.rs
 git commit -m "feat(traces): mint_account_login_link_via_sink (POST /v1/account/login-links)"
 ```
 
@@ -322,7 +322,7 @@ pub(super) async fn dispatch_account_login_link(
     }
     let tenant_id = request.scope.tenant_id.as_str();
     let user_id = request.scope.user_id.as_str();
-    match ironclaw_reborn_traces::contribution::resolve_trace_credentials(tenant_id, user_id) {
+    match ironclaw_trace_commons::contribution::resolve_trace_credentials(tenant_id, user_id) {
         Ok(Some(r)) if r.policy.enabled => {}
         Ok(_) => return Ok(account_login_link_error_value("not enrolled in Trace Commons".into())),
         Err(e) => return Ok(account_login_link_error_value(e.to_string())),
@@ -336,7 +336,7 @@ pub(super) async fn dispatch_account_login_link(
         scope: request.scope.clone(),
         capability_id: request.capability_id.clone(),
     };
-    match ironclaw_reborn_traces::contribution::mint_account_login_link_via_sink(
+    match ironclaw_trace_commons::contribution::mint_account_login_link_via_sink(
         tenant_id, user_id, &sink,
     ).await {
         Ok(link) => Ok(json!({

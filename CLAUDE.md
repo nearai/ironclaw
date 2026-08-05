@@ -30,11 +30,11 @@ This repo can be indexed into a **codebase knowledge graph** (the `codebase-memo
 **All new work lives in the Reborn stack under `crates/`.** There is no longer a
 v1 `src/` monolith or a legacy crate enclave to route around — `crates/` is the
 whole production tree. A Reborn WebUI feature crosses
-`ironclaw_webui → ProductSurface → ironclaw_product → composition → runtime`;
-the binary entry point is `crates/ironclaw_reborn_cli` (binary name `ironclaw`).
+`ironclaw_webui → ProductSurface → ironclaw_assistant → composition → runtime`;
+the binary entry point is `crates/app/ironclaw_cli` (binary name `ironclaw`).
 Start from the `reborn-feature` skill — it maps those layers so you wire a
 feature in one pass instead of layer-by-layer. The workspace root
-(`Cargo.toml`, package `ironclaw_reborn_integration_tests`) now hosts only the
+(`Cargo.toml`, package `ironclaw_integration_tests`) now hosts only the
 Reborn integration test suite (`tests/integration/*`); it has no lib/bin of its
 own.
 
@@ -98,7 +98,7 @@ Python/Playwright suite in `tests/e2e/CLAUDE.md`.
 - Prefer strong types over strings (enums, newtypes)
 - Keep functions focused, extract helpers when logic is reused
 - Comments for non-obvious logic only
-- **Prompt templates live in files, not Rust code**: Multi-line prompt strings (mission goals, system prompts, preambles) go in a `prompts/*.md` file **inside the crate that owns the behavior** and are loaded via `include_str!()`. Reborn examples: `crates/ironclaw_loop_host`, `crates/ironclaw_turns`, `crates/ironclaw_skills` (`ls -d crates/*/prompts` lists every crate that owns prompt files). Never inline large prompt templates as Rust string constants — they're hard to read, review, and iterate on. Single-line format strings are fine inline.
+- **Prompt templates live in files, not Rust code**: Multi-line prompt strings (mission goals, system prompts, preambles) go in a `prompts/*.md` file **inside the crate that owns the behavior** and are loaded via `include_str!()`. Reborn examples: `crates/loop/ironclaw_loop_host`, `crates/kernel/ironclaw_turns`, `crates/domains/ironclaw_skills` (`ls -d crates/*/prompts` lists every crate that owns prompt files). Never inline large prompt templates as Rust string constants — they're hard to read, review, and iterate on. Single-line format strings are fine inline.
 - **Logging levels matter for REPL/TUI**: `info!` and `warn!` output appears in the REPL and corrupts the terminal UI. Use `debug!` for internal diagnostics (trace analysis, reflection results, engine internals). Reserve `info!` for user-facing status that the REPL intentionally renders. Background tasks (reflection, trace analysis) must NEVER use `info!` — it breaks the interactive display.
 - **Test through the caller, not just the helper**: When a predicate/classifier/transform helper gates a side effect (HTTP, DB write, OAuth, UI mutation, tool execution) and has any wrapper or computed input between it and that side effect, a unit test on the helper alone is *not* sufficient regression coverage. Add a test that drives the call site — typically a `*_handler`, `factory::create_*`, or `manager::*` — at the integration tier (`cargo test --features integration`) or higher. The same applies to test mocks: if you mock a multi-arg runtime API like `window.open(url, target, features)`, the mock must capture every argument the production caller passes. See `.claude/rules/testing.md` ("Test Through the Caller, Not Just the Helper") for the full rule and the bug examples that motivated it.
 
@@ -117,7 +117,7 @@ product identity (`slack`, `github`, `gmail`); `ProviderId` is the credential
 authority namespace and may be shared across extensions (`google` backs
 gmail + drive + calendar + …). There is no separate channel registry, no
 `slack_bot`/`slack_personal` split, and no extension `kind` wire string —
-`crates/ironclaw_architecture/tests/reborn_retired_taxonomy.rs` pins the
+`crates/app/ironclaw_architecture_tests/tests/reborn_retired_taxonomy.rs` pins the
 retired vocabulary at zero. Start from the `reborn-extension-surfaces` skill
 when adding an integration. The identity rules below predate the unified model
 and remain binding wherever credential/extension identities appear:
@@ -145,13 +145,13 @@ Rules:
 - New auth/onboarding code must reuse the shared resolver/controller path instead of adding channel-specific or frontend-only fallbacks.
 
 The `credential_name` / `extension_name` newtypes live in
-`crates/ironclaw_common/src/identity.rs` (see `.claude/rules/types.md`). The v1
+`crates/contracts/ironclaw_common/src/identity.rs` (see `.claude/rules/types.md`). The v1
 resolver/auth-flow ownership (`src/auth/extension.rs`, the web `pending_auth`
 path, the `ironclaw_gateway` onboarding JS) was deleted under Tier B; the Reborn
 identity/product-auth model lives in the Reborn crates
-(`crates/ironclaw_reborn_identity/CONTRACT.md`, `crates/ironclaw_auth` — which
+(`crates/domains/ironclaw_identity/CONTRACT.md`, `crates/domains/ironclaw_auth` — which
 also owns the OAuth transport) and its WebUI onboarding in
-`crates/ironclaw_webui/frontend`.
+`crates/product/ironclaw_webui/frontend`.
 
 Key traits for extensibility: `ChannelAdapter`, `ToolAdapter`, `Extension`, `ProductSurface`, `CapabilityDispatcher` (all `ironclaw_host_api`), `RootFilesystem` (`ironclaw_filesystem`), `LlmProvider` (`ironclaw_llm`), `NetworkHttpEgress` (`ironclaw_network`), and the `ironclaw_hooks` sink/hook family. Re-derive with `rg -n "^pub trait " crates/<crate>/src` before relying on any name here.
 
@@ -161,24 +161,24 @@ All I/O is async with tokio. Use `Arc<T>` for shared state, `RwLock` for concurr
 
 ## Extracted Crates
 
-Safety logic lives in `crates/ironclaw_safety/`, skills in `crates/ironclaw_skills/`, multi-provider LLM integration in `crates/ironclaw_llm/`. **Import directly from the extracted crate** (e.g. `use ironclaw_safety::SafetyLayer`, `use ironclaw_skills::SkillRegistry`, `use ironclaw_llm::{LlmProvider, LlmError}`). These crates are the sole home of their types; always import from the owning crate.
+Safety logic lives in `crates/substrates/ironclaw_safety/`, skills in `crates/domains/ironclaw_skills/`, multi-provider LLM integration in `crates/domains/ironclaw_llm/`. **Import directly from the extracted crate** (e.g. `use ironclaw_safety::SafetyLayer`, `use ironclaw_skills::SkillRegistry`, `use ironclaw_llm::{LlmProvider, LlmError}`). These crates are the sole home of their types; always import from the owning crate.
 
 ## Project Structure
 
 All production code lives in the Reborn stack under `crates/` (the one
-workspace `exclude` is `crates/ironclaw_silk_decoder`, a standalone helper
+workspace `exclude` is `tools/ironclaw_silk_decoder`, a standalone helper
 binary). For where a symbol or subsystem lives, query the codebase knowledge
 graph (see "Code Discovery" above) or read the relevant crate's `CLAUDE.md` /
 `AGENTS.md`; `crates/AGENTS.md` is the crate-level map. The reborn-feature
 flow is described in `.claude/skills/reborn-feature/SKILL.md` (binary
-`ironclaw` in `crates/ironclaw_reborn_cli`).
+`ironclaw` in `crates/app/ironclaw_cli`).
 
 ```
 crates/                     # all production code (see crates/AGENTS.md for the full map)
-├── ironclaw_reborn_cli/    # binary entry point (binary name `ironclaw`)
-├── ironclaw_reborn_composition/  # wires storage/runtime services by profile
-├── ironclaw_product/             # product-facing orchestration and surface
-├── ironclaw_runner/ ironclaw_turns/ ironclaw_agent_loop/  # turn runtime + agent loop
+├── ironclaw_cli/    # binary entry point (binary name `ironclaw`)
+├── ironclaw_composition/  # wires storage/runtime services by profile
+├── ironclaw_assistant/             # product-facing orchestration and surface
+├── ironclaw_turn_runner/ ironclaw_turns/ ironclaw_agent_loop/  # turn runtime + agent loop
 ├── ironclaw_webui/         # WebChat v2 routes, SPA (frontend/) + serve wiring
 ├── ironclaw_filesystem/    # RootFilesystem mount catalog (persistence plane)
 ├── ironclaw_llm/ ironclaw_safety/ ironclaw_skills/  # extracted subsystems
@@ -194,25 +194,25 @@ tests/
 ## Database
 
 Reborn persistence goes through the `RootFilesystem` mount catalog
-(`crates/ironclaw_filesystem`); composition chooses concrete backends
+(`crates/substrates/ironclaw_filesystem`); composition chooses concrete backends
 (PostgreSQL, libSQL, local filesystem) by profile. Domain crates own record
 schemas and never branch on backend. When a domain supports multiple durable
 backends, keep behavioral parity via a shared conformance suite. See
-`crates/ironclaw_filesystem/CLAUDE.md` and `.claude/rules/database.md`.
+`crates/substrates/ironclaw_filesystem/CLAUDE.md` and `.claude/rules/database.md`.
 
 ## Module Specs
 
 When modifying a module with a spec, read the spec first. Code follows spec; spec is the tiebreaker.
 
-**Module-owned initialization:** Module-specific initialization logic (storage connection, transport creation, service wiring) must live in the owning crate as a public factory function — not reconstructed at the composition/route layer. Composition (`ironclaw_reborn_composition`) orchestrates calls to crate factories and chooses concrete backends by profile.
+**Module-owned initialization:** Module-specific initialization logic (storage connection, transport creation, service wiring) must live in the owning crate as a public factory function — not reconstructed at the composition/route layer. Composition (`ironclaw_composition`) orchestrates calls to crate factories and chooses concrete backends by profile.
 
 | Module | Spec |
 |--------|------|
-| `crates/ironclaw_llm/` | `crates/ironclaw_llm/CLAUDE.md` |
-| `crates/ironclaw_filesystem/` | `crates/ironclaw_filesystem/CLAUDE.md` |
-| `crates/ironclaw_webui/` | `crates/ironclaw_webui/CLAUDE.md` |
-| `crates/ironclaw_reborn_composition/` | `crates/ironclaw_reborn_composition/CLAUDE.md` |
-| `crates/ironclaw_reborn_identity/` | `crates/ironclaw_reborn_identity/CONTRACT.md` |
+| `crates/domains/ironclaw_llm/` | `crates/domains/ironclaw_llm/CLAUDE.md` |
+| `crates/substrates/ironclaw_filesystem/` | `crates/substrates/ironclaw_filesystem/CLAUDE.md` |
+| `crates/product/ironclaw_webui/` | `crates/product/ironclaw_webui/CLAUDE.md` |
+| `crates/app/ironclaw_composition/` | `crates/app/ironclaw_composition/CLAUDE.md` |
+| `crates/domains/ironclaw_identity/` | `crates/domains/ironclaw_identity/CONTRACT.md` |
 | `tests/` (scenario coverage map) | `tests/CLAUDE.md` |
 | `tests/integration/` | `tests/integration/CLAUDE.md` |
 | `tests/support/reborn_parity_qa/` | `tests/support/reborn_parity_qa/CLAUDE.md` |
@@ -237,7 +237,7 @@ SKILL.md files extend the agent's prompt with domain-specific instructions. See 
 
 ## Configuration
 
-See `.env.example` for all environment variables. LLM backends (`nearai`, `openai`, `anthropic`, `ollama`, `openai_compatible`, `tinfoil`, `bedrock`) documented in `crates/ironclaw_llm/CLAUDE.md`.
+See `.env.example` for all environment variables. LLM backends (`nearai`, `openai`, `anthropic`, `ollama`, `openai_compatible`, `tinfoil`, `bedrock`) documented in `crates/domains/ironclaw_llm/CLAUDE.md`.
 
 ## Adding a New Channel
 
@@ -245,10 +245,10 @@ A Reborn channel is one capability surface of an **extension** (unified model):
 the manifest (`reborn.extension_manifest.v3`) declares `[channel]` (ingress
 verification recipe, `[channel.config]`, egress allowlist, presentation) beside
 the extension's tools and auth recipes, and the extension's `ChannelAdapter`
-(`crates/ironclaw_host_api/src/product_adapter/channel_adapter.rs`) implements inbound normalize / deliver /
+(`crates/contracts/ironclaw_host_api/src/product_adapter/channel_adapter.rs`) implements inbound normalize / deliver /
 activate / cleanup. Binaries supply adapters through
 `RebornHostBindings::with_channel_extension_bindings`
-(`crates/ironclaw_reborn_composition/src/input.rs`); composition wires the
+(`crates/app/ironclaw_composition/src/input.rs`); composition wires the
 generic ingress router, pairing seam, identity bindings, and the host-owned
 delivery coordinator — never per-channel host code. Start from the
 `reborn-extension-surfaces` skill; the worked example is the Slack package
@@ -264,7 +264,7 @@ owning contracts are the source of truth for this boundary.
 
 ## Workspace & Memory
 
-Persistent memory with hybrid search lives in `crates/ironclaw_memory`
+Persistent memory with hybrid search lives in `crates/domains/ironclaw_memory`
 (model tools `ironclaw.memory.read` / `.write` / `.search` / `.tree`), persisted
 through the `RootFilesystem` mount catalog. Identity files (AGENTS.md, SOUL.md,
 USER.md, IDENTITY.md) are injected into the system prompt. (The v1 heartbeat

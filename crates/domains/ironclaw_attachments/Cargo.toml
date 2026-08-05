@@ -1,0 +1,44 @@
+[package]
+name = "ironclaw_attachments"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Channel-agnostic attachment landing for IronClaw Reborn: write attachment bytes through the scoped filesystem authority and return a ScopedPath storage key."
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "substrates"
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+ironclaw_common = { path = "../../contracts/ironclaw_common", version = "0.4.2" }
+ironclaw_extractors = { path = "../ironclaw_extractors", version = "0.1.0" }
+ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", version = "0.1.0" }
+ironclaw_host_api = { path = "../../contracts/ironclaw_host_api", version = "0.1.0" }
+# The landing/read ports error with `ProductSurfaceError`: their caller is a
+# product surface and the WebUI bytes endpoint maps the error code straight onto
+# an HTTP status. `ironclaw_product_contracts` is the neutral product-tier
+# contract crate and sits in the `contracts` layer, so this is a downward edge
+# like `host_api` — never a dependency on `ironclaw_assistant` itself.
+ironclaw_product_contracts = { path = "../../contracts/ironclaw_product_contracts", version = "0.1.0" }
+# `ThreadScope` — the ports are scoped per canonical thread.
+ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.11"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", version = "0.1.0", features = [
+    "test-support",
+] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

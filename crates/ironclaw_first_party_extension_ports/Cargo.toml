@@ -16,12 +16,12 @@ layer = "loops"
 [dependencies]
 async-trait = "0.1"
 futures = "0.3"
-ironclaw_filesystem = { path = "../ironclaw_filesystem" }
-ironclaw_host_api = { path = "../ironclaw_host_api" }
-ironclaw_loop_host = { path = "../ironclaw_loop_host" }
-ironclaw_skills = { path = "../ironclaw_skills" }
-ironclaw_loop_contracts = { path = "../ironclaw_loop_contracts", version = "0.1.0" }
-ironclaw_turns = { path = "../ironclaw_turns" }
+ironclaw_filesystem = { path = "../substrates/ironclaw_filesystem" }
+ironclaw_host_api = { path = "../contracts/ironclaw_host_api" }
+ironclaw_loop_host = { path = "../loop/ironclaw_loop_host" }
+ironclaw_skills = { path = "../domains/ironclaw_skills" }
+ironclaw_loop_contracts = { path = "../contracts/ironclaw_loop_contracts", version = "0.1.0" }
+ironclaw_turns = { path = "../kernel/ironclaw_turns" }
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"

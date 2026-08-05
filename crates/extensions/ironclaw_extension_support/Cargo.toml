@@ -34,13 +34,13 @@ blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
 glob = "0.3"
-ironclaw_auth = { path = "../../ironclaw_auth" }
-ironclaw_extractors = { path = "../../ironclaw_extractors" }
-ironclaw_filesystem = { path = "../../ironclaw_filesystem" }
-ironclaw_host_api = { path = "../../ironclaw_host_api" }
-ironclaw_observability = { path = "../../ironclaw_observability" }
-ironclaw_safety = { path = "../../ironclaw_safety" }
-ironclaw_skills = { path = "../../ironclaw_skills" }
+ironclaw_auth = { path = "../../domains/ironclaw_auth" }
+ironclaw_extractors = { path = "../../domains/ironclaw_extractors" }
+ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem" }
+ironclaw_host_api = { path = "../../contracts/ironclaw_host_api" }
+ironclaw_observability = { path = "../../substrates/ironclaw_observability" }
+ironclaw_safety = { path = "../../substrates/ironclaw_safety" }
+ironclaw_skills = { path = "../../domains/ironclaw_skills" }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -55,11 +55,11 @@ url = "2"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
-ironclaw_filesystem = { path = "../../ironclaw_filesystem", features = ["test-support"] }
-ironclaw_loop_contracts = { path = "../../ironclaw_loop_contracts", version = "0.1.0" }
-ironclaw_auth = { path = "../../ironclaw_auth", features = ["test-support"] }
+ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", features = ["test-support"] }
+ironclaw_loop_contracts = { path = "../../contracts/ironclaw_loop_contracts", version = "0.1.0" }
+ironclaw_auth = { path = "../../domains/ironclaw_auth", features = ["test-support"] }
 # Dev-only: coding-tool tests re-run the loop-boundary safe-summary validator
 # (`LoopSafeSummary`) to pin that dispatch failure reasons survive it.
-ironclaw_turns = { path = "../../ironclaw_turns" }
+ironclaw_turns = { path = "../../kernel/ironclaw_turns" }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "time"] }

@@ -26,8 +26,8 @@
 
 **Files:**
 
-- Modify: `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle_capabilities.rs`
+- Modify: `crates/ironclaw_composition/src/extension_host/extension_lifecycle.rs`
+- Modify: `crates/ironclaw_composition/src/extension_host/extension_lifecycle_capabilities.rs`
 
 ### Steps
 
@@ -41,9 +41,9 @@
 
 **Files:**
 
-- Modify: `crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs`
-- Create: `crates/ironclaw_reborn_composition/src/extension_host/extension_removal_cleanup.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/extension_host/mod.rs`
+- Modify: `crates/ironclaw_composition/src/extension_host/available_extensions.rs`
+- Create: `crates/ironclaw_composition/src/extension_host/extension_removal_cleanup.rs`
+- Modify: `crates/ironclaw_composition/src/extension_host/mod.rs`
 
 ### Steps
 
@@ -60,9 +60,9 @@
 
 **Files:**
 
-- Modify: `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle_capabilities.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/factory.rs`
+- Modify: `crates/ironclaw_composition/src/extension_host/extension_lifecycle.rs`
+- Modify: `crates/ironclaw_composition/src/extension_host/extension_lifecycle_capabilities.rs`
+- Modify: `crates/ironclaw_composition/src/factory.rs`
 
 ### Steps
 
@@ -85,9 +85,9 @@
 ### Steps
 
 - [ ] Run focused lifecycle, catalog, Slack, WebUI, and model-capability removal tests with required feature flags.
-- [ ] Run `cargo test -p ironclaw_extensions`.
-- [ ] Run `cargo test -p ironclaw_reborn_composition --lib`.
-- [ ] Run `cargo clippy -p ironclaw_reborn_composition --all-targets --all-features -- -D warnings` and report any verified unrelated baseline failures separately.
+- [ ] Run `cargo test -p ironclaw_extension_registry`.
+- [ ] Run `cargo test -p ironclaw_composition --lib`.
+- [ ] Run `cargo clippy -p ironclaw_composition --all-targets --all-features -- -D warnings` and report any verified unrelated baseline failures separately.
 - [ ] Run `cargo fmt --check` and `git diff --check`.
 - [ ] Require no production hits for `RemovableChannelCleanup`, `removable_channel_cleanup_for_summary`, `disconnect_channel_for_cleanup`, `cleanup_channel_before_remove`, or `IfConnectionFacadeSupportsChannel`.
 - [ ] Check `FEATURE_PARITY.md` and `CHANGELOG.md`; change them only if current repository conventions make the bug fix status inaccurate.

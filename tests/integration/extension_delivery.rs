@@ -57,6 +57,15 @@ use axum::http::{Request, StatusCode};
 use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
+use ironclaw_assistant::{
+    AdapterInstallationId, InboundOutcome, ParsedProductInbound, ProductAdapterId,
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProtocolAuthEvidence,
+    UserMessagePayload, VerifiedInbound,
+};
+use ironclaw_assistant::{
+    ResolveBindingRequest, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+};
+use ironclaw_composition::{ChannelHostAssemblyTestWiring, RebornRuntime};
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
 use ironclaw_extension_host::extension_ingress::{
@@ -85,19 +94,10 @@ use ironclaw_loop_host::{
     HostManagedModelResponse,
 };
 use ironclaw_outbound::OutboundDeliveryStatus;
-use ironclaw_product::{
-    AdapterInstallationId, InboundOutcome, ParsedProductInbound, ProductAdapterId,
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProtocolAuthEvidence,
-    UserMessagePayload, VerifiedInbound,
-};
-use ironclaw_product::{
-    ResolveBindingRequest, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
-};
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
 use ironclaw_product_contracts::binding::ProductBindingResolver;
 use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
-use ironclaw_reborn_composition::{ChannelHostAssemblyTestWiring, RebornRuntime};
 use ironclaw_threads::FinalizedAssistantMessageByRunRequest;
 use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnRunId, TurnScope, TurnStatus};
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
@@ -329,7 +329,7 @@ impl PostAdmissionObserver for RecordingForwardObserver {
     async fn observe_error(
         &self,
         envelope: ProductInboundEnvelope,
-        error: ironclaw_product::ProductAdapterError,
+        error: ironclaw_assistant::ProductAdapterError,
     ) {
         self.errors
             .lock()
@@ -374,7 +374,7 @@ fn delivery_run_services(
         outbound_store,
         route_store,
         communication_preferences,
-        project_filesystem: Arc::new(ironclaw_product::NoProjectFilesystem),
+        project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         coordinator,
         extension_id: extension_id.to_string(),
         fallback_notice_scope,
@@ -413,7 +413,7 @@ async fn preresolve_vendor_turn_scope(
     };
     let message = messages.first().expect("one normalized message");
     // Mirror of the sink's envelope assembly (`extension_ingress.rs::admit`).
-    let context = ironclaw_product::TrustedInboundContext::from_verified_evidence(
+    let context = ironclaw_assistant::TrustedInboundContext::from_verified_evidence(
         ProductAdapterId::new(adapter_id).expect("adapter id"),
         AdapterInstallationId::new(installation_id).expect("installation id"),
         Utc::now(),
@@ -1523,8 +1523,9 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     let installation_store = services
         .extension_installation_store_for_test()
         .expect("extension delivery profile carries the lifecycle store");
-    let installation_id = ironclaw_extensions::ExtensionInstallationId::new(TELEGRAM_INSTALLATION)
-        .expect("Telegram installation id");
+    let installation_id =
+        ironclaw_extension_registry::ExtensionInstallationId::new(TELEGRAM_INSTALLATION)
+            .expect("Telegram installation id");
     let installation = installation_store
         .get_installation(&installation_id)
         .await
