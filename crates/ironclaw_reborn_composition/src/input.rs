@@ -143,10 +143,6 @@ impl RebornRuntimeProcessBinding {
         Self::UserSandbox { process_port }
     }
 
-    pub(crate) fn is_user_sandbox(&self) -> bool {
-        matches!(self, Self::UserSandbox { .. })
-    }
-
     pub(crate) fn validate_for_production_policy(
         &self,
         runtime_policy: &EffectiveRuntimePolicy,

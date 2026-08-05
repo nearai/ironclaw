@@ -70,6 +70,17 @@ impl RailwayCli for FakeRailwayCli {
         {
             return Err(RuntimeProcessError::Timeout(timeout));
         }
+        if invocation
+            .args
+            .starts_with(&["sandbox".into(), "create".into()])
+            && let Some(index) = invocation.args.iter().position(|arg| arg == "--checkpoint")
+            && let Some(name) = invocation.args.get(index + 1)
+            && !self.checkpoints.lock().await.contains(name)
+        {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "Railway preview failed to create sandbox: checkpoint not found".into(),
+            ));
+        }
         self.invocations.lock().await.push(invocation.clone());
         if invocation.args.iter().any(|arg| arg == OUTER_EXEC_WRAPPER)
             && self.failed_worker_execs.swap(0, Ordering::SeqCst) > 0
@@ -90,22 +101,6 @@ impl RailwayCli for FakeRailwayCli {
             let number = self.next_sandbox.fetch_add(1, Ordering::SeqCst);
             return Ok(RailwayCliOutput {
                 stdout: format!(r#"{{"id":"sandbox-{number}"}}"#),
-                stderr: String::new(),
-            });
-        }
-        if invocation
-            .args
-            .starts_with(&["sandbox".into(), "checkpoint".into(), "list".into()])
-        {
-            let checkpoints = self.checkpoints.lock().await;
-            return Ok(RailwayCliOutput {
-                stdout: serde_json::to_string(
-                    &checkpoints
-                        .iter()
-                        .map(|key| serde_json::json!({ "key": key }))
-                        .collect::<Vec<_>>(),
-                )
-                .unwrap(),
                 stderr: String::new(),
             });
         }
@@ -193,6 +188,11 @@ async fn provisions_once_per_user_and_runs_ephemeral_workers_per_command() {
             .iter()
             .all(|call| !call.args.iter().any(|argument| argument == "--variable"))
     );
+    assert!(invocations.iter().all(|call| {
+        !call
+            .args
+            .starts_with(&["sandbox".into(), "checkpoint".into(), "list".into()])
+    }));
     for invocation in invocations.iter().filter(|invocation| {
         invocation
             .args
@@ -475,16 +475,29 @@ fn cli_failure_diagnostic_names_operation_and_redacts_auth_token() {
     )]);
 
     let message = railway_cli_failure_message(
-        RailwayCliOperation::ListCheckpoints,
+        RailwayCliOperation::CreateSandbox,
         Some(17),
         "request denied for railway-secret-token",
         &environment,
     );
 
-    assert!(message.contains("list checkpoints"));
+    assert!(message.contains("create sandbox"));
     assert!(message.contains("exit code 17"));
     assert!(message.contains("request denied for [REDACTED]"));
     assert!(!message.contains("railway-secret-token"));
+}
+
+#[test]
+fn only_an_explicit_missing_checkpoint_error_allows_fresh_provisioning() {
+    assert!(is_missing_checkpoint_error(
+        &RuntimeProcessError::ExecutionFailed("sandbox checkpoint not found".into())
+    ));
+    assert!(!is_missing_checkpoint_error(
+        &RuntimeProcessError::ExecutionFailed("project not found".into())
+    ));
+    assert!(!is_missing_checkpoint_error(&RuntimeProcessError::Timeout(
+        Duration::from_secs(1)
+    )));
 }
 
 async fn assert_rejected(

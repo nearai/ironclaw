@@ -572,17 +572,6 @@ impl DeploymentConfig {
         self.event_store_profile
     }
 
-    /// Whether this deployment requires a complete per-user sandbox process
-    /// binding. Provider selection stays at boot; generic composition only
-    /// sees this invariant and the opaque process port.
-    pub(crate) fn sandbox_enabled(&self) -> bool {
-        matches!(
-            self.profile,
-            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
-                | RebornCompositionProfile::HostedSingleTenantVolumeSandboxedRailway
-        )
-    }
-
     pub(crate) fn uses_hosted_extension_installation_state(&self) -> bool {
         self.hosted_extension_installation_state
     }
