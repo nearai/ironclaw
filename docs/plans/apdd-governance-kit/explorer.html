@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>APDD Governance Kit — Review</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    /* petrol-teal control-plane identity on cool, teal-biased paper */
+    --ground:      #ECF0EE;
+    --panel:       #F6F8F6;
+    --raised:      #FFFFFF;
+    --ink:         #16211F;
+    --ink-soft:    #4C5B58;
+    --ink-faint:   #798985;
+    --line:        #CCD7D3;
+    --line-soft:   #DDE4E1;
+    --accent:      #14636B;
+    --accent-deep: #0E4A50;
+    --accent-tint: #E1ECEC;
+    /* three-state governance status language (separate from accent) */
+    --have:        #2F7A57;
+    --have-bg:     #E2EFE7;
+    --partial:     #A9741C;
+    --partial-bg:  #F1E9D6;
+    --gap:         #A8483A;
+    --gap-bg:      #F2E0DB;
+    --grid:        rgba(20,99,107,0.06);
+
+    --font-display: "Helvetica Neue", "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+    --font-body:    system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono:    ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+
+    --maxw: 1080px;
+    --r: 3px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:      #0E1414;
+      --panel:       #151E1E;
+      --raised:      #1B2626;
+      --ink:         #E7EEEB;
+      --ink-soft:    #A3B4B0;
+      --ink-faint:   #74857f;
+      --line:        #2A3837;
+      --line-soft:   #223030;
+      --accent:      #45B3BF;
+      --accent-deep: #6FCBD4;
+      --accent-tint: #17302F;
+      --have:        #55B487;
+      --have-bg:     #16302A;
+      --partial:     #D6A64A;
+      --partial-bg:  #322A16;
+      --gap:         #D77A69;
+      --gap-bg:      #331F1C;
+      --grid:        rgba(69,179,191,0.07);
+    }
+  }
+  :root[data-theme="light"] {
+    --ground:#ECF0EE;--panel:#F6F8F6;--raised:#FFFFFF;--ink:#16211F;--ink-soft:#4C5B58;--ink-faint:#798985;
+    --line:#CCD7D3;--line-soft:#DDE4E1;--accent:#14636B;--accent-deep:#0E4A50;--accent-tint:#E1ECEC;
+    --have:#2F7A57;--have-bg:#E2EFE7;--partial:#A9741C;--partial-bg:#F1E9D6;--gap:#A8483A;--gap-bg:#F2E0DB;
+    --grid:rgba(20,99,107,0.06);
+  }
+  :root[data-theme="dark"] {
+    --ground:#0E1414;--panel:#151E1E;--raised:#1B2626;--ink:#E7EEEB;--ink-soft:#A3B4B0;--ink-faint:#74857f;
+    --line:#2A3837;--line-soft:#223030;--accent:#45B3BF;--accent-deep:#6FCBD4;--accent-tint:#17302F;
+    --have:#55B487;--have-bg:#16302A;--partial:#D6A64A;--partial-bg:#322A16;--gap:#D77A69;--gap-bg:#331F1C;
+    --grid:rgba(69,179,191,0.07);
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 17px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
+
+  /* ---- type ---- */
+  h1,h2,h3 { font-family: var(--font-display); font-weight: 800; letter-spacing: -0.02em; line-height: 1.08; text-wrap: balance; margin: 0; }
+  h2 { font-size: clamp(1.5rem, 3.4vw, 2.15rem); }
+  h3 { font-size: 1.16rem; letter-spacing: -0.01em; }
+  p { margin: 0 0 1rem; max-width: 68ch; }
+  a { color: var(--accent); text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent); text-underline-offset: 3px; }
+  strong { font-weight: 700; color: var(--ink); }
+  .mono { font-family: var(--font-mono); }
+  code {
+    font-family: var(--font-mono); font-size: 0.84em;
+    background: var(--accent-tint); color: var(--accent-deep);
+    padding: 0.08em 0.38em; border-radius: var(--r); border: 1px solid var(--line-soft);
+    word-break: break-word;
+  }
+  :root[data-theme="dark"] code, .eyebrow { }
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 0.72rem; font-weight: 600;
+    letter-spacing: 0.16em; text-transform: uppercase; color: var(--accent);
+    display: inline-flex; align-items: center; gap: 0.6ch;
+  }
+  .eyebrow::before { content: ""; width: 20px; height: 1px; background: var(--accent); opacity: 0.7; }
+
+  /* ---- top bar ---- */
+  .topbar {
+    position: sticky; top: 0; z-index: 40;
+    background: color-mix(in srgb, var(--ground) 88%, transparent);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--line);
+  }
+  .topbar .row { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: 54px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-family: var(--font-mono); font-size: 0.8rem; letter-spacing: 0.04em; color: var(--ink-soft); }
+  .brand b { color: var(--ink); font-weight: 700; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint); flex: none; }
+  .toggle {
+    font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase;
+    background: var(--panel); color: var(--ink-soft); border: 1px solid var(--line);
+    padding: 6px 12px; border-radius: var(--r); cursor: pointer;
+  }
+  .toggle:hover { border-color: var(--accent); color: var(--accent); }
+  .toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ---- hero ---- */
+  .hero { padding: 68px 0 40px; border-bottom: 1px solid var(--line); position: relative; overflow: hidden; }
+  .hero::before {
+    content:""; position:absolute; inset:0; z-index:0; pointer-events:none;
+    background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 26px 26px;
+    -webkit-mask-image: radial-gradient(ellipse 80% 70% at 70% 0%, #000 0%, transparent 75%);
+    mask-image: radial-gradient(ellipse 80% 70% at 70% 0%, #000 0%, transparent 75%);
+  }
+  .hero .wrap { position: relative; z-index: 1; }
+  .hero h1 { font-size: clamp(2.1rem, 6vw, 3.9rem); letter-spacing: -0.035em; margin: 18px 0 0; }
+  .hero h1 .accent { color: var(--accent); }
+  .lede { font-size: clamp(1.05rem, 2.2vw, 1.3rem); color: var(--ink-soft); max-width: 60ch; margin-top: 18px; line-height: 1.5; }
+  .metaline { display: flex; flex-wrap: wrap; gap: 8px 10px; margin-top: 26px; font-family: var(--font-mono); font-size: 0.74rem; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 7px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink-soft);
+    padding: 5px 11px; border-radius: 100px;
+  }
+  .chip b { color: var(--ink); font-weight: 700; }
+
+  /* ---- verdict ---- */
+  .verdict { margin-top: 34px; border: 1px solid var(--line); border-left: 3px solid var(--accent); background: var(--raised); border-radius: var(--r); padding: 22px 24px; }
+  .verdict .tag { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); }
+  .verdict p { font-size: 1.05rem; margin: 10px 0 0; max-width: 74ch; }
+  .verdict .kv { display: flex; flex-wrap: wrap; gap: 22px; margin-top: 18px; padding-top: 16px; border-top: 1px dashed var(--line); }
+  .verdict .kv div { font-family: var(--font-mono); font-size: 0.78rem; color: var(--ink-soft); }
+  .verdict .kv b { display: block; font-size: 1.05rem; color: var(--ink); margin-top: 2px; letter-spacing: -0.01em; }
+  .verdict .kv b.pos { color: var(--have); }
+
+  /* ---- sections ---- */
+  section { padding: 56px 0; border-bottom: 1px solid var(--line); }
+  .sec-head { margin-bottom: 30px; }
+  .sec-head h2 { margin-top: 12px; }
+  .sec-head p { margin-top: 12px; color: var(--ink-soft); }
+
+  /* ---- schematic panel ---- */
+  .schema {
+    position: relative; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r);
+    padding: 30px 26px; margin-top: 8px;
+    background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+  .schema::before, .schema::after { content:""; position:absolute; width:10px; height:10px; border:1px solid var(--accent); opacity:0.5; }
+  .schema::before { top:-1px; left:-1px; border-right:0; border-bottom:0; }
+  .schema::after { bottom:-1px; right:-1px; border-left:0; border-top:0; }
+  .schema .cap { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.06em; color: var(--ink-faint); margin-bottom: 20px; }
+  .schema .cap b { color: var(--ink-soft); }
+
+  /* layer cards row */
+  .layers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .node {
+    background: var(--raised); border: 1px solid var(--line); border-radius: var(--r); padding: 16px 16px 18px;
+    position: relative; display: flex; flex-direction: column;
+  }
+  .node .num { font-family: var(--font-mono); font-weight: 700; font-size: 0.78rem; color: var(--accent); letter-spacing: 0.05em; }
+  .node h3 { margin-top: 3px; font-size: 1.05rem; }
+  .node .mech { font-family: var(--font-mono); font-size: 0.73rem; color: var(--ink-faint); margin-top: 8px; line-height: 1.45; }
+  .node .q { font-size: 0.92rem; color: var(--ink-soft); margin-top: 12px; line-height: 1.45; font-style: italic; }
+  .node.enforce { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+
+  .flowlabel { text-align: center; font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.1em; color: var(--ink-faint); text-transform: uppercase; padding: 14px 0 8px; position: relative; }
+  .flowlabel span { background: var(--panel); padding: 0 12px; position: relative; z-index: 1; }
+  .flowlabel::before { content:""; position:absolute; left:10%; right:10%; top:50%; height:1px; background: var(--line); }
+
+  .converge { display: grid; grid-template-columns: 1.4fr 1fr; gap: 14px; align-items: stretch; }
+  .bignode {
+    background: var(--accent); color: #fff; border-radius: var(--r); padding: 18px 20px; display: flex; flex-direction: column; justify-content: center;
+    border: 1px solid var(--accent-deep);
+  }
+  :root[data-theme="dark"] .bignode { color: #071414; }
+  .bignode .num { color: rgba(255,255,255,0.75); font-family: var(--font-mono); font-size: 0.75rem; font-weight: 700; }
+  :root[data-theme="dark"] .bignode .num { color: rgba(7,20,20,0.7); }
+  .bignode h3 { color: inherit; font-size: 1.2rem; }
+  .bignode .sub { font-family: var(--font-mono); font-size: 0.74rem; opacity: 0.85; margin-top: 6px; }
+  .writenode {
+    background: var(--raised); border: 1px dashed var(--accent); border-radius: var(--r); padding: 18px 20px;
+    display: flex; flex-direction: column; justify-content: center;
+  }
+  .writenode h3 { font-size: 1.05rem; }
+  .writenode .sub { font-family: var(--font-mono); font-size: 0.74rem; color: var(--ink-faint); margin-top: 6px; }
+
+  /* spine callout */
+  .spine { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 22px; }
+  .rulecard { background: var(--raised); border: 1px solid var(--line); border-top: 3px solid var(--accent); border-radius: var(--r); padding: 18px 20px; }
+  .rulecard .lbl { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent); }
+  .rulecard h3 { margin-top: 8px; font-size: 1.02rem; }
+  .rulecard p { font-size: 0.93rem; color: var(--ink-soft); margin: 8px 0 0; }
+
+  /* benefits grid */
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .benefit { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 20px; }
+  .benefit .ix { font-family: var(--font-mono); font-size: 0.72rem; color: var(--accent); letter-spacing: 0.08em; }
+  .benefit h3 { margin-top: 8px; font-size: 1.02rem; }
+  .benefit p { font-size: 0.92rem; color: var(--ink-soft); margin: 8px 0 0; }
+
+  /* pipeline */
+  .pipe { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin-top: 16px; }
+  .pstep { background: var(--raised); border: 1px solid var(--line); border-radius: var(--r); padding: 13px 12px; position: relative; }
+  .pstep .pn { font-family: var(--font-mono); font-weight: 700; font-size: 0.8rem; color: var(--accent); }
+  .pstep h4 { margin: 4px 0 0; font-family: var(--font-display); font-size: 0.92rem; font-weight: 700; letter-spacing: -0.01em; }
+  .pstep .pd { font-family: var(--font-mono); font-size: 0.68rem; color: var(--ink-faint); margin-top: 6px; line-height: 1.4; }
+  .constitution { background: var(--accent-tint); border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); border-radius: var(--r); padding: 14px 18px; margin-top: 16px; display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; }
+  .constitution .k { font-family: var(--font-mono); font-weight: 700; color: var(--accent-deep); font-size: 0.82rem; letter-spacing: 0.04em; }
+  :root[data-theme="dark"] .constitution .k { color: var(--accent-deep); }
+  .constitution .v { font-size: 0.9rem; color: var(--ink-soft); }
+  .reverse { font-family: var(--font-mono); font-size: 0.72rem; color: var(--ink-faint); margin-top: 14px; text-align: center; }
+  .reverse b { color: var(--accent); }
+
+  /* modules */
+  .mods { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .mod { border: 1px solid var(--line); background: var(--panel); border-radius: var(--r); padding: 16px; }
+  .mod .mono { font-size: 0.78rem; color: var(--ink); font-weight: 700; }
+  .mod p { font-size: 0.84rem; color: var(--ink-soft); margin: 8px 0 0; }
+  .mod.on { border-color: var(--accent); background: var(--accent-tint); }
+  .mod.on .flag { display: inline-block; margin-top: 10px; font-family: var(--font-mono); font-size: 0.66rem; letter-spacing: 0.08em; text-transform: uppercase; color: #fff; background: var(--accent); padding: 3px 8px; border-radius: 100px; }
+  :root[data-theme="dark"] .mod.on .flag { color: #071414; }
+
+  /* status matrix */
+  .legend { display: flex; flex-wrap: wrap; gap: 10px 18px; margin-bottom: 18px; font-family: var(--font-mono); font-size: 0.76rem; }
+  .lg { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-soft); }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+  .sw-have { background: var(--have); } .sw-part { background: var(--partial); } .sw-gap { background: var(--gap); }
+
+  .matrix { display: grid; gap: 8px; }
+  .mrow { display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: center; background: var(--raised); border: 1px solid var(--line); border-radius: var(--r); padding: 12px 16px; }
+  .mrow .name { font-size: 0.95rem; }
+  .mrow .name small { display: block; font-family: var(--font-mono); font-size: 0.68rem; color: var(--ink-faint); margin-top: 2px; letter-spacing: 0.03em; }
+  .status { font-family: var(--font-mono); font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; padding: 5px 11px; border-radius: 100px; white-space: nowrap; }
+  .st-have { color: var(--have); background: var(--have-bg); }
+  .st-part { color: var(--partial); background: var(--partial-bg); }
+  .st-gap { color: var(--gap); background: var(--gap-bg); }
+  .mgroup { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent); margin: 20px 0 4px; }
+  .mgroup:first-child { margin-top: 0; }
+
+  .takeaway { margin-top: 22px; display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; }
+  .tk { border: 1px solid var(--line); border-radius: var(--r); padding: 16px 18px; background: var(--panel); }
+  .tk .n { font-family: var(--font-mono); font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; }
+  .tk.have .n { color: var(--have); } .tk.part .n { color: var(--partial); } .tk.gap .n { color: var(--gap); }
+  .tk p { font-size: 0.86rem; color: var(--ink-soft); margin: 6px 0 0; }
+
+  /* roadmap */
+  .road { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-top: 8px; }
+  .phase { border: 1px solid var(--line); border-radius: var(--r); background: var(--raised); padding: 16px 14px; position: relative; }
+  .phase.key { border-color: var(--accent); box-shadow: inset 0 2px 0 var(--accent); }
+  .phase .ph { font-family: var(--font-mono); font-size: 0.72rem; color: var(--accent); font-weight: 700; letter-spacing: 0.05em; }
+  .phase h4 { margin: 6px 0 0; font-family: var(--font-display); font-size: 0.95rem; font-weight: 700; letter-spacing: -0.01em; line-height: 1.2; }
+  .phase .meta { margin-top: 12px; display: flex; flex-direction: column; gap: 5px; font-family: var(--font-mono); font-size: 0.68rem; color: var(--ink-faint); }
+  .phase .meta span b { color: var(--ink-soft); font-weight: 700; }
+  .bar { display: flex; align-items: center; gap: 3px; }
+  .bar i { height: 5px; border-radius: 2px; flex: 1; background: var(--line); }
+  .bar i.f { background: var(--accent); }
+  .roadnote { font-family: var(--font-mono); font-size: 0.74rem; color: var(--ink-soft); margin-top: 16px; padding: 12px 16px; border: 1px dashed var(--accent); border-radius: var(--r); background: var(--accent-tint); }
+  .roadnote b { color: var(--accent-deep); }
+  :root[data-theme="dark"] .roadnote b { color: var(--accent-deep); }
+
+  /* footer */
+  footer { padding: 44px 0 60px; }
+  .files { display: grid; grid-template-columns: repeat(2,1fr); gap: 12px; margin-top: 18px; }
+  .file { border: 1px solid var(--line); border-radius: var(--r); padding: 14px 16px; background: var(--panel); }
+  .file .fn { font-family: var(--font-mono); font-size: 0.82rem; color: var(--accent); font-weight: 600; }
+  .file p { font-size: 0.85rem; color: var(--ink-soft); margin: 6px 0 0; }
+  .foot-meta { margin-top: 28px; font-family: var(--font-mono); font-size: 0.72rem; color: var(--ink-faint); border-top: 1px solid var(--line); padding-top: 18px; line-height: 1.7; }
+
+  @media (max-width: 860px) {
+    .layers { grid-template-columns: 1fr; }
+    .converge { grid-template-columns: 1fr; }
+    .spine, .grid3, .mods, .takeaway { grid-template-columns: 1fr; }
+    .pipe { grid-template-columns: repeat(2, 1fr); }
+    .road { grid-template-columns: 1fr; }
+    .files { grid-template-columns: 1fr; }
+    .grid3 { grid-template-columns: 1fr; }
+    body { font-size: 16px; }
+  }
+  @media (min-width: 861px) and (max-width: 1024px) {
+    .grid3 { grid-template-columns: 1fr 1fr; }
+    .mods { grid-template-columns: 1fr 1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="wrap row">
+    <div class="brand"><span class="dot"></span> <b>APDD&nbsp;KIT</b> &nbsp;·&nbsp; governance evaluation</div>
+    <button class="toggle" id="themeToggle" aria-label="Toggle color theme">◐ Theme</button>
+  </div>
+</div>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="eyebrow">Framework review · for human reviewers</div>
+    <h1>An operating system for<br><span class="accent">agentic</span> product development.</h1>
+    <p class="lede">The APDD Kit turns "an AI agent editing files" into "an agent operating inside guard-rails" — four governance layers, two standing rules, and a design-governance track, all copy-in and stack-agnostic. This page reviews what it does and how it fits IronClaw.</p>
+    <div class="metaline">
+      <span class="chip"><b>Source</b> apdd-kit @ 61daaa2</span>
+      <span class="chip"><b>Scope</b> UI / front-end software</span>
+      <span class="chip"><b>Form</b> guides · templates · rules · skills · enforcement</span>
+      <span class="chip"><b>Evaluated for</b> IronClaw</span>
+    </div>
+
+    <div class="verdict">
+      <span class="tag">Verdict — adopt selectively</span>
+      <p>IronClaw has already independently built the kit's <strong>backend &amp; enforcement half</strong> — path-scoped agent rules, CI-enforced regression tests, a rich skills library. The kit's <strong>net-new value is its Design/UX governance track</strong> (absent today) and a <strong>living docs-first feature workflow</strong> — and both land on a React/Vite/Tailwind frontend that fits them with unusually low friction. <strong>Skip</strong> the kit's backend MVVM rules; IronClaw's crate-architecture rules already own that ground.</p>
+      <div class="kv">
+        <div>Effort <b>~1–2 weeks</b></div>
+        <div>Most value in <b class="pos">Phases 0–2 · ~1 wk</b></div>
+        <div>Reversibility <b class="pos">Fully additive</b></div>
+        <div>Runtime risk <b class="pos">Near-zero (docs + rules)</b></div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section id="what">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">01 · The framework</div>
+      <h2>Four governance layers, held together by two rules</h2>
+      <p>The kit's core idea: any single artifact may reach the agent as the <em>only</em> governance in context, so each is self-sufficient — and a deterministic enforcement layer binds even when the prose is ignored. Below is the control plane the layers form.</p>
+    </div>
+
+    <div class="schema">
+      <div class="cap">FIG.1 &nbsp;·&nbsp; <b>Governance control plane</b> — plan &amp; guide &amp; protect converge on the code the agent writes; enforcement gates the merge.</div>
+
+      <div class="layers">
+        <div class="node">
+          <span class="num">① PLAN</span>
+          <h3>Docs-first workflow</h3>
+          <div class="mech">docs/&lt;slug&gt;/ SPEC · PLAN · TEST + registry</div>
+          <div class="q">What is this feature meant to do — and is my change in scope?</div>
+        </div>
+        <div class="node">
+          <span class="num">② GUIDE</span>
+          <h3>Auto-loading rules</h3>
+          <div class="mech">.claude/rules/*.md · paths: globs</div>
+          <div class="q">What conventions govern the exact file I'm touching now?</div>
+        </div>
+        <div class="node">
+          <span class="num">③ PROTECT</span>
+          <h3>Critical journeys</h3>
+          <div class="mech">CRITICAL_FLOWS.md + hot-path rule</div>
+          <div class="q">Did my local change break a flow two layers away?</div>
+        </div>
+      </div>
+
+      <div class="flowlabel"><span>converge on</span></div>
+
+      <div class="converge">
+        <div class="writenode">
+          <h3>Write the code</h3>
+          <div class="sub">agent + human, inside the guard-rails above</div>
+        </div>
+        <div class="bignode">
+          <span class="num">④ ENFORCE</span>
+          <h3>Hooks + CI</h3>
+          <div class="sub">pre-commit → pre-push → CI · self-skipping · one aggregate gate → merge</div>
+        </div>
+      </div>
+
+      <div class="spine">
+        <div class="rulecard">
+          <span class="lbl">Rule 1 — the spine</span>
+          <h3>Docs are the source of truth</h3>
+          <p>Read a feature's spec + plan before editing its code. Add uncovered behavior → update the spec in the <em>same</em> change. Spec and code disagree → stop and reconcile.</p>
+        </div>
+        <div class="rulecard">
+          <span class="lbl">Rule 2 — the spine</span>
+          <h3>Critical fixes update docs + add a test</h3>
+          <p>Same diff: log it in the spec's Critical Bug Fix Log, revise the plan, and add a regression test that fails-before / passes-after. Incomplete without all three.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="benefits">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">02 · Why it exists</div>
+      <h2>What the kit buys you</h2>
+      <p>Two priorities drive every artifact: <strong>minimize regression</strong> and <strong>raise product design &amp; development quality</strong> when the author is an AI coding agent.</p>
+    </div>
+    <div class="grid3">
+      <div class="benefit"><div class="ix">discoverable</div><h3>Guidance finds the agent</h3><p>Path-scoped rules inject themselves the moment a matching file is edited — the agent doesn't have to know they exist.</p></div>
+      <div class="benefit"><div class="ix">deterministic</div><h3>The machine is the backstop</h3><p>Hooks + CI bind regardless of which tool wrote the code or whether it read the prose. Non-compliance is assumed.</p></div>
+      <div class="benefit"><div class="ix">portable</div><h3>Tool-agnostic by design</h3><p>Ships in Claude Code conventions, but maps cleanly to Cursor, Antigravity, and root-file-only tools.</p></div>
+      <div class="benefit"><div class="ix">grounded</div><h3>Agents stop guessing UI</h3><p>A Storybook MCP lets the agent read real component props instead of hallucinating them — the single biggest UI-quality win.</p></div>
+      <div class="benefit"><div class="ix">living</div><h3>Docs that don't rot</h3><p>Specs are the working reference, not creation stubs — every critical fix drags the docs forward with the code.</p></div>
+      <div class="benefit"><div class="ix">additive</div><h3>Adopt only what applies</h3><p>A UI-focused core plus opt-in modules; nothing in core depends on a module. Copy in, fill placeholders, done.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="design">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">03 · The design track</div>
+      <h2>A design constitution, wired into the build</h2>
+      <p>Treated as <em>core</em>, not an add-on. A single root <code>DESIGN.md</code> governs everything below it; every step conforms to it or bounces back.</p>
+    </div>
+
+    <div class="schema">
+      <div class="cap">FIG.2 &nbsp;·&nbsp; <b>Design-to-code pipeline</b> — one governing constitution, a do-not-skip handoff, and a workbench that doubles as the test harness.</div>
+      <div class="constitution">
+        <span class="k">DESIGN.md ▸ constitution</span>
+        <span class="v">principles · theming · typography · a11y governance · component taxonomy · a hard REJECT list</span>
+      </div>
+      <div class="pipe">
+        <div class="pstep"><div class="pn">①</div><h4>Handoff</h4><div class="pd">context → metadata → screenshot → translate → validate 1:1</div></div>
+        <div class="pstep"><div class="pn">②</div><h4>Tokens</h4><div class="pd">no raw hex · light + dark · semantic tokens only</div></div>
+        <div class="pstep"><div class="pn">③</div><h4>Taxonomy</h4><div class="pd">5 tiers · 2–3 stay pure · only tier 4 binds state</div></div>
+        <div class="pstep"><div class="pn">④</div><h4>Storybook</h4><div class="pd">workbench + MCP + stories-as-tests</div></div>
+        <div class="pstep"><div class="pn">⑤</div><h4>Perf</h4><div class="pd">transform/opacity · render-gated · capped FPS</div></div>
+        <div class="pstep"><div class="pn">⑥</div><h4>Gate</h4><div class="pd">validation checklist + REJECT rules → done / back</div></div>
+      </div>
+      <div class="reverse">↩ reverse handoff — <b>Storybook → design tool</b> extraction keeps design ↔ code in sync</div>
+    </div>
+  </div>
+</section>
+
+<section id="modules">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">04 · Opt-in modules</div>
+      <h2>Capabilities only some products have</h2>
+      <p>Include a module only if it applies. For IronClaw, one is directly on-point — it ships LLM agents <em>inside</em> the product.</p>
+    </div>
+    <div class="mods">
+      <div class="mod"><span class="mono">realtime-media</span><p>Live audio/video — encode, codec, simulcast, frame callbacks.</p></div>
+      <div class="mod"><span class="mono">rich-view</span><p>Canvas / 3D / embedded-webview GPU surface with its own render loop.</p></div>
+      <div class="mod"><span class="mono">multitenant-isolation</span><p>One deployment, many customers; real-time broadcast / fan-out.</p></div>
+      <div class="mod on"><span class="mono">embedded-ai-agents</span><p>Ships LLM agents inside the product — keys encrypted at rest, per-agent DB config, tenant-scoped context on every call.</p><span class="flag">Applies to IronClaw</span></div>
+    </div>
+  </div>
+</section>
+
+<section id="fit">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">05 · The fit</div>
+      <h2>Overlap &amp; gap map — kit vs. IronClaw today</h2>
+      <p>The honest baseline. IronClaw isn't a greenfield adopter; it has already converged on much of the kit's backend model. This map shows where.</p>
+    </div>
+
+    <div class="legend">
+      <span class="lg"><span class="swatch sw-have"></span> Have — same mechanism today</span>
+      <span class="lg"><span class="swatch sw-part"></span> Partial — exists, but informal / different shape</span>
+      <span class="lg"><span class="swatch sw-gap"></span> Gap — absent</span>
+    </div>
+
+    <div class="matrix">
+      <div class="mgroup">Backend &amp; enforcement — largely solved</div>
+      <div class="mrow"><div class="name">Path-scoped auto-loading rules<small>.claude/rules/ · 12 rules present</small></div><span class="status st-have">Have</span></div>
+      <div class="mrow"><div class="name">Regression test + doc update per critical fix<small>commit-msg hook + regression-test-check.yml</small></div><span class="status st-have">Have</span></div>
+      <div class="mrow"><div class="name">Enforcement: hooks + CI, path-filtered, aggregate gate<small>~30 workflows</small></div><span class="status st-have">Have</span></div>
+      <div class="mrow"><div class="name">Reusable, user-invocable skills<small>reborn-feature, testing, review…</small></div><span class="status st-have">Have</span></div>
+      <div class="mrow"><div class="name">Embedded-AI-agent invariants<small>encoded, but scattered across CLAUDE.md + safety rules</small></div><span class="status st-part">Partial</span></div>
+
+      <div class="mgroup">Feature workflow — net-new structure</div>
+      <div class="mrow"><div class="name">Rule 1 — read-spec-before-edit discipline<small>reborn-feature skill covers wiring, not living specs</small></div><span class="status st-part">Partial</span></div>
+      <div class="mrow"><div class="name">docs/&lt;slug&gt;/ SPEC·PLAN·TEST + registry<small>only flat, dated docs/plans/*.md today</small></div><span class="status st-gap">Gap</span></div>
+      <div class="mrow"><div class="name">Critical User Journey registry + hot-path rule<small>e2e/Playwright exist; no CUJ catalog</small></div><span class="status st-gap">Gap</span></div>
+
+      <div class="mgroup">Design / UX track — the headline gap</div>
+      <div class="mrow"><div class="name">DESIGN.md design constitution<small>none today</small></div><span class="status st-gap">Gap</span></div>
+      <div class="mrow"><div class="name">Design-scoped rules (styling · a11y · taxonomy)<small>none scoped to the frontend</small></div><span class="status st-gap">Gap</span></div>
+      <div class="mrow"><div class="name">Storybook workbench + MCP + stories-as-tests<small>not a declared dep — a small, pinned pnpm install away</small></div><span class="status st-gap">Gap</span></div>
+      <div class="mrow"><div class="name">Design tokens governance<small>src/design-system/theme.ts exists, ungoverned</small></div><span class="status st-part">Partial</span></div>
+      <div class="mrow"><div class="name">Accessibility gate (contrast · focus · semantics)<small>no formal gate</small></div><span class="status st-gap">Gap</span></div>
+    </div>
+
+    <div class="takeaway">
+      <div class="tk have"><div class="n">4 / 5</div><p>Backend &amp; enforcement rows already <strong>Have</strong> — IronClaw is ahead of the kit here, with a knowledge graph it lacks entirely.</p></div>
+      <div class="tk part"><div class="n">◑</div><p>Invariants &amp; Rule 1 are <strong>Partial</strong> — present but scattered; the kit's value is consolidating them.</p></div>
+      <div class="tk gap"><div class="n">7</div><p><strong>Gaps</strong> — nearly all in the design track &amp; feature-doc structure. That's precisely the kit's net-new value.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="road">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="eyebrow">06 · The plan</div>
+      <h2>A phased, reversible rollout</h2>
+      <p>Each phase is independently shippable and gated by review. Phases 0–2 deliver most of the value; 3–4 are follow-on. Bars show relative value.</p>
+    </div>
+
+    <div class="road">
+      <div class="phase"><div class="ph">PHASE 0</div><h4>Foundations &amp; decisions</h4><div class="meta"><span><b>½ day</b> · enabling</span><span>Locations, prefixes, skip list</span><div class="bar"><i class="f"></i><i></i><i></i><i></i></div></div></div>
+      <div class="phase key"><div class="ph">PHASE 1</div><h4>DESIGN.md + design rules</h4><div class="meta"><span><b>1–2 days</b> · high value</span><span>Highest-leverage gap</span><div class="bar"><i class="f"></i><i class="f"></i><i class="f"></i><i class="f"></i></div></div></div>
+      <div class="phase key"><div class="ph">PHASE 2</div><h4>Storybook + stories-as-tests</h4><div class="meta"><span><b>2–4 days</b> · high value</span><span>Prop-grounding + a11y</span><div class="bar"><i class="f"></i><i class="f"></i><i class="f"></i><i class="f"></i></div></div></div>
+      <div class="phase"><div class="ph">PHASE 3</div><h4>Docs-first (scoped)</h4><div class="meta"><span><b>1–2 days</b> · medium</span><span>WebUI features only</span><div class="bar"><i class="f"></i><i class="f"></i><i></i><i></i></div></div></div>
+      <div class="phase"><div class="ph">PHASE 4</div><h4>Critical journeys + visual regression</h4><div class="meta"><span><b>2–3 days</b> · med–high</span><span>Name the must-not-break flows</span><div class="bar"><i class="f"></i><i class="f"></i><i class="f"></i><i></i></div></div></div>
+    </div>
+
+    <div class="roadnote">▸ <b>Ship order:</b> Phase 1 first (pure governance, near-zero risk). Phases 1 &amp; 3 are docs-and-rules only; Phases 2 &amp; 4 touch the frontend toolchain / CI and warrant the most testing. <b>Rollback = delete the added files.</b></div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="eyebrow">Read the full evaluation</div>
+    <h2 style="margin-top:12px;">Where the detail lives</h2>
+    <p style="color:var(--ink-soft);">This artifact is the visual summary. The full analysis sits on the <code>eval/apdd-governance-kit</code> branch under <code>docs/plans/apdd-governance-kit/</code>.</p>
+    <div class="files">
+      <div class="file"><div class="fn">EVALUATION.md</div><p>Kit anatomy — the four-layer OS + design track — and the grounded overlap/gap analysis against IronClaw.</p></div>
+      <div class="file"><div class="fn">PROPOSAL.md</div><p>The recommendation and the per-component Adopt / Adapt / Skip decisions with rationale.</p></div>
+      <div class="file"><div class="fn">INTEGRATION_PLAN.md</div><p>The phased rollout — file targets, effort, risks, and open questions for reviewers.</p></div>
+      <div class="file"><div class="fn">README.md</div><p>The index and the one-paragraph decision, with reading order.</p></div>
+    </div>
+    <div class="foot-meta">
+      APDD Kit governance evaluation · prepared for human review · source apdd-kit @ 61daaa2 · target repo IronClaw<br>
+      Status language — Have / Partial / Gap — reflects IronClaw's tree at evaluation time; verify against live code before acting.
+    </div>
+  </div>
+</footer>
+
+<script>
+  (function () {
+    var root = document.documentElement;
+    var btn = document.getElementById('themeToggle');
+    function current() {
+      if (root.dataset.theme) return root.dataset.theme;
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    btn.addEventListener('click', function () {
+      var next = current() === 'dark' ? 'light' : 'dark';
+      root.dataset.theme = next;
+    });
+  })();
+</script>
+</body>
+</html>

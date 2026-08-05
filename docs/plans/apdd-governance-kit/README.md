@@ -35,11 +35,11 @@ majority of the value.** Fully additive and reversible.
 ## The human-review artifact
 
 A visual, diagram-first overview of the kit's benefits, functionality, and the
-agentic-OS framework — plus the IronClaw overlap/gap map and rollout — is
-published as a shareable claude.ai artifact:
-<https://claude.ai/code/artifact/5bef4973-c97b-41ba-99c1-0607bbbf73fb>
-(also linked from PR #7255). The artifact is a convenience view; the Markdown in
-this folder is the source of truth.
+agentic-OS framework — plus the IronClaw overlap/gap map and rollout — lives in
+[explorer.html](explorer.html): a **self-contained** page (no build step; open
+in any browser, or render it without cloning via
+[html-preview](https://html-preview.github.io/?url=https://github.com/nearai/ironclaw/blob/eval/apdd-governance-kit/docs/plans/apdd-governance-kit/explorer.html)).
+It is a convenience view; the Markdown in this folder is the source of truth.
 
 ## What this branch contains
 
@@ -53,3 +53,4 @@ execute, gated by review.
 | `EVALUATION.md` | Kit anatomy + IronClaw overlap/gap analysis |
 | `PROPOSAL.md` | Recommendation + Adopt/Adapt/Skip scope |
 | `INTEGRATION_PLAN.md` | Phased rollout, effort, risks, open questions |
+| `explorer.html` | Self-contained diagram-first review page (open in any browser) |
