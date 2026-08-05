@@ -155,6 +155,10 @@ fn request(tenant: &str, user: &str, command: &str) -> CommandExecutionRequest {
     }
 }
 
+fn user_key(tenant: &str, user: &str) -> RebornSandboxUserKey {
+    RebornSandboxUserKey::from_scope(&request(tenant, user, "true").scope)
+}
+
 #[tokio::test]
 async fn provisions_once_per_user_and_runs_ephemeral_workers_per_command() {
     let cli = Arc::new(FakeRailwayCli::new());
@@ -229,6 +233,52 @@ async fn isolates_workers_for_distinct_tenant_users() {
         .collect();
     assert_eq!(workspaces.len(), 2);
     assert_ne!(workspaces[0], workspaces[1]);
+}
+
+#[tokio::test]
+async fn user_state_registry_evicts_the_least_recently_used_idle_entry() {
+    let transport = RailwayPreviewSandboxTransport::with_cli_and_capacity(
+        config(),
+        Arc::new(FakeRailwayCli::new()),
+        2,
+    );
+    let key_a = user_key("tenant", "a");
+    let key_b = user_key("tenant", "b");
+    let key_c = user_key("tenant", "c");
+
+    drop(transport.state_for(key_a.clone()).await.unwrap());
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    drop(transport.state_for(key_b.clone()).await.unwrap());
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    drop(transport.state_for(key_a.clone()).await.unwrap());
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    drop(transport.state_for(key_c.clone()).await.unwrap());
+
+    let users = transport.users.lock().await;
+    assert_eq!(users.len(), 2);
+    assert!(users.contains_key(&key_a));
+    assert!(!users.contains_key(&key_b));
+    assert!(users.contains_key(&key_c));
+}
+
+#[tokio::test]
+async fn user_state_registry_fails_closed_when_all_entries_are_active() {
+    let transport = RailwayPreviewSandboxTransport::with_cli_and_capacity(
+        config(),
+        Arc::new(FakeRailwayCli::new()),
+        2,
+    );
+    let active_a = transport.state_for(user_key("tenant", "a")).await.unwrap();
+    let active_b = transport.state_for(user_key("tenant", "b")).await.unwrap();
+
+    let error = transport
+        .state_for(user_key("tenant", "c"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, RuntimeProcessError::ExecutionFailed(message) if message.contains("capacity is exhausted"))
+    );
+    drop((active_a, active_b));
 }
 
 #[tokio::test]

@@ -483,7 +483,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "crates/ironclaw_sandbox/src/sandbox_process.rs",
             "crates/ironclaw_reborn_composition/src/builtin_capability_policy.rs",
             "crates/ironclaw_reborn_composition/src/deployment.rs",
-            "crates/ironclaw_reborn_composition/src/factory/production_build_assembly.rs",
+            "crates/ironclaw_reborn_composition/src/factory/runtime_lane_assembly.rs",
             "crates/ironclaw_reborn_composition/src/input.rs",
             "crates/ironclaw_host_runtime/src/first_party_tools/mod.rs",
             "crates/ironclaw_host_runtime/src/invocation_services.rs",

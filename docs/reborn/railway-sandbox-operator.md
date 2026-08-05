@@ -60,6 +60,10 @@ Configure the Railway service with all of the following:
 - Exactly one IronClaw replica. Do not enable horizontal scaling, a second
   control service, or concurrent deploy overlap against the same volume-backed
   state. Scale back to one before a preview is considered healthy.
+- The preview transport tracks at most 4,096 user lifecycle entries per
+  process. At capacity it evicts the least-recently-used idle entry, never an
+  entry held by an active command; Railway's configured idle timeout reclaims
+  any outer sandbox no longer tracked by the process.
 - The usual WebUI and LLM secrets described in
   [the Docker deployment guide](deploy-reborn-cli-docker.md); do not invent or
   bake values into this runbook.

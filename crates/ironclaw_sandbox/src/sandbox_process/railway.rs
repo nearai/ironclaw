@@ -36,6 +36,7 @@ const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_OUTPUT_LIMIT: usize = 16 * 1024;
 const REMOTE_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_TRACKED_USERS: usize = 4_096;
 const WORKSPACE_ROOT: &str = "/workspace";
 const RAILWAY_WORKSPACES_ROOT: &str = "/workspace/ironclaw-users";
 const EXIT_SENTINEL: &str = "__IRONCLAW_RAILWAY_PRIVATE_EXIT_CODE__=";
@@ -113,7 +114,8 @@ impl RailwayPreviewSandboxConfig {
 pub struct RailwayPreviewSandboxTransport {
     config: RailwayPreviewSandboxConfig,
     cli: Arc<dyn RailwayCli>,
-    users: Arc<Mutex<HashMap<RebornSandboxUserKey, Arc<Mutex<UserSandboxState>>>>>,
+    users: Arc<Mutex<HashMap<RebornSandboxUserKey, TrackedUserState>>>,
+    max_tracked_users: usize,
 }
 
 impl std::fmt::Debug for RailwayPreviewSandboxTransport {
@@ -134,15 +136,41 @@ impl RailwayPreviewSandboxTransport {
             config,
             cli: Arc::new(SystemRailwayCli),
             users: Arc::new(Mutex::new(HashMap::new())),
+            max_tracked_users: MAX_TRACKED_USERS,
         }
     }
 
-    async fn state_for(&self, key: RebornSandboxUserKey) -> Arc<Mutex<UserSandboxState>> {
+    async fn state_for(
+        &self,
+        key: RebornSandboxUserKey,
+    ) -> Result<Arc<Mutex<UserSandboxState>>, RuntimeProcessError> {
         let mut users = self.users.lock().await;
-        users
-            .entry(key)
-            .or_insert_with(|| Arc::new(Mutex::new(UserSandboxState::default())))
-            .clone()
+        if let Some(tracked) = users.get_mut(&key) {
+            tracked.last_touched = Instant::now();
+            return Ok(tracked.state.clone());
+        }
+        if users.len() >= self.max_tracked_users {
+            let idle_lru = users
+                .iter()
+                .filter(|(_, tracked)| Arc::strong_count(&tracked.state) == 1)
+                .min_by_key(|(_, tracked)| tracked.last_touched)
+                .map(|(key, _)| key.clone())
+                .ok_or_else(|| {
+                    RuntimeProcessError::ExecutionFailed(
+                        "Railway preview user-state capacity is exhausted".to_string(),
+                    )
+                })?;
+            users.remove(&idle_lru);
+        }
+        let state = Arc::new(Mutex::new(UserSandboxState::default()));
+        users.insert(
+            key,
+            TrackedUserState {
+                state: state.clone(),
+                last_touched: Instant::now(),
+            },
+        );
+        Ok(state)
     }
 
     async fn provision(
@@ -311,7 +339,7 @@ impl SandboxCommandTransport for RailwayPreviewSandboxTransport {
         let started = Instant::now();
         let deadline = started + timeout;
         let key = RebornSandboxUserKey::from_scope(&request.scope);
-        let state = self.state_for(key.clone()).await;
+        let state = self.state_for(key.clone()).await?;
 
         // Per-user lifecycle gate: first provision, worker bootstrap, and all
         // use of that worker serialize without blocking other tenant/users.
@@ -388,13 +416,28 @@ mod constructor_test_support {
             config: RailwayPreviewSandboxConfig,
             cli: Arc<dyn RailwayCli>,
         ) -> Self {
+            Self::with_cli_and_capacity(config, cli, MAX_TRACKED_USERS)
+        }
+
+        pub(super) fn with_cli_and_capacity(
+            config: RailwayPreviewSandboxConfig,
+            cli: Arc<dyn RailwayCli>,
+            max_tracked_users: usize,
+        ) -> Self {
             Self {
                 config,
                 cli,
                 users: Arc::new(Mutex::new(HashMap::new())),
+                max_tracked_users,
             }
         }
     }
+}
+
+#[derive(Debug)]
+struct TrackedUserState {
+    state: Arc<Mutex<UserSandboxState>>,
+    last_touched: Instant,
 }
 
 #[derive(Debug, Default)]
