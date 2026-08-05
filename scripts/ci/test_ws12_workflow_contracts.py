@@ -463,7 +463,11 @@ class CrateScopeFilterSabotageTests(unittest.TestCase):
         are deliberately scoped and must stay scoped."""
         for workflows in (
             self.sabotage(CODE_STYLE_WORKFLOW, "^(crates/([^/]+/)*ironclaw_turn_runner/", "^(crates/"),
-            self.sabotage(STRESS_WORKFLOW, '- "crates/ironclaw_turns/**"', '- "crates/**"'),
+            self.sabotage(
+                STRESS_WORKFLOW,
+                '- "crates/kernel/ironclaw_turns/**"',
+                '- "crates/**"',
+            ),
         ):
             errors = validate_crate_scope_filters(workflows, ROOT)
             self.assertTrue(

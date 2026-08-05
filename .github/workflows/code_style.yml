@@ -22,7 +22,7 @@ concurrency:
 env:
   # Tests must never touch the real OS keychain (macOS Keychain auth dialog /
   # Linux Secret Service). Guarded by
-  # crates/ironclaw_secrets/src/keychain.rs::os_keychain_suppressed:
+  # crates/substrates/ironclaw_secrets/src/keychain.rs::os_keychain_suppressed:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
@@ -231,11 +231,15 @@ jobs:
           # (verified against the pinned commit's bundled dist/setup/index.js:
           # `hashFiles` walks one globber built from every newline-separated
           # pattern and only throws when the COMBINED walk finds nothing), so
-          # the flat line stays live for today's tree and the nested line picks
-          # up the family move without either one needing to be conditional.
+          # the exact line stays live for today's tree (WS7 put the crate in
+          # `crates/product/`) and the deeper glob picks up any later re-homing
+          # without either one needing to be conditional. The two must not
+          # overlap: `ws12_workflow_contracts.py` rejects a spare that already
+          # matches the real location, because a pattern matching everything is
+          # broad rather than depth-tolerant.
           cache-dependency-path: |
-            crates/ironclaw_webui/frontend/pnpm-lock.yaml
-            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
       # `no-undef` over WebUI v2 JavaScript catches production modules that reference a
       # symbol they never imported. The VM-based component suites stub
       # every collaborator through a `vm` context, so that class of bug (e.g. an
@@ -296,8 +300,8 @@ jobs:
           # See the webui-v2-js-lint job above for why this is a depth-tolerant
           # glob list rather than a single literal.
           cache-dependency-path: |
-            crates/ironclaw_webui/frontend/pnpm-lock.yaml
-            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
       - name: Enable pnpm
         if: contains(matrix.flags, '--all-features')
         run: corepack enable pnpm
@@ -336,7 +340,7 @@ jobs:
           done < <(jq -r '.[]' <<< "${CLIPPY_PACKAGES}")
           # No explicit target filter. `--lib` is a hard error on a bin-only
           # package ("no library targets found in package `ironclaw`"), which
-          # is exactly what a PR touching only crates/ironclaw_cli
+          # is exactly what a PR touching only crates/app/ironclaw_cli
           # selects, and `--bins` alone degrades to "no targets matched; this
           # is a no-op" on a lib-only package — the lane would report green
           # having linted nothing. Cargo's default target set for a package is
@@ -379,8 +383,8 @@ jobs:
           # See the webui-v2-js-lint job above for why this is a depth-tolerant
           # glob list rather than a single literal.
           cache-dependency-path: |
-            crates/ironclaw_webui/frontend/pnpm-lock.yaml
-            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
       - name: Enable pnpm
         if: contains(matrix.flags, '--all-features')
         run: corepack enable pnpm

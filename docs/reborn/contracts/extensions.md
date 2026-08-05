@@ -2,7 +2,7 @@
 
 **Status:** Draft implementation contract
 **Date:** 2026-04-24
-**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/filesystem.md`, `crates/ironclaw_host_api`, `crates/ironclaw_filesystem`
+**Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/filesystem.md`, `crates/contracts/ironclaw_host_api`, `crates/substrates/ironclaw_filesystem`
 
 ---
 
@@ -490,9 +490,9 @@ Rules:
   authority namespace, not the extension id: several extensions (gmail,
   google-drive, ...) may share one provider (`google`).
 
-Tests: `crates/ironclaw_extension_registry/tests/manifest_v2_contract.rs`
+Tests: `crates/extensions/ironclaw_extension_registry/tests/manifest_v2_contract.rs`
 (capability surface projection block) and
-`crates/ironclaw_extension_registry/tests/product_adapter_manifest_ingestion.rs`
+`crates/extensions/ironclaw_extension_registry/tests/product_adapter_manifest_ingestion.rs`
 (channel-surface projection through the real product-adapter contract). Run:
 `cargo test -p ironclaw_extension_registry --test manifest_v2_contract` and
 `cargo test -p ironclaw_extension_registry --test product_adapter_manifest_ingestion`.

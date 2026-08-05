@@ -57,6 +57,14 @@ assert_empty_scope() {
 }
 
 assert_scope \
+  "family-level guidance file (direct child of a family dir, owned by no crate)" \
+  "crates/app/AGENTS.md" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=false"
+
+assert_scope \
   "reborn binary crate" \
   "crates/ironclaw_cli/src/main.rs" \
   "docs_only=false
@@ -686,14 +694,24 @@ printf 'PASS bash and python discovery floors agree (%s)\n' "${python_floor}"
 known_dead_patterns="crates/ironclaw_extension_support/
 crates/ironclaw_oauth/"
 
+# The arms are keyed to the NORMALIZED spelling `crates/<crate>/<rest>`, which
+# is a crate IDENTITY, not a path on disk — `normalize_crate_path` rewrites a
+# real `crates/<family>/<crate>/<rest>` onto it. So "does this arm name
+# something real?" is answered against the crate inventory, not by globbing the
+# filesystem: after the family move (PROPOSAL §5) every live arm would fail a
+# bare glob, and repointing the arms instead would break the normalizer's
+# contract. The check itself is unchanged in strength — an arm naming a crate
+# the inventory cannot resolve is still dead (CHECKLIST WS10).
 dead_found=0
 while IFS= read -r pattern; do
   [ -n "${pattern}" ] || continue
   case "${known_dead_patterns}" in
     *"${pattern}"*) continue ;;
   esac
-  # shellcheck disable=SC2086
-  if ! compgen -G "${pattern}"* >/dev/null 2>&1; then
+  crate_name="${pattern#crates/}"
+  crate_name="${crate_name%/}"
+  if ! python3 "${script_dir}/lib/crate_tree.py" --directory "${crate_name}" \
+      "${repo_root_for_inventory}" >/dev/null 2>&1; then
     printf 'FAIL classifier pattern matches no real path: %s\n' "${pattern}" >&2
     dead_found=1
   fi

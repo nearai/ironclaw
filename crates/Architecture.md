@@ -829,7 +829,7 @@ Subagent work is modeled as child runs, not as a second private loop engine.
 > **Status note (2026-07):** the machinery below is wired and tested, but the
 > `builtin.spawn_subagent` capability is currently deny-filtered off in all
 > shipped profiles (`TEMP(disable-spawn-subagents)` in
-> `crates/ironclaw_turn_runner/src/runtime.rs`) — the model cannot invoke it until
+> `crates/loop/ironclaw_turn_runner/src/runtime.rs`) — the model cannot invoke it until
 > that filter is lifted.
 
 ```text
@@ -1002,18 +1002,18 @@ Partial or evolving:
 - `docs/reborn/contracts/network.md`
 - `docs/reborn/contracts/secrets.md`
 - `crates/AGENTS.md`
-- `crates/ironclaw_turns/src/lib.rs`
-- `crates/ironclaw_turns/src/runner.rs`
-- `crates/ironclaw_loop_contracts/src/driver.rs`
-- `crates/ironclaw_loop_contracts/src/host/`
-- `crates/ironclaw_agent_loop/src/executor.rs`
-- `crates/ironclaw_agent_loop/src/family.rs`
-- `crates/ironclaw_agent_loop/src/state.rs`
-- `crates/ironclaw_turn_runner/src/planned_driver.rs`
-- `crates/ironclaw_turn_runner/src/turn_runner.rs`
-- `crates/ironclaw_turn_runner/src/turn_run_executor.rs`
-- `crates/ironclaw_turn_runner/src/turn_scheduler.rs`
-- `crates/ironclaw_turn_runner/src/runtime.rs`
-- `crates/ironclaw_turn_runner/src/loop_driver_host.rs`
-- `crates/ironclaw_composition/src/runtime.rs`
-- `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`
+- `crates/kernel/ironclaw_turns/src/lib.rs`
+- `crates/kernel/ironclaw_turns/src/runner.rs`
+- `crates/contracts/ironclaw_loop_contracts/src/driver.rs`
+- `crates/contracts/ironclaw_loop_contracts/src/host/`
+- `crates/loop/ironclaw_agent_loop/src/executor.rs`
+- `crates/loop/ironclaw_agent_loop/src/family.rs`
+- `crates/loop/ironclaw_agent_loop/src/state.rs`
+- `crates/loop/ironclaw_turn_runner/src/planned_driver.rs`
+- `crates/loop/ironclaw_turn_runner/src/turn_runner.rs`
+- `crates/loop/ironclaw_turn_runner/src/turn_run_executor.rs`
+- `crates/loop/ironclaw_turn_runner/src/turn_scheduler.rs`
+- `crates/loop/ironclaw_turn_runner/src/runtime.rs`
+- `crates/loop/ironclaw_turn_runner/src/loop_driver_host.rs`
+- `crates/app/ironclaw_composition/src/runtime.rs`
+- `crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`

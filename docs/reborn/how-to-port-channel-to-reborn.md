@@ -39,7 +39,7 @@ Native host checklist:
 - [ ] route policy, body limits, rate limits, origin checks, and auth are explicit;
 - [ ] handler uses `ProductSurfaceCaller` and `BoundProductSurface`;
 - [ ] product DTOs/descriptors live in `ironclaw_assistant`;
-- [ ] frontend code lives under `crates/ironclaw_webui/frontend`;
+- [ ] frontend code lives under `crates/product/ironclaw_webui/frontend`;
 - [ ] caller-level route tests cover success, denial, scope, and failure paths;
 - [ ] whole-path integration coverage is added when behavior crosses turns,
       persistence, runtime lanes, or external-service seams.
@@ -67,8 +67,8 @@ Use the existing implementations as references:
 
 - `crates/extensions/packages/slack/src/channel.rs`
 - `crates/extensions/packages/telegram/src/channel.rs`
-- `crates/ironclaw_extension_host/src/ingress/`
-- `crates/ironclaw_extension_contracts/src/channel_adapter.rs`
+- `crates/extensions/ironclaw_extension_host/src/ingress/`
+- `crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs`
 
 The adapter must not own canonical threads, runs, transcripts, authorization,
 approval state, secrets, filesystem access, or direct network clients. It must
@@ -91,7 +91,7 @@ Start with the owning crate's guidance and the nearest existing caller test:
 
 ```bash
 bash scripts/codebase-graph.sh status
-rg -n "ProductSurface|ProductView|ProductSurfaceCommandDescriptor|ProductCapabilityDescriptor" crates/ironclaw_assistant crates/ironclaw_host_api crates/ironclaw_webui
+rg -n "ProductSurface|ProductView|ProductSurfaceCommandDescriptor|ProductCapabilityDescriptor" crates/product/ironclaw_assistant crates/contracts/ironclaw_host_api crates/product/ironclaw_webui
 rg -n "trait ChannelAdapter|impl ChannelAdapter" crates
 cargo test -p ironclaw_assistant
 cargo test -p ironclaw_webui --all-features

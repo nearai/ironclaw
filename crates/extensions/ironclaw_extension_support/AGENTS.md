@@ -4,8 +4,8 @@
 
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these neighboring contracts before changing behavior:
-  - `crates/ironclaw_host_runtime/AGENTS.md`
-  - `crates/ironclaw_filesystem/AGENTS.md`
+  - `crates/kernel/ironclaw_host_runtime/AGENTS.md`
+  - `crates/substrates/ironclaw_filesystem/AGENTS.md`
 
 ## Where The Packages Live
 

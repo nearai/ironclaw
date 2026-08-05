@@ -8,7 +8,7 @@ sanitized-auth/validation-error slice; see `01-auth.md` and
   `platform/router.rs` (header layers), with auth-error text in
   `platform/auth.rs`.
 - **v2** applies headers via outer `SetResponseHeaderLayer`s in
-  `crates/ironclaw_composition/src/webui/webui_serve.rs`; errors are
+  `crates/app/ironclaw_composition/src/webui/webui_serve.rs`; errors are
   sanitized at the `WebuiAuthenticator` boundary (auth), the
   `WebUiV2HttpError` type (`ironclaw_webui/src/error.rs`), and the
   axum `Json` extractor (validation).
@@ -34,7 +34,7 @@ Decision legend as in `01-auth.md`: **Keep** / **Change** / **Beta-break**.
 ## Test coverage
 
 **This PR** —
-`crates/ironclaw_webui/tests/headers_errors_contract.rs`:
+`crates/product/ironclaw_webui/tests/headers_errors_contract.rs`:
 
 - `static_security_headers_present_on_error_response` — an
   unauthenticated 401 still carries `nosniff`, `DENY`, CSP, and
