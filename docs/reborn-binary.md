@@ -5,7 +5,7 @@ implementation remains in the workspace during migration, but it is not part of
 the Reborn release package.
 
 The workspace package and executable are both named `ironclaw`; its source
-directory remains `crates/ironclaw_reborn_cli`.
+directory remains `crates/app/ironclaw_cli`.
 
 ## Current status
 
@@ -67,7 +67,7 @@ ironclaw status --json
 ```
 
 The `traces` command tree is a contributor-only trace client; see
-`crates/ironclaw_reborn_cli/src/commands/traces/` for its subcommands.
+`crates/app/ironclaw_cli/src/commands/traces/` for its subcommands.
 
 **`channels`, `hooks`, and `logs` are disabled.** They stay in `--help` and
 shell completions so the eventual real implementation has a stable command
@@ -310,6 +310,8 @@ cargo run -q -p ironclaw --bin ironclaw -- ironhub search github
 cargo run -q -p ironclaw --bin ironclaw -- ironhub list --kind skill
 cargo run -q -p ironclaw --bin ironclaw -- ironhub info github-tool --kind tool
 cargo run -q -p ironclaw --bin ironclaw -- ironhub install github-tool --kind tool
+cargo run -q -p ironclaw --bin ironclaw -- ironhub install private-tool \
+  --private-manifest-url-file /secure/path/ironhub-manifest-url
 ```
 
 Catalog and artifact downloads use host-mediated HTTPS egress, bounded response
@@ -319,12 +321,26 @@ artifacts must match both the signed byte count and SHA-256 digest. Install
 automation can pin the inspected catalog state with `--expected-version` and
 `--expected-artifact-digest`.
 
+Private org-scoped manifests use the same pinned Ed25519 verification key and
+must come from the exact HTTPS origin configured by `IRONHUB_MANIFEST_URL`;
+their artifact URLs are pinned to that origin as well. The tokenized private
+manifest URL is read from a file so it does not appear in argv. Durable replay
+state is keyed by the configured host and the signed repository identity, not
+by the rotating access token in that URL.
+
 Unverified community content is rejected unless a CLI operator supplies
 `--acknowledge-unverified`; the model-facing install capability intentionally
 has no equivalent acknowledgement field. `--force` replaces an existing
 registry install through the normal lifecycle manager and restores the previous
-package or skill if the replacement fails. The command alias `iron-hub` is also
-accepted.
+package or skill if the replacement fails. The command aliases `iron-hub` and
+`hub` are also accepted.
+
+`ironclaw serve` exposes the public `POST /api/ironhub/register` handshake only
+when `IRONHUB_AGENT_SHARED_KEY` is explicitly set to a non-empty value of at
+least 32 bytes. The bearer-authenticated install-delivery route stays
+fail-closed as unavailable unless that same optional service is attached. The
+gateway is disabled by default. Signed install deliveries accept timestamps
+within a 300-second drift window and consume their nonces durably.
 
 ### `completion`
 
@@ -655,9 +671,9 @@ Run these before changing Reborn CLI behavior:
 ```bash
 cargo fmt --all -- --check
 cargo test -p ironclaw
-cargo test -p ironclaw_reborn_config
-cargo test -p ironclaw_runner model_slots_are_exposed_in_cli_display_order
-cargo test -p ironclaw_architecture reborn
+cargo test -p ironclaw_config
+cargo test -p ironclaw_turn_runner model_slots_are_exposed_in_cli_display_order
+cargo test -p ironclaw_architecture_tests reborn
 cargo clippy -p ironclaw --all-targets -- -D warnings
 cargo run -q -p ironclaw --bin ironclaw -- --help
 # channels/hooks/logs are disabled — these are expected to exit non-zero
@@ -680,12 +696,12 @@ cargo run -q -p ironclaw --bin ironclaw -- skills list
 Future commands should follow the crate-local agent contract in:
 
 ```text
-crates/ironclaw_reborn_cli/AGENTS.md
+crates/app/ironclaw_cli/AGENTS.md
 ```
 
 Short version:
 
-1. add one command module under `crates/ironclaw_reborn_cli/src/commands/`;
+1. add one command module under `crates/app/ironclaw_cli/src/commands/`;
 2. register it in `commands::Command`;
 3. resolve and pass `RebornCliContext` from dispatch only when the command needs boot config;
 4. keep pure commands independent from Reborn home resolution;

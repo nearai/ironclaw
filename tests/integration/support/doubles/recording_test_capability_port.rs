@@ -212,6 +212,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             capability_id: self.primary_capability_id(),
             name: ProviderToolName::new(self.primary_tool_name()).expect("provider tool name"),
             description: "Echo a test payload".to_string(),
+            description_trust: Default::default(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -225,6 +226,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
                 name: ProviderToolName::new(SPAWN_SUBAGENT_PROVIDER_TOOL_NAME)
                     .expect("provider tool name"),
                 description: "Spawn a child subagent run and wait for its result".to_string(),
+                description_trust: Default::default(),
                 parameters: build_spawn_subagent_parameters_schema(&[]),
             });
         }

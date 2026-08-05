@@ -16,7 +16,7 @@ use ironclaw_auth::{
     PkceVerifierHash, PkceVerifierSecret, ProviderScope,
 };
 use ironclaw_auth::{RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest};
-use ironclaw_reborn_composition::test_support::OAuthProductAuthTestBundle;
+use ironclaw_composition::test_support::OAuthProductAuthTestBundle;
 use secrecy::SecretString;
 
 /// Build a 64-character hex string from a repeated byte value.
@@ -41,6 +41,7 @@ pub async fn connect_google_account(
         .services
         .flow_manager()
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,

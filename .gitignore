@@ -47,7 +47,7 @@ artifacts/
 
 # WASM build artifacts (loaded from disk, not bundled)
 *.wasm
-!crates/ironclaw_first_party_extensions/assets/*/wasm/*.wasm
+!crates/extensions/packages/*/wasm/*.wasm
 
 # Traces
 trace_*.json
@@ -83,10 +83,12 @@ tests/fixtures/llm_traces/live/*.log
 .anvil/
 .codegraph/
 
-# codebase-memory knowledge graph — build artifact, not source.
-# Rebuilt from code via the codebase-memory MCP; per-environment, never committed.
+# codebase-memory knowledge graph. Share only the compressed bootstrap snapshot;
+# local metadata and runtime state remain per-environment.
 # See CLAUDE.md -> "Code Discovery".
-.codebase-memory/
+.codebase-memory/*
+!.codebase-memory/.gitattributes
+!.codebase-memory/graph.db.zst
 
 # test-tools fixture-bundle build artifacts — regenerate with
 # scripts/build-test-tools.sh; only sources/manifests/schemas/prompts are tracked.
@@ -109,3 +111,8 @@ crates/*/frontend/dist/
 # It is a regenerable build artifact of a local audit, never source.
 mutants.out/
 mutants.out.old/
+
+# Local TypeScript app directory — anchored to repo root so it does not
+# silently exclude nested `app/` directories (e.g. crates/*/frontend/src/app/).
+# Prefer .git/info/exclude for personal working directories.
+/app/

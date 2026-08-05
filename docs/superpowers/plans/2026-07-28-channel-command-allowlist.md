@@ -9,7 +9,7 @@
 bundled Slack and Telegram exposing only the existing exact `/status` command.
 
 **Architecture:** `ironclaw_host_api::ChannelDescriptor` owns the neutral,
-bounded `commands` declaration. `ironclaw_product` remains the only product
+bounded `commands` declaration. `ironclaw_assistant` remains the only product
 command registry and owns the concrete availability/direct-conversation
 admission policy. `ironclaw_extension_host` validates a resolved manifest
 against that registry and injects the policy into the generic channel graph.
@@ -17,7 +17,7 @@ Adapters only normalize ingress; no Slack- or Telegram-specific command
 filtering or execution is added.
 
 **Tech Stack:** Rust 2024 workspace, Serde/TOML, Tokio async tests,
-`ironclaw_host_api`, `ironclaw_product`, `ironclaw_extension_host`, bundled
+`ironclaw_host_api`, `ironclaw_assistant`, `ironclaw_extension_host`, bundled
 first-party extension manifests, Cargo test/clippy.
 
 ## Global Constraints
@@ -55,20 +55,20 @@ first-party extension manifests, Cargo test/clippy.
 - `crates/ironclaw_host_api/src/channel.rs`
   owns the serialized `ChannelDescriptor.commands` field and neutral
   declaration validation.
-- `crates/ironclaw_product/src/commands.rs`
+- `crates/ironclaw_assistant/src/commands.rs`
   owns exact-name lookup against the canonical product-command registry and
   enabled-inventory rendering.
-- `crates/ironclaw_product/src/command_dispatch.rs`
+- `crates/ironclaw_assistant/src/command_dispatch.rs`
   carries the exact inbound command token in the authority-bearing admission
   context.
-- `crates/ironclaw_product/src/command_admission.rs`
+- `crates/ironclaw_assistant/src/command_admission.rs`
   owns the concrete direct-conversation plus manifest-availability policy.
-- `crates/ironclaw_product/src/lib.rs`
+- `crates/ironclaw_assistant/src/lib.rs`
   re-exports only the registry/policy interfaces needed by the generic host.
-- `crates/ironclaw_product/src/run_delivery/observer.rs`
+- `crates/ironclaw_assistant/src/run_delivery/observer.rs`
   renders channel-scoped invalid-request feedback configured from the same
   validated manifest instead of the global inventory.
-- `crates/ironclaw_product/tests/product_command_surface_contract.rs`
+- `crates/ironclaw_assistant/tests/product_command_surface_contract.rs`
   proves exact-token admission context and fail-closed handler behavior.
 - `crates/ironclaw_extension_host/src/channel_host.rs`
   validates the resolved manifest and injects the centralized policy.
@@ -156,7 +156,7 @@ grammar (`a-z`, `0-9`, `_`, and `-`), reject `/`, whitespace, control
 characters, and duplicates, and return a typed `ChannelDescriptorError`.
 
 The validator must not know which product commands exist. Registry membership
-belongs to `ironclaw_product`.
+belongs to `ironclaw_assistant`.
 
 - [ ] **Step 4: Run the focused and full host-API tests**
 
@@ -180,11 +180,11 @@ git commit -m "feat(channels): declare bounded manifest commands"
 ### Task 2: Make Product Admission Exact, Centralized, and Fail Closed
 
 **Files:**
-- Modify: `crates/ironclaw_product/src/commands.rs`
-- Modify: `crates/ironclaw_product/src/command_dispatch.rs`
-- Modify: `crates/ironclaw_product/src/command_admission.rs`
-- Modify: `crates/ironclaw_product/src/lib.rs`
-- Modify: `crates/ironclaw_product/tests/product_command_surface_contract.rs`
+- Modify: `crates/ironclaw_assistant/src/commands.rs`
+- Modify: `crates/ironclaw_assistant/src/command_dispatch.rs`
+- Modify: `crates/ironclaw_assistant/src/command_admission.rs`
+- Modify: `crates/ironclaw_assistant/src/lib.rs`
+- Modify: `crates/ironclaw_assistant/tests/product_command_surface_contract.rs`
 
 **Interfaces:**
 - Add the original normalized token to `ProductCommandContext`, separate from
@@ -214,9 +214,9 @@ In `product_commands_contract.rs`, add focused tests proving:
 Run:
 
 ```bash
-cargo test -p ironclaw_product --test product_command_surface_contract \
+cargo test -p ironclaw_assistant --test product_command_surface_contract \
   command_admission_receives_authority_context_and_action_metadata -- --nocapture
-cargo test -p ironclaw_product --test product_commands_contract \
+cargo test -p ironclaw_assistant --test product_commands_contract \
   declared_command -- --nocapture
 ```
 
@@ -261,7 +261,7 @@ commands through `DefaultProductSurface`:
 Run:
 
 ```bash
-cargo test -p ironclaw_product --test product_command_surface_contract \
+cargo test -p ironclaw_assistant --test product_command_surface_contract \
   manifest_command_admission_ -- --nocapture
 ```
 
@@ -290,8 +290,8 @@ empty/fail-closed rather than allow-all.
 Run:
 
 ```bash
-cargo test -p ironclaw_product --test product_command_surface_contract -- --nocapture
-cargo test -p ironclaw_product --test product_commands_contract -- --nocapture
+cargo test -p ironclaw_assistant --test product_command_surface_contract -- --nocapture
+cargo test -p ironclaw_assistant --test product_commands_contract -- --nocapture
 ```
 
 Expected: exact-token, sensitive-command denial, direct-conversation, lease,
@@ -300,19 +300,19 @@ and existing command dispatch contracts all pass.
 - [ ] **Step 8: Commit the product policy**
 
 ```bash
-git add crates/ironclaw_product/src/commands.rs \
-  crates/ironclaw_product/src/command_dispatch.rs \
-  crates/ironclaw_product/src/command_admission.rs \
-  crates/ironclaw_product/src/lib.rs \
-  crates/ironclaw_product/tests/product_command_surface_contract.rs \
-  crates/ironclaw_product/tests/product_commands_contract.rs
+git add crates/ironclaw_assistant/src/commands.rs \
+  crates/ironclaw_assistant/src/command_dispatch.rs \
+  crates/ironclaw_assistant/src/command_admission.rs \
+  crates/ironclaw_assistant/src/lib.rs \
+  crates/ironclaw_assistant/tests/product_command_surface_contract.rs \
+  crates/ironclaw_assistant/tests/product_commands_contract.rs
 git commit -m "feat(product): enforce channel command allowlists"
 ```
 
 ### Task 3: Preserve Channel-Scoped Rejection Feedback
 
 **Files:**
-- Modify: `crates/ironclaw_product/src/run_delivery/observer.rs`
+- Modify: `crates/ironclaw_assistant/src/run_delivery/observer.rs`
 
 **Interfaces:**
 - Consume enabled-command help configured from the same validated manifest as
@@ -340,7 +340,7 @@ Assert the delivered command feedback is exactly
 Run:
 
 ```bash
-cargo test -p ironclaw_product command_feedback_uses_scoped_invalid_request_reason \
+cargo test -p ironclaw_assistant command_feedback_uses_scoped_invalid_request_reason \
   -- --nocapture
 ```
 
@@ -365,9 +365,9 @@ not remove the global helper if other callers/tests still use it.
 Run:
 
 ```bash
-cargo test -p ironclaw_product command_feedback_uses_scoped_invalid_request_reason \
+cargo test -p ironclaw_assistant command_feedback_uses_scoped_invalid_request_reason \
   -- --nocapture
-cargo test -p ironclaw_product --lib run_delivery::observer -- --nocapture
+cargo test -p ironclaw_assistant --lib run_delivery::observer -- --nocapture
 ```
 
 Expected: scoped feedback is delivered and existing direct-conversation,
@@ -376,7 +376,7 @@ binding, and terminal-rejection behavior remains intact.
 - [ ] **Step 5: Commit the feedback boundary**
 
 ```bash
-git add crates/ironclaw_product/src/run_delivery/observer.rs
+git add crates/ironclaw_assistant/src/run_delivery/observer.rs
 git commit -m "fix(product): scope channel command feedback"
 ```
 
@@ -507,7 +507,7 @@ git commit -m "feat(channels): enforce resolved command exposure"
 - Modify: `crates/ironclaw_first_party_extensions/assets/telegram/manifest.toml`
 - Modify: `crates/ironclaw_extension_host/src/available_extensions.rs`
 - Modify if the existing production-binding assertion requires it:
-  `crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs`
+  `crates/ironclaw_cli/src/runtime/native_extensions.rs`
 
 **Interfaces:**
 - Shipping Slack and Telegram resolved manifests each expose exactly
@@ -564,7 +564,7 @@ Run:
 ```bash
 cargo test -p ironclaw_extension_host bundled_slack_package -- --nocapture
 cargo test -p ironclaw_extension_host bundled_telegram_package -- --nocapture
-cargo test -p ironclaw_reborn_cli \
+cargo test -p ironclaw_cli \
   bundled_telegram_binding_routes_targeted_commands_through_generic_sink \
   -- --nocapture
 cargo test -p ironclaw_telegram_v2_adapter command -- --nocapture
@@ -580,7 +580,7 @@ owning product availability.
 git add crates/ironclaw_first_party_extensions/assets/slack/manifest.toml \
   crates/ironclaw_first_party_extensions/assets/telegram/manifest.toml \
   crates/ironclaw_extension_host/src/available_extensions.rs \
-  crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs
+  crates/ironclaw_cli/src/runtime/native_extensions.rs
 git commit -m "feat(channels): expose status in bundled channels"
 ```
 
@@ -613,11 +613,11 @@ Run:
 ```bash
 cargo fmt --all -- --check
 cargo test -p ironclaw_host_api
-cargo test -p ironclaw_product
+cargo test -p ironclaw_assistant
 cargo test -p ironclaw_extension_host
 cargo test -p ironclaw_telegram_v2_adapter
 cargo test -p ironclaw_telegram_extension
-cargo test -p ironclaw_reborn_cli native_extensions -- --nocapture
+cargo test -p ironclaw_cli native_extensions -- --nocapture
 ```
 
 If a broad suite is blocked by an unrelated baseline failure, record the exact
@@ -629,9 +629,9 @@ has a passing focused test.
 Run:
 
 ```bash
-cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold
-cargo clippy -p ironclaw_host_api -p ironclaw_product \
-  -p ironclaw_extension_host -p ironclaw_reborn_cli \
+cargo test -p ironclaw_architecture_tests reborn_crate_dependency_boundaries_hold
+cargo clippy -p ironclaw_host_api -p ironclaw_assistant \
+  -p ironclaw_extension_host -p ironclaw_cli \
   --all-targets --all-features -- -D warnings
 git diff --check
 ```
@@ -645,10 +645,10 @@ Run targeted searches over changed production files for:
 ```bash
 rg -n '\.unwrap\(\)|\.expect\(' \
   crates/ironclaw_host_api/src/channel.rs \
-  crates/ironclaw_product/src/commands.rs \
-  crates/ironclaw_product/src/command_dispatch.rs \
-  crates/ironclaw_product/src/command_admission.rs \
-  crates/ironclaw_product/src/run_delivery/observer.rs \
+  crates/ironclaw_assistant/src/commands.rs \
+  crates/ironclaw_assistant/src/command_dispatch.rs \
+  crates/ironclaw_assistant/src/command_admission.rs \
+  crates/ironclaw_assistant/src/run_delivery/observer.rs \
   crates/ironclaw_extension_host/src/channel_host.rs
 ```
 

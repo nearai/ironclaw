@@ -21,8 +21,15 @@ use axum::body::{Body, to_bytes};
 use axum::http::StatusCode;
 use axum::http::{Method, Request};
 use chrono::{DateTime, Utc};
-use ironclaw_events::InMemoryDurableEventLog;
-use ironclaw_extensions::{
+use ironclaw_assistant::{ProductOutboundEnvelope, ProductOutboundPayload};
+use ironclaw_assistant::{RebornServices, RebornStreamEventsRequest};
+use ironclaw_composition::test_support::BudgetTestGateway;
+use ironclaw_composition::{
+    RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
+    standalone_runtime_policy,
+};
+use ironclaw_event_log::InMemoryDurableEventLog;
+use ironclaw_extension_registry::{
     CapabilityProviderHostApiContract, ExtensionInstallation, ExtensionInstallationId,
     ExtensionManifestRecord, ExtensionManifestRef, HostApiContractRegistry, InstallationOwner,
 };
@@ -31,19 +38,15 @@ use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
     ids::{AgentId, CapabilityId, ExtensionId, SecretHandle, TenantId, UserId},
 };
-use ironclaw_product::{
+use ironclaw_product_contracts::admin_users::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
-    AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornOperatorToolCatalog,
-    RebornOperatorToolInfo, RebornServices, RebornStreamEventsRequest,
+    AdminUserSecretMeta, AdminUserService, AdminUserStatus,
 };
-use ironclaw_product::{ProductOutboundEnvelope, ProductOutboundPayload};
+use ironclaw_product_contracts::operator_tools::{
+    RebornOperatorToolCatalog, RebornOperatorToolInfo,
+};
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceStreamRequest,
-};
-use ironclaw_reborn_composition::test_support::BudgetTestGateway;
-use ironclaw_reborn_composition::{
-    RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
-    standalone_runtime_policy,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnEventProjectionSource, TurnStatus};
 use ironclaw_webui::webui_v2::{
@@ -89,7 +92,7 @@ async fn thread_history_cold_get_and_libsql_reopen() {
         .await
         .expect("migrations on fresh libsql reopen are idempotent");
     let mut fresh_composite = CompositeRootFilesystem::new();
-    ironclaw_reborn_composition::test_support::mount_database_roots_for_test(
+    ironclaw_composition::test_support::mount_database_roots_for_test(
         &mut fresh_composite,
         fresh_fs,
     )
@@ -260,7 +263,7 @@ async fn settings_tool_permission_post_then_cold_read() {
         .service_instance()
         .expect("fresh thread service instance");
     let (fresh_overrides, fresh_auto_approve, fresh_persistent_policies) =
-        ironclaw_reborn_composition::test_support::open_standalone_approval_settings_stores_for_test(
+        ironclaw_composition::test_support::open_standalone_approval_settings_stores_for_test(
             &capability_harness.storage_root_for_test(),
         )
         .await
@@ -300,16 +303,14 @@ async fn operator_can_import_extension_bundle_through_production_webui_facade() 
     let tenant_id = TenantId::new("webui-import-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-import-agent").expect("agent id");
     let user_id = UserId::new("webui-import-operator").expect("user id");
-    let input = ironclaw_reborn_composition::local_filesystem_build_input(
-        user_id.as_str(),
-        storage_root.clone(),
-    )
-    .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
-    .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
-    .with_bundled_first_party_for_test()
-    .with_network_http_egress_for_test(Arc::new(
-        reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
-    ));
+    let input =
+        ironclaw_composition::local_filesystem_build_input(user_id.as_str(), storage_root.clone())
+            .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+            .with_runtime_policy(standalone_runtime_policy().expect("local-dev policy"))
+            .with_bundled_first_party_for_test()
+            .with_network_http_egress_for_test(Arc::new(
+                reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+            ));
     let runtime = build_reborn_runtime(
         RebornRuntimeInput::from_build_input(input)
             .with_identity(RebornRuntimeIdentity {
@@ -407,7 +408,7 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     let tenant_id = TenantId::new("webui-legacy-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-legacy-agent").expect("agent id");
     let operator_id = UserId::new("webui-legacy-operator").expect("operator id");
-    let input = ironclaw_reborn_composition::local_filesystem_build_input(
+    let input = ironclaw_composition::local_filesystem_build_input(
         operator_id.as_str(),
         storage_root.clone(),
     )
@@ -477,11 +478,12 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");
 
-    let store = ironclaw_reborn_composition::test_support::open_standalone_extension_installation_store_for_test(
-        &storage_root,
-    )
-    .await
-    .expect("open extension installation store");
+    let store =
+        ironclaw_composition::test_support::open_standalone_extension_installation_store_for_test(
+            &storage_root,
+        )
+        .await
+        .expect("open extension installation store");
     let rows = store
         .list_installations()
         .await
@@ -519,7 +521,7 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     }
     drop(store);
 
-    let rebuilt_input = ironclaw_reborn_composition::local_filesystem_build_input(
+    let rebuilt_input = ironclaw_composition::local_filesystem_build_input(
         "webui-legacy-operator",
         storage_root.clone(),
     )
@@ -547,11 +549,12 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
         .product_surface(None)
         .expect("rebuilt product surface builds");
 
-    let store = ironclaw_reborn_composition::test_support::open_standalone_extension_installation_store_for_test(
-        &storage_root,
-    )
-    .await
-    .expect("reopen canonical extension installation store");
+    let store =
+        ironclaw_composition::test_support::open_standalone_extension_installation_store_for_test(
+            &storage_root,
+        )
+        .await
+        .expect("reopen canonical extension installation store");
     let installations = store
         .list_installations()
         .await
@@ -635,7 +638,7 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     let tenant_id = TenantId::new("webui-orphan-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-orphan-agent").expect("agent id");
     let operator_id = UserId::new("webui-orphan-operator").expect("operator id");
-    let input = ironclaw_reborn_composition::local_filesystem_build_input(
+    let input = ironclaw_composition::local_filesystem_build_input(
         operator_id.as_str(),
         storage_root.clone(),
     )
@@ -706,11 +709,12 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     // materialized catalog package (no `/system/extensions/<id>/` files were
     // written for it), simulating a migration that has not yet materialized
     // catalog packages.
-    let store = ironclaw_reborn_composition::test_support::open_standalone_extension_installation_store_for_test(
-        &storage_root,
-    )
-    .await
-    .expect("open extension installation store");
+    let store =
+        ironclaw_composition::test_support::open_standalone_extension_installation_store_for_test(
+            &storage_root,
+        )
+        .await
+        .expect("open extension installation store");
     let catalog_extension_id = ExtensionId::new("catalog-present").expect("extension id");
     let catalog_manifest = store
         .get_manifest(&catalog_extension_id)
@@ -763,7 +767,7 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
         .expect("write orphan manifest and installation rows");
     drop(store);
 
-    let rebuilt_input = ironclaw_reborn_composition::local_filesystem_build_input(
+    let rebuilt_input = ironclaw_composition::local_filesystem_build_input(
         "webui-orphan-operator",
         storage_root.clone(),
     )
@@ -794,15 +798,16 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     // The orphan row is preserved untouched (never deleted or rewritten) so
     // it can restore once the migration tool later materializes its catalog
     // package.
-    let store = ironclaw_reborn_composition::test_support::open_standalone_extension_installation_store_for_test(
-        &storage_root,
-    )
-    .await
-    .expect("reopen canonical extension installation store");
+    let store =
+        ironclaw_composition::test_support::open_standalone_extension_installation_store_for_test(
+            &storage_root,
+        )
+        .await
+        .expect("reopen canonical extension installation store");
     assert!(
         store
             .get_installation(
-                &ironclaw_extensions::ExtensionInstallationId::new("orphan-migrated")
+                &ironclaw_extension_registry::ExtensionInstallationId::new("orphan-migrated")
                     .expect("valid installation id")
             )
             .await
@@ -855,7 +860,7 @@ async fn users_and_operator_install_and_remove_independently_through_production_
     let tenant_id = TenantId::new("webui-eviction-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-eviction-agent").expect("agent id");
     let operator_id = UserId::new("webui-eviction-operator").expect("operator id");
-    let input = ironclaw_reborn_composition::local_filesystem_build_input(
+    let input = ironclaw_composition::local_filesystem_build_input(
         operator_id.as_str(),
         storage_root.clone(),
     )
@@ -1112,7 +1117,7 @@ async fn operator_lists_uninstalled_manifest_admin_configuration_with_secrets_re
     let tenant_id = TenantId::new("webui-admin-config-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-admin-config-agent").expect("agent id");
     let user_id = UserId::new("webui-admin-config-operator").expect("user id");
-    let input = ironclaw_reborn_composition::local_filesystem_build_input(
+    let input = ironclaw_composition::local_filesystem_build_input(
         user_id.as_str(),
         root.path().join("local-dev"),
     )
@@ -1187,7 +1192,7 @@ async fn operator_saves_admin_configuration_and_reads_back_new_redacted_revision
     let tenant_id = TenantId::new("webui-admin-save-tenant").expect("tenant id");
     let agent_id = AgentId::new("webui-admin-save-agent").expect("agent id");
     let user_id = UserId::new("webui-admin-save-operator").expect("user id");
-    let input = ironclaw_reborn_composition::local_filesystem_build_input(
+    let input = ironclaw_composition::local_filesystem_build_input(
         user_id.as_str(),
         root.path().join("local-dev"),
     )
@@ -1611,7 +1616,7 @@ impl AdminConfigurationFixture {
         let tenant_id = TenantId::new(format!("webui-admin-{name}-tenant")).expect("tenant id");
         let agent_id = AgentId::new(format!("webui-admin-{name}-agent")).expect("agent id");
         let user_id = UserId::new(format!("webui-admin-{name}-user")).expect("user id");
-        let input = ironclaw_reborn_composition::local_filesystem_build_input(
+        let input = ironclaw_composition::local_filesystem_build_input(
             user_id.as_str(),
             root.path().join("local-dev"),
         )
@@ -1665,10 +1670,11 @@ impl AdminConfigurationFixture {
     }
 
     fn pairing_member_router(&self) -> Router {
-        let pairing = self
-            .runtime
-            .channel_pairing_route_mount()
-            .expect("Telegram pairing route mount");
+        let pairing = ironclaw_webui::channel_pairing_route_mount(
+            self.runtime
+                .channel_pairing_registry()
+                .expect("Telegram pairing registry"),
+        );
         pairing
             .router
             .layer(axum::Extension(self.caller.clone()))
@@ -1837,13 +1843,12 @@ async fn sse_activity_stream_replay_and_reconnect() {
     let reply_target_binding_ref =
         ReplyTargetBindingRef::new("webui-api-1-test").expect("valid reply target binding ref");
     let turn_event_source: Arc<dyn TurnEventProjectionSource> = h.turn_event_projection_for_test();
-    let event_stream =
-        ironclaw_reborn_composition::test_support::build_product_event_stream_for_test(
-            event_log,
-            turn_event_source,
-            h.coordinator.clone(),
-            reply_target_binding_ref,
-        );
+    let event_stream = ironclaw_composition::test_support::build_product_event_stream_for_test(
+        event_log,
+        turn_event_source,
+        h.coordinator.clone(),
+        reply_target_binding_ref,
+    );
     let services = RebornServices::new(h.thread_harness.service.clone(), h.coordinator.clone())
         .with_event_stream(event_stream);
 
@@ -1959,13 +1964,12 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
     let reply_target_binding_ref =
         ReplyTargetBindingRef::new("webui-api2-test").expect("valid reply target binding ref");
     let turn_event_source: Arc<dyn TurnEventProjectionSource> = h.turn_event_projection_for_test();
-    let event_stream =
-        ironclaw_reborn_composition::test_support::build_product_event_stream_for_test(
-            event_log,
-            turn_event_source,
-            h.coordinator.clone(),
-            reply_target_binding_ref,
-        );
+    let event_stream = ironclaw_composition::test_support::build_product_event_stream_for_test(
+        event_log,
+        turn_event_source,
+        h.coordinator.clone(),
+        reply_target_binding_ref,
+    );
     let services: Arc<dyn ProductSurface> = Arc::new(
         RebornServices::new(h.thread_harness.service.clone(), h.coordinator.clone())
             .with_event_stream(event_stream)
@@ -2057,7 +2061,7 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
 
 /// Minimal `AdminUserService` double for the command-palette scenarios below.
 /// `caller_is_command_admin`
-/// (`crates/ironclaw_product/src/reborn_services/product_commands.rs`) only
+/// (`crates/ironclaw_assistant/src/reborn_services/product_commands.rs`) only
 /// ever calls `get_user` on this port; every other method fails closed
 /// exactly like the production default (`RejectingAdminUserService`), since
 /// this fixture never exercises them.
@@ -2066,7 +2070,7 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
 /// default, so it falls back to that same rejecting default — proven at the
 /// crate tier by
 /// `list_commands_surfaces_directory_unavailable_as_retryable_503`
-/// (`crates/ironclaw_product/tests/reborn_services_contract.rs`). Without this
+/// (`crates/ironclaw_assistant/tests/reborn_services_contract.rs`). Without this
 /// double, every caller here would get a retryable 503 instead of a genuine
 /// member/admin result, so the audience-filtering distinction below could
 /// never reach the WebUI route as a 200.
@@ -2196,8 +2200,8 @@ impl AdminUserService for StaticAdminUserService {
 }
 
 /// `GET /commands` filters the registry by the caller's command-admin
-/// audience (member sees only the two `User`-audience commands; admin sees
-/// the full 12-entry registry, including the `Lifecycle` family), and
+/// audience (member sees only the five `User`-audience commands; admin sees
+/// the full 15-entry registry, including the `Lifecycle` family), and
 /// executing an `Admin`-audience action (`/model set ...`) as a member is
 /// rejected at the audience gate before the LLM-config seam ever runs — a 200
 /// response carrying a body-level `rejection`, never a transport error. See
@@ -2238,7 +2242,7 @@ async fn command_list_and_model_execute_are_gated_by_command_admin_role() {
         .collect();
     assert_eq!(
         member_names,
-        vec!["model", "status"],
+        vec!["model", "status", "new", "stop", "interrupt"],
         "member must see only the User-audience commands: {body}"
     );
 
@@ -2256,7 +2260,7 @@ async fn command_list_and_model_execute_are_gated_by_command_admin_role() {
         .collect();
     assert_eq!(
         admin_names.len(),
-        12,
+        15,
         "admin must see the full registry including the Lifecycle family: {body}"
     );
     assert!(
@@ -2284,7 +2288,7 @@ async fn command_list_and_model_execute_are_gated_by_command_admin_role() {
 /// both settle to the same idle `CommandResultView`, never a 404. This
 /// mirrors the crate-tier design pin
 /// (`execute_status_on_foreign_thread_is_indistinguishable_from_unknown` in
-/// `crates/ironclaw_product/tests/reborn_services_contract.rs`): leaking
+/// `crates/ironclaw_assistant/tests/reborn_services_contract.rs`): leaking
 /// "this thread_id exists but isn't yours" through a 404-vs-200 split would
 /// let a caller probe for other users' thread ids one guess at a time.
 #[tokio::test]

@@ -23,7 +23,14 @@ on:
         type: string
   pull_request:
     branches:
+      # Release branches get the same gate as main: a release-blocker fix
+      # opened against a frozen candidate must clear the deterministic Reborn
+      # suite before it can produce a new rc. `release-fix-*` is the 1.0.0-era
+      # name; `release/*` is the weekly cut named in
+      # docs/internal/weekly-release-strategy.md.
       - main
+      - "release-fix-*"
+      - "release/*"
   merge_group:
     branches:
       - main
@@ -43,7 +50,7 @@ concurrency:
 env:
   # Tests must never touch the real OS keychain (macOS Keychain auth dialog /
   # Linux Secret Service). Guarded by
-  # crates/ironclaw_secrets/src/keychain.rs::os_keychain_suppressed:
+  # crates/substrates/ironclaw_secrets/src/keychain.rs::os_keychain_suppressed:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
@@ -78,79 +85,116 @@ jobs:
     name: Detect Reborn test scope
     runs-on: ubuntu-latest
     outputs:
-      docs_only: ${{ steps.non_diff.outputs.docs_only || steps.diff.outputs.docs_only }}
-      has_reborn_tests: ${{ steps.non_diff.outputs.has_reborn_tests || steps.diff.outputs.has_reborn_tests }}
+      plan_mode: ${{ steps.plan.outputs.plan_mode }}
+      run_crate_tests: ${{ steps.plan.outputs.run_crate_tests }}
+      crate_buckets: ${{ steps.plan.outputs.crate_buckets }}
+      run_root_tests: ${{ steps.plan.outputs.run_root_tests }}
+      root_partitions: ${{ steps.plan.outputs.root_partitions }}
+      run_group_tests: ${{ steps.plan.outputs.run_group_tests }}
+      run_integration_tests: ${{ steps.plan.outputs.run_integration_tests }}
+      integration_lanes: ${{ steps.plan.outputs.integration_lanes }}
+      run_coverage: ${{ steps.plan.outputs.run_coverage }}
+      run_qa_replay: ${{ steps.plan.outputs.run_qa_replay }}
     steps:
-      - id: non_diff
-        if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
-        run: |
-          echo "docs_only=false" >> "$GITHUB_OUTPUT"
-          echo "has_reborn_tests=true" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
+          ref: ${{ inputs.ref || github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - id: diff
-        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - id: plan
+        name: Build affected-area test plan
         env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
-          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          CHANGED_FILES="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
-
-          echo "Changed files:"
-          if [ -n "$CHANGED_FILES" ]; then
-            printf '%s\n' "$CHANGED_FILES"
-          else
-            echo "<none>"
+          set -euo pipefail
+          changed_args=()
+          base_args=()
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git diff --name-only "$BASE_SHA"..."$HEAD_SHA" \
+              > "${RUNNER_TEMP}/reborn-changed-files.txt"
+            changed_args=(--changed-files "${RUNNER_TEMP}/reborn-changed-files.txt")
+            base_args=(--base-sha "$BASE_SHA")
           fi
 
-          printf '%s\n' "$CHANGED_FILES" | scripts/ci/classify-test-scope.sh >> "$GITHUB_OUTPUT"
+          python3 scripts/ci/test_reborn_pr_test_plan.py
+          python3 scripts/ci/test_pre_commit_staged_paths.py
+          scripts/ci/discover-reborn-package-crates.sh \
+            > "${RUNNER_TEMP}/reborn-canonical-packages.json"
+          plan="$(
+            python3 scripts/ci/reborn_pr_test_plan.py \
+              --event "${{ github.event_name }}" \
+              --canonical-packages "${RUNNER_TEMP}/reborn-canonical-packages.json" \
+              "${base_args[@]}" \
+              "${changed_args[@]}"
+          )"
+          printf '%s\n' "${plan}" | jq .
+          canonical="$(cat "${RUNNER_TEMP}/reborn-canonical-packages.json")"
+          if ! jq -e --argjson canonical "${canonical}" '
+            .mode != "full" or (
+              ([.crate_buckets[].packages[]] | sort) == ($canonical | sort)
+              and .root_partitions == [0, 1, 2, 3]
+              and .integration_lanes == [0, 1, 2, 3, "groups"]
+              and .run_group_tests == true
+              and .run_qa_replay == true
+              and .coverage_mode == "full"
+            )
+          ' <<< "${plan}" > /dev/null; then
+            echo "Full Reborn plan is not exhaustive"
+            exit 1
+          fi
+          {
+            echo "### Reborn affected-area plan"
+            echo
+            echo "- Mode: $(jq -r '.mode' <<< "${plan}")"
+            echo "- Reasons: $(jq -r '.reasons | join("; ")' <<< "${plan}")"
+            echo "- Crate buckets: $(jq -r '.crate_buckets | length' <<< "${plan}")"
+            echo "- Root partitions: $(jq -c '.root_partitions' <<< "${plan}")"
+            echo "- Integration lanes: $(jq -c '.integration_lanes' <<< "${plan}")"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          # Guard the tests/integration/ <-> tests/support/reborn_parity_qa/
-          # one-way boundary on every PR/merge_group run, in the same step as
-          # the scope classifier above (both are cheap, checkout-only checks).
+          echo "plan_mode=$(jq -r '.mode' <<< "${plan}")" >> "$GITHUB_OUTPUT"
+          echo "run_crate_tests=$(jq -r '.crate_buckets | length > 0' <<< "${plan}")" >> "$GITHUB_OUTPUT"
+          echo "crate_buckets=$(jq -c '.crate_buckets' <<< "${plan}")" >> "$GITHUB_OUTPUT"
+          echo "run_root_tests=$(jq -r '.root_partitions | length > 0' <<< "${plan}")" >> "$GITHUB_OUTPUT"
+          echo "root_partitions=$(jq -c '.root_partitions' <<< "${plan}")" >> "$GITHUB_OUTPUT"
+          echo "run_group_tests=$(jq -r '.run_group_tests' <<< "${plan}")" >> "$GITHUB_OUTPUT"
+          echo "run_integration_tests=$(jq -r '.integration_lanes | length > 0' <<< "${plan}")" >> "$GITHUB_OUTPUT"
+          echo "integration_lanes=$(jq -c '.integration_lanes' <<< "${plan}")" >> "$GITHUB_OUTPUT"
+          # Owner decision 2026-08-04 (Ben + Firat): coverage collection,
+          # the report job, the floors, and the changed-line gate all run on
+          # pushes to main ONLY. PR and merge-queue lanes run plain
+          # (uninstrumented) tests — llvm-cov overhead was a large share of
+          # the ~hour cycle — and a post-merge coverage breach lands as a red
+          # main run that main-ci-slack-alerts.yml announces, fixed forward.
+          run_coverage="$(jq -r '.coverage_mode == "full"' <<< "${plan}")"
+          if [[ "${{ github.event_name }}" != "push" ]]; then
+            run_coverage=false
+          fi
+          echo "run_coverage=${run_coverage}" >> "$GITHUB_OUTPUT"
+          echo "run_qa_replay=$(jq -r '.run_qa_replay' <<< "${plan}")" >> "$GITHUB_OUTPUT"
+
           scripts/ci/check-test-suite-boundaries.sh
           scripts/ci/test-reborn-changed-coverage.sh
           scripts/ci/test-reborn-coverage.sh
           scripts/ci/test-check-reborn-branch-coverage-flags.sh
 
-  package-matrix:
-    name: Discover Reborn package crates
-    needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
-    runs-on: ubuntu-latest
-    outputs:
-      packages: ${{ steps.packages.outputs.packages }}
-      buckets: ${{ steps.packages.outputs.buckets }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-          persist-credentials: false
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - id: packages
-        name: Build package matrix from Reborn crate families
-        run: |
-          packages="$(scripts/ci/discover-reborn-package-crates.sh)"
-          echo "packages=${packages}" >> "$GITHUB_OUTPUT"
-          buckets="$(scripts/ci/reborn-crate-test-buckets.sh "${packages}")"
-          echo "buckets=${buckets}" >> "$GITHUB_OUTPUT"
-
-          echo "Testing Reborn package crates:"
-          printf '%s\n' "${packages}" | jq -r '.[] | "- " + .'
-          echo "Testing Reborn package buckets:"
-          printf '%s\n' "${buckets}" | jq -r '.[] | "- \(.name): \(.packages | join(", "))"'
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            scripts/ci/test-critical-mutation-gate.sh
+            python3 scripts/ci/critical_mutation_gate.py \
+              --manifest tests/integration/critical-mutation-functions.toml \
+              --changed-files "${RUNNER_TEMP}/reborn-changed-files.txt" \
+              --selection-only
+          fi
 
   crate-tests:
     name: Test Reborn crate bucket (${{ matrix.bucket.name }})
-    needs: [changes, package-matrix]
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
+    needs: changes
+    if: needs.changes.outputs.run_crate_tests == 'true'
     runs-on: ubuntu-latest
     # 60->90 for llvm-cov instrumentation overhead; watch `composition-core` first (single-package bucket, most feature-loaded, zero headroom).
     timeout-minutes: 90
@@ -164,8 +208,9 @@ jobs:
       RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold -Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
     strategy:
       fail-fast: false
+      max-parallel: ${{ github.event_name == 'pull_request' && 3 || 14 }}
       matrix:
-        bucket: ${{ fromJSON(needs.package-matrix.outputs.buckets) }}
+        bucket: ${{ fromJSON(needs.changes.outputs.crate_buckets) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -177,6 +222,7 @@ jobs:
         run: echo "COREPACK_HOME=${RUNNER_TEMP}/ironclaw-corepack" >> "$GITHUB_ENV"
 
       - name: Free disk space
+        if: needs.changes.outputs.run_coverage == 'true'
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
@@ -203,19 +249,19 @@ jobs:
             # These packages link `ironclaw_webui`, whose build script compiles
             # the Vite frontend and therefore needs a Node/pnpm toolchain.
             case "${package}" in
-              ironclaw|ironclaw_reborn_composition|ironclaw_webui)
+              ironclaw|ironclaw_composition|ironclaw_webui)
                 needs_webui_node=true
                 ;;
             esac
 
             case "${package}" in
-              ironclaw_reborn_composition|ironclaw_triggers)
+              ironclaw_composition|ironclaw_triggers)
                 needs_postgres_image=true
                 ;;
             esac
 
             case "${package}" in
-              ironclaw|ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_host|ironclaw_product|ironclaw_runner|ironclaw_reborn_composition|ironclaw_webui|ironclaw_wasm)
+              ironclaw|ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_host|ironclaw_assistant|ironclaw_turn_runner|ironclaw_composition|ironclaw_webui|ironclaw_wasm)
                 sccache_dist_enabled=false
                 ;;
             esac
@@ -239,7 +285,19 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+          # actions/setup-node hashes this list to build the cache key
+          # (verified against the pinned commit's bundled dist/setup/index.js:
+          # `hashFiles` walks one globber built from every newline-separated
+          # pattern and only throws when the COMBINED walk finds nothing), so
+          # the exact line stays live for today's tree (WS7 put the crate in
+          # `crates/product/`) and the deeper glob picks up any later re-homing
+          # without either one needing to be conditional. The two must not
+          # overlap: `ws12_workflow_contracts.py` rejects a spare that already
+          # matches the real location, because a pattern matching everything is
+          # broad rather than depth-tolerant.
+          cache-dependency-path: |
+            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
@@ -248,7 +306,9 @@ jobs:
       - name: Install WebUI frontend dependencies
         if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
         run: |
-          cd crates/ironclaw_webui/frontend
+          set -euo pipefail
+          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
+          cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
 
       - name: Install mold and clang
@@ -269,7 +329,7 @@ jobs:
           # always-resident entry, so the registry is downloaded once, not ~60x.
           #
           # `-cov` suffix: instrumented llvm-cov build is a different artifact than plain `reborn-tests-crates`; separate lineage avoids corrupting whichever restores second (same as `reborn-integration-cov` below).
-          shared-key: reborn-tests-crates-cov-llvm21
+          shared-key: ${{ needs.changes.outputs.run_coverage == 'true' && 'reborn-tests-crates-cov-llvm21' || 'reborn-tests-crates' }}
           # Keep saves to protected-branch and merge_group runs so the ~10 GB
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
@@ -287,54 +347,77 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
       - name: Install cargo-llvm-cov
+        if: needs.changes.outputs.run_coverage == 'true'
         uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # cargo-llvm-cov
 
       - name: Run crate tests
         env:
           BUCKET_NAME: ${{ matrix.bucket.name }}
           BUCKET_PACKAGES: ${{ toJSON(matrix.bucket.packages) }}
+          EXACT_TARGETS: ${{ toJSON(matrix.bucket.exact_targets || fromJSON('[]')) }}
+          COLLECT_COVERAGE: ${{ needs.changes.outputs.run_coverage }}
         run: |
           echo "Running Reborn crate bucket: ${BUCKET_NAME}"
           printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[] | "- " + .'
 
           scripts/ci/run-hermetic-deterministic-suite.sh prepare-command
           export IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1
-          mkdir -p coverage
-
+          package_args=()
+          feature_args=()
+          incremental_env=()
           while IFS= read -r package; do
+            package_args+=(-p "$package")
             feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
-            echo "::group::cargo llvm-cov -p ${package} ${feature_flags} test"
-
-            # Scoped to this invocation only (never `export`) so it can't leak
-            # onto later packages in the same bucket iteration if
-            # composition-core ever stops being single-package.
-            incremental_env=()
-            if [ "$package" = "ironclaw_reborn_composition" ]; then
-              echo "Disabling incremental compilation for ironclaw_reborn_composition to keep runner disk usage bounded."
+            if [[ -n "${feature_flags}" ]]; then
+              features="${feature_flags#--features }"
+              IFS=, read -ra package_features <<< "${features}"
+              for feature in "${package_features[@]}"; do
+                feature_args+=(--features "${package}/${feature}")
+              done
+            fi
+            if [[ "$package" == "ironclaw_composition" ]]; then
               incremental_env=(env CARGO_INCREMENTAL=0)
             fi
-
-            # One combined test+lcov invocation, not the two-step `--no-report test` + `report` shape (report has no --workspace/-p, only reports the root package).
-            # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
-            scripts/ci/run-hermetic-deterministic-suite.sh command \
-              timeout --signal=INT --kill-after=30s 40m \
-              "${incremental_env[@]}" cargo llvm-cov --branch --skip-functions -p "$package" ${feature_flags} --all-targets \
-                --lcov --output-path "coverage/${package}.lcov" \
-                test --ignore-rust-version -- --nocapture
-            echo "::endgroup::"
           done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
 
-          # Merge per-package reports into one artifact per bucket. Keep the
-          # reports as separate inputs: cargo-llvm-cov does not guarantee a
-          # trailing newline, so raw concatenation can produce a malformed
-          # `end_of_recordSF:` boundary and silently drop the next package's
-          # first source file from changed-line coverage.
-          package_parts=(coverage/*.lcov)
-          scripts/ci/reborn-coverage-merge-lcov.sh \
-            "bucket-${BUCKET_NAME}.lcov" \
-            "${package_parts[@]}"
+          if [[ "${COLLECT_COVERAGE}" == "true" ]]; then
+            echo "::group::cargo llvm-cov bucket ${BUCKET_NAME}"
+            scripts/ci/run-hermetic-deterministic-suite.sh command \
+              timeout --signal=INT --kill-after=30s 40m \
+              "${incremental_env[@]}" cargo llvm-cov --branch --skip-functions \
+                "${package_args[@]}" "${feature_args[@]}" --all-targets \
+                --lcov --output-path "bucket-${BUCKET_NAME}.lcov" \
+                test --ignore-rust-version -- --nocapture
+            echo "::endgroup::"
+          else
+            echo "::group::cargo test affected bucket ${BUCKET_NAME}"
+            if [[ "$(jq 'length' <<< "${EXACT_TARGETS}")" -gt 0 ]]; then
+              while IFS=$'\t' read -r package kind name; do
+                target_feature_args=()
+                feature_flags="$(scripts/ci/package-feature-flags.sh "${package}")"
+                if [[ -n "${feature_flags}" ]]; then
+                  read -ra target_feature_args <<< "${feature_flags}"
+                fi
+                scripts/ci/run-hermetic-deterministic-suite.sh command \
+                  timeout --signal=INT --kill-after=30s 28m \
+                  "${incremental_env[@]}" cargo test \
+                    -p "${package}" "--${kind}" "${name}" \
+                    "${target_feature_args[@]}" --ignore-rust-version -- --nocapture
+              done < <(
+                jq -r '.[] | [.package, .kind, .name] | @tsv' \
+                  <<< "${EXACT_TARGETS}"
+              )
+            else
+              scripts/ci/run-hermetic-deterministic-suite.sh command \
+                timeout --signal=INT --kill-after=30s 28m \
+                "${incremental_env[@]}" cargo test "${package_args[@]}" \
+                  "${feature_args[@]}" --ignore-rust-version --all-targets -- --nocapture
+            fi
+            echo "::endgroup::"
+          fi
 
       - name: Upload bucket lcov artifact
+        if: needs.changes.outputs.run_coverage == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: reborn-crate-cov-bucket-${{ matrix.bucket.name }}
@@ -344,7 +427,7 @@ jobs:
   root-reborn-parity-tests:
     name: Reborn root tests (${{ matrix.partition }})
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
+    if: needs.changes.outputs.run_root_tests == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -365,8 +448,9 @@ jobs:
       RUST_MIN_STACK: "67108864"
     strategy:
       fail-fast: false
+      max-parallel: ${{ github.event_name == 'pull_request' && 1 || 4 }}
       matrix:
-        partition: [0, 1, 2, 3]
+        partition: ${{ fromJSON(needs.changes.outputs.root_partitions) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -375,6 +459,7 @@ jobs:
           persist-credentials: false
 
       - name: Free disk space
+        if: needs.changes.outputs.run_coverage == 'true'
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
@@ -437,7 +522,7 @@ jobs:
   reborn-group-tests:
     name: Reborn group tests
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
+    if: needs.changes.outputs.run_group_tests == 'true'
     runs-on: ubuntu-latest
     # Group tests run sequentially in ONE job (build once, reuse artifacts), so
     # the budget must cover N suites at REBORN_GROUP_TEST_TIMEOUT each plus setup
@@ -470,6 +555,7 @@ jobs:
           persist-credentials: false
 
       - name: Free disk space
+        if: needs.changes.outputs.run_coverage == 'true'
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
@@ -527,15 +613,14 @@ jobs:
         run: scripts/ci/run-hermetic-deterministic-suite.sh groups
 
   reborn-integration-coverage:
-    name: Reborn integration coverage (${{ matrix.lane }})
+    name: Reborn integration tests (${{ matrix.lane }})
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
+    if: needs.changes.outputs.run_integration_tests == 'true'
     runs-on: ubuntu-latest
-    # This is the ONLY execution of the 27 flat reborn_integration_* suites
-    # (there is no separate uninstrumented pass/fail run of them — `cargo
-    # llvm-cov ... test` has the same pass/fail semantics as `cargo test`, just
-    # instrumented) plus one more, instrumented, run of the 7 reborn_group_*
-    # suites already covered uninstrumented by reborn-group-tests above.
+    # Full merge/main plans instrument every flat, generated, and group suite.
+    # Selected pull-request plans run only the directly affected lanes without
+    # instrumentation for fast pass/fail feedback; exhaustive coverage remains
+    # a merge-queue requirement.
     # Generous backstop: a cold-cache instrumented build of the Reborn closure
     # is heavier than a plain build (see the retired reborn-coverage.yml's
     # 180m budget for the same closure, run as a single job); each of these 5
@@ -558,8 +643,9 @@ jobs:
       RUST_MIN_STACK: "8388608"
     strategy:
       fail-fast: false
+      max-parallel: ${{ github.event_name == 'pull_request' && 1 || 5 }}
       matrix:
-        lane: ["0", "1", "2", "3", "groups"]
+        lane: ${{ fromJSON(needs.changes.outputs.integration_lanes) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -571,6 +657,7 @@ jobs:
         run: echo "COREPACK_HOME=${RUNNER_TEMP}/ironclaw-corepack" >> "$GITHUB_ENV"
 
       - name: Free disk space
+        if: needs.changes.outputs.run_coverage == 'true'
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
@@ -594,14 +681,28 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+          # actions/setup-node hashes this list to build the cache key
+          # (verified against the pinned commit's bundled dist/setup/index.js:
+          # `hashFiles` walks one globber built from every newline-separated
+          # pattern and only throws when the COMBINED walk finds nothing), so
+          # the exact line stays live for today's tree (WS7 put the crate in
+          # `crates/product/`) and the deeper glob picks up any later re-homing
+          # without either one needing to be conditional. The two must not
+          # overlap: `ws12_workflow_contracts.py` rejects a spare that already
+          # matches the real location, because a pattern matching everything is
+          # broad rather than depth-tolerant.
+          cache-dependency-path: |
+            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         run: corepack enable pnpm
 
       - name: Install WebUI frontend dependencies for coverage
         run: |
-          cd crates/ironclaw_webui/frontend
+          set -euo pipefail
+          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
+          cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
 
       - name: Install mold and clang
@@ -618,7 +719,7 @@ jobs:
           # cache LRU. A dedicated key (never the plain `reborn-tests-*` keys
           # above) keeps an instrumented (llvm-cov) build from ever evicting
           # or being evicted by a plain one — the artifacts are incompatible.
-          shared-key: reborn-integration-cov-llvm21
+          shared-key: ${{ needs.changes.outputs.run_coverage == 'true' && 'reborn-integration-cov-llvm21' || 'reborn-integration-tests' }}
           # Keep saves to protected-branch and merge_group runs so the ~10 GB
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
@@ -634,30 +735,29 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
       - name: Install cargo-llvm-cov
+        if: needs.changes.outputs.run_coverage == 'true'
         uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # cargo-llvm-cov
 
-      - name: Run this lane's Reborn integration-tier suites (instrumented) and produce its lcov
+      - name: Run this lane's Reborn integration-tier suites
         env:
           REBORN_COV_LANE_MODE: ${{ matrix.lane == 'groups' && 'group' || 'flat-partition' }}
           REBORN_COV_LANE_PARTITIONS: 4
           REBORN_COV_LANE_INDEX: ${{ matrix.lane }}
           REBORN_COV_LANE_TEST_TIMEOUT: 45m
+          REBORN_COV_COLLECT: ${{ needs.changes.outputs.run_coverage }}
         run: |
-          # profraw-only (not --workspace): the shared reborn-integration-cov
-          # cache key is restored by whichever of the 5 matrix legs saved last
-          # (same shared-key-across-a-matrix pattern as crate-tests' single
-          # reborn-tests-crates key), so a stale *.profraw left over from a
-          # different lane's previous run could otherwise leak into this
-          # lane's report. Clearing just the profraw data (not the compiled
-          # instrumented binaries) keeps the build-cache speed win while
-          # guaranteeing this lane's lcov reflects only its own test run.
-          cargo llvm-cov clean --profraw-only
+          if [[ "${REBORN_COV_COLLECT}" == "true" ]]; then
+            # A shared instrumented cache can contain profraw from another
+            # matrix leg. Clear only profiling data, not compiled binaries.
+            cargo llvm-cov clean --profraw-only
+          fi
           scripts/ci/run-hermetic-deterministic-suite.sh prepare-command
           IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1 \
             scripts/ci/run-hermetic-deterministic-suite.sh command \
             scripts/ci/reborn-coverage-lane-run.sh part-${{ matrix.lane }}.lcov
 
       - name: Upload lane lcov artifact
+        if: needs.changes.outputs.run_coverage == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: reborn-integration-cov-part-${{ matrix.lane }}
@@ -668,13 +768,18 @@ jobs:
     name: Reborn integration-tier coverage report
     # Also needs crate-tests now: merges lane + bucket lcov, still pure text processing (no test execution), so the 10-min SLA below still holds.
     needs: [changes, reborn-integration-coverage, crate-tests]
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
+    if: needs.changes.outputs.run_coverage == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
       # The sticky coverage comment upserts a PR comment via the issues API.
       pull-requests: write
+      # The changed-line gate reads the base commit's own merged-lcov artifact
+      # to drop lines that were already uncovered before this PR. Without this
+      # scope the lookup 403s, which fails closed (every changed line counts)
+      # and says so — the gate stays correct, just stricter.
+      actions: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -740,10 +845,26 @@ jobs:
         run: python3 scripts/ci/test_reborn_changed_coverage.py
 
       - name: Gate changed Reborn lines and branches
-        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push'
+        # Owner decision 2026-08-04 (Ben + Firat, reversing the "leave CI
+        # policy as-is" note recorded on #7036): the changed-line verdict no
+        # longer blocks PRs or the merge queue. For move-heavy refactors it
+        # re-attributes relocated code as new-and-uncovered, and because this
+        # job runs last its verdict lands after the full hour of test lanes —
+        # the worst feedback shape the program has. It still RUNS on both
+        # lanes for visibility (step summary, sticky comment, and this step's
+        # red annotation), and it ENFORCES on pushes to main, where
+        # main-ci-slack-alerts.yml surfaces a breach. The aggregate and
+        # per-crate coverage floors are untouched and still gate everywhere
+        # they always did.
+        continue-on-error: ${{ github.event_name != 'push' }}
         env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          # `gh` resolves the base commit's merged-lcov artifact. The checkout
+          # runs with persist-credentials: false, so the token is passed here
+          # rather than inherited.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           python3 scripts/ci/reborn_changed_coverage.py \
@@ -751,6 +872,7 @@ jobs:
             --manifest tests/integration/changed-coverage-exemptions.toml \
             --base "$BASE_SHA" \
             --head "$HEAD_SHA" \
+            --fetch-base-coverage \
             --json reborn-changed-coverage.json \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -788,10 +910,7 @@ jobs:
   critical-mutation:
     name: Critical named-function mutation gate
     needs: changes
-    if: >-
-      needs.changes.outputs.docs_only != 'true' &&
-      needs.changes.outputs.has_reborn_tests == 'true' &&
-      (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -822,54 +941,32 @@ jobs:
           echo "should_run=${should_run}" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
-        if: steps.scope.outputs.should_run == 'true'
+        if: github.event_name == 'merge_group' && steps.scope.outputs.should_run == 'true'
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Install mold and clang
-        if: steps.scope.outputs.should_run == 'true'
+        if: github.event_name == 'merge_group' && steps.scope.outputs.should_run == 'true'
         run: |
           scripts/ci/install-ci-apt-packages.sh clang mold
           test -x /usr/bin/mold
 
       - name: Install cargo-mutants
-        if: steps.scope.outputs.should_run == 'true'
+        if: github.event_name == 'merge_group' && steps.scope.outputs.should_run == 'true'
         uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
         with:
           tool: cargo-mutants@27.1.0
 
       - name: Run affected named critical invariants
+        if: github.event_name == 'merge_group' && steps.scope.outputs.should_run == 'true'
         run: |
           python3 scripts/ci/critical_mutation_gate.py \
             --manifest tests/integration/critical-mutation-functions.toml \
             --changed-files changed-files.txt
 
-  webui-v2-js-tests:
-    name: Reborn WebUI v2 JS tests
-    needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-          persist-credentials: false
-
-      - name: Install Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
-        with:
-          node-version: "22"
-
-      - name: Enable pnpm
-        run: corepack enable pnpm
-
-      - name: Run Reborn WebUI frontend tests
-        run: scripts/ci/run-hermetic-deterministic-suite.sh frontend
-
   qa-recorded-fixtures:
     name: Reborn QA recorded fixtures
     needs: changes
-    if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
+    if: needs.changes.outputs.run_qa_replay == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -905,14 +1002,28 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+          # actions/setup-node hashes this list to build the cache key
+          # (verified against the pinned commit's bundled dist/setup/index.js:
+          # `hashFiles` walks one globber built from every newline-separated
+          # pattern and only throws when the COMBINED walk finds nothing), so
+          # the exact line stays live for today's tree (WS7 put the crate in
+          # `crates/product/`) and the deeper glob picks up any later re-homing
+          # without either one needing to be conditional. The two must not
+          # overlap: `ws12_workflow_contracts.py` rejects a spare that already
+          # matches the real location, because a pattern matching everything is
+          # broad rather than depth-tolerant.
+          cache-dependency-path: |
+            crates/product/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/*/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         run: corepack enable pnpm
 
       - name: Install WebUI frontend dependencies for QA replay
         run: |
-          cd crates/ironclaw_webui/frontend
+          set -euo pipefail
+          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
+          cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
 
       - name: Restore Rust cache
@@ -948,7 +1059,7 @@ jobs:
             scripts/ci/run-hermetic-deterministic-suite.sh \
             command \
             cargo test \
-            -p ironclaw_reborn_integration_tests \
+            -p ironclaw_integration_tests \
             --test reborn_qa_recorded_behavior \
             -- \
             --nocapture
@@ -959,14 +1070,12 @@ jobs:
     if: always()
     needs:
       - changes
-      - package-matrix
       - crate-tests
       - root-reborn-parity-tests
       - reborn-group-tests
       - reborn-integration-coverage
       - coverage-report
       - critical-mutation
-      - webui-v2-js-tests
       - qa-recorded-fixtures
     steps:
       - name: Checkout repository
@@ -986,68 +1095,92 @@ jobs:
             exit 1
           fi
 
-          if [[ "${{ needs.changes.outputs.docs_only }}" == "true" ]]; then
-            echo "Docs-only change detected — Reborn test roll-up passes fast"
-            exit 0
+          plan_mode="${{ needs.changes.outputs.plan_mode }}"
+          case "${plan_mode}" in
+            none|selected|full) ;;
+            *)
+              echo "Missing or invalid Reborn test plan mode: '${plan_mode}'"
+              exit 1
+              ;;
+          esac
+
+          for flag in \
+            "${{ needs.changes.outputs.run_crate_tests }}" \
+            "${{ needs.changes.outputs.run_root_tests }}" \
+            "${{ needs.changes.outputs.run_group_tests }}" \
+            "${{ needs.changes.outputs.run_integration_tests }}" \
+            "${{ needs.changes.outputs.run_coverage }}" \
+            "${{ needs.changes.outputs.run_qa_replay }}"; do
+            if [[ "${flag}" != "true" && "${flag}" != "false" ]]; then
+              echo "Missing or invalid Reborn test plan flag: '${flag}'"
+              exit 1
+            fi
+          done
+
+          if [[ "${plan_mode}" == "full" ]]; then
+            for flag in \
+              "${{ needs.changes.outputs.run_crate_tests }}" \
+              "${{ needs.changes.outputs.run_root_tests }}" \
+              "${{ needs.changes.outputs.run_group_tests }}" \
+              "${{ needs.changes.outputs.run_integration_tests }}" \
+              "${{ needs.changes.outputs.run_qa_replay }}"; do
+              if [[ "${flag}" != "true" ]]; then
+                echo "Full Reborn plan omitted a required lane"
+                exit 1
+              fi
+            done
+            # Coverage is push-only by owner decision (2026-08-04, Ben +
+            # Firat): full-mode merge_group runs plain tests, so run_coverage
+            # must be true exactly when the event is a push and false
+            # otherwise — either mismatch is a wiring bug worth failing on.
+            expected_coverage=${{ github.event_name == 'push' }}
+            if [[ "${{ needs.changes.outputs.run_coverage }}" != "${expected_coverage}" ]]; then
+              echo "run_coverage=${{ needs.changes.outputs.run_coverage }} but expected ${expected_coverage} for ${{ github.event_name }}"
+              exit 1
+            fi
           fi
 
-          if [[ "${{ needs.changes.outputs.has_reborn_tests }}" != "true" ]]; then
-            echo "No Reborn test scope detected — Reborn test roll-up passes fast"
-            exit 0
-          fi
+          check_planned_job() {
+            local name="$1"
+            local result="$2"
+            local expected="$3"
+            if [[ "${expected}" == "false" ]]; then
+              if [[ "${result}" != "skipped" ]]; then
+                echo "${name} ran with result '${result}' despite planned=false"
+                exit 1
+              fi
+              return
+            fi
+            if ! job_result_ok "${name}" "${result}" false "allow"; then
+              echo "${name} result '${result}' did not match planned=${expected}"
+              exit 1
+            fi
+          }
 
-          if ! job_result_ok "package-matrix" "${{ needs.package-matrix.result }}" false "allow"; then
-            echo "Reborn package matrix discovery failed: ${{ needs.package-matrix.result }}"
-            exit 1
-          fi
+          check_planned_job "crate-tests" \
+            "${{ needs.crate-tests.result }}" \
+            "${{ needs.changes.outputs.run_crate_tests }}"
+          check_planned_job "root-reborn-parity-tests" \
+            "${{ needs.root-reborn-parity-tests.result }}" \
+            "${{ needs.changes.outputs.run_root_tests }}"
+          check_planned_job "reborn-group-tests" \
+            "${{ needs.reborn-group-tests.result }}" \
+            "${{ needs.changes.outputs.run_group_tests }}"
+          check_planned_job "reborn-integration-coverage" \
+            "${{ needs.reborn-integration-coverage.result }}" \
+            "${{ needs.changes.outputs.run_integration_tests }}"
+          check_planned_job "coverage-report" \
+            "${{ needs.coverage-report.result }}" \
+            "${{ needs.changes.outputs.run_coverage }}"
+          check_planned_job "qa-recorded-fixtures" \
+            "${{ needs.qa-recorded-fixtures.result }}" \
+            "${{ needs.changes.outputs.run_qa_replay }}"
 
-          if ! job_result_ok "crate-tests" "${{ needs.crate-tests.result }}" false "allow"; then
-            echo "One or more Reborn binary crate tests failed: ${{ needs.crate-tests.result }}"
-            exit 1
-          fi
+          mutation_expected=${{ github.event_name == 'merge_group' }}
+          check_planned_job "critical-mutation" \
+            "${{ needs.critical-mutation.result }}" \
+            "${mutation_expected}"
 
-          if ! job_result_ok "root-reborn-parity-tests" "${{ needs.root-reborn-parity-tests.result }}" false "allow"; then
-            echo "One or more Reborn root tests failed: ${{ needs.root-reborn-parity-tests.result }}"
-            exit 1
-          fi
-
-          if ! job_result_ok "reborn-group-tests" "${{ needs.reborn-group-tests.result }}" false "allow"; then
-            echo "One or more Reborn group tests failed: ${{ needs.reborn-group-tests.result }}"
-            exit 1
-          fi
-
-          # This is the ONLY execution of the 27 flat reborn_integration_*
-          # suites (see the reborn-integration-coverage job), so it gates like
-          # every other test job above — real pass/fail, not the coverage
-          # percentage (that's coverage-report below).
-          if ! job_result_ok "reborn-integration-coverage" "${{ needs.reborn-integration-coverage.result }}" false "allow"; then
-            echo "One or more Reborn integration-tier coverage lanes failed: ${{ needs.reborn-integration-coverage.result }}"
-            exit 1
-          fi
-
-          # coverage-report merges lane + crate-bucket lcov, renders/posts the
-          # summary, AND runs the coverage ratchet (committed floor file,
-          # tests/integration/coverage-floor.toml) — a ratchet violation is a
-          # real regression, not a reporting-pipeline bug, so this now gates
-          # like every other job above. (While [global].enforce = false in the
-          # floor file, the ratchet step always exits 0, so this stays green
-          # during the dry-run soak period — see the floor file's own header.)
-          if ! job_result_ok "coverage-report" "${{ needs.coverage-report.result }}" false "allow"; then
-            echo "Reborn coverage-report job failed (merge/summary error, or a coverage ratchet violation): ${{ needs.coverage-report.result }}"
-            exit 1
-          fi
-
-          if ! job_result_ok "critical-mutation" "${{ needs.critical-mutation.result }}" false "allow"; then
-            echo "Critical named-function mutation gate failed: ${{ needs.critical-mutation.result }}"
-            exit 1
-          fi
-
-          if ! job_result_ok "webui-v2-js-tests" "${{ needs.webui-v2-js-tests.result }}" false "allow"; then
-            echo "Reborn WebUI v2 JS tests failed: ${{ needs.webui-v2-js-tests.result }}"
-            exit 1
-          fi
-
-          if ! job_result_ok "qa-recorded-fixtures" "${{ needs.qa-recorded-fixtures.result }}" false "allow"; then
-            echo "Reborn QA recorded fixture tests failed: ${{ needs.qa-recorded-fixtures.result }}"
-            exit 1
+          if [[ "${plan_mode}" == "none" ]]; then
+            echo "No affected Reborn test surface — baseline recorded replay ran as planned"
           fi

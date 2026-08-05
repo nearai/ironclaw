@@ -20,15 +20,16 @@ use std::time::Duration;
 
 use chrono::{TimeZone, Utc};
 use ironclaw_conversations::{
-    AdapterInstallationId, AdapterKind, ExternalActorRef, InMemoryConversationServices,
+    AdapterInstallationId, AdapterKind, InMemoryConversationServices,
     trusted_trigger_fire_submitter,
 };
+use ironclaw_extension_contracts::external::ExternalActorRef;
 use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_contracts::ModelProfileId;
 use ironclaw_loop_host::HostManagedModelGateway;
-use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
+use ironclaw_loop_host::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerFire, TriggerFireIdentity, TriggerId,
@@ -95,6 +96,7 @@ impl RebornIntegrationHarness {
                 ExternalActorRef::new(
                     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
                     self.binding.actor_user_id.as_str(),
+                    None::<String>,
                 )?,
                 self.binding.actor_user_id.clone(),
             )
@@ -120,14 +122,14 @@ impl RebornIntegrationHarness {
         ))?;
         let materialized_prompt = TriggerMaterializedPrompt::for_fire(&fire, content_ref);
         let request =
-            TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot);
+            TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot)?;
 
         let conversations = self.trigger_conversations_with_paired_actor().await?;
 
         let submitter = trusted_trigger_fire_submitter(
             conversations.clone(),
             conversations,
-            Arc::clone(&self.coordinator),
+            ironclaw_composition::conversation_turn_submitter(Arc::clone(&self.coordinator)),
         );
         match submitter.submit_trusted_trigger_fire(request).await? {
             TrustedTriggerFireSubmitOutcome::Accepted {
@@ -173,7 +175,7 @@ impl RebornIntegrationHarness {
             .ok_or("triggered submit requires a harness binding with an agent id")?;
 
         let (materialized_prompt, turn_scope) =
-            ironclaw_reborn_composition::test_support::materialize_trigger_prompt_for_test(
+            ironclaw_composition::test_support::materialize_trigger_prompt_for_test(
                 conversations.clone(),
                 thread_service,
                 default_agent_id,
@@ -208,11 +210,11 @@ impl RebornIntegrationHarness {
             .register(turn_scope.clone(), gateway);
 
         let request =
-            TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot);
+            TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot)?;
         let submitter = trusted_trigger_fire_submitter(
             conversations.clone(),
             conversations,
-            Arc::clone(&self.coordinator),
+            ironclaw_composition::conversation_turn_submitter(Arc::clone(&self.coordinator)),
         );
         match submitter.submit_trusted_trigger_fire(request).await? {
             TrustedTriggerFireSubmitOutcome::Accepted {

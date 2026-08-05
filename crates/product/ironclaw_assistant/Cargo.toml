@@ -1,0 +1,116 @@
+[package]
+name = "ironclaw_assistant"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Product-facing workflow service for IronClaw Reborn (#3280)"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "products"
+
+[features]
+# Compile in-memory fakes (FakeInboundTurnService, FakeConversationBindingService,
+# FakeIdempotencyLedger, etc.). Off by default so production binaries don't carry
+# the fake state machinery; downstream crates enable it from `[dev-dependencies]`.
+test-support = [
+    "ironclaw_host_api/test-support",
+    "ironclaw_turns/test-support",
+    "ironclaw_extension_contracts/test-support",
+    "ironclaw_product_contracts/test-support",
+]
+
+[dependencies]
+async-trait = "0.1"
+base64 = "0.23"
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+ironclaw_common = { path = "../../contracts/ironclaw_common", version = "0.4.1" }
+ironclaw_attachments = { path = "../../domains/ironclaw_attachments", version = "0.1.0" }
+ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", version = "0.1.0" }
+ironclaw_approvals = { path = "../../kernel/ironclaw_approvals", version = "0.1.0" }
+ironclaw_authorization = { path = "../../kernel/ironclaw_authorization", version = "0.1.0" }
+ironclaw_auth = { path = "../../domains/ironclaw_auth", version = "0.1.0" }
+ironclaw_event_projections = { path = "../../events/ironclaw_event_projections", version = "0.1.0" }
+ironclaw_event_streams = { path = "../../events/ironclaw_event_streams", version = "0.1.0" }
+ironclaw_event_log = { path = "../../events/ironclaw_event_log", version = "0.1.0" }
+ironclaw_first_party_extension_ports = { path = "../../ironclaw_first_party_extension_ports", version = "0.1.0" }
+ironclaw_host_api = { path = "../../contracts/ironclaw_host_api", version = "0.1.0" }
+ironclaw_product_contracts = { path = "../../contracts/ironclaw_product_contracts", version = "0.1.0" }
+ironclaw_extension_contracts = { path = "../../contracts/ironclaw_extension_contracts", version = "0.1.0" }
+ironclaw_loop_host = { path = "../../loop/ironclaw_loop_host", version = "0.1.0" }
+ironclaw_conversations = { path = "../../domains/ironclaw_conversations", version = "0.1.0" }
+ironclaw_outbound = { path = "../../domains/ironclaw_outbound", version = "0.1.0" }
+# The blocked-auth resume fan-out (WS6 eviction from the composition root)
+# reads durable process-gate records to find the caller's other parked runs.
+ironclaw_processes = { path = "../../kernel/ironclaw_processes", version = "0.1.0" }
+ironclaw_projects = { path = "../../ironclaw_projects", version = "0.1.0" }
+# The admin user-directory adapter (WS6 eviction from the composition root)
+# reads the identity directory and provisions per-user secrets through it.
+ironclaw_identity = { path = "../../domains/ironclaw_identity", version = "0.1.0" }
+ironclaw_trace_commons = { path = "../../domains/ironclaw_trace_commons", version = "0.1.0" }
+ironclaw_secrets = { path = "../../substrates/ironclaw_secrets", version = "0.1.0" }
+ironclaw_safety = { path = "../../substrates/ironclaw_safety", version = "0.2.2" }
+ironclaw_threads = { path = "../../domains/ironclaw_threads", version = "0.1.0" }
+ironclaw_triggers = { path = "../../domains/ironclaw_triggers", version = "0.1.0" }
+ironclaw_loop_contracts = { path = "../../contracts/ironclaw_loop_contracts", version = "0.1.0" }
+ironclaw_turns = { path = "../../kernel/ironclaw_turns", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+secrecy = { version = "0.10", features = ["serde"] }
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "sync", "time"] }
+toml = "1.1"
+tracing = "0.1"
+url = "2"
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+
+[dev-dependencies]
+# Enables the shared in-memory turn-state store double for tests only.
+ironclaw_turns = { path = "../../kernel/ironclaw_turns", features = ["test-support"] }
+# Enables the in-memory-backed outbound-state store constructor for tests only.
+ironclaw_outbound = { path = "../../domains/ironclaw_outbound", version = "0.1.0", features = ["test-support"] }
+# Enables the in-memory-backed approval store constructors for tests only.
+ironclaw_approvals = { path = "../../kernel/ironclaw_approvals", features = ["test-support"] }
+# Enables the in-memory-backed capability-lease store constructor for tests only.
+ironclaw_authorization = { path = "../../kernel/ironclaw_authorization", features = ["test-support"] }
+# Enables the in-memory-backed run-state/approval store constructors for tests only.
+# FaultInjecting decorator: test store fault paths through the real store
+ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", features = ["test-support"] }
+# ProductLive planned-loop harness builds a `FilesystemReplayPayloadStore` over
+# an in-memory filesystem so approval/auth resumes reconstitute their replay
+# input (mirrors production's capability-store wiring).
+ironclaw_capabilities = { path = "../../kernel/ironclaw_capabilities", version = "0.1.0" }
+ironclaw_host_runtime = { path = "../../kernel/ironclaw_host_runtime" }
+ironclaw_loop_host = { path = "../../loop/ironclaw_loop_host", features = ["test-support"] }
+ironclaw_event_projections = { path = "../../events/ironclaw_event_projections" }
+ironclaw_composition = { path = "../../app/ironclaw_composition", features = ["test-support"] }
+# Test-only: this crate's harnesses build a full turn stack (CAS-backed
+# fixtures, planned-driver factories, await-edge stores) to drive product
+# behavior end to end. WS1.7 removed the *normal* dependency — the failure
+# summary data it existed for now lives in `ironclaw_host_api::failure` — so
+# `ironclaw_turn_runner` is dev-only, and production `ironclaw_assistant` no longer
+# reaches into the loop-execution adapter at all.
+ironclaw_turn_runner = { path = "../../loop/ironclaw_turn_runner", features = ["test-support"] }
+ironclaw_trust = { path = "../../kernel/ironclaw_trust" }
+ironclaw_assistant = { path = ".", features = ["test-support"] }
+ironclaw_threads = { path = "../../domains/ironclaw_threads", version = "0.1.0", features = ["test-support"] }
+ironclaw_telegram_extension = { path = "../../extensions/packages/telegram" }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt", "sync", "test-util", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+# Durable-ledger contract tests drive the libSQL/Postgres RootFilesystem
+# backends directly; the Postgres leg builds its own pool. libSQL leg runs
+# embedded; Postgres leg needs a DB URL.
+deadpool-postgres = "0.14"
+tokio-postgres = "0.7"
+libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
+# Captures per-test tracing output so the command-palette parse/rejection
+# debug! logging (item 5 of the PR-2 review fix wave) can be asserted on
+# through the caller, not just trusted by inspection.
+tracing-test = { version = "0.2", features = ["no-env-filter"] }

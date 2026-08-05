@@ -1,5 +1,13 @@
 # IronClaw E2E Tests
 
+> **Adding, removing, renaming, or materially re-scoping a scenario here? Update
+> `tests/CLAUDE.md`** — the repo-wide scenario coverage map (what each scenario
+> proves, in plain English, and where the gaps are). Its maintenance rule is
+> binding: the row changes in the same commit.
+> §6 of that map is the exhaustive inventory of this directory, including each
+> scenario's current or pending-migration status; the representative table under
+> "Test Scenarios" below is older and partly stale.
+
 Python/Playwright test suite that runs against a live ironclaw instance. Added in PR #553 ("Trajectory benchmarks and e2e trace test rig").
 
 **The live surface is the Reborn `ironclaw serve` WebChat v2 SPA** (`/`,
@@ -233,7 +241,7 @@ runs per service: slack 0.18s, google 0.19s, github 0.20s.)
 it mutates, which is what makes the fixture reset them afterwards. That
 declaration is derived, not written by hand: `journey_cases.py` reads the
 `external_write` effect from the shipped manifests
-(`crates/ironclaw_first_party_extensions/assets/*/manifest.toml`), so a tool
+(`crates/extensions/packages/*/manifest.toml`), so a tool
 that writes to a provider is treated as mutating whether or not anyone
 remembered to list it. Two gates in
 `scenarios/test_journey_coverage.py` keep that honest: one fails when a

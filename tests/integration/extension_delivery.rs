@@ -57,6 +57,15 @@ use axum::http::{Request, StatusCode};
 use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
+use ironclaw_assistant::{
+    AdapterInstallationId, InboundOutcome, ParsedProductInbound, ProductAdapterId,
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProtocolAuthEvidence,
+    UserMessagePayload, VerifiedInbound,
+};
+use ironclaw_assistant::{
+    ResolveBindingRequest, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+};
+use ironclaw_composition::{ChannelHostAssemblyTestWiring, RebornRuntime};
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
 use ironclaw_extension_host::extension_ingress::{
@@ -68,6 +77,7 @@ use ironclaw_extension_host::extension_ingress::{
 use ironclaw_extension_host::ingress::{
     InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError,
 };
+use ironclaw_host_api::product_adapter::auth::AuthRequirement;
 use ironclaw_host_api::{
     action::NetworkPolicy,
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
@@ -84,18 +94,10 @@ use ironclaw_loop_host::{
     HostManagedModelResponse,
 };
 use ironclaw_outbound::OutboundDeliveryStatus;
-use ironclaw_product::{
-    AdapterInstallationId, InboundOutcome, ParsedProductInbound, ProductAdapterId,
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProtocolAuthEvidence,
-    UserMessagePayload, VerifiedInbound,
-};
-use ironclaw_product::{
-    ChannelConnectionNoticePolicy, ConversationBindingService, ResolveBindingRequest,
-    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
-};
+use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::binding::ProductBindingResolver;
 use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
-use ironclaw_reborn_composition::{ChannelHostAssemblyTestWiring, RebornRuntime};
 use ironclaw_threads::FinalizedAssistantMessageByRunRequest;
 use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnRunId, TurnScope, TurnStatus};
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
@@ -327,7 +329,7 @@ impl PostAdmissionObserver for RecordingForwardObserver {
     async fn observe_error(
         &self,
         envelope: ProductInboundEnvelope,
-        error: ironclaw_product::ProductAdapterError,
+        error: ironclaw_assistant::ProductAdapterError,
     ) {
         self.errors
             .lock()
@@ -372,7 +374,7 @@ fn delivery_run_services(
         outbound_store,
         route_store,
         communication_preferences,
-        project_filesystem: Arc::new(ironclaw_product::NoProjectFilesystem),
+        project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         coordinator,
         extension_id: extension_id.to_string(),
         fallback_notice_scope,
@@ -389,7 +391,7 @@ fn delivery_run_services(
 /// binding service the registered sink uses) — so the scripted model
 /// gateway can be registered for the run's scope up front.
 async fn preresolve_vendor_turn_scope(
-    binding_service: &Arc<dyn ConversationBindingService>,
+    binding_service: &Arc<dyn ProductBindingResolver>,
     adapter: &dyn ChannelAdapter,
     adapter_id: &str,
     installation_id: &str,
@@ -411,7 +413,7 @@ async fn preresolve_vendor_turn_scope(
     };
     let message = messages.first().expect("one normalized message");
     // Mirror of the sink's envelope assembly (`extension_ingress.rs::admit`).
-    let context = ironclaw_product::TrustedInboundContext::from_verified_evidence(
+    let context = ironclaw_assistant::TrustedInboundContext::from_verified_evidence(
         ProductAdapterId::new(adapter_id).expect("adapter id"),
         AdapterInstallationId::new(installation_id).expect("installation id"),
         Utc::now(),
@@ -720,7 +722,7 @@ async fn wait_for_production_registration(
     assembly: &Arc<GenericChannelHostAssembly>,
     services: &RebornRuntime,
     extension_id: &str,
-) -> Arc<dyn ConversationBindingService> {
+) -> Arc<dyn ProductBindingResolver> {
     let registry = services
         .extension_ingress_parts()
         .expect("composition built the generic ingress")
@@ -1264,9 +1266,15 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
     .to_string();
     // The run's scope is the vendor conversation's binding, not this harness
     // thread's — register its scripted model before the POST admits the turn.
-    let evidence = ironclaw_product::auth::mark_request_signature_verified(
-        "X-Slack-Signature".to_string(),
-        Some("X-Slack-Request-Timestamp".to_string()),
+    // `test_verified` is the `test-support` seam standing in for the ingress
+    // verifier: minting is witness-gated (PROPOSAL §11.2.5) and the harness
+    // holds no `VerifiedInboundGrant`. Value-identical to the pre-WS1.5
+    // `mark_request_signature_verified` call this replaced.
+    let evidence = ProtocolAuthEvidence::test_verified(
+        AuthRequirement::RequestSignature {
+            header_name: "X-Slack-Signature".to_string(),
+            timestamp_header_name: Some("X-Slack-Request-Timestamp".to_string()),
+        },
         SLACK_INSTALLATION,
     );
     let slack_binding_service = inbound
@@ -1515,8 +1523,9 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
     let installation_store = services
         .extension_installation_store_for_test()
         .expect("extension delivery profile carries the lifecycle store");
-    let installation_id = ironclaw_extensions::ExtensionInstallationId::new(TELEGRAM_INSTALLATION)
-        .expect("Telegram installation id");
+    let installation_id =
+        ironclaw_extension_registry::ExtensionInstallationId::new(TELEGRAM_INSTALLATION)
+            .expect("Telegram installation id");
     let installation = installation_store
         .get_installation(&installation_id)
         .await
@@ -1650,8 +1659,12 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         }
     })
     .to_string();
-    let evidence = ironclaw_product::auth::mark_shared_secret_header_verified(
-        "X-Telegram-Bot-Api-Secret-Token".to_string(),
+    // Same `test-support` seam as above; value-identical to the pre-WS1.5
+    // `mark_shared_secret_header_verified` call this replaced.
+    let evidence = ProtocolAuthEvidence::test_verified(
+        AuthRequirement::SharedSecretHeader {
+            header_name: "X-Telegram-Bot-Api-Secret-Token".to_string(),
+        },
         TELEGRAM_INSTALLATION,
     );
     // Pre-resolve through the SAME binding service the production-registered
@@ -2313,8 +2326,12 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
             .extension_ingress_parts()
             .expect("composition built the generic ingress"),
     );
-    let evidence = ironclaw_product::auth::mark_shared_secret_header_verified(
-        "X-Telegram-Bot-Api-Secret-Token".to_string(),
+    // Same `test-support` seam as above; value-identical to the pre-WS1.5
+    // `mark_shared_secret_header_verified` call this replaced.
+    let evidence = ProtocolAuthEvidence::test_verified(
+        AuthRequirement::SharedSecretHeader {
+            header_name: "X-Telegram-Bot-Api-Secret-Token".to_string(),
+        },
         TELEGRAM_INSTALLATION,
     );
 
@@ -2544,9 +2561,11 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     // identity and conversation-actor state, otherwise re-pairing this exact
     // Telegram chat would silently resurrect the old thread.
     let first_thread_id = vendor_scope.thread_id.clone();
-    let pairing_mount = services
-        .channel_pairing_route_mount_for_test()
-        .expect("the composed runtime exposes the production pairing routes");
+    let pairing_mount = ironclaw_webui::channel_pairing_route_mount(
+        services
+            .channel_pairing_registry_for_test()
+            .expect("the composed runtime exposes the production pairing registry"),
+    );
     let pairing_caller = ProductSurfaceCaller::new(
         inbound.binding.tenant_id.clone(),
         paired_user.clone(),

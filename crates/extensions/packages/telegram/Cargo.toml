@@ -1,0 +1,59 @@
+[package]
+name = "ironclaw_telegram_extension"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Telegram channel extension for IronClaw Reborn: Bot API protocol engine + ChannelAdapter (#3285)"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "products"
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+# Production deps only. `tracing` is here for one purpose: the attachment
+# transfer path must retain the cause of a provider parse failure server-side
+# while the user-facing reason stays a fixed literal. `uuid` is here
+# because the multipart boundary must be unpredictable: the payload is
+# attacker-authored, so a boundary derived from it lets a sender force
+# unbounded rescans.
+#
+# The `ironclaw_telegram_v2_adapter` path dep is gone: Wave 2's package
+# colocation merged that crate's `payload`/`render` modules into this one, so
+# the protocol engine is now in-crate (`crate::payload`, `crate::render`).
+# What remains is exactly Slack's ironclaw-dependency set — host_api,
+# extension_contracts, product_contracts, attachments — which is the parity
+# CHECKLIST WS2 asks for.
+ironclaw_host_api = { path = "../../../contracts/ironclaw_host_api", version = "0.1.0" }
+ironclaw_extension_contracts = { path = "../../../contracts/ironclaw_extension_contracts", version = "0.1.0" }
+ironclaw_product_contracts = { path = "../../../contracts/ironclaw_product_contracts", version = "0.1.0" }
+ironclaw_attachments = { path = "../../../domains/ironclaw_attachments", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# Property testing for the ingress boundary (#6524 workstream 9) — arrived
+# with the `payload` module in the Wave 2 merge.
+proptest = "1"
+# `test-support` exposes `FakeProtocolHttpEgress` / `FakeOutboundDeliverySink`
+# used by the `adapter::tests` mod, and `ProtocolAuthEvidence::test_verified`,
+# which `payload::tests` uses to stand in for the host; both come from
+# `ironclaw_host_api`, which owns them. The `ironclaw_assistant` dev-dep that
+# used to sit here supplied neither and went with the crate's normal
+# `ironclaw_assistant` edge (WS1.3). WS1.5 removed the `host-auth-mint` opt-in:
+# minting is witness-gated and an adapter crate holds no grant, in tests or in
+# production.
+ironclaw_host_api = { path = "../../../contracts/ironclaw_host_api", version = "0.1.0", features = ["test-support"] }
+# The exported channel-adapter conformance suite moved here with
+# `ChannelAdapter` (WS1.4); `tests/channel_conformance.rs` runs it.
+ironclaw_extension_contracts = { path = "../../../contracts/ironclaw_extension_contracts", version = "0.1.0", features = ["test-support"] }
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
+uuid = { version = "1", features = ["v4", "serde"] }

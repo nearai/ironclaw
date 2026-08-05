@@ -5,7 +5,7 @@
 //! capabilities, not MCP-extension capabilities — this module does NOT reuse
 //! `harness_mcp.rs`'s `McpRuntime` scaffolding. The real dispatch logic
 //! (`WebAccessExecutor::dispatch`, three sequential `RuntimeHttpEgress` calls
-//! to the Exa MCP endpoint) lives in the `ironclaw_first_party_extensions`
+//! to the Exa MCP endpoint) lives in the `ironclaw_extension_support`
 //! executor; extension-runtime DEL-7 moved the thin `FirstPartyCapabilityHandler`
 //! wrapper out of composition into the assembling binary, so this harness — like
 //! the binary — builds that wrapper directly over the executor
@@ -31,8 +31,11 @@ use std::{
 };
 
 use ironclaw_authorization::GrantAuthorizer;
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_first_party_extensions::{
+use ironclaw_extension_registry::{
+    ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+    default_host_api_contract_registry,
+};
+use ironclaw_extension_support::{
     EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_GET_CONTENT_CAPABILITY_ID, WEB_SEARCH_CAPABILITY_ID,
     WebAccessDispatchError, WebAccessDispatchRequest, WebAccessExecutor,
 };
@@ -40,6 +43,7 @@ use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     capability::EffectKind,
     error::HostApiError,
+    host_port::default_host_port_catalog,
     ids::{CapabilityId, PackageId},
     path::VirtualPath,
 };
@@ -47,7 +51,6 @@ use ironclaw_host_runtime::{
     CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion, FirstPartyCapabilityError,
     FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest,
     FirstPartyCapabilityResult, HostRuntime, HostRuntimeServices,
-    default_host_api_contract_registry, default_host_port_catalog,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_secrets::SecretStore;
@@ -74,7 +77,7 @@ pub(super) fn web_access_extension_package() -> HarnessResult<ExtensionPackage> 
     // Parse through the single record entry point (the bundled assets are
     // manifest v3 documents since the first-party rewrite).
     let root = VirtualPath::new(format!("/system/extensions/{WEB_ACCESS_PROVIDER_ID}"))?;
-    let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
+    let record = ironclaw_extension_registry::ExtensionManifestRecord::from_toml(
         std::fs::read_to_string(asset_root().join("manifest.toml"))?,
         ManifestSource::HostBundled,
         &default_host_port_catalog()?,
@@ -89,7 +92,7 @@ pub(super) fn web_access_extension_package() -> HarnessResult<ExtensionPackage> 
 /// Filesystem location of the real production `web-access` extension assets
 /// (manifest + JSON schemas), mirroring `github.rs`'s `asset_root()`.
 pub(super) fn asset_root() -> PathBuf {
-    repo_root().join("crates/ironclaw_first_party_extensions/assets/web-access")
+    repo_root().join("crates/extensions/packages/web-access")
 }
 
 fn repo_root() -> &'static Path {
@@ -115,7 +118,7 @@ pub(super) fn web_access_first_party_trust_policy() -> HarnessResult<HostTrustPo
 
 /// Network policy restricted to the Exa MCP host, kept aligned with the
 /// production policy inputs from private `exa_mcp_network_policy()`
-/// (`crates/ironclaw_first_party_extensions/src/web_access.rs`, not `pub`) —
+/// (`crates/extensions/ironclaw_extension_support/src/web_access.rs`, not `pub`) —
 /// re-declared here rather than imported.
 pub(super) fn exa_mcp_test_network_policy() -> NetworkPolicy {
     NetworkPolicy {

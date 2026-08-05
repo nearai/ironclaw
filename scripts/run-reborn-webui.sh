@@ -52,7 +52,12 @@ fi
 REPO_ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-FRONTEND_DIR="$REPO_ROOT/crates/ironclaw_webui/frontend"
+# Resolved by crate NAME through the shared inventory
+# (scripts/ci/lib/crate_tree.py) rather than a literal `crates/ironclaw_webui`
+# path, so the target-architecture family move (PROPOSAL §5) cannot leave this
+# pointed at a directory that no longer exists
+# (docs/reborn/target-architecture/CHECKLIST.md WS10).
+FRONTEND_DIR="$("$REPO_ROOT/scripts/ci/crate-dir.sh" ironclaw_webui "$REPO_ROOT")/frontend"
 if ! command -v pnpm >/dev/null 2>&1; then
   if command -v corepack >/dev/null 2>&1; then
     corepack enable pnpm

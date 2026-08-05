@@ -2,7 +2,7 @@
 
 **Status:** Contract-freeze draft
 **Date:** 2026-04-25
-**Target crate:** `crates/ironclaw_memory` (provider-neutral contract) + `crates/ironclaw_memory_native` (native provider implementation), plus service composition crates
+**Target crate:** `crates/domains/ironclaw_memory` (provider-neutral contract) + `crates/extensions/packages/memory-native` (native provider implementation), plus service composition crates
 **Depends on:** [`host-api.md`](host-api.md), [`filesystem.md`](filesystem.md), [`storage-placement.md`](storage-placement.md), [`network.md`](network.md), [`secrets.md`](secrets.md), [`events-projections.md`](events-projections.md)
 
 ---

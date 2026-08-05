@@ -28,22 +28,22 @@
 # remains accounted for in the owned implementation modules. Tracked by #6524.
 
 [[exemption]]
-module = "crates/ironclaw_product/src/lib.rs"
+module = "crates/product/ironclaw_assistant/src/lib.rs"
 reason = "Declaration-only public facade with no executable Rust statements; rustc emits no LCOV source record. Executable product behavior remains covered in the owned implementation modules."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[exemption]]
-module = "crates/ironclaw_threads/src/lib.rs"
+module = "crates/domains/ironclaw_threads/src/lib.rs"
 reason = "Declaration-only public facade with no executable Rust statements; rustc emits no LCOV source record. Executable thread behavior remains covered in the owned implementation modules."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[exemption]]
-module = "crates/ironclaw_webui/src/webui_v2/mod.rs"
+module = "crates/product/ironclaw_webui/src/webui_v2/mod.rs"
 reason = "Declaration-only WebUI v2 facade with no executable Rust statements; rustc emits no LCOV source record. Executable route behavior remains covered in the owned implementation modules."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[exemption]]
-module = "crates/ironclaw_llm/src/rig_adapter/tests/finish_reason_tests.rs"
+module = "crates/domains/ironclaw_llm/src/rig_adapter/tests/finish_reason_tests.rs"
 reason = "Test-only module stored under src/ for private adapter access; cargo-llvm-cov omits test harness source from production LCOV while the exercised rig_adapter.rs production lines remain coverage-gated."
 issue  = "https://github.com/nearai/ironclaw/issues/6284"
 
@@ -63,62 +63,62 @@ issue  = "https://github.com/nearai/ironclaw/issues/5657"
 # hermetic coverage platform in #6524.
 
 [[exemption]]
-module = "crates/ironclaw_attachments/src/lib.rs"
+module = "crates/domains/ironclaw_attachments/src/lib.rs"
 reason = "Declarative crate facade: module declarations, constants, and re-exports only; executable attachment modules remain covered."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[exemption]]
-module = "crates/ironclaw_extension_host/src/ingress/mod.rs"
+module = "crates/extensions/ironclaw_extension_host/src/ingress/mod.rs"
 reason = "Declarative ingress module facade and documentation only; executable router modules remain covered."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[exemption]]
-module = "crates/ironclaw_host_api/src/lib.rs"
+module = "crates/contracts/ironclaw_host_api/src/lib.rs"
 reason = "Declarative crate facade: module declarations and re-exports only; executable host API modules remain covered."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[exemption]]
-module = "crates/ironclaw_host_api/src/product_adapter/mod.rs"
+module = "crates/contracts/ironclaw_host_api/src/product_adapter/mod.rs"
 reason = "Declarative product-adapter facade: module declarations and re-exports only; executable adapter modules remain covered."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[exemption]]
-module = "crates/ironclaw_outbound/src/error.rs"
+module = "crates/domains/ironclaw_outbound/src/error.rs"
 reason = "Declarative error vocabulary only; variants have no LLVM-instrumentable production statements."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[exemption]]
-module = "crates/ironclaw_outbound/src/lib.rs"
+module = "crates/domains/ironclaw_outbound/src/lib.rs"
 reason = "Declarative crate facade: module declarations and re-exports only; executable outbound modules remain covered."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[exemption]]
-module = "crates/ironclaw_product/src/lib.rs"
+module = "crates/product/ironclaw_assistant/src/lib.rs"
 reason = "Declarative crate facade: module declarations and re-exports only; executable product modules remain covered."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[exemption]]
-module = "crates/ironclaw_product/src/scoped_fs/mod.rs"
+module = "crates/product/ironclaw_assistant/src/scoped_fs/mod.rs"
 reason = "Declarative scoped-filesystem facade and documentation only; executable scoped filesystem modules remain covered."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[exemption]]
-module = "crates/ironclaw_reborn_composition/src/support/fs/mod.rs"
+module = "crates/app/ironclaw_composition/src/support/fs/mod.rs"
 reason = "Declarative composition support facade: module declarations and re-exports only; executable filesystem adapters remain covered."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[exemption]]
-module = "crates/ironclaw_slack_extension/src/lib.rs"
+module = "crates/extensions/packages/slack/src/lib.rs"
 reason = "Declarative Slack crate facade: module declarations and re-exports only; executable Slack modules remain covered."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[exemption]]
-module = "crates/ironclaw_telegram_extension/src/lib.rs"
+module = "crates/extensions/packages/telegram/src/lib.rs"
 reason = "Declarative Telegram crate facade: module declarations and re-exports only; executable Telegram modules remain covered."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[exemption]]
-module = "crates/ironclaw_loop_contracts/src/lib.rs"
+module = "crates/contracts/ironclaw_loop_contracts/src/lib.rs"
 reason = "Declaration-only public facade with no executable Rust statements; rustc emits no LCOV source record. Executable loop-contract behavior remains covered in the owned implementation modules."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
 

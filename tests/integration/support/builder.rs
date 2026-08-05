@@ -25,6 +25,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use ironclaw_assistant::{
+    DefaultProductSurface, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
+};
+use ironclaw_assistant::{ProductInboundAck, ProductTriggerReason};
 use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
@@ -43,15 +47,11 @@ use ironclaw_llm::Role;
 use ironclaw_loop_contracts::{
     CommunicationContextProvider, InstructionSafetyContext, LoopHostMilestone,
 };
+use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
-use ironclaw_product::{
-    ConversationBindingService, DefaultProductSurface, ProductConversationRouteKind,
-    ResolveBindingRequest, ResolvedBinding,
-};
-use ironclaw_product::{ProductInboundAck, ProductTriggerReason};
-use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
-use ironclaw_runner::runtime::ToolDisclosureMode;
+use ironclaw_product_contracts::binding::ProductBindingResolver;
 use ironclaw_threads::ThreadScope;
+use ironclaw_turn_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_turns::{
     AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, GateResumeDisposition,
     ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnRunState,
@@ -82,6 +82,9 @@ type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub(crate) const HARNESS_ACTOR_ID: &str = "host-user";
 /// Model profile the planned runtime requests; the gateway policy permits it.
 pub(crate) const INTERACTIVE_MODEL_PROFILE: &str = "interactive_model";
+/// Coverage-instrumented real-runtime paths (notably bundled WASM startup) can
+/// take more than 30 seconds when several tests run concurrently in CI.
+const RUN_STATE_SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Selects the durable storage backend mounted into the integration harness's
 /// `CompositeRootFilesystem`. Both modes ride **one** composite at the
@@ -175,7 +178,7 @@ pub struct RebornIntegrationHarnessBuilder {
     hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
     /// C-TRAJECTORY: optional run trajectory observer threaded into the
     /// degenerate one-thread group's production capability-port factory.
-    trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
+    trajectory_observer: Option<Arc<dyn ironclaw_composition::RebornTrajectoryObserver>>,
     /// E-GATEWAY tool-path analog of `park_gate`: when set, this harness's
     /// `BuiltinHttpTools` capability dispatch parks until released (issue
     /// #5476 lease-wedge coverage). Threaded into `RebornCapabilityBackend::install`.
@@ -262,7 +265,7 @@ impl RebornIntegrationHarnessBuilder {
     /// capability-port factory. Defaults `None`.
     pub fn with_raw_trajectory_observer(
         mut self,
-        observer: Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>,
+        observer: Arc<dyn ironclaw_composition::RebornTrajectoryObserver>,
     ) -> Self {
         self.trajectory_observer = Some(observer);
         self
@@ -1002,7 +1005,7 @@ impl RebornIntegrationHarness {
     fn build_user_envelope(
         &self,
         text: &str,
-    ) -> HarnessResult<(String, ironclaw_product::ProductInboundEnvelope)> {
+    ) -> HarnessResult<(String, ironclaw_assistant::ProductInboundEnvelope)> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
         let envelope = self.ingress.verified_text_envelope_with_trigger(
             &event_id,
@@ -1056,7 +1059,7 @@ impl RebornIntegrationHarness {
     /// admission-time writes.
     pub(crate) fn binding_service_for_test(
         &self,
-    ) -> HarnessResult<Arc<dyn ConversationBindingService>> {
+    ) -> HarnessResult<Arc<dyn ProductBindingResolver>> {
         Ok(Arc::new(self._shared.product_harness.binding_service()?))
     }
 
@@ -1171,7 +1174,7 @@ impl RebornIntegrationHarness {
     pub async fn submit_approval_resolution(
         &self,
         gate_ref: &TurnGateRef,
-        decision: ironclaw_product::ApprovalDecision,
+        decision: ironclaw_assistant::ApprovalDecision,
     ) -> HarnessResult<ProductInboundAck> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
         let envelope = self.ingress.verified_approval_resolution_envelope(
@@ -1191,7 +1194,7 @@ impl RebornIntegrationHarness {
     pub async fn submit_auth_resolution(
         &self,
         gate_ref: &TurnGateRef,
-        result: ironclaw_product::AuthResolutionResult,
+        result: ironclaw_assistant::AuthResolutionResult,
     ) -> HarnessResult<ProductInboundAck> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
         let envelope = self.ingress.verified_auth_resolution_envelope(
@@ -1233,7 +1236,7 @@ impl RebornIntegrationHarness {
                 .await
                 .map_err(|error| format!("Postgres reopen migrations failed: {error}"))?;
             let mut fresh_composite = CompositeRootFilesystem::new();
-            ironclaw_reborn_composition::test_support::mount_database_roots_for_test(
+            ironclaw_composition::test_support::mount_database_roots_for_test(
                 &mut fresh_composite,
                 filesystem,
             )?;
@@ -1297,7 +1300,7 @@ impl RebornIntegrationHarness {
                 )?,
             ));
             let fresh_processes =
-                ironclaw_runner::runtime::ProcessRuntimeSystem::from_process_journal_store(
+                ironclaw_turn_runner::runtime::ProcessRuntimeSystem::from_process_journal_store(
                     fresh_process_store,
                 );
             let state = fresh_processes
@@ -1537,6 +1540,20 @@ impl RebornIntegrationHarness {
             .collect()
     }
 
+    /// Every User-role message across the captured model requests, in call
+    /// order. Same per-thread `scripted_llm` source (and the same no-baseline
+    /// rationale) as `captured_system_prompts`. Read by
+    /// `assert_model_saw_user_message` in `assertions.rs`.
+    pub(super) fn captured_model_user_messages(&self) -> Vec<String> {
+        self.scripted_llm
+            .captured_requests()
+            .into_iter()
+            .flatten()
+            .filter(|message| matches!(message.role, Role::User))
+            .map(|message| message.content)
+            .collect()
+    }
+
     pub(super) fn captured_system_prompts(&self) -> Vec<String> {
         self.scripted_llm
             .captured_requests()
@@ -1569,7 +1586,7 @@ impl RebornIntegrationHarness {
     /// earlier sibling thread's events.
     pub(super) fn recorded_security_audit_events(
         &self,
-    ) -> Vec<ironclaw_events::SecurityAuditEvent> {
+    ) -> Vec<ironclaw_event_log::SecurityAuditEvent> {
         let all = self._shared.security_audit_sink.events();
         all[self.baseline_security_audit_count.min(all.len())..].to_vec()
     }
@@ -1730,7 +1747,7 @@ impl RebornIntegrationHarness {
         mut decide: impl FnMut(&TurnRunState) -> ControlFlow<HarnessResult<TurnRunState>>,
         timeout_context: &str,
     ) -> HarnessResult<TurnRunState> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let deadline = tokio::time::Instant::now() + RUN_STATE_SETTLE_TIMEOUT;
         loop {
             let state = self
                 .turn_runtime
@@ -1986,7 +2003,7 @@ impl RebornIntegrationHarness {
     /// That user is NOT the capability harness's fixed constructor user: the
     /// production capability surface (`standalone_visible_capability_request` /
     /// `standalone_resource_scope_for_run` in
-    /// `crates/ironclaw_reborn_composition/src/runtime/standalone.rs`) resolves
+    /// `crates/ironclaw_composition/src/runtime/standalone.rs`) resolves
     /// the execution user per run as `thread owner → run actor → fixed
     /// fallback`, and every harness thread run carries an actor — so the fixed
     /// fallback never applies here. Seeding under the harness's fixed
@@ -2245,7 +2262,7 @@ pub(crate) async fn reopen_fresh_libsql_composite(
         .await
         .map_err(|e| format!("migrations on fresh libsql reopen: {e}"))?;
     let mut fresh_composite = CompositeRootFilesystem::new();
-    ironclaw_reborn_composition::test_support::mount_database_roots_for_test(
+    ironclaw_composition::test_support::mount_database_roots_for_test(
         &mut fresh_composite,
         fresh_fs,
     )?;
@@ -2266,22 +2283,21 @@ pub(crate) async fn build_storage_composite(
     let mut composite = CompositeRootFilesystem::new();
     let reopen = match mode {
         StorageMode::InMemory => {
-            ironclaw_reborn_composition::test_support::mount_database_roots_for_test(
+            ironclaw_composition::test_support::mount_database_roots_for_test(
                 &mut composite,
                 Arc::new(InMemoryBackend::new()),
             )?;
             StorageReopen::None
         }
         StorageMode::LibSql => {
-            ironclaw_reborn_composition::test_support::build_default_database_roots_for_test(
+            ironclaw_composition::test_support::build_default_database_roots_for_test(
                 dir,
                 &mut composite,
             )
             .await?;
             // The canonical filename is the production constant — one source of truth.
             StorageReopen::LibSql {
-                db_path: dir
-                    .join(ironclaw_reborn_composition::test_support::STANDALONE_DB_FILENAME),
+                db_path: dir.join(ironclaw_composition::test_support::STANDALONE_DB_FILENAME),
             }
         }
         StorageMode::Postgres => {
@@ -2293,7 +2309,7 @@ pub(crate) async fn build_storage_composite(
                 .run_migrations()
                 .await
                 .map_err(|error| format!("Postgres migrations failed: {error}"))?;
-            ironclaw_reborn_composition::test_support::mount_database_roots_for_test(
+            ironclaw_composition::test_support::mount_database_roots_for_test(
                 &mut composite,
                 filesystem,
             )?;
@@ -2435,7 +2451,7 @@ pub(crate) fn apply_hermetic_env() {
             // No integration test should inherit the ambient tool-disclosure
             // knob. Builders pin Off and disclosure tests opt into Bridged;
             // scrubbing is defense in depth for the retained env fallback.
-            std::env::remove_var(ironclaw_runner::runtime::REBORN_TOOL_DISCLOSURE_ENV);
+            std::env::remove_var(ironclaw_loop_host::REBORN_TOOL_DISCLOSURE_ENV);
         }
     });
 }
@@ -2443,7 +2459,7 @@ pub(crate) fn apply_hermetic_env() {
 /// Assemble a `ResolveBindingRequest` from a verified inbound envelope. This
 /// harness only submits DirectChat turns, so the route kind is `Direct`.
 pub(crate) fn binding_request(
-    envelope: &ironclaw_product::ProductInboundEnvelope,
+    envelope: &ironclaw_assistant::ProductInboundEnvelope,
 ) -> ResolveBindingRequest {
     ResolveBindingRequest {
         adapter_id: envelope.adapter_id().clone(),

@@ -31,7 +31,7 @@ Spec: `docs/superpowers/specs/2026-06-25-trace-commons-instance-enrollment-profi
 - Read-only projection of server state; no raw bearer or device-key material in
   any response; sanitize errors at the HTTP boundary (`WebUiV2HttpError`).
 - No `.unwrap()`/`.expect()` in production code; zero clippy warnings.
-- Rust tests: `cargo test -p ironclaw_reborn_traces`, and
+- Rust tests: `cargo test -p ironclaw_trace_commons`, and
   `cargo test -p ironclaw_webui_v2 --features webui-v2-beta`. Frontend assets are
   embedded at compile time (`assets.rs`); no JS test harness — verify via the
   handler contract test + manual.
@@ -41,7 +41,7 @@ Spec: `docs/superpowers/specs/2026-06-25-trace-commons-instance-enrollment-profi
 ### Task 1: `fetch_account_traces` in reborn_traces (per-user list)
 
 **Files:**
-- Modify: `crates/ironclaw_reborn_traces/src/client.rs` (add an account-traces
+- Modify: `crates/ironclaw_trace_commons/src/client.rs` (add an account-traces
   fetch alongside the existing remote sync) and/or `contribution.rs` for the
   request shaping (mirror `mint_account_login_link_via_sink` from Slice 3).
 - Test: the owning file's test module (mock-issuer pattern).
@@ -107,7 +107,7 @@ async fn fetch_account_traces_returns_user_submissions() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p ironclaw_reborn_traces fetch_account_traces_returns_user_submissions`
+Run: `cargo test -p ironclaw_trace_commons fetch_account_traces_returns_user_submissions`
 Expected: FAIL — function not found.
 
 - [ ] **Step 3: Implement**
@@ -134,13 +134,13 @@ backend outages surface instead of hiding behind an empty-list UI.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p ironclaw_reborn_traces fetch_account_traces_returns_user_submissions`
+Run: `cargo test -p ironclaw_trace_commons fetch_account_traces_returns_user_submissions`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/ironclaw_reborn_traces/src/
+git add crates/ironclaw_trace_commons/src/
 git commit -m "feat(traces): fetch_account_traces_via_sink (GET /v1/account/traces, per-user)"
 ```
 
@@ -150,8 +150,8 @@ git commit -m "feat(traces): fetch_account_traces_via_sink (GET /v1/account/trac
 
 **Files:**
 - Modify: the services facade trait + default impl that backs
-  `state.services().trace_credits(...)` (in `crates/ironclaw_product/`;
-  find it via `grep -rn "fn trace_credits" crates/ironclaw_product`).
+  `state.services().trace_credits(...)` (in `crates/ironclaw_assistant/`;
+  find it via `grep -rn "fn trace_credits" crates/ironclaw_assistant`).
 - Test: the facade's own tests if present; otherwise covered by Task 3's contract test.
 
 **Interfaces:**
@@ -203,13 +203,13 @@ call `fetch_account_traces_via_sink` via the facade's host-egress sink, map
 
 - [ ] **Step 3: Build**
 
-Run: `cargo build -p ironclaw_product`
+Run: `cargo build -p ironclaw_assistant`
 Expected: compiles.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/ironclaw_product/
+git add crates/ironclaw_assistant/
 git commit -m "feat(reborn): trace_account_traces facade method + wire types"
 ```
 

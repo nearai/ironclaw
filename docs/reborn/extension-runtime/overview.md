@@ -1,8 +1,8 @@
 # Unified Extension Runtime — Overview
 
 **Status:** Current extension-runtime model.
-**Implementation source of truth:** `crates/ironclaw_extensions`,
-`crates/ironclaw_extension_host`, `crates/ironclaw_product`, and the first-party
+**Implementation source of truth:** `crates/extensions/ironclaw_extension_registry`,
+`crates/extensions/ironclaw_extension_host`, `crates/product/ironclaw_assistant`, and the first-party
 extension crates. The former implementation/checklist documents are historical
 migration records and are not current build instructions.
 **Baseline:** the unified extension taxonomy this branch already contains (extension as the only installable product object).
@@ -60,7 +60,7 @@ restated so this document stands alone.
 
 The retired vocabulary (`slack_bot`, `slack_personal`, channel-as-product,
 extension `kind` strings) stays pinned at zero by
-`crates/ironclaw_architecture/tests/reborn_retired_taxonomy.rs`.
+`crates/app/ironclaw_architecture_tests/tests/reborn_retired_taxonomy.rs`.
 
 ## 3. The manifest
 
@@ -77,7 +77,7 @@ cannot be derived from the manifest. Host code consumes a package as one
 opaque, cleanly built bundle (id, display name, manifest source, assets);
 nothing outside the package enumerates or re-describes its contents, and
 generic crates never name one. There is no hand-maintained catalog: the
-bundled inventory (`ironclaw_first_party_extensions`) holds exactly one
+bundled inventory (`ironclaw_extension_support`) holds exactly one
 small module per package (`src/packages/<id>.rs`) beside its
 `assets/<id>/` directory, and a collector concatenates the per-module
 bundles. Adding an integration is a new assets directory plus its module;
@@ -308,7 +308,8 @@ Rules that keep the boundary easy to reason about:
 Extensions that use the same `VendorId` each carry the recipe (gmail, drive,
 calendar all embed the `[auth.google]` recipe). During internal publication the
 host unifies them: recipes for one vendor must be **identical except `scopes`
-and `display_name`**, or publication fails with a conflict. Scope ceilings union
+and presentation-only `display_name`, `instructions`, and `setup_url`**, or
+publication fails with a conflict. Scope ceilings union
 across extensions available to the caller exactly as the system does today; a
 new extension needing more scopes triggers incremental re-consent. Accounts and
 grants are stored per user and vendor and shared — connecting Google once serves

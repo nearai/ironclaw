@@ -14,9 +14,9 @@ per-item line numbers and symbol names below are **main's**, retained for
 provenance — they are NOT live pointers on this branch. The structural map:
 
 1. **The shared OAuth engine moved.** On main the exchange lives in
-   `crates/ironclaw_auth/src/engine/`
+   `crates/domains/ironclaw_auth/src/engine/`
    (`AuthEngine`, `scopes_for_exchange`, `MissingScopeBehavior`). On the
-   rollup it is the recipe-driven `AuthEngine` in **`crates/ironclaw_auth/src/engine/`**
+   rollup it is the recipe-driven `AuthEngine` in **`crates/domains/ironclaw_auth/src/engine/`**
    (`exchange.rs` + `mod.rs`), executing `ironclaw_extension_contracts::recipe::OAuth2CodeRecipe` data.
    Scope extraction is `extract_token_response` and the exchange-scope policy enum is
    `MissingScopeBehavior::{Reject, FallbackToRequested}` (not `ExchangeScopePolicy`).
@@ -24,12 +24,12 @@ provenance — they are NOT live pointers on this branch. The structural map:
    `if vendor == …`.
 2. **The OAuth "recipe" is Rust/manifest data, not `[auth.*.token_response]` TOML on
    main** — but on this rollup the first-party recipes ARE bundled TOML under
-   `crates/ironclaw_first_party_extensions/assets/<pkg>/manifest.toml` (`[auth.<vendor>]`
+   `crates/extensions/packages/<pkg>/manifest.toml` (`[auth.<vendor>]`
    with `[token_response]` / `[token_response.scope]`), resolved into `OAuth2CodeRecipe`.
-   The engine suite (`crates/ironclaw_auth/tests/auth_engine_contract.rs`) runs against
+   The engine suite (`crates/domains/ironclaw_auth/tests/auth_engine_contract.rs`) runs against
    those real bundled manifests.
 3. **The specificity scanner is present on this rollup** (unlike main):
-   `crates/ironclaw_architecture/tests/reborn_extension_specificity.rs` /
+   `crates/app/ironclaw_architecture_tests/tests/reborn_extension_specificity.rs` /
    `reborn_retired_taxonomy.rs` exist here, so §0.5.1 is enforceable — but the folded
    changes are generic (no vendor literals in the engine), so nothing new trips it.
 
@@ -201,7 +201,7 @@ have no manifest in this tree. Nothing to verify.
   (real production code path over the FS backend).
 - [x] **A2a · Projection honors `expires_at`.** BUILT + TESTED (folded — verbatim structure match).
   `AuthGateRecord::to_view(now)` returns not-live for a non-terminal flow past `expires_at`
-  (`crates/ironclaw_product/src/auth_interaction/types.rs`), and
+  (`crates/product/ironclaw_assistant/src/auth_interaction/types.rs`), and
   `DefaultAuthInteractionService::list_pending` passes `chrono::Utc::now()`. RFC 6819 §5.1.5.3.
   **Proven:** `auth_interaction_contract::list_pending_auth_omits_flow_past_its_expiry`.
 - [ ] **A2b · Background flow-expiry sweep** — DEFERRED FOLLOW-UP (bounded; not shipped here). A2a
@@ -237,7 +237,7 @@ have no manifest in this tree. Nothing to verify.
   cleanup, and it is a separate turn-UX feature owned by the concurrent main-delta reconciliation. The
   predicate here is `!is_terminal_status` only.
 - [x] **A6 · Scope downgrade/over-claim on the echoed-scope path.** BUILT + TESTED (folded onto the
-  rollup engine). `extract_token_response` (`crates/ironclaw_auth/src/engine/exchange.rs`) now stores
+  rollup engine). `extract_token_response` (`crates/domains/ironclaw_auth/src/engine/exchange.rs`) now stores
   `granted ∩ requested` on the echoed-scope arm — dropping any scope the vendor granted beyond the
   request (stop over-claiming) and never widening to the full requested set — and emits a count-only
   guard `warn!` when the effective grant differs from requested. When the intersection is empty it
@@ -261,7 +261,7 @@ have no manifest in this tree. Nothing to verify.
   `durable/cleanup.rs` similarly propagates secret-delete failures as retryable; not re-proven here).
 - [x] **A14 · InMemory fake fidelity — `Revoked` on `InvalidGrant`.** BUILT + TESTED (folded).
   Added the `Err(InvalidGrant) → Revoked` arm to the fake's `refresh_account`
-  (`crates/ironclaw_auth/src/fakes.rs`), matching production
+  (`crates/domains/ironclaw_auth/src/fakes.rs`), matching production
   `ProviderBackedCredentialAccountService::refresh_account` (credential.rs:804 maps
   `invalid_grant → Revoked`). **Proven:**
   `refresh_contract::fake_refresh_account_marks_account_revoked_on_invalid_grant` (drives the fake

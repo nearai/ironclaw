@@ -49,7 +49,7 @@ The static kernel owns the generic mechanisms required by every extension:
   journal queries.
 
 Agent-loop scheduling and loop-exit validation are not kernel policy.
-`TurnRunScheduler` remains in `ironclaw_runner` and consumes
+`TurnRunScheduler` remains in `ironclaw_turn_runner` and consumes
 `ProcessTransitionPort`. `LoopExitApplier` validates agent-loop evidence and
 then maps a validated exit to a neutral process transition. The kernel sees a
 process outcome, not an agent turn.

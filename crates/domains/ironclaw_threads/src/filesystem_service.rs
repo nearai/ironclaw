@@ -1,0 +1,3659 @@
+// arch-exempt: large_file, filesystem thread service decomposition, plan #5662
+//! Filesystem-backed canonical session thread and transcript service.
+//!
+//! Records live under the `/threads` mount alias on a
+//! [`ScopedFilesystem`](ironclaw_filesystem::ScopedFilesystem). The paths in
+//! this module are alias-relative [`ScopedPath`](ironclaw_host_api::path::ScopedPath)
+//! strings — at every op the [`ScopedFilesystem`] resolves the alias against
+//! its caller-supplied [`MountView`](ironclaw_host_api::mount::MountView) and enforces
+//! per-grant ACL before backend dispatch. The composition layer wires the
+//! alias to a tenant/user-scoped
+//! [`VirtualPath`](ironclaw_host_api::path::VirtualPath), so tenant isolation is
+//! structural rather than something this crate must re-derive from
+//! `ThreadScope.tenant_id`.
+//!
+//! Within the alias, sub-scope (`agent_id`, `project_id`, `owner_user_id`,
+//! `mission_id`) is encoded in the path so a single tenant/user can own
+//! multiple agent/project/mission cells. Within a single thread, messages,
+//! summary artifacts, and inbound idempotency records are stored as
+//! individual records keyed by their identifiers:
+//!
+//! ```text
+//! /threads[/agents/<agent>][/projects/<project>][/owners/<owner_user>][/missions/<mission>]/threads/<thread_id>/thread.json
+//! /threads[/.../...]/threads/<thread_id>/messages/<message_id>.json
+//! /threads[/.../...]/threads/<thread_id>/summaries/<summary_id>.json
+//! /threads/idempotency/<sha256>.json
+//! ```
+//!
+//! The idempotency record key SHA-256s the full (`scope`,
+//! `source_binding_id`, `external_event_id`) tuple, so flat layout under one
+//! `/threads/idempotency/` directory is safe — two different scopes with
+//! identical binding/event id produce different on-disk keys.
+//! `replay_accepted_inbound_message` recomputes that key from its scoped
+//! request and performs one exact read.
+
+mod message_lookup_index;
+mod message_read;
+mod thread_index;
+mod transcript_migration;
+
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+};
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use futures::{StreamExt, future::join_all};
+use ironclaw_filesystem::{
+    CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FilesystemError,
+    FilesystemOperation, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue,
+    OrderedPage, OrderedQueryCursor, Page, RecordKind, RecordVersion, RootFilesystem,
+    ScopedFilesystem, SortDirection, cas_update,
+};
+use ironclaw_host_api::{
+    error::HostApiError,
+    ids::{InvocationId, TenantId, ThreadId, UserId},
+    path::ScopedPath,
+    resource::ResourceScope,
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+use crate::identifiers::SummaryArtifactId;
+use crate::stored_message::serialize_stored_thread_message;
+use crate::summary_artifacts::find_overlapping_summary;
+use crate::title::derive_title_from_message;
+use crate::tool_result_records::{
+    tool_result_record_chunk, validate_tool_result_record_content,
+    validate_tool_result_record_read, validate_tool_result_record_ref,
+};
+use crate::{
+    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
+    AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
+    AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
+    BoundedThreadMessageSnapshot, BoundedThreadMessages, BoundedThreadMessagesRequest,
+    CapabilityDisplayPreviewEnvelope, ContextMessage, ContextMessages, ContextWindow,
+    CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
+    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
+    MessageStatus, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
+    ThreadMessageRecord, ThreadScope, ToolResultRecordChunk, ToolResultReferenceEnvelope,
+    UpdateAssistantDraftRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
+};
+use message_lookup_index::MessageLookupIndexStore;
+use message_read::{MessageReadBudget, MessageReadResult};
+
+/// Bound on the CAS retry loop. Mirrors the run-state / authorization
+/// store budgets — enough to absorb routine cross-process contention,
+/// small enough to surface pathological loops loudly.
+const FILESYSTEM_CAS_RETRIES: usize = 8;
+
+/// [`RecordKind`] discriminants for the four record types persisted by this
+/// service. Setting `entry.kind` makes writes record-shaped so
+/// [`DiskFilesystem`] (which rejects record-shaped puts) triggers the
+/// fail-closed path on the CAS gate instead of accepting a byte-only first
+/// write without CAS enforcement.
+const SESSION_THREAD_KIND: &str = "session_thread";
+const THREAD_MESSAGE_KIND: &str = "thread_message";
+const THREAD_SUMMARY_KIND: &str = "thread_summary";
+const THREAD_IDEMPOTENCY_KIND: &str = "thread_idempotency";
+
+/// Conservative fan-out for per-thread title derivation during sidebar listing.
+const TITLE_DERIVATION_READ_CONCURRENCY: usize = 8;
+/// One-shot first-turn context windows are a hot-path handoff from inbound
+/// accept to prompt construction; keep the cache bounded if a turn never runs.
+const ONE_SHOT_CONTEXT_WINDOW_CACHE_MAX_ENTRIES: usize = 4096;
+
+struct MaterializedMessageRange {
+    thread: StoredThreadRecord,
+    messages: Vec<ThreadMessageRecord>,
+}
+
+enum TransactionalMessageWrite {
+    Unsupported,
+    Written,
+    IdempotencyAlreadyAccepted,
+}
+
+/// On-disk thread state record. The transcript boundary's
+/// [`SessionThreadRecord`] is the user-visible shape; this struct adds
+/// `next_sequence` so the per-thread monotonic counter is durable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct StoredThreadRecord {
+    #[serde(flatten)]
+    record: SessionThreadRecord,
+    next_sequence: u64,
+}
+
+/// On-disk inbound idempotency record. Includes the originating scope so a
+/// replay can validate the hashed lookup and rehydrate the reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InboundIdempotencyRecord {
+    scope: ThreadScope,
+    source_binding_id: String,
+    external_event_id: String,
+    thread_id: ThreadId,
+    message_id: ThreadMessageId,
+}
+
+/// Filesystem-backed [`SessionThreadService`].
+///
+/// Construct with an [`Arc<ScopedFilesystem<F>>`](ScopedFilesystem) over
+/// any [`RootFilesystem`]. The [`ScopedFilesystem`] resolves the
+/// `/threads` alias to a tenant/user-scoped
+/// [`VirtualPath`](ironclaw_host_api::path::VirtualPath) per its
+/// [`MountView`](ironclaw_host_api::mount::MountView) and enforces per-op ACL
+/// before backend dispatch — so tenant isolation is structural rather
+/// than something this crate must re-derive from
+/// `ThreadScope.tenant_id`. Within-tenant axes (`agent_id`,
+/// `project_id`, `owner_user_id`, `mission_id`) stay in the
+/// alias-relative path because they are not covered by the per-tenant
+/// `MountAlias`.
+pub struct FilesystemSessionThreadService<F>
+where
+    F: RootFilesystem,
+{
+    filesystem: Arc<ScopedFilesystem<F>>,
+    known_thread_index_rows: Mutex<HashSet<String>>,
+    ready_thread_index_scopes: Mutex<HashSet<String>>,
+    /// Mounts whose `/threads`-root index specs are already declared, keyed by
+    /// `tenant:user` — the pair the alias resolves through. Keeps thread create
+    /// off the index-DDL path after a mount's first thread.
+    ready_index_mounts: Mutex<HashSet<(TenantId, UserId)>>,
+    thread_index_declaration_lock: tokio::sync::Mutex<()>,
+    one_shot_context_windows: Mutex<HashMap<String, ContextWindow>>,
+}
+
+/// Whether a mount that cannot serve ordered indexes is a hard failure.
+///
+/// A named mode rather than a boolean: one caller derives it from `!required`,
+/// and an inverted argument there would silently downgrade a required
+/// declaration to a skipped one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum IndexDeclarationPolicy {
+    /// Propagate `Unsupported` — the caller needs the projection.
+    Required,
+    /// Tolerate `Unsupported` — the caller only wants the projection if the
+    /// mount can serve it.
+    Optional,
+}
+
+impl<F> FilesystemSessionThreadService<F>
+where
+    F: RootFilesystem,
+{
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
+        Self {
+            filesystem,
+            known_thread_index_rows: Mutex::new(HashSet::new()),
+            ready_thread_index_scopes: Mutex::new(HashSet::new()),
+            ready_index_mounts: Mutex::new(HashSet::new()),
+            thread_index_declaration_lock: tokio::sync::Mutex::new(()),
+            one_shot_context_windows: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn clear_thread_index_cache_for_scope(&self, _scope: &ThreadScope) {}
+
+    fn seed_one_shot_context_window(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message: &ThreadMessageRecord,
+    ) {
+        let messages = vec![message.clone()];
+        let context = ContextWindow {
+            thread_id: thread_id.clone(),
+            messages: context_messages_with_summary_replacements(&messages, &[]),
+        };
+        if let Ok(mut cache) = self.one_shot_context_windows.lock() {
+            let key = one_shot_context_window_cache_key(scope, thread_id);
+            cache.insert(key.clone(), context);
+            evict_hash_map_entry_over_limit(
+                &mut cache,
+                ONE_SHOT_CONTEXT_WINDOW_CACHE_MAX_ENTRIES,
+                &key,
+            );
+        }
+    }
+
+    fn take_one_shot_context_window(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        max_messages: usize,
+    ) -> Option<ContextWindow> {
+        let key = one_shot_context_window_cache_key(scope, thread_id);
+        let mut context = self.one_shot_context_windows.lock().ok()?.remove(&key)?;
+        if max_messages < context.messages.len() {
+            let start = context.messages.len() - max_messages;
+            context.messages = context.messages.split_off(start);
+        }
+        Some(context)
+    }
+
+    fn invalidate_one_shot_context_window(&self, scope: &ThreadScope, thread_id: &ThreadId) {
+        if let Ok(mut cache) = self.one_shot_context_windows.lock() {
+            cache.remove(&one_shot_context_window_cache_key(scope, thread_id));
+        }
+    }
+
+    fn thread_entry(record: &StoredThreadRecord) -> Result<Entry, SessionThreadError> {
+        let body = serialize_pretty(record)?;
+        let kind = RecordKind::new(SESSION_THREAD_KIND).map_err(|error| {
+            SessionThreadError::Backend(format!("invalid session_thread record kind: {error}"))
+        })?;
+        let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
+        entry.kind = Some(kind);
+        Ok(entry)
+    }
+
+    fn message_entry(record: &ThreadMessageRecord) -> Result<Entry, SessionThreadError> {
+        let body = serialize_stored_thread_message(record)?;
+        let kind = RecordKind::new(THREAD_MESSAGE_KIND).map_err(|error| {
+            SessionThreadError::Backend(format!("invalid thread_message record kind: {error}"))
+        })?;
+        let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
+        entry.kind = Some(kind);
+        Ok(entry
+            .with_indexed(
+                fs_index_key("thread_id")?,
+                IndexValue::Text(record.thread_id.to_string()),
+            )
+            .with_indexed(
+                fs_index_key("sequence")?,
+                IndexValue::I64(i64::try_from(record.sequence).map_err(|_| {
+                    SessionThreadError::Backend(
+                        "message sequence exceeds indexed integer range".to_string(),
+                    )
+                })?),
+            )
+            .with_indexed(
+                fs_index_key("message_id")?,
+                IndexValue::Text(record.message_id.to_string()),
+            )
+            .with_indexed(
+                fs_index_key("message_kind")?,
+                IndexValue::Text(serde_enum_index_value(&record.kind)?),
+            )
+            .with_indexed(
+                fs_index_key("message_status")?,
+                IndexValue::Text(serde_enum_index_value(&record.status)?),
+            ))
+    }
+
+    fn summary_entry(record: &SummaryArtifact) -> Result<Entry, SessionThreadError> {
+        let body = serialize_pretty(record)?;
+        let kind = RecordKind::new(THREAD_SUMMARY_KIND).map_err(|error| {
+            SessionThreadError::Backend(format!("invalid thread_summary record kind: {error}"))
+        })?;
+        let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
+        entry.kind = Some(kind);
+        Ok(entry
+            .with_indexed(
+                fs_index_key("thread_id")?,
+                IndexValue::Text(record.thread_id.to_string()),
+            )
+            .with_indexed(
+                fs_index_key("start_sequence")?,
+                IndexValue::I64(i64::try_from(record.start_sequence).map_err(|_| {
+                    SessionThreadError::Backend(
+                        "summary start sequence exceeds indexed integer range".to_string(),
+                    )
+                })?),
+            )
+            .with_indexed(
+                fs_index_key("summary_id")?,
+                IndexValue::Text(record.summary_id.to_string()),
+            ))
+    }
+
+    /// Declare every ordered-index spec this crate queries, once per mount.
+    ///
+    /// These are declared at the `/threads` alias root rather than under each
+    /// thread. A declaration is catalog work — a spec row, and on first use the
+    /// static projection trigger set — so declaring per thread paid that cost
+    /// on every thread create and left a catalog row per thread behind
+    /// forever, which the projection then has to consider on each write.
+    /// (Under the per-declaration trigger design this branch replaced, it also
+    /// accumulated three triggers per spec per thread.) Every spec leads with
+    /// its partition key
+    /// (`thread_id`, or `scope_key` for the listing projection), so a single
+    /// declaration above the per-thread paths serves every thread under this
+    /// mount; `query_ordered` resolves it by walking ancestor prefixes.
+    ///
+    /// The alias root resolves to a per-(tenant, user) backend path, so the
+    /// memo is keyed by that pair. Racing callers may each declare once more
+    /// than strictly needed — declarations are idempotent by contract, and the
+    /// backend keeps its own cache on the same resolved path — which is why
+    /// this deliberately takes no lock.
+    ///
+    /// `IndexDeclarationPolicy::Optional` lets a caller that only needs the
+    /// projection for an optional listing tolerate a mount without
+    /// ordered-index support; `Required` propagates. The mount is memoized as
+    /// declared
+    /// only on full success, so a fail-soft skip does not suppress a later
+    /// required declaration.
+    pub(super) async fn declare_root_indexes(
+        &self,
+        scope: &ThreadScope,
+        policy: IndexDeclarationPolicy,
+    ) -> Result<(), SessionThreadError> {
+        let resource_scope = scope.to_resource_scope();
+        // The `/threads` alias resolves through tenant and user, so the mount
+        // identity is that pair. Kept typed rather than flattened into a
+        // delimited string (typed-internals rule).
+        let mount_key = (
+            resource_scope.tenant_id.clone(),
+            resource_scope.user_id.clone(),
+        );
+        if self
+            .ready_index_mounts
+            .lock()
+            .map(|ready| ready.contains(&mount_key))
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        let root = scoped_path(THREADS_PREFIX)?;
+        for index in root_index_specs()? {
+            match self
+                .filesystem
+                .ensure_index(&resource_scope, &root, &index)
+                .await
+            {
+                Ok(()) => {}
+                Err(FilesystemError::Unsupported { .. })
+                    if policy == IndexDeclarationPolicy::Optional =>
+                {
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if let Ok(mut ready) = self.ready_index_mounts.lock() {
+            ready.insert(mount_key.clone());
+            thread_index::evict_entry_over_limit(&mut ready, 512, &mount_key);
+        }
+        Ok(())
+    }
+
+    fn idempotency_entry(record: &InboundIdempotencyRecord) -> Result<Entry, SessionThreadError> {
+        let body = serialize_pretty(record)?;
+        let kind = RecordKind::new(THREAD_IDEMPOTENCY_KIND).map_err(|error| {
+            SessionThreadError::Backend(format!("invalid thread_idempotency record kind: {error}"))
+        })?;
+        let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
+        entry.kind = Some(kind);
+        Ok(entry)
+    }
+
+    async fn read_thread_versioned(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<(StoredThreadRecord, RecordVersion)>, SessionThreadError> {
+        let path = thread_record_path(scope, thread_id)?;
+        let Some(versioned) = self
+            .filesystem
+            .get(&scope.to_resource_scope(), &path)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let record = deserialize::<StoredThreadRecord>(&versioned.entry.body)?;
+        if &record.record.scope != scope || &record.record.thread_id != thread_id {
+            return Ok(None);
+        }
+        Ok(Some((record, versioned.version)))
+    }
+
+    async fn read_message_versioned(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<Option<(ThreadMessageRecord, RecordVersion)>, SessionThreadError> {
+        let path = message_record_path(scope, thread_id, message_id)?;
+        let Some(versioned) = self
+            .filesystem
+            .get(&scope.to_resource_scope(), &path)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let record = deserialize::<ThreadMessageRecord>(&versioned.entry.body)?;
+        if &record.thread_id != thread_id || record.message_id != message_id {
+            return Ok(None);
+        }
+        Ok(Some((record, versioned.version)))
+    }
+
+    async fn write_message_lookup_indexes(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message: &ThreadMessageRecord,
+    ) -> Result<(), SessionThreadError> {
+        MessageLookupIndexStore::new(self.filesystem.as_ref())
+            .write_for_message(scope, thread_id, message)
+            .await
+    }
+
+    async fn write_message_lookup_indexes_best_effort(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message: &ThreadMessageRecord,
+        context: &'static str,
+    ) {
+        if let Err(error) = self
+            .write_message_lookup_indexes(scope, thread_id, message)
+            .await
+        {
+            // The source message is already durable. Lookup projection failure
+            // is observable as a missing exact lookup; requests never repair it
+            // by scanning the transcript.
+            tracing::debug!(
+                ?error,
+                ?scope,
+                thread_id = %thread_id.as_str(),
+                message_id = %message.message_id,
+                kind = ?message.kind,
+                status = ?message.status,
+                context = context,
+                "message lookup projection write failed; exact lookup remains unavailable",
+            );
+        }
+    }
+
+    async fn write_new_message(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message: &ThreadMessageRecord,
+        description: &'static str,
+    ) -> Result<(), SessionThreadError> {
+        crate::contract::validate_new_message_timestamps(message, description)?;
+        let path = message_record_path(scope, thread_id, message.message_id)?;
+        let entry = Self::message_entry(message)?;
+        let resource_scope = scope.to_resource_scope();
+        let txn_prefix = scoped_path(THREADS_PREFIX)?;
+        match self.filesystem.begin(&resource_scope, &txn_prefix).await {
+            Ok(mut txn) => {
+                let message_virtual_path = self.filesystem.resolve(&resource_scope, &path)?;
+                if let Err(error) = txn
+                    .put(&message_virtual_path, entry.clone(), CasExpectation::Absent)
+                    .await
+                {
+                    txn.rollback().await;
+                    return Err(absent_put_error(error, description, &path));
+                }
+                for (lookup_path, lookup_entry, expectation) in
+                    MessageLookupIndexStore::<F>::entries_for_message(scope, thread_id, message)?
+                {
+                    let virtual_path = self.filesystem.resolve(&resource_scope, &lookup_path)?;
+                    if matches!(expectation, CasExpectation::Absent)
+                        && txn.get(&virtual_path).await?.is_some()
+                    {
+                        continue;
+                    }
+                    if let Err(error) = txn.put(&virtual_path, lookup_entry, expectation).await {
+                        txn.rollback().await;
+                        return Err(absent_put_error(error, "message lookup", &lookup_path));
+                    }
+                }
+                txn.commit().await?;
+                self.invalidate_one_shot_context_window(scope, thread_id);
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn try_write_new_message_transactionally(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message: &mut ThreadMessageRecord,
+        idempotency_record: Option<(&ScopedPath, &Entry)>,
+    ) -> Result<TransactionalMessageWrite, SessionThreadError> {
+        crate::contract::validate_new_message_timestamps(message, "transactional message")?;
+        let resource_scope = scope.to_resource_scope();
+        let txn_prefix = scoped_path(THREADS_PREFIX)?;
+        let thread_path = thread_record_path(scope, thread_id)?;
+        let thread_virtual_path = self.filesystem.resolve(&resource_scope, &thread_path)?;
+        let message_path = message_record_path(scope, thread_id, message.message_id)?;
+        let message_virtual_path = self.filesystem.resolve(&resource_scope, &message_path)?;
+        let lookup_entries =
+            MessageLookupIndexStore::<F>::entries_for_message(scope, thread_id, message)?
+                .into_iter()
+                .map(|(path, entry, expectation)| {
+                    self.filesystem
+                        .resolve(&resource_scope, &path)
+                        .map(|virtual_path| (path, virtual_path, entry, expectation))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+        let idempotency_record = idempotency_record
+            .map(|(path, entry)| {
+                self.filesystem
+                    .resolve(&resource_scope, path)
+                    .map(|virtual_path| (path, virtual_path, entry))
+            })
+            .transpose()?;
+
+        for _ in 0..FILESYSTEM_CAS_RETRIES {
+            let mut txn = match self.filesystem.begin(&resource_scope, &txn_prefix).await {
+                Ok(txn) => txn,
+                Err(FilesystemError::Unsupported {
+                    operation: FilesystemOperation::BeginTxn,
+                    ..
+                }) => return Ok(TransactionalMessageWrite::Unsupported),
+                Err(error) => return Err(error.into()),
+            };
+
+            if let Some((_, virtual_path, entry)) = &idempotency_record {
+                match txn
+                    .put(virtual_path, (*entry).clone(), CasExpectation::Absent)
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(error) => {
+                        txn.rollback().await;
+                        return match error {
+                            FilesystemError::VersionMismatch { .. } => {
+                                Ok(TransactionalMessageWrite::IdempotencyAlreadyAccepted)
+                            }
+                            error => Err(error.into()),
+                        };
+                    }
+                }
+            }
+
+            let Some(versioned_thread) = txn.get(&thread_virtual_path).await? else {
+                txn.rollback().await;
+                return Err(SessionThreadError::UnknownThread {
+                    thread_id: thread_id.clone(),
+                });
+            };
+            let mut stored = deserialize::<StoredThreadRecord>(&versioned_thread.entry.body)?;
+            let thread_version = versioned_thread.version;
+            if &stored.record.scope != scope || &stored.record.thread_id != thread_id {
+                txn.rollback().await;
+                return Err(SessionThreadError::UnknownThread {
+                    thread_id: thread_id.clone(),
+                });
+            }
+
+            if message.sequence == 0 {
+                if stored.next_sequence > 1 {
+                    let assigned = stored.next_sequence;
+                    stored.next_sequence = assigned + 1;
+                    stored.record.updated_at = Some(Utc::now());
+                    let entry = Self::thread_entry(&stored)?;
+                    if let Err(error) = txn
+                        .put(
+                            &thread_virtual_path,
+                            entry,
+                            CasExpectation::Version(thread_version),
+                        )
+                        .await
+                    {
+                        txn.rollback().await;
+                        return Err(absent_put_error(error, "thread", &thread_path));
+                    }
+                    message.sequence = assigned;
+                } else {
+                    let sequence_path = message_sequence_counter_path(scope, thread_id)?;
+                    let sequence_virtual_path =
+                        self.filesystem.resolve(&resource_scope, &sequence_path)?;
+                    match txn.reserve_sequence(&sequence_virtual_path).await {
+                        Ok(sequence) => message.sequence = sequence.get(),
+                        Err(FilesystemError::Unsupported {
+                            operation: FilesystemOperation::ReserveSeq,
+                            ..
+                        }) => {
+                            txn.rollback().await;
+                            return Ok(TransactionalMessageWrite::Unsupported);
+                        }
+                        Err(error) => {
+                            txn.rollback().await;
+                            return Err(error.into());
+                        }
+                    }
+                }
+            }
+            let message_entry = Self::message_entry(message)?;
+            if let Err(error) = txn
+                .put(&message_virtual_path, message_entry, CasExpectation::Absent)
+                .await
+            {
+                txn.rollback().await;
+                return Err(absent_put_error(error, "message", &message_path));
+            }
+            for (lookup_path, virtual_path, entry, expectation) in &lookup_entries {
+                if matches!(expectation, CasExpectation::Absent)
+                    && txn.get(virtual_path).await?.is_some()
+                {
+                    continue;
+                }
+                if let Err(error) = txn.put(virtual_path, entry.clone(), *expectation).await {
+                    txn.rollback().await;
+                    return Err(absent_put_error(error, "message lookup", lookup_path));
+                }
+            }
+
+            match txn.commit().await {
+                Ok(()) => return Ok(TransactionalMessageWrite::Written),
+                // Optimistic-concurrency conflict on the thread record: another
+                // writer committed between our `get` and `commit`. Retry the
+                // whole transaction — this is the bounded CAS-retry budget the
+                // loop exists to provide. (libSQL/in-memory never reach here;
+                // they return `Unsupported` from `begin` above.)
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        Err(SessionThreadError::Backend(format!(
+            "filesystem CAS retries exhausted accepting inbound message at {}",
+            thread_path.as_str()
+        )))
+    }
+
+    async fn list_thread_messages(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<ThreadMessageRecord>, SessionThreadError> {
+        self.read_thread_versioned(scope, thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            })?;
+        self.list_thread_messages_range_indexed(scope, thread_id, 0, u64::MAX)
+            .await
+    }
+
+    async fn find_assistant_message_by_run(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        turn_run_id: &str,
+        required_status: Option<MessageStatus>,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        self.ensure_transcript_indexes_migrated(scope).await?;
+        let index_store = MessageLookupIndexStore::new(self.filesystem.as_ref());
+        let indexed_message_id = index_store
+            .read_assistant_run(scope, thread_id, turn_run_id)
+            .await?;
+        if let Some(message_id) = indexed_message_id
+            && let Some((message, _)) = self
+                .read_message_versioned(scope, thread_id, message_id)
+                .await?
+            && assistant_message_matches_run(&message, turn_run_id, required_status)
+        {
+            return Ok(Some(message));
+        }
+
+        Ok(None)
+    }
+
+    async fn find_tool_result_reference_message(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        turn_run_id: &str,
+        result_ref: &str,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        self.ensure_transcript_indexes_migrated(scope).await?;
+        let index_store = MessageLookupIndexStore::new(self.filesystem.as_ref());
+        let indexed_message_id = index_store
+            .read_tool_result(scope, thread_id, turn_run_id, result_ref)
+            .await?;
+        if let Some(message_id) = indexed_message_id
+            && let Some((message, _)) = self
+                .read_message_versioned(scope, thread_id, message_id)
+                .await?
+            && matches_tool_result_reference(&message, turn_run_id, result_ref)
+        {
+            return Ok(Some(message));
+        }
+
+        Ok(None)
+    }
+
+    async fn list_thread_messages_range_indexed(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        after_sequence: u64,
+        through_sequence: u64,
+    ) -> Result<Vec<ThreadMessageRecord>, SessionThreadError> {
+        self.ensure_transcript_indexes_migrated(scope).await?;
+        if through_sequence <= after_sequence {
+            return Ok(Vec::new());
+        }
+        let root = messages_root(scope, thread_id)?;
+        let index = message_sequence_index_spec()?;
+        let after = i64::try_from(after_sequence).map_err(|_| {
+            SessionThreadError::Backend(
+                "message sequence cursor exceeds indexed integer range".to_string(),
+            )
+        })?;
+        let mut cursor = OrderedQueryCursor {
+            value: IndexValue::I64(after),
+            tie_breaker: IndexValue::Text("~".to_string()),
+        };
+        let mut expected_sequence = after_sequence.saturating_add(1);
+        let mut messages = Vec::new();
+        loop {
+            let page = OrderedPage::new(
+                index.name.clone(),
+                fs_index_key("sequence")?,
+                fs_index_key("message_id")?,
+                SortDirection::Ascending,
+                Page::MAX_LIMIT,
+            )
+            .after(cursor.clone());
+            let entries = self
+                .filesystem
+                .query_ordered(
+                    &scope.to_resource_scope(),
+                    &root,
+                    &thread_partition_filter(thread_id)?,
+                    &page,
+                )
+                .await?;
+            let count = entries.len();
+            for entry in entries {
+                let message = deserialize::<ThreadMessageRecord>(&entry.entry.body)?;
+                if message.sequence > through_sequence {
+                    return Ok(messages);
+                }
+                if message.sequence < expected_sequence {
+                    return Err(SessionThreadError::Backend(format!(
+                        "message sequence projection is out of order at sequence {}",
+                        message.sequence
+                    )));
+                }
+                // Sequence allocation precedes the durable write. A crash or
+                // backend failure can therefore leave a legitimate gap, which
+                // must not make every subsequent transcript read fail.
+                expected_sequence = message.sequence.saturating_add(1);
+                cursor = OrderedQueryCursor {
+                    value: IndexValue::I64(i64::try_from(message.sequence).unwrap_or(i64::MAX)),
+                    tie_breaker: IndexValue::Text(message.message_id.to_string()),
+                };
+                messages.push(message);
+            }
+            if count < Page::MAX_LIMIT as usize {
+                break;
+            }
+        }
+        Ok(messages)
+    }
+
+    async fn list_latest_thread_messages(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        limit: usize,
+    ) -> Result<Vec<ThreadMessageRecord>, SessionThreadError> {
+        self.ensure_transcript_indexes_migrated(scope).await?;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = u32::try_from(limit)
+            .unwrap_or(Page::MAX_LIMIT)
+            .min(Page::MAX_LIMIT);
+        let root = messages_root(scope, thread_id)?;
+        let index = message_sequence_index_spec()?;
+        let page = OrderedPage::new(
+            index.name,
+            fs_index_key("sequence")?,
+            fs_index_key("message_id")?,
+            SortDirection::Descending,
+            limit,
+        );
+        let mut messages = self
+            .filesystem
+            .query_ordered(
+                &scope.to_resource_scope(),
+                &root,
+                &thread_partition_filter(thread_id)?,
+                &page,
+            )
+            .await?
+            .into_iter()
+            .map(|entry| deserialize::<ThreadMessageRecord>(&entry.entry.body))
+            .collect::<Result<Vec<_>, _>>()?;
+        messages.reverse();
+        Ok(messages)
+    }
+
+    async fn latest_thread_message_by_kind_status(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        kind: &MessageKind,
+        status: &MessageStatus,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        self.ensure_transcript_indexes_migrated(scope).await?;
+        let root = messages_root(scope, thread_id)?;
+        let index = message_kind_status_index_spec()?;
+        let page = OrderedPage::new(
+            index.name,
+            fs_index_key("sequence")?,
+            fs_index_key("message_id")?,
+            SortDirection::Descending,
+            1,
+        );
+        let filter = Filter::And(vec![
+            thread_partition_filter(thread_id)?,
+            Filter::Eq {
+                key: fs_index_key("message_kind")?,
+                value: IndexValue::Text(serde_enum_index_value(kind)?),
+            },
+            Filter::Eq {
+                key: fs_index_key("message_status")?,
+                value: IndexValue::Text(serde_enum_index_value(status)?),
+            },
+        ]);
+        self.filesystem
+            .query_ordered(&scope.to_resource_scope(), &root, &filter, &page)
+            .await?
+            .into_iter()
+            .next()
+            .map(|entry| deserialize::<ThreadMessageRecord>(&entry.entry.body))
+            .transpose()
+    }
+
+    /// Caller must have run `ensure_transcript_indexes_migrated` for the
+    /// scope; hoisted out so a list page pays the marker check once, not once
+    /// per untitled thread.
+    async fn first_user_message_for_title(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        _next_sequence: u64,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        let Some(message_id) = MessageLookupIndexStore::new(self.filesystem.as_ref())
+            .read_first_user(scope, thread_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .read_message_versioned(scope, thread_id, message_id)
+            .await?
+            .map(|(message, _)| message)
+            .filter(|message| message.kind == MessageKind::User))
+    }
+
+    async fn materialize_message_range(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        after_sequence: u64,
+        through_sequence: u64,
+    ) -> Result<MaterializedMessageRange, SessionThreadError> {
+        let thread = self
+            .read_thread_versioned(scope, thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            })?
+            .0;
+        let messages = self
+            .list_thread_messages_range_indexed(scope, thread_id, after_sequence, through_sequence)
+            .await?;
+        Ok(MaterializedMessageRange { thread, messages })
+    }
+
+    async fn find_capability_display_preview_message(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        turn_run_id: &str,
+        invocation_id: InvocationId,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        let Some(message_id) = MessageLookupIndexStore::new(self.filesystem.as_ref())
+            .read_capability_preview(scope, thread_id, turn_run_id, invocation_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let Some((message, _)) = self
+            .read_message_versioned(scope, thread_id, message_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let matches = message.kind == MessageKind::CapabilityDisplayPreview
+            && message.status == MessageStatus::Finalized
+            && message.turn_run_id.as_deref() == Some(turn_run_id)
+            && CapabilityDisplayPreviewEnvelope::invocation_id_from_json(
+                message.content.as_deref(),
+            )
+            .map_err(SessionThreadError::Serialization)?
+                == Some(invocation_id);
+        Ok(matches.then_some(message))
+    }
+
+    async fn list_thread_summaries(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<SummaryArtifact>, SessionThreadError> {
+        self.ensure_transcript_indexes_migrated(scope).await?;
+        let root = summaries_root(scope, thread_id)?;
+        let index = summary_index_spec()?;
+        let mut summaries = Vec::new();
+        let mut cursor = None;
+
+        loop {
+            let mut page = OrderedPage::new(
+                index.name.clone(),
+                fs_index_key("start_sequence")?,
+                fs_index_key("summary_id")?,
+                SortDirection::Ascending,
+                Page::MAX_LIMIT,
+            );
+            if let Some(after) = cursor.take() {
+                page = page.after(after);
+            }
+            let entries = self
+                .filesystem
+                .query_ordered(
+                    &scope.to_resource_scope(),
+                    &root,
+                    &thread_partition_filter(thread_id)?,
+                    &page,
+                )
+                .await?;
+            let entry_count = entries.len();
+
+            for versioned in &entries {
+                let record = deserialize::<SummaryArtifact>(&versioned.entry.body)?;
+                if &record.thread_id == thread_id {
+                    summaries.push(record);
+                }
+            }
+            cursor = entries.last().and_then(|entry| {
+                Some(OrderedQueryCursor {
+                    value: entry
+                        .entry
+                        .indexed
+                        .get(&fs_index_key("start_sequence").ok()?)?
+                        .clone(),
+                    tie_breaker: entry
+                        .entry
+                        .indexed
+                        .get(&fs_index_key("summary_id").ok()?)?
+                        .clone(),
+                })
+            });
+
+            if entry_count < Page::MAX_LIMIT as usize {
+                break;
+            }
+        }
+
+        summaries.sort_by_key(|summary| {
+            (
+                summary.start_sequence,
+                summary.end_sequence,
+                summary.summary_id.to_string(),
+            )
+        });
+        Ok(summaries)
+    }
+
+    async fn accepted_message_from_idempotency_path(
+        &self,
+        scope: &ThreadScope,
+        requested_thread_id: &ThreadId,
+        requested_actor_id: &str,
+        path: &ScopedPath,
+    ) -> Result<Option<AcceptedInboundMessage>, SessionThreadError> {
+        let Some(versioned) = self
+            .filesystem
+            .get(&scope.to_resource_scope(), path)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let record = deserialize::<InboundIdempotencyRecord>(&versioned.entry.body)?;
+        self.accepted_message_from_idempotency_record(
+            scope,
+            requested_thread_id,
+            requested_actor_id,
+            record,
+        )
+        .await
+        .map(Some)
+    }
+
+    async fn accepted_message_from_idempotency_record(
+        &self,
+        scope: &ThreadScope,
+        requested_thread_id: &ThreadId,
+        requested_actor_id: &str,
+        record: InboundIdempotencyRecord,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        if &record.thread_id != requested_thread_id {
+            return Err(SessionThreadError::IdempotentReplayThreadMismatch {
+                stored_thread_id: record.thread_id,
+                requested_thread_id: requested_thread_id.clone(),
+            });
+        }
+        let (_, _) = self
+            .read_thread_versioned(scope, &record.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: record.thread_id.clone(),
+            })?;
+        let existing = self
+            .read_message_versioned(scope, &record.thread_id, record.message_id)
+            .await?
+            .map(|(message, _)| message)
+            .ok_or(SessionThreadError::UnknownMessage {
+                message_id: record.message_id,
+            })?;
+        if existing.actor_id.as_deref() != Some(requested_actor_id) {
+            return Err(SessionThreadError::IdempotentReplayActorMismatch {
+                stored_actor_id: existing.actor_id.clone().unwrap_or_default(),
+                requested_actor_id: requested_actor_id.to_string(),
+            });
+        }
+        Ok(AcceptedInboundMessage {
+            thread_id: existing.thread_id,
+            message_id: record.message_id,
+            sequence: existing.sequence,
+            idempotent_replay: true,
+        })
+    }
+
+    /// Reserve a per-thread message sequence without rewriting the thread
+    /// metadata record. SQL-backed filesystems serve this with an atomic
+    /// path-local counter row; older/backends without the sequence primitive
+    /// fall back to the legacy `thread.json` CAS counter.
+    async fn reserve_sequence(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<u64, SessionThreadError> {
+        let (stored, _) = self
+            .read_thread_versioned(scope, thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            })?;
+        // Migration safety: a thread that already assigned message sequences
+        // under the legacy per-thread-record counter (`next_sequence > 1`) must
+        // keep using it. The native path-local counter starts at 1 for a path
+        // with no row, so switching an *existing* thread onto it would restart
+        // at 1 and collide with messages already at sequences 1..N — corrupting
+        // ordering and clobbering the sequence index on instances that predate
+        // this change. New/empty threads (`next_sequence == 1`, no messages
+        // yet) take the fast native counter; because the native path never
+        // rewrites `next_sequence`, such a thread's record stays at 1 and
+        // deterministically keeps using the native path for its whole life,
+        // while a pre-existing thread stays on the legacy counter for its whole
+        // life. No thread ever switches counters mid-stream.
+        if stored.next_sequence > 1 {
+            return self
+                .reserve_sequence_via_thread_record(scope, thread_id)
+                .await;
+        }
+        let sequence_path = message_sequence_counter_path(scope, thread_id)?;
+        match self
+            .filesystem
+            .reserve_sequence(&scope.to_resource_scope(), &sequence_path)
+            .await
+        {
+            Ok(sequence) => return Ok(sequence.get()),
+            Err(FilesystemError::Unsupported {
+                operation: FilesystemOperation::ReserveSeq,
+                ..
+            }) => {}
+            Err(error) => return Err(error.into()),
+        }
+        self.reserve_sequence_via_thread_record(scope, thread_id)
+            .await
+    }
+
+    /// Legacy fallback for backends that cannot atomically reserve a
+    /// path-local sequence. This preserves compatibility but retains the old
+    /// shared-thread-record CAS bottleneck.
+    async fn reserve_sequence_via_thread_record(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<u64, SessionThreadError> {
+        let path = thread_record_path(scope, thread_id)?;
+        for _ in 0..FILESYSTEM_CAS_RETRIES {
+            let (mut stored, version) = self
+                .read_thread_versioned(scope, thread_id)
+                .await?
+                .ok_or_else(|| SessionThreadError::UnknownThread {
+                    thread_id: thread_id.clone(),
+                })?;
+            let assigned = stored.next_sequence;
+            stored.next_sequence = assigned + 1;
+            // Every appended message is thread activity; bump the
+            // last-activity stamp so the sidebar surfaces freshly-used
+            // threads first. Reserving a sequence is the single choke
+            // point all append paths share.
+            stored.record.updated_at = Some(Utc::now());
+            let entry = Self::thread_entry(&stored)?;
+            match put_with_cas(
+                self.filesystem.as_ref(),
+                &scope.to_resource_scope(),
+                &path,
+                entry,
+                CasExpectation::Version(version),
+            )
+            .await
+            {
+                Ok(()) => return Ok(assigned),
+                Err(PutError::VersionMismatch) => continue,
+                Err(PutError::Other(error)) => return Err(error),
+            }
+        }
+        Err(SessionThreadError::Backend(format!(
+            "filesystem CAS retries exhausted reserving thread sequence at {}",
+            path.as_str()
+        )))
+    }
+
+    /// Stamp `thread.updated_at = now` at a turn boundary (inbound accept,
+    /// finalized assistant append) so `list_threads_for_scope` orders by
+    /// genuine recency without scanning transcripts. The index row is the
+    /// recency authority for listing; avoiding a full `thread.json` CAS here
+    /// keeps activity writes row-shaped.
+    ///
+    /// The message itself is already durably written before most callers reach
+    /// this path, so best-effort wrappers log and continue on failure.
+    async fn touch_thread_updated_at(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        updated_at: DateTime<Utc>,
+    ) -> Result<(), SessionThreadError> {
+        self.touch_thread_index_updated_at(scope, thread_id, updated_at)
+            .await
+    }
+
+    /// Best-effort recency stamp for after-commit call sites. The message is
+    /// already durably written when these run, so a touch failure must not
+    /// fail the enclosing operation: `accept_inbound_message` permits requests
+    /// without an idempotency key, and propagating an error here could make an
+    /// un-idempotent caller retry and duplicate the message. Logs and
+    /// continues; the advisory `updated_at` stamp simply stays at its prior
+    /// value until the next activity.
+    async fn touch_thread_updated_at_best_effort_at(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        updated_at: DateTime<Utc>,
+    ) {
+        if let Err(error) = self
+            .touch_thread_updated_at(scope, thread_id, updated_at)
+            .await
+        {
+            // silent-ok: recency stamp is advisory after the message is durable.
+            tracing::debug!(
+                ?error,
+                thread_id = %thread_id.as_str(),
+                "message persisted but thread recency touch failed",
+            );
+        }
+    }
+
+    /// Read-modify-write a single message record with optimistic CAS and
+    /// bounded retry. The `mutate` closure projects the staged record onto
+    /// its new shape.
+    async fn apply_message_update<M>(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+        mut mutate: M,
+    ) -> Result<ThreadMessageRecord, SessionThreadError>
+    where
+        M: FnMut(&mut ThreadMessageRecord) -> Result<(), SessionThreadError>,
+    {
+        let path = message_record_path(scope, thread_id, message_id)?;
+        for _ in 0..FILESYSTEM_CAS_RETRIES {
+            let (mut message, cas) = match self
+                .filesystem
+                .get(&scope.to_resource_scope(), &path)
+                .await?
+            {
+                Some(versioned) => {
+                    let record = deserialize::<ThreadMessageRecord>(&versioned.entry.body)?;
+                    if &record.thread_id != thread_id || record.message_id != message_id {
+                        return Err(SessionThreadError::UnknownMessage { message_id });
+                    }
+                    (record, CasExpectation::Version(versioned.version))
+                }
+                None => return Err(SessionThreadError::UnknownMessage { message_id }),
+            };
+            let before_created_at = message.created_at;
+            let before_updated_at = message.updated_at;
+            mutate(&mut message)?;
+            crate::contract::validate_message_timestamp_fields_not_cleared(
+                message.message_id,
+                before_created_at,
+                before_updated_at,
+                message.created_at,
+                message.updated_at,
+                "filesystem message update",
+            )?;
+            let entry = Self::message_entry(&message)?;
+            match put_with_cas(
+                self.filesystem.as_ref(),
+                &scope.to_resource_scope(),
+                &path,
+                entry,
+                cas,
+            )
+            .await
+            {
+                Ok(()) => {
+                    self.write_message_lookup_indexes_best_effort(
+                        scope,
+                        thread_id,
+                        &message,
+                        "message update",
+                    )
+                    .await;
+                    self.invalidate_one_shot_context_window(scope, thread_id);
+                    return Ok(message);
+                }
+                Err(PutError::VersionMismatch) => continue,
+                Err(PutError::Other(error)) => return Err(error),
+            }
+        }
+        Err(SessionThreadError::Backend(format!(
+            "filesystem CAS retries exhausted updating message at {}",
+            path.as_str()
+        )))
+    }
+
+    /// Force-set a persisted message's status to `DeferredBusy` and clear its
+    /// turn refs, exactly as the retired `mark_message_deferred_busy` writer
+    /// would have. Never call from production code.
+    ///
+    /// Gated behind `#[cfg(any(test, feature = "test-support"))]` so it is
+    /// absent from production builds. Integration tests in a separate
+    /// compilation unit must enable the `test-support` feature.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn inject_legacy_deferred_busy_for_test(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.apply_message_update(scope, thread_id, message_id, |message| {
+            message.status = MessageStatus::DeferredBusy;
+            message.turn_id = None;
+            message.turn_run_id = None;
+            Ok(())
+        })
+        .await
+    }
+}
+
+#[async_trait]
+impl<F> SessionThreadService for FilesystemSessionThreadService<F>
+where
+    F: RootFilesystem,
+{
+    async fn ensure_thread(
+        &self,
+        request: EnsureThreadRequest,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        let thread_id = match request.thread_id {
+            Some(id) => id,
+            None => generated_thread_id()?,
+        };
+        let path = thread_record_path(&request.scope, &thread_id)?;
+        let resource_scope = request.scope.to_resource_scope();
+        // Capture request fields so the apply closure can re-run per CAS retry
+        // without moving them out.
+        let scope = request.scope;
+        let created_by_actor_id = request.created_by_actor_id;
+        let title = request.title;
+        let metadata_json = request.metadata_json;
+        let thread_id_clone = thread_id.clone();
+        let (record, created) = cas_update(
+            self.filesystem.as_ref(),
+            &resource_scope,
+            &path,
+            |bytes: &[u8]| deserialize::<StoredThreadRecord>(bytes),
+            |stored: &StoredThreadRecord| Self::thread_entry(stored),
+            |current: Option<StoredThreadRecord>| {
+                // Clone all request fields for this retry iteration.
+                let scope = scope.clone();
+                let created_by_actor_id = created_by_actor_id.clone();
+                let title = title.clone();
+                let metadata_json = metadata_json.clone();
+                let thread_id = thread_id_clone.clone();
+                let outcome: Result<
+                    CasApply<StoredThreadRecord, (SessionThreadRecord, bool)>,
+                    SessionThreadError,
+                > = match current {
+                    Some(existing) => {
+                        // Thread already exists: scope- and identity-check before
+                        // returning it (no write). Mirrors the guard in
+                        // `read_thread_versioned` which rejects both a scope
+                        // mismatch and a thread_id mismatch — defensive parity
+                        // even though the path already encodes thread_id.
+                        if existing.record.scope != scope || existing.record.thread_id != thread_id
+                        {
+                            Err(SessionThreadError::ThreadScopeMismatch { thread_id })
+                        } else {
+                            // Unchanged snapshot → cas_update skips the write.
+                            Ok(CasApply::new(existing.clone(), (existing.record, false)))
+                        }
+                    }
+                    None => {
+                        // First writer: build a fresh record and let cas_update
+                        // persist it with CasExpectation::Absent. A concurrent
+                        // winner causes VersionMismatch → the helper re-reads and
+                        // re-runs apply, which will then see Some(existing) above
+                        // and take the scope-reconcile path.
+                        let now = Utc::now();
+                        let record = SessionThreadRecord {
+                            scope,
+                            thread_id,
+                            created_by_actor_id,
+                            title,
+                            metadata_json,
+                            goal: None,
+                            created_at: Some(now),
+                            updated_at: Some(now),
+                        };
+                        let stored = StoredThreadRecord {
+                            record: record.clone(),
+                            next_sequence: 1,
+                        };
+                        Ok(CasApply::new(stored, (record, true)))
+                    }
+                };
+                async move { outcome }
+            },
+        )
+        .await
+        .map_err(map_cas_error)?;
+        if created {
+            self.declare_root_indexes(&record.scope, IndexDeclarationPolicy::Required)
+                .await?;
+        }
+        if created || !self.is_thread_index_known(&record.scope, &record.thread_id) {
+            self.refresh_thread_index_from_source(&record.scope, &record.thread_id)
+                .await?;
+        }
+        Ok(record)
+    }
+
+    async fn accept_inbound_message(
+        &self,
+        request: AcceptInboundMessageRequest,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        let AcceptInboundMessageRequest {
+            scope,
+            thread_id,
+            actor_id,
+            source_binding_id,
+            reply_target_binding_id,
+            external_event_id,
+            content,
+        } = request;
+        let idempotency_key = match (&source_binding_id, &external_event_id) {
+            (Some(source_binding_id), Some(external_event_id)) => Some(InboundIdempotencyKey {
+                scope: scope.clone(),
+                source_binding_id: source_binding_id.clone(),
+                external_event_id: external_event_id.clone(),
+            }),
+            _ => None,
+        };
+        let idempotency_path = idempotency_key
+            .as_ref()
+            .map(|key| {
+                let record_key = idempotency_record_key(key)?;
+                idempotency_record_path(&record_key)
+            })
+            .transpose()?;
+
+        // First, check idempotency. The on-disk key SHA-256s the full
+        // (scope, source_binding_id, external_event_id) tuple, so a
+        // same-binding/event from a different scope hashes to a different
+        // key (and we only see records under the current MountView).
+        if let Some(path) = &idempotency_path
+            && let Some(accepted) = self
+                .accepted_message_from_idempotency_path(&scope, &thread_id, &actor_id, path)
+                .await?
+        {
+            return Ok(accepted);
+        }
+
+        let message_id = ThreadMessageId::new();
+        let (content_text, attachments) = content.into_parts();
+        // Derived before `content_text` moves into the message record; seeds
+        // the sidebar label in the post-accept activity touch below.
+        let derived_title_candidate = derive_title_from_message(&content_text);
+        crate::contract::validate_attachment_refs(&attachments)?;
+        // Sequence assignment happens only after payload validation. On
+        // transactional backends the thread counter, message, sequence index,
+        // and idempotency record commit together; fallback backends reserve
+        // immediately before the legacy message write.
+        let now = Utc::now();
+        let mut message = ThreadMessageRecord {
+            message_id,
+            thread_id: thread_id.clone(),
+            sequence: 0,
+            kind: MessageKind::User,
+            status: MessageStatus::Accepted,
+            created_at: Some(now),
+            updated_at: Some(now),
+            actor_id: Some(actor_id.clone()),
+            source_binding_id: source_binding_id.clone(),
+            reply_target_binding_id: reply_target_binding_id.clone(),
+            turn_id: None,
+            turn_run_id: None,
+            tool_result_ref: None,
+            tool_result_provider_call: None,
+            content: Some(content_text),
+            attachments,
+            redaction_ref: None,
+        };
+        let idempotency_write =
+            if let (Some(idempotency_key), Some(path)) = (&idempotency_key, &idempotency_path) {
+                let idem_record = InboundIdempotencyRecord {
+                    scope: idempotency_key.scope.clone(),
+                    source_binding_id: idempotency_key.source_binding_id.clone(),
+                    external_event_id: idempotency_key.external_event_id.clone(),
+                    thread_id: thread_id.clone(),
+                    message_id,
+                };
+                let entry = Self::idempotency_entry(&idem_record)?;
+                Some((path.clone(), entry))
+            } else {
+                None
+            };
+
+        let sequence = match self
+            .try_write_new_message_transactionally(
+                &scope,
+                &thread_id,
+                &mut message,
+                idempotency_write
+                    .as_ref()
+                    .map(|(path, entry)| (path, entry)),
+            )
+            .await?
+        {
+            TransactionalMessageWrite::Written => message.sequence,
+            TransactionalMessageWrite::IdempotencyAlreadyAccepted => {
+                let path = idempotency_path.as_ref().ok_or_else(|| {
+                    SessionThreadError::Backend(
+                        "transaction reported idempotency conflict without an idempotency path"
+                            .to_string(),
+                    )
+                })?;
+                let accepted = self
+                    .accepted_message_from_idempotency_path(&scope, &thread_id, &actor_id, path)
+                    .await?
+                    .ok_or_else(|| {
+                        SessionThreadError::Backend(format!(
+                            "filesystem transaction rejected duplicate inbound idempotency at {} but record is missing",
+                            path.as_str()
+                        ))
+                })?;
+                return Ok(accepted);
+            }
+            TransactionalMessageWrite::Unsupported => {
+                let sequence = self.reserve_sequence(&scope, &thread_id).await?;
+                message.sequence = sequence;
+                self.write_new_message(&scope, &thread_id, &message, "message")
+                    .await?;
+
+                // Non-transactional backends keep the legacy best-effort
+                // shape: the message is authoritative, and the idempotency
+                // record accelerates later replays when it can be written.
+                if let Some((path, entry)) = idempotency_write {
+                    self.filesystem
+                        .put(
+                            &scope.to_resource_scope(),
+                            &path,
+                            entry,
+                            CasExpectation::Any,
+                        )
+                        .await?;
+                }
+                sequence
+            }
+        };
+        if sequence == 1 {
+            self.seed_one_shot_context_window(&scope, &thread_id, &message);
+        } else {
+            self.invalidate_one_shot_context_window(&scope, &thread_id);
+        }
+
+        // Inbound user message is thread activity — stamp recency so the
+        // sidebar surfaces this thread first, and seed the derived sidebar
+        // label from this message in the same index-row write (the label only
+        // lands when the thread has no title yet). Best-effort: the message is
+        // already durable, so a touch failure must not fail (and retry) the
+        // accept.
+        // Only the first user message may seed the label. A pre-upgrade thread
+        // has messages but no cached label, and seeding from whatever arrives
+        // next would show the newest message where the sidebar contract
+        // promises the first — the probe-and-heal path derives those correctly.
+        let derived_title_candidate = (sequence == 1).then_some(derived_title_candidate).flatten();
+        if let Err(error) = self
+            .touch_thread_index_updated_at_with_derived_title(
+                &scope,
+                &thread_id,
+                now,
+                derived_title_candidate,
+            )
+            .await
+        {
+            // silent-ok: the message is already durable; the recency stamp and
+            // derived label are advisory, and failing the accept here could
+            // make an un-idempotent caller retry and duplicate the message.
+            tracing::debug!(
+                thread_id = %thread_id.as_str(),
+                ?error,
+                "skipping thread recency/title touch after inbound accept"
+            );
+        }
+
+        Ok(AcceptedInboundMessage {
+            thread_id,
+            message_id,
+            sequence,
+            idempotent_replay: false,
+        })
+    }
+
+    async fn replay_accepted_inbound_message(
+        &self,
+        request: ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+        let key = InboundIdempotencyKey {
+            scope: request.scope.clone(),
+            source_binding_id: request.source_binding_id.clone(),
+            external_event_id: request.external_event_id.clone(),
+        };
+        let path = idempotency_record_path(&idempotency_record_key(&key)?)?;
+        let Some(versioned) = self
+            .filesystem
+            .get(&request.scope.to_resource_scope(), &path)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let record = deserialize::<InboundIdempotencyRecord>(&versioned.entry.body)?;
+        if record.scope != request.scope
+            || record.source_binding_id != request.source_binding_id
+            || record.external_event_id != request.external_event_id
+        {
+            return Err(SessionThreadError::Backend(
+                "inbound idempotency record does not match its hashed lookup key".to_string(),
+            ));
+        }
+        let Some((_, _)) = self
+            .read_thread_versioned(&record.scope, &record.thread_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let message = self
+            .read_message_versioned(&record.scope, &record.thread_id, record.message_id)
+            .await?
+            .map(|(message, _)| message)
+            .ok_or(SessionThreadError::UnknownMessage {
+                message_id: record.message_id,
+            })?;
+        Ok(Some(AcceptedInboundMessageReplay {
+            scope: record.scope,
+            thread_id: record.thread_id,
+            message_id: record.message_id,
+            sequence: message.sequence,
+            status: message.status,
+            actor_id: message.actor_id,
+            source_binding_id: message.source_binding_id,
+            reply_target_binding_id: message.reply_target_binding_id,
+            turn_run_id: message.turn_run_id,
+        }))
+    }
+
+    async fn mark_message_submitted(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+        turn_id: String,
+        turn_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        // Confirm the thread is in this scope before opening the message
+        // record. `read_thread_versioned` returns `None` on scope mismatch,
+        // which we surface as `UnknownThread` to match the in-memory shape.
+        self.read_thread_versioned(scope, thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            })?;
+        let queued_sequence = match self
+            .read_message_versioned(scope, thread_id, message_id)
+            .await?
+            .ok_or(SessionThreadError::UnknownMessage { message_id })?
+            .0
+            .status
+        {
+            MessageStatus::Queued => Some(self.reserve_sequence(scope, thread_id).await?),
+            _ => None,
+        };
+        let updated = self
+            .apply_message_update(scope, thread_id, message_id, |message| {
+                // Idempotent re-submit: if this exact run already submitted the
+                // message, a redelivered/duplicate ack is a no-op rather than an
+                // `InvalidMessageTransition`. The queued-message consumer
+                // (`InMemoryHostInputQueue::ack_consumed`) drives this transition
+                // on an at-least-once ack path, so the same run can legitimately
+                // ack twice. The terminal-state guard is preserved: a *different*
+                // run, or a `RejectedBusy` row, still fails through
+                // `ensure_user_accepted`.
+                if message.status == MessageStatus::Submitted
+                    && message.turn_run_id.as_deref() == Some(turn_run_id.as_str())
+                {
+                    return Ok(());
+                }
+                ensure_user_accepted(message, "mark_message_submitted")?;
+                if message.status == MessageStatus::Queued
+                    && let Some(sequence) = queued_sequence
+                {
+                    message.sequence = sequence;
+                }
+                message.status = MessageStatus::Submitted;
+                message.turn_id = Some(turn_id.clone());
+                message.turn_run_id = Some(turn_run_id.clone());
+                Ok(())
+            })
+            .await?;
+        if updated.sequence == 1 {
+            self.seed_one_shot_context_window(scope, thread_id, &updated);
+        }
+        Ok(updated)
+    }
+
+    async fn mark_message_rejected_busy(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.read_thread_versioned(scope, thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            })?;
+        self.apply_message_update(scope, thread_id, message_id, |message| {
+            ensure_user_accepted(message, "mark_message_rejected_busy")?;
+            message.status = MessageStatus::RejectedBusy;
+            message.turn_id = None;
+            message.turn_run_id = None;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn mark_message_queued(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+        active_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.read_thread_versioned(scope, thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            })?;
+        self.apply_message_update(scope, thread_id, message_id, |message| {
+            ensure_user_accepted(message, "mark_message_queued")?;
+            message.status = MessageStatus::Queued;
+            message.turn_id = None;
+            message.turn_run_id = Some(active_run_id.clone());
+            Ok(())
+        })
+        .await
+    }
+
+    async fn read_thread_message(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        if self
+            .read_thread_versioned(scope, thread_id)
+            .await?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        Ok(self
+            .read_message_versioned(scope, thread_id, message_id)
+            .await?
+            .map(|(message, _)| message))
+    }
+
+    async fn append_assistant_draft(
+        &self,
+        request: AppendAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        // Dedup-by-turn-run-id is an exact projection read (legacy rows require
+        // explicit index migration; requests never scan the transcript) — while
+        // preserving multiple finalized assistant replies in a run: retries of
+        // the same draft/final content reuse the existing record; a different
+        // finalized reply starts a sibling draft (a steered run replies more
+        // than once).
+        let requested_content = request.content.as_text().to_owned();
+        if let Some(existing) = self
+            .find_assistant_message_by_run(
+                &request.scope,
+                &request.thread_id,
+                &request.turn_run_id,
+                None,
+            )
+            .await?
+            && crate::contract::should_reuse_assistant_run_message(
+                &existing,
+                &requested_content,
+                request.content.attachments(),
+            )
+        {
+            return Ok(existing);
+        }
+        let sequence = self
+            .reserve_sequence(&request.scope, &request.thread_id)
+            .await?;
+        let now = Utc::now();
+        let message = ThreadMessageRecord {
+            message_id: ThreadMessageId::new(),
+            thread_id: request.thread_id.clone(),
+            sequence,
+            kind: MessageKind::Assistant,
+            status: MessageStatus::Draft,
+            created_at: Some(now),
+            updated_at: Some(now),
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: Some(request.turn_run_id),
+            tool_result_ref: None,
+            tool_result_provider_call: None,
+            content: Some(requested_content),
+            attachments: Vec::new(),
+            redaction_ref: None,
+        };
+        self.write_new_message(
+            &request.scope,
+            &request.thread_id,
+            &message,
+            "assistant draft",
+        )
+        .await?;
+        Ok(message)
+    }
+
+    async fn append_finalized_assistant_message(
+        &self,
+        request: AppendFinalizedAssistantMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let (content, attachments) = request.content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
+        if let Some(existing) = self
+            .find_assistant_message_by_run(
+                &request.scope,
+                &request.thread_id,
+                &request.turn_run_id,
+                None,
+            )
+            .await?
+        {
+            if existing.status != MessageStatus::Draft {
+                if crate::contract::should_reuse_assistant_run_message(
+                    &existing,
+                    &content,
+                    &attachments,
+                ) {
+                    // Retry of the same finalized reply (or a redacted/deleted
+                    // row that must not be resurrected): idempotent return.
+                    return Ok(existing);
+                }
+                if existing.status == MessageStatus::Finalized
+                    && existing.content.as_deref() == Some(content.as_str())
+                {
+                    // Same finalized text with a DIFFERENT attachment set is a
+                    // mismatched replay, not a steered second reply: appending
+                    // a sibling would duplicate the visible reply, and
+                    // returning the old row would silently drop the new
+                    // attachments. Fail loud instead (the loop transcript
+                    // port surfaces this as a transcript write failure).
+                    return Err(SessionThreadError::InvalidMessageTransition {
+                        message_id: existing.message_id,
+                        from: MessageStatus::Finalized,
+                        attempted: "append_finalized_assistant_message with mismatched attachments",
+                    });
+                }
+                // A DIFFERENT finalized reply in the same run — a steered run
+                // replying again. Skip the draft-finalize branch and append a
+                // sibling finalized message below (the run index moves to it).
+            } else {
+                let content = content.clone();
+                let attachments = attachments.clone();
+                let now = Utc::now();
+                let finalized = self
+                    .apply_message_update(
+                        &request.scope,
+                        &request.thread_id,
+                        existing.message_id,
+                        |message| {
+                            ensure_draft(message)?;
+                            message.status = MessageStatus::Finalized;
+                            message.content = Some(content.clone());
+                            message.attachments = attachments.clone();
+                            message.updated_at = Some(now);
+                            Ok(())
+                        },
+                    )
+                    .await?;
+                // Finalizing the in-flight draft is thread activity — stamp
+                // recency (best-effort; the draft update above is durable).
+                self.touch_thread_updated_at_best_effort_at(
+                    &request.scope,
+                    &request.thread_id,
+                    now,
+                )
+                .await;
+                return Ok(finalized);
+            }
+        }
+        let sequence = self
+            .reserve_sequence(&request.scope, &request.thread_id)
+            .await?;
+        let now = Utc::now();
+        let message = ThreadMessageRecord {
+            message_id: ThreadMessageId::new(),
+            thread_id: request.thread_id.clone(),
+            sequence,
+            kind: MessageKind::Assistant,
+            status: MessageStatus::Finalized,
+            created_at: Some(now),
+            updated_at: Some(now),
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: Some(request.turn_run_id),
+            tool_result_ref: None,
+            tool_result_provider_call: None,
+            content: Some(content),
+            attachments,
+            redaction_ref: None,
+        };
+        self.write_new_message(
+            &request.scope,
+            &request.thread_id,
+            &message,
+            "finalized assistant message",
+        )
+        .await?;
+        // Finalized assistant reply is thread activity — stamp recency
+        // (best-effort; the append above is already durable).
+        self.touch_thread_updated_at_best_effort_at(&request.scope, &request.thread_id, now)
+            .await;
+        Ok(message)
+    }
+
+    async fn append_tool_result_reference(
+        &self,
+        request: AppendToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let provider_call = request.provider_call;
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            request.result_ref,
+            request.safe_summary,
+            request.model_observation,
+        )
+        .map_err(SessionThreadError::Serialization)?;
+        if let Some(existing) = self
+            .find_tool_result_reference_message(
+                &request.scope,
+                &request.thread_id,
+                &request.turn_run_id,
+                &envelope.result_ref,
+            )
+            .await?
+        {
+            // Idempotent replay. If new provider metadata arrives, validate
+            // and attach it (or reject on conflict) — matching the in-memory
+            // contract semantics.
+            let provider_call_update = if let Some(provider_call) = provider_call.as_ref() {
+                provider_call
+                    .validate()
+                    .map_err(SessionThreadError::Serialization)?;
+                match existing.tool_result_provider_call.as_ref() {
+                    Some(existing_call) if existing_call == provider_call => None,
+                    Some(_) => {
+                        return Err(SessionThreadError::Serialization(
+                            "tool result provider metadata conflicts with existing record"
+                                .to_string(),
+                        ));
+                    }
+                    None => Some(provider_call.clone()),
+                }
+            } else {
+                None
+            };
+            let model_observation = envelope.model_observation.clone();
+            if provider_call_update.is_some() || model_observation.is_some() {
+                let now = Utc::now();
+                let updated = self
+                    .apply_message_update(
+                        &request.scope,
+                        &request.thread_id,
+                        existing.message_id,
+                        |message| {
+                            let mut changed = false;
+                            if let Some(provider_call) = provider_call_update.as_ref() {
+                                message.tool_result_provider_call = Some(provider_call.clone());
+                                changed = true;
+                            }
+                            if let Some(model_observation) = model_observation.as_ref() {
+                                let content = message.content.as_deref().ok_or_else(|| {
+                                    SessionThreadError::Serialization(
+                                        "tool result reference content is missing".to_string(),
+                                    )
+                                })?;
+                                if let Some(content) = ToolResultReferenceEnvelope::merge_model_observation_content_if_absent(
+                                    content,
+                                    model_observation.clone(),
+                                )
+                                .map_err(SessionThreadError::Serialization)?
+                                {
+                                    message.content = Some(content);
+                                    changed = true;
+                                }
+                            }
+                            if changed {
+                                message.updated_at = Some(now);
+                            }
+                            Ok(())
+                        },
+                    )
+                    .await?;
+                if updated != existing {
+                    self.touch_thread_updated_at_best_effort_at(
+                        &request.scope,
+                        &request.thread_id,
+                        now,
+                    )
+                    .await;
+                }
+                return Ok(updated);
+            }
+            return Ok(existing);
+        }
+        if let Some(provider_call) = &provider_call {
+            provider_call
+                .validate()
+                .map_err(SessionThreadError::Serialization)?;
+        }
+        let content = serde_json::to_string(&envelope)
+            .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+        let sequence = self
+            .reserve_sequence(&request.scope, &request.thread_id)
+            .await?;
+        let now = Utc::now();
+        let message = ThreadMessageRecord {
+            message_id: ThreadMessageId::new(),
+            thread_id: request.thread_id.clone(),
+            sequence,
+            kind: MessageKind::ToolResultReference,
+            status: MessageStatus::Finalized,
+            created_at: Some(now),
+            updated_at: Some(now),
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: Some(request.turn_run_id),
+            tool_result_ref: Some(envelope.result_ref),
+            tool_result_provider_call: provider_call,
+            content: Some(content),
+            attachments: Vec::new(),
+            redaction_ref: None,
+        };
+        self.write_new_message(
+            &request.scope,
+            &request.thread_id,
+            &message,
+            "tool result reference",
+        )
+        .await?;
+        Ok(message)
+    }
+
+    async fn append_capability_display_preview(
+        &self,
+        request: AppendCapabilityDisplayPreviewRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        request
+            .preview
+            .validate()
+            .map_err(SessionThreadError::Serialization)?;
+        let existing = self
+            .find_capability_display_preview_message(
+                &request.scope,
+                &request.thread_id,
+                &request.turn_run_id,
+                request.preview.invocation_id,
+            )
+            .await?;
+        if let Some(existing) = existing {
+            return Ok(existing);
+        }
+        let message_id = capability_display_preview_message_id(
+            &request.scope,
+            &request.thread_id,
+            &request.turn_run_id,
+            request.preview.invocation_id,
+        )?;
+        let content = serde_json::to_string(&request.preview)
+            .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+        let sequence = self
+            .reserve_sequence(&request.scope, &request.thread_id)
+            .await?;
+        let now = Utc::now();
+        let message = ThreadMessageRecord {
+            message_id,
+            thread_id: request.thread_id.clone(),
+            sequence,
+            kind: MessageKind::CapabilityDisplayPreview,
+            status: MessageStatus::Finalized,
+            created_at: Some(now),
+            updated_at: Some(now),
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: Some(request.turn_run_id),
+            tool_result_ref: request.preview.result_ref.clone(),
+            tool_result_provider_call: None,
+            content: Some(content),
+            attachments: Vec::new(),
+            redaction_ref: None,
+        };
+        let path = message_record_path(&request.scope, &request.thread_id, message.message_id)?;
+        crate::contract::validate_new_message_timestamps(&message, "capability display preview")?;
+        let entry = Self::message_entry(&message)?;
+        match put_with_cas(
+            self.filesystem.as_ref(),
+            &request.scope.to_resource_scope(),
+            &path,
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        {
+            Ok(()) => {
+                self.write_message_lookup_indexes_best_effort(
+                    &request.scope,
+                    &request.thread_id,
+                    &message,
+                    "capability display preview",
+                )
+                .await;
+                Ok(message)
+            }
+            Err(PutError::VersionMismatch) => self
+                .read_message_versioned(&request.scope, &request.thread_id, message_id)
+                .await?
+                .map(|(existing, _)| existing)
+                .ok_or_else(|| {
+                    SessionThreadError::Backend(format!(
+                        "filesystem CAS Absent rejected new capability display preview at {} but no existing message could be read",
+                        path.as_str()
+                    ))
+                }),
+            Err(PutError::Other(error)) => Err(error),
+        }
+    }
+
+    async fn update_tool_result_reference(
+        &self,
+        request: UpdateToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let message = self
+            .find_tool_result_reference_message(
+                &request.scope,
+                &request.thread_id,
+                &request.turn_run_id,
+                &request.result_ref,
+            )
+            .await?
+            .ok_or_else(|| {
+                SessionThreadError::Backend(format!(
+                    "tool result reference {} was not found in thread {}",
+                    request.result_ref, request.thread_id
+                ))
+            })?;
+        // Re-validate inside the CAS closure: on retry the projected record is
+        // stale, so a concurrent writer that flipped status, changed
+        // turn_run_id, or rewrote tool_result_ref between the exact lookup and
+        // our retry must not be silently overwritten. The closure refuses the
+        // mutation in that case and surfaces the same "not found" error as
+        // the initial lookup path.
+        let turn_run_id = request.turn_run_id.clone();
+        let result_ref = request.result_ref.clone();
+        let thread_id_for_error = request.thread_id.clone();
+        let safe_summary = request.safe_summary;
+        let now = Utc::now();
+        let updated = self
+            .apply_message_update(
+            &request.scope,
+            &request.thread_id,
+            message.message_id,
+            |message| {
+                if !matches_tool_result_reference(message, &turn_run_id, &result_ref) {
+                    return Err(SessionThreadError::Backend(format!(
+                        "tool result reference {result_ref} was not found in thread {thread_id_for_error}",
+                    )));
+                }
+                let content = message.content.as_deref().ok_or_else(|| {
+                    SessionThreadError::Serialization(
+                        "tool result reference content is missing".to_string(),
+                    )
+                })?;
+                let envelope = ToolResultReferenceEnvelope::from_json_str(content)
+                    .map_err(SessionThreadError::Serialization)?
+                    .with_safe_summary(safe_summary.clone());
+                let content = serde_json::to_string(&envelope)
+                    .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+                message.content = Some(content.clone());
+                message.updated_at = Some(now);
+                Ok(())
+            },
+        )
+        .await?;
+        self.touch_thread_updated_at_best_effort_at(&request.scope, &request.thread_id, now)
+            .await;
+        Ok(updated)
+    }
+
+    async fn put_tool_result_record(
+        &self,
+        request: PutToolResultRecordRequest,
+    ) -> Result<(), SessionThreadError> {
+        validate_tool_result_record_ref(&request.result_ref)?;
+        validate_tool_result_record_content(&request.content)?;
+        self.read_thread(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: request.thread_id.clone(),
+        })
+        .await?;
+        let path =
+            tool_result_record_path(&request.scope, &request.thread_id, &request.result_ref)?;
+        let content = request.content;
+        cas_update(
+            self.filesystem.as_ref(),
+            &request.scope.to_resource_scope(),
+            &path,
+            |body| Ok::<_, SessionThreadError>(body.to_vec()),
+            |body| {
+                Ok::<_, SessionThreadError>(
+                    Entry::bytes(body.clone()).with_content_type(ContentType::octet_stream()),
+                )
+            },
+            move |existing| {
+                let content = content.clone();
+                async move {
+                    match existing {
+                        Some(existing) if existing == content => Ok(CasApply::no_op(existing, ())),
+                        Some(_) => Err(SessionThreadError::Backend(
+                            "tool result record conflicts with existing content".to_string(),
+                        )),
+                        None => Ok(CasApply::new(content, ())),
+                    }
+                }
+            },
+        )
+        .await
+        .map_err(map_cas_error)
+    }
+
+    async fn read_tool_result_record(
+        &self,
+        request: ReadToolResultRecordRequest,
+    ) -> Result<Option<ToolResultRecordChunk>, SessionThreadError> {
+        validate_tool_result_record_ref(&request.result_ref)?;
+        validate_tool_result_record_read(request.max_bytes)?;
+        self.read_thread(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: request.thread_id.clone(),
+        })
+        .await?;
+        let path =
+            tool_result_record_path(&request.scope, &request.thread_id, &request.result_ref)?;
+        let content = self
+            .filesystem
+            .get(&request.scope.to_resource_scope(), &path)
+            .await?
+            .map(|entry| entry.entry.body);
+        Ok(content
+            .map(|content| tool_result_record_chunk(&content, request.offset, request.max_bytes)))
+    }
+
+    async fn update_tool_result_record(
+        &self,
+        request: UpdateToolResultRecordRequest,
+    ) -> Result<(), SessionThreadError> {
+        validate_tool_result_record_ref(&request.result_ref)?;
+        validate_tool_result_record_content(&request.content)?;
+        self.read_thread(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: request.thread_id.clone(),
+        })
+        .await?;
+        let path =
+            tool_result_record_path(&request.scope, &request.thread_id, &request.result_ref)?;
+        let content = request.content;
+        cas_update(
+            self.filesystem.as_ref(),
+            &request.scope.to_resource_scope(),
+            &path,
+            |body| Ok::<_, SessionThreadError>(body.to_vec()),
+            |body| {
+                Ok::<_, SessionThreadError>(
+                    Entry::bytes(body.clone()).with_content_type(ContentType::octet_stream()),
+                )
+            },
+            move |existing| {
+                let content = content.clone();
+                async move {
+                    if existing.is_none() {
+                        return Err(SessionThreadError::Backend(
+                            "tool result record was not found in thread".to_string(),
+                        ));
+                    }
+                    Ok(CasApply::new(content, ()))
+                }
+            },
+        )
+        .await
+        .map_err(map_cas_error)
+    }
+
+    async fn delete_tool_result_record(
+        &self,
+        request: DeleteToolResultRecordRequest,
+    ) -> Result<(), SessionThreadError> {
+        validate_tool_result_record_ref(&request.result_ref)?;
+        self.read_thread(ThreadHistoryRequest {
+            scope: request.scope.clone(),
+            thread_id: request.thread_id.clone(),
+        })
+        .await?;
+        let path =
+            tool_result_record_path(&request.scope, &request.thread_id, &request.result_ref)?;
+        match self
+            .filesystem
+            .delete(&request.scope.to_resource_scope(), &path)
+            .await
+        {
+            Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn update_assistant_draft(
+        &self,
+        request: UpdateAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?;
+        let now = Utc::now();
+        let updated = self
+            .apply_message_update(
+                &request.scope,
+                &request.thread_id,
+                request.message_id,
+                |message| {
+                    ensure_draft(message)?;
+                    message.content = Some(request.content.clone().into_text());
+                    // Keep content and attachments in lockstep (as redaction does):
+                    // a content update must not leave stale attachment refs behind.
+                    message.attachments = Vec::new();
+                    message.updated_at = Some(now);
+                    Ok(())
+                },
+            )
+            .await?;
+        self.touch_thread_updated_at_best_effort_at(&request.scope, &request.thread_id, now)
+            .await;
+        Ok(updated)
+    }
+
+    async fn finalize_assistant_message(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+        content: MessageContent,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let (content, attachments) = content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
+        self.read_thread_versioned(scope, thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            })?;
+        let now = Utc::now();
+        let finalized = self
+            .apply_message_update(scope, thread_id, message_id, |message| {
+                ensure_draft(message)?;
+                message.status = MessageStatus::Finalized;
+                message.content = Some(content.clone());
+                message.attachments = attachments.clone();
+                message.updated_at = Some(now);
+                Ok(())
+            })
+            .await?;
+        // Finalizing the assistant draft is thread activity — stamp recency
+        // (best-effort; the finalize above is already durable). Without this,
+        // the draft/update/finalize path would leave active threads stale in
+        // the `updated_at`-sorted sidebar.
+        self.touch_thread_updated_at_best_effort_at(scope, thread_id, now)
+            .await;
+        Ok(finalized)
+    }
+
+    async fn redact_message(
+        &self,
+        request: RedactMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?;
+        let now = Utc::now();
+        let updated = self
+            .apply_message_update(
+                &request.scope,
+                &request.thread_id,
+                request.message_id,
+                |message| {
+                    message.status = MessageStatus::Redacted;
+                    message.content = None;
+                    message.attachments = Vec::new();
+                    message.tool_result_provider_call = None;
+                    message.redaction_ref = Some(request.redaction_ref.clone());
+                    message.updated_at = Some(now);
+                    Ok(())
+                },
+            )
+            .await?;
+        // The cached sidebar label may be a copy of the text just redacted.
+        // Propagating the removal is a redaction obligation, not best-effort:
+        // failing here is correct if the copy cannot be cleared.
+        self.clear_derived_title(&request.scope, &request.thread_id)
+            .await?;
+        self.touch_thread_updated_at_best_effort_at(&request.scope, &request.thread_id, now)
+            .await;
+        Ok(updated)
+    }
+
+    async fn load_context_window(
+        &self,
+        request: LoadContextWindowRequest,
+    ) -> Result<ContextWindow, SessionThreadError> {
+        if let Some(context) = self.take_one_shot_context_window(
+            &request.scope,
+            &request.thread_id,
+            request.max_messages,
+        ) {
+            return Ok(context);
+        }
+
+        self.read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?;
+        let messages = self
+            .list_latest_thread_messages(&request.scope, &request.thread_id, request.max_messages)
+            .await?;
+        let summaries = self
+            .list_thread_summaries(&request.scope, &request.thread_id)
+            .await?;
+        let mut context = context_messages_with_summary_replacements(&messages, &summaries);
+        if request.max_messages < context.len() {
+            let start = context.len() - request.max_messages;
+            context = context.split_off(start);
+        }
+        Ok(ContextWindow {
+            thread_id: request.thread_id,
+            messages: context,
+        })
+    }
+
+    async fn load_context_messages(
+        &self,
+        request: LoadContextMessagesRequest,
+    ) -> Result<ContextMessages, SessionThreadError> {
+        self.read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?;
+        let reads = request.message_ids.iter().copied().map(|message_id| {
+            self.read_message_versioned(&request.scope, &request.thread_id, message_id)
+        });
+        let messages = join_all(reads)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .map(|(message, _)| message)
+            .collect::<Vec<_>>();
+        Ok(ContextMessages {
+            thread_id: request.thread_id,
+            messages: context_messages_by_id(&messages, &request.message_ids),
+        })
+    }
+
+    async fn list_thread_history(
+        &self,
+        request: ThreadHistoryRequest,
+    ) -> Result<ThreadHistory, SessionThreadError> {
+        let thread = self
+            .read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?
+            .0;
+        let messages = self
+            .list_thread_messages(&request.scope, &request.thread_id)
+            .await?;
+        let summaries = self
+            .list_thread_summaries(&request.scope, &request.thread_id)
+            .await?;
+        let thread_record = self.thread_record_with_index_overlay(thread).await?;
+        Ok(ThreadHistory {
+            thread: thread_record,
+            summary_artifacts: history_summary_artifacts(&messages, summaries),
+            messages: history_messages(&messages),
+        })
+    }
+
+    async fn list_thread_messages_bounded(
+        &self,
+        request: BoundedThreadMessagesRequest,
+    ) -> Result<BoundedThreadMessages, SessionThreadError> {
+        let thread = self
+            .read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?
+            .0;
+        let messages = match self
+            .read_thread_messages(
+                &request.scope,
+                &request.thread_id,
+                Some(MessageReadBudget::new(
+                    request.max_messages,
+                    request.max_bytes,
+                )),
+            )
+            .await?
+        {
+            MessageReadResult::Complete(messages) => messages,
+            MessageReadResult::LimitExceeded => {
+                return Ok(BoundedThreadMessages::LimitExceeded);
+            }
+        };
+        let message_ids = messages
+            .iter()
+            .map(|message| message.message_id)
+            .collect::<Vec<_>>();
+        Ok(BoundedThreadMessages::Complete(Box::new(
+            BoundedThreadMessageSnapshot {
+                history: ThreadMessageRange {
+                    thread: self.thread_record_with_index_overlay(thread).await?,
+                    messages: messages.iter().map(history_message).collect(),
+                },
+                context: ContextMessages {
+                    thread_id: request.thread_id,
+                    messages: context_messages_by_id(&messages, &message_ids),
+                },
+            },
+        )))
+    }
+
+    async fn list_thread_messages_range(
+        &self,
+        request: ThreadMessageRangeRequest,
+    ) -> Result<ThreadMessageRange, SessionThreadError> {
+        let range = self
+            .materialize_message_range(
+                &request.scope,
+                &request.thread_id,
+                request.after_sequence,
+                request.through_sequence,
+            )
+            .await?;
+        Ok(ThreadMessageRange {
+            thread: range.thread.record,
+            messages: range.messages.iter().map(history_message).collect(),
+        })
+    }
+
+    async fn latest_thread_message(
+        &self,
+        request: LatestThreadMessageRequest,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        self.read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?;
+        let Some(message) = self
+            .latest_thread_message_by_kind_status(
+                &request.scope,
+                &request.thread_id,
+                &request.kind,
+                &request.status,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(history_message(&message)))
+    }
+
+    async fn finalized_assistant_message_by_run(
+        &self,
+        request: crate::FinalizedAssistantMessageByRunRequest,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        self.read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?;
+        let Some(message) = self
+            .find_assistant_message_by_run(
+                &request.scope,
+                &request.thread_id,
+                &request.turn_run_id,
+                Some(MessageStatus::Finalized),
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(history_message(&message)))
+    }
+
+    async fn read_thread(
+        &self,
+        request: ThreadHistoryRequest,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        let thread = self
+            .read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?
+            .0;
+        self.thread_record_with_index_overlay(thread).await
+    }
+
+    async fn delete_thread(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), SessionThreadError> {
+        // read_thread/read_thread_versioned enforce exact-scope ownership and
+        // preserve the same UnknownThread shape for absent or cross-scope rows.
+        match self
+            .read_thread(ThreadHistoryRequest {
+                scope: scope.clone(),
+                thread_id: thread_id.clone(),
+            })
+            .await
+        {
+            Ok(_) => {}
+            Err(SessionThreadError::UnknownThread { .. }) => {
+                self.delete_thread_index_record(scope, thread_id).await?;
+                return Err(SessionThreadError::UnknownThread {
+                    thread_id: thread_id.clone(),
+                });
+            }
+            Err(error) => return Err(error),
+        }
+        match self
+            .filesystem
+            .delete(&scope.to_resource_scope(), &thread_root(scope, thread_id)?)
+            .await
+        {
+            Ok(()) => {
+                self.invalidate_one_shot_context_window(scope, thread_id);
+                self.delete_thread_index_record(scope, thread_id).await
+            }
+            Err(error) if is_not_found(&error) => Err(SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            }),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn create_summary_artifact(
+        &self,
+        request: CreateSummaryArtifactRequest,
+    ) -> Result<SummaryArtifact, SessionThreadError> {
+        if request.start_sequence == 0 || request.start_sequence > request.end_sequence {
+            return Err(SessionThreadError::InvalidSummaryRange {
+                start_sequence: request.start_sequence,
+                end_sequence: request.end_sequence,
+            });
+        }
+        let range_messages = self
+            .materialize_message_range(
+                &request.scope,
+                &request.thread_id,
+                request.start_sequence.saturating_sub(1),
+                request.end_sequence,
+            )
+            .await?;
+        if !range_messages
+            .messages
+            .iter()
+            .any(|message| message.sequence == request.start_sequence)
+            || !range_messages
+                .messages
+                .iter()
+                .any(|message| message.sequence == request.end_sequence)
+        {
+            return Err(SessionThreadError::InvalidSummaryRange {
+                start_sequence: request.start_sequence,
+                end_sequence: request.end_sequence,
+            });
+        }
+        let existing_summaries = self
+            .list_thread_summaries(&request.scope, &request.thread_id)
+            .await?;
+        let content = request.content.as_text().to_string();
+        if let Some(overlapping) =
+            find_overlapping_summary(&existing_summaries, &request, &content)?
+        {
+            return Ok(overlapping.clone());
+        }
+        let artifact = SummaryArtifact {
+            summary_id: SummaryArtifactId::new(),
+            thread_id: request.thread_id.clone(),
+            start_sequence: request.start_sequence,
+            end_sequence: request.end_sequence,
+            summary_kind: request.summary_kind,
+            content,
+            model_context_policy: request.model_context_policy,
+        };
+        let path = summary_record_path(&request.scope, &request.thread_id, artifact.summary_id)?;
+        let entry = Self::summary_entry(&artifact)?;
+        match put_with_cas(
+            self.filesystem.as_ref(),
+            &request.scope.to_resource_scope(),
+            &path,
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        {
+            Ok(()) => {
+                self.invalidate_one_shot_context_window(&request.scope, &request.thread_id);
+                Ok(artifact)
+            }
+            Err(PutError::VersionMismatch) => Err(SessionThreadError::Backend(format!(
+                "filesystem CAS Absent rejected new summary artifact at {}",
+                path.as_str()
+            ))),
+            Err(PutError::Other(error)) => Err(error),
+        }
+    }
+
+    async fn list_threads_for_scope(
+        &self,
+        request: ListThreadsForScopeRequest,
+    ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
+        let limit = request
+            .limit
+            .map(|n| (n as usize).clamp(1, LIST_THREADS_MAX_PAGE_SIZE))
+            .unwrap_or(LIST_THREADS_DEFAULT_PAGE_SIZE);
+        let (listed, has_more) = self
+            .list_thread_index_page(&request.scope, request.cursor.as_deref(), limit)
+            .await?;
+        let mut page = Vec::with_capacity(listed.len());
+        // Records whose `title` is `None` need a sidebar-friendly label
+        // derived from their first user message. We collect their page
+        // indices here and fan-out the indexed first-user reads below so
+        // we don't serialize N transcript probes inline.
+        let mut needs_title: Vec<(usize, ThreadId, u64)> = Vec::new();
+        for index in &listed {
+            let idx = page.len();
+            let mut record = index.record.clone();
+            if record.title.is_none() {
+                match &index.derived_title {
+                    // The write path seeded the label into the index row; the
+                    // sidebar entry costs no extra reads.
+                    Some(derived) => record.title = Some(derived.clone()),
+                    // Row predates write-time derivation: probe for this
+                    // response; the migration backfills the label durably.
+                    None => needs_title.push((idx, record.thread_id.clone(), index.next_sequence)),
+                }
+            }
+            page.push(record);
+        }
+        // Derive titles in parallel from each thread's first user
+        // message. v1's libSQL list path did the same thing in SQL
+        // (`SELECT substr(content, 1, 100) FROM conversation_messages
+        // WHERE role='user' ORDER BY created_at LIMIT 1`); Reborn's
+        // filesystem layout reads via `RootFilesystem` instead. Errors
+        // are silent-ok — the sidebar entry simply falls back to its
+        // thread-id label, matching the WebUI fallback path.
+        if !needs_title.is_empty() {
+            self.ensure_transcript_indexes_migrated(&request.scope)
+                .await?;
+            let title_results: Vec<(
+                usize,
+                ThreadId,
+                Result<Option<ThreadMessageRecord>, SessionThreadError>,
+            )> = futures::stream::iter(needs_title)
+                .map(|(idx, thread_id, next_sequence)| {
+                    let scope = request.scope.clone();
+                    async move {
+                        let result = self
+                            .first_user_message_for_title(&scope, &thread_id, next_sequence)
+                            .await;
+                        (idx, thread_id, result)
+                    }
+                })
+                .buffer_unordered(TITLE_DERIVATION_READ_CONCURRENCY)
+                .collect()
+                .await;
+            for (idx, thread_id, msg_result) in title_results {
+                match msg_result {
+                    Ok(first_user) => {
+                        if let Some(title) = first_user
+                            .as_ref()
+                            .and_then(|message| message.content.as_deref())
+                            .and_then(derive_title_from_message)
+                        {
+                            // Read-only: the label serves this response but is
+                            // not persisted here. Backfilling it durably is the
+                            // thread-index migration's job (threads guardrail —
+                            // a list request must not repair the projection).
+                            page[idx].title = Some(title);
+                        }
+                    }
+                    Err(error) => {
+                        // Internal diagnostic — `debug!`, not `warn!`, to keep
+                        // the REPL/TUI display intact (project logging rule).
+                        tracing::debug!(
+                            thread_id = %thread_id.as_str(),
+                            scope = ?request.scope,
+                            ?error,
+                            "skipping thread-title derivation during list_threads_for_scope",
+                        );
+                    }
+                }
+            }
+        }
+        // The cursor is the last thread_id on this page; the next
+        // request resumes after it in the activity-sorted order. Only
+        // emit one when more records remain beyond this slice.
+        let next_cursor = if has_more {
+            page.last()
+                .map(Self::encode_thread_index_cursor)
+                .transpose()?
+        } else {
+            None
+        };
+        Ok(ListThreadsForScopeResponse {
+            threads: page,
+            next_cursor,
+        })
+    }
+}
+
+const LIST_THREADS_DEFAULT_PAGE_SIZE: usize = 50;
+const LIST_THREADS_MAX_PAGE_SIZE: usize = 200;
+// ── Idempotency key shape ──────────────────────────────────────
+//
+// Mirrors the legacy `DurableState` key shape so on-disk hashes are
+// byte-stable. Two callers with the same `(scope, source_binding_id,
+// external_event_id)` tuple compute identical record keys; mismatched
+// scopes hash to different keys, which is why a flat
+// `/threads/idempotency/<sha256>.json` directory is safe.
+
+#[derive(Debug, Clone, Serialize)]
+struct InboundIdempotencyKey {
+    scope: ThreadScope,
+    source_binding_id: String,
+    external_event_id: String,
+}
+
+fn idempotency_record_key(key: &InboundIdempotencyKey) -> Result<String, SessionThreadError> {
+    let payload = serialize_pretty(key)?;
+    let digest = Sha256::digest(&payload);
+    let mut output = String::with_capacity("sha256-".len() + digest.len() * 2);
+    output.push_str("sha256-");
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut output, "{byte:02x}")
+            .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+    }
+    Ok(output)
+}
+
+// ── Paths ──────────────────────────────────────────────────────
+//
+// Every path is alias-relative under the `/threads` mount alias. The
+// leading tenant/user prefix that the legacy implementation hand-formatted
+// into the path is gone: the MountView's
+// `/threads → /tenants/<tenant>/users/<user>/threads` grant supplies it
+// at every op. Within-tenant axes (agent/project/owner_user/mission)
+// remain in the alias-relative path because they are within-tenant scoping
+// not covered by the per-tenant `MountAlias`.
+
+const THREADS_PREFIX: &str = "/threads";
+
+fn thread_record_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/thread.json",
+        thread_root_string(scope, thread_id)
+    ))
+}
+
+fn thread_root(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&thread_root_string(scope, thread_id))
+}
+
+fn messages_root(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/messages",
+        thread_root_string(scope, thread_id)
+    ))
+}
+
+fn tool_result_record_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    result_ref: &str,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/tool_results/{}.bin",
+        thread_root_string(scope, thread_id),
+        tool_result_record_key(result_ref)
+    ))
+}
+
+fn tool_result_record_key(result_ref: &str) -> String {
+    let digest = Sha256::digest(result_ref.as_bytes());
+    let mut output = String::with_capacity("sha256-".len() + digest.len() * 2);
+    output.push_str("sha256-");
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    output
+}
+
+fn message_record_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    message_id: ThreadMessageId,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/messages/{message_id}.json",
+        thread_root_string(scope, thread_id)
+    ))
+}
+
+fn message_sequence_counter_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/message_sequence",
+        thread_root_string(scope, thread_id)
+    ))
+}
+
+fn summaries_root(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/summaries",
+        thread_root_string(scope, thread_id)
+    ))
+}
+
+fn summary_record_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    summary_id: SummaryArtifactId,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/summaries/{summary_id}.json",
+        thread_root_string(scope, thread_id)
+    ))
+}
+
+fn idempotency_record_path(record_key: &str) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!("{}/idempotency/{record_key}.json", THREADS_PREFIX))
+}
+
+/// Build the alias-relative per-thread root for a scope under `/threads`.
+fn thread_root_string(scope: &ThreadScope, thread_id: &ThreadId) -> String {
+    let mut base = scope_axes_string(scope);
+    base.push_str("/threads/");
+    base.push_str(thread_id.as_str());
+    base
+}
+
+fn one_shot_context_window_cache_key(scope: &ThreadScope, thread_id: &ThreadId) -> String {
+    format!(
+        "{}:{}",
+        scope.tenant_id.as_str(),
+        thread_root_string(scope, thread_id)
+    )
+}
+
+fn evict_hash_map_entry_over_limit<T>(
+    map: &mut HashMap<String, T>,
+    max_entries: usize,
+    keep: &str,
+) {
+    if map.len() <= max_entries {
+        return;
+    }
+    let mut keys = map.keys();
+    let victim = match keys.next() {
+        Some(first) if first.as_str() == keep => keys.next().cloned(),
+        Some(first) => Some(first.clone()),
+        None => None,
+    };
+    if let Some(victim) = victim {
+        map.remove(&victim);
+    }
+}
+
+/// Within-tenant sub-scope axes encoded into the path. Tenant + user
+/// identity lives in the caller's MountView and is intentionally absent.
+fn scope_axes_string(scope: &ThreadScope) -> String {
+    let mut base = String::from(THREADS_PREFIX);
+    base.push_str("/agents/");
+    base.push_str(scope.agent_id.as_str());
+    if let Some(project_id) = &scope.project_id {
+        base.push_str("/projects/");
+        base.push_str(project_id.as_str());
+    }
+    if let Some(owner_user_id) = &scope.owner_user_id {
+        base.push_str("/owners/");
+        base.push_str(owner_user_id.as_str());
+    }
+    if let Some(mission_id) = &scope.mission_id {
+        base.push_str("/missions/");
+        base.push_str(mission_id.as_str());
+    }
+    base
+}
+
+fn scoped_path(raw: &str) -> Result<ScopedPath, SessionThreadError> {
+    ScopedPath::new(raw).map_err(invalid_path)
+}
+
+fn fs_index_key(raw: &str) -> Result<IndexKey, SessionThreadError> {
+    IndexKey::new(raw)
+        .map_err(|error| SessionThreadError::Backend(format!("invalid index key: {error}")))
+}
+
+fn fs_index_name(raw: &str) -> Result<IndexName, SessionThreadError> {
+    IndexName::new(raw)
+        .map_err(|error| SessionThreadError::Backend(format!("invalid index name: {error}")))
+}
+
+/// Every ordered-index spec this crate queries, all declared together at the
+/// `/threads` alias root. Each leads with its partition key, so one
+/// declaration above the per-thread paths serves every thread on the mount.
+fn root_index_specs() -> Result<[IndexSpec; 4], SessionThreadError> {
+    Ok([
+        message_sequence_index_spec()?,
+        message_kind_status_index_spec()?,
+        summary_index_spec()?,
+        thread_index::thread_activity_index_spec()?,
+    ])
+}
+
+fn summary_index_spec() -> Result<IndexSpec, SessionThreadError> {
+    Ok(IndexSpec::new(
+        fs_index_name("thread_summary_sequence_v2")?,
+        vec![
+            fs_index_key("thread_id")?,
+            fs_index_key("start_sequence")?,
+            fs_index_key("summary_id")?,
+        ],
+        IndexKind::Exact,
+    ))
+}
+
+fn message_sequence_index_spec() -> Result<IndexSpec, SessionThreadError> {
+    Ok(IndexSpec::new(
+        fs_index_name("thread_message_sequence_v3")?,
+        vec![
+            fs_index_key("thread_id")?,
+            fs_index_key("sequence")?,
+            fs_index_key("message_id")?,
+        ],
+        IndexKind::Exact,
+    ))
+}
+
+fn message_kind_status_index_spec() -> Result<IndexSpec, SessionThreadError> {
+    Ok(IndexSpec::new(
+        fs_index_name("thread_message_kind_status_v2")?,
+        vec![
+            fs_index_key("thread_id")?,
+            fs_index_key("message_kind")?,
+            fs_index_key("message_status")?,
+            fs_index_key("sequence")?,
+            fs_index_key("message_id")?,
+        ],
+        IndexKind::Exact,
+    ))
+}
+
+fn thread_partition_filter(thread_id: &ThreadId) -> Result<Filter, SessionThreadError> {
+    Ok(Filter::Eq {
+        key: fs_index_key("thread_id")?,
+        value: IndexValue::Text(thread_id.to_string()),
+    })
+}
+
+fn serde_enum_index_value(value: &impl Serialize) -> Result<String, SessionThreadError> {
+    serde_json::to_value(value)
+        .map_err(|error| SessionThreadError::Serialization(error.to_string()))?
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            SessionThreadError::Serialization(
+                "thread enum did not serialize to an indexed string".to_string(),
+            )
+        })
+}
+
+fn generated_thread_id() -> Result<ThreadId, SessionThreadError> {
+    ThreadId::new(uuid::Uuid::new_v4().to_string())
+        .map_err(|error| SessionThreadError::GeneratedThreadId(error.to_string()))
+}
+
+fn invalid_path(error: HostApiError) -> SessionThreadError {
+    SessionThreadError::Backend(format!("invalid storage path: {error}"))
+}
+
+fn serialize_pretty<T>(value: &T) -> Result<Vec<u8>, SessionThreadError>
+where
+    T: Serialize,
+{
+    serde_json::to_vec_pretty(value)
+        .map_err(|error| SessionThreadError::Serialization(error.to_string()))
+}
+
+fn deserialize<T>(bytes: &[u8]) -> Result<T, SessionThreadError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    serde_json::from_slice(bytes)
+        .map_err(|error| SessionThreadError::Deserialization(error.to_string()))
+}
+
+fn is_not_found(error: &FilesystemError) -> bool {
+    matches!(error, FilesystemError::NotFound { .. })
+}
+
+// ── Transcript helpers (shared semantics) ──────────────────────
+//
+// Both the in-memory and filesystem stores compute the same model-visible
+// context window and history-summary projection. These helpers are pure
+// functions over message/summary lists so the two stores stay in sync.
+
+fn ensure_draft(message: &ThreadMessageRecord) -> Result<(), SessionThreadError> {
+    if message.kind != MessageKind::Assistant || message.status != MessageStatus::Draft {
+        return Err(SessionThreadError::MessageNotDraft {
+            message_id: message.message_id,
+        });
+    }
+    Ok(())
+}
+
+fn ensure_user_accepted(
+    message: &ThreadMessageRecord,
+    attempted: &'static str,
+) -> Result<(), SessionThreadError> {
+    if message.kind == MessageKind::User
+        && matches!(
+            message.status,
+            MessageStatus::Accepted | MessageStatus::DeferredBusy | MessageStatus::Queued
+        )
+    {
+        return Ok(());
+    }
+    Err(SessionThreadError::InvalidMessageTransition {
+        message_id: message.message_id,
+        from: message.status,
+        attempted,
+    })
+}
+
+fn is_model_visible(status: MessageStatus) -> bool {
+    matches!(
+        status,
+        MessageStatus::Accepted | MessageStatus::Submitted | MessageStatus::Finalized
+    )
+}
+
+fn is_model_context_visible(message: &ThreadMessageRecord) -> bool {
+    is_model_visible(message.status) && message.kind != MessageKind::CapabilityDisplayPreview
+}
+
+fn capability_display_preview_message_id(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    turn_run_id: &str,
+    invocation_id: InvocationId,
+) -> Result<ThreadMessageId, SessionThreadError> {
+    #[derive(Serialize)]
+    struct PreviewMessageKey<'a> {
+        scope: &'a ThreadScope,
+        thread_id: &'a ThreadId,
+        turn_run_id: &'a str,
+        invocation_id: InvocationId,
+    }
+    let key = serde_json::to_vec(&PreviewMessageKey {
+        scope,
+        thread_id,
+        turn_run_id,
+        invocation_id,
+    })
+    .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+    let digest = Sha256::digest(&key);
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(ThreadMessageId::from_uuid(Uuid::from_bytes(bytes)))
+}
+
+fn matches_tool_result_reference(
+    message: &ThreadMessageRecord,
+    turn_run_id: &str,
+    result_ref: &str,
+) -> bool {
+    message.kind == MessageKind::ToolResultReference
+        && message.status == MessageStatus::Finalized
+        && message.turn_run_id.as_deref() == Some(turn_run_id)
+        && message.tool_result_ref.as_deref() == Some(result_ref)
+}
+
+fn assistant_message_matches_run(
+    message: &ThreadMessageRecord,
+    turn_run_id: &str,
+    required_status: Option<MessageStatus>,
+) -> bool {
+    message.kind == MessageKind::Assistant
+        && message.turn_run_id.as_deref() == Some(turn_run_id)
+        && required_status.is_none_or(|status| message.status == status)
+}
+
+const REDACTED_SUMMARY_CONTENT: &str = "[redacted]";
+
+fn context_messages_with_summary_replacements(
+    messages: &[ThreadMessageRecord],
+    summaries: &[SummaryArtifact],
+) -> Vec<ContextMessage> {
+    let replacement_summaries = summaries
+        .iter()
+        .filter(|summary| {
+            summary.model_context_policy
+                == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
+                && !summary_covers_hidden_content(messages, summary)
+        })
+        .collect::<Vec<_>>();
+    let mut skip_through = 0u64;
+    let mut emitted_summaries: std::collections::HashSet<_> = std::collections::HashSet::new();
+    let mut context = Vec::new();
+    for message in messages
+        .iter()
+        .filter(|message| is_model_context_visible(message))
+    {
+        if message.sequence <= skip_through {
+            continue;
+        }
+        if let Some(summary) = replacement_summaries.iter().find(|summary| {
+            summary.start_sequence <= message.sequence
+                && message.sequence <= summary.end_sequence
+                && !emitted_summaries.contains(&summary.summary_id)
+        }) {
+            context.push(ContextMessage {
+                message_id: None,
+                summary_id: Some(summary.summary_id),
+                sequence: summary.start_sequence,
+                kind: MessageKind::Summary,
+                tool_result_provider_call: None,
+                content: summary.content.clone(),
+                image_attachments: Vec::new(),
+            });
+            emitted_summaries.insert(summary.summary_id);
+            skip_through = summary.end_sequence;
+            continue;
+        }
+        if let Some(content) = message.content.clone() {
+            context.push(ContextMessage::from_transcript_message(message, content));
+        }
+    }
+    context
+}
+
+fn context_messages_by_id(
+    messages: &[ThreadMessageRecord],
+    message_ids: &[ThreadMessageId],
+) -> Vec<ContextMessage> {
+    let visible_messages: std::collections::HashMap<_, _> = messages
+        .iter()
+        .filter(|message| is_model_context_visible(message))
+        .map(|message| (message.message_id, message))
+        .collect();
+    message_ids
+        .iter()
+        .filter_map(|message_id| {
+            let message = visible_messages.get(message_id)?;
+            let content = message.content.clone()?;
+            Some(ContextMessage::from_transcript_message(message, content))
+        })
+        .collect()
+}
+
+fn history_messages(messages: &[ThreadMessageRecord]) -> Vec<ThreadMessageRecord> {
+    messages.iter().map(history_message).collect()
+}
+
+// Deny-by-default projection: every field is listed deliberately so a newly
+// added sensitive field does NOT auto-flow into persisted history. Do not
+// collapse to `..message.clone()` — `tool_result_provider_call` is dropped
+// here precisely because raw runtime/tool payloads must never surface as
+// ordinary transcript content (see crate guardrails).
+fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
+    ThreadMessageRecord {
+        message_id: message.message_id,
+        thread_id: message.thread_id.clone(),
+        sequence: message.sequence,
+        kind: message.kind,
+        status: message.status,
+        actor_id: message.actor_id.clone(),
+        source_binding_id: message.source_binding_id.clone(),
+        reply_target_binding_id: message.reply_target_binding_id.clone(),
+        turn_id: message.turn_id.clone(),
+        turn_run_id: message.turn_run_id.clone(),
+        created_at: message.created_at,
+        updated_at: message.updated_at,
+        tool_result_ref: message.tool_result_ref.clone(),
+        tool_result_provider_call: None,
+        content: message.content.clone(),
+        attachments: message.attachments.clone(),
+        redaction_ref: message.redaction_ref.clone(),
+    }
+}
+
+fn history_summary_artifacts(
+    messages: &[ThreadMessageRecord],
+    summaries: Vec<SummaryArtifact>,
+) -> Vec<SummaryArtifact> {
+    summaries
+        .into_iter()
+        .map(|summary| {
+            if summary_covers_redacted_or_deleted_content(messages, &summary) {
+                let mut redacted = summary;
+                redacted.content = REDACTED_SUMMARY_CONTENT.to_string();
+                redacted.model_context_policy = None;
+                redacted
+            } else {
+                summary
+            }
+        })
+        .collect()
+}
+
+/// Returns true when a non-model-context-visible message within the summary
+/// span could later become model-visible (i.e. it is in a resurfaceable pending
+/// state).  Permanently-terminal non-visible messages (RejectedBusy, capability
+/// previews) never resurface, so a compaction summary spanning them is safe to
+/// apply — blocking it would silently drop a legitimate compacted range.
+///
+/// Resurfaceable statuses (must still block the summary):
+///   Draft | Interrupted | Superseded | Queued | DeferredBusy
+/// Permanent non-visible (must NOT block):
+///   RejectedBusy (terminal, user must explicitly resend)
+///   CapabilityDisplayPreview kind (never model-visible regardless of status)
+///
+/// Note: Redacted/Deleted keep their blocking role here — they were never
+/// model-visible and the separate `summary_covers_redacted_or_deleted_content`
+/// guard (used for history display) doesn't cover the context-build path.
+fn can_resurface_as_model_visible(message: &ThreadMessageRecord) -> bool {
+    matches!(
+        message.status,
+        MessageStatus::Draft
+            | MessageStatus::Interrupted
+            | MessageStatus::Superseded
+            | MessageStatus::Queued
+            | MessageStatus::DeferredBusy
+    )
+}
+
+fn summary_covers_hidden_content(
+    messages: &[ThreadMessageRecord],
+    summary: &SummaryArtifact,
+) -> bool {
+    messages.iter().any(|message| {
+        summary.start_sequence <= message.sequence
+            && message.sequence <= summary.end_sequence
+            && !is_model_context_visible(message)
+            && (can_resurface_as_model_visible(message)
+                || matches!(
+                    message.status,
+                    MessageStatus::Redacted | MessageStatus::Deleted
+                ))
+    })
+}
+
+fn summary_covers_redacted_or_deleted_content(
+    messages: &[ThreadMessageRecord],
+    summary: &SummaryArtifact,
+) -> bool {
+    messages.iter().any(|message| {
+        summary.start_sequence <= message.sequence
+            && message.sequence <= summary.end_sequence
+            && matches!(
+                message.status,
+                MessageStatus::Redacted | MessageStatus::Deleted
+            )
+    })
+}
+
+// ── CAS-aware put with `Unsupported`→`Any` fallback ────────────
+//
+// Local, lock-free CAS-retry loop that predates the shared
+// `ironclaw_filesystem::cas_update` helper (`write_new_message`,
+// `reserve_sequence_via_thread_record` — the legacy fallback for
+// backends without native sequence reservation; `reserve_sequence`
+// itself is now row-native — `apply_message_update`,
+// `append_capability_display_preview`, `create_summary_artifact`, and
+// the message-sequence/message-lookup index writers). On CAS-capable
+// production backends it always issues
+// `put(_, _, CasExpectation::Version)` and retries on
+// `FilesystemError::VersionMismatch` — that's correct and matches
+// `cas_update`'s contract. The `Unsupported` → `CasExpectation::Any`
+// fallback below only triggers on byte-only backends (e.g.
+// `DiskFilesystem`), which production does not mount for these
+// stores; it is not protected by any lock map. Migrating these
+// single-record RMWs onto `cas_update` (fail-closed on a non-CAS
+// backend) is a tracked, deferred follow-up sibling to the
+// `ironclaw_turns` runner-lease migration (#5274) — see
+// `docs/plans/2026-06-25-cas-migration.md`.
+
+/// Local error classification for the CAS-aware put helper.
+enum PutError {
+    /// Backend reported `VersionMismatch` (cross-process raced us). The
+    /// caller retries by re-reading the current record.
+    VersionMismatch,
+    /// Any other backend or serialization failure; surface to caller.
+    Other(SessionThreadError),
+}
+
+fn absent_put_error(
+    error: FilesystemError,
+    description: &'static str,
+    path: &ScopedPath,
+) -> SessionThreadError {
+    match error {
+        FilesystemError::VersionMismatch { .. } => SessionThreadError::Backend(format!(
+            "filesystem CAS Absent rejected new {description} at {}",
+            path.as_str()
+        )),
+        error => error.into(),
+    }
+}
+
+async fn put_with_cas<F>(
+    filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
+    path: &ScopedPath,
+    entry: Entry,
+    cas: CasExpectation,
+) -> Result<(), PutError>
+where
+    F: RootFilesystem,
+{
+    let fallback_entry = entry.clone();
+    match filesystem.put(scope, path, entry, cas).await {
+        Ok(_) => Ok(()),
+        Err(FilesystemError::VersionMismatch { .. }) => Err(PutError::VersionMismatch),
+        Err(FilesystemError::Unsupported {
+            operation: FilesystemOperation::WriteFile,
+            ..
+        }) => {
+            if matches!(cas, CasExpectation::Absent) {
+                let existing = filesystem
+                    .get(scope, path)
+                    .await
+                    .map_err(|error| PutError::Other(error.into()))?;
+                if existing.is_some() {
+                    return Err(PutError::VersionMismatch);
+                }
+            }
+            filesystem
+                .put(scope, path, fallback_entry, CasExpectation::Any)
+                .await
+                .map(|_| ())
+                .map_err(|error| PutError::Other(error.into()))
+        }
+        Err(error) => Err(PutError::Other(error.into())),
+    }
+}
+
+/// Map the shared CAS helper's [`CasUpdateError`] into a
+/// [`SessionThreadError`].
+///
+/// [`CasUpdateError::Apply`] carries the caller's own error straight through;
+/// all other variants are storage-layer failures. Fail-closed: a backend that
+/// cannot honor versioned CAS surfaces as a [`SessionThreadError::Backend`]
+/// rather than a silent blind overwrite.
+fn map_cas_error(error: CasUpdateError<SessionThreadError>) -> SessionThreadError {
+    match error {
+        CasUpdateError::Apply(inner) => inner,
+        CasUpdateError::Timeout | CasUpdateError::RetriesExhausted => {
+            SessionThreadError::Backend("filesystem CAS retries exhausted".to_string())
+        }
+        CasUpdateError::CasUnsupported => SessionThreadError::Backend(
+            "backend does not support versioned compare-and-swap".to_string(),
+        ),
+        CasUpdateError::Backend(fs_err) => SessionThreadError::Backend(fs_err.to_string()),
+    }
+}
+
+impl From<FilesystemError> for SessionThreadError {
+    fn from(error: FilesystemError) -> Self {
+        Self::Backend(error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
+
+    use super::{InboundIdempotencyKey, idempotency_record_key};
+    use crate::ThreadScope;
+
+    #[test]
+    fn idempotency_record_key_is_fixed_size_for_long_external_ids() {
+        let key = InboundIdempotencyKey {
+            scope: ThreadScope {
+                tenant_id: TenantId::new("tenant-a").unwrap(),
+                agent_id: AgentId::new("agent-a").unwrap(),
+                project_id: Some(ProjectId::new("project-a").unwrap()),
+                owner_user_id: Some(UserId::new("user-a").unwrap()),
+                mission_id: None,
+            },
+            source_binding_id: "web-client".into(),
+            external_event_id: format!("event-{}", "x".repeat(10_000)),
+        };
+
+        let record_key = idempotency_record_key(&key).unwrap();
+
+        assert!(record_key.starts_with("sha256-"));
+        assert_eq!(record_key.len(), "sha256-".len() + 64);
+    }
+
+    /// Migration safety: a thread that already assigned message sequences under
+    /// the legacy per-thread-record counter (`next_sequence > 1`) must keep
+    /// resuming from it, never restart at 1 on the native path-local counter —
+    /// otherwise deploying this change onto an existing instance would collide
+    /// new messages with the existing 1..N sequences. New/empty threads
+    /// (`next_sequence == 1`) take the native counter.
+    #[tokio::test]
+    async fn reserve_sequence_resumes_existing_thread_counter_not_native_restart() {
+        use ironclaw_filesystem::{CasExpectation, InMemoryBackend, ScopedFilesystem};
+        use ironclaw_host_api::{
+            ids::ThreadId,
+            mount::{MountGrant, MountPermissions, MountView},
+            path::{MountAlias, VirtualPath},
+        };
+
+        use super::{FilesystemSessionThreadService, thread_record_path};
+        use crate::{EnsureThreadRequest, SessionThreadService};
+
+        let backend = std::sync::Arc::new(InMemoryBackend::new());
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/threads").unwrap(),
+            VirtualPath::new("/tenants/t/users/u/threads").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .unwrap();
+        let scoped = std::sync::Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts));
+        let service = FilesystemSessionThreadService::new(scoped);
+        let scope = ThreadScope {
+            tenant_id: TenantId::new("t").unwrap(),
+            agent_id: AgentId::new("a").unwrap(),
+            project_id: Some(ProjectId::new("p").unwrap()),
+            owner_user_id: Some(UserId::new("u").unwrap()),
+            mission_id: None,
+        };
+
+        // Fresh thread (next_sequence == 1) → native path-local counter from 1.
+        let fresh = ThreadId::new("fresh").unwrap();
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(fresh.clone()),
+                created_by_actor_id: "actor".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(service.reserve_sequence(&scope, &fresh).await.unwrap(), 1);
+        assert_eq!(service.reserve_sequence(&scope, &fresh).await.unwrap(), 2);
+
+        // Simulate a pre-existing thread: bump its on-disk `next_sequence` to 5
+        // (as the legacy per-record counter would have, for a thread with
+        // messages at sequences 1..4) while leaving the native counter absent.
+        let existing = ThreadId::new("existing").unwrap();
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(existing.clone()),
+                created_by_actor_id: "actor".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        let (mut stored, version) = service
+            .read_thread_versioned(&scope, &existing)
+            .await
+            .unwrap()
+            .unwrap();
+        stored.next_sequence = 5;
+        let record_path = thread_record_path(&scope, &existing).unwrap();
+        service
+            .filesystem
+            .put(
+                &scope.to_resource_scope(),
+                &record_path,
+                FilesystemSessionThreadService::<InMemoryBackend>::thread_entry(&stored).unwrap(),
+                CasExpectation::Version(version),
+            )
+            .await
+            .unwrap();
+
+        // Reservation resumes the legacy counter at 5, not the native restart 1.
+        assert_eq!(
+            service.reserve_sequence(&scope, &existing).await.unwrap(),
+            5
+        );
+        assert_eq!(
+            service.reserve_sequence(&scope, &existing).await.unwrap(),
+            6
+        );
+    }
+}

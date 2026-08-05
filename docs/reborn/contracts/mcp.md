@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-02
 **Status:** Hosted HTTP/SSE discovery slice
-**Crate:** `crates/ironclaw_mcp`
+**Crate:** `crates/lanes/ironclaw_mcp`
 **Depends on:** `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/extensions.md`, `docs/reborn/contracts/resources.md`, `docs/reborn/contracts/dispatcher.md`
 
 ---
@@ -16,11 +16,17 @@ MCP is an integration lane, not an authority bypass:
 ```text
 ExtensionPackage(runtime = mcp)
   -> McpRuntime validates manifest/capability metadata
-  -> ResourceGovernor reserve(...)
+  -> RuntimeResourceBudget reserve(...)
   -> host-selected McpClient adapter call
   -> output limit enforcement
-  -> ResourceGovernor reconcile(...) / release(...)
+  -> RuntimeResourceBudget reconcile(...) / release(...)
 ```
+
+The lane holds no budget authority of its own. It is handed
+`ironclaw_host_api::resource::RuntimeResourceBudget` — reserve / reconcile /
+release, and nothing else — which the kernel implements over its
+`ResourceGovernor` (`ironclaw_resources::GovernorRuntimeBudget`). The lane
+cannot set limits, read account state, or name an account (#7067).
 
 The crate does not discover extensions, grant secrets, open host paths, perform approval decisions, or expose unmediated network/process authority to models or MCP servers.
 
@@ -101,6 +107,12 @@ pub struct McpClientRequest {
 advertised catalog violated the provider-neutral bounded-shape contract; the
 lifecycle treats that generation as permanently invalid instead of repeatedly
 reauthorizing a valid credential.
+
+The concrete host-mediated HTTP client also exposes an initialization-only
+auth probe for hosted-MCP registration. It performs `initialize` plus
+`notifications/initialized`, discards the temporary session, and never calls
+`tools/list`; extension catalog discovery and admission remain lifecycle
+preparation work rather than part of registration.
 
 Important boundaries:
 

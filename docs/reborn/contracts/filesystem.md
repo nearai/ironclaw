@@ -2,7 +2,7 @@
 
 **Status:** Draft implementation contract
 **Date:** 2026-04-24
-**Depends on:** `docs/reborn/contracts/host-api.md`, `crates/ironclaw_host_api`
+**Depends on:** `docs/reborn/contracts/host-api.md`, `crates/contracts/ironclaw_host_api`
 
 ---
 
@@ -395,6 +395,45 @@ RemoteFilesystemBackend
 Memory-specific backend adapters are owned outside this crate. The first Reborn memory seams are `ironclaw_memory::MemoryDocumentFilesystem` for the built-in repository path and `ironclaw_memory::MemoryBackendFilesystemAdapter` for plugin backends that declare file-document capability. PostgreSQL/libSQL adapters port/adapt the current workspace table family (`memory_documents`, `memory_chunks`, libSQL `memory_chunks_fts`, and `memory_document_versions`); metadata inheritance, skip flags, schema validation, embedding-provider integration, embedded chunk writes, FTS search, and rank-fused hybrid search are memory service/indexer responsibilities already represented in `ironclaw_memory`, not in the generic filesystem crate.
 
 ---
+
+## 12a. Ordered-index declaration and resolution
+
+Ordered (`Exact` / `Prefix`) indexes are declared on a path prefix and queried
+on a path. The two need not be the same path.
+
+**Resolution walks ancestors, most specific first.** A query at `/a/b/c` for
+index `N` resolves the declaration of `N` at `/a/b/c`, else `/a/b`, else `/a`,
+else `/`. This is the "declare high, query low" contract the FTS path already
+followed; a caller may declare once at a mount root and query any descendant.
+A spec declared at the sentinel prefix `/shared` takes precedence over every
+path-derived candidate (SQL backends only — the in-memory backend does not
+implement the sentinel).
+
+**Nested same-name declarations resolve most-specific-wins.** Where several
+ancestors declare the same index name, the deepest one wins on both the read
+and the write side. Declaring one name at overlapping prefixes with *different*
+key layouts is therefore not supported: projection rows are identified by
+`(index_name, path)`, so the two declarations share a row and the broader
+query reads the narrower declaration's values. Same name at *disjoint*
+prefixes is fully independent and supported.
+
+**Queries are scoped to their own subtree.** A spec resolved from an ancestor
+covers a wider subtree than the caller asked for, so every backend re-applies
+subtree containment to the matched rows. A query never returns rows outside
+the path it was issued on.
+
+**Declaration never backfills.** Projection is write-maintained: rows already
+present when a spec is declared are not projected. Populating them is explicit
+migration work.
+
+**Projection machinery is static and versioned.** Each SQL backend installs one
+generation of projection triggers for the whole database (currently `v3`), not
+one per declaration; declaring an index writes a catalog row. Installing a
+generation sweeps older generations, including the pre-`v3` per-declaration
+triggers. The sweep is one-way: an older binary re-installs its own generation
+on next declaration, but rows written while the newer generation was active are
+not re-projected — a downgrade should be followed by the explicit migration for
+any scope written in between.
 
 ## 13. Error contract
 

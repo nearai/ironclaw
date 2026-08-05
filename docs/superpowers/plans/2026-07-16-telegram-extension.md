@@ -26,7 +26,7 @@
 
 **Goal:** Ship the single `telegram` extension on Reborn main — admin bot setup (Channels tab), webhook-only ingress, WebGeneratedCode pairing with BlockedAuth park/resume, DM-only messaging, proactive delivery, zero tools — per `docs/superpowers/specs/2026-07-16-telegram-extension-design.md`.
 
-**Architecture:** Clone the `crates/ironclaw_reborn_composition/src/slack/**` host-module shape as `telegram/**` behind cargo feature `telegram-v2-host-beta`, reusing the unwired `ironclaw_telegram_v2_adapter` (ProductAdapter) and the existing park/resume machinery (`RuntimeCredentialAuthRequirement` → `BlockedAuth` → `BlockedAuthResumeFanout`, all provider-string-keyed on `"telegram"`). Pairing state lives in telegram host state (filesystem-over-backend); no credential accounts are minted for pairing — the gate is synthesized from pairedness.
+**Architecture:** Clone the `crates/ironclaw_composition/src/slack/**` host-module shape as `telegram/**` behind cargo feature `telegram-v2-host-beta`, reusing the unwired `ironclaw_telegram_v2_adapter` (ProductAdapter) and the existing park/resume machinery (`RuntimeCredentialAuthRequirement` → `BlockedAuth` → `BlockedAuthResumeFanout`, all provider-string-keyed on `"telegram"`). Pairing state lives in telegram host state (filesystem-over-backend); no credential accounts are minted for pairing — the gate is synthesized from pairedness.
 
 **Tech Stack:** Rust (axum, tokio, async_trait, secrecy, sha2, rand), React/TSX (Vite, react-query, `qrcode` npm dep), tests via the `RebornIntegrationHarness` scripted tier + crate/contract tests + arch gates.
 
@@ -52,8 +52,8 @@ Owner pre-approved inline execution straight to a single PR (base `main`, origin
 
 **Files:**
 - Create: `crates/ironclaw_first_party_extensions/assets/telegram/manifest.toml`
-- Modify: `crates/ironclaw_reborn_composition/Cargo.toml` (features block ~L74), `crates/ironclaw_reborn_cli/Cargo.toml` (~L51), `crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs`, `scripts/ci/package-feature-flags.sh` (L44/L55)
-- Test: extend `crates/ironclaw_reborn_composition` tests (new `#[cfg(feature = "telegram-v2-host-beta")]` test in `available_extensions.rs` tests mod)
+- Modify: `crates/ironclaw_composition/Cargo.toml` (features block ~L74), `crates/ironclaw_cli/Cargo.toml` (~L51), `crates/ironclaw_composition/src/extension_host/available_extensions.rs`, `scripts/ci/package-feature-flags.sh` (L44/L55)
+- Test: extend `crates/ironclaw_composition` tests (new `#[cfg(feature = "telegram-v2-host-beta")]` test in `available_extensions.rs` tests mod)
 
 **Interfaces:**
 - Produces: `telegram_manifest_toml() -> &'static str` and `telegram_package() -> Result<AvailableExtensionPackage, ProductWorkflowError>` in `available_extensions.rs`, both `#[cfg(feature = "telegram-v2-host-beta")]`; `pub(crate) const TELEGRAM_EXTENSION_ID: &str = "telegram";` there too. Catalog builder `from_first_party_assets_with_nearai_mcp_config` pushes `telegram_package()` under the feature.
@@ -121,10 +121,10 @@ effect_path = { type = "product_workflow" }
 Cargo features (mirror slack lines exactly):
 ```toml
 # composition Cargo.toml [features]
-telegram-v2-host-beta = ["webui-v2-beta", "dep:ironclaw_telegram_v2_adapter", "dep:ironclaw_wasm_product_adapters", "ironclaw_product/storage"]
+telegram-v2-host-beta = ["webui-v2-beta", "dep:ironclaw_telegram_v2_adapter", "dep:ironclaw_wasm_product_adapters", "ironclaw_assistant/storage"]
 # + [dependencies] ironclaw_telegram_v2_adapter = { path = "../ironclaw_telegram_v2_adapter", optional = true }
 # cli Cargo.toml [features]
-telegram-v2-host-beta = ["webui-v2-beta", "ironclaw_reborn_composition/telegram-v2-host-beta"]
+telegram-v2-host-beta = ["webui-v2-beta", "ironclaw_composition/telegram-v2-host-beta"]
 ```
 CI: append `,telegram-v2-host-beta` to the cli (L44) and composition (L55) feature lists in `scripts/ci/package-feature-flags.sh`.
 
@@ -140,9 +140,9 @@ fn telegram_package_is_visible_channel_with_zero_tools() {
     assert!(package.package.manifest.capabilities.is_empty(), "telegram must expose zero tools");
 }
 ```
-- [ ] **Step 2:** `cargo test -p ironclaw_reborn_composition --features telegram-v2-host-beta telegram_package_is_visible` → FAIL (fn undefined)
+- [ ] **Step 2:** `cargo test -p ironclaw_composition --features telegram-v2-host-beta telegram_package_is_visible` → FAIL (fn undefined)
 - [ ] **Step 3:** Add manifest asset, features, `telegram_manifest_toml()` (include_str), `telegram_package()` via `bundled_extension_package("telegram", "Telegram", ...)`, catalog push, CI script lines.
-- [ ] **Step 4:** test PASSES; also `cargo check -p ironclaw_reborn_composition` (feature OFF) still green.
+- [ ] **Step 4:** test PASSES; also `cargo check -p ironclaw_composition` (feature OFF) still green.
 - [ ] **Step 5:** Commit `feat(reborn): telegram manifest, feature flag, catalog entry`.
 
 ---
@@ -150,8 +150,8 @@ fn telegram_package_is_visible_channel_with_zero_tools() {
 ### Task 2: Telegram host state + setup service (getMe/setWebhook via injected Bot API port)
 
 **Files:**
-- Create: `crates/ironclaw_reborn_composition/src/telegram/mod.rs`, `telegram/telegram_setup.rs`, `telegram/telegram_host_state.rs`, `telegram/telegram_bot_api.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/lib.rs` (mod + cfg-gated re-exports mirroring L203-248), lib.rs mount-view fn (mirror `slack_host_state_mount_view` L708 with aliases `/tenant-shared/telegram-setup`, `/tenant-shared/telegram-pairing`, `/tenant-shared/telegram-binding`, `/tenant-shared/telegram-dm-targets`)
+- Create: `crates/ironclaw_composition/src/telegram/mod.rs`, `telegram/telegram_setup.rs`, `telegram/telegram_host_state.rs`, `telegram/telegram_bot_api.rs`
+- Modify: `crates/ironclaw_composition/src/lib.rs` (mod + cfg-gated re-exports mirroring L203-248), lib.rs mount-view fn (mirror `slack_host_state_mount_view` L708 with aliases `/tenant-shared/telegram-setup`, `/tenant-shared/telegram-pairing`, `/tenant-shared/telegram-binding`, `/tenant-shared/telegram-dm-targets`)
 
 **Interfaces (produces):**
 ```rust
@@ -218,7 +218,7 @@ Setup errors mirror `SlackSetupError` (+`PublicUrlMissing`, `BotApi{reason: Stri
 ### Task 3: Pairing service (issue/rotate/consume) + identity binding + DM targets
 
 **Files:**
-- Create: `crates/ironclaw_reborn_composition/src/telegram/telegram_pairing.rs`, `telegram/telegram_actor_identity.rs`
+- Create: `crates/ironclaw_composition/src/telegram/telegram_pairing.rs`, `telegram/telegram_actor_identity.rs`
 - Modify: `telegram/telegram_host_state.rs` (store impls)
 
 **Interfaces (produces):**
@@ -286,8 +286,8 @@ self.continuation.dispatch_auth_continuation(event).await // fan-out resumes Blo
 > design and must not be copied into current code or fixtures.
 
 **Files:**
-- Modify: `crates/ironclaw_host_api/src/capability.rs` (~L128-144 `RuntimeCredentialAccountSetup`), `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs` (`activation_credential_requirements` L526-543; connect-strategy fn ~L3143; `channel_connection_requirement` construction ~L2190-2216), `crates/ironclaw_product/src/lifecycle.rs` (`LifecycleExtensionCredentialSetup` — add `Pairing`), `crates/ironclaw_product/src/reborn_services/types.rs` (`RebornExtensionCredentialSetup` — add `Pairing` arm), `crates/ironclaw_reborn_composition/src/extension_host/extension_credential_requirements.rs` (projection arms)
-- Create: `crates/ironclaw_reborn_composition/src/telegram/telegram_channel_connection.rs` (slot + facade)
+- Modify: `crates/ironclaw_host_api/src/capability.rs` (~L128-144 `RuntimeCredentialAccountSetup`), `crates/ironclaw_composition/src/extension_host/extension_lifecycle.rs` (`activation_credential_requirements` L526-543; connect-strategy fn ~L3143; `channel_connection_requirement` construction ~L2190-2216), `crates/ironclaw_assistant/src/lifecycle.rs` (`LifecycleExtensionCredentialSetup` — add `Pairing`), `crates/ironclaw_assistant/src/reborn_services/types.rs` (`RebornExtensionCredentialSetup` — add `Pairing` arm), `crates/ironclaw_composition/src/extension_host/extension_credential_requirements.rs` (projection arms)
+- Create: `crates/ironclaw_composition/src/telegram/telegram_channel_connection.rs` (slot + facade)
 - Test: `crates/ironclaw_webui_v2/tests/webui_v2_handlers_contract.rs` (DTO), composition tests
 
 **Interfaces:**
@@ -320,7 +320,7 @@ let (run_id, gate_ref) = h.submit_turn_until_blocked("activate telegram").await?
 ### Task 5: Pairing completion resumes blocked runs (continuation dispatch end-to-end)
 
 **Files:**
-- Modify: `crates/ironclaw_reborn_composition/src/factory.rs` (expose the composed `Arc<dyn RebornAuthContinuationDispatcher>` to telegram mounts — it already exists at factory.rs:1269-1297; add an accessor or pass-through in the runtime parts used by Task 7), `tests/integration/telegram_gate.rs` (extend)
+- Modify: `crates/ironclaw_composition/src/factory.rs` (expose the composed `Arc<dyn RebornAuthContinuationDispatcher>` to telegram mounts — it already exists at factory.rs:1269-1297; add an accessor or pass-through in the runtime parts used by Task 7), `tests/integration/telegram_gate.rs` (extend)
 
 **Interfaces:**
 - Consumes: `auth_continuation_dispatcher(..)` chain (LifecycleAuthContinuationDispatcher → BlockedAuthResumeFanout → ProductAuthTurnGateResumeDispatcher); `TelegramPairingService.consume` (Task 3).
@@ -334,7 +334,7 @@ let (run_id, gate_ref) = h.submit_turn_until_blocked("activate telegram").await?
 ### Task 6: Webhook ingress — resolver, pairing-aware dispatcher, DM admission, hint throttle
 
 **Files:**
-- Create: `crates/ironclaw_reborn_composition/src/telegram/telegram_serve.rs`, `telegram/telegram_dispatch.rs`
+- Create: `crates/ironclaw_composition/src/telegram/telegram_serve.rs`, `telegram/telegram_dispatch.rs`
 - Test: crate tests + `tests/integration/telegram_ingress.rs` (`reborn_integration_telegram_ingress`)
 
 **Interfaces:**
@@ -370,7 +370,7 @@ Static copy (single-line consts): hint `"This bot is IronClaw. Pair your account
 
 **Files:**
 - Create: `telegram/telegram_host_beta.rs` (+ `telegram_host_beta/runtime_setup.rs`), `telegram/telegram_channel_routes.rs`, `telegram/telegram_connectable_channel.rs`, `telegram/telegram_outbound_targets.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/webui/webui_serve.rs` (add `with_telegram_channel_routes` mirroring `with_slack_channel_routes` L404 — or reuse `with_protected_route_mount` if the generic mount carries state cleanly), composite facades in `crates/ironclaw_reborn_composition/src/webui/` (new `composite_channels.rs`: `CompositeConnectableChannelsFacade(Vec<Arc<dyn ConnectableChannelsProductFacade>>)` concatenating lists; `CompositeChannelConnectionFacade(Vec<Arc<dyn ChannelConnectionFacade>>)` merging maps / routing disconnect by channel key)
+- Modify: `crates/ironclaw_composition/src/webui/webui_serve.rs` (add `with_telegram_channel_routes` mirroring `with_slack_channel_routes` L404 — or reuse `with_protected_route_mount` if the generic mount carries state cleanly), composite facades in `crates/ironclaw_composition/src/webui/` (new `composite_channels.rs`: `CompositeConnectableChannelsFacade(Vec<Arc<dyn ConnectableChannelsProductFacade>>)` concatenating lists; `CompositeChannelConnectionFacade(Vec<Arc<dyn ChannelConnectionFacade>>)` merging maps / routing disconnect by channel key)
 
 **Interfaces:**
 ```rust
@@ -400,14 +400,14 @@ Connectable channels: operator gets `{channel:"telegram", strategy: AdminManaged
 ### Task 8: Serve wiring + config section + trigger-delivery composite
 
 **Files:**
-- Create: `crates/ironclaw_reborn_cli/src/commands/serve_telegram.rs`
-- Modify: `crates/ironclaw_reborn_cli/src/commands/serve.rs` (mirror slack blocks at L22-25/L221/L472-506/L612-619), `crates/ironclaw_reborn_config/src/config_file.rs` (add `TelegramSection { enabled: Option<bool> }` with `deny_unknown_fields`, next to `SlackSection` L344), `crates/ironclaw_reborn_composition/src/slack/slack_delivery.rs` consumers if a composite `PostSubmitDeliveryHook` is needed (`CompositePostSubmitDeliveryHook(Vec<Arc<dyn PostSubmitDeliveryHook>>)` in a shared module — `set_trigger_post_submit_hook` is a single OnceLock slot; when both slack+telegram are enabled serve installs the composite once)
+- Create: `crates/ironclaw_cli/src/commands/serve_telegram.rs`
+- Modify: `crates/ironclaw_cli/src/commands/serve.rs` (mirror slack blocks at L22-25/L221/L472-506/L612-619), `crates/ironclaw_config/src/config_file.rs` (add `TelegramSection { enabled: Option<bool> }` with `deny_unknown_fields`, next to `SlackSection` L344), `crates/ironclaw_composition/src/slack/slack_delivery.rs` consumers if a composite `PostSubmitDeliveryHook` is needed (`CompositePostSubmitDeliveryHook(Vec<Arc<dyn PostSubmitDeliveryHook>>)` in a shared module — `set_trigger_post_submit_hook` is a single OnceLock slot; when both slack+telegram are enabled serve installs the composite once)
 
 **Interfaces:**
 - Produces: `resolve_telegram_config_for_serve(section, tenant_id, agent_id, project_id, user_id) -> anyhow::Result<Option<TelegramHostRuntimeConfig>>` gated on env `IRONCLAW_REBORN_TELEGRAM_ENABLED` override else `section.enabled`; `#[cfg(not(feature))]` stub errors when enabled without the feature (mirror serve_slack.rs L90).
 - Serve: `build_telegram_host_runtime_mounts` → `serve_config.with_public_route_mount(telegram_mounts.events).with_telegram_channel_routes(telegram_mounts.channel_routes)`; connectable/connection facades are exposed through the runtime-backed product surface.
 
-- [ ] **Step 1: Red test**: config-file test for `TelegramSection` parse + env override precedence (mirror existing SlackSection tests); a compile-features matrix check: `cargo check -p ironclaw_reborn_cli` (no features), `--features telegram-v2-host-beta`, `--features slack-v2-host-beta,telegram-v2-host-beta`.
+- [ ] **Step 1: Red test**: config-file test for `TelegramSection` parse + env override precedence (mirror existing SlackSection tests); a compile-features matrix check: `cargo check -p ironclaw_cli` (no features), `--features telegram-v2-host-beta`, `--features slack-v2-host-beta,telegram-v2-host-beta`.
 - [ ] **Steps 2-4:** implement; all three feature combos compile; green. **Step 5:** commit `feat(reborn): serve wiring + config for telegram host`.
 
 ---
@@ -415,7 +415,7 @@ Connectable channels: operator gets `{channel:"telegram", strategy: AdminManaged
 ### Task 9: Removal/lifecycle semantics + restart survival (integration)
 
 **Files:**
-- Modify: `crates/ironclaw_reborn_composition/src/extension_host/extension_removal_cleanup.rs` (register telegram cleanup requirement: user remove ⇒ `TelegramPairingService::unpair` for the caller), `available_extensions.rs` (`cleanup_requirements` for telegram mirroring the slack entry at L620-632)
+- Modify: `crates/ironclaw_composition/src/extension_host/extension_removal_cleanup.rs` (register telegram cleanup requirement: user remove ⇒ `TelegramPairingService::unpair` for the caller), `available_extensions.rs` (`cleanup_requirements` for telegram mirroring the slack entry at L620-632)
 - Test: `tests/integration/telegram_lifecycle.rs` (`reborn_integration_telegram_lifecycle`)
 
 - [ ] **Step 1: Red integration tests**: (a) user remove unpairs only the caller (other user's binding + DM target intact; history files intact); (b) remove during pending pairing invalidates the code (consume afterwards ⇒ ExpiredOrUnknown); (c) restart survival with `.storage(StorageMode::LibSql)`: setup + binding + pending BlockedAuth run all read back through freshly reopened stores, then pairing consume still resumes the run; (d) admin `clear()` ⇒ resolver rejects next webhook (fail-closed), bindings retained.
@@ -426,8 +426,8 @@ Connectable channels: operator gets `{channel:"telegram", strategy: AdminManaged
 ### Task 10: Arch gates — naming + no-legacy + boundaries
 
 **Files:**
-- Create: `crates/ironclaw_architecture/tests/telegram_extension_gates.rs`
-- Modify: `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` if the new module adds edges
+- Create: `crates/ironclaw_architecture_tests/tests/telegram_extension_gates.rs`
+- Modify: `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs` if the new module adds edges
 
 - [ ] **Step 1: Red gates**:
 ```rust
@@ -435,7 +435,7 @@ Connectable channels: operator gets `{channel:"telegram", strategy: AdminManaged
 #[test] fn telegram_strings_confined() { /* "telegram" (case-insens) in crates/** limited to: composition/src/telegram/**, extension_host/{available_extensions,extension_lifecycle,extension_removal_cleanup}.rs cfg-gated arms, ironclaw_telegram_v2_adapter, reborn_cli serve wiring, first_party assets, tests, doc comments — mirror reborn_extension_specificity boundaries */ }
 #[test] fn reborn_context_free_of_v1_pairing_routes() { /* no "/api/pairing/" literals in crates/** or webui frontend src */ }
 ```
-- [ ] **Steps 2-4:** tune allowlists to the real tree; green (`cargo test -p ironclaw_architecture`). **Step 5:** commit `test(arch): telegram naming + no-legacy gates`.
+- [ ] **Steps 2-4:** tune allowlists to the real tree; green (`cargo test -p ironclaw_architecture_tests`). **Step 5:** commit `test(arch): telegram naming + no-legacy gates`.
 
 ---
 
@@ -458,7 +458,7 @@ Connectable channels: operator gets `{channel:"telegram", strategy: AdminManaged
 
 **Files:**
 - Rewrite: `docs/reborn/extension-runtime/overview.md` (current extension contract: single extension, admin setup pipeline, pairing state machine, DM admission table, honest-delivery mapping; names its test bins + run commands), `tests/telegram_v2_default_off_integration.rs` → new-model gating test (feature posture + `REBORN_TELEGRAM_V2_ENABLED` v1-exclusivity arbitration comment refresh)
-- Modify: telegram legs in `tests/reborn_qa_connect_flows.rs`, `tests/staging_regression_fixes.rs`, `crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs`, `crates/ironclaw_webui_v2/tests/webui_v2_handlers_contract.rs` (WebGeneratedCode payloads), `scripts/reborn_webui_v2_live_qa/case_matrix.py` telegram cases, `scripts/ci/reborn-e2e-rust.sh` (add the telegram contract test mapping); remove dormant pasted-proof redeem plumbing.
+- Modify: telegram legs in `tests/reborn_qa_connect_flows.rs`, `tests/staging_regression_fixes.rs`, `crates/ironclaw_composition/tests/webui_v2_serve.rs`, `crates/ironclaw_webui_v2/tests/webui_v2_handlers_contract.rs` (WebGeneratedCode payloads), `scripts/reborn_webui_v2_live_qa/case_matrix.py` telegram cases, `scripts/ci/reborn-e2e-rust.sh` (add the telegram contract test mapping); remove dormant pasted-proof redeem plumbing.
 - Do NOT touch: `channels-src/telegram/`, `tools-src/telegram/`, v1 tests, `src/**` (v1 monolith stays working; `validate_telegram_v1_v2_exclusivity` comments updated only if strictly needed)
 
 - [ ] Steps: inventory each file's telegram leg → rewrite to new model → run each touched suite → commit `refactor(reborn): retire legacy-shaped telegram from the reborn context`.
@@ -468,7 +468,7 @@ Connectable channels: operator gets `{channel:"telegram", strategy: AdminManaged
 ### Task 13: Quality gate + PR
 
 - [ ] `cargo fmt` all; `cargo clippy --workspace --all-targets --all-features -- -D warnings` (fix everything)
-- [ ] `cargo test -p ironclaw_reborn_composition --features telegram-v2-host-beta` + all new `--test reborn_integration_telegram_*` bins + `cargo test -p ironclaw_architecture` + touched contract tests
+- [ ] `cargo test -p ironclaw_composition --features telegram-v2-host-beta` + all new `--test reborn_integration_telegram_*` bins + `cargo test -p ironclaw_architecture_tests` + touched contract tests
 - [ ] `bash scripts/pre-commit-safety.sh`; frontend build + vitest
 - [ ] Push branch to origin as `feat/telegram-extension`; open PR to `main`: body = feature summary, the five owner decisions, seam notes (Pairing variant, synthesized gate, composite facades, OnceLock delivery-hook composite), test inventory (manual-QA plan cross-reference), explicit cut list if any, `🤖 Generated with [Claude Code](https://claude.com/claude-code)`
 - [ ] Watch CI (Code Style + Tests(Reborn) aggregates BY NAME); fix red until green.

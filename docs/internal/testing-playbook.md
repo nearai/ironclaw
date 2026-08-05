@@ -360,9 +360,12 @@ The merged Reborn LCOV report enforces three complementary ratchets:
   baseline (which supersedes the historical 80.81% floor);
 - critical production crates have percentage and covered-line floors in
   [`tests/integration/coverage-floor.toml`](../../tests/integration/coverage-floor.toml);
-- added, instrumentable production lines and branch arms must be covered. The
-  denominator comes from the pull-request diff intersected with LLVM `DA` and
-  `BRDA` records, not from a hand-maintained file list.
+- added, instrumentable production code must meet the original committed 90%
+  changed-line floor. Changed-branch coverage is still required in LCOV and
+  reported for review, but has no universal percentage floor. The denominator
+  comes from the pull-request diff intersected with LLVM `DA` and `BRDA`
+  records, not from a hand-maintained file list. Missing production coverage
+  and changed files with no measured instrumented lines remain hard failures.
 
 Changed-code exemptions live in
 [`tests/integration/changed-coverage-exemptions.toml`](../../tests/integration/changed-coverage-exemptions.toml).
@@ -509,7 +512,7 @@ layer is omitted, explain why in one sentence.
 - Assert an observable outcome, not only `Completed` status or a mock call
   count.
 - Run the narrowest test during development, then expand based on risk.
-- Add `cargo test -p ironclaw_architecture` when dependency or ownership edges
+- Add `cargo test -p ironclaw_architecture_tests` when dependency or ownership edges
   change.
 - Use `bash scripts/reborn-e2e-rust.sh` when a Reborn contract or whole-path
   behavior changes.
@@ -540,7 +543,7 @@ shipped manifests rather than a hand-maintained list:
 | read | A `ProviderOperationCase` with `outcome_class = "success"` **and** one with `outcome_class = "empty"`. |
 
 The read/write split comes from each tool's `effects` in
-`crates/ironclaw_first_party_extensions/assets/*/manifest.toml`
+`crates/extensions/packages/*/manifest.toml`
 (`external_write`), so shipping a new tool classifies it automatically.
 
 **A harvested tool-call name is not evidence for a write.** A recorded model

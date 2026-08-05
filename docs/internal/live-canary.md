@@ -89,13 +89,9 @@ Current provider material includes:
 
 ### Reborn WebUI v2 Slack lane
 
-The Reborn WebUI v2 live QA runner must not write legacy `[slack]` setup fields
-into `config.toml`. The generated Reborn config only enables Slack:
-
-```toml
-[slack]
-enabled = true
-```
+The Reborn WebUI v2 live QA runner does not write the retired `[slack]`
+configuration section. Slack cases are gated on the required live credentials
+below and their `auth.test` preflight.
 
 Bot installation setup is applied headlessly after `ironclaw serve`
 boots by saving the manifest-declared `extension.slack` group through the

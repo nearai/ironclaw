@@ -7,8 +7,16 @@ set -euo pipefail
 # Only run the check if relevant files are staged
 STAGED=$(git diff --cached --name-only)
 
+# The WIT branch is depth-agnostic on purpose. `wit/` lives inside the
+# `ironclaw_wasm` crate, and WS7 moved that crate into its family directory
+# (`crates/lanes/ironclaw_wasm/`, PROPOSAL §5). A flat path literal here fails
+# *silently* — the hook keeps exiting 0 and version bumps stop being checked —
+# so the branch matches the crate at any depth under `crates/`, exactly as
+# `platform-and-compat.yml`'s `has_direct_wasm_abi_risk` filter already does.
+# Pinned by `scripts/ci/test_pre_commit_staged_paths.py` against the real
+# inventory, so a rename (which the regex cannot follow) still fails loudly.
 NEEDS_CHECK=false
-if echo "$STAGED" | grep -qE '^wit/|^channels-src/|^tools-src/'; then
+if echo "$STAGED" | grep -qE '^crates/([^/]+/)*ironclaw_wasm/wit/|^channels-src/|^tools-src/'; then
     NEEDS_CHECK=true
 fi
 

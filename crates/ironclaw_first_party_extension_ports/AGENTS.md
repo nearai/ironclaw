@@ -4,8 +4,8 @@
 
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these neighboring contracts before changing behavior:
-  - `crates/ironclaw_first_party_extensions/AGENTS.md`
-  - `crates/ironclaw_loop_host/AGENTS.md`
+  - `crates/extensions/ironclaw_extension_support/AGENTS.md`
+  - `crates/loop/ironclaw_loop_host/AGENTS.md`
   - `docs/reborn/contracts/skills-extension.md`
 
 ## What This Crate Owns
@@ -16,7 +16,7 @@
 
 ## Do Not Move In Here
 
-- Concrete tool behavior that can live below host runtime in `ironclaw_first_party_extensions`.
+- Concrete tool behavior that can live below host runtime in `ironclaw_extension_support`.
 - Generic extension manifests, install state, activation lifecycle, registry, or store contracts.
 - Runtime authority, raw host services, secrets, network clients, dispatcher handles, or lower substrate handles.
 - Product workflow or root application composition.
@@ -24,8 +24,8 @@
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_first_party_extension_ports`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
-- Composition check when exposed ports change: `cargo test -p ironclaw_reborn_composition standalone_runtime_webui_bundle`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests reborn_crate_dependency_boundaries_hold`
+- Composition check when exposed ports change: `cargo test -p ironclaw_composition standalone_runtime_webui_bundle`
 
 ## Agent Notes
 
