@@ -1108,6 +1108,17 @@ fn build_rig_request(
     })
 }
 
+fn effective_cache_retention(
+    configured: CacheRetention,
+    disable_prompt_cache: bool,
+) -> CacheRetention {
+    if disable_prompt_cache {
+        CacheRetention::None
+    } else {
+        configured
+    }
+}
+
 /// Inject a per-request model override into the typed rig request field.
 ///
 /// Rig-core providers use this field in preference to their configured model.
@@ -1179,7 +1190,7 @@ where
             None,
             request.temperature,
             request.max_tokens,
-            self.cache_retention,
+            effective_cache_retention(self.cache_retention, request.disable_prompt_cache),
         )?;
 
         merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
@@ -1239,7 +1250,7 @@ where
             None,
             request.temperature,
             request.max_tokens,
-            self.cache_retention,
+            effective_cache_retention(self.cache_retention, request.disable_prompt_cache),
         )?;
 
         merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
@@ -1299,7 +1310,7 @@ where
             tool_choice,
             request.temperature,
             request.max_tokens,
-            self.cache_retention,
+            effective_cache_retention(self.cache_retention, request.disable_prompt_cache),
         )?;
 
         merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
@@ -1389,7 +1400,7 @@ where
             tool_choice,
             request.temperature,
             request.max_tokens,
-            self.cache_retention,
+            effective_cache_retention(self.cache_retention, request.disable_prompt_cache),
         )?;
 
         merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
@@ -3484,6 +3495,23 @@ mod tests {
             req.additional_params.is_none(),
             "additional_params should be None when cache is disabled"
         );
+    }
+
+    #[test]
+    fn one_shot_override_suppresses_configured_cache_control() {
+        let retention = effective_cache_retention(CacheRetention::Long, true);
+        let req = build_rig_request(
+            Some("Summarize once.".to_string()),
+            vec![RigMessage::user("transcript")],
+            Vec::new(),
+            None,
+            None,
+            None,
+            retention,
+        )
+        .unwrap();
+
+        assert!(req.additional_params.is_none());
     }
 
     /// Verify that the multiplier match arms in `RigAdapter::cache_write_multiplier`

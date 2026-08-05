@@ -153,8 +153,9 @@ where
             surface_version: None,
             fallback_index: 0,
             resolved_model_route: self.run_context.resolved_model_route.clone(),
-            run_id: self.run_context.run_id,
-            turn_id: self.run_context.turn_id,
+            run_id: ironclaw_turns::TurnRunId::new(),
+            turn_id: ironclaw_turns::TurnId::new(),
+            disable_prompt_cache: true,
         };
         let requested_fallback_index = model_request.fallback_index;
 
@@ -496,8 +497,9 @@ mod tests {
             context.resolved_run_profile.model_profile_id
         );
         assert_eq!(request.resolved_model_route, context.resolved_model_route);
-        assert_eq!(request.run_id, context.run_id);
-        assert_eq!(request.turn_id, context.turn_id);
+        assert_ne!(request.run_id, context.run_id);
+        assert_ne!(request.turn_id, context.turn_id);
+        assert!(request.disable_prompt_cache);
         assert_eq!(request.surface_version, None);
         assert_eq!(request.messages.len(), 2);
         assert_eq!(

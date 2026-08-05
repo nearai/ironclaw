@@ -158,6 +158,25 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
     assert_eq!(requests[0].messages[1].content, "hello model");
 }
 
+#[tokio::test]
+async fn gateway_suppresses_prompt_cache_for_one_shot_request() {
+    let provider = Arc::new(RecordingLlmProvider::reply("summary"));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let mut request = model_request(interactive_model());
+    request.disable_prompt_cache = true;
+
+    gateway.stream_model(request).await.unwrap();
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].disable_prompt_cache);
+}
+
 #[traced_test]
 #[tokio::test]
 async fn gateway_records_prompt_cache_break_within_a_run() {
@@ -4170,6 +4189,7 @@ fn model_request(model_profile_id: ModelProfileId) -> HostManagedModelRequest {
         resolved_model_route: None,
         run_id: TurnRunId::new(),
         turn_id: TurnId::new(),
+        disable_prompt_cache: false,
     }
 }
 

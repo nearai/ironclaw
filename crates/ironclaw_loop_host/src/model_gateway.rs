@@ -427,6 +427,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
+        let disable_prompt_cache = request.disable_prompt_cache;
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 self.provider.as_ref(),
@@ -436,6 +437,9 @@ where
                 request.messages,
             )?;
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        if disable_prompt_cache {
+            completion = completion.without_prompt_cache();
+        }
 
         complete_model_request(
             self.provider.as_ref(),
@@ -444,7 +448,7 @@ where
             None,
             None,
             ProviderRequestContext::new(replay_identity, next_fallback_index),
-            Some(self.prompt_cache_scope(run_id)),
+            (!disable_prompt_cache).then(|| self.prompt_cache_scope(run_id)),
         )
         .await
         .map(|response| response.with_effective_fallback_index(effective_fallback_index))
@@ -753,6 +757,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
+        let disable_prompt_cache = request.disable_prompt_cache;
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
@@ -764,6 +769,9 @@ where
             )?;
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
+        if disable_prompt_cache {
+            completion = completion.without_prompt_cache();
+        }
 
         complete_model_request(
             provider.as_ref(),
@@ -772,7 +780,7 @@ where
             None,
             None,
             ProviderRequestContext::new(replay_identity, next_fallback_index),
-            Some(self.prompt_cache_scope(run_id)),
+            (!disable_prompt_cache).then(|| self.prompt_cache_scope(run_id)),
         )
         .await
         .map(|response| response.with_effective_fallback_index(effective_fallback_index))

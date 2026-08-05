@@ -1648,6 +1648,7 @@ fn nearai_gateway_test_request() -> HostManagedModelRequest {
         fallback_index: 0,
         run_id: TurnRunId::new(),
         turn_id: TurnId::new(),
+        disable_prompt_cache: false,
     }
 }
 

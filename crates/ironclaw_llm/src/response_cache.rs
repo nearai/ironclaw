@@ -412,6 +412,7 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             metadata: Default::default(),
+            disable_prompt_cache: false,
         }
     }
 
@@ -423,6 +424,7 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             metadata: Default::default(),
+            disable_prompt_cache: false,
         }
     }
 
@@ -560,6 +562,7 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             metadata: Default::default(),
+            disable_prompt_cache: false,
         };
         cached.complete(third).await.unwrap();
         assert_eq!(cached.len(), 2);
@@ -580,6 +583,7 @@ mod tests {
             stop_sequences: None,
             tool_choice: None,
             metadata: Default::default(),
+            disable_prompt_cache: false,
         };
 
         cached.complete_with_tools(req.clone()).await.unwrap();
@@ -754,6 +758,7 @@ mod tests {
                 temperature: None,
                 stop_sequences: None,
                 metadata: Default::default(),
+                disable_prompt_cache: false,
             };
             cached.complete(req).await.unwrap();
         }
@@ -770,6 +775,7 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             metadata: Default::default(),
+            disable_prompt_cache: false,
         };
         cached.complete(req).await.unwrap();
         assert!(
@@ -800,6 +806,7 @@ mod tests {
                 temperature: None,
                 stop_sequences: None,
                 metadata: Default::default(),
+                disable_prompt_cache: false,
             };
             cached.complete(req).await.unwrap();
         }
@@ -813,6 +820,7 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             metadata: Default::default(),
+            disable_prompt_cache: false,
         };
         let result = cached.complete(req).await;
         assert!(result.is_err());

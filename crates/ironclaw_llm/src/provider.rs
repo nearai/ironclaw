@@ -330,6 +330,8 @@ pub struct CompletionRequest {
     pub stop_sequences: Option<Vec<String>>,
     /// Opaque metadata passed through to the provider (e.g. thread_id for chaining).
     pub metadata: std::collections::HashMap<String, String>,
+    /// Per-request override that suppresses provider prompt-cache markers.
+    pub disable_prompt_cache: bool,
 }
 
 impl CompletionRequest {
@@ -342,6 +344,7 @@ impl CompletionRequest {
             temperature: None,
             stop_sequences: None,
             metadata: std::collections::HashMap::new(),
+            disable_prompt_cache: false,
         }
     }
 
@@ -354,6 +357,12 @@ impl CompletionRequest {
     /// Set max tokens.
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    /// Suppress provider prompt-cache markers for one-shot inference.
+    pub fn without_prompt_cache(mut self) -> Self {
+        self.disable_prompt_cache = true;
         self
     }
 
@@ -580,6 +589,8 @@ pub struct ToolCompletionRequest {
     pub tool_choice: Option<String>,
     /// Opaque metadata passed through to the provider (e.g. thread_id for chaining).
     pub metadata: std::collections::HashMap<String, String>,
+    /// Per-request override that suppresses provider prompt-cache markers.
+    pub disable_prompt_cache: bool,
 }
 
 impl ToolCompletionRequest {
@@ -594,6 +605,7 @@ impl ToolCompletionRequest {
             stop_sequences: None,
             tool_choice: None,
             metadata: std::collections::HashMap::new(),
+            disable_prompt_cache: false,
         }
     }
 
@@ -606,6 +618,7 @@ impl ToolCompletionRequest {
             temperature,
             stop_sequences,
             metadata,
+            disable_prompt_cache,
         } = request;
         Self {
             messages,
@@ -616,6 +629,7 @@ impl ToolCompletionRequest {
             stop_sequences,
             tool_choice: None,
             metadata,
+            disable_prompt_cache,
         }
     }
 

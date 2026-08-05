@@ -1399,6 +1399,7 @@ where
             resolved_model_route: self.run_context.resolved_model_route.clone(),
             run_id: self.run_context.run_id,
             turn_id: self.run_context.turn_id,
+            disable_prompt_cache: false,
         };
         let gateway_result = if let Some(capabilities) = self.capabilities.as_ref() {
             let capabilities: Arc<dyn LoopCapabilityPort> =
@@ -1865,6 +1866,9 @@ pub struct HostManagedModelRequest {
     pub resolved_model_route: Option<HostManagedModelRouteSnapshot>,
     pub run_id: TurnRunId,
     pub turn_id: TurnId,
+    /// One-shot system inference must not write provider prompt-cache entries.
+    #[serde(default)]
+    pub disable_prompt_cache: bool,
 }
 
 /// Boundary alias for the route snapshot carried from turn/run state into
