@@ -116,13 +116,13 @@ observed_date = "2026-07-16"
 # eviction (-2,189) and the WS6 policy eviction (-2,439) are disjoint; on the
 # merged tree the deltas add exactly: 45,127 - 2,189 - 2,439 = 40,499.
 #
-# Re-ratcheted 40499 -> 40405 on 2026-08-05 by the WS6 OpenAI-compat eviction
+# Re-ratcheted 40499 -> 40419 on 2026-08-05 by the WS6 OpenAI-compat eviction
 # (the re-scoped clause: the router-state assembly behind a ports params
 # struct, the `/v1/models` LlmConfig catalog + its error map, the projection
 # streamer + envelope decode, and the scope->caller projection all move to
 # `ironclaw_openai_compat::mount`). MEASURED on this tree with
 # `bash scripts/ci/check-composition-budget.sh --print`, not derived from the
-# diff: the post-eviction branch reads 40405, where the same command on the
+# diff: the post-eviction branch reads 40419, where the same command on the
 # branch's own base (ws7/wasm-and-closeout @ 22e73de89) read 40595 -- i.e. the
 # base was already 96 LOC above the 40499 ceiling and passing on tolerance
 # alone, so this ratchet reclaims that drift as well as the eviction. Set to

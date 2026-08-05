@@ -54,7 +54,7 @@
     also forbids `ironclaw_loop_host` outright, so "put it beside its reader"
     is closed off in that direction too.
   - **The shed itself is still sound**: nothing in `ironclaw_turns` uses the
-    module — it is a pure passenger, re-exported and never called. A legal home
+    module — it is a pure passenger, re-exported and never called from a product-tier crate (loop_host and composition are its production readers). A legal home
     must sit at or below `loops` and be reachable from `products` and `app`;
     `ironclaw_loop_contracts` is the candidate, and choosing it is a design call
     (it would put an in-memory store impl in a contracts crate), not this row's

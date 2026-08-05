@@ -188,10 +188,23 @@ fn reborn_no_workspace_crate_is_publishable() {
         let manifest = std::fs::read_to_string(manifest_path)
             .unwrap_or_else(|error| panic!("cannot read {manifest_path}: {error}"));
         checked += 1;
-        if !manifest
-            .lines()
-            .any(|line| line.trim() == "publish = false")
-        {
+        // Table-scoped: `publish` is only meaningful in `[package]`. A
+        // `publish = false` under any other table (say, `[package.metadata]`)
+        // is inert to cargo and must not satisfy this gate.
+        let mut in_package_table = false;
+        let mut declared = false;
+        for line in manifest.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                in_package_table = trimmed == "[package]";
+                continue;
+            }
+            if in_package_table && trimmed == "publish = false" {
+                declared = true;
+                break;
+            }
+        }
+        if !declared {
             missing.push(format!("{name} at {manifest_path}"));
         }
     }

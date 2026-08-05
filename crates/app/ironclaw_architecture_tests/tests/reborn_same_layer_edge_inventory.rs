@@ -714,7 +714,7 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 /// The target is fewer, and every wave that deletes one must lower this number
 /// in the same PR — the equality below refuses both growth *and* slack, so a
 /// forgotten decrement is red rather than banked as headroom.
-/// ✎ **2026-08-05 (WS8): 72 → 71.** The dissolution of
+/// ✎ **2026-08-05 (WS8): 72 → 71; the projects merge in the same batch took it to 70.** The dissolution of
 /// `ironclaw_first_party_extension_ports` into `ironclaw_loop_host` removed the
 /// `loops` pair the two of them formed. No edge was re-plumbed and none was
 /// added: the crate's five workspace dependencies were already `loop_host`'s.

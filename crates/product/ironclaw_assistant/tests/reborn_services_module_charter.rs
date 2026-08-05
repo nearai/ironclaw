@@ -45,8 +45,15 @@ fn src_dir() -> PathBuf {
 /// owner of `RebornServices` itself, which the map assigns to `dispatch`.
 fn top_level_items(source: &str) -> Vec<String> {
     let mut out = Vec::new();
+    let mut prev_cfg_test = false;
     for line in source.lines() {
         if line.starts_with(' ') || line.starts_with('\t') || line.is_empty() {
+            continue;
+        }
+        // A `#[cfg(test)] mod …` is test scaffolding, not charter surface.
+        let was_cfg_test = prev_cfg_test;
+        prev_cfg_test = line.trim() == "#[cfg(test)]";
+        if was_cfg_test {
             continue;
         }
         let rest = strip_visibility(line);
@@ -57,7 +64,7 @@ fn top_level_items(source: &str) -> Vec<String> {
         };
         if !matches!(
             keyword,
-            "fn" | "struct" | "enum" | "trait" | "type" | "const" | "static"
+            "fn" | "struct" | "enum" | "trait" | "type" | "const" | "static" | "mod"
         ) {
             continue;
         }
@@ -66,7 +73,13 @@ fn top_level_items(source: &str) -> Vec<String> {
             .take_while(|c| c.is_alphanumeric() || *c == '_')
             .collect();
         if !name.is_empty() {
-            out.push(name);
+            // Modules chart as `mod <name>` so a map row reads unambiguously —
+            // a module and a same-named fn/type stay distinct entries.
+            if keyword == "mod" {
+                out.push(format!("mod {name}"));
+            } else {
+                out.push(name);
+            }
         }
     }
     out
