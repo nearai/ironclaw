@@ -110,7 +110,7 @@ regression if Phase 2 proved its worth.
 |---|---|---|
 | 4.1 | Catalog real CUJs in `CRITICAL_FLOWS.md`: onboarding/pairing, a chat turn end-to-end, extension auth (Slack/Telegram/Gmail), mission/routine run, notification delivery — each with hot-path files + a smoke checklist. Cross-reference existing e2e/Playwright coverage. | `docs/qa/CRITICAL_FLOWS.md` |
 | 4.2 | Add `.claude/rules/critical-flows.md` with `paths:` = the hot-path files, requiring the matching CUJ be run/considered before "done." | `.claude/rules/` |
-| 4.3 | Map each CUJ to its existing automated coverage (`reborn-e2e`, `reborn-playwright`) and flag any CUJ with no automation as a coverage gap. | `CRITICAL_FLOWS.md` |
+| 4.3 | Map each CUJ to its existing automated coverage (`reborn-e2e`, `reborn-playwright`) and flag any CUJ with no automation as a coverage gap. | `docs/qa/CRITICAL_FLOWS.md` |
 | 4.4 | *(Optional)* Add **Chromatic** visual regression for Storybook stories if Phase 2 adoption is healthy and the CI budget allows. | `.storybook/` + CI |
 
 **Exit:** a named regression baseline tied to real automation; a hot-path edit
@@ -172,12 +172,13 @@ exact path here instead**:
 - `.claude/rules/design.md` (and `design-a11y.md` if created), `.claude/rules/feature-workflow.md`, `.claude/rules/critical-flows.md`
 - `docs/qa/CRITICAL_FLOWS.md`
 - the `docs/features/_templates/` scaffold and the specific piloted `docs/features/<slug>/` folder(s) this rollout created *(or the §0.2-resolved location)* — **not** a blanket `docs/features/` delete
-- `crates/product/ironclaw_webui/frontend/.storybook/` and the specific `*.stories.tsx` files this rollout added — **not** every `*.stories.tsx`
+- the specific `.storybook/` files this rollout creates — `main.ts`, `preview.ts`, `vitest.setup.ts` (under `crates/product/ironclaw_webui/frontend/.storybook/`) — plus the specific `*.stories.tsx` files this rollout added. `.storybook/` does **not** exist in the frontend today, so removing the directory is safe **only after verifying it is still rollout-created** — otherwise delete just the listed files. **Not** every `*.stories.tsx`.
 
 **Edits to existing files to revert with targeted patches** (revert only the
 rollout's hunks — do not wholesale-revert a file that other work also touched):
 - `CLAUDE.md` — the DESIGN.md pointer, the Storybook-MCP line, and the consolidated invariant list (Phase 1.4/1.5, 2.5)
 - `crates/product/ironclaw_webui/frontend/package.json` + `pnpm-lock.yaml` — the pinned Storybook `devDependencies`
+- `crates/product/ironclaw_webui/frontend/vite.config.ts` — the **browser-mode Vitest project** entry added in Phase 2.2 (or a new `vitest.config.ts` if split out — list it under added files in that case). Revert this together with the `@vitest/browser` / `playwright` deps so a rollback never leaves the browser project referencing removed packages.
 - `.github/workflows/code_style.yml` — the Storybook a11y/browser **step added to the existing `webui-v2-js-lint` job** (remove the step; do **not** delete the job)
 
 **Compatibility / hidden side effects:** reverting `package.json` +

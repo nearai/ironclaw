@@ -59,7 +59,7 @@ is additive and copy-in; nothing forces a rewrite of existing crates or CI.
 | **Design/UX `.claude/rules/`** (styling, theming, a11y, taxonomy, handoff) | Auto-load on frontend edits — the mechanism IronClaw already trusts, applied to a surface that has none. | `.claude/rules/design.md` (+ optional `design-a11y.md`), `paths:` scoped to `crates/product/ironclaw_webui/frontend/src/**`. |
 | **Storybook workbench + MCP + stories-as-tests** | Isolated component dev, `get-documentation` prop-grounding, and a11y/token/interaction tests in the existing Vitest. Storybook is *not* a declared dependency today (absent from `package.json` and `pnpm-lock.yaml`), so adoption is an explicit, pinned install — not "already there." | Add pinned `storybook`, the React/Vite framework adapter `@storybook/react-vite`, and `@storybook/addon-{vitest,a11y,docs,mcp}` as `devDependencies` via **pnpm** (set `framework: '@storybook/react-vite'` in `.storybook/main.ts`), commit the lockfile, configure `.storybook/`, and author stories per Tier-2/3 component. |
 | **Component taxonomy (5-tier purity model)** | Codifies the implicit `components/` (pure) vs `pages/` (bound) split so Tiers 2–3 stay renderable in isolation. | Section in `DESIGN.md`; enforced by the design rule + REJECT list. |
-| **Critical User Journeys registry + `critical-flows` rule** | Turns IronClaw's e2e/Playwright coverage into a named regression baseline with a hot-path auto-load trigger. | `docs/_reference/CRITICAL_FLOWS.md` (or `docs/qa/CRITICAL_FLOWS.md`) + `.claude/rules/critical-flows.md`. |
+| **Critical User Journeys registry + `critical-flows` rule** | Turns IronClaw's e2e/Playwright coverage into a named regression baseline with a hot-path auto-load trigger. | `docs/qa/CRITICAL_FLOWS.md` + `.claude/rules/critical-flows.md`. |
 
 ### ◑ ADAPT (take the idea; fit it to IronClaw's shape)
 
@@ -99,7 +99,7 @@ is additive and copy-in; nothing forces a rewrite of existing crates or CI.
   changed-story filtering is a local fast path, not the gate (see the Phase 2
   a11y-gate definition in
   [INTEGRATION_PLAN.md](INTEGRATION_PLAN.md)).
-- A **`CRITICAL_FLOWS.md`** catalogs IronClaw's real end-to-end journeys (e.g.
+- A **`docs/qa/CRITICAL_FLOWS.md`** catalogs IronClaw's real end-to-end journeys (e.g.
   onboarding/pairing, chat turn, extension auth, mission run) with hot-path
   files, and a `critical-flows` rule auto-loads on those paths.
 - The **embedded-AI-agent invariants are consolidated** into one referenced
