@@ -348,6 +348,15 @@ where
         Ok(())
     }
 
+    /// Best-effort cleanup for a startup path that is already returning its
+    /// primary error. A failed cleanup remains observable without replacing
+    /// the error that caused startup to abort.
+    pub async fn fail_and_log(self) {
+        if let Err(error) = self.fail().await {
+            tracing::error!(%error, "release-pair migration lease could not be marked failed");
+        }
+    }
+
     async fn replace(&mut self) -> Result<(), ReleasePairMigrationError> {
         if self.lost_lease.load(Ordering::Acquire) {
             return Err(ReleasePairMigrationError::LostLease);

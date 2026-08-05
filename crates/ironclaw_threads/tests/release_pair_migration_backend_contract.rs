@@ -75,7 +75,10 @@ async fn rc1_thread_upgrade_is_durable_on_libsql() {
 
 #[tokio::test]
 async fn rc1_thread_upgrade_is_durable_on_postgres() {
-    let Some(backend) = postgres_backend().await else {
+    let Some(backend) = postgres_backend()
+        .await
+        .expect("configured PostgreSQL migration backend must initialize")
+    else {
         eprintln!(
             "skipping thread release-pair Postgres contract: \
              IRONCLAW_FILESYSTEM_POSTGRES_URL / DATABASE_URL unavailable"
@@ -248,20 +251,38 @@ where
     }))
 }
 
-async fn postgres_backend() -> Option<PostgresRootFilesystem> {
+async fn postgres_backend() -> Result<Option<PostgresRootFilesystem>, String> {
     if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
-        return None;
+        return Ok(None);
     }
-    let url = std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .ok()?;
-    let config = url.parse::<tokio_postgres::Config>().ok()?;
+    let url = match std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL") {
+        Ok(url) => Some(url),
+        Err(std::env::VarError::NotPresent) => match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(url),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => return Err(format!("DATABASE_URL is unreadable: {error}")),
+        },
+        Err(error) => {
+            return Err(format!(
+                "IRONCLAW_FILESYSTEM_POSTGRES_URL is unreadable: {error}"
+            ));
+        }
+    };
+    let Some(url) = url else {
+        return Ok(None);
+    };
+    let config = url
+        .parse::<tokio_postgres::Config>()
+        .map_err(|error| format!("PostgreSQL URL is invalid: {error}"))?;
     let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
     let pool = deadpool_postgres::Pool::builder(manager)
         .max_size(4)
         .build()
-        .ok()?;
+        .map_err(|error| format!("PostgreSQL test pool could not be built: {error}"))?;
     let backend = PostgresRootFilesystem::new(pool);
-    backend.run_migrations().await.ok()?;
-    Some(backend)
+    backend
+        .run_migrations()
+        .await
+        .map_err(|error| format!("PostgreSQL filesystem migrations failed: {error}"))?;
+    Ok(Some(backend))
 }

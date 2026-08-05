@@ -34,6 +34,29 @@ fn target_root() -> VirtualPath {
     path("/tenants/tenant-a/shared/channel-extensions/telegram/product-workflow/idempotency")
 }
 
+// Captured from the 1.0.0-rc.1 `ProductInboundAction` serde contract. Keep this
+// literal independent of the current serializer so schema drift cannot make the
+// release-pair compatibility test pass by construction.
+const RC1_SETTLED_ACTION_WIRE: &str = r#"{
+  "action_id": "8e933c3e-87fd-43c3-ae36-98477ecafbc2",
+  "fingerprint": {
+    "adapter_id": "telegram",
+    "installation_id": "default-installation",
+    "external_actor_ref": {
+      "kind": "user",
+      "id": "telegram-user",
+      "display_name": null
+    },
+    "source_binding_key": "space:0:;conversation:6:chat-a;topic:0:;",
+    "external_event_id": "event-0001"
+  },
+  "phase": "settled",
+  "dispatch_kind": null,
+  "outcome": "no_op",
+  "received_at": "2026-01-02T03:04:05Z",
+  "settled_at": "2026-01-02T03:04:06Z"
+}"#;
+
 fn scope() -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new("tenant-a").expect("tenant"),
@@ -147,6 +170,27 @@ async fn put_old_action(
         .expect("seed old action");
 }
 
+async fn put_frozen_rc1_action(
+    backend: &InMemoryBackend,
+    root: &VirtualPath,
+    scope: &ResourceScope,
+    action: &ProductInboundAction,
+) {
+    let payload = serde_json::from_str(RC1_SETTLED_ACTION_WIRE).expect("frozen rc1 action wire");
+    backend
+        .put(
+            &action_path(root, scope, &action.fingerprint),
+            Entry::record(
+                RecordKind::new("product_workflow_action").expect("rc1 action kind"),
+                &payload,
+            )
+            .expect("rc1 action entry"),
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("seed frozen rc1 action");
+}
+
 fn target_ledger(
     backend: Arc<InMemoryBackend>,
     root: &VirtualPath,
@@ -182,9 +226,10 @@ async fn rc1_action_wire_migrates_replays_and_retains_source_on_repeat() {
     let target = target_root();
     let scope = scope();
     let received_at = Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap();
-    let mut action = ProductInboundAction::begin(fingerprint(1), received_at);
-    action.settle(ProductInboundAck::NoOp);
-    put_old_action(backend.as_ref(), &source, &scope, &action).await;
+    let action: ProductInboundAction =
+        serde_json::from_str(RC1_SETTLED_ACTION_WIRE).expect("deserialize frozen rc1 action");
+    assert_eq!(action.received_at, received_at);
+    put_frozen_rc1_action(backend.as_ref(), &source, &scope, &action).await;
     let source_path = action_path(&source, &scope, &action.fingerprint);
     let source_before = backend
         .get(&source_path)

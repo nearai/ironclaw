@@ -217,7 +217,7 @@ where
     {
         Ok(migration) => migration,
         Err(error) => {
-            let _ = release_pair_lease.fail().await;
+            release_pair_lease.fail_and_log().await;
             return Err(crate::RebornCompositionError::InvalidConfig {
                 reason: error.to_string(),
             });
@@ -534,7 +534,7 @@ pub(super) async fn build_backend_production(
     {
         Ok(migration) => migration,
         Err(error) => {
-            let _ = release_pair_lease.fail().await;
+            release_pair_lease.fail_and_log().await;
             return Err(crate::RebornCompositionError::InvalidConfig {
                 reason: error.to_string(),
             }
@@ -718,7 +718,7 @@ pub(super) async fn build_backend_production(
         {
             Ok(report) => report,
             Err(error) => {
-                let _ = release_pair_lease.fail().await;
+                release_pair_lease.fail_and_log().await;
                 return Err(RebornBuildError::InvalidConfig {
                     reason: format!("hosted rc1 extension state could not be restored: {error}"),
                 });
@@ -972,7 +972,7 @@ pub(super) async fn build_backend_production(
         {
             Ok(scopes) => scopes,
             Err(error) => {
-                let _ = release_pair_lease.fail().await;
+                release_pair_lease.fail_and_log().await;
                 return Err(crate::RebornCompositionError::InvalidConfig {
                     reason: format!("channel extension-state scope discovery failed: {error}"),
                 }
@@ -1013,7 +1013,7 @@ pub(super) async fn build_backend_production(
         {
             Ok(report) => report,
             Err(error) => {
-                let _ = release_pair_lease.fail().await;
+                release_pair_lease.fail_and_log().await;
                 return Err(crate::RebornCompositionError::InvalidConfig {
                     reason: format!("channel extension-state startup migration failed: {error}"),
                 }
