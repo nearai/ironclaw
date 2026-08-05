@@ -29,6 +29,7 @@
 //! the compiler and needs a manual audit
 //! (`rg -n dispatch_with_host_remediation crates`).
 
+use ironclaw_config::HostRemediationText;
 use ironclaw_host_api::dispatch::RuntimeDispatchErrorKind;
 use ironclaw_host_api::{
     dispatch::DispatchFailureDetail, host_remediation::HostRemediation, resolution::Resolution,
@@ -39,7 +40,6 @@ use ironclaw_loop_contracts::{
     CapabilityFailureDetail, ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail,
     ToolObservationStatus, resolution,
 };
-use ironclaw_reborn_config::HostRemediationText;
 use ironclaw_threads::{ToolResultReferenceEnvelope, ToolResultSafeSummary};
 
 /// The exact string a degraded remediation collapses to. Asserted ABSENT
@@ -286,7 +286,7 @@ fn persistence_is_governed_by_provenance_not_content_shape() {
         // The dotted-key shape the heuristic used to special-case.
         "run `ironclaw config set google.client_secret` to update it",
         // And a real production string end to end.
-        &ironclaw_reborn_config::HostRemediationText::GoogleBackendAuth.text(),
+        &ironclaw_config::HostRemediationText::GoogleBackendAuth.text(),
     ] {
         persists_to_thread_history(text, ObservationTrust::HostAuthored).unwrap_or_else(|error| {
             panic!("host-authored provenance must persist {text:?} intact: {error}")

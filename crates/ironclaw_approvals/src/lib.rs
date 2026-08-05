@@ -23,7 +23,7 @@ pub use test_support::{
 };
 
 use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLeaseStorePort};
-use ironclaw_events::AuditSink;
+use ironclaw_event_log::AuditSink;
 use ironclaw_host_api::{
     action::Action,
     approval::InvocationFingerprint,

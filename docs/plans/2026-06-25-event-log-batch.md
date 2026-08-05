@@ -6,7 +6,7 @@
 
 The durable runtime event log issues **one single-row INSERT per emitted event**, on the hot path, append-only:
 
-- `EventSink::emit` (`crates/ironclaw_events/src/sink.rs:166`) does `self.log.append(event).await.map(|_| ())` — the returned `EventLogEntry { cursor, .. }` is **discarded**. Nothing downstream gates a side effect on the assigned seq.
+- `EventSink::emit` (`crates/ironclaw_event_log/src/sink.rs:166`) does `self.log.append(event).await.map(|_| ())` — the returned `EventLogEntry { cursor, .. }` is **discarded**. Nothing downstream gates a side effect on the assigned seq.
 - `DurableEventSink` (runtime events) is a *separate* sink from `DurableAuditSink` (compliance audit). Audit must stay synchronous; runtime events need not.
 - Production path: `DurableEventSink` → `FilesystemDurableEventLog::append` (`durable_log.rs:86`) → `ScopedFilesystem::append` (`scoped.rs:175`) → `RootFilesystem::append` single-row INSERT:
   - Postgres `postgres.rs:608`: `INSERT INTO root_filesystem_events (path, payload) VALUES ($1,$2) RETURNING id` (id = BIGSERIAL = SeqNo).
@@ -33,12 +33,12 @@ Keep the event log **durable** (it is the read-model substrate: projections fold
 - libSQL override (libsql.rs): one multi-row `INSERT ... VALUES (?,?),(?,?),... RETURNING seq`; sort seqs ASC → payload order. Empty input → `Ok(vec![])`.
 - in-memory override (in_memory.rs): lock once, push all, collect SeqNos.
 
-### 2. Event-log batch append (`ironclaw_events` + `ironclaw_reborn_event_store`)
+### 2. Event-log batch append (`ironclaw_event_log` + `ironclaw_event_store`)
 
 - `DurableEventLog::append_batch(&self, Vec<RuntimeEvent>) -> Vec<Result<EventLogEntry<RuntimeEvent>, _>>` (sink.rs trait): **default loops `append`**.
 - `FilesystemDurableEventLog::append_batch` override (durable_log.rs): group events by `stream_path` (one path per `(tenant,user,agent)`), serialize, call `fs.append_batch(scope, path, payloads)` **once per path** = one multi-row INSERT per stream.
 
-### 3. Coalescing write-behind sink (`ironclaw_reborn_event_store`)
+### 3. Coalescing write-behind sink (`ironclaw_event_store`)
 
 New `CoalescingEventSink` (`coalescing_sink.rs`) implementing `EventSink`, wrapping `Arc<dyn DurableEventLog>`:
 

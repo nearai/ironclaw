@@ -7,8 +7,8 @@
 use ironclaw_capabilities::{
     BoundCapabilityAdapter, CapabilityDispatchRequest, RuntimeDispatcher, ToolResolver,
 };
-use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
-use ironclaw_extensions::SharedExtensionRegistry;
+use ironclaw_event_log::{InMemoryEventSink, RuntimeEventKind};
+use ironclaw_extension_registry::SharedExtensionRegistry;
 use ironclaw_host_api::{
     authorized::Authorized,
     ids::{ActivityId, CorrelationId, ProductKind},
@@ -318,7 +318,7 @@ async fn registry_rejects_descriptor_package_runtime_mismatch_at_insert() {
 
     assert!(matches!(
         err,
-        ironclaw_extensions::ExtensionError::InvalidManifest { reason }
+        ironclaw_extension_registry::ExtensionError::InvalidManifest { reason }
             if reason.contains("package capability descriptors do not match")
     ));
 }

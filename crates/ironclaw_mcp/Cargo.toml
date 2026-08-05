@@ -20,7 +20,7 @@ tracing = "0.1"
 # Lane tests build a real ExtensionPackage and project the three inputs the
 # lane takes, proving the projection against a parsed manifest. Dev-only: the
 # production dependency is gone, which is what the layer matrix measures.
-ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_extension_registry = { path = "../ironclaw_extension_registry" }
 # Same shape, same reason (#7067): the lane's production dependency on the
 # budget authority is gone — it sees only `host_api::resource`'s narrow
 # `RuntimeResourceBudget` port. The tests drive that port over the REAL

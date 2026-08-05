@@ -1,6 +1,6 @@
 //! Neutral live-extension contract.
 //!
-//! Declarative manifest data remains owned by `ironclaw_extensions`; this
+//! Declarative manifest data remains owned by `ironclaw_extension_registry`; this
 //! module defines the in-process callable shape a host publishes after loading
 //! and binding an extension. The callable facets are the existing
 //! [`ToolAdapter`] and [`ChannelAdapter`] contracts.

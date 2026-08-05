@@ -1,5 +1,5 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use ironclaw_extensions::{CapabilityManifest, ExtensionError};
+use ironclaw_extension_registry::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
     action::{NetworkMethod, NetworkPolicy},
     capability::{EffectKind, PermissionMode},

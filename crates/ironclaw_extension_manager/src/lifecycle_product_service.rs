@@ -414,7 +414,7 @@ fn install_response_with_activation(
 ///
 /// The status table itself lives with the contract
 /// (`ProductOperationFailure` -> `ProductSurfaceError`), so this path and
-/// `ironclaw_product`'s `lifecycle_product_surface_error` cannot answer
+/// `ironclaw_assistant`'s `lifecycle_product_surface_error` cannot answer
 /// differently for the same failure. Only the logging is local: contracts may
 /// not log, and the 503 body is sanitized, so without this line the cause is
 /// dropped entirely and the failure is undiagnosable.

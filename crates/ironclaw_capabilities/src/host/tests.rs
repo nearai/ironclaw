@@ -315,7 +315,7 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
 "#;
 
 fn echo_registry() -> ExtensionRegistry {
-    use ironclaw_extensions::{
+    use ironclaw_extension_registry::{
         CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage,
         HostApiContractRegistry, ManifestSource,
     };

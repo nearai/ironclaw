@@ -48,7 +48,7 @@ by moving the function back here.
 ## Consumers
 
 `ironclaw_filesystem`, `ironclaw_host_runtime`, `ironclaw_loop_host`,
-`ironclaw_runner`, `ironclaw_turns`, `ironclaw_reborn_composition`,
+`ironclaw_turn_runner`, `ironclaw_turns`, `ironclaw_composition`,
 `ironclaw_extension_support`. Every one of them gets whatever this crate
 depends on, which is the whole reason the dependency list is the enforcement
 mechanism and this file is only the explanation.

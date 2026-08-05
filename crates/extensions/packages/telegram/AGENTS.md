@@ -33,7 +33,7 @@
 
 The package's `ironclaw_*` dependency set is exactly Slack's — `host_api`,
 `extension_contracts`, `product_contracts`, `attachments` — and nothing else.
-No `ironclaw_product`, no registry, no extension host: a concrete package crate
+No `ironclaw_assistant`, no registry, no extension host: a concrete package crate
 is linked only by the binary and by tests
 (`concrete_extension_crates_link_only_from_the_binary_and_tests`).
 
@@ -46,7 +46,7 @@ is linked only by the binary and by tests
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_telegram_extension`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
 
 ## Agent Notes
 

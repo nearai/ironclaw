@@ -23,7 +23,7 @@ Ship Telegram as a first-class IronClaw entrypoint on the Reborn stack:
   automatically, resumes blocked threads, and makes the derived state `active`.
 - Once paired, DMs to the bot are a full IronClaw entrypoint (continuous conversation, proactive delivery in). **No `telegram.*` tools; IronClaw cannot act on the user's behalf** — that is the future link-device flow under the same `telegram` extension identity.
 
-The implementation clones the proven `crates/ironclaw_reborn_composition/src/slack/**` host-module shape (as `telegram/**`, cargo feature `telegram-v2-host-beta`), reuses the existing, unwired `crates/ironclaw_telegram_v2_adapter` untouched, and pins every externally observable name/route/semantic to the shapes PR #6116 already ships for its reference Telegram extension — so porting later means deleting the composition module while the behavior contract (and this QA suite) carries over 1:1.
+The implementation clones the proven `crates/ironclaw_composition/src/slack/**` host-module shape (as `telegram/**`, cargo feature `telegram-v2-host-beta`), reuses the existing, unwired `crates/ironclaw_telegram_v2_adapter` untouched, and pins every externally observable name/route/semantic to the shapes PR #6116 already ships for its reference Telegram extension — so porting later means deleting the composition module while the behavior contract (and this QA suite) carries over 1:1.
 
 ## Decisions log (owner: Ben, 2026-07-16)
 
@@ -140,7 +140,7 @@ All pairing state in telegram host state (`/tenant-shared/telegram-pairing/`). T
 **Carries over 1:1** (the behavior contract): every name/route/handle in §1, the admin one-field setup UX, the pairing UX + refusal semantics, DM-only admission, plain-text/4096 presentation, honest-delivery rules, and the entire QA suite (it pins behavior, not implementation).
 
 **Deleted/replaced at port time:**
-- `crates/ironclaw_reborn_composition/src/telegram/**` → absorbed by the generic extension runtime.
+- `crates/ironclaw_composition/src/telegram/**` → absorbed by the generic extension runtime.
 - Main-schema manifest (`[[product_adapter.inbound.host_ingress]]` shape) → replaced by the v3 manifest that already exists at `f8e7c72c3:crates/ironclaw_first_party_extensions/assets/telegram/manifest.toml` (same id, same handles, same route suffix, same presentation).
 - `ironclaw_telegram_v2_adapter` diffs against its #6116 descendant `ironclaw_telegram_extension` (the reconciliation already contains that port); keep main-side adapter changes at zero or near-zero.
 
@@ -159,7 +159,7 @@ After this feature, the Reborn context — `crates/**`, the webui_v2 frontend, `
 | webui_v2 v1-pairing UI (`pages/extensions/lib/pairing-api.ts`, `pairing-section.tsx` + test, `chat/components/onboarding-pairing-card.tsx` + test, `useExtensions-pairing.test.ts`, telegram paths in `useChannelOnboarding.ts`) | Replaced by the WebGeneratedCode pairing panel + its tests. **Caveat (verify at planning):** these components may also serve v1-mounted webui_v2 flows (`test_reborn_webui_v2_legacy_extensions.py` suggests dual hosting). If a v1 consumer exists, the legacy components stay only for that consumer, clearly quarantined, and no reborn path routes to them; if reborn-only, they are deleted. |
 | `docs/reborn/extension-runtime/overview.md` | Current extension contract (single extension, admin setup, WebGeneratedCode pairing, DM-only). Per house pattern it names its test file + run command and is wired into `scripts/reborn-e2e-rust.sh`. |
 | `tests/telegram_v2_default_off_integration.rs` | Replaced by a new-model gating test: the `telegram-v2-host-beta` feature/default posture, and the exclusivity guard still blocking v1 telegram activation when the reborn channel owns the bot. |
-| Telegram legs in `tests/reborn_qa_connect_flows.rs`, `tests/staging_regression_fixes.rs`, `crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs`, `crates/ironclaw_webui_v2/tests/webui_v2_handlers_contract.rs` | Rewritten to the new model (pairing connect action, `WebGeneratedCode` strategy payloads). |
+| Telegram legs in `tests/reborn_qa_connect_flows.rs`, `tests/staging_regression_fixes.rs`, `crates/ironclaw_composition/tests/webui_v2_serve.rs`, `crates/ironclaw_webui_v2/tests/webui_v2_handlers_contract.rs` | Rewritten to the new model (pairing connect action, `WebGeneratedCode` strategy payloads). |
 | Stale `telegram` references in composition (`extension_host/extension_removal_cleanup.rs`, `extension_host/extension_lifecycle.rs`, `outbound/outbound_preferences.rs`, `root/communication_context.rs`, mention in `slack/slack_actor_identity.rs`) | Reconciled into the new `telegram/**` module — no orphaned pre-feature hooks left behind. |
 | `scripts/reborn_webui_v2_live_qa/` telegram cases; `scripts/live-canary` / `scripts/live_canary` telegram registry entries | Updated to drive the new model (admin setup + pairing), becoming its live proof. |
 | Telegram-flavored logic in shared reborn crates (`ironclaw_common/src/{platform,event,attachment,identity}.rs`, `ironclaw_product_adapter_registry` fixtures, `ironclaw_wasm_product_adapters` examples) | Inventoried at planning: doc-comments/examples stay; any v1-behavior-bearing logic is aligned to the new model. |
@@ -172,7 +172,7 @@ After this feature, the Reborn context — `crates/**`, the webui_v2 frontend, `
 
 ## 9. Feature flag & config
 
-- New cargo feature `telegram-v2-host-beta` on `ironclaw_reborn_composition` (module gate + `lib.rs` re-exports) and `ironclaw_reborn_cli` (serve wiring), **declared in every workspace manifest that references it** and threaded through CI aggregate jobs, reborn-e2e, live-canary, and the QA runner flag sets — the S1 merge-hygiene lesson: no undeclared features.
+- New cargo feature `telegram-v2-host-beta` on `ironclaw_composition` (module gate + `lib.rs` re-exports) and `ironclaw_cli` (serve wiring), **declared in every workspace manifest that references it** and threaded through CI aggregate jobs, reborn-e2e, live-canary, and the QA runner flag sets — the S1 merge-hygiene lesson: no undeclared features.
 - Serve wiring mirrors `serve.rs` lines ~497–619 + `serve_slack.rs`: build telegram mounts, install facades (connectable channels, channel connection), `with_public_route_mount(telegram_mounts.events)`, `with_telegram_channel_routes(...)`, register the outbound delivery target provider.
 - Public base URL: required for `setWebhook`; sourced from the existing deployment public-origin config (same as OAuth callbacks), overridable per §2. Absent ⇒ admin save fails closed with a precise message.
 
@@ -201,7 +201,7 @@ Plus rewrite the 3 stale Telegram tests in `connect-and-use-other-integrations/t
 
 | Piece | Mirror of |
 |---|---|
-| `crates/ironclaw_reborn_composition/src/telegram/mod.rs` (+ submodules below) | `src/slack/mod.rs` |
+| `crates/ironclaw_composition/src/telegram/mod.rs` (+ submodules below) | `src/slack/mod.rs` |
 | `telegram_setup.rs` — setup service, `getMe`/`setWebhook` client, secret handles | `slack_setup.rs` |
 | `telegram_host_state.rs` — setup/pairing/binding/target stores under `/tenant-shared/telegram-*` | `slack_host_state.rs` |
 | `telegram_channel_routes/` — admin `GET/PUT /setup`, operator auth, safety scan, reconcile-with-rollback | `slack_channel_routes/*` |

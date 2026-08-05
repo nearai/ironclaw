@@ -4,7 +4,7 @@
 **Date:** 2026-04-24
 **Target crate:** `crates/ironclaw_host_api`
 **Source of truth:** this contract, `crates/ironclaw_host_api/CLAUDE.md`, and
-the architecture tests in `crates/ironclaw_architecture`.
+the architecture tests in `crates/ironclaw_architecture_tests`.
 
 ---
 
@@ -30,7 +30,7 @@ carriers consumed by host assembly at the HTTP boundary:
 `PublicRouteMount`, `ProtectedRouteMount`, and `SplitRouteMount` in
 `crates/ironclaw_host_ingress/src/lib.rs`.
 
-The first implementation PR should create this crate before implementing `ironclaw_filesystem`, `ironclaw_resources`, `ironclaw_extensions`, `ironclaw_wasm`, or `ironclaw_dispatcher`.
+The first implementation PR should create this crate before implementing `ironclaw_filesystem`, `ironclaw_resources`, `ironclaw_extension_registry`, `ironclaw_wasm`, or `ironclaw_dispatcher`.
 
 ---
 
@@ -57,7 +57,7 @@ dispatch-time checks remain separate host stages.
 - `ironclaw_dispatcher`
 - `ironclaw_filesystem`
 - `ironclaw_resources`
-- `ironclaw_extensions`
+- `ironclaw_extension_registry`
 - `ironclaw_wasm`
 - `ironclaw_mcp`
 - `ironclaw_sandbox`

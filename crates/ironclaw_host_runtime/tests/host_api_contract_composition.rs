@@ -1,4 +1,4 @@
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     CAPABILITY_PROVIDER_HOST_API_ID, CAPABILITY_PROVIDER_SECTION, ExtensionError, ManifestV2Error,
 };
 use ironclaw_filesystem::DiskFilesystem;

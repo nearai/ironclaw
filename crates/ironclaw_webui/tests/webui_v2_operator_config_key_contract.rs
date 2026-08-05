@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
+use ironclaw_assistant::*;
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
-use ironclaw_product::*;
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
     ProductSurfaceErrorKind,

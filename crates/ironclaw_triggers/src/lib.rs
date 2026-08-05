@@ -30,6 +30,7 @@ mod fire_access;
 mod in_memory;
 mod libsql;
 mod postgres;
+mod prompt_safety;
 mod trusted_submit;
 mod worker;
 

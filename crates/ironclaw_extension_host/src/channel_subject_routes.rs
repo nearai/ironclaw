@@ -250,7 +250,7 @@ impl ProductConversationSubjectRouteResolver for ChannelConfigSubjectRouteResolv
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_extensions::{
+    use ironclaw_extension_registry::{
         ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
         ExtensionInstallationStorePort, ExtensionManifestRecord, ExtensionManifestRef,
         ManifestSource,
@@ -347,14 +347,15 @@ supports_threads = false
         .expect("filesystem extension installation store")
     }
 
-    fn product_extension_host_api_contract_registry()
-    -> Result<ironclaw_extensions::HostApiContractRegistry, ironclaw_extensions::ManifestV2Error>
-    {
-        let mut registry = ironclaw_extensions::default_host_api_contract_registry()?;
-        ironclaw_extensions::host_api::product_adapter::register_product_adapter_host_api_contract(
+    fn product_extension_host_api_contract_registry() -> Result<
+        ironclaw_extension_registry::HostApiContractRegistry,
+        ironclaw_extension_registry::ManifestV2Error,
+    > {
+        let mut registry = ironclaw_extension_registry::default_host_api_contract_registry()?;
+        ironclaw_extension_registry::host_api::product_adapter::register_product_adapter_host_api_contract(
             &mut registry,
         )
-        .map_err(|error| ironclaw_extensions::ManifestV2Error::Invalid {
+        .map_err(|error| ironclaw_extension_registry::ManifestV2Error::Invalid {
             reason: format!("product adapter host API contract registration failed: {error}"),
         })?;
         Ok(registry)
@@ -382,7 +383,7 @@ supports_threads = false
                     ExtensionManifestRef::new(extension_id.clone(), None),
                     Vec::new(),
                     chrono::Utc::now(),
-                    ironclaw_extensions::InstallationOwner::Tenant,
+                    ironclaw_extension_registry::InstallationOwner::Tenant,
                 )
                 .expect("installation"),
             )

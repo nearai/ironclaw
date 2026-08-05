@@ -18,7 +18,7 @@ use crate::model_gateway_error_mapping::host_error_to_model_gateway_error;
 /// Everything a [`ThreadResolvingLoopModelGateway`] needs, as one value.
 ///
 /// A params struct rather than an eleven-argument constructor, and public
-/// rather than the struct's own fields: the driver host in `ironclaw_runner`
+/// rather than the struct's own fields: the driver host in `ironclaw_turn_runner`
 /// assembles the run-scoped inputs, and this crate owns what the gateway does
 /// with them. Adding a field is a compile error at the two call sites, which
 /// is the property the previous `pub`-fields shape also had — without letting
@@ -45,7 +45,7 @@ where
 /// Resolves a thread's transcript into a host-managed model request.
 ///
 /// Fields are private and the only way in is [`Self::new`]: the WS3 shed moved
-/// this port implementation out of `ironclaw_runner`, and turning its
+/// this port implementation out of `ironclaw_turn_runner`, and turning its
 /// `pub(super)` fields into `pub` ones to keep the caller's struct literal
 /// working would have let any downstream crate assemble a gateway with no
 /// host-owned construction path (root `CLAUDE.md`: "module-specific

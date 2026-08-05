@@ -120,7 +120,7 @@ three separate reasons, any one of which is sufficient:
    product decision this restructure has no mandate to make.** Unlike the hooks
    backends (ADR 0004), the trigger repositories *are* wired: composition
    selects `LibSqlTriggerRepository` or `PostgresTriggerRepository` by profile
-   at `crates/ironclaw_reborn_composition/src/backend_store_assembly.rs:89`
+   at `crates/ironclaw_composition/src/backend_store_assembly.rs:89`
    and `:99`, and again in the production path at
    `src/factory/production_backend_assembly.rs:1330` and `:1373`. Deleting
    either drops a shipped deployment shape.
@@ -128,7 +128,7 @@ three separate reasons, any one of which is sufficient:
    rewriting persistence.** `ironclaw_triggers` is *mechanically forbidden* a
    dependency on `ironclaw_filesystem` — it is in the `forbidden` list of the
    crate's `BoundaryRule` at
-   `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs:3968`.
+   `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs:3968`.
    Adopting `ScopedFilesystem` means legalizing a new substrate→substrate edge
    *on top of* the persistence rewrite.
 
@@ -150,7 +150,7 @@ construction; that stays.
 
 The exception is registered where it is enforced: `ironclaw_triggers` is on
 `DRIVER_LINKED_CRATES` in
-`crates/ironclaw_architecture/tests/reborn_persistence_driver_boundary.rs:33`.
+`crates/ironclaw_architecture_tests/tests/reborn_persistence_driver_boundary.rs:33`.
 That list is asserted as a **bidirectional set equality** — a crate gaining the
 driver fails, and a crate that sheds it also fails until the entry is removed —
 so the allowlist can only ratchet down. This ADR is the argued justification the

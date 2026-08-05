@@ -22,8 +22,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_events::AuditSink;
-use ironclaw_extensions::ExtensionPackage;
+use ironclaw_event_log::AuditSink;
+use ironclaw_extension_registry::ExtensionPackage;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage, DecisionSummary},
@@ -152,7 +152,7 @@ impl FirstPartyCapabilityHandler for MemoryToolGuard {
 /// tools. Mirrors what production composition does with the resolved binding.
 pub fn register_native_memory_tools(
     registry: &mut FirstPartyCapabilityRegistry,
-) -> Result<(), ironclaw_extensions::ExtensionError> {
+) -> Result<(), ironclaw_extension_registry::ExtensionError> {
     let bundle = crate::memory_native_extension::native_memory_provider_bundle()?;
     let handler = Arc::new(NativeMemoryToolHandler::from_package(&bundle.package));
     register_memory_tool_handler(registry, &bundle.package, handler);

@@ -1,0 +1,201 @@
+[package]
+name = "ironclaw_composition"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Composition-root production composition root for IronClaw Reborn"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "app"
+
+[features]
+# Compile the mem0 third-party memory provider into the composed runtime.
+# Off by default (productionization, #5264) so default builds carry no mem0
+# code or its `reqwest`/`rustls` transport deps; an operator who binds memory
+# to mem0 builds with `--features memory-mem0`. mem0 stays runtime-off too
+# (the binding policy defaults to native).
+memory-mem0 = ["dep:ironclaw_memory_mem0"]
+# Expose test-only helpers (mock LLM gateway, budget runtime accessors)
+# so integration tests in this crate's `tests/` directory and downstream
+# crates can drive `build_reborn_runtime` with a stub model gateway
+# (via `RebornRuntimeInput::with_model_gateway_override`) and inspect the
+# budget pipeline end-to-end. Enable with `cargo test --features
+# test-support.
+test-support = [
+    "dep:ironclaw_extension_support",
+    "ironclaw_network/test-support",
+    "ironclaw_extension_host/test-support",
+    "ironclaw_extension_manager/test-support",
+    "ironclaw_auth/test-support",
+    "ironclaw_host_runtime/test-support",
+    "ironclaw_loop_host/test-support",
+    "ironclaw_outbound/test-support",
+    "ironclaw_assistant/test-support",
+    "ironclaw_turn_runner/test-support",
+]
+[dependencies]
+async-trait = "0.1"
+base64 = "0.23"
+chrono = "0.4"
+deadpool-postgres = "0.14"
+futures = "0.3"
+ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_common = { path = "../ironclaw_common" }
+ironclaw_capabilities = { path = "../ironclaw_capabilities" }
+ironclaw_approvals = { path = "../ironclaw_approvals" }
+ironclaw_attachments = { path = "../ironclaw_attachments" }
+ironclaw_authorization = { path = "../ironclaw_authorization" }
+ironclaw_conversations = { path = "../ironclaw_conversations" }
+ironclaw_event_projections = { path = "../ironclaw_event_projections" }
+ironclaw_event_log = { path = "../ironclaw_event_log" }
+ironclaw_extension_registry = { path = "../ironclaw_extension_registry" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_hooks = { path = "../ironclaw_hooks" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version = "0.1.0" }
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
+ironclaw_host_ingress = { path = "../ironclaw_host_ingress" }
+ironclaw_extension_host = { path = "../ironclaw_extension_host" }
+ironclaw_extension_manager = { path = "../ironclaw_extension_manager" }
+ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
+ironclaw_llm = { path = "../ironclaw_llm", default-features = false, features = ["registry-provider-factory"] }
+ironclaw_loop_host = { path = "../ironclaw_loop_host" }
+ironclaw_libsql_runtime = { path = "../ironclaw_libsql_runtime" }
+ironclaw_memory = { path = "../ironclaw_memory" }
+ironclaw_mcp = { path = "../ironclaw_mcp" }
+# Memory contract + provider crates. Composition is the layer that wires the
+# configured memory provider (issue #3537 / #5264): like `ironclaw_embeddings`'s
+# provider factory it may depend on every concrete provider crate — the native
+# (filesystem) provider and the mem0 (REST) provider — and builds whichever the
+# `[memory]` binding selects.
+ironclaw_memory_mem0 = { path = "../extensions/packages/mem0", optional = true }
+ironclaw_memory_native = { path = "../extensions/packages/memory-native" }
+ironclaw_network = { path = "../ironclaw_network" }
+ironclaw_observability = { path = "../ironclaw_observability" }
+ironclaw_operator = { path = "../ironclaw_operator" }
+ironclaw_outbound = { path = "../ironclaw_outbound" }
+ironclaw_processes = { path = "../ironclaw_processes" }
+ironclaw_assistant = { path = "../ironclaw_assistant" }
+ironclaw_turn_runner = { path = "../ironclaw_turn_runner" }
+ironclaw_config = { path = "../ironclaw_config" }
+ironclaw_identity = { path = "../ironclaw_identity" }
+ironclaw_event_store = { path = "../ironclaw_event_store" }
+ironclaw_openai_compat = { path = "../ironclaw_openai_compat" }
+ironclaw_trace_commons = { path = "../ironclaw_trace_commons" }
+ironclaw_first_party_extension_ports = { path = "../ironclaw_first_party_extension_ports" }
+ironclaw_extension_support = { path = "../extensions/ironclaw_extension_support", optional = true }
+ironclaw_resources = { path = "../ironclaw_resources" }
+ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
+ironclaw_safety = { path = "../ironclaw_safety" }
+ironclaw_secrets = { path = "../ironclaw_secrets" }
+ironclaw_skills = { path = "../ironclaw_skills" }
+ironclaw_threads = { path = "../ironclaw_threads" }
+ironclaw_triggers = { path = "../ironclaw_triggers" }
+ironclaw_projects = { path = "../ironclaw_projects" }
+ironclaw_trust = { path = "../ironclaw_trust" }
+ironclaw_loop_contracts = { path = "../ironclaw_loop_contracts", version = "0.1.0" }
+ironclaw_turns = { path = "../ironclaw_turns" }
+nix = { version = "0.31", default-features = false, features = ["process"] }
+# WebUI v2 route surface + static SPA bundle merged up into
+# `ironclaw_webui`; no longer a composition dependency.
+libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
+libc = "0.2"
+# axum + tower middleware stack used by the `webui_serve` module. Each
+# entry is feature-gated so non-beta builds carry no HTTP surface code.
+axum = { version = "0.8" }
+tower = { version = "0.5" }
+tower-http = { version = "0.7", features = ["cors", "set-header", "limit", "catch-panic"] }
+lru = { version = "0.18" }
+fs4 = "1.1"
+hex = "0.4.3"
+rand = "0.10"
+rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+toml = "1.1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+ironclaw_auth = { path = "../ironclaw_auth", features = ["test-support"] }
+ironclaw_extension_host = { path = "../ironclaw_extension_host", features = ["test-support"] }
+ironclaw_extension_manager = { path = "../ironclaw_extension_manager", features = ["test-support"] }
+# DEL-7: composition no longer links first-party extensions in production; the
+# binary injects them as neutral data. The dev-dependency stays so the crate's
+# own unit/integration tests (and the test-support inventory helper) can build
+# the catalog and trust policy without the binary.
+ironclaw_extension_support = { path = "../extensions/ironclaw_extension_support" }
+async-trait = "0.1"
+chrono = "0.4"
+hmac = "0.13"
+# Enables the in-memory-backed outbound-state store constructor for tests only.
+ironclaw_outbound = { path = "../ironclaw_outbound", features = ["test-support"] }
+# Enables the in-memory-backed approval store constructors for tests only.
+ironclaw_approvals = { path = "../ironclaw_approvals", features = ["test-support"] }
+# Enables the in-memory-backed capability-lease store constructor for tests only.
+ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test-support"] }
+# Enables the in-memory-backed process store constructors for tests only.
+ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
+# Enables the in-memory-backed run-state/approval store constructors for tests only.
+# Enables the in-memory-backed budget-gate store constructor for tests only.
+ironclaw_resources = { path = "../ironclaw_resources", features = ["test-support"] }
+# Enables the `FaultInjecting` backend decorator so store fault paths are tested
+# through the real filesystem-backed store instead of a whole-trait fake.
+ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
+http = "1"
+http-body-util = "0.1"
+# Admin-user-management e2e test drives the composed app with a real session
+# authenticator so a minted API token can be validated (login-with-token).
+ironclaw_webui = { path = "../ironclaw_webui" }
+secrecy = { version = "0.10", features = ["serde"] }
+ironclaw_common = { path = "../ironclaw_common" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_host_runtime = { path = "../ironclaw_host_runtime", features = ["test-support"] }
+# mem0 provider with its mock transport: the provider-swap integration test
+# drives the config-driven factory over the in-memory `MockMem0Transport`.
+ironclaw_memory_mem0 = { path = "../extensions/packages/mem0", features = ["test-support"] }
+ironclaw_loop_host = { path = "../ironclaw_loop_host", features = ["test-support"] }
+ironclaw_conversations = { path = "../ironclaw_conversations" }
+ironclaw_composition = { path = ".", features = ["test-support"] }
+ironclaw_threads = { path = "../ironclaw_threads" }
+ironclaw_turns = { path = "../ironclaw_turns", features = ["test-support"] }
+ironclaw_assistant = { path = "../ironclaw_assistant", features = ["test-support"] }
+# Channel-host E2E suites drive Slack's existing concrete provider fixture.
+# Cross-provider parity belongs in the root integration-test package.
+ironclaw_slack_extension = { path = "../extensions/packages/slack" }
+rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
+rust_decimal_macros = "1"
+sha2 = "0.11"
+tempfile = "3"
+testcontainers-modules = { version = "0.12", features = ["postgres"] }
+tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "time"] }
+# Real WebSocket client for the v2 stream-events-ws caller-level test.
+# Oneshot via `tower::ServiceExt::oneshot` cannot complete a true WS
+# upgrade (no underlying TCP stream → axum's WebSocketUpgrade extractor
+# returns 426), so the happy-path test needs a bound listener and a
+# proper WS client.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
+tower = { version = "0.5", features = ["util"] }
+tracing-test = "0.2"
+
+[[test]]
+name = "production_runtime_automations"
+
+[[test]]
+name = "resource_governor_libsql_contract"
+
+[lints]
+workspace = true

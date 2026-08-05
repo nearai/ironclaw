@@ -533,7 +533,7 @@ mod tests {
         let invocation_id = ironclaw_host_api::ids::InvocationId::new();
         let scope = ironclaw_host_api::resource::ResourceScope::local_default(user, invocation_id)
             .expect("valid scope");
-        let event = ironclaw_events::RuntimeEvent::hook_failed(
+        let event = ironclaw_event_log::RuntimeEvent::hook_failed(
             scope,
             ironclaw_host_api::ids::CapabilityId::new("hooks.failed").expect("valid capability"),
             crate::identity::HookId::for_builtin("tests::event", crate::identity::HookVersion::ONE)
@@ -545,7 +545,7 @@ mod tests {
         let ctx = EventTriggeredHookContext {
             tenant_id: tenant,
             event: &event,
-            event_cursor: ironclaw_events::EventCursor::new(1),
+            event_cursor: ironclaw_event_log::EventCursor::new(1),
             is_replay: false,
         };
         let mut recording = RecordingObserverSink::new();

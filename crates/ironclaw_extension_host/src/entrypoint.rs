@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::tool_adapter::ToolAdapter;
-use ironclaw_extensions::{CapabilityVisibility, ResolvedExtensionManifest};
+use ironclaw_extension_registry::{CapabilityVisibility, ResolvedExtensionManifest};
 
 /// The bound behavior of one extension: the adapters it implements. Auth
 /// never binds (host-managed via recipes); trigger/file are reserved.

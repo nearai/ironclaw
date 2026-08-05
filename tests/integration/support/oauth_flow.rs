@@ -16,7 +16,7 @@ use ironclaw_auth::{
     PkceVerifierHash, PkceVerifierSecret, ProviderScope,
 };
 use ironclaw_auth::{RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest};
-use ironclaw_reborn_composition::test_support::OAuthProductAuthTestBundle;
+use ironclaw_composition::test_support::OAuthProductAuthTestBundle;
 use secrecy::SecretString;
 
 /// Build a 64-character hex string from a repeated byte value.

@@ -6,18 +6,18 @@
 //! [`TrustedInboundContext`] via
 //! [`ProductInboundEnvelope::from_trusted_parse`] — the same path the
 //! production `ChannelAdapter` ingress bridge takes
-//! (`ironclaw_reborn_composition::extension_host::extension_ingress`).
+//! (`ironclaw_composition::extension_host::extension_ingress`).
 //!
 //! Ported in P7b (DEL-5): the retired `ProductAdapter` trait's `parse_inbound`
 //! used to produce the parsed value here. The harness never needed the trait —
 //! only the LIVE envelope it wrapped — so the parsed inbound is now built
 //! directly. Coverage that exercised the retired trait's own `parse_inbound` /
 //! `render_outbound` moved to the `ChannelAdapter` conformance suite
-//! (`ironclaw_product::test_support::run_channel_adapter_conformance`);
+//! (`ironclaw_assistant::test_support::run_channel_adapter_conformance`);
 //! see that PR's DEL-5 notes.
 
 use chrono::Utc;
-use ironclaw_product::{
+use ironclaw_assistant::{
     AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
     AuthResolutionPayload, AuthResolutionResult, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, ParsedProductInbound, ProductAdapterError, ProductAdapterId,

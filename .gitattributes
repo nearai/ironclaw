@@ -1,2 +1,2 @@
 tests/test-pages/**/*.html linguist-generated=true
-crates/ironclaw_reborn_cli/wix/main.wxs whitespace=cr-at-eol,-blank-at-eol
+crates/ironclaw_cli/wix/main.wxs whitespace=cr-at-eol,-blank-at-eol

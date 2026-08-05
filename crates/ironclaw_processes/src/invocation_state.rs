@@ -8,7 +8,7 @@ use crate::{
     SuspendProcessRequest,
 };
 use async_trait::async_trait;
-use ironclaw_events::sanitize_error_kind;
+use ironclaw_event_log::sanitize_error_kind;
 use ironclaw_host_api::{
     approval::ApprovalRequest,
     ids::{ApprovalRequestId, CapabilityId, InvocationId, ProcessId, UserId},

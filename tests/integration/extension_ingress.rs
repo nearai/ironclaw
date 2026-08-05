@@ -76,7 +76,7 @@ fn acme_signature(timestamp: &str, body: &str) -> String {
 /// message entered the existing binding + turn-submission pipeline).
 #[derive(Default)]
 struct RecordingAdmissionObserver {
-    acks: Mutex<Vec<ironclaw_product::ProductInboundAck>>,
+    acks: Mutex<Vec<ironclaw_assistant::ProductInboundAck>>,
     errors: Mutex<Vec<String>>,
 }
 
@@ -84,16 +84,16 @@ struct RecordingAdmissionObserver {
 impl PostAdmissionObserver for RecordingAdmissionObserver {
     async fn observe_ack(
         &self,
-        _envelope: ironclaw_product::ProductInboundEnvelope,
-        ack: ironclaw_product::ProductInboundAck,
+        _envelope: ironclaw_assistant::ProductInboundEnvelope,
+        ack: ironclaw_assistant::ProductInboundAck,
     ) {
         self.acks.lock().expect("acks lock").push(ack);
     }
 
     async fn observe_error(
         &self,
-        _envelope: ironclaw_product::ProductInboundEnvelope,
-        error: ironclaw_product::ProductAdapterError,
+        _envelope: ironclaw_assistant::ProductInboundEnvelope,
+        error: ironclaw_assistant::ProductAdapterError,
     ) {
         self.errors
             .lock()
@@ -121,7 +121,7 @@ impl AcmeIngress {
         let observer = Arc::new(RecordingAdmissionObserver::default());
         let surface = harness.product_surface_for_test() as Arc<dyn ChannelInboundProductSurface>;
         let sink = Arc::new(GenericChannelInboundSink::new(ChannelInboundSinkConfig {
-            adapter_id: ironclaw_product::ProductAdapterId::new("acme-messenger")
+            adapter_id: ironclaw_assistant::ProductAdapterId::new("acme-messenger")
                 .expect("adapter id"),
             evidence: VerifiedEvidenceMint::RequestSignature {
                 signature_header: "X-Acme-Signature".to_string(),
@@ -201,7 +201,7 @@ impl AcmeIngress {
             .lock()
             .expect("acks lock")
             .iter()
-            .filter(|ack| matches!(ack, ironclaw_product::ProductInboundAck::Accepted { .. }))
+            .filter(|ack| matches!(ack, ironclaw_assistant::ProductInboundAck::Accepted { .. }))
             .count()
     }
 
@@ -211,7 +211,7 @@ impl AcmeIngress {
             .lock()
             .expect("acks lock")
             .iter()
-            .filter(|ack| matches!(ack, ironclaw_product::ProductInboundAck::Duplicate { .. }))
+            .filter(|ack| matches!(ack, ironclaw_assistant::ProductInboundAck::Duplicate { .. }))
             .count()
     }
 }

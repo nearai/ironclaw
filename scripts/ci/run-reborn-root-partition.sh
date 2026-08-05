@@ -50,7 +50,7 @@ for index in "${!test_names[@]}"; do
   test_name="${test_names[$index]}"
   echo "::group::cargo test --test ${test_name}"
   timeout --signal=INT --kill-after=30s "${test_timeout}" \
-    cargo test -p ironclaw_reborn_integration_tests --test "${test_name}" -- --nocapture
+    cargo test -p ironclaw_integration_tests --test "${test_name}" -- --nocapture
   echo "::endgroup::"
 done
 

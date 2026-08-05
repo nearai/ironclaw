@@ -17,5 +17,5 @@
 ## Validation
 
 - `cargo check -p ironclaw_host_ingress`
-- `cargo test -p ironclaw_architecture` after dependency changes.
+- `cargo test -p ironclaw_architecture_tests` after dependency changes.
 

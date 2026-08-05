@@ -5,7 +5,7 @@
 //! a [`ProductActionId`] and deduplicated by an [`ActionFingerprintKey`]:
 //! tenant-scoped installation + external actor + source binding + external
 //! event id. The durable ledger record and its saga phases are product
-//! workflow state and stay in `ironclaw_product`; what crosses the boundary is
+//! workflow state and stay in `ironclaw_assistant`; what crosses the boundary is
 //! the identity and the fingerprint, because every caller that builds a
 //! command context — including `ironclaw_extension_host`'s channel hosts —
 //! must speak them.

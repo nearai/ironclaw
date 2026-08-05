@@ -1,9 +1,9 @@
 //! Test-support first-party handler registrars that mirror the concrete
-//! executors the `ironclaw_reborn_cli` binary assembles in production.
+//! executors the `ironclaw_cli` binary assembles in production.
 
 /// Test-support first-party handler registrars (GSuite + web tooling) mirroring
-/// the concrete executors the `ironclaw_reborn_cli` binary assembles in
-/// production (`crates/ironclaw_reborn_cli/src/first_party/`).
+/// the concrete executors the `ironclaw_cli` binary assembles in
+/// production (`crates/ironclaw_cli/src/first_party/`).
 ///
 /// Composition names `ironclaw_extension_support` in production nowhere
 /// (extension-runtime DEL-7); the binary supplies these registrars on the build
@@ -43,7 +43,7 @@ use ironclaw_host_runtime::{
 };
 
 /// The full set of first-party handler registrars a standalone/test build
-/// needs, mirroring `ironclaw_reborn_cli::first_party::bundled_first_party_registrars`.
+/// needs, mirroring `ironclaw_cli::first_party::bundled_first_party_registrars`.
 pub fn bundled_first_party_registrars() -> Vec<Arc<dyn FirstPartyHandlerRegistrar>> {
     vec![
         Arc::new(GsuiteFirstPartyRegistrar),
@@ -100,7 +100,7 @@ impl FirstPartyCapabilityHandler for GsuiteFirstPartyHandler {
             return Err(FirstPartyCapabilityError::dispatch_with_host_remediation(
                 RuntimeDispatchErrorKind::OperationFailed,
                 None,
-                ironclaw_reborn_config::HostRemediationText::GoogleNotConfigured.text(),
+                ironclaw_config::HostRemediationText::GoogleNotConfigured.text(),
             ));
         }
         let egress = request
@@ -175,7 +175,7 @@ fn gsuite_error(
                         "Google OAuth is configured but the provider rejected the credentials"
                             .to_string(),
                     ),
-                    ironclaw_reborn_config::HostRemediationText::GoogleBackendAuth.text(),
+                    ironclaw_config::HostRemediationText::GoogleBackendAuth.text(),
                 )
             }
             _ => FirstPartyCapabilityError::new(error.kind()),

@@ -1,5 +1,5 @@
 /// Test double substituting the production `LoopCapabilityPortFactory` wiring:
-/// `RefreshingLoopCapabilityPortFactory` (`crates/ironclaw_reborn_composition/src/runtime/standalone.rs`)
+/// `RefreshingLoopCapabilityPortFactory` (`crates/ironclaw_composition/src/runtime/standalone.rs`)
 /// and `HostRuntimeLoopCapabilityPortFactory` (`crates/ironclaw_loop_host/src/capability_port.rs`).
 use std::sync::Arc;
 
@@ -13,8 +13,7 @@ use super::super::harness::HostRuntimeCapabilityHarness;
 pub(crate) struct HostRuntimeHarnessCapabilityPortFactory {
     pub(crate) harness: Arc<HostRuntimeCapabilityHarness>,
     pub(crate) milestone_sink: Arc<ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink>,
-    pub(crate) trajectory_observer:
-        Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
+    pub(crate) trajectory_observer: Option<Arc<dyn ironclaw_composition::RebornTrajectoryObserver>>,
 }
 
 #[async_trait]

@@ -3,9 +3,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
 use ironclaw_host_api::turn::{RunOriginAdapter, RunProfileId, RunProfileRequest, TurnSurfaceType};
-use ironclaw_safety::{
-    InjectionScanner, PromptSafetyRejection, Sanitizer, validate_trusted_trigger_prompt,
-};
 use ironclaw_triggers::{
     TriggerError, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
     TrustedTriggerSubmitRequest,
@@ -284,10 +281,16 @@ where
     }
 }
 
+/// Conversations-owned implementation of the trusted-trigger submit seam.
+///
+/// It converts an already-validated `TrustedTriggerSubmitRequest` into this
+/// crate's private trusted inbound request and submits it. Prompt safety is
+/// *not* checked here: PROPOSAL §6.4.2 moved that scan behind the seam, into
+/// `ironclaw_triggers`' mint of the sealed request, so it applies to every
+/// submitter rather than only to this one.
 #[derive(Clone)]
 pub(crate) struct ConversationTrustedTriggerSubmitter<B, S, C: ?Sized> {
     inbound: InboundTurnService<B, S, C>,
-    prompt_safety: Arc<dyn InjectionScanner>,
 }
 
 impl<B, S, C> ConversationTrustedTriggerSubmitter<B, S, C>
@@ -299,7 +302,6 @@ where
     pub(crate) fn new(binding_service: B, conversation_service: S, turn_submitter: Arc<C>) -> Self {
         Self {
             inbound: InboundTurnService::new(binding_service, conversation_service, turn_submitter),
-            prompt_safety: Arc::new(Sanitizer::new()),
         }
     }
 }
@@ -339,11 +341,6 @@ where
         request: TrustedTriggerSubmitRequest,
     ) -> Result<TrustedTriggerFireSubmitOutcome, TriggerError> {
         let submitted_at = request.received_at();
-        // Defense in depth: composition scans before materializing/recording the
-        // prompt, and conversations scans again at the final trusted submission
-        // boundary before converting into the private trusted inbound request.
-        validate_trusted_trigger_prompt(&*self.prompt_safety, &request.fire().prompt)
-            .map_err(trigger_prompt_safety_rejection)?;
         let response = self
             .inbound
             .handle_inbound_turn_with_trusted_scope(
@@ -390,7 +387,7 @@ fn trusted_inbound_request_from_trigger(
             received_at,
             // Issue #5505: a trusted trigger fire must run under the
             // dedicated scheduled_trigger profile so the host deny-map
-            // (ironclaw_runner runtime.rs) strips the trigger mutator
+            // (ironclaw_turn_runner runtime.rs) strips the trigger mutator
             // capabilities from the fire's model-visible surface — a fire
             // must not be able to create/remove/pause/resume triggers.
             requested_run_profile: Some(
@@ -451,12 +448,6 @@ fn submit_trusted_trigger_outcome(
         submitted_at,
         turn_scope: response.resolution.turn_scope.clone(),
     })
-}
-
-fn trigger_prompt_safety_rejection(error: PromptSafetyRejection) -> TriggerError {
-    TriggerError::InvalidMaterialization {
-        reason: error.to_string(),
-    }
 }
 
 /// Classify conversation inbound failures for the trusted trigger submit path.
@@ -802,7 +793,8 @@ mod tests {
             TriggerInboundContentRef::new("content:test-trigger-creator").expect("content ref");
         let materialized_prompt = TriggerMaterializedPrompt::for_fire(&fire, content_ref);
         let request =
-            TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot);
+            TrustedTriggerSubmitRequest::new_for_test(fire, materialized_prompt, fire_slot)
+                .expect("a clean trigger prompt mints a trusted submit request");
 
         let outcome = submitter
             .submit_trusted_trigger_fire(request)
@@ -818,7 +810,7 @@ mod tests {
             "submit_trusted_trigger_fire must surface the creator as explicit turn-scope owner"
         );
         // Issue #5505: a trusted trigger fire must request the dedicated
-        // scheduled_trigger run profile so the host deny-map (ironclaw_runner
+        // scheduled_trigger run profile so the host deny-map (ironclaw_turn_runner
         // runtime.rs) strips the trigger mutator capabilities from the fire's
         // model-visible surface. Assert through the same recording
         // coordinator already used above, on the SubmitTurnRequest that
@@ -1328,7 +1320,7 @@ mod tests {
     }
 
     /// Mirror of the production port adapter
-    /// (`ironclaw_reborn_composition::automation::conversation_turn_submitter`):
+    /// (`ironclaw_composition::automation::conversation_turn_submitter`):
     /// it derives the owner and resolves the classification through the same
     /// `product_context::resolve_inbound` call, producing the same
     /// `SubmitTurnRequest` the real adapter hands the coordinator. The fakes

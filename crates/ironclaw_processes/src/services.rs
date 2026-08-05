@@ -18,7 +18,7 @@ use std::{
 
 use async_trait::async_trait;
 use futures::FutureExt;
-use ironclaw_events::sanitize_error_kind;
+use ironclaw_event_log::sanitize_error_kind;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     ids::ProcessId,

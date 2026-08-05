@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection;
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     ExtensionManifestRecord, ExtensionPackage, ManifestSource, PackageDefinitionRetention,
     PackageRootBinding,
 };
@@ -206,7 +206,7 @@ pub(crate) fn manifest_with_admitted_oauth(
         required: true,
     };
     let mut resolved = seed.resolved().clone();
-    resolved.auth = vec![ironclaw_extensions::ResolvedAuthSurface {
+    resolved.auth = vec![ironclaw_extension_registry::ResolvedAuthSurface {
         vendor,
         setup,
         recipe: Some(admitted.recipe),
@@ -295,7 +295,7 @@ default_permission = "ask"
 effects = ["network", "use_secret"]
 {auth}"#
     );
-    let manifest_hash = ironclaw_extensions::ManifestHash::new(
+    let manifest_hash = ironclaw_extension_registry::ManifestHash::new(
         ironclaw_host_api::approval::sha256_digest_token(raw.as_bytes()),
     )
     .map_err(map_extension_installation_error)?;
@@ -338,7 +338,7 @@ pub(crate) fn available_package(
     record: &ExtensionManifestRecord,
 ) -> Result<AvailableExtensionPackage, ProductOperationFailure> {
     let id = record.resolved().id.as_str();
-    let manifest: ironclaw_extensions::ExtensionManifest =
+    let manifest: ironclaw_extension_registry::ExtensionManifest =
         record.manifest().clone().try_into().map_err(|error| {
             ProductOperationFailure::InvalidBindingRequest {
                 reason: format!("hosted MCP package manifest is invalid: {error}"),

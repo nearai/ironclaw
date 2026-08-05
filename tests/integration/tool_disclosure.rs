@@ -2,7 +2,7 @@
 //!
 //! Proves `.with_tool_disclosure_bridged()` reaches production's
 //! `ToolDisclosureCapabilityDecorator` wiring
-//! (`ironclaw_runner::runtime::build_default_planned_runtime_inner`, gated on
+//! (`ironclaw_turn_runner::runtime::build_default_planned_runtime_inner`, gated on
 //! `DefaultPlannedRuntimeConfig::tool_disclosure.is_bridged()`) — the same
 //! lower-level factory this harness's group assembly already calls.
 //!

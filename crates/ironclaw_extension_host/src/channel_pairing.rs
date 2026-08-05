@@ -244,13 +244,13 @@ pub trait ChannelPairingTemplateValues: Send + Sync {
 /// Pairing is setup work performed after install and before activation, so an
 /// active-host snapshot is intentionally too narrow for this lookup.
 pub struct StoredPairingInstallationSource {
-    store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
+    store: Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort>,
     extension_id: ExtensionId,
 }
 
 impl StoredPairingInstallationSource {
     pub fn new(
-        store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
+        store: Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort>,
         extension_id: ExtensionId,
     ) -> Self {
         Self {

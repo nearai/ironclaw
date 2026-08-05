@@ -29,7 +29,7 @@ Read `.claude/skills/ironclaw-reborn-testing/SKILL.md` and
    product orchestration, runner, loop, decorator chain, and in-memory filesystem —
    `cargo test --test reborn_integration_SCENARIO`.
 3. **Architecture:** dependency and composition boundaries —
-   `cargo test -p ironclaw_architecture`.
+   `cargo test -p ironclaw_architecture_tests`.
 4. **Backend/runtime integration:** DB-, Docker-, or runtime-shaped behavior —
    use the owning feature-gated suite and `cargo test --features integration`
    when required by its guide.
@@ -88,4 +88,4 @@ workflow, or capability dispatch. Re-derive exact commands from
 `crates/AGENTS.md` and the owning crate guide rather than copying stale commands.
 
 Reborn dependency/composition boundary enforcement is
-`cargo test -p ironclaw_architecture`.
+`cargo test -p ironclaw_architecture_tests`.

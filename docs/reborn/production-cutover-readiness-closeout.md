@@ -22,7 +22,7 @@ traffic cannot reach a partially wired Reborn graph.
 
 Production cutover is controlled by `RebornCompositionProfile` plus typed
 `RebornHostBindings` / `RebornRuntimeInput`, assembled through the current
-`build_runtime` composition factory (`crates/ironclaw_reborn_composition/src/runtime.rs`;
+`build_runtime` composition factory (`crates/ironclaw_composition/src/runtime.rs`;
 bindings/errors live in `src/input.rs` and `src/error.rs`):
 
 | Profile | Runtime behavior |
@@ -34,7 +34,7 @@ bindings/errors live in `src/input.rs` and `src/error.rs`):
 | `production` | Builds production-shaped storage/runtime services and starts live runtime traffic only when readiness is `ProductionValidated` with no blocking diagnostics. |
 
 The live runtime boundary is `build_runtime`. CLI/WebUI entrypoints reach
-that boundary through `ironclaw_reborn_composition`; they do not reconstruct
+that boundary through `ironclaw_composition`; they do not reconstruct
 lower-level stores, `TurnCoordinator`, or host-runtime handles at the route
 layer.
 
@@ -60,9 +60,9 @@ layer.
 | Migration-dry-run validates but does not switch live traffic | `migration_dry_run_validates_libsql_shape`, process-port fail-closed tests, and `runtime_rejects_migration_dry_run_before_live_traffic`. |
 | Production fails closed on missing/local-only/unverified/unsupported services | `build_production_shaped` wiring validation, `ProductionWiringReport` mapping tests, and required-backend parity tests for libSQL/PostgreSQL. |
 | Redacted stable readiness diagnostics | `readiness_diagnostics_do_not_carry_sensitive_detail_fields`, backend URL/secret redaction assertions, and operator observability backend contract requirements. |
-| AppBuilder/default startup stays clear | Reborn production composition remains in `ironclaw_reborn_composition`. (Historical: this was also guarded by `legacy_main_does_not_compose_reborn_runtime` against legacy `src/main.rs`, removed along with `src/` under Tier B.) |
+| AppBuilder/default startup stays clear | Reborn production composition remains in `ironclaw_composition`. (Historical: this was also guarded by `legacy_main_does_not_compose_reborn_runtime` against legacy `src/main.rs`, removed along with `src/` under Tier B.) |
 | Reborn binary remains thin bootstrap | `ironclaw` delegates to command modules and Reborn-owned factories; `reborn_binary_main_is_thin_bootstrap` guards this mechanically. |
-| WebUI/ProductSurface consume runtime/product APIs | `RebornRuntime::product_surface`, `ProductSurface`, product-live surface tests, and crate guardrails in `crates/ironclaw_reborn_composition/CLAUDE.md`. |
+| WebUI/ProductSurface consume runtime/product APIs | `RebornRuntime::product_surface`, `ProductSurface`, product-live surface tests, and crate guardrails in `crates/ironclaw_composition/CLAUDE.md`. |
 | Required graph components included or diagnosed | Host-runtime `ProductionWiringReport`, Reborn readiness diagnostic component mapping, and #4620 backend-parity readiness tests. |
 | PostgreSQL/libSQL parity evidence | #4620 tests plus #4551/#4615 production storage/runtime launch work. |
 | No hidden legacy/Reborn dual writers | Reborn startup is separate from legacy `main.rs`; migration/compatibility writes remain under #3029 and are not silently performed by production readiness. |
@@ -100,7 +100,7 @@ Recommended closeout validation:
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p ironclaw_reborn_composition runtime_rejects_disabled_profile_before_local_substrate_lookup
-cargo test -p ironclaw_reborn_composition runtime_rejects_migration_dry_run_before_live_traffic --locked
-cargo test -p ironclaw_architecture reborn_binary_main_is_thin_bootstrap
+cargo test -p ironclaw_composition runtime_rejects_disabled_profile_before_local_substrate_lookup
+cargo test -p ironclaw_composition runtime_rejects_migration_dry_run_before_live_traffic --locked
+cargo test -p ironclaw_architecture_tests reborn_binary_main_is_thin_bootstrap
 ```

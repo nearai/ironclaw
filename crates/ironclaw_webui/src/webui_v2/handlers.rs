@@ -30,8 +30,7 @@ use axum::response::{IntoResponse, Response};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::SinkExt;
 use futures::stream::Stream;
-use ironclaw_attachments::{AttachmentCapabilities, attachment_capabilities};
-use ironclaw_product::{
+use ironclaw_assistant::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_VIEW, ADMIN_USER_CREATE_COMMAND,
     ADMIN_USER_DELETE_CAPABILITY, ADMIN_USER_DELETE_SECRET_COMMAND,
     ADMIN_USER_PUT_SECRET_CAPABILITY, ADMIN_USER_SECRETS_VIEW, ADMIN_USER_SET_ROLE_CAPABILITY,
@@ -63,6 +62,7 @@ use ironclaw_product::{
     TRACE_ACCOUNT_LOGIN_LINK_COMMAND, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
     TRACE_HOLD_AUTHORIZE_COMMAND,
 };
+use ironclaw_attachments::{AttachmentCapabilities, attachment_capabilities};
 use ironclaw_product_contracts::admin_users::{
     RebornAdminCreateUserRequest, RebornAdminDeleteSecretProductRequest,
     RebornAdminPutSecretProductRequest, RebornAdminPutSecretRequest,
@@ -1841,7 +1841,7 @@ pub async fn execute_command(
     Extension(caller): Extension<ProductSurfaceCaller>,
     Path(thread_id): Path<String>,
     Json(body): Json<ExecuteCommandBody>,
-) -> Result<Json<ironclaw_product::RebornExecuteProductCommandResponse>, WebUiV2HttpError> {
+) -> Result<Json<ironclaw_assistant::RebornExecuteProductCommandResponse>, WebUiV2HttpError> {
     let response = invoke_product_command(
         state.services(),
         caller,
@@ -2731,7 +2731,7 @@ async fn extension_install_succeeded(
 /// The install landed: the caller can see their membership, in any resting
 /// public state. `Uninstalled` is never a listed entry, so this rejects only a
 /// projection that somehow reports the caller as a non-member.
-fn membership_is_visible(extension: &ironclaw_product::RebornExtensionInfo) -> bool {
+fn membership_is_visible(extension: &ironclaw_assistant::RebornExtensionInfo) -> bool {
     matches!(
         extension.installation_state,
         LifecyclePublicState::Active | LifecyclePublicState::SetupNeeded
@@ -2742,7 +2742,7 @@ fn membership_is_visible(extension: &ironclaw_product::RebornExtensionInfo) -> b
 /// auth, or channel pairing). This is the expected readback when the mutation
 /// reported a blocked-auth or transient outcome: membership exists, readiness
 /// does not.
-fn membership_landed_pending_setup(extension: &ironclaw_product::RebornExtensionInfo) -> bool {
+fn membership_landed_pending_setup(extension: &ironclaw_assistant::RebornExtensionInfo) -> bool {
     extension.installation_state == LifecyclePublicState::SetupNeeded
 }
 
@@ -2750,7 +2750,7 @@ async fn ensure_extension_inventory_readback(
     services: &std::sync::Arc<dyn ProductSurface>,
     caller: ProductSurfaceCaller,
     package_ref: &LifecyclePackageRef,
-    accepts: impl Fn(&ironclaw_product::RebornExtensionInfo) -> bool,
+    accepts: impl Fn(&ironclaw_assistant::RebornExtensionInfo) -> bool,
 ) -> Result<(), ProductSurfaceError> {
     let page = query_product_page(
         services,

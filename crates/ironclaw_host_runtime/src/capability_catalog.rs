@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     CapabilityDescriptorSchemaMode, CapabilityVisibility, ExtensionPackage, ExtensionRegistry,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
@@ -284,7 +284,7 @@ mod tests {
     use ironclaw_extension_contracts::hosted_mcp::{
         HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations,
     };
-    use ironclaw_extensions::{
+    use ironclaw_extension_registry::{
         CapabilityProviderHostApiContract, HostApiContractRegistry,
         package_with_discovered_hosted_mcp_tools,
     };
@@ -330,9 +330,9 @@ input_schema_ref = "schemas/hosted-tool/invoke.input.json"
     }
 
     fn hosted_mcp_package() -> ExtensionPackage {
-        let manifest = ironclaw_extensions::ExtensionManifest::parse(
+        let manifest = ironclaw_extension_registry::ExtensionManifest::parse(
             HOSTED_MCP_MANIFEST,
-            ironclaw_extensions::ManifestSource::HostBundled,
+            ironclaw_extension_registry::ManifestSource::HostBundled,
             &HostPortCatalog::default(),
             &contracts(),
         )

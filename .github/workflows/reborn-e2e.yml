@@ -65,7 +65,6 @@ on:
       - "scripts/ci/*hermetic*"
       - "tests/e2e/**"
       - "build.rs"
-      - "providers.json"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/reborn-e2e.yml"
@@ -115,7 +114,7 @@ jobs:
           # for the same reason (CHECKLIST WS10); both forms are pinned by
           # scripts/ci/ws12_workflow_contracts.py, which replays a nested
           # crate path through this exact regex.
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|docs/reborn/|scripts/reborn-e2e-rust\.sh$|scripts/ci/[^/]*hermetic[^/]*$|tests/e2e/|build\.rs$|providers\.json$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/reborn-e2e\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|docs/reborn/|scripts/reborn-e2e-rust\.sh$|scripts/ci/[^/]*hermetic[^/]*$|tests/e2e/|build\.rs$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/reborn-e2e\.yml$)'; then
             echo "has_e2e_scope=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_e2e_scope=false" >> "$GITHUB_OUTPUT"

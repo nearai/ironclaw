@@ -3,14 +3,14 @@
 //! wire DTO homes").
 //!
 //! WebUI, the OpenAI-compatible adapter, and the operator surface all speak
-//! these; none of them should compile `ironclaw_product` to name a response
+//! these; none of them should compile `ironclaw_assistant` to name a response
 //! body. The *inventory* of concrete commands, capabilities, and views that
 //! produce them stays in product as its frozen surface — this module is the
 //! payload vocabulary only, and holds no service, handler, or projection
 //! reducer.
 //!
 //! Nine of this family's members could not follow it here and stay in
-//! `ironclaw_product::reborn_services::types`, each because its fields name a
+//! `ironclaw_assistant::reborn_services::types`, each because its fields name a
 //! crate outside the contracts allowlist (`ironclaw_host_api` +
 //! `ironclaw_extension_contracts`): `RebornCreateThreadResponse`,
 //! `RebornListThreadsResponse` and `RebornTimelineResponse` carry
@@ -20,7 +20,7 @@
 //! `ironclaw_common::llm_costs::RunCost` and
 //! `ironclaw_loop_contracts::LoopModelUsage`; and
 //! `RebornExecuteProductCommandResponse` carries
-//! `ironclaw_product::commands::CommandResultView`, the command grammar §6.9.1
+//! `ironclaw_assistant::commands::CommandResultView`, the command grammar §6.9.1
 //! keeps there.
 //!
 //! The three `From<ironclaw_turns::…>` conversions stayed too — with both sides
@@ -414,7 +414,7 @@ pub struct RebornTimelineRequest {
     /// the per-response size bound by asking for an unbounded page, and
     /// substitutes `TIMELINE_DEFAULT_PAGE_SIZE` when absent. Both bounds are
     /// the service's, not the wire's: they live beside the clamp in
-    /// `ironclaw_product::reborn_services` and are crate-private there, so
+    /// `ironclaw_assistant::reborn_services` and are crate-private there, so
     /// this is deliberately a description rather than a link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
@@ -1293,7 +1293,7 @@ pub enum RebornExtensionSurface {
         /// when the surface binds a caller-scoped account. `None` until an
         /// account exists. One account per vendor today (ADR 0001 keeps the
         /// list shape); the id points into the `auth_accounts` of
-        /// `ironclaw_product::reborn_services::types::RebornExtensionInfo`, which
+        /// `ironclaw_assistant::reborn_services::types::RebornExtensionInfo`, which
         /// stayed in product because it carries `ironclaw_auth` account state.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resolved_account_id: Option<String>,
@@ -1730,7 +1730,7 @@ pub struct RebornCommandRejection {
 ///
 /// All aggregates are the contributor-local view as of the last credit
 /// sync (see `TRACE_CREDITS_NOTE`, the server-authoritative wording in
-/// `ironclaw_product::reborn_services::trace_credits`). A user with no local Trace
+/// `ironclaw_assistant::reborn_services::trace_credits`). A user with no local Trace
 /// Commons state gets the unenrolled zero-state, never an error.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RebornTraceCreditsResponse {
@@ -1760,7 +1760,7 @@ pub struct RebornTraceCreditsResponse {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub holds: Vec<RebornTraceHold>,
     /// Server-authoritative framing — always `TRACE_CREDITS_NOTE`, defined
-    /// with the builder in `ironclaw_product::reborn_services::trace_credits`.
+    /// with the builder in `ironclaw_assistant::reborn_services::trace_credits`.
     pub note: String,
 }
 

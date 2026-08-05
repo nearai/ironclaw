@@ -17,7 +17,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_events::{EventSink, RuntimeEvent};
+use ironclaw_event_log::{EventSink, RuntimeEvent};
 use ironclaw_host_api::{
     ids::{CapabilityId, ProcessId},
     resource::{ResourceScope, ResourceUsage},

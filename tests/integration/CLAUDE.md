@@ -349,7 +349,7 @@ scripted default id is not a vision pattern, so image parts are dropped for it.
 
 ### OAuth / product-auth
 
-Available from crate `ironclaw_reborn_composition::test_support`, gated on
+Available from crate `ironclaw_composition::test_support`, gated on
 `#[cfg(feature = "test-support")]`.
 
 **`ScriptedOAuthTokenEgress`** — `RuntimeHttpEgress` impl returning a fixed
@@ -400,14 +400,14 @@ On a harness built from a `live_approvals` group:
 
 - `extension_installation_store_for_test()` — returns the `Option<Arc<dyn ExtensionInstallationStorePort>>` wired into the local-dev extension management port; mirrors the production installation store for test read-back assertions. Returns `None` when the local runtime has no extension management wired.
 
-`ironclaw_reborn_composition::test_support` exposes:
+`ironclaw_composition::test_support` exposes:
 
 - `build_secret_store_for_test(root, scoped)` — returns the `Arc<ironclaw_secrets::SecretStore<F>>` that production standalone composition builds (via `factory::build_secret_store`); for store read-back in secrets tests.
 - `build_runtime_with_resource_governor_for_test(input)` — builds the ordinary production-composed runtime and returns the exact `ResourceGovernor` wired into its capability path. Use only for reservation read-back; resource policy remains owned by `ironclaw_resources`.
 
 `RebornRuntime` (returned by `build_runtime`, test-only methods defined in
-`crates/ironclaw_reborn_composition/src/runtime.rs` and
-`crates/ironclaw_reborn_composition/src/runtime/test_support.rs`) exposes:
+`crates/ironclaw_composition/src/runtime.rs` and
+`crates/ironclaw_composition/src/runtime/test_support.rs`) exposes:
 
 - `outbound_delivery_stores_for_test()` — the exact composition-owned outbound
   stores, including the reply-intent store shared by the built-in

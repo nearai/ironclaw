@@ -13,7 +13,7 @@ use ironclaw_extension_contracts::extension::{
     Extension, ExtensionContract, ExtensionInstanceId, ExtensionRuntimeIdentity,
 };
 use ironclaw_extension_contracts::tool_adapter::ToolAdapter;
-use ironclaw_extensions::ResolvedExtensionManifest;
+use ironclaw_extension_registry::ResolvedExtensionManifest;
 use ironclaw_host_api::{
     capability::CapabilityDescriptor, ids::CapabilityId, runtime::TrustClass,
     trust::RequestedTrustClass,

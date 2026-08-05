@@ -24,7 +24,7 @@ use std::{
 use axum::{Router, extract::State, routing::post};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_authorization::GrantAuthorizer;
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_extension_registry::ExtensionRegistry;
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::result_meta::FailureKind;
 use ironclaw_host_api::{

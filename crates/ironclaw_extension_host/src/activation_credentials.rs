@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_extensions::ExtensionPackage;
+use ironclaw_extension_registry::ExtensionPackage;
 use ironclaw_host_api::decision::RuntimeCredentialAuthRequirement;
 use ironclaw_product_contracts::error::ProductOperationFailure;
 
@@ -81,7 +81,7 @@ mod tests {
         ExtensionActivationCredentialGate, ExtensionActivationCredentialReadiness,
         UnavailableExtensionActivationCredentialGate, missing_activation_credentials_error,
     };
-    use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ManifestSource};
+    use ironclaw_extension_registry::{ExtensionManifest, ExtensionPackage, ManifestSource};
     use ironclaw_host_api::path::VirtualPath;
     use ironclaw_product_contracts::error::ProductOperationFailure;
 

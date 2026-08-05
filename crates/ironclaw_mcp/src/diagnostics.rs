@@ -137,7 +137,11 @@ impl McpResponseErrorCause {
                 }
                 if let Some(message) = message {
                     reason.push_str(": ");
-                    reason.push_str(&message);
+                    // The only production producer (`parse_json_rpc_error_info`)
+                    // already bounds and control-strips this, but the cap is
+                    // this module's invariant, not the caller's — a second
+                    // producer must not be able to reopen it.
+                    reason.push_str(&bound_mcp_reason_detail(&message));
                 }
                 reason
             }
@@ -154,6 +158,39 @@ impl McpResponseErrorCause {
             }
         }
     }
+}
+
+/// Per-cause host-egress failure tokens.
+///
+/// The `egress` seam classifies ("the egress future panicked", "the host
+/// runtime refused it"); this module names. Before these existed, `egress.rs`
+/// minted `"runtime_http_egress_panicked"` inline and forwarded
+/// `stable_runtime_reason()` verbatim — the one live exception to the crate
+/// charter's "no module builds a failure string of its own", and the reason the
+/// model-visible token set was not fully enumerable here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpEgressCause {
+    /// The host runtime egress future panicked.
+    RuntimeEgressPanicked,
+    /// The host runtime egress refused or failed the request, reported as one
+    /// of `RuntimeHttpEgressError`'s stable, host-owned reason codes.
+    RuntimeEgressFailed(&'static str),
+}
+
+impl McpEgressCause {
+    fn into_reason(self) -> String {
+        match self {
+            Self::RuntimeEgressPanicked => "runtime_http_egress_panicked".to_string(),
+            // Already a closed set of `&'static str` codes owned by
+            // `ironclaw_host_api`, but bounded here anyway: the cap is this
+            // module's invariant, not the producer's.
+            Self::RuntimeEgressFailed(code) => bound_mcp_reason_detail(code),
+        }
+    }
+}
+
+pub(crate) fn egress_failure(cause: McpEgressCause) -> String {
+    cause.into_reason()
 }
 
 pub(crate) fn request_denied(cause: McpRequestDeniedCause) -> String {

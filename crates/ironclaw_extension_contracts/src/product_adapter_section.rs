@@ -11,7 +11,7 @@
 //! `ManifestSectionPath` it was declared at, walking the manifest's host-API
 //! list, and the `HostApiManifestContract` that hooks this schema into v2
 //! manifest ingestion — is the registry's, in
-//! `ironclaw_extensions::host_api::product_adapter`. That split is PROPOSAL
+//! `ironclaw_extension_registry::host_api::product_adapter`. That split is PROPOSAL
 //! §6.1.2 (this crate: "manifest-surface descriptors", "parses no manifests")
 //! against §6.8.1 (the registry: "manifest schemas … resolved + digest").
 
@@ -517,6 +517,156 @@ handle = "example_bot_token"
             descriptor: webhook_descriptor(route_id),
             credential_handles: credential_handles.iter().map(|h| h.to_string()).collect(),
         }
+    }
+
+    /// Resolve an arbitrary `[product_adapter.*]` section body through the
+    /// real wire path, so these cases exercise deserialization + `resolve` +
+    /// `validate` exactly as manifest ingestion does.
+    fn project_toml(section: &str) -> Result<ProductAdapterSection, ProductAdapterSectionError> {
+        let declaration: ProductAdapterSectionDeclaration =
+            toml::from_str(section).expect("section declaration deserializes");
+        let extension_id = ExtensionId::new("example-v2").expect("extension id");
+        declaration.resolve(&extension_id, "inbound")
+    }
+
+    /// The cross-field invariants that came over from
+    /// `ironclaw_assistant::adapter_registry` with WS5.
+    ///
+    /// Three of them arrived with no assertion anywhere: a duplicate
+    /// credential handle, a duplicate `(host, handle)` egress pair, and the
+    /// RFC 7230 token rule on every header/cookie name the auth requirement
+    /// carries. Each is a fail-closed rule whose regression is silent — a
+    /// duplicate handle would resolve to one binding, a duplicate egress pair
+    /// would double-declare a host, and a header name with a separator or
+    /// control character would be split or smuggled downstream — so each is
+    /// pinned here rather than left to the ingestion suite, which covers only
+    /// the ingress half.
+    #[test]
+    fn section_rejects_duplicate_handles_duplicate_egress_and_non_token_names() {
+        const VALID_BASE: &str = r#"
+surface_kind = "external_channel"
+[auth]
+kind = "shared_secret_header"
+header_name = "X-Example-Secret-Token"
+[capabilities]
+flags = ["inbound_messages"]
+[[required_credentials]]
+handle = "example_bot_token"
+"#;
+        project_toml(VALID_BASE)
+            .expect("the base section must be valid, or nothing below proves anything");
+
+        // Duplicate credential handle.
+        let err = project_toml(&format!(
+            "{VALID_BASE}\n[[required_credentials]]\nhandle = \"example_bot_token\"\n"
+        ))
+        .expect_err("a repeated credential handle must reject");
+        assert!(
+            matches!(
+                err,
+                ProductAdapterSectionError::DuplicateCredentialHandle { ref handle }
+                    if handle.as_str() == "example_bot_token"
+            ),
+            "got {err:?}"
+        );
+
+        // Duplicate `(host, credential_handle)` egress pair. The same host with
+        // a *different* handle is legitimate, so only the exact pair collides.
+        let err = project_toml(&format!(
+            "{VALID_BASE}\n\
+             [[egress]]\nhost = \"api.example.com\"\ncredential_handle = \"example_bot_token\"\n\
+             [[egress]]\nhost = \"api.example.com\"\ncredential_handle = \"example_bot_token\"\n"
+        ))
+        .expect_err("a repeated (host, handle) egress pair must reject");
+        assert!(
+            matches!(err, ProductAdapterSectionError::DuplicateEgressTarget),
+            "got {err:?}"
+        );
+        project_toml(&format!(
+            "{VALID_BASE}\n\
+             [[required_credentials]]\nhandle = \"example_other_token\"\n\
+             [[egress]]\nhost = \"api.example.com\"\ncredential_handle = \"example_bot_token\"\n\
+             [[egress]]\nhost = \"api.example.com\"\ncredential_handle = \"example_other_token\"\n"
+        ))
+        .expect("the same host under two distinct handles is not a duplicate");
+
+        // Egress naming a handle that was never declared.
+        let err = project_toml(&format!(
+            "{VALID_BASE}\n[[egress]]\nhost = \"api.example.com\"\ncredential_handle = \"not_declared\"\n"
+        ))
+        .expect_err("egress must not name an undeclared handle");
+        assert!(
+            matches!(
+                err,
+                ProductAdapterSectionError::UndeclaredEgressCredentialHandle { ref handle }
+                    if handle.as_str() == "not_declared"
+            ),
+            "got {err:?}"
+        );
+
+        // RFC 7230 token rule, on every field `validate_auth_requirement`
+        // routes through `validate_http_token` — including
+        // `auth.timestamp_header_name`, the optional one a rename could drop
+        // from validation without any other case noticing.
+        for (label, auth, field) in [
+            (
+                "empty shared-secret header",
+                "kind = \"shared_secret_header\"\nheader_name = \"\"",
+                "auth.header_name",
+            ),
+            (
+                "separator in shared-secret header",
+                "kind = \"shared_secret_header\"\nheader_name = \"X-Bad Header\"",
+                "auth.header_name",
+            ),
+            (
+                "control char in signature header",
+                "kind = \"request_signature\"\nheader_name = \"X-Sig\\u0007\"",
+                "auth.header_name",
+            ),
+            (
+                "separator in timestamp header",
+                "kind = \"request_signature\"\nheader_name = \"X-Sig\"\ntimestamp_header_name = \"X-Ts;v=1\"",
+                "auth.timestamp_header_name",
+            ),
+            (
+                "empty timestamp header",
+                "kind = \"request_signature\"\nheader_name = \"X-Sig\"\ntimestamp_header_name = \"\"",
+                "auth.timestamp_header_name",
+            ),
+            (
+                "separator in session cookie name",
+                "kind = \"session_cookie\"\nname = \"sid=x\"",
+                "auth.name",
+            ),
+        ] {
+            let section = format!(
+                "surface_kind = \"external_channel\"\n\
+                 [auth]\n{auth}\n\
+                 [capabilities]\nflags = [\"inbound_messages\"]\n"
+            );
+            let err = project_toml(&section)
+                .expect_err(&format!("{label}: a non-token name must reject"));
+            match err {
+                ProductAdapterSectionError::InvalidValue {
+                    field: reported, ..
+                } => assert_eq!(
+                    reported, field,
+                    "{label}: the rejection must name the field it validated"
+                ),
+                other => panic!("{label}: expected InvalidValue, got {other:?}"),
+            }
+        }
+
+        // A valid `timestamp_header_name` still resolves, so the rule above is
+        // rejecting the token shape and not the field itself.
+        project_toml(
+            "surface_kind = \"external_channel\"\n\
+             [auth]\nkind = \"request_signature\"\nheader_name = \"X-Sig\"\n\
+             timestamp_header_name = \"X-Timestamp\"\n\
+             [capabilities]\nflags = [\"inbound_messages\"]\n",
+        )
+        .expect("a valid RFC 7230 timestamp header must resolve");
     }
 
     #[test]

@@ -4,11 +4,11 @@
 //! (arch-simplification §5.3.2/§9): trust is now *computed by the kernel* rather
 //! than received as a pre-stamped `trust_decision` request field. The kernel
 //! already depends on `ironclaw_trust` (the `TrustPolicy` trait it reuses) and on
-//! `ironclaw_extensions` (the registry it walks), so this move adds no dependency
+//! `ironclaw_extension_registry` (the registry it walks), so this move adds no dependency
 //! edge — it just relocates a pure classification over those inputs to the single
 //! authority site.
 
-use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
+use ironclaw_extension_registry::{ExtensionPackage, ExtensionRegistry};
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_host_api::trust::TrustPolicyInput;
 use ironclaw_trust::{TrustDecision, TrustPolicy};
@@ -110,7 +110,7 @@ fn trust_policy_input_for_package(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_extensions::{ExtensionManifest, ManifestSource};
+    use ironclaw_extension_registry::{ExtensionManifest, ManifestSource};
     use ironclaw_host_api::{
         approval::sha256_digest_token, host_port::HostPortCatalog, path::VirtualPath,
         trust::PackageSource,
@@ -121,11 +121,11 @@ mod tests {
     // policy input must carry the manifest path as `PackageSource::LocalManifest`
     // and the manifest digest, so the host trust policy classifies the package
     // from its on-disk identity.
-    fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
-        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    fn capability_provider_contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
+        let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
         contracts
             .register(std::sync::Arc::new(
-                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                     .expect("capability provider contract"),
             ))
             .expect("register capability provider contract");

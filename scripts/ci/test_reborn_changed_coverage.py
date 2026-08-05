@@ -151,7 +151,7 @@ class PreimageMappingTests(unittest.TestCase):
     def _parse(self, diff: str) -> gate.DiffChanges:
         return gate.parse_diff(diff, gate.ProductionPaths(ROOT))
 
-    PATH = "crates/ironclaw_product/src/lib.rs"
+    PATH = "crates/ironclaw_assistant/src/lib.rs"
 
     def test_modified_lines_pair_one_to_one(self):
         changes = self._parse(
@@ -203,7 +203,7 @@ class PreimageMappingTests(unittest.TestCase):
         self.assertEqual(changes.preimage, {})
 
     def test_a_rename_resolves_the_preimage_to_the_old_path(self):
-        old = "crates/ironclaw_product/src/old_home.rs"
+        old = "crates/ironclaw_assistant/src/old_home.rs"
         changes = self._parse(
             f"diff --git a/{old} b/{self.PATH}\n"
             "similarity index 92%\n"
@@ -237,7 +237,7 @@ class PreimageMappingTests(unittest.TestCase):
 class BaseCoverageDecisionTests(unittest.TestCase):
     """Only a positively observed uncovered pre-image may leave the gate."""
 
-    PATH = "crates/ironclaw_product/src/lib.rs"
+    PATH = "crates/ironclaw_assistant/src/lib.rs"
 
     def _base(self, hits: dict[int, int]) -> gate.Coverage:
         return gate.Coverage(lines={self.PATH: dict(hits)}, branches={})

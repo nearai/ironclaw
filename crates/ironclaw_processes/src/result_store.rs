@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_events::sanitize_error_kind;
+use ironclaw_event_log::sanitize_error_kind;
 use ironclaw_filesystem::{CasExpectation, ContentType, Entry, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     ids::ProcessId,

@@ -2,12 +2,13 @@
 use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
+use ironclaw_assistant::RebornChannelConnectStrategy;
 use ironclaw_extension_contracts::{
     hosted_mcp::{HostedMcpAuthSelection, HostedMcpEndpoint, RegisterHostedMcpRequest},
     lifecycle_id::LifecyclePackageId,
     state::InstallationState,
 };
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
 };
 use ironclaw_host_api::{
@@ -25,7 +26,6 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
-use ironclaw_product::RebornChannelConnectStrategy;
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::package_lifecycle::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
@@ -914,12 +914,12 @@ mod tests {
         invoke_json_with_standalone_approval, invoke_with_standalone_approval,
         lifecycle_product_context,
     };
+    use ironclaw_assistant::RebornChannelConnectStrategy;
     use ironclaw_extension_contracts::state::InstallationState;
     use ironclaw_extension_contracts::{
         hosted_mcp::{HostedMcpAuthSelection, HostedMcpEndpoint, RegisterHostedMcpRequest},
         lifecycle_id::LifecyclePackageId,
     };
-    use ironclaw_product::RebornChannelConnectStrategy;
     use ironclaw_product_contracts::lifecycle_service::LifecycleProductService;
     use ironclaw_product_contracts::package_lifecycle::{
         ChannelConnectionRequirement, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
@@ -2077,7 +2077,7 @@ mod tests {
     /// declares only `network` + `use_secret`: scripting a discovered tool
     /// with a `destructiveHint` annotation (see
     /// `discovered_tool_requires_external_write` in
-    /// `ironclaw_extensions::hosted_mcp_discovery`) makes the DISCOVERED
+    /// `ironclaw_extension_registry::hosted_mcp_discovery`) makes the DISCOVERED
     /// package carry `ExternalWrite` while the SEED package never does —
     /// exactly the shape needed to fail if publish ever ran on the wrong
     /// package.
@@ -2431,8 +2431,8 @@ mod tests {
 
         let reason = format!(
             "{}\n\n{}",
-            ironclaw_reborn_config::google_remediation_text(),
-            ironclaw_reborn_config::apply_step_text()
+            ironclaw_config::google_remediation_text(),
+            ironclaw_config::apply_step_text()
         );
         let mapped = lifecycle_error(ProductOperationFailure::ProviderInstanceNotConfigured {
             reason: reason.clone(),

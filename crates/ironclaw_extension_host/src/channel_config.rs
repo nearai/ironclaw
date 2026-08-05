@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_extension_contracts::recipe::RecipeSecretField;
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     ExtensionInstallationStorePort, ExtensionManifestRecord, ResolvedExtensionManifest,
 };
 use ironclaw_filesystem::RootFilesystem;
@@ -678,7 +678,7 @@ fn channel_config_admin_idempotency_key(
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ironclaw_extensions::{
+    use ironclaw_extension_registry::{
         ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
         ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
     };
@@ -845,7 +845,8 @@ fields = [
                     .expect("valid test path"),
                 ironclaw_host_api::host_port::default_host_port_catalog()
                     .expect("host port catalog"),
-                ironclaw_extensions::default_host_api_contract_registry().expect("contracts"),
+                ironclaw_extension_registry::default_host_api_contract_registry()
+                    .expect("contracts"),
             )
             .await
             .expect("filesystem extension installation store"),
@@ -855,7 +856,7 @@ fields = [
             ManifestSource::HostBundled,
             &ironclaw_host_api::host_port::default_host_port_catalog().expect("catalog"),
             None,
-            &ironclaw_extensions::default_host_api_contract_registry().expect("contracts"),
+            &ironclaw_extension_registry::default_host_api_contract_registry().expect("contracts"),
             None,
         )
         .expect("fixture manifest parses");
@@ -869,7 +870,7 @@ fields = [
                     ExtensionManifestRef::new(extension_id, None),
                     Vec::new(),
                     chrono::Utc::now(),
-                    ironclaw_extensions::InstallationOwner::Tenant,
+                    ironclaw_extension_registry::InstallationOwner::Tenant,
                 )
                 .expect("installation"),
             )
