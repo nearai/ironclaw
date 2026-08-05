@@ -152,6 +152,51 @@ def top_level_operands(expression: str) -> list[str]:
     return operands
 
 
+def without_typescript_comments_and_strings(text: str) -> str:
+    """Mask TypeScript comments and string literals while preserving offsets."""
+
+    masked = list(text)
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character in {"'", '"', "`"}:
+            quote = character
+            masked[index] = " "
+            index += 1
+            escaped = False
+            while index < len(text):
+                character = text[index]
+                if character != "\n":
+                    masked[index] = " "
+                index += 1
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == quote:
+                    break
+            continue
+        if text.startswith("//", index):
+            while index < len(text) and text[index] != "\n":
+                masked[index] = " "
+                index += 1
+            continue
+        if text.startswith("/*", index):
+            masked[index : index + 2] = [" ", " "]
+            index += 2
+            while index < len(text):
+                if text.startswith("*/", index):
+                    masked[index : index + 2] = [" ", " "]
+                    index += 2
+                    break
+                if text[index] != "\n":
+                    masked[index] = " "
+                index += 1
+            continue
+        index += 1
+    return "".join(masked)
+
+
 def git(repo: Path, *args: str) -> str:
     result = subprocess.run(
         ("git", "-C", str(repo), *args),
@@ -387,7 +432,7 @@ def has_meaningful_python_assertion(text: str) -> bool:
 
 
 def has_meaningful_typescript_assertion(text: str) -> bool:
-    text = without_comment_lines(text, ("//", "/*", "*"))
+    text = without_typescript_comments_and_strings(text)
     for match in re.finditer(
         r"expect\s*\((.*?)\)\s*\.\s*"
         r"(to[A-Z]\w*|resolves|rejects)(?:\.\w+)?\s*\((.*?)\)",

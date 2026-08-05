@@ -457,6 +457,31 @@ expect_fail "tautological node:assert TypeScript assertions" \
   "no meaningful changed regression assertion" \
   run_check "$typescript_node_assert_tautology"
 
+typescript_node_assert_string="$TMP_ROOT/typescript-node-assert-string"
+init_repo "$typescript_node_assert_string"
+mkdir -p "$typescript_node_assert_string/tests"
+cat > "$typescript_node_assert_string/tests/regression.test.ts" <<'EOF'
+test("does not accept assertion-shaped strings", () => {
+  const docs = "assert.equal(actualStatus(), fixedStatus())";
+  renderDocumentation(docs);
+});
+EOF
+expect_fail "node:assert text in a TypeScript string" \
+  "no meaningful changed regression assertion" \
+  run_check "$typescript_node_assert_string"
+
+typescript_node_assert_inline_comment="$TMP_ROOT/typescript-node-assert-inline-comment"
+init_repo "$typescript_node_assert_inline_comment"
+mkdir -p "$typescript_node_assert_inline_comment/tests"
+cat > "$typescript_node_assert_inline_comment/tests/regression.test.ts" <<'EOF'
+test("does not accept assertions in inline comments", () => {
+  work(); /* assert.equal(actualStatus(), fixedStatus()); */
+});
+EOF
+expect_fail "node:assert text in an inline TypeScript comment" \
+  "no meaningful changed regression assertion" \
+  run_check "$typescript_node_assert_inline_comment"
+
 shell_test="$TMP_ROOT/shell"
 init_repo "$shell_test"
 mkdir -p "$shell_test/scripts/ci"
