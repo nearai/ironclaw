@@ -7257,6 +7257,40 @@ async fn read_file_tolerates_stray_nul_and_invalid_utf8_in_text_logs() {
 }
 
 #[tokio::test]
+async fn write_file_overwrites_a_readable_text_log_with_a_stray_nul() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut original = b"Jan  1 00:00:00 host sshd[1]: Failed password for root\n".to_vec();
+    original.push(0u8);
+    original.extend_from_slice(b"Jan  1 00:00:01 host sshd[1]: more log line\n");
+    let log_path = temp.path().join("syslog.log");
+    tokio::fs::write(&log_path, original).await.unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/syslog.log"}),
+        context.clone(),
+    )
+    .await
+    .expect("text log with a stray NUL must be readable");
+
+    invoke_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/syslog.log", "content": "redacted log\n"}),
+        context,
+    )
+    .await
+    .expect("a text log accepted by read_file must remain writable");
+
+    assert_eq!(tokio::fs::read(log_path).await.unwrap(), b"redacted log\n");
+}
+
+#[tokio::test]
 async fn read_file_still_rejects_nul_dense_binary() {
     // Genuine binary (NUL-dense): must still be kept out of context rather than
     // dumped as U+FFFD soup. 25% NUL bytes clears both the floor and the ratio.
