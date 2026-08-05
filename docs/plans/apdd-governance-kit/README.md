@@ -4,8 +4,8 @@ Evaluation of the **APDD Kit** ("Agent Product Design & Development") — a
 stack-agnostic governance framework for building UI software with an AI coding
 agent — and a proposal + phased plan for integrating it into IronClaw.
 
-**Source evaluated:** `/Users/rondisandro/devprojects/github/apdd-kit` (git
-`61daaa2`).
+**Source evaluated:** [`rdisandro/apdd-kit`](https://github.com/rdisandro/apdd-kit)
+@ `61daaa2` (evaluated from a local clone).
 
 ## TL;DR — the decision
 
@@ -15,8 +15,9 @@ agent — and a proposal + phased plan for integrating it into IronClaw.
 > skills library, ~30 CI workflows. The kit's **net-new value** is its
 > **Design/UX governance track** (which IronClaw lacks entirely) and a **living
 > docs-first feature workflow** — and both land on a React/Vite/Tailwind/Vitest
-> frontend (with an emerging `src/design-system/` and Storybook already in
-> `node_modules`) that fits them with unusually low friction. **Skip** the kit's
+> frontend (with an emerging `src/design-system/`; Storybook is not yet a
+> declared dependency, so adoption is a small, pinned install) that fits them
+> with unusually low friction. **Skip** the kit's
 > backend MVVM layer rules — IronClaw's crate architecture rules own that ground.
 
 **Effort:** ~1–2 weeks for the full rollout; **~1 week (Phases 0–2) captures the
@@ -35,8 +36,10 @@ majority of the value.** Fully additive and reversible.
 
 A visual, diagram-first overview of the kit's benefits, functionality, and the
 agentic-OS framework — plus the IronClaw overlap/gap map and rollout — is
-published as a shareable claude.ai artifact. See the link in the conversation /
-PR description that accompanies this branch.
+published as a shareable claude.ai artifact:
+<https://claude.ai/code/artifact/5bef4973-c97b-41ba-99c1-0607bbbf73fb>
+(also linked from PR #7255). The artifact is a convenience view; the Markdown in
+this folder is the source of truth.
 
 ## What this branch contains
 

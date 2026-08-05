@@ -3,7 +3,7 @@
 **Status:** Evaluation (no code changes proposed in this branch — docs only)
 **Date:** 2026-08-04
 **Author:** Ron (with Claude Code)
-**Source:** `/Users/rondisandro/devprojects/github/apdd-kit` (git `61daaa2`, "APDD Kit")
+**Source:** [`rdisandro/apdd-kit`](https://github.com/rdisandro/apdd-kit) @ `61daaa2` ("APDD Kit") — evaluated from a local clone at `/Users/rondisandro/devprojects/github/apdd-kit`.
 
 > This document evaluates the **APDD Kit** ("Agent Product Design &
 > Development") as a candidate governance framework for IronClaw. It describes
@@ -138,13 +138,19 @@ the design track targets. It already has:
 
 - an emerging **`src/design-system/`** (`theme.ts`, `theme.test.tsx`) and
   `src/styles/theme-colors.test.ts` — a design system *without a constitution*;
-- **Storybook already present in `node_modules`** (transitively) but **not
-  configured** — no `.storybook/`, not in `package.json` scripts;
+- **no Storybook configured** — no `.storybook/`, and Storybook is a declared
+  dependency of **neither `package.json` nor `pnpm-lock.yaml`**. (A stray
+  `storybook`/`@storybook` copy exists in the gitignored local `node_modules`,
+  but it is not lockfile-backed — a clean `pnpm install` would not restore it,
+  so it signals nothing about intent);
 - a real component/page tree (`src/components/`, `src/pages/{chat,missions,
   projects,settings,extensions,onboarding,…}`), and light/dark theming.
 
 In other words, the single biggest gap the kit fills (design governance) lands
-on a frontend that is one `npx storybook init` away from adopting it.
+on a frontend that is a small, well-understood step from adopting it — a pinned
+`pnpm add -D` of Storybook + addons plus a `.storybook/` config (Phase 2 of the
+plan) — on a stack (React 19 / Vite / Tailwind v4 / Vitest, pnpm@11.7.0) that
+Storybook supports directly.
 
 ---
 

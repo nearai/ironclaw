@@ -57,7 +57,7 @@ is additive and copy-in; nothing forces a rewrite of existing crates or CI.
 |---|---|---|
 | **`DESIGN.md` constitution** | Highest-leverage gap; agentic UI without it invites hallucinated props/hex and skipped a11y. | New root or `docs/design/DESIGN.md`, seeded from `templates/DESIGN.template.md`; substitute React/Tailwind/`ironclaw` token prefix. |
 | **Design/UX `.claude/rules/`** (styling, theming, a11y, taxonomy, handoff) | Auto-load on frontend edits — the mechanism IronClaw already trusts, applied to a surface that has none. | `.claude/rules/design.md` (+ optional `design-a11y.md`), `paths:` scoped to `crates/ironclaw_webui/frontend/src/**`. |
-| **Storybook workbench + MCP + stories-as-tests** | Storybook is already in `node_modules`; wiring it gives isolated component dev, `get-documentation` prop-grounding, and a11y/token/interaction tests in the existing Vitest. | Configure `.storybook/` in the frontend; add `@storybook/addon-{vitest,a11y,docs,mcp}`; author stories per Tier-2/3 component. |
+| **Storybook workbench + MCP + stories-as-tests** | Isolated component dev, `get-documentation` prop-grounding, and a11y/token/interaction tests in the existing Vitest. Storybook is *not* a declared dependency today (absent from `package.json` and `pnpm-lock.yaml`), so adoption is an explicit, pinned install — not "already there." | Add pinned `storybook` + `@storybook/addon-{vitest,a11y,docs,mcp}` as `devDependencies` via **pnpm**, commit the lockfile, configure `.storybook/`, and author stories per Tier-2/3 component. |
 | **Component taxonomy (5-tier purity model)** | Codifies the implicit `components/` (pure) vs `pages/` (bound) split so Tiers 2–3 stay renderable in isolation. | Section in `DESIGN.md`; enforced by the design rule + REJECT list. |
 | **Critical User Journeys registry + `critical-flows` rule** | Turns IronClaw's e2e/Playwright coverage into a named regression baseline with a hot-path auto-load trigger. | `docs/_reference/CRITICAL_FLOWS.md` (or `docs/qa/CRITICAL_FLOWS.md`) + `.claude/rules/critical-flows.md`. |
 
@@ -66,7 +66,7 @@ is additive and copy-in; nothing forces a rewrite of existing crates or CI.
 | Component | Adaptation |
 |---|---|
 | **Docs-first feature workflow (Layer ①)** | Adopt the three-doc set + registry, but **scope it to WebUI/product-surface features** and prefer the **lightweight single-file `FEATURE.md` tier** for most. Keep the existing `docs/plans/*` dated plans for backend/infra epics. Use a light `docs/<slug>/` under a product-features area rather than mandating it repo-wide. |
-| **`embedded-ai-agents` module** | IronClaw *is* an embedded-AI-agent product, but its invariants (LLM-data-never-deleted, keys/secrets handling, capability-dispatch scoping, credential/extension identity) are already written — just scattered across CLAUDE.md and safety rules. Use the module as a **checklist to consolidate them into one "What NOT to do" invariant list** referenced from CLAUDE.md. Do not import the module's generic multi-tenant SaaS framing verbatim. |
+| **`embedded-ai-agents` module** | IronClaw *is* an embedded-AI-agent product. Consolidate the module's invariants into one referenced "What NOT to do" list rather than importing its multi-tenant SaaS framing. Map **each** invariant named in [EVALUATION.md](EVALUATION.md) §1 to its IronClaw home so none is lost: **(a) keys encrypted at rest** → the secrets/credential-storage path (the `credential_name` identity + safety rules); **(b) per-agent config in the DB, not env vars** → IronClaw's DB-backed config persisted through the `RootFilesystem` mount catalog; **(c) tenant/scoped context on every LLM call** → capability-dispatch scoping + the scoped-filesystem tenant isolation; plus IronClaw's own **LLM-data-is-never-deleted** and **credential/extension identity** invariants. Each already exists in a CLAUDE.md/safety rule — the consolidation only cross-links them. |
 | **Code-to-feature mapping (`// Feature: <slug>`)** | For the **frontend**, adopt lightweight headers so the design/feature docs are discoverable on edit. For the **backend**, keep the knowledge graph + `openwiki/` — it is a superior discovery layer the kit lacks. Do not blanket the crates with comment headers. |
 | **Enforcement templates** | IronClaw's CI already exceeds the kit's. **Adapt only the design-specific additions**: a Storybook/a11y CI job and (optionally later) Chromatic visual regression. Do not touch the existing hook/CI stack. |
 
@@ -90,7 +90,10 @@ is additive and copy-in; nothing forces a rewrite of existing crates or CI.
   rule** (tokens, a11y, taxonomy, handoff) — verified by inspection.
 - **Storybook runs** in the frontend with the MCP addon, and at least the
   **atoms/primitives** ship stories with a smoke play test, a token/CSS check,
-  and passing a11y (axe) checks; these run in the existing Vitest lane.
+  and **passing a11y (axe) checks for every component that ships a story**.
+  These run in the existing Vitest lane; the CI a11y check starts non-blocking
+  and is promoted to a blocking gate once the covered set is clean (see the
+  Phase 2 a11y-gate definition in [INTEGRATION_PLAN.md](INTEGRATION_PLAN.md)).
 - A **`CRITICAL_FLOWS.md`** catalogs IronClaw's real end-to-end journeys (e.g.
   onboarding/pairing, chat turn, extension auth, mission run) with hot-path
   files, and a `critical-flows` rule auto-loads on those paths.
