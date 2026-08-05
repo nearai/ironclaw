@@ -28,6 +28,23 @@ import { NEW_DRAFT_KEY } from "./lib/draft-store";
 import { buildRuntimeContext } from "./lib/runtime-context";
 import { buildScopedLogsPath } from "../logs/lib/logs-data";
 import { useInterfacePreferences } from "../../lib/interface-preferences";
+import {
+  inspectorDebugEnabled,
+  latestInspectorRunId,
+} from "./inspector/inspector-state";
+
+let LazyInspectorPanel: React.LazyExoticComponent<
+  React.ComponentType<{ threadId: string | null; runId: string | null }>
+> | null = null;
+
+function getInspectorPanel() {
+  LazyInspectorPanel ??= React.lazy(() =>
+    import("./inspector/inspector-panel").then(({ InspectorPanel }) => ({
+      default: InspectorPanel,
+    })),
+  );
+  return LazyInspectorPanel;
+}
 
 /* Grace window before an active thread's sidebar state is cleared to idle.
  * Long enough for SSE to rehydrate a gate/run after a thread switch (so a
@@ -144,6 +161,15 @@ export function Chat({
     Boolean(activeThreadId) && Boolean(pendingOnboarding);
   const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
   const activeRunId = activeRun?.runId || null;
+  const inspectorEnabled = React.useMemo(
+    () => inspectorDebugEnabled(window.location.search),
+    [],
+  );
+  const inspectorRunId = React.useMemo(
+    () => latestInspectorRunId(activeRun, messages),
+    [activeRun, messages],
+  );
+  const InspectorPanel = inspectorEnabled ? getInspectorPanel() : null;
   const showTypingIndicator =
     activeThreadIsProcessing &&
     !activeThreadHasGate;
@@ -537,6 +563,11 @@ export function Chat({
         open={shortcutsOpen}
         onClose={() => setShortcutsOpen(false)}
       />
+      {InspectorPanel && (
+        <React.Suspense fallback={null}>
+          <InspectorPanel threadId={activeThreadId} runId={inspectorRunId} />
+        </React.Suspense>
+      )}
     </div>
   );
 }
