@@ -1,5 +1,5 @@
 use ironclaw_host_api::ids::CapabilityId;
-use ironclaw_wasm::{WasmError, WasmLogLevel, WasmLogRecord, sanitize_wasm_diagnostic};
+use ironclaw_wasm::{WasmError, WasmLogRecord, sanitize_wasm_diagnostic};
 
 pub(super) fn log_wasm_runtime_error(capability_id: &CapabilityId, error: &WasmError) {
     if let WasmError::ExecutionFailed { message, logs, .. } = error {
@@ -36,35 +36,21 @@ pub(super) fn log_wasm_guest_error(
 }
 
 fn log_wasm_guest_logs(capability_id: &CapabilityId, logs: &[WasmLogRecord]) {
+    // Always emitted at `debug!`, never at the guest's own `log.level`: WASM
+    // capability dispatch is background work relative to the REPL, and
+    // `info!`/`warn!` from a background task corrupt the REPL/TUI (see
+    // CLAUDE.md "Logging levels matter for REPL/TUI"). An untrusted guest
+    // must not be able to pick host log severity. The guest's requested
+    // level is preserved as the `guest_level` field instead of being
+    // dropped.
     for log in logs {
         let message = sanitize_wasm_diagnostic(&log.message);
-        match log.level {
-            WasmLogLevel::Trace => tracing::trace!(
-                capability_id = %capability_id,
-                wasm_log = %message,
-                "WASM guest log"
-            ),
-            WasmLogLevel::Debug => tracing::debug!(
-                capability_id = %capability_id,
-                wasm_log = %message,
-                "WASM guest log"
-            ),
-            WasmLogLevel::Info => tracing::info!(
-                capability_id = %capability_id,
-                wasm_log = %message,
-                "WASM guest log"
-            ),
-            WasmLogLevel::Warn => tracing::warn!(
-                capability_id = %capability_id,
-                wasm_log = %message,
-                "WASM guest log"
-            ),
-            WasmLogLevel::Error => tracing::error!(
-                capability_id = %capability_id,
-                wasm_log = %message,
-                "WASM guest log"
-            ),
-        }
+        tracing::debug!(
+            capability_id = %capability_id,
+            guest_level = ?log.level,
+            wasm_log = %message,
+            "WASM guest log"
+        );
     }
 }
 
@@ -94,8 +80,8 @@ mod tests {
     };
     use ironclaw_resources::InMemoryResourceGovernor;
     use ironclaw_wasm::{
-        WASM_DIAGNOSTIC_MAX_BYTES, WASM_DIAGNOSTIC_REDACTION_MARKER, WitToolHost, WitToolRuntime,
-        WitToolRuntimeConfig,
+        WASM_DIAGNOSTIC_MAX_BYTES, WASM_DIAGNOSTIC_REDACTION_MARKER, WasmLogLevel, WitToolHost,
+        WitToolRuntime, WitToolRuntimeConfig,
     };
     use serde_json::json;
     use tracing::field::{Field, Visit};
@@ -260,20 +246,21 @@ mod tests {
                 .all(|event| field(event, "capability_id") == capability_id.as_str()),
             "sanitization must retain capability routing: {events:?}"
         );
+        assert!(
+            events
+                .iter()
+                .take(5)
+                .all(|event| event.level == Level::DEBUG),
+            "an untrusted guest must never control host log severity: {events:?}"
+        );
         assert_eq!(
             events
                 .iter()
                 .take(5)
-                .map(|event| event.level)
+                .map(|event| field(event, "guest_level"))
                 .collect::<Vec<_>>(),
-            vec![
-                Level::TRACE,
-                Level::DEBUG,
-                Level::INFO,
-                Level::WARN,
-                Level::ERROR,
-            ],
-            "guest log levels must survive sanitization"
+            vec!["Trace", "Debug", "Info", "Warn", "Error"],
+            "guest log levels must survive sanitization as data"
         );
 
         let diagnostics = diagnostic_fields(&events);
@@ -682,7 +669,16 @@ __OUTCOME__)
                 .iter()
                 .all(|event| field(event, "capability_id") == capability_id.as_str())
         );
-        assert_eq!(events[0].level, Level::INFO, "guest log level must survive");
+        assert_eq!(
+            events[0].level,
+            Level::DEBUG,
+            "an untrusted guest must never control host log severity"
+        );
+        assert_eq!(
+            field(&events[0], "guest_level"),
+            "Info",
+            "guest log level must survive as data"
+        );
         assert_eq!(
             events[1].level,
             Level::DEBUG,
