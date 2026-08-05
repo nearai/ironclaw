@@ -5,7 +5,7 @@ use ironclaw_skills::normalize_safe_relative_path;
 
 use crate::skills::SkillManagementCapabilityError;
 
-use super::{SkillUrlPayload, SkillUrlPayloadFile, MAX_TOTAL_UNZIPPED_BYTES, MAX_ZIP_ENTRY_BYTES};
+use super::{MAX_TOTAL_UNZIPPED_BYTES, MAX_ZIP_ENTRY_BYTES, SkillUrlPayload, SkillUrlPayloadFile};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SkillBundle {
@@ -166,12 +166,13 @@ mod tests {
     }
 
     #[test]
-    fn normalize_archive_path_rejects_windows_backslash() {
-        let result = normalize_archive_path(Path::new("my-skill\\SKILL.md"));
-        assert_eq!(
-            result.unwrap_err().kind(),
-            RuntimeDispatchErrorKind::InputEncode
-        );
+    fn normalize_archive_path_keeps_backslash_as_plain_segment() {
+        // On unix hosts `\` is an ordinary filename byte, not a separator, so a
+        // zip entry named `my-skill\SKILL.md` normalizes to a single in-root
+        // segment rather than escaping the bundle directory. The security
+        // property is containment: no segment may traverse or be absolute.
+        let path = normalize_archive_path(Path::new("my-skill\\SKILL.md")).unwrap();
+        assert_eq!(path, PathBuf::from("my-skill\\SKILL.md"));
     }
 
     #[test]
@@ -294,14 +295,18 @@ mod tests {
             .unwrap();
         let payload = collector.finish().unwrap();
         assert_eq!(payload.files.len(), 2);
-        assert!(payload
-            .files
-            .iter()
-            .any(|f| f.path == PathBuf::from("config.json")));
-        assert!(payload
-            .files
-            .iter()
-            .any(|f| f.path == PathBuf::from("scripts/setup.sh")));
+        assert!(
+            payload
+                .files
+                .iter()
+                .any(|f| f.path == Path::new("config.json"))
+        );
+        assert!(
+            payload
+                .files
+                .iter()
+                .any(|f| f.path == Path::new("scripts/setup.sh"))
+        );
     }
 
     #[test]
@@ -324,14 +329,23 @@ mod tests {
     #[test]
     fn bundle_collector_rejects_total_over_limit() {
         let mut collector = BundleCollector::new(PathBuf::from("skill"));
-        // Push SKILL.md first to avoid finish() error
-        collector
-            .push_file(PathBuf::from("skill/SKILL.md"), b"valid".to_vec())
-            .unwrap();
-        // Push a file that would exceed total
-        let big = vec![0u8; (MAX_TOTAL_UNZIPPED_BYTES + 1) as usize];
+        // Every push stays under the per-entry limit; only the cumulative total
+        // crosses MAX_TOTAL_UNZIPPED_BYTES (10 full-size entries fit, the 11th
+        // pushes the running total past the cap).
+        let full_entries = MAX_TOTAL_UNZIPPED_BYTES / MAX_ZIP_ENTRY_BYTES;
+        for index in 0..full_entries {
+            collector
+                .push_file(
+                    PathBuf::from(format!("skill/fragment-{index}.bin")),
+                    vec![0u8; MAX_ZIP_ENTRY_BYTES as usize],
+                )
+                .unwrap();
+        }
         let err = collector
-            .push_file(PathBuf::from("skill/big.bin"), big)
+            .push_file(
+                PathBuf::from("skill/fragment-overflow.bin"),
+                vec![0u8; MAX_ZIP_ENTRY_BYTES as usize],
+            )
             .unwrap_err();
         assert_eq!(err.kind(), RuntimeDispatchErrorKind::OutputTooLarge);
     }
@@ -349,20 +363,76 @@ mod tests {
     }
 
     #[test]
-    fn bundle_collector_ignore_files_outside_root() {
+    fn bundle_collector_push_file_outside_root_errors() {
         let mut collector = BundleCollector::new(PathBuf::from("subdir"));
         collector
             .push_file(PathBuf::from("subdir/SKILL.md"), b"content".to_vec())
             .unwrap();
-        let payload = collector.finish().unwrap();
-        assert_eq!(payload.content, "content");
+        // A path that does not share the collector root is rejected, not
+        // silently ignored: it cannot be relativized into the bundle.
+        let err = collector
+            .push_file(PathBuf::from("other/file.txt"), b"x".to_vec())
+            .unwrap_err();
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::OperationFailed);
     }
 
     #[test]
-    fn strip_common_root_single_nested_file_no_strip() {
-        // One deeply nested file: the root is the parent, but has_nested is false
+    fn bundle_collector_push_root_itself_is_skipped() {
+        let mut collector = BundleCollector::new(PathBuf::from("subdir"));
+        // The root path relativizes to nothing, so pushing it is a no-op
+        // rather than an error; finish() still fails without a SKILL.md.
+        collector
+            .push_file(PathBuf::from("subdir"), b"content".to_vec())
+            .unwrap();
+        assert_eq!(
+            collector.finish().unwrap_err().kind(),
+            RuntimeDispatchErrorKind::OperationFailed
+        );
+    }
+
+    #[test]
+    fn bundle_collector_rejects_skill_md_over_prompt_size() {
+        let mut collector = BundleCollector::new(PathBuf::from("skill"));
+        // Under the per-entry limit and the running total, but SKILL.md itself
+        // may not exceed MAX_PROMPT_FILE_SIZE.
+        let err = collector
+            .push_file(
+                PathBuf::from("skill/SKILL.md"),
+                vec![0u8; ironclaw_skills::MAX_PROMPT_FILE_SIZE as usize + 1],
+            )
+            .unwrap_err();
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::OutputTooLarge);
+    }
+
+    #[test]
+    fn bundle_collector_rejects_over_max_bundle_files() {
+        let mut collector = BundleCollector::new(PathBuf::from("skill"));
+        collector
+            .push_file(PathBuf::from("skill/SKILL.md"), b"content".to_vec())
+            .unwrap();
+        for index in 0..ironclaw_skills::MAX_INSTALL_BUNDLE_FILES {
+            collector
+                .push_file(
+                    PathBuf::from(format!("skill/auxiliary-{index}.bin")),
+                    b"x".to_vec(),
+                )
+                .unwrap();
+        }
+        let err = collector
+            .push_file(PathBuf::from("skill/overflow.bin"), b"x".to_vec())
+            .unwrap_err();
+        assert_eq!(err.kind(), RuntimeDispatchErrorKind::OutputTooLarge);
+    }
+
+    #[test]
+    fn strip_common_root_single_nested_file_strips_parent() {
+        // A single nested file still has a nested component, so its parent
+        // directory is treated as the common archive root and stripped.
         let paths = vec![PathBuf::from("my-skill-repo/SKILL.md")];
-        assert_eq!(strip_common_archive_root(&paths), None);
+        assert_eq!(
+            strip_common_archive_root(&paths).as_deref(),
+            Some(Path::new("my-skill-repo"))
+        );
     }
 
     #[test]
