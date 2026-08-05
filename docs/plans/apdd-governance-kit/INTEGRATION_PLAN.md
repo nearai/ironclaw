@@ -204,13 +204,19 @@ Use a search that is **hidden-file-aware and ignore-disabled**, because plain
 by default:
 
 ```bash
-rg -uu --glob '!.git' -n \
+rg -uu --glob '!.git' --glob '!docs/plans/apdd-governance-kit/**' -n \
   'DESIGN\.md|CRITICAL_FLOWS|docs/features|\.storybook|design\.md|design-a11y\.md|feature-workflow\.md|critical-flows\.md|@vitest/browser|playwright|storybook'
 ```
 
-(`-uu` = search hidden and gitignored files.) The edited files themselves are
-**not** deleted, so they are not search *targets* — check them by confirming
-their reverted diff is clean, not by grepping for their names.
+(`-uu` = search hidden and gitignored files.) **Exclude the proposal docs
+themselves** (`docs/plans/apdd-governance-kit/**`) — they enumerate every
+removed path and dependency by design, so they would swamp the output with
+expected self-matches. **Keep the edited production files in scope**
+(`CLAUDE.md`, `package.json`, `vite.config.ts`, `code_style.yml`): after a
+correct revert they name none of these, so a match *there* is a real leftover
+(an incomplete revert) — precisely what this check should surface. As a
+belt-and-suspenders complement, also confirm each edited file's reverted diff is
+clean (per the manifest above).
 
 Then strip any pointer left in `CLAUDE.md`, other `.claude/rules/*`, the CI
 workflows, or docs, so a deleted file is never still referenced as authoritative.
