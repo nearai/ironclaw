@@ -3569,7 +3569,6 @@ dependencies = [
  "ironclaw_event_streams",
  "ironclaw_extension_contracts",
  "ironclaw_filesystem",
- "ironclaw_first_party_extension_ports",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_identity",
@@ -3754,7 +3753,6 @@ dependencies = [
  "ironclaw_extension_registry",
  "ironclaw_extension_support",
  "ironclaw_filesystem",
- "ironclaw_first_party_extension_ports",
  "ironclaw_hooks",
  "ironclaw_host_api",
  "ironclaw_host_ingress",
@@ -4141,24 +4139,6 @@ dependencies = [
  "tracing",
  "tracing-test",
  "uuid",
-]
-
-[[package]]
-name = "ironclaw_first_party_extension_ports"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "ironclaw_filesystem",
- "ironclaw_host_api",
- "ironclaw_loop_contracts",
- "ironclaw_loop_host",
- "ironclaw_skills",
- "ironclaw_turns",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
 ]
 
 [[package]]

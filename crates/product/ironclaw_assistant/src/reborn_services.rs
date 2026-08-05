@@ -167,9 +167,9 @@ pub use trace_credits::{
 
 use approval_settings::{
     AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingKey, AutoApproveSettingStorePort,
-    PersistentApprovalAction, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
-    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
+    CapabilityPermissionOverrideStorePort, PersistentApprovalAction, PersistentApprovalPolicyError,
+    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort,
+    ToolPermissionOverride, ToolPermissionOverrideInput, ToolPermissionOverrideKey,
     ToolPermissionState, permission_mode_allows_persistent_approval,
 };
 pub use extensions::{EXTENSION_REGISTRY_VIEW, EXTENSIONS_VIEW};
@@ -566,7 +566,7 @@ pub const SKILL_CONTENT_VIEW: ProductView<serde_json::Value, RebornSkillContentR
 
 #[derive(Clone)]
 struct RebornOperatorApprovalConfig {
-    overrides: Arc<dyn ToolPermissionOverrideStorePort>,
+    overrides: Arc<dyn CapabilityPermissionOverrideStorePort>,
     auto_approve: Arc<dyn AutoApproveSettingStorePort>,
     persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
     tool_catalog: Arc<dyn RebornOperatorToolCatalog>,
@@ -2347,7 +2347,7 @@ where
 
     pub fn with_operator_approval_config(
         mut self,
-        overrides: Arc<dyn ToolPermissionOverrideStorePort>,
+        overrides: Arc<dyn CapabilityPermissionOverrideStorePort>,
         auto_approve: Arc<dyn AutoApproveSettingStorePort>,
         persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
         tool_catalog: Arc<dyn RebornOperatorToolCatalog>,

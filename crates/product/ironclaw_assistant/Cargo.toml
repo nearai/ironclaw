@@ -38,7 +38,6 @@ ironclaw_auth = { path = "../../domains/ironclaw_auth", version = "0.1.0" }
 ironclaw_event_projections = { path = "../../events/ironclaw_event_projections", version = "0.1.0" }
 ironclaw_event_streams = { path = "../../events/ironclaw_event_streams", version = "0.1.0" }
 ironclaw_event_log = { path = "../../events/ironclaw_event_log", version = "0.1.0" }
-ironclaw_first_party_extension_ports = { path = "../../ironclaw_first_party_extension_ports", version = "0.1.0" }
 ironclaw_host_api = { path = "../../contracts/ironclaw_host_api", version = "0.1.0" }
 ironclaw_product_contracts = { path = "../../contracts/ironclaw_product_contracts", version = "0.1.0" }
 ironclaw_extension_contracts = { path = "../../contracts/ironclaw_extension_contracts", version = "0.1.0" }

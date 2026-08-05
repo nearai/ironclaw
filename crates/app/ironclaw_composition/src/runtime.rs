@@ -42,10 +42,6 @@ use ironclaw_assistant::{
 use ironclaw_event_log::{DurableAuditLog, DurableEventLog, RuntimeEvent};
 use ironclaw_extension_registry::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::{CompositeRootFilesystem, ScopedFilesystem};
-use ironclaw_first_party_extension_ports::{
-    FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
-    SkillActivationSelectorConfig, SkillExecutionAdapter, SkillInjectionMode,
-};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, IdempotencyKey, LoopGateRef, ReplyTargetBindingRef,
     SanitizedCancelReason, SourceBindingRef, TurnActor, TurnId, TurnRunId, TurnScope, TurnStatus,
@@ -70,6 +66,10 @@ use ironclaw_loop_host::{
     HostIdentityContextSource, HostSkillContextSource, HostUserProfileSource,
     JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
     LoopCapabilityResultWriter, ModelGatewayBackedSystemInferencePort,
+};
+use ironclaw_loop_host::{
+    FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
+    SkillActivationSelectorConfig, SkillExecutionAdapter, SkillInjectionMode,
 };
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_processes::{
@@ -1304,9 +1304,9 @@ impl RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub fn standalone_tool_permission_overrides_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>> {
+    ) -> Option<Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>> {
         Some(self.tool_permission_overrides.clone()
-            as Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>)
+            as Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -4488,8 +4488,7 @@ fn skill_activation_selector_config(
         // `max_active_skills` / `max_context_tokens`. Under the default
         // `Listing` injection mode a criteria match ranks the skill in the
         // one-line listing instead of injecting its body.
-        selection_mode:
-            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitAndCriteria,
+        selection_mode: ironclaw_loop_host::SkillActivationSelectionMode::ExplicitAndCriteria,
         regex_activation_enabled: regex_skill_activation_enabled,
         injection_mode,
         ..SkillActivationSelectorConfig::default()

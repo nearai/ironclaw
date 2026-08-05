@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::{SkillBundleId, SkillBundleSource, SkillBundleSourceError, SkillFilePath};
 use ironclaw_loop_contracts::LoopRunContext;
-use ironclaw_loop_host::{SkillBundleId, SkillBundleSource, SkillBundleSourceError, SkillFilePath};
 use thiserror::Error;
 
 use super::SkillActivationRequest;
@@ -160,12 +160,12 @@ impl SkillBundleAssetReadError {
 mod tests {
     use std::collections::HashMap;
 
+    use crate::{SkillFilePath, SkillSourceKind};
     use async_trait::async_trait;
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
     use ironclaw_loop_contracts::{
         InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest, RunProfileResolver,
     };
-    use ironclaw_loop_host::{SkillFilePath, SkillSourceKind};
     use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
     use super::*;
@@ -218,8 +218,7 @@ mod tests {
         async fn list_skill_bundles(
             &self,
             _run_context: &LoopRunContext,
-        ) -> Result<Vec<ironclaw_loop_host::SkillBundleDescriptor>, SkillBundleSourceError>
-        {
+        ) -> Result<Vec<crate::SkillBundleDescriptor>, SkillBundleSourceError> {
             Ok(Vec::new())
         }
 

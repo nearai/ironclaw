@@ -83,13 +83,14 @@ enforced dependency truth stays each crate's `[package.metadata.ironclaw] layer`
 family placement is ownership and discoverability only. A crate's directory
 carries its full package name, so moving between families is never a rename.
 
-Two crates are still flat under `crates/` on purpose, and each is a documented
+One crate is still flat under `crates/` on purpose, and it is a documented
 exception with a named owner rather than a leftover: `ironclaw_projects` (its
-§12.10 merge into `ironclaw_identity` is decided but not executed) and
-`ironclaw_first_party_extension_ports` (its deletion is owned by its own §9 row).
-Both are pinned by `scripts/ci/check-target-tree.py`'s shrink-only exceptions
-table, which fails on a *new* delta and is the thing to update when either
-disposition lands. The standalone `ironclaw_silk_decoder` helper is not one of
+§12.10 merge into `ironclaw_identity` is decided but not executed). ✎ **WS8,
+2026-08-05:** `ironclaw_first_party_extension_ports` was the second such crate;
+its §9 deletion row executed and it dissolved into `ironclaw_loop_host`
+(`src/skill_activation/`), so its exception row is gone too. It is pinned by
+`scripts/ci/check-target-tree.py`'s shrink-only exceptions table, which fails on
+a *new* delta and is the thing to update when the disposition lands. The standalone `ironclaw_silk_decoder` helper is not one of
 them — WS7 moved it to `tools/ironclaw_silk_decoder`, its §5 home (§12.13 D-O).
 
 ## Crate Map
@@ -171,7 +172,6 @@ them — WS7 moved it to `tools/ironclaw_silk_decoder`, its §5 home (§12.13 D-
 | `ironclaw_composition` | `ironclaw_composition/AGENTS.md`, `ironclaw_composition/CLAUDE.md` | Service-shaped production composition root for Reborn. | Low-level policy internals that belong to service crates. |
 | `ironclaw_openai_compat` | `ironclaw_openai_compat/AGENTS.md`, `ironclaw_openai_compat/CLAUDE.md` | Reborn-native OpenAI-compatible API route descriptors, Chat/Responses DTOs, sanitized error envelope, fail-closed route fragment, and the durable ref/idempotency storage adapters. The crate declares **no cargo features** — every one of those surfaces compiles unconditionally. | Direct LLM proxying, listener binding, ProductSurface internals/direct runtime wiring, or filesystem access outside `OpenAiCompatRefStore`. |
 | `ironclaw_extension_support` | `extensions/ironclaw_extension_support/AGENTS.md`, `Cargo.toml` | Concrete first-party userland extension implementations and deterministic tool behavior behind scoped handles. | Host runtime composition, loop-facing ports, ambient runtime authority, dispatcher/network/secrets handles. |
-| `ironclaw_first_party_extension_ports` | `ironclaw_first_party_extension_ports/AGENTS.md`, `Cargo.toml` | Loop-facing adapters for first-party extensions: skill activation/context/execution ports over loop-host and turn-run contracts. | Concrete tool behavior, host runtime composition, product workflow, raw host authority. |
 | `ironclaw` | `ironclaw_cli/AGENTS.md` | Standalone Reborn CLI, command files, CLI context, shell completions, doctor/home/profile commands. | V1 runtime imports, root `ironclaw_legacy` deps, side effects in pure commands. |
 | `ironclaw_assistant` | `ironclaw_assistant/AGENTS.md`, `ironclaw_assistant/CLAUDE.md` | Product contracts and orchestration: adapters, identity, inbound turns, bindings, idempotency, ProductSurface views/commands/capabilities, redaction, and the durable ledger adapters. Its only cargo feature is `test-support` — it is not an evidence minter, and WS1.5 deleted both of its re-export paths to the protocol-auth mint family. | Host runtime internals, specific runtime lanes, direct provider transports, or backend access outside typed ports. |
 | `ironclaw_telegram_extension` | `extensions/packages/telegram/AGENTS.md`, `Cargo.toml`, `src/lib.rs` | The whole Telegram **package**: the Bot API protocol engine (`payload.rs` normalization, `render.rs` outbound shaping — no I/O, no secrets) **and** the `ChannelAdapter` over it (live inbound/outbound, webhook registration hooks, preference targets, attachment transfer), with its `manifest.toml` beside them. Stays free of raw token bytes. Absorbed `ironclaw_telegram_v2_adapter` in WS2's package colocation. | Host signing secrets, admission, or egress credentials; anything generic enough to serve a second channel. |

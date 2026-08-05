@@ -331,13 +331,10 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         decided_in: "WS3",
     },
     // ---- loops ----
-    SameLayerEdge {
-        crate_name: "ironclaw_first_party_extension_ports",
-        dependency_name: "ironclaw_loop_host",
-        layer: "loops",
-        owner: "dissolved (no target family)",
-        decided_in: "WS8",
-    },
+    // ✎ WS8, 2026-08-05: `first_party_extension_ports -> loop_host` is gone —
+    // the crate dissolved into `ironclaw_loop_host` (PROPOSAL §9 row 55), which
+    // is what "dissolved (no target family)" was waiting for. The baseline
+    // below drops with it; this is the equality doing its job.
     SameLayerEdge {
         crate_name: "ironclaw_turn_runner",
         dependency_name: "ironclaw_agent_loop",
@@ -712,7 +709,11 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 /// The target is fewer, and every wave that deletes one must lower this number
 /// in the same PR — the equality below refuses both growth *and* slack, so a
 /// forgotten decrement is red rather than banked as headroom.
-const SAME_LAYER_EDGE_BASELINE: usize = 72;
+/// ✎ **2026-08-05 (WS8): 72 → 71.** The dissolution of
+/// `ironclaw_first_party_extension_ports` into `ironclaw_loop_host` removed the
+/// `loops` pair the two of them formed. No edge was re-plumbed and none was
+/// added: the crate's five workspace dependencies were already `loop_host`'s.
+const SAME_LAYER_EDGE_BASELINE: usize = 71;
 
 /// Sanity floors for the metadata walk. A gate that scans nothing must never
 /// read as success; these are deliberately far below the live values (67
@@ -751,7 +752,9 @@ const CRATE_LAYER_ORIGINS: &[(&str, &str)] = &[
     ("ironclaw_extension_registry", "loops"),
     ("ironclaw_extractors", "substrates"),
     ("ironclaw_filesystem", "substrates"),
-    ("ironclaw_first_party_extension_ports", "loops"),
+    // ✎ WS8, 2026-08-05: `ironclaw_first_party_extension_ports`' row is deleted
+    // with the crate, per this table's own stale-row rule — a demotion detector
+    // aimed at a crate that no longer exists detects nothing.
     // Promoted substrates -> loops. Moving UP narrows reach; no pin owed.
     ("ironclaw_hooks", "substrates"),
     ("ironclaw_host_api", "contracts"),
@@ -854,7 +857,10 @@ const DOWNGRADE_PINS: &[DowngradePin] = &[
             "ironclaw_extension_host",
             "ironclaw_extension_manager",
             "ironclaw_extension_support",
-            "ironclaw_first_party_extension_ports",
+            // ✎ WS8, 2026-08-05: `ironclaw_first_party_extension_ports` dropped
+            // off here by dissolving into `ironclaw_loop_host`, which was
+            // already a permitted consumer — the reach did not widen, one of
+            // the two crates holding it stopped existing.
             "ironclaw_loop_host",
             "ironclaw_composition",
         ],

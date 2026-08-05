@@ -32,7 +32,6 @@ use ironclaw_event_streams::{
     SubscriberCapabilities, ThreadLiveProjectionUpdate,
 };
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
-use ironclaw_first_party_extension_ports::SkillActivationObserver;
 use ironclaw_host_api::{
     error::HostApiError,
     ids::UserId,
@@ -41,6 +40,7 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_loop_contracts::LoopHostMilestoneSink;
+use ironclaw_loop_host::SkillActivationObserver;
 use ironclaw_outbound::OutboundStateStore;
 use ironclaw_turns::{
     ReplyTargetBindingRef, SanitizedFailure, TurnActor, TurnCoordinator, TurnError,

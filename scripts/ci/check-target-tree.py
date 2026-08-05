@@ -115,19 +115,10 @@ EXCEPTIONS: tuple[Exception_, ...] = (
             "delete this exception in the same PR."
         ),
     ),
-    Exception_(
-        package="ironclaw_first_party_extension_ports",
-        actual="crates/ironclaw_first_party_extension_ports",
-        documented=None,
-        owner="its own §9 disposition row (deletion), not WS7",
-        why=(
-            "§5 draws no home for this crate because its disposition is deletion. That "
-            "deletion is design work, not a move: intervening waves moved adapters INTO "
-            "it, so it cannot be deleted by relocating it. WS7 deliberately left it flat "
-            "rather than inventing a family for a crate that is not supposed to have one. "
-            "Delete this exception in the PR that deletes the crate."
-        ),
-    ),
+    # ✎ WS8, 2026-08-05: the `ironclaw_first_party_extension_ports` row is gone
+    # with the crate — its §9 disposition row executed, the crate dissolved into
+    # `ironclaw_loop_host`, and this table is shrink-only in both directions, so
+    # a row that no longer describes a real delta is red.
 )
 
 

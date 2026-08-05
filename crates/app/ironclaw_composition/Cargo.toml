@@ -87,7 +87,6 @@ ironclaw_identity = { path = "../../domains/ironclaw_identity" }
 ironclaw_event_store = { path = "../../events/ironclaw_event_store" }
 ironclaw_openai_compat = { path = "../../product/ironclaw_openai_compat" }
 ironclaw_trace_commons = { path = "../../domains/ironclaw_trace_commons" }
-ironclaw_first_party_extension_ports = { path = "../../ironclaw_first_party_extension_ports" }
 ironclaw_extension_support = { path = "../../extensions/ironclaw_extension_support", optional = true }
 ironclaw_resources = { path = "../../kernel/ironclaw_resources" }
 ironclaw_runtime_policy = { path = "../../kernel/ironclaw_runtime_policy" }

@@ -53,7 +53,7 @@ pub fn extend_builtin_first_party_package(
 pub fn insert_handler(
     registry: &mut FirstPartyCapabilityRegistry,
     auto_approve: Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
-    overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+    overrides: Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>,
     persistent_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
     tool_catalog: Arc<dyn RebornOperatorToolCatalog>,
 ) -> Result<(), HostApiError> {
@@ -169,7 +169,7 @@ impl FirstPartyCapabilityHandler for SetAutoApproveHandler {
 }
 
 struct SetToolPermissionHandler {
-    overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+    overrides: Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>,
     persistent_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
     tool_catalog: Arc<dyn RebornOperatorToolCatalog>,
 }
@@ -353,7 +353,7 @@ async fn find_operator_tool(
 }
 
 async fn apply_tool_permission_state(
-    overrides: &dyn ironclaw_approvals::ToolPermissionOverrideStorePort,
+    overrides: &dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort,
     persistent_policies: &dyn ironclaw_approvals::PersistentApprovalPolicyStorePort,
     scope: &ResourceScope,
     actor: &UserId,
@@ -581,7 +581,7 @@ mod tests {
     fn tool_permission_fixture(
         tools: Vec<RebornOperatorToolInfo>,
     ) -> (
-        Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+        Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>,
         Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
         Arc<dyn FirstPartyCapabilityHandler>,
     ) {
@@ -598,7 +598,7 @@ mod tests {
             ])
             .expect("test mount view"),
         ));
-        let overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort> =
+        let overrides: Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort> =
             Arc::new(ToolPermissionOverrideStore::new(Arc::clone(&scoped)));
         let persistent_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort> =
             Arc::new(PersistentApprovalPolicyStore::new(Arc::clone(&scoped)));
@@ -806,7 +806,7 @@ mod tests {
     /// An override store whose `clear` always fails, so a test can observe what
     /// a partial failure of the two-store `always_allow` write leaves behind.
     struct ClearFailsOverrideStore {
-        inner: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+        inner: Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>,
     }
 
     #[async_trait]
@@ -864,7 +864,7 @@ mod tests {
             effects: Arc::<[EffectKind]>::from(vec![EffectKind::Network]),
         };
         let (overrides, persistent_policies, _) = tool_permission_fixture(vec![tool.clone()]);
-        let failing_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort> =
+        let failing_overrides: Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort> =
             Arc::new(ClearFailsOverrideStore {
                 inner: Arc::clone(&overrides),
             });

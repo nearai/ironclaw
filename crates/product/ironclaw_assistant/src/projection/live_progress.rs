@@ -24,7 +24,6 @@ use ironclaw_event_streams::{
     InMemoryProjectionUpdateSource, ProductProjectionEnvelope, ProjectionStreamError,
     ThreadLiveProjectionItem, ThreadLiveProjectionUpdate, ThreadLiveWorkSummaryPhase,
 };
-use ironclaw_first_party_extension_ports::{SkillActivationObservedEvent, SkillActivationObserver};
 use ironclaw_host_api::{
     ids::{CapabilityId, ExtensionId, InvocationId, UserId},
     runtime::RuntimeKind,
@@ -33,6 +32,7 @@ use ironclaw_loop_contracts::{
     AgentLoopHostError, LoopDriverNoteKind, LoopHostMilestone, LoopHostMilestoneKind,
     LoopHostMilestoneSink, LoopSafeSummary, sanitize_model_visible_text,
 };
+use ironclaw_loop_host::{SkillActivationObservedEvent, SkillActivationObserver};
 use ironclaw_turns::{TurnRunId, TurnScope};
 
 // Live progress uses a synthetic cursor because it is an ephemeral UI hint,

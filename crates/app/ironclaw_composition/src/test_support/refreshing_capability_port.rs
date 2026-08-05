@@ -76,7 +76,7 @@ pub struct RefreshingCapabilityPortTestParts {
     /// Per-tool approval-setting overrides; wrapped into the same
     /// `StoreApprovalSettingsProvider` production wires (`standalone.rs:1002`).
     pub tool_permission_overrides:
-        std::sync::Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+        std::sync::Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>,
     pub auto_approve_settings: std::sync::Arc<dyn ironclaw_approvals::AutoApproveSettingStorePort>,
     pub persistent_approval_policies:
         std::sync::Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,

@@ -14,7 +14,6 @@ use ironclaw_event_log::{
     RuntimeEvent, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND, sanitize_error_kind,
     sanitize_recovery_label,
 };
-use ironclaw_host_api::turn::EventCursor as TurnEventCursor;
 use ironclaw_host_api::{
     Timestamp,
     audit::{AuditEnvelope, AuditStage},
@@ -383,13 +382,6 @@ pub enum ProjectionError {
         // happy path. Construction sites use `Box::new(..)`.
         requested: Box<ProjectionCursor>,
         earliest: Box<ProjectionCursor>,
-    },
-    #[error(
-        "turn event projection rebase required: requested turn cursor {requested:?} cannot replay from earliest retained turn cursor {earliest:?}"
-    )]
-    TurnEventRebaseRequired {
-        requested: TurnEventCursor,
-        earliest: TurnEventCursor,
     },
     #[error("projection source failed during {operation}")]
     Source { operation: &'static str },

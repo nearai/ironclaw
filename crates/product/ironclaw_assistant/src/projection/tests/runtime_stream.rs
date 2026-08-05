@@ -3,14 +3,14 @@ use ironclaw_assistant::{
     PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
     PROJECTION_SKILL_NAME_MAX_BYTES, ProductWorkSummaryPhase,
 };
-use ironclaw_first_party_extension_ports::{
-    SkillActivationMode, SkillActivationObservedEvent, SkillActivationRequest,
-};
 use ironclaw_host_api::dispatch::INPUT_ENCODE_HUMAN_SUMMARY;
 use ironclaw_loop_contracts::{
     CapabilityInputRef, InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopDriverId,
     LoopDriverNoteKind, LoopHostMilestone, LoopHostMilestoneKind, LoopRunContext, LoopSafeSummary,
     RunProfileResolutionRequest, RunProfileResolver,
+};
+use ironclaw_loop_host::{
+    SkillActivationMode, SkillActivationObservedEvent, SkillActivationRequest,
 };
 use ironclaw_turns::TurnId;
 

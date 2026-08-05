@@ -2,18 +2,18 @@
 
 use std::{collections::HashSet, sync::Arc};
 
+use crate::{
+    CapabilityResultWrite, DurablePersistence, SkillBundleSource, SyntheticCapability,
+    SyntheticCapabilityDescriptor, SyntheticCapabilityHandler, SyntheticCapabilityInvocation,
+};
 use async_trait::async_trait;
 use ironclaw_host_api::{ids::InvocationId, resolution::Resolution, result_meta::FailureKind};
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, ConcurrencyHint,
     resolution,
 };
-use ironclaw_loop_host::{
-    CapabilityResultWrite, DurablePersistence, SkillBundleSource, SyntheticCapability,
-    SyntheticCapabilityDescriptor, SyntheticCapabilityHandler, SyntheticCapabilityInvocation,
-};
 
-use crate::{
+use super::{
     DEFAULT_MAX_ACTIVE_SKILLS, SelectableSkillContextSource, SkillActivationSelectionError,
 };
 
@@ -202,7 +202,7 @@ fn skill_activation_host_error(error: SkillActivationSelectionError) -> AgentLoo
         SkillActivationSelectionError::SourceUnavailable => AgentLoopHostErrorKind::Unavailable,
         SkillActivationSelectionError::Internal => AgentLoopHostErrorKind::Internal,
     };
-    ironclaw_loop_host::raw_agent_loop_host_error(
+    crate::raw_agent_loop_host_error(
         "skill_activate",
         "activate",
         kind,
@@ -229,7 +229,7 @@ fn skill_activation_host_error(error: SkillActivationSelectionError) -> AgentLoo
 fn skill_activation_selection_outcome(
     error: SkillActivationSelectionError,
 ) -> Result<Resolution, AgentLoopHostError> {
-    use crate::SkillActivationSelectionError as SelectionError;
+    use super::SkillActivationSelectionError as SelectionError;
     match error {
         // A resource limit, not an encoding fault — `Resource` keeps the
         // precise kind for downstream fate/wire/UI projections (both kinds

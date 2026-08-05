@@ -7,7 +7,7 @@ use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::path::ScopedPath;
 use ironclaw_loop_contracts::LoopRunContext;
 
-use crate::{SkillActivationSelectionError, activation::SetupMarkerSource};
+use super::{SkillActivationSelectionError, activation::SetupMarkerSource};
 
 const MAX_CONCURRENT_SETUP_MARKER_STATS: usize = 16;
 

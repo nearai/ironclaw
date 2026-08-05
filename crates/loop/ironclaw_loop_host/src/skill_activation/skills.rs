@@ -1,13 +1,11 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use crate::{FilesystemSkillBundleRoot, FilesystemSkillBundleSource, HostSkillContextSource};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{ids::TenantId, path::ScopedPath};
-use ironclaw_loop_host::{
-    FilesystemSkillBundleRoot, FilesystemSkillBundleSource, HostSkillContextSource,
-};
 
-use crate::{
+use super::{
     SelectableSkillContextSource, SkillActivationSelectorConfig, SkillExecutionAdapter,
     error::FirstPartySkillsExtensionError, setup_markers::FilesystemSetupMarkerSource,
 };
@@ -296,6 +294,7 @@ fn validate_handle_root(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{SkillBundleContextSource, SkillBundleSource, build_skill_run_snapshot};
     use ironclaw_filesystem::{CasExpectation, Entry, InMemoryBackend, RootFilesystem};
     use ironclaw_host_api::{
         ids::{AgentId, ProjectId, TenantId, UserId},
@@ -305,9 +304,6 @@ mod tests {
     use ironclaw_loop_contracts::{
         InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest,
         RunProfileResolver, SkillActivationState, SkillTrustLevel, SkillVisibility,
-    };
-    use ironclaw_loop_host::{
-        SkillBundleContextSource, SkillBundleSource, build_skill_run_snapshot,
     };
     use ironclaw_skills::SkillTrust;
     use ironclaw_turns::{AcceptedMessageRef, TurnActor, TurnId, TurnRunId, TurnScope};

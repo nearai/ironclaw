@@ -878,6 +878,182 @@ fn retired_host_trusted_ingress_token_crate_stays_removed() {
     );
 }
 
+/// The module that received the dissolved `ironclaw_first_party_extension_ports`
+/// crate, resolved through the crate inventory like every other path here.
+const DISSOLVED_PORTS_MODULE: &str = "crates/ironclaw_loop_host/src/skill_activation";
+
+/// The dissolved crate's entire workspace dependency set, frozen as an
+/// **equality** (CHECKLIST WS8, 2026-08-05).
+///
+/// `ironclaw_first_party_extension_ports` declared exactly these five workspace
+/// dependencies plus `ironclaw_loop_host` itself, and a `BoundaryRule` enforced
+/// the complement. The crate is gone — its contents live in
+/// `ironclaw_loop_host` — and a crate-granular rule can no longer say anything
+/// useful about them, because `loop_host` legitimately depends on nine of the
+/// crates that rule forbade (`approvals`, `capabilities`, `host_runtime`,
+/// `llm`, `memory`, `outbound`, `processes`, `resources`, `safety`). Dissolving
+/// the crate without this test would have widened the moved code's legal reach
+/// by those nine in silence: the classic "removing a redundant layer un-masks
+/// behavior" trade, where the layer was backstopping an import restriction.
+///
+/// An **equality**, not a denylist, because the denylist form only catches the
+/// crates someone thought to enumerate. Widening this set is allowed and is
+/// exactly the reviewable moment: it means the skill-activation adapters have
+/// grown a new dependency the dissolved crate never had.
+const DISSOLVED_PORTS_MODULE_REACH: &[&str] = &[
+    "ironclaw_filesystem",
+    "ironclaw_host_api",
+    "ironclaw_loop_contracts",
+    "ironclaw_skills",
+    "ironclaw_turns",
+];
+
+/// Every `ironclaw_*` crate named in code (not comments or string literals)
+/// under `dir`, recursively.
+fn workspace_crates_named_in_code(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    named: &mut std::collections::BTreeMap<String, String>,
+) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| panic!("failed to read dir entry: {error}"));
+        let path = entry.path();
+        if path.is_dir() {
+            workspace_crates_named_in_code(&path, root, named);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        // Fatal on unreadable: a scanner that skips a file it cannot read
+        // reports an empty reach and passes while measuring nothing (WS10).
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        let code = strip_comments_and_strings(&source);
+        let chars: Vec<char> = code.chars().collect();
+        let mut index = 0usize;
+        while index < chars.len() {
+            if !(chars[index] == 'i' && code_word_starts_at(&chars, index, "ironclaw_")) {
+                index += 1;
+                continue;
+            }
+            let mut end = index + "ironclaw_".len();
+            while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+                end += 1;
+            }
+            let name: String = chars[index..end].iter().collect();
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            named
+                .entry(name)
+                .or_insert_with(|| relative.display().to_string());
+            index = end;
+        }
+    }
+}
+
+/// `word` begins at `index` and is not preceded by an identifier character.
+fn code_word_starts_at(chars: &[char], index: usize, word: &str) -> bool {
+    if index > 0 {
+        let previous = chars[index - 1];
+        if previous.is_ascii_alphanumeric() || previous == '_' {
+            return false;
+        }
+    }
+    chars[index..]
+        .iter()
+        .zip(word.chars())
+        .filter(|(a, b)| **a == *b)
+        .count()
+        == word.chars().count()
+}
+
+/// ✎ WS8, 2026-08-05 — the module-granular successor to the deleted
+/// `BoundaryRule { crate_name: "ironclaw_first_party_extension_ports", .. }`.
+#[test]
+fn dissolved_ports_module_keeps_its_crate_boundary() {
+    let root = workspace_root();
+    let dir = crate_path(&root, DISSOLVED_PORTS_MODULE);
+    assert!(
+        dir.is_dir(),
+        "{DISSOLVED_PORTS_MODULE} does not resolve — the skill-activation module moved again \
+         and this gate now measures nothing. Repoint it rather than deleting it."
+    );
+
+    let mut named = std::collections::BTreeMap::new();
+    workspace_crates_named_in_code(&dir, &root, &mut named);
+    // `ironclaw_loop_host` is the crate the module now lives in; it names
+    // itself through `crate::`, so a literal self-reference would be a
+    // leftover from the move.
+    let permitted: std::collections::BTreeSet<&str> =
+        DISSOLVED_PORTS_MODULE_REACH.iter().copied().collect();
+
+    let unexpected: Vec<String> = named
+        .iter()
+        .filter(|(name, _)| !permitted.contains(name.as_str()))
+        .map(|(name, first)| format!("    {name} (first seen in {first})"))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "the skill-activation module reaches crates the dissolved \
+         `ironclaw_first_party_extension_ports` never depended on. Its old crate boundary is \
+         now enforced here, at module granularity, because `ironclaw_loop_host` legitimately \
+         depends on nine crates that boundary forbade — so folding the module in widened its \
+         *legal* reach and only this equality keeps its *actual* reach honest. If the new \
+         dependency is intended, add it to DISSOLVED_PORTS_MODULE_REACH in the same change \
+         with the reason.\n{}",
+        unexpected.join("\n")
+    );
+
+    let missing: Vec<&&str> = DISSOLVED_PORTS_MODULE_REACH
+        .iter()
+        .filter(|name| !named.contains_key(**name))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these crates are in DISSOLVED_PORTS_MODULE_REACH but the skill-activation module no \
+         longer names any of them: {missing:?}. A stale allowance is a hole waiting to be \
+         reused — drop it in the change that removed the dependency."
+    );
+}
+
+/// The scanner must see a rogue import and must not be fooled by prose. Without
+/// this, the equality above could pass on an empty measurement.
+#[test]
+fn dissolved_ports_module_scanner_reads_code_not_comments() {
+    let root = std::env::temp_dir().join(format!(
+        "ironclaw-dissolved-ports-scan-{}",
+        std::process::id()
+    ));
+    let src = root.join("crates/example/src/skill_activation");
+    std::fs::create_dir_all(&src).expect("test source directory must be created");
+    std::fs::write(
+        src.join("prose.rs"),
+        "//! Mentions ironclaw_host_runtime in prose only.\n\
+         // and ironclaw_approvals in a line comment\n\
+         fn f() { let _ = \"ironclaw_secrets\"; }\n",
+    )
+    .expect("prose fixture must be written");
+    std::fs::write(
+        src.join("rogue.rs"),
+        "use ironclaw_processes::ProcessId;\nuse my_ironclaw_turns::Nope;\n",
+    )
+    .expect("rogue fixture must be written");
+
+    let mut named = std::collections::BTreeMap::new();
+    workspace_crates_named_in_code(&src, &root, &mut named);
+    std::fs::remove_dir_all(&root).expect("test source directory must be removed");
+
+    let found: Vec<&String> = named.keys().collect();
+    assert_eq!(
+        found,
+        vec!["ironclaw_processes"],
+        "the scanner must report the real import, ignore comment/string mentions, and not \
+         match inside a longer identifier: {named:?}"
+    );
+}
+
 #[test]
 fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
     let root = workspace_root();
@@ -905,7 +1081,12 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
     ];
     let untrusted_src_roots = [
         "crates/ironclaw_capabilities/src",
-        "crates/ironclaw_first_party_extension_ports/src",
+        // ✎ WS8, 2026-08-05: was `crates/ironclaw_first_party_extension_ports/src`.
+        // That crate dissolved into `ironclaw_loop_host`, so this narrows to the
+        // module that received it rather than dropping the tree out of the guard
+        // (the rest of `loop_host` is not an ingress path and is not covered
+        // here — widening it to the whole crate would be a different claim).
+        "crates/ironclaw_loop_host/src/skill_activation",
         "crates/extensions/ironclaw_extension_support/src",
         "crates/ironclaw_extension_contracts/src",
         // WS2.4: the manager holds the extension-management capability
@@ -3502,45 +3683,17 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_wasm",
             ],
         },
-        BoundaryRule {
-            // First-party extension ports are adapter glue above concrete
-            // userland implementations. They may depend on loop/turn-facing
-            // contracts, but must not reach into host runtime authority or
-            // product composition.
-            crate_name: "ironclaw_first_party_extension_ports",
-            forbidden: vec![
-                "ironclaw_legacy",
-                "ironclaw_approvals",
-                "ironclaw_authorization",
-                "ironclaw_capabilities",
-                "ironclaw_conversations",
-                "ironclaw_engine",
-                "ironclaw_event_log",
-                "ironclaw_extension_registry",
-                "ironclaw_gateway",
-                "ironclaw_host_runtime",
-                "ironclaw_llm",
-                "ironclaw_mcp",
-                "ironclaw_memory",
-                "ironclaw_network",
-                "ironclaw_outbound",
-                "ironclaw_processes",
-                "ironclaw_assistant",
-                "ironclaw_assistant",
-                "ironclaw_turn_runner",
-                "ironclaw_composition",
-                "ironclaw_config",
-                "ironclaw_event_store",
-                "ironclaw_resources",
-                "ironclaw_approvals",
-                "ironclaw_runtime_policy",
-                "ironclaw_safety",
-                "ironclaw_sandbox",
-                "ironclaw_secrets",
-                "ironclaw_tui",
-                "ironclaw_wasm",
-            ],
-        },
+        // ✎ WS8, 2026-08-05 — the `ironclaw_first_party_extension_ports` rule
+        // that sat here is gone with the crate. Its replacement is
+        // `dissolved_ports_module_keeps_its_crate_boundary` below, which pins
+        // the same reach at module granularity. Deleting it outright would
+        // have widened the moved code's legal imports by nine crates in
+        // silence; leaving it would have left an inert rule, since a rule
+        // whose crate has no directory is skipped by
+        // `reborn_boundary_rules_active_crates_are_workspace_members`.
+        // `ironclaw_first_party_extension_ports` stays in every *forbidden*
+        // list that named it — those are reintroduction pins now, and the
+        // crate must not come back.
         BoundaryRule {
             crate_name: "ironclaw_config",
             forbidden: vec![

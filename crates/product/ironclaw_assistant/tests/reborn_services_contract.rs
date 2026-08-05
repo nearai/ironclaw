@@ -16,10 +16,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use ironclaw_approvals::{
     AutoApproveSettingInput, AutoApproveSettingKey, AutoApproveSettingRecord,
-    AutoApproveSettingStorePort, CapabilityPermissionStoreError, PersistentApprovalAction,
-    PersistentApprovalPolicy, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
-    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
+    AutoApproveSettingStorePort, CapabilityPermissionOverrideStorePort,
+    CapabilityPermissionStoreError, PersistentApprovalAction, PersistentApprovalPolicy,
+    PersistentApprovalPolicyError, PersistentApprovalPolicyInput, PersistentApprovalPolicyKey,
+    PersistentApprovalPolicyStorePort, ToolPermissionOverride, ToolPermissionOverrideInput,
+    ToolPermissionOverrideKey,
 };
 use ironclaw_assistant::EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID;
 use ironclaw_assistant::{
@@ -11165,7 +11166,7 @@ type OperatorConfigServices = RebornServices<OperatorConfigAutoApproveInvoker>;
 #[derive(Clone)]
 struct OperatorConfigAutoApproveInvoker {
     auto_approve: Arc<dyn AutoApproveSettingStorePort>,
-    overrides: Arc<dyn ToolPermissionOverrideStorePort>,
+    overrides: Arc<dyn CapabilityPermissionOverrideStorePort>,
     persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
     tools: Arc<Vec<RebornOperatorToolInfo>>,
 }
@@ -11388,7 +11389,7 @@ fn services_with_operator_approval_config_stores(
     auto_approve: Arc<dyn AutoApproveSettingStorePort>,
     persistent_policies: Arc<dyn PersistentApprovalPolicyStorePort>,
 ) -> OperatorConfigServices {
-    let overrides: Arc<dyn ToolPermissionOverrideStorePort> = Arc::new(
+    let overrides: Arc<dyn CapabilityPermissionOverrideStorePort> = Arc::new(
         ironclaw_approvals::test_support::in_memory_backed_capability_permission_override_store(),
     );
     let tools = Arc::new(operator_config_test_tools());

@@ -2614,11 +2614,58 @@ dependencies = [
  "ironclaw_event_log",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_runtime_policy",
+ "ironclaw_trust",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "ironclaw_assistant"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "chrono",
+ "futures",
+ "ironclaw_approvals",
+ "ironclaw_attachments",
+ "ironclaw_auth",
+ "ironclaw_authorization",
+ "ironclaw_common",
+ "ironclaw_conversations",
+ "ironclaw_event_log",
+ "ironclaw_event_projections",
+ "ironclaw_event_streams",
+ "ironclaw_extension_contracts",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_identity",
+ "ironclaw_loop_contracts",
+ "ironclaw_loop_host",
+ "ironclaw_outbound",
+ "ironclaw_processes",
+ "ironclaw_product_contracts",
+ "ironclaw_projects",
+ "ironclaw_safety",
+ "ironclaw_secrets",
+ "ironclaw_threads",
+ "ironclaw_trace_commons",
+ "ironclaw_triggers",
+ "ironclaw_turns",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 1.1.3+spec-1.1.0",
+ "tracing",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -2654,6 +2701,7 @@ dependencies = [
  "ironclaw_extension_contracts",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_product_contracts",
  "ironclaw_secrets",
  "rand 0.10.2",
  "secrecy",
@@ -2729,6 +2777,101 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_composition"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "base64 0.23.1",
+ "chrono",
+ "deadpool-postgres",
+ "fs4",
+ "futures",
+ "hex",
+ "ironclaw_approvals",
+ "ironclaw_assistant",
+ "ironclaw_attachments",
+ "ironclaw_auth",
+ "ironclaw_authorization",
+ "ironclaw_capabilities",
+ "ironclaw_common",
+ "ironclaw_config",
+ "ironclaw_conversations",
+ "ironclaw_event_log",
+ "ironclaw_event_projections",
+ "ironclaw_event_store",
+ "ironclaw_extension_contracts",
+ "ironclaw_extension_host",
+ "ironclaw_extension_manager",
+ "ironclaw_extension_registry",
+ "ironclaw_filesystem",
+ "ironclaw_hooks",
+ "ironclaw_host_api",
+ "ironclaw_host_ingress",
+ "ironclaw_host_runtime",
+ "ironclaw_identity",
+ "ironclaw_libsql_runtime",
+ "ironclaw_llm",
+ "ironclaw_loop_contracts",
+ "ironclaw_loop_host",
+ "ironclaw_mcp",
+ "ironclaw_memory",
+ "ironclaw_memory_native",
+ "ironclaw_network",
+ "ironclaw_observability",
+ "ironclaw_openai_compat",
+ "ironclaw_operator",
+ "ironclaw_outbound",
+ "ironclaw_processes",
+ "ironclaw_product_contracts",
+ "ironclaw_projects",
+ "ironclaw_resources",
+ "ironclaw_runtime_policy",
+ "ironclaw_safety",
+ "ironclaw_secrets",
+ "ironclaw_skills",
+ "ironclaw_threads",
+ "ironclaw_trace_commons",
+ "ironclaw_triggers",
+ "ironclaw_trust",
+ "ironclaw_turn_runner",
+ "ironclaw_turns",
+ "libc",
+ "libsql",
+ "lru",
+ "nix",
+ "rand 0.10.2",
+ "rust_decimal",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "toml 1.1.3+spec-1.1.0",
+ "tower 0.5.3",
+ "tower-http 0.7.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "ironclaw_config"
+version = "0.1.0"
+dependencies = [
+ "fs4",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml 1.1.3+spec-1.1.0",
+ "toml_edit",
+]
+
+[[package]]
 name = "ironclaw_conversations"
 version = "0.1.0"
 dependencies = [
@@ -2737,13 +2880,25 @@ dependencies = [
  "ironclaw_extension_contracts",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "ironclaw_safety",
  "ironclaw_triggers",
- "ironclaw_turns",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "ironclaw_event_log"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
  "tracing",
  "uuid",
 ]
@@ -2760,6 +2915,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_event_store"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "deadpool-postgres",
+ "hex",
+ "ironclaw_event_log",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "libsql",
+ "rustls 0.23.42",
+ "rustls-native-certs 0.8.4",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
+ "tracing",
+ "urlencoding",
+ "webpki-roots 1.0.8",
+]
+
+[[package]]
 name = "ironclaw_event_streams"
 version = "0.1.0"
 dependencies = [
@@ -2772,20 +2953,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
-]
-
-[[package]]
-name = "ironclaw_event_log"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "ironclaw_host_api",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -2819,10 +2986,11 @@ dependencies = [
  "ironclaw_authorization",
  "ironclaw_capabilities",
  "ironclaw_common",
+ "ironclaw_config",
  "ironclaw_conversations",
  "ironclaw_extension_contracts",
- "ironclaw_extension_support",
  "ironclaw_extension_registry",
+ "ironclaw_extension_support",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_host_ingress",
@@ -2834,9 +3002,7 @@ dependencies = [
  "ironclaw_network",
  "ironclaw_outbound",
  "ironclaw_processes",
- "ironclaw_assistant",
  "ironclaw_product_contracts",
- "ironclaw_config",
  "ironclaw_resources",
  "ironclaw_safety",
  "ironclaw_secrets",
@@ -2872,6 +3038,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "ironclaw_approvals",
+ "ironclaw_assistant",
  "ironclaw_auth",
  "ironclaw_extension_contracts",
  "ironclaw_extension_host",
@@ -2879,7 +3046,6 @@ dependencies = [
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
- "ironclaw_assistant",
  "ironclaw_product_contracts",
  "ironclaw_secrets",
  "ironclaw_skills",
@@ -2891,6 +3057,25 @@ dependencies = [
  "toml 1.1.3+spec-1.1.0",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "ironclaw_extension_registry"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_extension_contracts",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 1.1.3+spec-1.1.0",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -2923,25 +3108,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_extension_registry"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "ironclaw_extension_contracts",
- "ironclaw_filesystem",
- "ironclaw_host_api",
- "parking_lot",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "toml 1.1.3+spec-1.1.0",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "ironclaw_extractors"
 version = "0.1.0"
 dependencies = [
@@ -2969,23 +3135,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
- "tracing",
-]
-
-[[package]]
-name = "ironclaw_first_party_extension_ports"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "ironclaw_filesystem",
- "ironclaw_host_api",
- "ironclaw_loop_contracts",
- "ironclaw_loop_host",
- "ironclaw_skills",
- "ironclaw_turns",
- "serde_json",
- "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -3027,7 +3176,6 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.18",
- "tokio",
  "tracing",
  "uuid",
  "zeroize",
@@ -3059,9 +3207,10 @@ dependencies = [
  "ironclaw_capabilities",
  "ironclaw_common",
  "ironclaw_event_log",
+ "ironclaw_event_store",
  "ironclaw_extension_contracts",
- "ironclaw_extension_support",
  "ironclaw_extension_registry",
+ "ironclaw_extension_support",
  "ironclaw_extractors",
  "ironclaw_filesystem",
  "ironclaw_host_api",
@@ -3074,13 +3223,12 @@ dependencies = [
  "ironclaw_outbound",
  "ironclaw_processes",
  "ironclaw_prompt_envelope",
- "ironclaw_event_store",
- "ironclaw_trace_commons",
  "ironclaw_resources",
  "ironclaw_runtime_policy",
  "ironclaw_safety",
  "ironclaw_sandbox",
  "ironclaw_secrets",
+ "ironclaw_trace_commons",
  "ironclaw_triggers",
  "ironclaw_trust",
  "ironclaw_turns",
@@ -3103,6 +3251,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_identity"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "chrono",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ironclaw_latency_runner"
 version = "0.1.0"
 dependencies = [
@@ -3111,13 +3275,13 @@ dependencies = [
  "chrono",
  "deadpool-postgres",
  "ironclaw_approvals",
+ "ironclaw_composition",
+ "ironclaw_event_store",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_libsql_runtime",
  "ironclaw_processes",
- "ironclaw_composition",
- "ironclaw_event_store",
  "ironclaw_resources",
  "ironclaw_secrets",
  "ironclaw_triggers",
@@ -3246,7 +3410,6 @@ dependencies = [
  "futures-util",
  "ironclaw_extension_contracts",
  "ironclaw_host_api",
- "ironclaw_resources",
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
@@ -3304,8 +3467,34 @@ dependencies = [
 name = "ironclaw_observability"
 version = "0.1.0"
 dependencies = [
- "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "ironclaw_openai_compat"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "axum 0.8.9",
+ "base64 0.23.1",
+ "chrono",
+ "futures-core",
+ "hex",
+ "ironclaw_assistant",
+ "ironclaw_attachments",
+ "ironclaw_common",
+ "ironclaw_extension_contracts",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_product_contracts",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3317,12 +3506,12 @@ dependencies = [
  "chrono",
  "fs4",
  "ironclaw_common",
+ "ironclaw_config",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_host_ingress",
  "ironclaw_llm",
  "ironclaw_product_contracts",
- "ironclaw_config",
  "ironclaw_safety",
  "libc",
  "nix",
@@ -3379,50 +3568,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_assistant"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.23.1",
- "chrono",
- "futures",
- "ironclaw_approvals",
- "ironclaw_attachments",
- "ironclaw_auth",
- "ironclaw_authorization",
- "ironclaw_common",
- "ironclaw_conversations",
- "ironclaw_event_projections",
- "ironclaw_event_streams",
- "ironclaw_event_log",
- "ironclaw_extension_contracts",
- "ironclaw_extension_registry",
- "ironclaw_filesystem",
- "ironclaw_first_party_extension_ports",
- "ironclaw_host_api",
- "ironclaw_loop_contracts",
- "ironclaw_loop_host",
- "ironclaw_outbound",
- "ironclaw_product_contracts",
- "ironclaw_projects",
- "ironclaw_trace_commons",
- "ironclaw_safety",
- "ironclaw_threads",
- "ironclaw_triggers",
- "ironclaw_turns",
- "secrecy",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror 2.0.18",
- "tokio",
- "toml 1.1.3+spec-1.1.0",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "ironclaw_product_contracts"
 version = "0.1.0"
 dependencies = [
@@ -3463,201 +3608,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_composition"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum 0.8.9",
- "base64 0.23.1",
- "chrono",
- "deadpool-postgres",
- "fs4",
- "futures",
- "hex",
- "ironclaw_approvals",
- "ironclaw_attachments",
- "ironclaw_auth",
- "ironclaw_authorization",
- "ironclaw_capabilities",
- "ironclaw_common",
- "ironclaw_conversations",
- "ironclaw_event_projections",
- "ironclaw_event_log",
- "ironclaw_extension_contracts",
- "ironclaw_extension_host",
- "ironclaw_extension_manager",
- "ironclaw_extension_registry",
- "ironclaw_filesystem",
- "ironclaw_first_party_extension_ports",
- "ironclaw_hooks",
- "ironclaw_host_api",
- "ironclaw_host_ingress",
- "ironclaw_host_runtime",
- "ironclaw_libsql_runtime",
- "ironclaw_llm",
- "ironclaw_loop_contracts",
- "ironclaw_loop_host",
- "ironclaw_mcp",
- "ironclaw_memory",
- "ironclaw_memory_native",
- "ironclaw_network",
- "ironclaw_observability",
- "ironclaw_operator",
- "ironclaw_outbound",
- "ironclaw_processes",
- "ironclaw_assistant",
- "ironclaw_product_contracts",
- "ironclaw_projects",
- "ironclaw_config",
- "ironclaw_event_store",
- "ironclaw_identity",
- "ironclaw_openai_compat",
- "ironclaw_trace_commons",
- "ironclaw_resources",
- "ironclaw_turn_runner",
- "ironclaw_runtime_policy",
- "ironclaw_safety",
- "ironclaw_secrets",
- "ironclaw_skills",
- "ironclaw_threads",
- "ironclaw_triggers",
- "ironclaw_trust",
- "ironclaw_turns",
- "libc",
- "libsql",
- "lru",
- "nix",
- "rand 0.10.2",
- "rust_decimal",
- "secrecy",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "toml 1.1.3+spec-1.1.0",
- "tower 0.5.3",
- "tower-http 0.7.0",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "ironclaw_config"
-version = "0.1.0"
-dependencies = [
- "fs4",
- "serde",
- "tempfile",
- "thiserror 2.0.18",
- "toml 1.1.3+spec-1.1.0",
- "toml_edit",
-]
-
-[[package]]
-name = "ironclaw_event_store"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "deadpool-postgres",
- "hex",
- "ironclaw_event_log",
- "ironclaw_filesystem",
- "ironclaw_host_api",
- "libsql",
- "rustls 0.23.42",
- "rustls-native-certs 0.8.4",
- "secrecy",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror 2.0.18",
- "tokio",
- "tokio-postgres",
- "tokio-postgres-rustls",
- "tracing",
- "urlencoding",
- "webpki-roots 1.0.8",
-]
-
-[[package]]
-name = "ironclaw_identity"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.23.1",
- "chrono",
- "ironclaw_filesystem",
- "ironclaw_host_api",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "ironclaw_openai_compat"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "async-trait",
- "axum 0.8.9",
- "base64 0.23.1",
- "chrono",
- "futures-core",
- "hex",
- "ironclaw_attachments",
- "ironclaw_common",
- "ironclaw_extension_contracts",
- "ironclaw_filesystem",
- "ironclaw_host_api",
- "ironclaw_assistant",
- "ironclaw_product_contracts",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "ironclaw_trace_commons"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64 0.23.1",
- "chrono",
- "dirs",
- "ed25519-dalek",
- "hex",
- "ironclaw_common",
- "ironclaw_host_api",
- "ironclaw_llm",
- "ironclaw_safety",
- "jsonwebtoken",
- "rand 0.10.2",
- "rand_core 0.6.4",
- "regex",
- "reqwest 0.12.28",
- "rust_decimal",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "ironclaw_resources"
 version = "0.1.0"
 dependencies = [
@@ -3674,40 +3624,6 @@ dependencies = [
  "tracing",
  "uuid",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "ironclaw_turn_runner"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "blake3",
- "chrono",
- "futures-util",
- "ironclaw_agent_loop",
- "ironclaw_approvals",
- "ironclaw_event_log",
- "ironclaw_filesystem",
- "ironclaw_hooks",
- "ironclaw_host_api",
- "ironclaw_host_runtime",
- "ironclaw_loop_contracts",
- "ironclaw_loop_host",
- "ironclaw_memory",
- "ironclaw_observability",
- "ironclaw_outbound",
- "ironclaw_processes",
- "ironclaw_safety",
- "ironclaw_threads",
- "ironclaw_turns",
- "libsql",
- "parking_lot",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
 ]
 
 [[package]]
@@ -3745,7 +3661,6 @@ dependencies = [
  "ironclaw_extension_contracts",
  "ironclaw_host_api",
  "ironclaw_network",
- "ironclaw_resources",
  "ironclaw_safety",
  "ironclaw_secrets",
  "libc",
@@ -3823,6 +3738,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_trace_commons"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.23.1",
+ "chrono",
+ "dirs",
+ "ed25519-dalek",
+ "hex",
+ "ironclaw_common",
+ "ironclaw_host_api",
+ "ironclaw_llm",
+ "ironclaw_safety",
+ "jsonwebtoken",
+ "rand 0.10.2",
+ "rand_core 0.6.4",
+ "regex",
+ "reqwest 0.12.28",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ironclaw_triggers"
 version = "0.1.0"
 dependencies = [
@@ -3835,6 +3781,7 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_host_api",
  "ironclaw_libsql_runtime",
+ "ironclaw_safety",
  "libsql",
  "serde",
  "sha2 0.11.0",
@@ -3853,6 +3800,42 @@ dependencies = [
  "ironclaw_host_api",
  "serde",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ironclaw_turn_runner"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "chrono",
+ "futures-util",
+ "ironclaw_agent_loop",
+ "ironclaw_approvals",
+ "ironclaw_event_log",
+ "ironclaw_filesystem",
+ "ironclaw_hooks",
+ "ironclaw_host_api",
+ "ironclaw_host_runtime",
+ "ironclaw_loop_contracts",
+ "ironclaw_loop_host",
+ "ironclaw_memory",
+ "ironclaw_observability",
+ "ironclaw_outbound",
+ "ironclaw_processes",
+ "ironclaw_safety",
+ "ironclaw_threads",
+ "ironclaw_trace_commons",
+ "ironclaw_turns",
+ "libsql",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3914,6 +3897,7 @@ dependencies = [
  "futures",
  "hex",
  "hmac 0.13.0",
+ "ironclaw_assistant",
  "ironclaw_attachments",
  "ironclaw_auth",
  "ironclaw_common",
@@ -3921,9 +3905,8 @@ dependencies = [
  "ironclaw_extension_host",
  "ironclaw_host_api",
  "ironclaw_host_ingress",
- "ironclaw_assistant",
- "ironclaw_product_contracts",
  "ironclaw_openai_compat",
+ "ironclaw_product_contracts",
  "jsonwebtoken",
  "lru",
  "parking_lot",
