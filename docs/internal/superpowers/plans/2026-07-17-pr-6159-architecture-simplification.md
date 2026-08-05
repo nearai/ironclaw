@@ -681,7 +681,7 @@ git commit -m "refactor(telegram): own revision and delivery runtime behavior"
 - Create/update: `crates/ironclaw_channel_delivery/AGENTS.md`
 - Modify: `crates/ironclaw_telegram_extension/AGENTS.md`
 - Modify: `docs/reborn/extension-runtime/overview.md`
-- Modify: `docs/superpowers/specs/2026-07-17-pr-6159-architecture-simplification-design.md`
+- Modify: `docs/internal/superpowers/specs/2026-07-17-pr-6159-architecture-simplification-design.md`
 - Modify: this plan.
 
 **Interfaces:**
@@ -803,7 +803,7 @@ key. The branch is a descendant of the PR baseline; it contains no rebase or ful
 Check A9 for Telegram contract suites, A10 for shared Slack/Telegram delivery, A11 for quality gates, and A12 for scope audit. Record exact commands and outcomes in the approved design and this plan.
 
 ```bash
-git add docs/superpowers/specs/2026-07-17-pr-6159-architecture-simplification-design.md docs/superpowers/plans/2026-07-17-pr-6159-architecture-simplification.md
+git add docs/internal/superpowers/specs/2026-07-17-pr-6159-architecture-simplification-design.md docs/internal/superpowers/plans/2026-07-17-pr-6159-architecture-simplification.md
 git commit -m "docs(reborn): complete PR 6159 architecture evidence"
 ```
 

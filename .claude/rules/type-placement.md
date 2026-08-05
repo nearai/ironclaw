@@ -47,7 +47,7 @@ tree; the 2026-07 judging pass ran over a **178**-pair snapshot of that scan and
 found **18 TRUE duplicates + 14 borderline identity-lockstep mirrors** — real
 but rare (~1%), and mostly under *different names* (invisible to name matching).
 Re-run the script before quoting either number; the unjudged delta is real. The
-judged backlog lives in `docs/plans/2026-07-02-type-dedup-backlog.md`.
+judged backlog lives in `docs/internal/plans/2026-07-02-type-dedup-backlog.md`.
 The dominant failure mode: a downstream crate re-declares an upstream type
 verbatim "for decoupling," plus an identity `From` that never diverges.
 
@@ -121,7 +121,7 @@ Output is candidates, not verdicts — judge each pair by reading both
 definitions: TRUE-DUP (unify into the owner per the placement order),
 JUSTIFIED-MIRROR (independent wire/domain evolution — document why), or
 COINCIDENTAL (same shape, different concept). Judged baseline:
-`docs/plans/2026-07-02-type-dedup-backlog.md`. A new TRUE-DUP-shaped pair
+`docs/internal/plans/2026-07-02-type-dedup-backlog.md`. A new TRUE-DUP-shaped pair
 appearing in the scan requires justification in the PR description;
 reviewers may block on it.
 
@@ -147,7 +147,7 @@ The same discipline applies to traits. A trait is justified by exactly one of:
 A trait with one same-crate impl, no double, no `dyn` use, and no inversion is
 **ceremony** — call the concrete type; delete the trait. The 2026-07 pass found
 only 8 traits failing this test (4 ceremony, 4 dead) — listed in
-`docs/plans/2026-07-02-type-dedup-backlog.md`. That judgement has not been
+`docs/internal/plans/2026-07-02-type-dedup-backlog.md`. That judgement has not been
 re-run against the current trait set. New single-impl traits need
 their §-reason stated in the PR description; reviewers may block on it.
 

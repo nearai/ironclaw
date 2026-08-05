@@ -2,7 +2,7 @@
 
 Status: proposed
 Date: 2026-06-10
-Related: `docs/plans/2026-06-10-auth-gate-resume-redispatch.md` (separate workstream, `ironclaw_agent_loop` only — does not overlap)
+Related: `docs/internal/plans/2026-06-10-auth-gate-resume-redispatch.md` (separate workstream, `ironclaw_agent_loop` only — does not overlap)
 
 ## Problem
 

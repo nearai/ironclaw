@@ -93,7 +93,7 @@ when introduced:
   every dependent manifest, `required-features` on `[[test]]` /
   `[[bin]]` targets, `.github/workflows/`, `Dockerfile*`,
   `scripts/ci/package-feature-flags.sh` and its self-test, and
-  `docs/plans/composition-pubuse.snapshot` when the public facade
+  `docs/internal/plans/composition-pubuse.snapshot` when the public facade
   changes.
 - **Persisted strings are not feature references.**
   `SLACK_OUTBOUND_PROVIDER_KEY_PREFIX = "slack-v2-host-beta"` is a

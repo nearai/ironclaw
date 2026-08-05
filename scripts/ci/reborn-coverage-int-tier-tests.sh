@@ -5,7 +5,7 @@
 #
 # Integration-tier (task T0-COV) is the set of in-process suites under
 # tests/integration/ (post-restructure home of the roadmap integration suite;
-# see docs/superpowers/specs/2026-06-26-reborn-integration-test-framework-design.md):
+# see docs/internal/superpowers/specs/2026-06-26-reborn-integration-test-framework-design.md):
 #   - tests/integration/<name>.rs        (flat bins; `name = reborn_integration_<name>`)
 #   - tests/integration/group_<x>/       (group bins; `name = reborn_group_<x>`)
 #   - tests/integration/<domain>/<n>.rs  (domain-folder bins, e.g. auth/;

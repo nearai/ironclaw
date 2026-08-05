@@ -115,7 +115,7 @@ E2E_SCOPE_PROBES: tuple[tuple[str, bool], ...] = (
     ("Cargo.toml", True),
     # Still out of scope: the filter must stay a filter.
     ("README.md", False),
-    ("docs/plans/whatever.md", False),
+    ("docs/internal/plans/whatever.md", False),
     (".github/workflows/code_style.yml", False),
     ("src/main.rs", False),
 )
@@ -370,7 +370,7 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
             "crates/extensions/packages/slack/manifest.toml",
             "tests/integration/mod.rs",
         ),
-        out_of_scope=("README.md", "docs/plans/whatever.md", "openwiki/index.md"),
+        out_of_scope=("README.md", "docs/internal/plans/whatever.md", "openwiki/index.md"),
     ),
     CrateScopeFilter(
         workflow=CODE_STYLE_WORKFLOW,

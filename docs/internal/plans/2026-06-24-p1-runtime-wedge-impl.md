@@ -3,8 +3,8 @@
 **Date:** 2026-06-24
 **Branch:** `fix/reborn-p1-runtime-wedge` (base: main tip `f08f09209`)
 **Worktree:** `/Users/henry/Code/ironclaw-wt-p1`
-**Source triage:** `docs/plans/2026-06-24-reborn-runtime-wedge-triage.md`
-**Companion (canonical fix design):** `docs/plans/2026-06-22-turn-state-lock-wedge-fix.md`
+**Source triage:** `docs/internal/plans/2026-06-24-reborn-runtime-wedge-triage.md`
+**Companion (canonical fix design):** `docs/internal/plans/2026-06-22-turn-state-lock-wedge-fix.md`
 
 This plan covers the two P1 *amplifiers* that turned a slow provider call into a
 total runtime freeze: worker-pool starvation (Wedge 2) and the redundant

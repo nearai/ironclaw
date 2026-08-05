@@ -124,7 +124,7 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
         // surface or prompt bundle (surface refreshed mid-iteration, host
         // state moved). An iteration-scoped retry rebuilds both; exhaustion
         // fails with the precise `model_stale_request` category. Audit
-        // §6.1/§7, docs/plans/2026-06-28-reborn-error-recoverability-audit.md.
+        // §6.1/§7, docs/internal/plans/2026-06-28-reborn-error-recoverability-audit.md.
         AgentLoopHostErrorKind::StaleSurface => Some(ModelErrorClass::StaleRequest),
         // Precise terminal categories: immediate abort via the recovery
         // strategy so the run fails gracefully (`LoopExit::Failed` with a
@@ -548,7 +548,7 @@ mod tests {
     /// runner derives their precise category from kind + reason_kind
     /// (`CredentialUnavailable` -> credits/credentials,
     /// `BudgetAccountingFailed` -> budget_accounting_failed). See
-    /// `docs/plans/2026-06-28-reborn-error-recoverability-audit.md` §1/§7.
+    /// `docs/internal/plans/2026-06-28-reborn-error-recoverability-audit.md` §1/§7.
     #[test]
     fn every_model_path_host_error_kind_has_a_deliberate_class() {
         use AgentLoopHostErrorKind as K;

@@ -15,7 +15,7 @@
 //! `LibSql*` / `Postgres*` impls that spoke SQL directly were removed during
 //! the `src/db/` dissolution pass — see the design-doc entry "Legacy
 //! per-backend store cleanup" in
-//! `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+//! `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
 //!
 //! KNOWN LIMITATION (PR #3171 review #39): replay filtering currently stops
 //! at project / mission / thread / process scope. The `ResourceScope` carries

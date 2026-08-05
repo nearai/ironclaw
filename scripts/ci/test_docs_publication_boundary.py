@@ -69,7 +69,7 @@ class DocsPublicationBoundaryTest(unittest.TestCase):
         docs = make_docs_tree(
             self.root,
             ["index"],
-            "internal/\nplans/\n*.draft.mdx\n",
+            "internal/\nreborn/\n*.draft.mdx\n",
             {"index.mdx": "# Home"},
         )
         _, _, unexpected = boundary.find_violations(docs)

@@ -54,7 +54,7 @@ dead_code = "warn"
 unused_must_use = "deny"
 
 [package]
-# Tier B (see docs/plans/2026-07-02-reborn-internal-module-refactor.md §8):
+# Tier B (see docs/internal/plans/2026-07-02-reborn-internal-module-refactor.md §8):
 # the v1 legacy monolith (`src/`, package `ironclaw_legacy`, binary
 # `ironclaw-legacy`) has been deleted. This package now exists solely to host
 # the Reborn integration test suite (`tests/integration/*`, the `reborn_*`

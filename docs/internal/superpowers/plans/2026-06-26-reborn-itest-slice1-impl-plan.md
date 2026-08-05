@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-26
 **Scope:** Minimal spine + exactly ONE passing test, per the design spec
-(`docs/superpowers/specs/2026-06-26-reborn-integration-test-framework-design.md`).
+(`docs/internal/superpowers/specs/2026-06-26-reborn-integration-test-framework-design.md`).
 Build orders 0–3 + a minimal slice of 5 (assertions). Everything else
 (libSQL backend, backend matrix, tool/HTTP/shell/MCP capture, pre-commit
 style check, tool-call façade, rstest) is an EXPLICIT follow-up — NOT built now.

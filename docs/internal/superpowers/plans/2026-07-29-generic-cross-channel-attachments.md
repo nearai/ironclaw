@@ -531,8 +531,8 @@ git commit -m "test(attachments): cover cross-channel end to end flow"
 
 **Files:**
 
-- Modify: `docs/superpowers/specs/2026-07-29-generic-cross-channel-attachments-design.md`
-- Modify: `docs/superpowers/plans/2026-07-29-generic-cross-channel-attachments.md`
+- Modify: `docs/internal/superpowers/specs/2026-07-29-generic-cross-channel-attachments-design.md`
+- Modify: `docs/internal/superpowers/plans/2026-07-29-generic-cross-channel-attachments.md`
 - Modify: `.github/pull_request_template.md` only if the existing template cannot express the required evidence
 - Modify: PR #6364 body `Test Strategy` section through GitHub after local verification
 
@@ -557,7 +557,7 @@ git commit -m "test(attachments): cover cross-channel end to end flow"
 - [ ] Commit final documentation changes before the push:
 
 ```bash
-git add docs/superpowers/specs/2026-07-29-generic-cross-channel-attachments-design.md docs/superpowers/plans/2026-07-29-generic-cross-channel-attachments.md
+git add docs/internal/superpowers/specs/2026-07-29-generic-cross-channel-attachments-design.md docs/internal/superpowers/plans/2026-07-29-generic-cross-channel-attachments.md
 git commit -m "docs: record cross-channel attachment verification"
 ```
 

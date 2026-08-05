@@ -12,7 +12,7 @@ The durable runtime event log issues **one single-row INSERT per emitted event**
   - Postgres `postgres.rs:608`: `INSERT INTO root_filesystem_events (path, payload) VALUES ($1,$2) RETURNING id` (id = BIGSERIAL = SeqNo).
   - libSQL `libsql.rs:896`: `INSERT ... VALUES (?1,?2)` then `last_insert_rowid()` (seq = INTEGER PK AUTOINCREMENT).
   - in-memory `in_memory.rs:363`: per-path `Vec` push.
-- Per-turn cost (write-classification audit, `docs/plans/2026-06-25-write-caching-batching-classification.md`, row E1): **~5K+3I+1** single-row INSERTs ≈ **21 at K=5/I=1, ≈57 at K=10/I=2**. On cross-region Postgres (~100–200 ms/round-trip) this is a top latency contributor.
+- Per-turn cost (write-classification audit, `docs/internal/plans/2026-06-25-write-caching-batching-classification.md`, row E1): **~5K+3I+1** single-row INSERTs ≈ **21 at K=5/I=1, ≈57 at K=10/I=2**. On cross-region Postgres (~100–200 ms/round-trip) this is a top latency contributor.
 
 ## Decision (already made — not relitigated)
 

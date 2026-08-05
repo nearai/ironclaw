@@ -21,7 +21,7 @@ directly. Personal-invite enrollment wins; instance enrollment is the fallback
 and carries a per-user subject = `local_pseudonymous_contributor_id("{tenant}:{user}")`.
 
 **Tech Stack:** Rust, tokio, serde, anyhow. Spec:
-`docs/superpowers/specs/2026-06-25-trace-commons-instance-enrollment-profiles-inspection-design.md`.
+`docs/internal/superpowers/specs/2026-06-25-trace-commons-instance-enrollment-profiles-inspection-design.md`.
 
 ## Global Constraints
 

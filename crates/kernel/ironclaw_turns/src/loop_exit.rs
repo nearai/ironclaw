@@ -808,7 +808,7 @@ fn invalid_exit_decision(
 ) -> LoopExitValidationDecision {
     // Persist the specific violation kind on the sanitized failure detail so
     // the durable record keeps WHICH protocol rule was broken, not only the
-    // coarse category (docs/plans/2026-07-03-loop-failure-matrix.md).
+    // coarse category (docs/internal/plans/2026-07-03-loop-failure-matrix.md).
     let failure = SanitizedFailure::from_trusted_static(kind.failure_category())
         .with_detail(kind.failure_detail());
     let mapping = TurnRunnerOutcome::Failed { failure }.into();

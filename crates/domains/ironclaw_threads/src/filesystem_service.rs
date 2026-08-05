@@ -3449,7 +3449,7 @@ fn summary_covers_redacted_or_deleted_content(
 // single-record RMWs onto `cas_update` (fail-closed on a non-CAS
 // backend) is a tracked, deferred follow-up sibling to the
 // `ironclaw_turns` runner-lease migration (#5274) — see
-// `docs/plans/2026-06-25-cas-migration.md`.
+// `docs/internal/plans/2026-06-25-cas-migration.md`.
 
 /// Local error classification for the CAS-aware put helper.
 enum PutError {

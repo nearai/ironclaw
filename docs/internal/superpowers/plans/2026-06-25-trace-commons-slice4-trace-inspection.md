@@ -22,7 +22,7 @@ hook/component renders it under the Trace Commons settings tab. Scope is always
 derived from the authenticated caller, never the request.
 
 **Tech Stack:** Rust (axum, tokio), React (htm/preact + @tanstack/react-query).
-Spec: `docs/superpowers/specs/2026-06-25-trace-commons-instance-enrollment-profiles-inspection-design.md`.
+Spec: `docs/internal/superpowers/specs/2026-06-25-trace-commons-instance-enrollment-profiles-inspection-design.md`.
 
 ## Global Constraints
 

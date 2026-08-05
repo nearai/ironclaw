@@ -18,13 +18,13 @@
 > stored public activation state. Tenant-admin bot configuration remains a
 > separate tenant-scoped authority and never installs Telegram for a user.
 > Use
-> `docs/superpowers/plans/2026-07-22-generic-extension-correctness-merge-readiness.md`
+> `docs/internal/superpowers/plans/2026-07-22-generic-extension-correctness-merge-readiness.md`
 > and the live manifest/contracts for current implementation and release
 > decisions.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship the single `telegram` extension on Reborn main — admin bot setup (Channels tab), webhook-only ingress, WebGeneratedCode pairing with BlockedAuth park/resume, DM-only messaging, proactive delivery, zero tools — per `docs/superpowers/specs/2026-07-16-telegram-extension-design.md`.
+**Goal:** Ship the single `telegram` extension on Reborn main — admin bot setup (Channels tab), webhook-only ingress, WebGeneratedCode pairing with BlockedAuth park/resume, DM-only messaging, proactive delivery, zero tools — per `docs/internal/superpowers/specs/2026-07-16-telegram-extension-design.md`.
 
 **Architecture:** Clone the `crates/ironclaw_composition/src/slack/**` host-module shape as `telegram/**` behind cargo feature `telegram-v2-host-beta`, reusing the unwired `ironclaw_telegram_v2_adapter` (ProductAdapter) and the existing park/resume machinery (`RuntimeCredentialAuthRequirement` → `BlockedAuth` → `BlockedAuthResumeFanout`, all provider-string-keyed on `"telegram"`). Pairing state lives in telegram host state (filesystem-over-backend); no credential accounts are minted for pairing — the gate is synthesized from pairedness.
 

@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-12
 **Status:** draft for review (revised after plan-mode review: approach/local-patterns/maintainability)
-**Related:** #4747 (pending-resume unification), plan #4539 (idempotency enforcement), PR #4799/#4811 (Slack gate routing/feedback), docs/plans/2026-06-10-auth-gate-resume-redispatch.md (introduced `PendingAuthResume`)
+**Related:** #4747 (pending-resume unification), plan #4539 (idempotency enforcement), PR #4799/#4811 (Slack gate routing/feedback), docs/internal/plans/2026-06-10-auth-gate-resume-redispatch.md (introduced `PendingAuthResume`)
 
 ## Problem
 
@@ -62,7 +62,7 @@ must resume the **same logical invocation** instead of minting a new one:
 
 - Extend the existing `PendingAuthResume` slot
   (`crates/ironclaw_agent_loop/src/state.rs:116`, introduced by
-  docs/plans/2026-06-10-auth-gate-resume-redispatch.md) to carry the original
+  docs/internal/plans/2026-06-10-auth-gate-resume-redispatch.md) to carry the original
   `invocation_id` (as resume token) and, when the invocation had previously passed an
   approval, the original `approval_request_id`. New fields use the established
   `#[serde(default, skip_serializing_if = "Option::is_none")]` pattern so existing

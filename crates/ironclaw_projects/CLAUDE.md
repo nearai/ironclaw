@@ -1,7 +1,7 @@
 # ironclaw_projects guardrails
 
 First-class **Project** entity, membership, and access control for the IronClaw
-Reborn stack. Plan: `docs/plans/2026-06-17-reborn-projects.md`.
+Reborn stack. Plan: `docs/internal/plans/2026-06-17-reborn-projects.md`.
 
 > The v1 engine's legacy `Project` type is gone with `ironclaw_engine`; this is
 > now the only `Project` in the tree. This crate

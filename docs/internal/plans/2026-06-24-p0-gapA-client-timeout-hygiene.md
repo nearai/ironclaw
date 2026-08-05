@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-24
 **Branch:** `fix/reborn-p0-provider-timeout` (worktree `/Users/henry/Code/ironclaw-wt-p0`, PR #5204)
-**Extends:** `docs/plans/2026-06-24-p0-provider-timeout-impl.md` (NEAR AI hardening + 75s primary-call wrapper, already committed at `8d4d8d47c`)
+**Extends:** `docs/internal/plans/2026-06-24-p0-provider-timeout-impl.md` (NEAR AI hardening + 75s primary-call wrapper, already committed at `8d4d8d47c`)
 
 ## Problem (verified in this worktree)
 

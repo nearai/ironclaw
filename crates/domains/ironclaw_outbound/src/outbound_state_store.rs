@@ -116,7 +116,7 @@ const COMMUNICATION_PREFERENCES_ROOT: &str = "/outbound/communication-preference
 
 /// Indexed projection key for the tenant id, written alongside every
 /// outbound write as a defense-in-depth measure beyond path-prefix
-/// scoping. See `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`
+/// scoping. See `docs/internal/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`
 /// — path-prefix scoping is the primary isolation boundary; this
 /// projection lets admin-tier queries filter explicitly by tenant and
 /// turns a path-rewriting bug into a query-time mismatch.

@@ -4,7 +4,7 @@
 
 **Goal:** Admin-scoped product-command actions (`/model set`, `/model set-provider`, the lifecycle family) execute only for `Owner`/`Admin` accounts; the alias mechanism is deleted; bundled Slack/Telegram manifests declare `["model", "status"]`.
 
-**Architecture:** `ironclaw_assistant::commands` gains a `CommandAudience` vocabulary (listing audience on descriptors + action-aware `required_audience`). `DirectConversationCommandAdmission` gains an audience step backed by a new `CommandActorRoleResolver` port; the production resolver (`ironclaw_extension_host`) maps channel actor → bound user (`RebornUserIdentityLookup`) → active-account role (`AdminUserService`). Denials reuse the existing wire-stable `ProductRejectionKind::AccessDenied`; the run-delivery observer maps it to fixed admin-denial copy and filters its static help to user-audience commands. Spec: `docs/superpowers/specs/2026-07-29-product-command-train-design.md`.
+**Architecture:** `ironclaw_assistant::commands` gains a `CommandAudience` vocabulary (listing audience on descriptors + action-aware `required_audience`). `DirectConversationCommandAdmission` gains an audience step backed by a new `CommandActorRoleResolver` port; the production resolver (`ironclaw_extension_host`) maps channel actor → bound user (`RebornUserIdentityLookup`) → active-account role (`AdminUserService`). Denials reuse the existing wire-stable `ProductRejectionKind::AccessDenied`; the run-delivery observer maps it to fixed admin-denial copy and filters its static help to user-audience commands. Spec: `docs/internal/superpowers/specs/2026-07-29-product-command-train-design.md`.
 
 **Tech Stack:** Rust 2024 workspace, async-trait, serde, tokio tests. Crates touched: `ironclaw_assistant`, `ironclaw_extension_host`, `ironclaw_host_api` (read-only), `ironclaw_composition`, `ironclaw_first_party_extensions` (manifests).
 
@@ -189,7 +189,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ### Task 3: Observer — admin-denial copy and user-audience help
 
 **Files:**
-- Modify: `crates/ironclaw_assistant/src/run_delivery/observer.rs`, `docs/superpowers/specs/2026-07-29-product-command-train-design.md`
+- Modify: `crates/ironclaw_assistant/src/run_delivery/observer.rs`, `docs/internal/superpowers/specs/2026-07-29-product-command-train-design.md`
 - Test: `crates/ironclaw_assistant/tests/run_delivery_contract.rs`
 
 **Interfaces:**
@@ -265,12 +265,12 @@ where
 - [ ] **Step 4: Run to verify green.** Run: `cargo test -p ironclaw_assistant --no-fail-fast`
 Expected: PASS, including all pre-existing feedback pins.
 
-- [ ] **Step 5: Sync the spec.** In `docs/superpowers/specs/2026-07-29-product-command-train-design.md`, PR-1 Admission section, replace the sentence claiming admission builds role-aware help at rejection time with: "Help is role-safe by filtering: the observer's static help includes only user-audience declared commands, for every actor. Admission rejections carry internal reasons only; the observer never echoes them. The admin denial is keyed by the reused wire-stable `ProductRejectionKind::AccessDenied`."
+- [ ] **Step 5: Sync the spec.** In `docs/internal/superpowers/specs/2026-07-29-product-command-train-design.md`, PR-1 Admission section, replace the sentence claiming admission builds role-aware help at rejection time with: "Help is role-safe by filtering: the observer's static help includes only user-audience declared commands, for every actor. Admission rejections carry internal reasons only; the observer never echoes them. The admin denial is keyed by the reused wire-stable `ProductRejectionKind::AccessDenied`."
 
 - [ ] **Step 6: Commit.**
 
 ```bash
-git add crates/ironclaw_assistant docs/superpowers/specs/2026-07-29-product-command-train-design.md
+git add crates/ironclaw_assistant docs/internal/superpowers/specs/2026-07-29-product-command-train-design.md
 git commit -m "feat(commands): deliver admin-denial notices and user-audience help
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
@@ -632,14 +632,14 @@ Expected: PASS. (ARCH-SPRAWL flags on uncommitted merges are known false positiv
 Run: `RUST_MIN_STACK=67108864 bash scripts/reborn-e2e-rust.sh`
 Expected: PASS (the stack floor is the precedented local requirement for the integration lanes).
 
-- [ ] **Step 5: Re-read the spec against the diff.** Open `docs/superpowers/specs/2026-07-29-product-command-train-design.md` PR-1 section; confirm every bullet is implemented or explicitly amended (Task 3 Step 5 already amended the help design). Fix any drift in the spec, not the code, if the code matches approved decisions.
+- [ ] **Step 5: Re-read the spec against the diff.** Open `docs/internal/superpowers/specs/2026-07-29-product-command-train-design.md` PR-1 section; confirm every bullet is implemented or explicitly amended (Task 3 Step 5 already amended the help design). Fix any drift in the spec, not the code, if the code matches approved decisions.
 
 - [ ] **Step 6: Push and open the PR — CONFIRM WITH BEN FIRST.** Pause and ask before pushing. Then:
 
 ```bash
 git push -u origin ivy-coreopsis
 gh pr create --base main --title "feat(commands): role-gate admin command actions (PR-1 of command train)" --body "$(cat <<'EOF'
-Implements PR-1 of docs/superpowers/specs/2026-07-29-product-command-train-design.md:
+Implements PR-1 of docs/internal/superpowers/specs/2026-07-29-product-command-train-design.md:
 audience vocabulary (user/admin, per-action), CommandActorRoleResolver port with
 the production channel resolver (identity binding -> active-account role),
 AccessDenied admin denials with fixed observer copy, user-audience help

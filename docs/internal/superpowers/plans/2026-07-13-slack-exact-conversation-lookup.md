@@ -159,7 +159,7 @@ Expected: pass.
 **Files:**
 - Check: `FEATURE_PARITY.md`
 - Check: `CHANGELOG.md`
-- Check: `docs/superpowers/specs/2026-07-12-q10-slack-canary-reliability-design.md`
+- Check: `docs/internal/superpowers/specs/2026-07-12-q10-slack-canary-reliability-design.md`
 
 **Interfaces:**
 - Consumes: the completed source, schemas, test contracts, and WASM artifact.

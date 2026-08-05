@@ -18,16 +18,12 @@ drafts/
 #
 # THE RULE: all new internal material goes under internal/. This list is frozen
 # — scripts/ci/docs_publication_boundary.py (Code Style workflow) rejects any
-# entry added to it. The other directories below are legacy locations kept
-# until they are consolidated into internal/; entries may be removed as that
-# happens, never added. The same check requires every .md/.mdx under docs/ to
-# be in docs.json navigation, matched here, or carrying `hidden: true`
-# frontmatter marking a deliberately unlisted public page.
-plans/
+# entry added to it. reborn/ is the one remaining legacy location: its path is
+# load-bearing (architecture tests read contract files from it, and the
+# reborn-e2e scope filters match it), so it moves into internal/ only when
+# those consumers move with it. Entries may be removed as that happens, never
+# added. The same check requires every .md/.mdx under docs/ to be in docs.json
+# navigation, matched here, or carrying `hidden: true` frontmatter marking a
+# deliberately unlisted public page.
 internal/
 reborn/
-superpowers/
-qa/
-adr/
-architecture-video/
-reborn-binary.md

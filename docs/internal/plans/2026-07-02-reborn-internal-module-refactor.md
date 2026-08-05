@@ -1,6 +1,6 @@
 # Reborn Internal-Module Refactor — Crate Map, Eval Harness, Testing Strategy
 
-**Status:** ACTIVE — supersedes `docs/plans/2026-06-21-composition-crate-decomposition.md`
+**Status:** ACTIVE — supersedes `docs/internal/plans/2026-06-21-composition-crate-decomposition.md`
 (the 6-crate extraction; PRs #5135/#5137 closed, direction reversed on fan-in evidence).
 
 ## 1. Decision
@@ -194,7 +194,7 @@ grep -c '^    "' Cargo.toml   # or: cargo metadata | jq '.workspace_members | le
 # so a silently dropped/changed feature gate on an export is caught, not missed.
 awk '/^#\[/{attr=(attr ? attr "\n" : "") $0; next} /^pub use/{p=1; if(attr){print attr; attr=""}} p{print; if(/;/){p=0}} !p{attr=""}' \
   crates/ironclaw_composition/src/lib.rs > "$TMPDIR/pubuse.after"
-diff docs/plans/composition-pubuse.snapshot "$TMPDIR/pubuse.after"
+diff docs/internal/plans/composition-pubuse.snapshot "$TMPDIR/pubuse.after"
 # S5 move-purity: diff must be ≥90% renames/moves (logic changes ≈ 0)
 git diff --find-renames=90% --stat main...HEAD
 ```

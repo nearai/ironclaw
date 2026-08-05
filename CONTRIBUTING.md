@@ -148,7 +148,7 @@ Run `cargo deny check` before adding new dependencies to verify license compatib
 
 In case you want to document the library itself (i.e. reference documentation) for other core contributors, use the `docs/internal/` folder
 
-If you use your Claude Code to "plan" and want to leave a record of it, use the `docs/plans` folder.
+If you use your Claude Code to "plan" and want to leave a record of it, use the `docs/internal/plans` folder.
 
 ### Skills
 Read the `.claude/skills/mintlify-docs` for guidelines on how to generate documentation with mintlify.

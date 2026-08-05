@@ -17,7 +17,7 @@ request builder serializes it (only in `DeviceKey` auth mode, mirroring the
 `resolve_trace_credentials` (Slice 1) and threads it into the context.
 
 **Tech Stack:** Rust, serde, reqwest, tokio. Spec:
-`docs/superpowers/specs/2026-06-25-trace-commons-instance-enrollment-profiles-inspection-design.md`.
+`docs/internal/superpowers/specs/2026-06-25-trace-commons-instance-enrollment-profiles-inspection-design.md`.
 
 ## Global Constraints
 

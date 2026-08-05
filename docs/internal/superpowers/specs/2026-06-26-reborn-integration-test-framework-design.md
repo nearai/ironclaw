@@ -8,7 +8,7 @@
 
 ## 1. Goal & Motivation
 
-Adopt the hermes-agent test philosophy for the Reborn stack: **run all internal logic for real; mock only the external edges (model vendor, inbound payload); use a real-but-ephemeral database.** Investigation of hermes-agent (see `docs/plans/2026-06-26-hermes-agent-test-ci-replication.md`) confirmed that pattern, and that the bulk of their tests stay 3–12 lines because all ceremony lives in fixtures + factory helpers with safe defaults.
+Adopt the hermes-agent test philosophy for the Reborn stack: **run all internal logic for real; mock only the external edges (model vendor, inbound payload); use a real-but-ephemeral database.** Investigation of hermes-agent (see `docs/internal/plans/2026-06-26-hermes-agent-test-ci-replication.md`) confirmed that pattern, and that the bulk of their tests stay 3–12 lines because all ceremony lives in fixtures + factory helpers with safe defaults.
 
 IronClaw already has the building blocks, but the current Reborn harness has two gaps relative to this goal:
 

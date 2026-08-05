@@ -19,7 +19,7 @@ URL is returned to the user (it is a one-time, user-facing link, not a stored
 bearer credential).
 
 **Tech Stack:** Rust, async_trait, serde_json. Spec:
-`docs/superpowers/specs/2026-06-25-trace-commons-instance-enrollment-profiles-inspection-design.md`.
+`docs/internal/superpowers/specs/2026-06-25-trace-commons-instance-enrollment-profiles-inspection-design.md`.
 
 ## Global Constraints
 

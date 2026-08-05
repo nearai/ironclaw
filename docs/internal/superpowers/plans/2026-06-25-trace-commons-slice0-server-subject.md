@@ -28,7 +28,7 @@ contract is part of this slice's documented API surface, not an implicit
 side effect of the claim change.
 
 **Tech Stack:** Rust, axum, jsonwebtoken (EdDSA), tokio, serde. Spec:
-`docs/superpowers/specs/2026-06-25-trace-commons-instance-enrollment-profiles-inspection-design.md`
+`docs/internal/superpowers/specs/2026-06-25-trace-commons-instance-enrollment-profiles-inspection-design.md`
 (in the ironclaw repo).
 
 ## Global Constraints

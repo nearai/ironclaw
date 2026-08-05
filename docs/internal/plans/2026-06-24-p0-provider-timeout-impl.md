@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-24
 **Branch:** `fix/reborn-p0-provider-timeout` (worktree `/Users/henry/Code/ironclaw-wt-p0`)
-**Source triage:** `docs/plans/2026-06-24-reborn-runtime-wedge-triage.md`
+**Source triage:** `docs/internal/plans/2026-06-24-reborn-runtime-wedge-triage.md`
 
 ## Problem (verified)
 

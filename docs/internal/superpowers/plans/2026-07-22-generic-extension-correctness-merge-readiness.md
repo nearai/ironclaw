@@ -297,7 +297,7 @@ This is an independent merge gate against the current host/product contracts, no
 - [ ] An auditor who did not author the relevant implementation slice performs the audit after the implementation diff stabilizes.
 - [ ] The audit records the exact PR head SHA and merge base from `git merge-base origin/main HEAD`.
 - [ ] The audit covers committed changes plus every staged/untracked production file that will enter the PR.
-- [ ] A companion report is materialized at `docs/superpowers/plans/2026-07-22-generic-extension-correctness-architecture-audit.md`.
+- [ ] A companion report is materialized at `docs/internal/superpowers/plans/2026-07-22-generic-extension-correctness-architecture-audit.md`.
 - [ ] Every changed production symbol is classified against the document's five routing surfaces: `ProductSurface`, `AgentLoopHost`, `authorize + dispatch`, `RuntimeLane`, or a substrate port; pure deployment selection is classified as data and composition as assembly.
 - [ ] Each finding is labeled `PASS`, `PRE-EXISTING UNCHANGED DEBT`, or `PR BLOCKER`, with file/symbol evidence and the exact search or trace used.
 - [ ] Pre-existing debt is only non-blocking when the auditor proves the PR neither adds a new instance nor expands the existing footprint.

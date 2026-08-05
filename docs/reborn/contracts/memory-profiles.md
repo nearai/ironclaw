@@ -89,7 +89,7 @@ schemas/memory/document-write.output.v1.json
   threaded into the memory handler in place of a raw `RootFilesystem`. Gated
   behind non-default `memory-native-*` features (the reborn composition crates
   cannot depend on the root `ironclaw` crate where the Postgres/libSQL backends
-  live). See `docs/adr/0002-native-memory-uses-host-storage-ports.md`.
+  live). See `docs/internal/adr/0002-native-memory-uses-host-storage-ports.md`.
 - **Default flip** — blocked until `/memory` data + API compatibility is decided
   and tested across caller boundaries (filesystem-mount, gateway/API,
   prompt-write-safety). Legacy `memory_documents` migration stays deferred.

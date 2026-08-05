@@ -60,19 +60,15 @@ OPENAPI_PAGE_RE = re.compile(
 HIDDEN_FRONTMATTER_RE = re.compile(r"^hidden:\s*true\s*$")
 
 # docs/.mintignore may only ever shrink. internal/ is the one growing home for
-# internal docs; the rest are legacy locations awaiting consolidation into it.
+# internal docs; reborn/ is the last legacy location, kept until its
+# load-bearing consumers (architecture tests reading contract files, the
+# reborn-e2e scope filters) can move with it.
 FROZEN_MINTIGNORE_PATTERNS = frozenset(
     {
         "drafts/",
         "*.draft.mdx",
-        "plans/",
         "internal/",
         "reborn/",
-        "superpowers/",
-        "qa/",
-        "adr/",
-        "architecture-video/",
-        "reborn-binary.md",
     }
 )
 

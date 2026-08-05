@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-28
 **Status:** discovery complete (core); two backend sweeps outstanding (see §6.4)
-**Builds on:** [`docs/plans/2026-06-12-reborn-no-borking-failures.md`](2026-06-12-reborn-no-borking-failures.md) and PR #4841 (`reborn: no run-borking failures`, OPEN).
+**Builds on:** [`docs/internal/plans/2026-06-12-reborn-no-borking-failures.md`](2026-06-12-reborn-no-borking-failures.md) and PR #4841 (`reborn: no run-borking failures`, OPEN).
 
 ## Goal (decided with user)
 

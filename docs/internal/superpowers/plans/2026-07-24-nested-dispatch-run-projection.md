@@ -198,7 +198,7 @@ git add \
   crates/ironclaw_composition/src/projection/tests/nested_dispatch_stream.rs \
   docs/reborn/contracts/events.md \
   docs/reborn/contracts/events-projections.md \
-  docs/superpowers/plans/2026-07-24-nested-dispatch-run-projection.md \
+  docs/internal/superpowers/plans/2026-07-24-nested-dispatch-run-projection.md \
   scripts/reborn-e2e-rust.sh
 git commit -m "fix(reborn): keep tool failures out of run status"
 ```

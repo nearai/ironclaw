@@ -98,7 +98,7 @@ Expected: every command exits successfully with zero test failures and zero warn
 - [x] **Step 6: Commit and publish**
 
 ```bash
-git add Dockerfile.reborn crates/ironclaw_cli/tests/smoke.rs crates/ironclaw_reborn_migration/Cargo.toml crates/ironclaw_reborn_migration/src/lib.rs crates/ironclaw_reborn_migration/src/report.rs crates/ironclaw_reborn_migration/src/target.rs docs/superpowers/plans/2026-07-13-railway-extension-ownership-migration-packaging.md
+git add Dockerfile.reborn crates/ironclaw_cli/tests/smoke.rs crates/ironclaw_reborn_migration/Cargo.toml crates/ironclaw_reborn_migration/src/lib.rs crates/ironclaw_reborn_migration/src/report.rs crates/ironclaw_reborn_migration/src/target.rs docs/internal/superpowers/plans/2026-07-13-railway-extension-ownership-migration-packaging.md
 git commit -m "build(reborn): ship extension ownership migration"
 git push -u origin codex/ship-extension-ownership-migration
 ```
