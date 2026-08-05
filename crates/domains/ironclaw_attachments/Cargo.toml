@@ -16,7 +16,7 @@ layer = "substrates"
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-ironclaw_common = { path = "../../contracts/ironclaw_common", version = "0.4.2" }
+ironclaw_common = { path = "../../contracts/ironclaw_common", version = "0.5.0" }
 ironclaw_extractors = { path = "../ironclaw_extractors", version = "0.1.0" }
 ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../../contracts/ironclaw_host_api", version = "0.1.0" }

@@ -45,7 +45,7 @@ ironclaw_observability = { path = "../../substrates/ironclaw_observability" }
 ironclaw_outbound = { path = "../../domains/ironclaw_outbound", version = "0.1.0" }
 ironclaw_processes = { path = "../../kernel/ironclaw_processes", version = "0.1.0" }
 ironclaw_approvals = { path = "../../kernel/ironclaw_approvals", version = "0.1.0" }
-ironclaw_safety = { path = "../../substrates/ironclaw_safety", version = "0.2.2" }
+ironclaw_safety = { path = "../../substrates/ironclaw_safety", version = "0.2.3" }
 ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", version = "0.1.0" }
 ironclaw_threads = { path = "../../domains/ironclaw_threads", version = "0.1.0" }
 ironclaw_loop_contracts = { path = "../../contracts/ironclaw_loop_contracts", version = "0.1.0" }
@@ -79,7 +79,7 @@ ironclaw_processes = { path = "../../kernel/ironclaw_processes", version = "0.1.
 ironclaw_event_store = { path = "../../events/ironclaw_event_store", version = "0.1.0" }
 ironclaw_resources = { path = "../../kernel/ironclaw_resources", version = "0.1.0" }
 ironclaw_sandbox = { path = "../../lanes/ironclaw_sandbox", version = "0.1.0" }
-ironclaw_skills = { path = "../../domains/ironclaw_skills", version = "0.3.0", default-features = false }
+ironclaw_skills = { path = "../../domains/ironclaw_skills", version = "0.4.0", default-features = false }
 ironclaw_trust = { path = "../../kernel/ironclaw_trust", version = "0.1.0" }
 ironclaw_turns = { path = "../../kernel/ironclaw_turns", version = "0.1.0", features = ["test-support"] }
 rust_decimal = "1"

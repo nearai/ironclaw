@@ -1,6 +1,6 @@
 [package]
 name = "ironclaw_skills"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version.workspace = true
 description = "Skill selection, scoring, and management for IronClaw"

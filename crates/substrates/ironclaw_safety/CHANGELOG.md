@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/nearai/ironclaw/compare/ironclaw_safety-v0.2.2...ironclaw_safety-v0.2.3) - 2026-08-05
+
+### Other
+
+- WS7 (1/2): family directory moves — text-only ([#7206](https://github.com/nearai/ironclaw/pull/7206))
+
 ### Added
 
 - Add validated all-action leak redaction for retention boundaries.

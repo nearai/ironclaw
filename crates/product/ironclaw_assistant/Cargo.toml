@@ -29,7 +29,7 @@ async-trait = "0.1"
 base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
-ironclaw_common = { path = "../../contracts/ironclaw_common", version = "0.4.1" }
+ironclaw_common = { path = "../../contracts/ironclaw_common", version = "0.5.0" }
 ironclaw_attachments = { path = "../../domains/ironclaw_attachments", version = "0.1.0" }
 ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", version = "0.1.0" }
 ironclaw_approvals = { path = "../../kernel/ironclaw_approvals", version = "0.1.0" }
@@ -54,7 +54,7 @@ ironclaw_projects = { path = "../../ironclaw_projects", version = "0.1.0" }
 ironclaw_identity = { path = "../../domains/ironclaw_identity", version = "0.1.0" }
 ironclaw_trace_commons = { path = "../../domains/ironclaw_trace_commons", version = "0.1.0" }
 ironclaw_secrets = { path = "../../substrates/ironclaw_secrets", version = "0.1.0" }
-ironclaw_safety = { path = "../../substrates/ironclaw_safety", version = "0.2.2" }
+ironclaw_safety = { path = "../../substrates/ironclaw_safety", version = "0.2.3" }
 ironclaw_threads = { path = "../../domains/ironclaw_threads", version = "0.1.0" }
 ironclaw_triggers = { path = "../../domains/ironclaw_triggers", version = "0.1.0" }
 ironclaw_loop_contracts = { path = "../../contracts/ironclaw_loop_contracts", version = "0.1.0" }

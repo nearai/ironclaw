@@ -28,7 +28,7 @@ parking_lot = "0.12"
 tracing = "0.1"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 ironclaw_capabilities = { path = "../../kernel/ironclaw_capabilities", version = "0.1.0" }
-ironclaw_common = { path = "../../contracts/ironclaw_common", version = "0.4.2" }
+ironclaw_common = { path = "../../contracts/ironclaw_common", version = "0.5.0" }
 # The model gateway calls `LlmProvider` directly (WS3 runner sheds, PROPOSAL
 # §6.7.2 "gains: runner's model-gateway adapter"). `default-features = false`
 # keeps the provider cone out of the default build, matching every other
@@ -41,8 +41,8 @@ ironclaw_observability = { path = "../../substrates/ironclaw_observability" }
 ironclaw_outbound = { path = "../../domains/ironclaw_outbound", version = "0.1.0" }
 ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", version = "0.1.0" }
 ironclaw_resources = { path = "../../kernel/ironclaw_resources", version = "0.1.0" }
-ironclaw_safety = { path = "../../substrates/ironclaw_safety", version = "0.2.2" }
-ironclaw_skills = { path = "../../domains/ironclaw_skills", version = "0.3.0", default-features = false }
+ironclaw_safety = { path = "../../substrates/ironclaw_safety", version = "0.2.3" }
+ironclaw_skills = { path = "../../domains/ironclaw_skills", version = "0.4.0", default-features = false }
 ironclaw_memory = { path = "../../domains/ironclaw_memory", version = "0.1.0" }
 ironclaw_threads = { path = "../../domains/ironclaw_threads", version = "0.1.0" }
 ironclaw_loop_contracts = { path = "../../contracts/ironclaw_loop_contracts", version = "0.1.0" }

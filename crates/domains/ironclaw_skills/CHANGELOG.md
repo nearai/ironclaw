@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/nearai/ironclaw/compare/ironclaw_skills-v0.3.0...ironclaw_skills-v0.4.0) - 2026-08-05
+
+### Other
+
+- WS7 (1/2): family directory moves — text-only ([#7206](https://github.com/nearai/ironclaw/pull/7206))
+
 ## [0.3.0](https://github.com/nearai/ironclaw/compare/ironclaw_skills-v0.2.0...ironclaw_skills-v0.3.0) - 2026-04-29
 
 ### Added
