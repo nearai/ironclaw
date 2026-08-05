@@ -10,6 +10,10 @@ import {
   commandMenuToken,
 } from "./chat-commands";
 import {
+  canStealFocus,
+  shouldAutoFocusComposer,
+} from "./chat-input-focus";
+import {
   HTML_ATTRIBUTE_PATTERN,
   componentProps,
   componentSourceForTest,
@@ -130,6 +134,8 @@ function renderChatInput({
     commandMenuToken,
     commandMenuSelectionReducer,
     INITIAL_COMMAND_MENU_SELECTION,
+    canStealFocus,
+    shouldAutoFocusComposer,
     useAttachmentConfig: () => ({
       accept: [],
       maxCount: 10,
@@ -145,6 +151,8 @@ function renderChatInput({
     setStagedAttachments: () => {},
     window: {
       clearTimeout: () => {},
+      document: { activeElement: null },
+      matchMedia: () => ({ matches: true }),
       requestAnimationFrame: (fn) => fn(),
       setTimeout: () => 1,
     },
@@ -708,6 +716,8 @@ function renderChatInputStateful({ getDraftByKey = {} } = {}) {
     commandMenuToken,
     commandMenuSelectionReducer,
     INITIAL_COMMAND_MENU_SELECTION,
+    canStealFocus,
+    shouldAutoFocusComposer,
     useAttachmentConfig: () => ({
       accept: [],
       maxCount: 10,
@@ -723,6 +733,8 @@ function renderChatInputStateful({ getDraftByKey = {} } = {}) {
     setStagedAttachments: () => {},
     window: {
       clearTimeout: () => {},
+      document: { activeElement: null },
+      matchMedia: () => ({ matches: true }),
       requestAnimationFrame: (fn) => fn(),
       setTimeout: () => 1,
     },
@@ -731,6 +743,7 @@ function renderChatInputStateful({ getDraftByKey = {} } = {}) {
   const ChatInputFn = context.globalThis.__testExports.ChatInput;
   return {
     components,
+    host,
     render: (props) => {
       host.beginRender();
       return ChatInputFn({
@@ -744,6 +757,79 @@ function renderChatInputStateful({ getDraftByKey = {} } = {}) {
     },
   };
 }
+
+test("chat composer focus helpers guard viewport and deliberate focus", () => {
+  assert.equal(
+    shouldAutoFocusComposer({ matchMedia: () => ({ matches: true }) }),
+    true,
+  );
+  assert.equal(
+    shouldAutoFocusComposer({ matchMedia: () => ({ matches: false }) }),
+    false,
+  );
+  assert.equal(shouldAutoFocusComposer({}), false);
+  assert.equal(
+    shouldAutoFocusComposer({
+      matchMedia: () => {
+        throw new Error("unavailable");
+      },
+    }),
+    false,
+  );
+
+  const child = { tagName: "BUTTON" };
+  const composer = {
+    tagName: "TEXTAREA",
+    contains: (node) => node === child,
+  };
+  assert.equal(canStealFocus(null, composer), true);
+  assert.equal(canStealFocus({ tagName: "BODY" }, composer), true);
+  assert.equal(canStealFocus(composer, composer), true);
+  assert.equal(canStealFocus(child, composer), true);
+  assert.equal(canStealFocus({ tagName: "INPUT" }, composer), false);
+});
+
+test("ChatInput focuses restored drafts only when composer identity changes", () => {
+  const { render } = renderChatInputStateful({
+    getDraftByKey: { "thread-a": "first", "thread-b": "restored draft" },
+  });
+  const focusCalls = [];
+  const composer = {
+    style: {},
+    scrollHeight: 40,
+    focus: () => focusCalls.push("focus"),
+    setSelectionRange: (start, end) => focusCalls.push([start, end]),
+    contains: () => false,
+  };
+
+  let tree = render({ draftKey: "thread-a", resetKey: "route-a" });
+  templateProps(findTextarea(tree)).ref.current = composer;
+
+  render({ draftKey: "thread-b", resetKey: "route-b" });
+  assert.deepEqual(focusCalls, ["focus", [14, 14]]);
+
+  render({ draftKey: "thread-b", resetKey: "route-b" });
+  assert.deepEqual(focusCalls, ["focus", [14, 14]]);
+
+  render({ draftKey: "thread-c", resetKey: "route-c", disabled: true });
+  assert.deepEqual(focusCalls, ["focus", [14, 14]]);
+});
+
+test("ChatInput removes the container focus ring but keeps textarea neutralizers", () => {
+  const { tree } = renderChatInput({ disabled: false });
+  const textarea = findTextarea(tree);
+  const textareaClass = templateProps(textarea).className;
+  const allClassNames = [];
+  findNode(tree, (node) => {
+    const className = templateProps(node).className;
+    if (typeof className === "string") allClassNames.push(className);
+    return false;
+  });
+
+  assert.equal(allClassNames.some((name) => name.includes("focus-within:")), false);
+  assert.ok(textareaClass.includes("focus:!shadow-none"));
+  assert.ok(textareaClass.includes("focus:!border-transparent"));
+});
 
 test("ChatInput ArrowDown moves the active command-menu row", () => {
   const setCalls = [];

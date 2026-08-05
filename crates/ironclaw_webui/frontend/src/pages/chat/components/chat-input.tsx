@@ -21,6 +21,10 @@ import {
   setDraft,
   setStagedAttachments,
 } from "../lib/draft-store";
+import {
+  canStealFocus,
+  shouldAutoFocusComposer,
+} from "../lib/chat-input-focus";
 
 export function ChatInput({
   onSend,
@@ -204,16 +208,23 @@ export function ChatInput({
     textRef.current = initialText;
     setText(initialText);
     resetCommandMenuSelection(initialText);
-    window.requestAnimationFrame(() => {
-      if (textareaRef.current) {
-        textareaRef.current.focus();
-        textareaRef.current.setSelectionRange(
-          initialText.length,
-          initialText.length
-        );
-      }
-    });
   }, [initialText, resetKey, resetCommandMenuSelection]);
+
+  // One focus owner. Fires on composer identity change (thread open, "+ New",
+  // route remount) and on the landing-hero draft hand-off. The rAF defers past
+  // the restore effects above, so the caret lands after restored text.
+  React.useEffect(() => {
+    if (disabled) return;
+    if (!shouldAutoFocusComposer(window)) return;
+    window.requestAnimationFrame(() => {
+      const node = textareaRef.current;
+      if (!node) return;
+      if (!canStealFocus(window.document.activeElement, node)) return;
+      node.focus();
+      const end = textRef.current.length;
+      node.setSelectionRange(end, end);
+    });
+  }, [draftKey, resetKey, initialText, disabled]);
 
   // Stage dropped/picked/pasted files: validate against the server contract,
   // append the accepted ones, and surface any rejection reasons as a single
@@ -585,13 +596,6 @@ export function ChatInput({
     : "px-4 py-3 sm:px-5 lg:px-8";
   const composerClass = [
     "relative mx-auto w-full max-w-5xl rounded-[20px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] shadow-[var(--v2-card-shadow)] p-2.5 transition-colors",
-    // Highlight the full rounded container on focus (not just the
-    // leaking textarea ring), mirroring the global input:focus accent.
-    // Suppressed only when the composer is hard-disabled; busy runs
-    // still allow draft editing.
-    disabled
-      ? ""
-      : "focus-within:border-[var(--v2-accent)] focus-within:shadow-[0_0_0_3px_color-mix(in_srgb,var(--v2-accent)_28%,transparent)]",
     isHero ? "min-h-[120px]" : "",
     disabled ? "opacity-70" : "",
   ].join(" ");
