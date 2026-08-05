@@ -306,6 +306,10 @@ h1,h2,h3,p{margin:0}
 .cpill.sel{border-color:color-mix(in srgb,var(--v2-accent) 55%,var(--v2-panel-border));background:var(--v2-accent-soft)}
 .cpill.sel .cstate{background:var(--v2-accent);border-color:var(--v2-accent);color:#fff}
 .cpill[disabled]{cursor:default}
+/* connect banner confirmation (after all selected tools are authorized) */
+#connectBlock.confirmed #connectIcon{color:var(--v2-positive-text)}
+#connectBlock.confirmed .connclose{display:none}
+#connectBlock.confirmed .cpill{cursor:default}
 
 /* automation task card (faithful to automation-task-card.tsx) */
 .tcard{flex:none;width:258px;position:relative;display:flex;flex-direction:column;border:1px solid var(--v2-panel-border);border-radius:16px;background:var(--v2-card-bg);padding:12px;text-align:left;box-shadow:0 1px 2px rgba(15,18,25,.04),0 12px 26px -12px rgba(15,18,25,.12)}
@@ -595,7 +599,7 @@ h1,h2,h3,p{margin:0}
           <div class="rev flagwrap" id="connectBlock">
             <span class="flag"><span class="tag ship">Shipped</span></span>
             <div class="connect">
-              <div class="ch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg><span class="t">Connect your tools</span><span class="s" id="connectSub">one tap each · add more anytime</span><button class="connclose" id="connCloseBtn" type="button" aria-label="Dismiss connect panel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+              <div class="ch"><svg id="connectIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg><span class="t" id="connectTitle">Connect your tools</span><span class="s" id="connectSub">one tap each · add more anytime</span><button class="connclose" id="connCloseBtn" type="button" aria-label="Dismiss connect panel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
               <div class="apps" id="appRow"></div>
             </div>
           </div>
@@ -785,8 +789,11 @@ h1,h2,h3,p{margin:0}
     {key:'drive',label:'Drive',icon:'triangle',accent:'#0f9d58'},
     {key:'github',label:'GitHub',icon:'code',accent:'#7d5bed'}
   ];
-  var appRow=document.getElementById('appRow'),connectSub=document.getElementById('connectSub');
-  var connSet=[], selSet=[], connectState='open'; // 'open' | 'pill' | 'gone'
+  var appRow=document.getElementById('appRow'),connectSub=document.getElementById('connectSub'),
+      connectIcon=document.getElementById('connectIcon'),connectTitle=document.getElementById('connectTitle');
+  var PLUG_PATHS='<path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/>';
+  var CHECK_PATHS='<circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/>';
+  var connSet=[], selSet=[], connectState='open', connectPhase='select'; // connectPhase: 'select' | 'done'
   function isConn(k){return connSet.indexOf(k)>=0;}
   function isSel(k){return selSet.indexOf(k)>=0;}
   function appChip(a){return '<span class="appchip">'+brandLogo(a.key)+'</span>';}
@@ -795,10 +802,23 @@ h1,h2,h3,p{margin:0}
   function startConnect(){
     var queue = selSet.length ? selSet.slice() : APPS.filter(function(a){return !isConn(a.key);}).map(function(a){return a.key;});
     if(!queue.length) return;
-    openAuth(queue, function(k){ if(!isConn(k)) connSet.push(k); var i=selSet.indexOf(k); if(i>=0) selSet.splice(i,1); }, function(){ renderConnect(); setTimeout(advanceFromConnect,500); });
+    openAuth(queue, function(k){ if(!isConn(k)) connSet.push(k); var i=selSet.indexOf(k); if(i>=0) selSet.splice(i,1); }, function(){ if(step<1){ step=1; } render(); setTimeout(function(){ if(step<2){ step=2; render(); } }, 1300); });
   }
   function renderConnect(){
     var all=APPS.length,n=connSet.length;
+    if(connectPhase==='done'){
+      if(connectIcon)connectIcon.innerHTML=CHECK_PATHS;
+      if(connectTitle)connectTitle.textContent='Tools connected';
+      connectSub.textContent=n+' tool'+(n===1?'':'s')+' authorized · getting to work…';
+      connectBlock.classList.add('confirmed');
+      appRow.innerHTML=APPS.filter(function(a){return isConn(a.key);}).map(function(a){
+        return '<span class="cpill on" aria-disabled="true">'+appChip(a)+'<span class="an">'+a.label+'</span><span class="cstate">'+svg('check',3)+'</span></span>';
+      }).join('');
+      return;
+    }
+    if(connectIcon)connectIcon.innerHTML=PLUG_PATHS;
+    if(connectTitle)connectTitle.textContent='Connect your tools';
+    connectBlock.classList.remove('confirmed');
     connectSub.textContent = n>=all ? 'all connected' : 'select tools, then authorize each';
     var html=APPS.map(function(a){
       var on=isConn(a.key), sel=isSel(a.key);
@@ -943,7 +963,7 @@ h1,h2,h3,p{margin:0}
   var MAX=4, step=0, dir='invite', playing=false, timer=null, scene='first';
   var CAP=[
     'The <b>cold start</b>. Zero automations, nothing connected — the screen has to earn the first connect and the first prompt.',
-    '<b>Connect all</b> wires up your tools in one tap; the pills condense into a compact stack and the agent can start.',
+    'Authorized — the banner <b>confirms</b> the connection (tools turn green), then dismisses as the agent gets to work.',
     'A brief <b>anticipatory</b> beat — the branded indicator + skeleton tiles say "I\'m on it" instead of showing an empty strip.',
     'The <b>first automation appears</b> — the strip is born and the first card reveals. The aha moment.',
     'The strip <b>fills in</b>. Now it matches the populated carousel from PR #6994 — review, modify, or undo any of it.'
@@ -1018,7 +1038,7 @@ h1,h2,h3,p{margin:0}
     var carouselActive = isVision ? (step>=2) : true;
     show(carouselBlock, carouselActive);
     connPill.style.display = (empty && connectState==='pill' && isVision) ? '' : 'none';
-    if(isVision){ if(step===0){ connSet=[]; selSet=[]; renderConnect(); } else if(step===1){ connSet=APPS.map(function(a){return a.key;}); selSet=[]; renderConnect(); } }
+    if(isVision){ if(step===0){ connSet=[]; selSet=[]; connectPhase='select'; renderConnect(); } else if(step===1){ if(!connSet.length) connSet=APPS.map(function(a){return a.key;}); selSet=[]; connectPhase='done'; renderConnect(); } }
     if(carouselActive){
       if(working){
         carTtl.textContent = prop ? 'Looking for things to suggest' : 'Working on your first automations';
