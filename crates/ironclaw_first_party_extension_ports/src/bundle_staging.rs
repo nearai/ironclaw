@@ -177,42 +177,70 @@ impl<F> WorkspaceSkillBundleStager<F>
 where
     F: RootFilesystem + 'static,
 {
-    /// The path the model should use as a working directory, derived from where the bytes actually
-    /// landed rather than assumed from the alias.
+    /// The path the model uses as a working directory for this skill's own commands.
     ///
-    /// The two are not the same string. `/workspace` means `<root>/tenants/<t>/users/<u>` to the file
-    /// tools under per-caller scoping and plain `<root>` to the shell, whose alias is registered once
-    /// at composition and knows nothing about callers. Assuming either spelling produces a path that
-    /// works for one tool and silently misses for the other -- which is the bug this staging exists to
-    /// end, so it is not repeated here.
+    /// Plainly `/workspace/.skills/<name>`, and that is only correct because the shell and the file
+    /// tools now resolve `/workspace` to the same directory (`HostProcessPort` applies the caller
+    /// scoping the mount view applies).
     ///
-    /// Asks the filesystem where the staged directory really is, asks it where the shell's
-    /// `/workspace` really is, and expresses one relative to the other. Falls back to the plain
-    /// workspace-relative spelling when either is database-backed, which is the case where no process
-    /// could run anything anyway.
-    fn runnable_dir(&self, scope: &ResourceScope, skill_name: &str) -> String {
-        let relative = format!("{STAGED_SKILLS_DIRNAME}/{skill_name}");
-        let fallback = format!("/workspace/{relative}");
-        let Ok(staged_scoped) = ScopedPath::new(format!("/workspace/{relative}")) else {
-            return fallback;
-        };
-        // Where the bytes really landed, through this caller's own view.
-        let Some(staged_host) = self.filesystem.host_path_for(scope, &staged_scoped) else {
-            return fallback;
-        };
-        // Where the shell's `/workspace` really is -- deliberately NOT through this caller's view,
-        // which would cancel the per-caller segment and produce a path the shell resolves elsewhere.
-        let Some(shell_root_host) = self
-            .filesystem
-            .host_path_for_virtual(&self.shell_workspace_root)
-        else {
-            return fallback;
-        };
-        match staged_host.strip_prefix(&shell_root_host) {
-            Ok(tail) => format!("/workspace/{}", tail.to_string_lossy()),
-            // Staged outside what the shell calls the workspace: no spelling of `/workspace` reaches
-            // it, so promising one would be worse than the plain relative form.
-            Err(_) => fallback,
-        }
+    /// An earlier version derived this by measuring the staged directory against the shell's
+    /// workspace root and expressing one relative to the other. That was right while the two roots
+    /// differed and became actively wrong the moment they were unified: it emitted
+    /// `/workspace/tenants/<t>/users/<u>/.skills/<name>`, which both tools then resolved beneath the
+    /// per-caller root again -- a doubled path. The shell got a working directory that did not exist
+    /// and every command failed with `Failed to spawn command: No such file or directory`, which reads
+    /// like a missing interpreter and is not.
+    fn runnable_dir(&self, _scope: &ResourceScope, skill_name: &str) -> String {
+        format!("/workspace/{STAGED_SKILLS_DIRNAME}/{skill_name}")
+    }
+}
+
+#[cfg(test)]
+mod runnable_dir_tests {
+    use super::*;
+    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_host_api::{
+        ids::{InvocationId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
+
+    /// The path handed to the model must be the plain workspace spelling.
+    ///
+    /// This is the assertion that was missing when a derived version shipped: it emitted
+    /// `/workspace/tenants/<t>/users/<u>/.skills/<name>`, which the shell and the file tools -- both
+    /// already resolving `/workspace` beneath the per-caller root -- resolved a second time. The
+    /// doubled directory did not exist, so every shell command failed with
+    /// `Failed to spawn command: No such file or directory`, and an agent following its own skill's
+    /// instructions could not run anything.
+    #[test]
+    fn the_runnable_directory_is_the_plain_workspace_spelling() {
+        let view = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").expect("alias"),
+            VirtualPath::new("/projects/workspace").expect("target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("view");
+        let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::default()),
+            view,
+        ));
+        let stager = WorkspaceSkillBundleStager::new(
+            filesystem,
+            VirtualPath::new("/projects/workspace").expect("shell workspace root"),
+        );
+        let scope = ironclaw_host_api::resource::ResourceScope::local_default(
+            UserId::new("ada").expect("user"),
+            InvocationId::new(),
+        )
+        .expect("scope");
+
+        assert_eq!(
+            stager.runnable_dir(&scope, "egfr-calc"),
+            "/workspace/.skills/egfr-calc",
+            "the model must be handed the same spelling both the shell and the file tools resolve; \
+             any per-caller segment here is applied a second time by both and the directory does not \
+             exist"
+        );
     }
 }

@@ -7377,6 +7377,11 @@ async fn thread_one_authors_a_scripted_skill_and_thread_two_executes_it() {
             }
         }
     }
+    // NOTE: this fixture cannot catch a wrong ADVERTISED path. Staging writes through the caller's
+    // own view, so the bytes land correctly even when the string handed to the model is wrong -- which
+    // is exactly what shipped once (`/workspace/tenants/<t>/users/<u>/.skills/<name>`, resolved a
+    // second time beneath the per-caller root, a directory that does not exist). That string is pinned
+    // where it is produced, by `runnable_dir_tests` in ironclaw_first_party_extension_ports.
     let mut staged = Vec::new();
     find_staged_script(&storage_root.join("workspace"), &mut staged);
     assert_eq!(
