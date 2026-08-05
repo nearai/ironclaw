@@ -30,6 +30,7 @@ transforms.
 | Telegram setup | setup, identities, DM targets, pairing rows | admin configuration, generic identities/DM targets | Import usable setup; migrate a DM target only when exactly one active canonical identity can own it; count and retain targets with no active identity; fail on ambiguous ownership; expire one-time pairing challenges and pending completions explicitly | All provider-specific rows are retained |
 | Triggers | backend trigger repository | same backend repository | Run existing backend schema migration and verify repository access; no record transform | Same trigger rows |
 | User/system skills | scoped filesystem skill roots | same roots through 1.1 mount catalog | Inventory and verify paths remain reachable; no content transform | Same skill files |
+| Workspace artifacts and landed attachments | shared physical workspace root | per-caller `tenants/<tenant>/users/<user>` subtree | Require an explicit rc1 snapshot source; copy files create-only, verify SHA-256 and byte counts, and fail on divergent content, symlinks, or ambiguous ownership | Snapshot is retained unchanged; copied files are additive |
 
 Each transformed domain writes its own versioned completion marker. The final
 release-pair completion is written only after all readback and cross-domain
@@ -56,6 +57,34 @@ identifiers, message contents, credentials, or secret handles.
 - Non-replayable ephemeral state is never guessed: active process locks,
   reservations, incomplete OAuth flows, stale connection attempts, and pairing
   challenges receive explicit expiration/supersession dispositions.
+- Workspace ownership is never guessed. Set
+  `IRONCLAW_REBORN_LEGACY_WORKSPACE_SNAPSHOT` only after placing the stopped
+  rc1 shared workspace snapshot on persistent storage and confirming the
+  configured 1.1 tenant/default owner is its intended recipient. A conflicting
+  destination or unsupported special file fails startup without overwrite.
+
+## Railway workspace handoff
+
+The image entrypoint defaults `IRONCLAW_REBORN_WORKSPACE_ROOT` to
+`$IRONCLAW_REBORN_HOME/workspace`; on Railway that is under the mounted volume.
+It fails closed when either the live workspace or configured legacy snapshot is
+outside `RAILWAY_VOLUME_MOUNT_PATH` (except explicitly disposable deployments).
+
+Before replacing the running rc1 container, stop writes and copy `/workspace`
+from that container to
+`$IRONCLAW_REBORN_HOME/migration-sources/1.0.0-rc.1-workspace` on the mounted
+volume. Take the platform volume/database snapshot, then deploy 1.1 with:
+
+```bash
+IRONCLAW_REBORN_LEGACY_WORKSPACE_SNAPSHOT=/data/ironclaw-reborn/migration-sources/1.0.0-rc.1-workspace
+```
+
+Adjust the prefix when `RAILWAY_VOLUME_MOUNT_PATH` is not `/data`. The startup
+barrier imports the snapshot into the configured tenant/default-owner subtree,
+verifies every copied file, records only counts in the release report, and
+keeps the snapshot for rollback. If the rc1 container has already been
+destroyed and `/workspace` was not on a volume, those bytes cannot be recovered
+from the database migration.
 
 ## Rollback procedure
 
@@ -66,9 +95,12 @@ identifiers, message contents, credentials, or secret handles.
    while IronClaw is stopped.
 3. Confirm the completion report says `old_authorities_retained=true` and
    `in_place_rows_backward_readable=true`.
-4. Start the exact `ironclaw-v1.0.0-rc.1` binary against the retained database.
-   Verify thread listing and transcript reads before admitting writes.
-5. If rc1 verification fails, stop it and restore the pre-upgrade
+4. Restore or mount the retained rc1 workspace snapshot at the rc1 container's
+   `/workspace`; the 1.1 scoped copy is not the rc1 filesystem layout.
+5. Start the exact `ironclaw-v1.0.0-rc.1` binary against the retained database.
+   Verify thread listing, transcript reads, and referenced workspace artifacts
+   before admitting writes.
+6. If rc1 verification fails, stop it and restore the pre-upgrade
    database-native snapshot. Do not delete 1.1 completion markers or normalized
    rows by hand.
 

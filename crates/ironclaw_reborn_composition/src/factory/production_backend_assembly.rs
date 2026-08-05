@@ -233,6 +233,7 @@ where
             &core_migration.oauth,
             None,
             None,
+            None,
         ))
         .await
         .map_err(|error| crate::RebornCompositionError::InvalidConfig {
@@ -377,6 +378,8 @@ pub(super) async fn build_backend_production(
         workspace_filesystems,
         standalone_storage_root,
         default_system_prompt_path,
+        workspace_root,
+        legacy_workspace_snapshot,
         #[cfg(any(test, feature = "test-support"))]
         network_http_egress_for_test,
         #[cfg(any(test, feature = "test-support"))]
@@ -527,6 +530,48 @@ pub(super) async fn build_backend_production(
         )))
         .with_concurrency_limits(process_concurrency_limits),
     );
+    let workspace_migration = match (legacy_workspace_snapshot, workspace_root) {
+        (None, _) => None,
+        (Some(_), None) => {
+            release_pair_lease.fail_and_log().await;
+            return Err(RebornBuildError::InvalidConfig {
+                reason: "legacy workspace migration requires a local workspace root".to_string(),
+            });
+        }
+        (Some(_), Some(_)) if !workspace_scoped_per_caller => {
+            release_pair_lease.fail_and_log().await;
+            return Err(RebornBuildError::InvalidConfig {
+                reason: "legacy workspace migration requires per-caller workspace scoping"
+                    .to_string(),
+            });
+        }
+        (Some(source), Some(workspace_root)) => {
+            let input = ironclaw_release_migration::LegacyWorkspaceMigrationInput {
+                source,
+                workspace_root,
+                tenant_id: turn_state_scope.tenant_id.clone(),
+                user_id: turn_state_scope.user_id.clone(),
+            };
+            match ironclaw_release_migration::migrate_legacy_workspace_snapshot(input).await {
+                Ok(report) => {
+                    tracing::info!(
+                        directories_verified = report.directories_verified,
+                        files_migrated = report.files_migrated,
+                        files_unchanged = report.files_unchanged,
+                        bytes_verified = report.bytes_verified,
+                        "workspace artifact startup migration completed"
+                    );
+                    Some(report)
+                }
+                Err(error) => {
+                    release_pair_lease.fail_and_log().await;
+                    return Err(RebornBuildError::InvalidConfig {
+                        reason: format!("workspace artifact startup migration failed: {error}"),
+                    });
+                }
+            }
+        }
+    };
     // Keep the cross-domain migration future off this already-large assembly
     // future's stack; current-thread runtimes may have a small caller stack.
     let core_migration = match Box::pin(ironclaw_release_migration::migrate_core_release_pair(
@@ -1035,6 +1080,7 @@ pub(super) async fn build_backend_production(
             &core_migration.oauth,
             Some(&extension_installation_migration),
             Some(&extension_state_migration),
+            workspace_migration.as_ref(),
         ))
         .await
         .map_err(|error| crate::RebornCompositionError::InvalidConfig {

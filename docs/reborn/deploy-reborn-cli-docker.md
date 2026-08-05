@@ -106,7 +106,10 @@ NEARAI_API_KEY=<nearai-api-key>
 Attach a Railway volume and mount it at `/data`, or set
 `IRONCLAW_REBORN_HOME` under `RAILWAY_VOLUME_MOUNT_PATH`. The image entrypoint
 will use `$RAILWAY_VOLUME_MOUNT_PATH/ironclaw-reborn` by default when Railway
-exposes a volume mount. Without a volume, Railway deployments using
+exposes a volume mount. It also defaults `IRONCLAW_REBORN_WORKSPACE_ROOT` to
+`$IRONCLAW_REBORN_HOME/workspace`, keeping project files and landed attachments
+on that volume. A workspace override outside `RAILWAY_VOLUME_MOUNT_PATH` fails
+closed. Without a volume, Railway deployments using
 `local-dev`, `local-dev-yolo`, `hosted-single-tenant`, or
 `hosted-single-tenant-volume` fail closed unless
 `IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY=true` is explicitly set for a
@@ -143,8 +146,18 @@ still live under the local filesystem root. The image default is
 `/data/ironclaw-reborn`; without a Railway volume, that path is ephemeral. The
 hosted single-tenant volume profile stores runtime/control-plane state under
 that Reborn home on the mounted volume and does not require
-`IRONCLAW_REBORN_POSTGRES_URL`. The container workdir is `/workspace` so the
-workspace root stays separate from Reborn's state and skill roots.
+`IRONCLAW_REBORN_POSTGRES_URL`. The container workdir remains `/workspace`, but
+the runtime workspace root is the persistent
+`IRONCLAW_REBORN_WORKSPACE_ROOT` above.
+
+For the exact `ironclaw-v1.0.0-rc.1` to `ironclaw-v1.1.0-rc.1` upgrade, copy
+the stopped rc1 container's `/workspace` into a snapshot directory on the
+volume before redeploying, then set
+`IRONCLAW_REBORN_LEGACY_WORKSPACE_SNAPSHOT` to that directory. Startup copies
+the snapshot create-only into the configured tenant/default-owner workspace,
+verifies file hashes, retains the source, and fails rather than guessing on
+conflicts or shared-workspace ownership. See
+`docs/internal/rc1-to-1.1-startup-migration.md` for the exact handoff.
 
 The image includes `sqlite3` and `psql` for terminal inspection from Railway
 shells. Use `sqlite3` for mounted-volume libSQL/SQLite state and `psql` for

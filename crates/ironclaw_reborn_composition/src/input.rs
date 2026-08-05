@@ -225,6 +225,10 @@ pub struct RebornHostBindings {
     /// build-time wiring can construct and register it. Selection stays in the
     /// binding policy; this only carries the chosen provider's connection.
     pub(crate) memory_provider_connection: Mem0ConnectionConfig,
+    /// Explicit rc1 shared-workspace snapshot to import under the startup
+    /// release-pair barrier. `None` is the normal path; discovery is never
+    /// guessed because rc1 shared ownership can be ambiguous.
+    pub(crate) legacy_workspace_snapshot: Option<PathBuf>,
 }
 
 /// One channel extension's binary-assembled vendor binding
@@ -531,6 +535,11 @@ impl RebornHostBindings {
             }
             _ => {}
         }
+        self
+    }
+
+    pub fn with_legacy_workspace_snapshot(mut self, source: PathBuf) -> Self {
+        self.legacy_workspace_snapshot = Some(source);
         self
     }
 
@@ -931,6 +940,7 @@ impl RebornHostBindings {
             credential_account_visibility_policy: None,
             memory_binding_policy: None,
             memory_provider_connection: Mem0ConnectionConfig::default(),
+            legacy_workspace_snapshot: None,
         }
     }
 

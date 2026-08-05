@@ -719,6 +719,11 @@ pub(crate) fn build_services_input_with_options(
             build_production_services_input(profile, owner_id, config_file.as_ref())?
         }
     };
+    if caller == RuntimeInputCaller::Serve
+        && let Some(snapshot) = optional_path_env("IRONCLAW_REBORN_LEGACY_WORKSPACE_SNAPSHOT")?
+    {
+        services_input = services_input.with_legacy_workspace_snapshot(snapshot);
+    }
     if let Some(ResolvedGoogleOAuthConfig {
         client,
         hosted_domain_hint: _hosted_domain_hint,
@@ -783,8 +788,7 @@ fn build_standalone_local_runtime_services_input(
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RebornHostBindings> {
     let local_runtime_root = local_runtime_storage_root(config, profile);
-    let workspace_root = std::env::current_dir()
-        .with_context(|| format!("failed to resolve current directory for {profile} workspace"))?;
+    let workspace_root = local_runtime_workspace_root(profile)?;
     let mut services_input = local_runtime_build_input_with_options(
         composition_profile(profile),
         owner_id,
@@ -812,8 +816,7 @@ fn build_hosted_single_tenant_services_input(
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
 ) -> anyhow::Result<RebornHostBindings> {
-    let workspace_root = std::env::current_dir()
-        .context("failed to resolve current directory for hosted single-tenant workspace")?;
+    let workspace_root = local_runtime_workspace_root(profile)?;
     let runtime_policy = hosted_single_tenant_runtime_policy()
         .context("failed to resolve hosted single-tenant runtime policy")?;
     Ok(
@@ -1161,6 +1164,24 @@ fn optional_nonempty_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn optional_path_env(name: &str) -> anyhow::Result<Option<PathBuf>> {
+    match std::env::var_os(name) {
+        None => Ok(None),
+        Some(value) if value.is_empty() => anyhow::bail!("{name} must not be empty when set"),
+        Some(value) => Ok(Some(PathBuf::from(value))),
+    }
+}
+
+fn local_runtime_workspace_root(profile: RebornProfile) -> anyhow::Result<PathBuf> {
+    optional_path_env("IRONCLAW_REBORN_WORKSPACE_ROOT")?
+        .map(Ok)
+        .unwrap_or_else(|| {
+            std::env::current_dir().with_context(|| {
+                format!("failed to resolve current directory for {profile} workspace")
+            })
+        })
 }
 
 pub(crate) fn default_owner_id(

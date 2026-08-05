@@ -9,6 +9,9 @@ fn production_writer_workers_remain_behind_the_completed_migration_barrier() {
     let channel_migration = flattened
         .find("migrate_rc1_channel_state")
         .expect("channel state migration remains in production startup");
+    let workspace_migration = flattened
+        .find("migrate_legacy_workspace_snapshot")
+        .expect("workspace artifact migration remains in production startup");
     let completion = flattened
         .find("release_pair_lease .complete")
         .expect("release-pair completion barrier remains in production startup");
@@ -18,6 +21,10 @@ fn production_writer_workers_remain_behind_the_completed_migration_barrier() {
     assert!(
         channel_migration < completion,
         "channel state migration must run before release-pair completion"
+    );
+    assert!(
+        workspace_migration < completion,
+        "workspace artifact migration must run before release-pair completion"
     );
     assert!(
         completion < first_worker,

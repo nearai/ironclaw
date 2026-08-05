@@ -77,7 +77,7 @@ fn fake_reborn_bin(bin_dir: &Path) {
     let bin = bin_dir.join("ironclaw");
     std::fs::write(
         &bin,
-        "#!/bin/sh\nprintf 'home=%s\\n' \"$IRONCLAW_REBORN_HOME\"\nprintf 'args=%s\\n' \"$*\"\n",
+        "#!/bin/sh\nprintf 'home=%s\\n' \"$IRONCLAW_REBORN_HOME\"\nprintf 'workspace=%s\\n' \"$IRONCLAW_REBORN_WORKSPACE_ROOT\"\nprintf 'args=%s\\n' \"$*\"\n",
     )
     .expect("write fake reborn bin");
     let mut permissions = std::fs::metadata(&bin)
@@ -690,6 +690,13 @@ fn docker_reborn_entrypoint_uses_railway_volume_mount_for_home() {
         "stdout: {stdout}"
     );
     assert!(stdout.contains("args=--help"), "stdout: {stdout}");
+    assert!(
+        stdout.contains(&format!(
+            "workspace={}",
+            reborn_home.join("workspace").display()
+        )),
+        "stdout: {stdout}"
+    );
 }
 
 #[cfg(unix)]
@@ -779,6 +786,69 @@ fn docker_reborn_entrypoint_rejects_standalone_home_outside_railway_volume() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("to be under RAILWAY_VOLUME_MOUNT_PATH"),
+        "stderr: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn docker_reborn_entrypoint_rejects_workspace_outside_railway_volume() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let bin_dir = temp.path().join("bin");
+    fake_reborn_bin(&bin_dir);
+    let volume = temp.path().join("railway-volume");
+    let reborn_home = volume.join("ironclaw-reborn");
+    write_reborn_config(&reborn_home, "hosted-single-tenant-volume");
+
+    let output = Command::new("/bin/sh")
+        .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
+        .arg("--help")
+        .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
+        .env("PATH", fake_bin_path(&bin_dir))
+        .env("HOME", temp.path().join("home"))
+        .env("RAILWAY_ENVIRONMENT", "production")
+        .env("RAILWAY_VOLUME_MOUNT_PATH", &volume)
+        .env("IRONCLAW_REBORN_WORKSPACE_ROOT", "/workspace")
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(!output.status.success(), "entrypoint should fail closed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("IRONCLAW_REBORN_WORKSPACE_ROOT=/workspace")
+            && stderr.contains("to be under RAILWAY_VOLUME_MOUNT_PATH"),
+        "stderr: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn docker_reborn_entrypoint_rejects_ephemeral_legacy_snapshot_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let bin_dir = temp.path().join("bin");
+    fake_reborn_bin(&bin_dir);
+    let volume = temp.path().join("railway-volume");
+    let reborn_home = volume.join("ironclaw-reborn");
+    write_reborn_config(&reborn_home, "hosted-single-tenant-volume");
+
+    let output = Command::new("/bin/sh")
+        .arg(workspace_root().join("docker/reborn/entrypoint.sh"))
+        .arg("--help")
+        .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
+        .env("PATH", fake_bin_path(&bin_dir))
+        .env("HOME", temp.path().join("home"))
+        .env("RAILWAY_ENVIRONMENT", "production")
+        .env("RAILWAY_VOLUME_MOUNT_PATH", &volume)
+        .env("IRONCLAW_REBORN_LEGACY_WORKSPACE_SNAPSHOT", "/workspace")
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(!output.status.success(), "entrypoint should fail closed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("IRONCLAW_REBORN_LEGACY_WORKSPACE_SNAPSHOT must be under"),
         "stderr: {stderr}"
     );
 }
