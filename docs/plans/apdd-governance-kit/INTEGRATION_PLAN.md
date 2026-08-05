@@ -197,7 +197,7 @@ lists** (including the lower-case rule files and the workflow):
 
 ```bash
 rg --hidden --glob '!.git' -n \
-  'DESIGN\.md|CRITICAL_FLOWS|docs/features|\.storybook|design\.md|feature-workflow\.md|critical-flows\.md'
+  'DESIGN\.md|CRITICAL_FLOWS|docs/features|\.storybook|design\.md|design-a11y\.md|feature-workflow\.md|critical-flows\.md'
 ```
 
 Then strip any pointer left in `CLAUDE.md`, other `.claude/rules/*`, the CI
