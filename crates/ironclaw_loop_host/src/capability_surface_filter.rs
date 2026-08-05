@@ -134,14 +134,7 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         let mut surface = self.inner.visible_capabilities(request).await?;
-        apply_visible_filter_to_surface(&mut surface, &self.visible_capability_ids);
-        if let Some(callable_capability_ids) = surface.callable_capability_ids.as_mut() {
-            callable_capability_ids.retain(|capability_id| {
-                provider_capability_permitted(capability_id, |capability_id| {
-                    self.permits(capability_id)
-                })
-            });
-        }
+        apply_policy_filter_to_surface(&mut surface, |capability_id| self.permits(capability_id));
         Ok(surface)
     }
 
@@ -347,17 +340,6 @@ async fn invoke_filtered_batch(
         resolutions,
         stopped_on_suspension,
     })
-}
-
-fn apply_visible_filter_to_surface(
-    surface: &mut VisibleCapabilitySurface,
-    visible_capability_ids: &HashSet<CapabilityId>,
-) {
-    surface.descriptors.retain(|descriptor| {
-        provider_capability_permitted(&descriptor.capability_id, |capability_id| {
-            visible_capability_ids.contains(capability_id)
-        })
-    });
 }
 
 fn apply_policy_filter_to_surface(
