@@ -9,7 +9,10 @@ use ironclaw_host_api::resource::ResourceScope;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
-use crate::{RuntimeProcessError, sandbox_process::RebornSandboxScopeKey};
+use ironclaw_host_api::process::{
+    RuntimeProcessError, SavedCommandOutput, SavedCommandOutputSanitization,
+};
+use ironclaw_sandbox::RebornSandboxScopeKey;
 
 /// Maximum model-facing process output preview before middle truncation.
 ///
@@ -33,23 +36,6 @@ const COMMAND_OUTPUT_ROOT_DIRNAME: &str = "ironclaw-command-outputs";
 const COMMAND_OUTPUT_BLOCKED_MARKER: &str =
     "[Full command output blocked due to potential secret leakage]\n";
 const STREAM_READ_BUF_SIZE: usize = 16 * 1024;
-
-/// Metadata for full process output persisted outside the model preview.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SavedCommandOutput {
-    pub path: PathBuf,
-    pub sanitization: SavedCommandOutputSanitization,
-    pub stream_was_capped: bool,
-    pub max_saved_stream_size: usize,
-    pub expires_at_unix_secs: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SavedCommandOutputSanitization {
-    Clean,
-    Redacted,
-    Blocked,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CapturedCommandOutput {

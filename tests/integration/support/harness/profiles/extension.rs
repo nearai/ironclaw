@@ -1003,7 +1003,7 @@ pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> 
 /// inbound request.
 fn slack_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExtensionBinding {
     ironclaw_reborn_composition::ChannelExtensionBinding {
-        extension_id: "slack".to_string(),
+        extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
         adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
         preference_target_codec: Some(Arc::new(
             ironclaw_slack_extension::SlackPreferenceTargetCodec,
@@ -1013,7 +1013,7 @@ fn slack_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExte
 
 fn telegram_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExtensionBinding {
     ironclaw_reborn_composition::ChannelExtensionBinding {
-        extension_id: "telegram".to_string(),
+        extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("telegram".to_string()),
         adapter: Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default()),
         preference_target_codec: None,
     }

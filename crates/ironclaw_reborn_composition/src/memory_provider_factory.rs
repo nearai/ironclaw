@@ -34,10 +34,11 @@ use ironclaw_host_runtime::{
 use ironclaw_loop_contracts::MemoryPromptContextService;
 use ironclaw_loop_host::HostUserProfileSource;
 use ironclaw_memory::{MemoryService, PromptWriteSafetyEventSink};
+#[cfg(all(test, feature = "memory-mem0"))]
+use ironclaw_memory_mem0::MEM0_MEMORY_EXTENSION_ID;
 #[cfg(feature = "memory-mem0")]
-use ironclaw_memory_mem0::{
-    MEM0_MEMORY_EXTENSION_ID, Mem0Config, Mem0HttpTransport, Mem0MemoryService, Mem0Transport,
-};
+use ironclaw_memory_mem0::{Mem0Config, Mem0HttpTransport, Mem0MemoryService, Mem0Transport};
+#[cfg(test)]
 use ironclaw_memory_native::NativeMemoryService;
 #[cfg(feature = "memory-mem0")]
 use secrecy::ExposeSecret;
@@ -130,7 +131,8 @@ impl MemoryProviderDeps {
 ///   its connection config over its real transport (or an injected mock). An
 ///   unknown id, or missing/invalid mem0 connection settings, yield `None`.
 /// - `Disabled` → `None`.
-pub fn create_provider(
+#[cfg(test)]
+pub(crate) fn create_provider(
     binding: &MemoryProviderBinding,
     deps: &MemoryProviderDeps,
 ) -> Option<Arc<dyn MemoryService>> {
@@ -148,6 +150,7 @@ pub fn create_provider(
     }
 }
 
+#[cfg(test)]
 fn create_third_party_provider(
     extension_id: &str,
     deps: &MemoryProviderDeps,

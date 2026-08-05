@@ -16,7 +16,7 @@ A type is admitted iff all four hold (the contracts-family test, §6.1):
 3. two or more consumers need it without importing an owner;
 4. it carries no execution, persistence, policy engine, or workflow.
 
-Today that is twenty-four shipped modules (plus the dev-only `test_support`, gated behind `#[cfg(any(test, feature = "test-support"))]`; `src/lib.rs` is the source of truth for the list):
+Today that is twenty-six shipped modules (plus the dev-only `test_support`, gated behind `#[cfg(any(test, feature = "test-support"))]`; `src/lib.rs` is the source of truth for the list):
 
 | Module | Owns |
 | --- | --- |
@@ -27,6 +27,7 @@ Today that is twenty-four shipped modules (plus the dev-only `test_support`, gat
 | `interaction_commands` | The channel-neutral interaction-reply grammar (`parse_interaction_resolution_text`). |
 | `operator_llm` | The operator LLM-administration port (`LlmConfigService`), the active-model read port (`ActiveModelReader`), the provider-menu and login/probe wire vocabulary, `LlmConfigServiceError`, and its projection onto `ProductSurfaceError`. Implemented by `ironclaw_operator`; the `llm_config` view descriptor and the "no service wired" error stay with product. |
 | `package_lifecycle` | Package/extension lifecycle projection vocabulary (`Lifecycle*`, `ChannelConnectStrategy`, `ChannelConfigField`) — see the ruling below. |
+| `ironhub` | The IronHub link port (`IronhubLinkService`), its register/install-delivery request and result bodies, `IronhubLinkError`, and the `ironhub.deliver_install` command descriptor. |
 | `lifecycle_service` | The lifecycle product service port (`LifecycleProductService`) and its caller contexts. Implemented by `ironclaw_extension_manager` (WS2.4); the *authority* it calls — the only writer of lifecycle state — stayed in `ironclaw_extension_host`. |
 | `delivery` | The delivery-resolution ports: `ChannelDeliveryResolver`, `ResolvedChannelDelivery`, `DeliveryReplyContextSource`. The coordinator itself is product's. |
 | `account_setup` | `AccountConnectionStatusSource` + the extension account-setup descriptor/notice/error vocabulary. The declaration registry is product's (it holds mutable state). |
@@ -41,6 +42,7 @@ Today that is twenty-four shipped modules (plus the dev-only `test_support`, gat
 | `inbound_requests` | The browser/API request bodies a transport hands to `ProductSurface` (`ProductSubmitTurnRequest`, `ProductCreateThreadRequest`, the cancel/gate/retry/setup/list bodies, `ProductInboundAttachment`). Field shapes and the `serde` contract only — normalization stays in product. |
 | `product_wire` | The `Reborn*` product wire DTO family every product transport serializes across the boundary. Payload vocabulary only: no service, handler, or projection reducer. |
 | `workspace_views` | Project and filesystem-browse wire vocabulary for the Projects page and the Workspace/Files explorer. The read ports that serve them stayed in product. |
+| `operator_secrets` | The operator control plane's secret-**value** port (`OperatorSecretValueStore`) and its opaque error. Implemented by `ironclaw_reborn_composition` — assembly is the only layer that may name both this port and `ironclaw_secrets` (PROPOSAL §8.2's product row). **Deliberately not a re-export of `SecretStorePort`:** no `ResourceScope` argument (the implementor fixes the operator scope), no lease/consume protocol, and an error carrying only a `&'static str` classification. Widening it back toward the substrate's shape undoes what CHECKLIST WS3 bought. |
 | `operator_service` | The deployment-operator control plane's three ports — `OperatorStatusService`, `OperatorLogsService`, `OperatorServiceLifecycleService` — their wire DTOs, and the log-context bound (`normalize_operator_log_context_value`). Implemented by `ironclaw_operator` except readiness status, which is composition's. Product keeps the `Unsupported*`/`Static*` doubles, the frozen view descriptors, and the operator *command-plane* envelope that wraps these DTOs. |
 | `error` | `ProductOperationFailure` — the error a product-side port fails with, and its projection onto `ProductSurfaceError`. Product's `ProductSurfaceFailure` is the superset and absorbs it; see the ruling below. |
 | `subject_route` | `ProductConversationSubjectRouteResolver` + `ProductConversationRouteKey` and its request. Shared-route subject resolution, implemented by `ironclaw_extension_host` over `[channel.config]`. |

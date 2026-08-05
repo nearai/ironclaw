@@ -29,7 +29,6 @@ ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version =
 ironclaw_llm = { path = "../ironclaw_llm", default-features = false, features = ["registry-provider-factory"] }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_safety = { path = "../ironclaw_safety" }
-ironclaw_secrets = { path = "../ironclaw_secrets" }
 nix = { version = "0.31", default-features = false, features = ["process"] }
 libc = "0.2"
 secrecy = "0.10"
@@ -46,7 +45,13 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
-ironclaw_secrets = { path = "../ironclaw_secrets" }
+# The in-memory `OperatorSecretValueStore` fake. WS3 removed this crate's
+# `ironclaw_secrets` edge (PROPOSAL §8.2, §12.1b); the substrate-fidelity tests
+# moved to the port's implementor in `ironclaw_reborn_composition`, and what
+# stays here drives operator policy through the port.
+ironclaw_product_contracts = { path = "../ironclaw_product_contracts", features = [
+    "test-support",
+] }
 rust_decimal = "1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

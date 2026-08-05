@@ -8,11 +8,36 @@ type BuildResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 fn main() -> BuildResult<()> {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
-    let repo_root = manifest_dir
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| build_error("ironclaw_reborn_composition lives under crates/"))?;
-    embed_reborn_skills(repo_root)
+    let repo_root = find_repo_root(&manifest_dir)?;
+    embed_reborn_skills(&repo_root)
+}
+
+/// The repository root: the nearest ancestor holding both a `crates/`
+/// directory and a `Cargo.toml`.
+///
+/// Deliberately a search, not two `.parent()` hops. The fixed-depth form
+/// encoded "this crate sits directly under `crates/`", which the family move
+/// (`crates/<family>/ironclaw_*`, PROPOSAL §5) makes false — and its failure
+/// was **silent and shipped**: the root would resolve to `crates/`,
+/// `crates/skills` does not exist, and `embed_reborn_skills` writes `[]` for
+/// both bundles with no error, so every bundled Reborn skill would vanish from
+/// the binary while the build stayed green. Same rule as
+/// `ratchet_support::find_workspace_root`, and pinned by
+/// `reborn_build_script_roots.rs` (CHECKLIST WS10).
+fn find_repo_root(start: &Path) -> BuildResult<PathBuf> {
+    let mut current = Some(start);
+    while let Some(directory) = current {
+        if directory.join("crates").is_dir() && directory.join("Cargo.toml").is_file() {
+            return Ok(directory.to_path_buf());
+        }
+        current = directory.parent();
+    }
+    Err(build_error(format!(
+        "no repository root above {} — expected an ancestor holding both crates/ and \
+         Cargo.toml. Refusing rather than embedding an empty skill set, which would ship \
+         silently.",
+        start.display()
+    )))
 }
 
 fn embed_reborn_skills(repo_root: &Path) -> BuildResult<()> {
@@ -23,6 +48,13 @@ fn embed_reborn_skills(repo_root: &Path) -> BuildResult<()> {
     let summaries_out_path = out_dir.join("embedded_reborn_skill_summaries.json");
     let bundles_out_path = out_dir.join("embedded_reborn_skill_bundles.json");
     if !path_is_real_dir(&skills_dir)? {
+        // Tolerated (a source package built outside a checkout has no
+        // `skills/`), but never silent: an empty bundle set is otherwise
+        // indistinguishable from a correct build that shipped no skills.
+        println!(
+            "cargo:warning=no skills directory at {} — embedding an empty Reborn skill set",
+            skills_dir.display()
+        );
         fs::write(summaries_out_path, "[]")?;
         fs::write(bundles_out_path, "[]")?;
         return Ok(());

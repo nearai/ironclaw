@@ -6,15 +6,16 @@ use chrono::Utc;
 
 use async_trait::async_trait;
 use ironclaw_attachments::ProjectScopedAttachmentLander;
+use ironclaw_auth::ChannelConnectionService;
 #[cfg(test)]
 use ironclaw_extensions::SharedExtensionRegistry;
 use ironclaw_host_api::{ids::InvocationId, resource::ResourceScope};
 use ironclaw_operator::OperatorServiceLifecycle;
 use ironclaw_product::{
-    ChannelConnectionService, ProjectScopedAttachmentReader, ProjectScopedFilesystemReader,
-    RebornAutomationProductService, RebornServices as ProductRebornServices,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel, SkillsProductService,
+    ProjectScopedAttachmentReader, ProjectScopedFilesystemReader, RebornAutomationProductService,
+    RebornServices as ProductRebornServices, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, SkillsProductService,
 };
 use ironclaw_product_contracts::operator_llm::LlmConfigService;
 use ironclaw_product_contracts::operator_service::OperatorStatusService;
@@ -97,13 +98,12 @@ pub(crate) fn build_product_surface_with_channel_connection(
     // Admin user-management surface: the directory and secret provisioner are
     // core runtime handles; only token minting is deployment-supplied.
     if let Some(minter) = runtime.reborn_admin_token_minter() {
-        api = api.with_admin_user_service(Arc::new(
-            crate::admin_user_directory::RebornAdminUserDirectory::new(
+        api =
+            api.with_admin_user_service(Arc::new(ironclaw_product::RebornAdminUserDirectory::new(
                 runtime.reborn_user_directory(),
                 runtime.reborn_admin_secret_provisioner(),
                 minter,
-            ),
-        ));
+            )));
     }
     if let Some(workspace_filesystem) = runtime.webui_workspace_filesystem() {
         api = api
@@ -295,7 +295,9 @@ pub(crate) fn build_llm_config_service(
     runtime: &RebornRuntime,
 ) -> Option<Arc<dyn LlmConfigService>> {
     let boot = runtime.webui_boot_config()?;
-    let keys = ironclaw_operator::LlmKeyStore::new(runtime.secret_store());
+    let keys = ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+        runtime.secret_store(),
+    ));
     let mut llm_config = ironclaw_operator::RebornLlmConfigService::new(boot.clone(), keys);
     if let Some(reload) = runtime.webui_llm_reload_trigger() {
         llm_config = llm_config.with_reload_trigger(reload);

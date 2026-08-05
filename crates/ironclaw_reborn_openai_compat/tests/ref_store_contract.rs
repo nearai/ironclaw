@@ -1,4 +1,6 @@
-// The filesystem-backed ref store lives behind the storage feature.
+// The filesystem-backed ref store is unconditional: this crate declares no
+// cargo features, and `OpenAiCompatRefStore` holds an `Arc<dyn RootFilesystem>`,
+// so the suite drives it over whichever backend it constructs.
 
 use std::sync::Arc;
 

@@ -274,7 +274,7 @@ pub fn build_hook_dispatcher_builder_factory(
 /// to that tenant, not the synthetic `"reborn-hook-projection"` fallback. This
 /// closes the observability gap where discovery-time audits carried the real
 /// tenant but install-time audits did not.
-pub fn build_hook_dispatcher_builder_factory_for_tenant(
+pub(crate) fn build_hook_dispatcher_builder_factory_for_tenant(
     config: HooksActivationConfig,
     registry: &HookProjectionRegistry,
     tenant_id: &ironclaw_host_api::ids::TenantId,

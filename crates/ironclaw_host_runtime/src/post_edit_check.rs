@@ -42,7 +42,8 @@ use ironclaw_host_api::{
 };
 use serde_json::{Value, json};
 
-use crate::{CommandExecutionRequest, RuntimeProcessError, RuntimeProcessPort};
+use crate::RuntimeProcessPort;
+use ironclaw_host_api::process::{CommandExecutionRequest, RuntimeProcessError};
 
 /// The operator post-edit check config bundled with the process port that must
 /// run it, resolved to the deployment's process-isolation boundary.
@@ -389,7 +390,9 @@ mod tests {
         path::{MountAlias, VirtualPath},
     };
 
-    use crate::{CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError};
+    use ironclaw_host_api::process::{
+        CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError,
+    };
 
     fn scope(user: &str) -> ResourceScope {
         ResourceScope::local_default(UserId::new(user).unwrap(), InvocationId::new()).unwrap()

@@ -138,8 +138,9 @@ use crate::outbound::{
     OutboundDeliveryTargetProvider, RebornOutboundPreferencesService,
     outbound_delivery_synthetic_provider,
 };
-use crate::process_gate_turn_view::{current_turn_gate_runs, first_turn_run_for_gate};
 use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
+pub(crate) use ironclaw_auth::product_prompt::blocked_auth_flow_canceller;
+pub use ironclaw_auth::product_prompt::product_auth_challenge_provider;
 use ironclaw_extension_host::AdminConfigurationCatalogUse;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_extension_host::channel_pairing::ChannelPairingConsumeOutcome;
@@ -149,7 +150,7 @@ use ironclaw_extension_manager::admin_configuration::{
     ComposedAdminConfigurationService, ComposedExtensionAdminConfigurationResolver,
 };
 use ironclaw_product::projection::{RebornProjectionServices, build_reborn_projection_services};
-pub use ironclaw_product::{blocked_auth_flow_canceller, product_auth_challenge_provider};
+use ironclaw_product::{current_turn_gate_runs, first_turn_run_for_gate};
 use ironclaw_secrets::SecretStorePort;
 use ironclaw_skills::ScopedSkillManagementPort;
 
@@ -192,15 +193,13 @@ use crate::runtime_input::{
     PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessChecker,
     TriggerFireAccessGrant,
 };
-use crate::trigger_fire_access::{
-    CompositeTriggerFireChecker, IdentityMembershipTriggerFireChecker,
-    StaticOwnerTriggerFireChecker,
-};
+use crate::trigger_fire_access::IdentityMembershipTriggerFireChecker;
 use crate::trigger_poller_assembly::{
     build_trigger_active_run_lookup, build_trigger_poller_services, poller_user_directory,
     validate_trigger_poller_authorization,
 };
 use crate::{RebornBuildError, RebornReadiness};
+use ironclaw_triggers::{CompositeTriggerFireChecker, StaticOwnerTriggerFireChecker};
 use production::{
     EmptyCapabilitySurfaceResolver, EmptyIdentityContextSource,
     UnavailableApprovalInteractionService, UnavailableCapabilityIo,
@@ -234,7 +233,7 @@ struct RuntimeStoreParts {
     trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     /// Process lifecycle source for trigger active-run lookup. Every substrate
     /// now provides the same typed process-journal projection.
-    admin_secret_provisioner: Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
+    admin_secret_provisioner: Arc<dyn ironclaw_product::AdminSecretProvisioner>,
     project_service: Arc<dyn ironclaw_product::ProjectService>,
     trigger_conversation_services: Option<RebornFilesystemConversationServices>,
 }
@@ -549,7 +548,7 @@ pub struct RebornRuntime {
     pub(crate) extension_lifecycle_surface_context: LifecycleProductSurfaceContext,
     pub(crate) secret_store: Arc<dyn SecretStorePort>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
-    pub(crate) admin_secret_provisioner: Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
+    pub(crate) admin_secret_provisioner: Arc<dyn ironclaw_product::AdminSecretProvisioner>,
     pub(crate) project_service: Arc<dyn ironclaw_product::ProjectService>,
     pub(crate) trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     #[cfg(any(test, feature = "test-support"))]
@@ -605,7 +604,7 @@ pub struct RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) delivery_coordinator: Option<Arc<ironclaw_product::DeliveryCoordinator>>,
     pub(crate) channel_facade_slot:
-        Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>>,
+        Arc<std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>>,
     pub(crate) admin_configuration: Arc<ComposedAdminConfigurationService>,
     pub(crate) admin_configuration_uses: Arc<Vec<AdminConfigurationCatalogUse>>,
     pub(crate) channel_config_service: Arc<ComposedExtensionAdminConfigurationResolver>,
@@ -636,7 +635,7 @@ pub struct RebornRuntime {
     turn_scheduler: RuntimeTurnScheduler,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
     credential_refresh_worker_handle: Option<ironclaw_auth::KeepaliveSweepHandle>,
-    trace_flush_worker: crate::observability::trace_capture::TraceQueueFlushWorkerHandle,
+    trace_flush_worker: ironclaw_reborn_traces::capture::TraceQueueFlushWorkerHandle,
     skill_learning_extraction_tasks:
         Option<Arc<ironclaw_extension_host::skill_learning::SkillLearningExtractionTasks>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -649,7 +648,8 @@ pub struct RebornRuntime {
     /// Mints the one-time API bearer on admin user creation. Read by
     /// `runtime.product_surface` when wiring the admin surface. `None` leaves the
     /// admin create path reporting the token minter unavailable.
-    admin_api_token_minter: Option<Arc<dyn crate::AdminApiTokenMinter>>,
+    admin_api_token_minter:
+        Option<Arc<dyn ironclaw_product_contracts::admin_users::AdminApiTokenMinter>>,
     actor_user_id: UserId,
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
@@ -1109,10 +1109,10 @@ impl RebornRuntime {
             channel_pairing: self.channel_pairing.clone(),
         };
         let admin_users: Arc<dyn AdminUserService> =
-            Arc::new(crate::admin_user_directory::RebornAdminUserDirectory::new(
+            Arc::new(ironclaw_product::RebornAdminUserDirectory::new(
                 self.reborn_user_directory(),
                 self.reborn_admin_secret_provisioner(),
-                Arc::new(crate::admin_token::RejectingAdminApiTokenMinter),
+                Arc::new(ironclaw_product::RejectingAdminApiTokenMinter),
             ));
         Some(crate::extension_host_assembly::start_channel_host(
             &source,
@@ -1477,7 +1477,9 @@ impl RebornRuntime {
             boot.clone(),
             Arc::clone(&parts.reload_handle),
             Arc::clone(&parts.session),
-            ironclaw_operator::LlmKeyStore::new(self.secret_store()),
+            ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+                self.secret_store(),
+            )),
         )))
     }
 
@@ -1583,7 +1585,7 @@ impl RebornRuntime {
     /// `admin_secrets.rs`.
     pub(crate) fn reborn_admin_secret_provisioner(
         &self,
-    ) -> Arc<dyn crate::admin_secrets::AdminSecretProvisioner> {
+    ) -> Arc<dyn ironclaw_product::AdminSecretProvisioner> {
         Arc::clone(&self.admin_secret_provisioner)
     }
 
@@ -1595,7 +1597,9 @@ impl RebornRuntime {
 
     /// The admin API-token minter supplied via
     /// [`RebornRuntimeInput::with_admin_api_token_minter`], if any.
-    pub(crate) fn reborn_admin_token_minter(&self) -> Option<Arc<dyn crate::AdminApiTokenMinter>> {
+    pub(crate) fn reborn_admin_token_minter(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_contracts::admin_users::AdminApiTokenMinter>> {
         self.admin_api_token_minter.clone()
     }
 
@@ -1700,7 +1704,7 @@ impl RebornRuntime {
     /// channel-identity storage.
     pub(crate) fn generic_channel_connection_facade(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product::ChannelConnectionService>> {
+    ) -> Option<Arc<dyn ironclaw_auth::ChannelConnectionService>> {
         let identity_store = self.channel_identity_store.clone();
         let installation_store = Some(self.extension_management.installation_store_handle());
         let credential_cleanup = Some(Arc::clone(&self.product_auth)
@@ -3432,12 +3436,12 @@ pub(crate) async fn build_runtime_with_resource_governor(
         thread_scope.tenant_id.as_str(),
         actor_user_id.as_str(),
     );
-    let trace_capture_scopes: crate::observability::trace_capture::ObservedTraceScopes =
+    let trace_capture_scopes: ironclaw_reborn_traces::capture::ObservedTraceScopes =
         Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::from([
             runtime_owner_trace_scope,
         ])));
     let trace_capture_sink: Arc<dyn ironclaw_turns::TurnEventSink> = Arc::new(
-        crate::observability::trace_capture::TraceCaptureTurnEventSink::new(
+        ironclaw_runner::trace_capture::TraceCaptureTurnEventSink::new(
             Arc::clone(&thread_service),
             Arc::clone(&trace_capture_scopes),
         ),
@@ -4068,7 +4072,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         crate::factory::CredentialRefreshWorkerReady::Absent => None,
     };
     let trace_flush_worker =
-        crate::observability::trace_capture::spawn_trace_queue_flush_worker(trace_capture_scopes);
+        ironclaw_reborn_traces::capture::spawn_trace_queue_flush_worker(trace_capture_scopes);
     // Scheduler is running (started inside build_default_planned_runtime); mark readiness.
     services.readiness.workers.turn_runner = true;
     services.readiness.workers.trigger_poller = trigger_poller_handle.is_some();
@@ -4084,7 +4088,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // `RebornRuntimeInput::with_budget_event_observer`.
     let budget_event_projection = Some({
         let observer = budget_event_observer.unwrap_or_else(|| {
-            Arc::new(crate::TracingBudgetEventObserver) as Arc<dyn crate::BudgetEventObserver>
+            Arc::new(crate::observability::budget_events::TracingBudgetEventObserver)
+                as Arc<dyn crate::BudgetEventObserver>
         });
         crate::observability::budget_events::BudgetEventProjection::spawn(
             broadcast_budget_event_sink.as_ref(),
@@ -4102,7 +4107,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
             boot_config.clone(),
             Arc::clone(&reload_parts.reload_handle),
             Arc::clone(&reload_parts.session),
-            ironclaw_operator::LlmKeyStore::new(Arc::clone(&services.secret_store)),
+            ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+                Arc::clone(&services.secret_store),
+            )),
         );
         if let Err(error) = ironclaw_operator::LlmReloadTrigger::reload(&boot_reload_adapter).await
         {
@@ -4625,7 +4632,9 @@ async fn overlay_stored_llm_key_for_nearai_mcp_bootstrap(
         return Ok(None);
     };
 
-    let keys = ironclaw_operator::LlmKeyStore::new(Arc::clone(&services.secret_store));
+    let keys = ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
+        Arc::clone(&services.secret_store),
+    ));
     if let Some(stored) = keys
         .read(llm.provider_id())
         .await

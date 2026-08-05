@@ -3524,6 +3524,8 @@ dependencies = [
  "ironclaw_events",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_runtime_policy",
+ "ironclaw_trust",
  "serde",
  "serde_json",
  "tempfile",
@@ -3580,6 +3582,7 @@ dependencies = [
  "ironclaw_extension_contracts",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_product_contracts",
  "ironclaw_secrets",
  "rand 0.10.2",
  "secrecy",
@@ -3884,6 +3887,7 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "url",
+ "zip",
 ]
 
 [[package]]
@@ -4027,7 +4031,6 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "base64 0.23.0",
- "bollard",
  "chrono",
  "chrono-tz",
  "deadpool-postgres",
@@ -4054,7 +4057,6 @@ dependencies = [
  "ironclaw_network",
  "ironclaw_observability",
  "ironclaw_outbound",
- "ironclaw_process_sandbox",
  "ironclaw_processes",
  "ironclaw_prompt_envelope",
  "ironclaw_reborn_event_store",
@@ -4062,7 +4064,7 @@ dependencies = [
  "ironclaw_resources",
  "ironclaw_runtime_policy",
  "ironclaw_safety",
- "ironclaw_scripts",
+ "ironclaw_sandbox",
  "ironclaw_secrets",
  "ironclaw_skills",
  "ironclaw_triggers",
@@ -4072,7 +4074,6 @@ dependencies = [
  "jsonschema",
  "libc",
  "libsql",
- "rcgen",
  "rust_decimal",
  "secrecy",
  "serde",
@@ -4081,7 +4082,6 @@ dependencies = [
  "static_assertions",
  "tempfile",
  "thiserror 2.0.19",
- "time",
  "tokio",
  "tokio-postgres",
  "tokio-util",
@@ -4093,7 +4093,6 @@ dependencies = [
  "wat",
  "wit-component 0.254.0",
  "wit-parser 0.254.0",
- "x509-parser",
  "zeroize",
  "zip",
 ]
@@ -4193,10 +4192,10 @@ dependencies = [
  "ironclaw_memory",
  "ironclaw_observability",
  "ironclaw_outbound",
- "ironclaw_process_sandbox",
  "ironclaw_processes",
  "ironclaw_resources",
  "ironclaw_safety",
+ "ironclaw_sandbox",
  "ironclaw_skills",
  "ironclaw_threads",
  "ironclaw_trust",
@@ -4325,7 +4324,6 @@ dependencies = [
  "ironclaw_product_contracts",
  "ironclaw_reborn_config",
  "ironclaw_safety",
- "ironclaw_secrets",
  "libc",
  "nix",
  "rust_decimal",
@@ -4364,15 +4362,6 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "ironclaw_process_sandbox"
-version = "0.1.0"
-dependencies = [
- "ironclaw_host_api",
- "serde",
- "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -4422,7 +4411,6 @@ dependencies = [
  "ironclaw_event_streams",
  "ironclaw_events",
  "ironclaw_extension_contracts",
- "ironclaw_extensions",
  "ironclaw_filesystem",
  "ironclaw_first_party_extension_ports",
  "ironclaw_host_api",
@@ -4435,9 +4423,11 @@ dependencies = [
  "ironclaw_product_contracts",
  "ironclaw_projects",
  "ironclaw_reborn_composition",
+ "ironclaw_reborn_identity",
  "ironclaw_reborn_traces",
  "ironclaw_runner",
  "ironclaw_safety",
+ "ironclaw_secrets",
  "ironclaw_telegram_extension",
  "ironclaw_threads",
  "ironclaw_triggers",
@@ -4762,7 +4752,6 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_product",
  "ironclaw_product_contracts",
- "ironclaw_reborn_openai_compat",
  "ironclaw_threads",
  "ironclaw_turns",
  "serde",
@@ -4803,6 +4792,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -4856,10 +4846,11 @@ dependencies = [
  "ironclaw_outbound",
  "ironclaw_processes",
  "ironclaw_reborn_event_store",
+ "ironclaw_reborn_traces",
  "ironclaw_resources",
  "ironclaw_runner",
  "ironclaw_safety",
- "ironclaw_scripts",
+ "ironclaw_sandbox",
  "ironclaw_skills",
  "ironclaw_threads",
  "ironclaw_trust",
@@ -4877,6 +4868,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracing-test",
+ "uuid",
  "wat",
 ]
 
@@ -4906,19 +4898,36 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_scripts"
+name = "ironclaw_sandbox"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bollard",
+ "chrono",
  "futures-util",
+ "hex",
+ "ironclaw_common",
+ "ironclaw_extension_contracts",
  "ironclaw_extensions",
  "ironclaw_host_api",
+ "ironclaw_network",
  "ironclaw_resources",
+ "ironclaw_safety",
+ "ironclaw_secrets",
+ "libc",
+ "rcgen",
  "rust_decimal_macros",
+ "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.19",
+ "time",
  "tokio",
+ "tracing",
+ "url",
+ "uuid",
+ "x509-parser",
 ]
 
 [[package]]
@@ -5133,6 +5142,7 @@ dependencies = [
  "async-trait",
  "ironclaw_capabilities",
  "ironclaw_events",
+ "ironclaw_extension_contracts",
  "ironclaw_extensions",
  "ironclaw_filesystem",
  "ironclaw_host_api",

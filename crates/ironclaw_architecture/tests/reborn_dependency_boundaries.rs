@@ -10,7 +10,11 @@ use std::{
 
 use serde_json::Value;
 
-use ratchet_support::workspace_root;
+// Crate paths are spelled flat (`crates/ironclaw_x/…`) and RESOLVED through the
+// crate inventory, so the family move (PROPOSAL §5) repoints them without a
+// lockstep edit of the ~100 literals below. On today's tree resolution is the
+// identity — pinned by `reborn_crate_inventory.rs`.
+use ratchet_support::{crate_path, resolve_crate_relative, try_crate_directory, workspace_root};
 
 #[test]
 fn reborn_boundary_rules_active_crates_are_workspace_members() {
@@ -30,15 +34,26 @@ fn reborn_boundary_rules_active_crates_are_workspace_members() {
         .collect::<std::collections::HashSet<_>>();
 
     let root = workspace_root();
+    // Resolved through the crate inventory, not `crates/<name>/`: a family move
+    // (PROPOSAL §5) makes the flat join miss every crate at once, and the
+    // `continue` below then skips the whole check while the test still passes.
+    // That fail-open is the WS10 dark-verdict shape, so the scan is counted.
+    let mut checked = 0usize;
     for rule in boundary_rules() {
         let manifest = if rule.crate_name == "ironclaw" {
-            root.join("crates/ironclaw_reborn_cli/Cargo.toml")
+            crate_path(&root, "crates/ironclaw_reborn_cli/Cargo.toml")
         } else {
-            root.join("crates").join(rule.crate_name).join("Cargo.toml")
+            match try_crate_directory(&root, rule.crate_name) {
+                Ok(directory) => root.join(directory).join("Cargo.toml"),
+                // A rule naming a crate with no directory (a retired-crate
+                // reintroduction pin) is legitimate and tolerated.
+                Err(_) => continue,
+            }
         };
         if !manifest.exists() {
             continue;
         }
+        checked += 1;
         assert!(
             registered.contains(rule.crate_name),
             "{} has a Cargo.toml at {} but is not registered as a workspace member; \
@@ -48,6 +63,13 @@ fn reborn_boundary_rules_active_crates_are_workspace_members() {
             manifest.display()
         );
     }
+
+    assert!(
+        checked >= 30,
+        "expected every active boundary rule's crate to resolve to a real manifest; only \
+         {checked} did. A rule set that resolves to nothing checks nothing while passing \
+         (docs/reborn/target-architecture/CHECKLIST.md WS10)."
+    );
 }
 
 /// A `forbidden` entry must name a **package**, never a crate *directory*.
@@ -86,9 +108,16 @@ fn boundary_rule_names_are_package_names_not_crate_directories() {
             if registered.contains(forbidden) {
                 continue;
             }
-            let manifest = root.join("crates").join(forbidden).join("Cargo.toml");
-            if !manifest.exists() {
+            // Inventory-resolved, not `crates/<name>/`: under a family move the
+            // flat join misses every directory, every entry looks like a
+            // reintroduction pin, and the directory-vs-package confusion this
+            // test exists to catch goes unchecked (WS10).
+            let Ok(directory) = try_crate_directory(&root, forbidden) else {
                 // A reintroduction pin for a crate that no longer exists.
+                continue;
+            };
+            let manifest = root.join(directory).join("Cargo.toml");
+            if !manifest.exists() {
                 continue;
             }
             let declared = std::fs::read_to_string(&manifest)
@@ -270,8 +299,9 @@ fn reborn_workspace_crates_declare_layers_and_follow_layer_matrix() {
 #[test]
 fn reborn_virtual_roots_match_storage_placement_contract() {
     let root = workspace_root();
-    let path_source = std::fs::read_to_string(root.join("crates/ironclaw_host_api/src/path.rs"))
-        .expect("host API path source must be readable");
+    let path_source =
+        std::fs::read_to_string(crate_path(&root, "crates/ironclaw_host_api/src/path.rs"))
+            .expect("host API path source must be readable");
     let storage_contract =
         std::fs::read_to_string(root.join("docs/reborn/contracts/storage-placement.md"))
             .expect("storage placement contract must be readable");
@@ -695,10 +725,13 @@ fn conversation_trusted_trigger_submitter_stays_conversation_or_composition_owne
         &root,
         &mut uses,
     );
-    let allowed = BTreeSet::from([
+    let allowed: BTreeSet<String> = [
         "crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs",
         "crates/ironclaw_conversations/src/inbound.rs",
-    ]);
+    ]
+    .into_iter()
+    .map(|entry| resolve_crate_relative(&root, entry))
+    .collect();
     let violations = uses
         .into_iter()
         .filter(|path| !allowed.contains(path.as_str()))
@@ -716,8 +749,11 @@ fn conversation_trusted_trigger_submitter_stays_conversation_or_composition_owne
 #[test]
 fn conversation_trusted_trigger_submitter_stays_out_of_root_exports() {
     let root = workspace_root();
-    let lib_source = std::fs::read_to_string(root.join("crates/ironclaw_conversations/src/lib.rs"))
-        .expect("conversation lib source must be readable");
+    let lib_source = std::fs::read_to_string(crate_path(
+        &root,
+        "crates/ironclaw_conversations/src/lib.rs",
+    ))
+    .expect("conversation lib source must be readable");
 
     assert!(
         !lib_source.contains("ConversationTrustedTriggerSubmitter"),
@@ -729,8 +765,11 @@ fn conversation_trusted_trigger_submitter_stays_out_of_root_exports() {
 #[test]
 fn conversation_trusted_trigger_classifier_stays_out_of_root_exports() {
     let root = workspace_root();
-    let lib_source = std::fs::read_to_string(root.join("crates/ironclaw_conversations/src/lib.rs"))
-        .expect("conversation lib source must be readable");
+    let lib_source = std::fs::read_to_string(crate_path(
+        &root,
+        "crates/ironclaw_conversations/src/lib.rs",
+    ))
+    .expect("conversation lib source must be readable");
 
     assert!(
         !lib_source.contains("classify_trusted_trigger_inbound_error"),
@@ -765,10 +804,13 @@ fn trusted_trigger_submit_request_minting_stays_worker_owned() {
         &root,
         &mut struct_literal_uses,
     );
-    let allowed_struct_literals = BTreeSet::from([
+    let allowed_struct_literals: BTreeSet<String> = [
         "crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs",
         "crates/ironclaw_triggers/src/worker/ports.rs",
-    ]);
+    ]
+    .into_iter()
+    .map(|entry| resolve_crate_relative(&root, entry))
+    .collect();
     let struct_literal_violations = struct_literal_uses
         .into_iter()
         .filter(|path| !allowed_struct_literals.contains(path.as_str()))
@@ -877,7 +919,7 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
 
     let mut violations = Vec::new();
     for relative_root in untrusted_src_roots {
-        let dir = root.join(relative_root);
+        let dir = crate_path(&root, relative_root);
         // A missing root is a stale entry, not a pass: silently skipping it is
         // exactly how a crate rename would drop a whole tree out of this guard
         // while the list still reads as covering it.
@@ -914,7 +956,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         .collect::<HashMap<_, _>>();
 
     let root = workspace_root();
-    let manifest_path = root.join("crates/ironclaw_reborn_cli/Cargo.toml");
+    let manifest_path = crate_path(&root, "crates/ironclaw_reborn_cli/Cargo.toml");
     assert!(
         manifest_path.exists(),
         "Reborn should ship as a separate binary crate at {}",
@@ -944,13 +986,14 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
     ];
     for path in command_module_paths {
         assert!(
-            root.join(path).exists(),
+            crate_path(&root, path).exists(),
             "Reborn CLI commands should use an agent-friendly one-command-per-file layout; missing {path}"
         );
     }
 
-    let agent_contract = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/AGENTS.md"))
-        .expect("Reborn CLI crate-local AGENTS.md must be readable");
+    let agent_contract =
+        std::fs::read_to_string(crate_path(&root, "crates/ironclaw_reborn_cli/AGENTS.md"))
+            .expect("Reborn CLI crate-local AGENTS.md must be readable");
     for required_phrase in [
         "one command per file",
         "RebornCliContext",
@@ -1007,9 +1050,15 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         "ironclaw_reborn_config must remain a standalone boot contract crate with no IronClaw workspace dependencies of any dependency kind",
     );
 
-    let runtime_dir = root.join("crates/ironclaw_reborn_cli/src/runtime");
+    let runtime_dir = crate_path(&root, "crates/ironclaw_reborn_cli/src/runtime");
     let mut cli_runtime_source = String::new();
-    collect_runtime_rs(&runtime_dir, &mut cli_runtime_source);
+    let cli_runtime_files = collect_runtime_rs(&runtime_dir, &mut cli_runtime_source);
+    assert!(
+        cli_runtime_files > 0,
+        "expected the Reborn CLI runtime module tree at {}; found no .rs files, so this scan \
+         would be enforcing nothing",
+        runtime_dir.display()
+    );
     assert!(
         cli_runtime_source.contains("build_reborn_runtime"),
         "Reborn CLI should enter the assembled runtime through ironclaw_reborn_composition::build_reborn_runtime"
@@ -1032,24 +1081,57 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
 #[test]
 fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     let root = workspace_root();
-    let lib = std::fs::read_to_string(root.join("crates/ironclaw_host_runtime/src/lib.rs"))
+    let lib = std::fs::read_to_string(crate_path(&root, "crates/ironclaw_host_runtime/src/lib.rs"))
         .expect("host runtime lib.rs must be readable");
-    let services =
-        std::fs::read_to_string(root.join("crates/ironclaw_host_runtime/src/services.rs"))
-            .expect("host runtime services.rs must be readable");
-    let obligations =
-        std::fs::read_to_string(root.join("crates/ironclaw_host_runtime/src/obligations.rs"))
-            .expect("host runtime obligations.rs must be readable");
+    let services = std::fs::read_to_string(crate_path(
+        &root,
+        "crates/ironclaw_host_runtime/src/services.rs",
+    ))
+    .expect("host runtime services.rs must be readable");
+    // WS3 split `obligations.rs` into `obligations/{mod,handler,staged_handoffs,
+    // process_store,tests}.rs` (one module per chartered owner). This gate is
+    // about the *escape hatches* the obligation code may not make public, and
+    // those can now be written in any of those modules — so it scans the whole
+    // directory rather than one file. The file count is asserted so a future
+    // move that empties the directory fails here instead of scanning nothing
+    // and reporting success (the loud-vs-silent distinction WS10 tracks).
+    let obligations_dir = crate_path(&root, "crates/ironclaw_host_runtime/src/obligations");
+    let mut obligations = String::new();
+    let obligations_files = collect_runtime_rs(&obligations_dir, &mut obligations);
+    assert!(
+        obligations_files >= 4,
+        "expected the host-runtime obligation owners under {} (mod + the three chartered \
+         modules at minimum); found {obligations_files} .rs files, so this gate would be \
+         scanning nothing",
+        obligations_dir.display()
+    );
     let host_runtime_contract =
         std::fs::read_to_string(root.join("docs/reborn/contracts/host-runtime.md"))
             .expect("host runtime contract must be readable");
-    let scripts = std::fs::read_to_string(root.join("crates/ironclaw_scripts/src/lib.rs"))
-        .expect("script runtime lib.rs must be readable");
-    let scripts_manifest = std::fs::read_to_string(root.join("crates/ironclaw_scripts/Cargo.toml"))
-        .expect("script runtime Cargo.toml must be readable");
-    let mcp = std::fs::read_to_string(root.join("crates/ironclaw_mcp/src/lib.rs"))
-        .expect("MCP runtime lib.rs must be readable");
-    let mcp_manifest = std::fs::read_to_string(root.join("crates/ironclaw_mcp/Cargo.toml"))
+    // WS3 re-point: the script lane merged into `ironclaw_sandbox` and no longer
+    // lives in a `lib.rs`. Scanning the whole crate source tree keeps the rule
+    // non-vacuous across that move (and the family `git mv` still to come) —
+    // reading one hardcoded file would have gone silently green.
+    let scripts = concatenated_crate_sources(&crate_path(&root, "crates/ironclaw_sandbox/src"));
+    assert!(
+        scripts.contains("pub struct ScriptRuntime"),
+        "sandbox lane scan is vacuous: it found no script-lane source under \
+         crates/ironclaw_sandbox/src (did the lane move again?)"
+    );
+    let scripts_manifest =
+        std::fs::read_to_string(crate_path(&root, "crates/ironclaw_sandbox/Cargo.toml"))
+            .expect("sandbox lane Cargo.toml must be readable");
+    // WS6 module charters: the MCP lane is no longer one file. Scanning the
+    // whole crate source tree keeps the rule non-vacuous across the §6.6.3
+    // split (and the family `git mv` still to come) — reading `lib.rs` alone
+    // would now see only the re-export list and go silently green.
+    let mcp = concatenated_crate_sources(&crate_path(&root, "crates/ironclaw_mcp/src"));
+    assert!(
+        mcp.contains("pub struct McpRuntime<C>"),
+        "MCP lane scan is vacuous: it found no MCP runtime source under \
+         crates/ironclaw_mcp/src (did the lane move again?)"
+    );
+    let mcp_manifest = std::fs::read_to_string(crate_path(&root, "crates/ironclaw_mcp/Cargo.toml"))
         .expect("MCP runtime Cargo.toml must be readable");
 
     let forbidden_lib_exports = [
@@ -1162,7 +1244,7 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     for pattern in forbidden_script_lane_surface {
         assert!(
             !scripts.contains(pattern),
-            "ironclaw_scripts must not expose host-runtime dispatcher composition surface `{pattern}`; compose script dispatch adapters inside ironclaw_host_runtime"
+            "ironclaw_sandbox must not expose host-runtime dispatcher composition surface `{pattern}`; compose script dispatch adapters inside ironclaw_host_runtime"
         );
     }
 
@@ -1171,7 +1253,7 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     // now names the crate that actually owns `RuntimeDispatcher`.
     assert!(
         !scripts_manifest.contains("ironclaw_capabilities"),
-        "ironclaw_scripts must not depend on ironclaw_capabilities; script dispatcher adapters are host-runtime-private composition"
+        "ironclaw_sandbox must not depend on ironclaw_capabilities; script dispatcher adapters are host-runtime-private composition"
     );
 
     let forbidden_mcp_lane_surface = [
@@ -1206,7 +1288,7 @@ fn extract_pub_use_block<'a>(contents: &'a str, start_marker: &str) -> &'a str {
 #[test]
 fn reborn_turns_public_surface_keeps_runner_api_explicit() {
     let root = workspace_root();
-    let lib = std::fs::read_to_string(root.join("crates/ironclaw_turns/src/lib.rs"))
+    let lib = std::fs::read_to_string(crate_path(&root, "crates/ironclaw_turns/src/lib.rs"))
         .expect("turns lib.rs must be readable");
 
     let forbidden_public_exports = [
@@ -1231,7 +1313,7 @@ fn reborn_runner_llm_wiring_is_isolated() {
     // adapter"). The pin moved with it, and gained its other half: the adapter
     // must be at the new home AND absent from the old one, so a half-finished
     // move fails here instead of leaving two gateways.
-    let reborn_gateway = root.join("crates/ironclaw_loop_host/src/model_gateway.rs");
+    let reborn_gateway = crate_path(&root, "crates/ironclaw_loop_host/src/model_gateway.rs");
     assert!(
         reborn_gateway.exists(),
         "expected Reborn LLM gateway wiring at {}",
@@ -1245,9 +1327,7 @@ fn reborn_runner_llm_wiring_is_isolated() {
          crates/ironclaw_loop_host"
     );
     assert!(
-        !root
-            .join("crates/ironclaw_runner/src/model_gateway.rs")
-            .exists(),
+        !crate_path(&root, "crates/ironclaw_runner/src/model_gateway.rs").exists(),
         "the model gateway moved to ironclaw_loop_host (WS3 runner sheds); a file back at \
          crates/ironclaw_runner/src/model_gateway.rs is a re-import, not a fix"
     );
@@ -1264,7 +1344,7 @@ fn reborn_runner_llm_wiring_is_isolated() {
         "crates/ironclaw_loop_host/Cargo.toml",
         "crates/ironclaw_reborn_composition/Cargo.toml",
     ] {
-        let manifest = std::fs::read_to_string(root.join(manifest_path))
+        let manifest = std::fs::read_to_string(crate_path(&root, manifest_path))
             .unwrap_or_else(|_| panic!("{manifest_path} must be readable"));
         let llm_dep = manifest
             .lines()
@@ -1285,7 +1365,7 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
     let mut uses = Vec::new();
     collect_provider_tool_name_boundary_uses(&root.join("crates"), &root, &mut uses);
 
-    let allowed = BTreeSet::from([
+    let allowed: BTreeSet<String> = [
         // Type definition and provider-wire validation.
         "crates/ironclaw_host_api/src/ids.rs",
         "crates/ironclaw_safety/src/lib.rs",
@@ -1319,8 +1399,14 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         // output or synthetic provider tools.
         "crates/ironclaw_reborn_composition/src/llm_admin/openai_compat_serve.rs",
         "crates/ironclaw_loop_host/src/synthetic_capability.rs",
-        "crates/ironclaw_reborn_composition/src/observability/trace_capture.rs",
-    ]);
+        // Trace capture rebuilds a provider-shaped tool-call transcript from
+        // stored replay metadata for the Trace Commons envelope; it moved out
+        // of composition into the turn-runner observer seam (WS6, §6.10.1).
+        "crates/ironclaw_runner/src/trace_capture.rs",
+    ]
+    .into_iter()
+    .map(|entry| resolve_crate_relative(&root, entry))
+    .collect();
     let violations = uses
         .into_iter()
         .filter(|use_site| !allowed.contains(use_site.path.as_str()))
@@ -1360,7 +1446,7 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
 #[test]
 fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
     let root = workspace_root();
-    let lib = std::fs::read_to_string(root.join("crates/ironclaw_runner/src/lib.rs"))
+    let lib = std::fs::read_to_string(crate_path(&root, "crates/ironclaw_runner/src/lib.rs"))
         .expect("ironclaw_runner lib.rs must be readable");
 
     // The forbidden re-export prefixes correspond to the original noisy
@@ -1388,9 +1474,12 @@ fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
     // module paths. Confirm the run-state assembly is wired there (it would
     // otherwise have to live in the CLI or root app, which the dep rules
     // forbid).
-    let composition_runtime = root.join("crates/ironclaw_reborn_composition/src/runtime.rs");
-    let composition_capability_host =
-        root.join("crates/ironclaw_reborn_composition/src/runtime/capability_host.rs");
+    let composition_runtime =
+        crate_path(&root, "crates/ironclaw_reborn_composition/src/runtime.rs");
+    let composition_capability_host = crate_path(
+        &root,
+        "crates/ironclaw_reborn_composition/src/runtime/capability_host.rs",
+    );
     assert!(
         composition_runtime.exists(),
         "expected Reborn runtime assembly at {}",
@@ -1658,8 +1747,10 @@ fn composition_runtime_has_no_slack_output_policy() {
         violations.join("\n")
     );
 
-    let slack_policy_module =
-        root.join("crates/ironclaw_reborn_composition/src/runtime/slack_output_hygiene.rs");
+    let slack_policy_module = crate_path(
+        &root,
+        "crates/ironclaw_reborn_composition/src/runtime/slack_output_hygiene.rs",
+    );
     assert!(
         !slack_policy_module.exists(),
         "Reborn composition must not own the Slack-specific output policy module at {}",
@@ -1668,7 +1759,7 @@ fn composition_runtime_has_no_slack_output_policy() {
 }
 
 fn production_composition_sources(root: &std::path::Path) -> Vec<(PathBuf, String)> {
-    let composition_src = root.join("crates/ironclaw_reborn_composition/src");
+    let composition_src = crate_path(root, "crates/ironclaw_reborn_composition/src");
     let mut paths = Vec::new();
     let mut pending = vec![composition_src];
 
@@ -2209,8 +2300,11 @@ fn slack_import_segment(suffix: &str) -> &str {
 fn reborn_boot_config_file_layout_is_pinned() {
     let root = workspace_root();
 
-    let config_lib = std::fs::read_to_string(root.join("crates/ironclaw_reborn_config/src/lib.rs"))
-        .expect("reborn config lib.rs must be readable");
+    let config_lib = std::fs::read_to_string(crate_path(
+        &root,
+        "crates/ironclaw_reborn_config/src/lib.rs",
+    ))
+    .expect("reborn config lib.rs must be readable");
     for required_export in [
         "pub use config_file::",
         "RebornConfigFile",
@@ -2224,8 +2318,11 @@ fn reborn_boot_config_file_layout_is_pinned() {
         );
     }
 
-    let home_src = std::fs::read_to_string(root.join("crates/ironclaw_reborn_config/src/home.rs"))
-        .expect("reborn config home.rs must be readable");
+    let home_src = std::fs::read_to_string(crate_path(
+        &root,
+        "crates/ironclaw_reborn_config/src/home.rs",
+    ))
+    .expect("reborn config home.rs must be readable");
     for required_method in ["pub fn config_file_path", "pub fn providers_file_path"] {
         assert!(
             home_src.contains(required_method),
@@ -2250,9 +2347,11 @@ fn reborn_boot_config_file_layout_is_pinned() {
     // regression that bypasses it (e.g. a future contributor adds a
     // new section and forgets to call `reject_inline_secret`) would
     // silently allow pasted credentials through.
-    let config_file_src =
-        std::fs::read_to_string(root.join("crates/ironclaw_reborn_config/src/config_file.rs"))
-            .expect("reborn config_file.rs must be readable");
+    let config_file_src = std::fs::read_to_string(crate_path(
+        &root,
+        "crates/ironclaw_reborn_config/src/config_file.rs",
+    ))
+    .expect("reborn config_file.rs must be readable");
     assert!(
         config_file_src.contains("reject_inline_secret"),
         "RebornConfigFile::validate must call `reject_inline_secret` on operator-pasteable \
@@ -2264,7 +2363,10 @@ fn reborn_boot_config_file_layout_is_pinned() {
     // control-plane without forcing `ironclaw_reborn_config` to depend on
     // `ironclaw_llm` (which would violate _config's standalone boundary).
     // The composition crate only re-exports this surface for compatibility.
-    let llm_catalog = root.join("crates/ironclaw_operator/src/llm_admin/llm_catalog.rs");
+    let llm_catalog = crate_path(
+        &root,
+        "crates/ironclaw_operator/src/llm_admin/llm_catalog.rs",
+    );
     assert!(
         llm_catalog.exists(),
         "operator must expose a catalog resolver at {} so the CLI can stitch \
@@ -2289,8 +2391,9 @@ fn reborn_boot_config_file_layout_is_pinned() {
     // catalog file location is selectable per-deployment (the
     // standalone Reborn binary points at $IRONCLAW_REBORN_HOME/providers.json,
     // not v1's ~/.ironclaw/providers.json).
-    let llm_registry = std::fs::read_to_string(root.join("crates/ironclaw_llm/src/registry.rs"))
-        .expect("ironclaw_llm registry.rs must be readable");
+    let llm_registry =
+        std::fs::read_to_string(crate_path(&root, "crates/ironclaw_llm/src/registry.rs"))
+            .expect("ironclaw_llm registry.rs must be readable");
     assert!(
         llm_registry.contains("pub fn load_from_path"),
         "ironclaw_llm::ProviderRegistry must expose `load_from_path` so callers can \
@@ -2302,7 +2405,7 @@ fn reborn_boot_config_file_layout_is_pinned() {
 #[test]
 fn reborn_turns_public_surface_uses_turn_ids_not_runtime_or_process_ids() {
     let root = workspace_root();
-    let turns_src = root.join("crates/ironclaw_turns/src");
+    let turns_src = crate_path(&root, "crates/ironclaw_turns/src");
     let mut violations = Vec::new();
     collect_forbidden_turns_identifier_uses(&turns_src, &root, &mut violations);
 
@@ -2316,13 +2419,14 @@ fn reborn_turns_public_surface_uses_turn_ids_not_runtime_or_process_ids() {
 #[test]
 fn wasm_sandbox_core_module_stays_domain_free_v1_parity_kernel() {
     let workspace = workspace_root();
-    let module = workspace.join("crates/ironclaw_wasm/src/wasm_sandbox_core.rs");
+    let module = crate_path(&workspace, "crates/ironclaw_wasm/src/wasm_sandbox_core.rs");
     assert!(
         module.exists(),
         "shared WASM sandbox core should stay as a module inside ironclaw_wasm after W2.3"
     );
-    let guardrails = std::fs::read_to_string(workspace.join("crates/ironclaw_wasm/CLAUDE.md"))
-        .expect("ironclaw_wasm guardrails must be readable");
+    let guardrails =
+        std::fs::read_to_string(crate_path(&workspace, "crates/ironclaw_wasm/CLAUDE.md"))
+            .expect("ironclaw_wasm guardrails must be readable");
     assert!(
         guardrails.contains("wasm_sandbox_core")
             && guardrails.contains("Do not put ProductAdapter"),
@@ -2417,14 +2521,14 @@ fn reborn_runtime_http_egress_has_single_network_boundary() {
     let root = workspace_root();
     let runtime_src_roots = [
         "crates/ironclaw_wasm/src",
-        "crates/ironclaw_scripts/src",
+        "crates/ironclaw_sandbox/src",
         "crates/ironclaw_mcp/src",
         "crates/ironclaw_host_runtime/src",
     ];
 
     let mut violations = Vec::new();
     for relative_root in runtime_src_roots {
-        let dir = root.join(relative_root);
+        let dir = crate_path(&root, relative_root);
         if !dir.exists() {
             continue;
         }
@@ -2441,12 +2545,15 @@ fn reborn_runtime_http_egress_has_single_network_boundary() {
 #[test]
 fn hosted_mcp_discovery_is_never_driven_by_ambient_startup_composition() {
     let root = workspace_root();
-    let factory =
-        std::fs::read_to_string(root.join("crates/ironclaw_reborn_composition/src/factory.rs"))
-            .expect("composition factory source must be readable");
-    let owner_transaction = std::fs::read_to_string(
-        root.join("crates/ironclaw_extension_host/src/activation_transaction.rs"),
-    )
+    let factory = std::fs::read_to_string(crate_path(
+        &root,
+        "crates/ironclaw_reborn_composition/src/factory.rs",
+    ))
+    .expect("composition factory source must be readable");
+    let owner_transaction = std::fs::read_to_string(crate_path(
+        &root,
+        "crates/ironclaw_extension_host/src/activation_transaction.rs",
+    ))
     .expect("extension-host activation transaction source must be readable");
 
     for forbidden in [
@@ -2546,7 +2653,7 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
     let missing: Vec<&str> = reborn_product_api_src_roots
         .iter()
         .copied()
-        .filter(|relative_root| !root.join(relative_root).is_dir())
+        .filter(|relative_root| !crate_path(&root, relative_root).is_dir())
         .collect();
     assert!(
         missing.is_empty(),
@@ -2557,7 +2664,7 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
 
     let mut violations = Vec::new();
     for relative_root in reborn_product_api_src_roots {
-        let dir = root.join(relative_root);
+        let dir = crate_path(&root, relative_root);
         collect_forbidden_uses(&dir, &root, &forbidden, &mut violations);
     }
 
@@ -2619,7 +2726,7 @@ fn reborn_openai_compat_routes_do_not_depend_on_v1_gateway_or_legacy_streams() {
     ];
 
     let root = workspace_root();
-    let compat_src = root.join("crates/ironclaw_reborn_openai_compat/src");
+    let compat_src = crate_path(&root, "crates/ironclaw_reborn_openai_compat/src");
     let mut violations = Vec::new();
     collect_forbidden_uses(&compat_src, &root, &forbidden, &mut violations);
 
@@ -2731,14 +2838,14 @@ fn reborn_product_auth_contract_stays_reborn_native() {
     ];
 
     let root = workspace_root();
-    let manifest = std::fs::read_to_string(root.join("crates/ironclaw_auth/Cargo.toml"))
+    let manifest = std::fs::read_to_string(crate_path(&root, "crates/ironclaw_auth/Cargo.toml"))
         .expect("ironclaw_auth manifest must be readable");
     assert!(
         !manifest.contains("reqwest"),
         "ironclaw_auth must not depend on reqwest directly; provider transport belongs behind Reborn-native composition"
     );
 
-    let auth_src = root.join("crates/ironclaw_auth/src");
+    let auth_src = crate_path(&root, "crates/ironclaw_auth/src");
     assert!(
         auth_src.exists(),
         "Reborn product auth contract crate must have a src directory at {}",
@@ -2748,8 +2855,8 @@ fn reborn_product_auth_contract_stays_reborn_native() {
     let mut violations = Vec::new();
     collect_forbidden_uses(&auth_src, &root, &forbidden, &mut violations);
     collect_forbidden_reborn_auth_path_uses(
-        &root.join("crates/ironclaw_webui/src/product_auth"),
-        &root.join("crates/ironclaw_webui/src/product_auth.rs"),
+        &crate_path(&root, "crates/ironclaw_webui/src/product_auth"),
+        &crate_path(&root, "crates/ironclaw_webui/src/product_auth.rs"),
         &root,
         &forbidden,
         &mut violations,
@@ -3041,12 +3148,20 @@ struct BoundaryRule {
 fn boundary_rules() -> Vec<BoundaryRule> {
     vec![
         BoundaryRule {
+            // `ironclaw_extensions` was on this crate's *guidance* forbidden
+            // list (`CLAUDE.md`) but never on the enforced one, and the crate
+            // held the dependency the whole time — the guidance-vs-code
+            // contradiction PROPOSAL §6.9.1 names. Resolved by CHECKLIST WS5's
+            // `product` narrows row: `adapter_registry` (product's only
+            // consumer of the registry) moved to its chartered owners, the
+            // manifest entry is gone, and the rule is enforced from here on.
             crate_name: "ironclaw_product",
             forbidden: vec![
+                "ironclaw_extensions",
                 "ironclaw_host_runtime",
                 "ironclaw_mcp",
                 "ironclaw_wasm",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_network",
                 "ironclaw_engine",
                 "ironclaw_gateway",
@@ -3089,7 +3204,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_skills",
                 "ironclaw_storage",
                 "ironclaw_threads",
@@ -3121,9 +3236,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_events",
                 "ironclaw_extensions",
                 // `ironclaw_filesystem` is permitted: the durable
-                // OpenAiCompatRefStore lives behind the
-                // `storage`/`libsql`/`postgres` features and persists opaque refs
-                // through the universal RootFilesystem port.
+                // OpenAiCompatRefStore persists opaque refs through the universal
+                // RootFilesystem port. It is unconditional — this crate declares no
+                // cargo features, and WS5 collapsed the LibSql/Postgres ref-store
+                // newtypes onto that one backend-neutral form.
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",
                 "ironclaw_llm",
@@ -3144,7 +3260,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_storage",
@@ -3189,7 +3305,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_resources",
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_threads",
                 "ironclaw_tui",
@@ -3229,7 +3345,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_tui",
                 "ironclaw_wasm",
@@ -3263,7 +3379,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_threads",
@@ -3311,6 +3427,49 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // response/error DTO primitives used by product-auth HTTP routes;
             // secret storage and durable auth ownership stay behind
             // `ironclaw_auth`, not `ironclaw_secrets`.
+            //
+            // ✎ **Re-derived 2026-08-04 (WS5 `webui` row) against PROPOSAL
+            // §6.9.4.** The row asked for the derivation nobody had done. Result:
+            // **zero removals, nine additions**, all no-op ratchets (webui's ten
+            // normal workspace deps are `host_api`, `product_contracts`,
+            // `extension_contracts`, `extension_host`, `host_ingress`, `auth`,
+            // `attachments`, `common`, `product`, `reborn_openai_compat` — none of
+            // the nine appears in any dependency kind).
+            //
+            // What the derivation is *from*, since §6.9.4 carries no forbidden
+            // list of its own: §8.2's `product/` row ("**app ✗**", "product still
+            // ✗ host_runtime/dispatch/lanes"), §8.2's retained named rules
+            // ("concrete extension crates link only from the binary"), and
+            // `families/product.md`'s "never touches a lane crate / the extension
+            // registry or hosting crates". Additions, in that order:
+            // `ironclaw_reborn_composition` (§8.2 app ✗ — and the direction is
+            // backwards: this crate *receives* handles from composition; it is on
+            // 15 other rules and on every other products-layer rule but
+            // `ironclaw_product`'s), `ironclaw_wasm_limiter` (§8.2 ✗ lanes — the
+            // **only one of the nine no other gate covers**; zero rules named it
+            // workspace-wide, and the existing wasm_limiter gate checks its
+            // outbound deps, not its inbound edges), `ironclaw_slack_extension` +
+            // `ironclaw_telegram_extension` (concrete extension crates),
+            // `ironclaw_event_projections` + `ironclaw_event_streams` +
+            // `ironclaw_extension_support` + `ironclaw_first_party_extension_ports`
+            // + `ironclaw_storage` (parity with `ironclaw_reborn_openai_compat`,
+            // the sibling transport, whose list these five closed the gap to).
+            //
+            // Explicitly NOT added, because the charter sanctions them:
+            // `ironclaw_product` (§12.11 D-B, permanent edge — not a pending
+            // flip), `ironclaw_extension_host` (§6.9.4's 2026-08-02 pairing
+            // amendment; the pairing *service* core stays in the host by §6.8.2),
+            // `ironclaw_reborn_openai_compat`, `ironclaw_attachments`,
+            // `ironclaw_host_api`, `ironclaw_host_ingress`,
+            // `ironclaw_product_contracts`, `ironclaw_extension_contracts`,
+            // `ironclaw_auth`, `ironclaw_common`. Memory providers are covered by
+            // `only_the_sanctioned_residue_names_a_memory_provider`, deliberately.
+            //
+            // **Keep this rule normal-deps-only.** Four entries on the list below
+            // (`ironclaw_secrets`, `ironclaw_loop_host`, `ironclaw_threads`,
+            // `ironclaw_turns`) are live *dev*-dependencies of `ironclaw_webui`;
+            // tightening this rule to all dependency kinds would go red on four
+            // counts on the day it landed.
             crate_name: "ironclaw_webui",
             forbidden: vec![
                 "ironclaw_legacy",
@@ -3318,9 +3477,13 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_capabilities",
                 "ironclaw_conversations",
                 "ironclaw_engine",
+                "ironclaw_event_projections",
+                "ironclaw_event_streams",
                 "ironclaw_events",
+                "ironclaw_extension_support",
                 "ironclaw_extensions",
                 "ironclaw_filesystem",
+                "ironclaw_first_party_extension_ports",
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",
                 "ironclaw_llm",
@@ -3332,20 +3495,25 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_runner",
                 "ironclaw",
+                "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
+                "ironclaw_slack_extension",
+                "ironclaw_storage",
+                "ironclaw_telegram_extension",
                 "ironclaw_threads",
                 "ironclaw_trust",
                 "ironclaw_tui",
                 "ironclaw_turns",
                 "ironclaw_wasm",
+                "ironclaw_wasm_limiter",
             ],
         },
         BoundaryRule {
@@ -3370,7 +3538,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_product",
                 "ironclaw_reborn_composition",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_slack_extension",
                 "ironclaw_telegram_extension",
                 "ironclaw_turns",
@@ -3408,7 +3576,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_openai_compat",
                 "ironclaw_runner",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_slack_extension",
                 "ironclaw_telegram_extension",
                 "ironclaw_turns",
@@ -3438,17 +3606,26 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // machinery (`ironclaw_extension_host`, `ironclaw_extensions`,
             // `ironclaw_extension_support`), no lanes
             // (`ironclaw_host_runtime`, `ironclaw_mcp`, `ironclaw_wasm`,
-            // `ironclaw_scripts`) and no turn kernel (`ironclaw_turns`,
+            // `ironclaw_sandbox`) and no turn kernel (`ironclaw_turns`,
             // `ironclaw_runner`, `ironclaw_loop_host`). Operator administers
             // LLM providers, rings logs, and controls an OS service; none of
             // that needs to see a turn.
             //
-            // `ironclaw_secrets` is deliberately **not** here. WS3's row
-            // ("tighten direct `secrets` consumers: remove the `webui` and
-            // `operator` edges via `product_contracts` ports") removes it, and
-            // PROPOSAL §12.1b names it security-sensitive with "port
-            // replacements land first". Adding it before that port exists
-            // would either fail today or force a waiver — the row owns it.
+            // ✎ **`ironclaw_secrets` joined the list with WS3's row** ("tighten
+            // direct `secrets` consumers: remove the `webui` and `operator`
+            // edges via `product_contracts` ports"). PROPOSAL §12.1b required
+            // the port replacement to land first, and it did, in the same
+            // change: `ironclaw_product_contracts::operator_secrets::
+            // OperatorSecretValueStore` is what `LlmKeyStore` now holds, and
+            // `ironclaw_reborn_composition::RuntimeOperatorSecretValueStore`
+            // implements it over the substrate. This entry is the "add the
+            // boundary rule" half of the row and is what stops the edge coming
+            // back through some later convenience.
+            //
+            // The rule is normal-deps only, so a *dev*-dependency would still be
+            // legal here — and there is deliberately none: the substrate-fidelity
+            // tests moved to the port's implementor rather than keeping a test
+            // seam open into the substrate from the products tier.
             crate_name: "ironclaw_operator",
             forbidden: vec![
                 "ironclaw_extension_host",
@@ -3461,7 +3638,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_openai_compat",
                 "ironclaw_runner",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
+                "ironclaw_secrets",
                 "ironclaw_slack_extension",
                 "ironclaw_telegram_extension",
                 "ironclaw_turns",
@@ -3513,7 +3691,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_resources",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_slack_extension",
@@ -3591,7 +3769,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_triggers",
                 "ironclaw_turns",
@@ -3613,7 +3791,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -3635,7 +3813,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -3655,7 +3833,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -3675,7 +3853,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -3693,7 +3871,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -3720,7 +3898,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -3753,7 +3931,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_telegram_extension",
@@ -3805,7 +3983,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_telegram_extension",
@@ -3838,7 +4016,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_resources",
                 "ironclaw_approvals",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_tui",
@@ -3878,7 +4056,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_threads",
@@ -3904,7 +4082,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -3926,7 +4104,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -3944,7 +4122,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_wasm",
             ],
@@ -3962,7 +4140,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -3991,7 +4169,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 // ironclaw_safety is permitted: thread/transcript storage
                 // validates provider-originated replay metadata before it can
                 // be persisted or exposed back to a model-visible context.
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_tui",
@@ -4009,7 +4187,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -4025,7 +4203,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_mcp",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -4049,7 +4227,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 // kernel migration: turns adapts its existing turn-run store
                 // to the canonical process lifecycle vocabulary owned there.
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_wasm",
             ],
@@ -4073,7 +4251,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_runner",
                 "ironclaw_approvals",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_wasm",
             ],
@@ -4120,7 +4298,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_threads",
@@ -4136,7 +4314,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_secrets",
                 "ironclaw_network",
                 "ironclaw_mcp",
-                "ironclaw_scripts",
+                "ironclaw_sandbox",
                 "ironclaw_wasm",
             ],
         },
@@ -4219,52 +4397,158 @@ struct LayerMatrixException {
 /// resolves every W7-tagged edge through WS2/WS3/WS4 work. Surviving entries
 /// carry a workstream-or-issue key; do not read any remaining `W7` as a
 /// schedule.
-const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 6;
+///
+/// **6 → 5 (WS3, consolidated).** Two WS3 slices touch this list and their
+/// edits are disjoint, so the consolidated PR recomputes the constant rather
+/// than inheriting either slice's figure.
+///
+/// *Sandbox lane merge + `ironclaw_mcp` contracts flip.* Authored against a
+/// 10-entry list, where it deleted `ironclaw_mcp → ironclaw_extensions` and
+/// `ironclaw_scripts → ironclaw_extensions` and computed `10 → 8`. **WS2's
+/// re-layer above deleted both of those edges first**, by legalizing the whole
+/// `→ ironclaw_extensions` class rather than crate by crate — so against live
+/// `main` this slice's only remaining effect on the list is a rename:
+/// `ironclaw_scripts → ironclaw_resources` becomes
+/// `ironclaw_sandbox → ironclaw_resources`, the same edge carried with the
+/// crate the merge absorbed `ironclaw_scripts` into. One entry out, one in,
+/// net zero. The slice's *evidence* is unaffected — those two edges are gone
+/// from the manifests either way — but its arithmetic is superseded.
+///
+/// *First-party skill tools move to `extension_support`.* `host_runtime`
+/// reached `ironclaw_skills` for exactly two things, both inside
+/// `first_party_tools/`: `InstalledSkillMetadataSource` when rewriting a URL
+/// install's input, and the `MAX_INSTALL_BUNDLE_*` limits enforced while
+/// unpacking a fetched bundle. Both moved to
+/// `ironclaw_extension_support::skills` (which already owned the executor half
+/// and already depends on `ironclaw_skills`), so the manifest edge is gone
+/// rather than waived. `ironclaw_skills` survives as a **dev**-dependency only
+/// — the host's own tests still assert against the shared bundle limits, and
+/// dev edges are outside the matrix by construction (`is_normal_dependency`).
+/// This is the one entry the consolidated slices actually remove: `6 → 5`.
+///
+/// The obligations/builder split and the operator-secrets tightening move
+/// nothing here: an intra-crate module split changes no crate's layer, and
+/// `products → substrates` (operator → secrets) is matrix-legal, so that edge
+/// was never in this register — it is an §8.2 forbidden-edge rule instead.
+///
+/// Both surviving `→ ironclaw_resources` rows (`mcp`, `sandbox`) point at
+/// #7067, which owns the narrow reserve/reconcile/release port that dissolves
+/// them.
+///
+/// Recomputed as `len()` of the merged list on the pushed ref, per the union
+/// rule the CHECKLIST §11.2.2 row records. Each slice's own figure (8 and 9,
+/// both computed against a 10-entry list) is superseded by WS2 landing first.
+///
+/// **5 → 4 (WS3, `ironclaw_processes` re-layered `runtimes` → kernel).** Not a
+/// waiver removal and not a code move: the edge became *legal*. `processes`
+/// held `ironclaw_resources` (kernel) from `runtimes`, an upward edge, which
+/// is the only reason it needed an exception. CHECKLIST WS3 already called for
+/// the re-layer and `families/kernel.md` already listed `ironclaw_processes`
+/// among the kernel crates — only `Cargo.toml`'s `layer =` still said
+/// `runtimes`. With that corrected the pair is kernel → kernel and the
+/// exception went **stale**, which is how the ratchet reported it
+/// (`reborn_workspace_crates_declare_layers_and_follow_layer_matrix` fails on
+/// a stale entry, not just a new one) — so this deletion is the gate's own
+/// verdict rather than a judgement call. Every one of the nine crates that
+/// depends on `processes` is kernel or above, so the move legalizes an edge
+/// without forbidding any existing one.
+///
+/// **4 → 2 (WS3, #7067 — the lanes take a narrow budget port).** Both
+/// `→ ironclaw_resources` lane rows are deleted, and neither was waived: the
+/// production edge is gone from `ironclaw_mcp` and `ironclaw_sandbox` alike.
+/// What held them was never the estimate/usage vocabulary the older rows
+/// blamed — that already lived in `host_api::resource` and both lanes already
+/// imported it from there — but `ResourceGovernor`, a 10-method kernel
+/// budget-authority trait of which each lane called exactly three, plus the
+/// `ResourceError` denial cone. Relocating those would have moved kernel
+/// budget authority into the zero-internal-dep contracts crate, which
+/// PROPOSAL §8.3's 2026-08-04 amendment rules out. Instead
+/// `ironclaw_host_api::resource` declares `RuntimeResourceBudget` — reserve /
+/// reconcile / release and nothing else, over shapes that crate already owned
+/// — and `ironclaw_resources` implements it over any `ResourceGovernor`
+/// (`GovernorRuntimeBudget`), projecting `ResourceError` onto a narrow
+/// classified port error. Dependency inversion, `type-placement.md` §2: the
+/// port is declared below and implemented above, so the lanes cannot name the
+/// authority at all. `ironclaw_resources` survives in both lanes as a **dev**
+/// dependency — the lane suites drive the port over the REAL governor so a
+/// denial they assert on is one the kernel produced — and dev edges are
+/// outside the matrix by construction (`is_normal_dependency`).
+///
+/// **2 → 1 / 3 → 1 (2026-08-04, Waves 0–4 batch union).** The two stacked
+/// slices each removed their own entries off the same 4-entry base — the
+/// governor port (#7160) the two lane `→ resources` rows, the conversations
+/// port inversion (#7159) the `conversations → turns` row — and this batch
+/// merge is where the union lands: recomputed as `len()` of the merged list
+/// per the CHECKLIST §11.2.2 union rule. One entry survives.
+///
+/// **1 → 0 (WS3 closeout, 2026-08-04 — `ironclaw_extension_support` re-layered
+/// `loops` → `runtimes`). The list is empty: PROPOSAL §11.2.2's end state and
+/// CHECKLIST WS12's gate condition, reached.** The last entry was
+/// `host_runtime → extension_support`, and it did not fall to the shed its
+/// `removes_in` named. Two measurements, both on this tree, decided that:
+///
+/// 1. **The blocker the CHECKLIST row recorded was wrong.** The row said the
+///    edge "clears only when the last executor family lands". It is held by
+///    exactly **two** `use` sites — `first_party_tools/mod.rs`
+///    (`extension_support::coding`) and `first_party_tools/skill_management.rs`
+///    (`extension_support::skills`) — and both belong to the families whose
+///    executors have **already** moved — `coding` before this row was written,
+///    `skills` with the row's family 1. The five families still awaiting a move
+///    keep their executors in `host_runtime` and hold no edge at all, so moving
+///    them could never have cleared this. (`latency.rs`'s third grep hit is a
+///    doc comment.)
+/// 2. **The seam makes the edge structural, not transitional.** WS3's own
+///    executor/adapter seam — PROPOSAL §8.2's 2026-08-03 note and
+///    `families/extensions.md` — says a tool arrives in `extension_support` as
+///    an *executor* and leaves its `FirstPartyCapabilityHandler`,
+///    `CapabilityManifest` and registry wiring on the host side, because that
+///    crate's `BoundaryRule` forbids naming `ironclaw_host_runtime`. That makes
+///    the kernel a **designed** consumer. Shedding the two adapters upward
+///    anyway costs ~8 kernel private→`pub` widenings (`mod post_edit_check` is
+///    private in `lib.rs`; `first_party_capability_manifest`,
+///    `resource_profile`, `first_party_origin_gate_matrix` are module-private;
+///    `bounded_input_size`, `bounded_output_bytes`,
+///    `FIRST_PARTY_MAX_OUTPUT_BYTES` are `pub(super)`) and relocates the
+///    registration of **builtin** capabilities that 145 references across 31
+///    files reach through `builtin_first_party_*` — a semantic change,
+///    not a move. It is the same refutation §6.5.9's binder half already
+///    carries: paying a kernel API widening to relocate an adapter whose
+///    encapsulation already holds.
+///
+/// A crate the kernel is designed to call cannot be declared two rungs above
+/// it, so the layer is what was wrong. `runtimes` is the **least** demotion
+/// that legalizes a kernel consumer, and it is where this crate's own §8.2 row
+/// already places it in posture — "mediated services arrive by injection",
+/// kernel ✗, invoked only through capability dispatch, which is the wasm / mcp
+/// / sandbox cell verbatim. Checked both directions before flipping it: all
+/// seven normal dependencies (`auth`, `extractors`, `filesystem`,
+/// `observability`, `safety`, `skills` — `substrates`; `host_api` —
+/// `contracts`) and every domain the crate's charter reserves (`memory`,
+/// `traces`, `triggers` — all `substrates`) fit the narrower row, and all five
+/// consumers (`host_runtime` kernel; `extension_host`, `extension_manager`
+/// products; `reborn_composition`, `reborn_cli` app) are `kernel` or above, so
+/// the move forbids no existing edge. **Zero same-layer edges are created** —
+/// no `runtimes` crate is a dependency or a consumer — where `substrates`
+/// would have hidden six of this crate's seven dependencies from the matrix.
+/// The widening it *does* buy is frozen by the `DowngradePin` in
+/// `reborn_same_layer_edge_inventory.rs`, which is the pin #7149 exists for.
+///
+/// Mechanism, not novelty: this is the fourth time the register has moved by a
+/// re-layer and the third `loops → *` demotion in this family — WS2's
+/// `ironclaw_extensions` (4 entries), WS3's `processes` (1), WS4's `skills`
+/// (0). PLAN's Wave 2 note states the rule ("a re-layer *downward* is the
+/// cheap kind … expect the exception register to move"). What is **not**
+/// closed by it: CHECKLIST WS3's `first_party_tools` row, which is executor
+/// consolidation and stays open at five of six families. Only the exception is
+/// discharged.
+///
+/// **The ratchet is now an equality in effect.** With the list empty, any new
+/// entry trips `reborn_layer_matrix_exceptions_ratchet_down_only` immediately;
+/// re-arming it requires an owner-approved baseline raise in the same PR, per
+/// that test's own failure message.
+const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 0;
 
-const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
-    LayerMatrixException {
-        crate_name: "ironclaw_host_runtime",
-        dependency_name: "ironclaw_extension_support",
-        introduced: "2026-07-09",
-        removes_in: "WS3 (first-party activation wiring; ex-July-train label W7)",
-        reason: "host_runtime still owns first-party extension activation wiring until kernel consolidation separates host policy from loop/product concerns",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_host_runtime",
-        dependency_name: "ironclaw_skills",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "host_runtime still owns first-party skill management tools and skill URL install limits; remove when kernel consolidation or a dedicated skill-host extraction moves that execution surface out of host_runtime",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_processes",
-        dependency_name: "ironclaw_resources",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "runtime process management still depends on resource contracts currently classed with kernel behavior",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_conversations",
-        dependency_name: "ironclaw_turns",
-        introduced: "2026-07-09",
-        removes_in: "WS5 conversations->turns slice row (CHECKLIST, added 2026-08-04)",
-        reason: "re-verified during WS1.2: this is NOT turn-DTO naming and loop_contracts does not dissolve it. InboundTurnService holds Arc<dyn TurnCoordinator> and calls submit_turn(SubmitTurnRequest), and trusted_trigger classifies TurnError/AdmissionRejectionReason - turn ADMISSION authority, not vocabulary. It clears when the inbound submit orchestration moves to the product tier (PROPOSAL 6.4.2 lists conversations deps as filesystem/host_api/safety/triggers with turn vocabulary via host_api)",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_mcp",
-        dependency_name: "ironclaw_resources",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "MCP runtime support still depends on resource contracts currently classed with kernel behavior",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_scripts",
-        dependency_name: "ironclaw_resources",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "script runtime support still depends on resource contracts currently classed with kernel behavior",
-    },
-];
+const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[];
 
 /// The tracking metadata every exception must carry to be removable: the edge
 /// it names, when it was taken on, the milestone that deletes it, and why it
@@ -4305,8 +4589,21 @@ fn exception_tracking_defect(exception: &LayerMatrixException) -> Option<&'stati
 /// the two together mean the list can only move toward empty.
 #[test]
 fn reborn_layer_matrix_exceptions_ratchet_down_only() {
-    assert!(
-        LAYER_MATRIX_EXCEPTIONS.len() <= WS0_LAYER_MATRIX_EXCEPTION_BASELINE,
+    // Expressed as "how far above the baseline are we", not as
+    // `len() <= BASELINE`. The two are the same assertion for every baseline,
+    // but the comparison form becomes `usize <= 0` once the baseline reaches
+    // its target of zero, which is a tautology to `-D warnings`
+    // (`clippy::absurd_extreme_comparisons`) and would have had to be silenced
+    // with an `allow` on the one gate whose whole job is to be loud. The
+    // ceiling semantics are unchanged and deliberately kept: a list *below* the
+    // baseline is fine (the baseline is then lowered in the same PR, per the
+    // constant's own doc); only growth past it is red.
+    let above_baseline = LAYER_MATRIX_EXCEPTIONS
+        .len()
+        .saturating_sub(WS0_LAYER_MATRIX_EXCEPTION_BASELINE);
+    assert_eq!(
+        above_baseline,
+        0,
         "layer-matrix exceptions grew to {} (WS0 baseline {}): the restructure's exception \
          list is shrink-only on its way to empty (PROPOSAL §11.2.2). Remove the edge instead \
          of allowlisting it — or, if the owner has approved a genuinely new exception, raise \
@@ -4661,35 +4958,37 @@ fn assert_no_normal_workspace_deps<'a>(
 }
 
 /// Recursively concatenate every `.rs` file under `dir` into `out`,
-/// descending into subdirectories. Matches the recursion pattern used by
-/// `collect_forbidden_*` walkers above so future boundary checks over
-/// `runtime/` can reuse the same helper. Used by
-/// `reborn_cli_binary_crate_stays_separate_from_v1_root` to scan the
-/// entire `runtime/` module tree for forbidden imports.
-fn collect_runtime_rs(dir: &std::path::Path, out: &mut String) {
-    for entry in std::fs::read_dir(dir).unwrap_or_else(|err| {
-        panic!(
-            "Reborn CLI runtime directory must be readable at {}: {err}",
-            dir.display()
-        )
-    }) {
+/// descending into subdirectories, and return how many files were read.
+/// Matches the recursion pattern used by `collect_forbidden_*` walkers above so
+/// future boundary checks over a module tree can reuse the same helper. Used by
+/// `reborn_cli_binary_crate_stays_separate_from_v1_root` to scan the entire
+/// `runtime/` module tree for forbidden imports, and by
+/// `reborn_host_runtime_services_do_not_expose_lower_substrate_handles` to scan
+/// the obligation owners.
+///
+/// The count is returned so a caller can assert it actually read something: a
+/// path-keyed scan that silently walks an empty directory reports success while
+/// enforcing nothing.
+fn collect_runtime_rs(dir: &std::path::Path, out: &mut String) -> usize {
+    let mut files = 0usize;
+    for entry in std::fs::read_dir(dir)
+        .unwrap_or_else(|err| panic!("directory must be readable at {}: {err}", dir.display()))
+    {
         let path = entry.expect("dir entry").path();
         if path.is_dir() {
-            collect_runtime_rs(&path, out);
+            files += collect_runtime_rs(&path, out);
             continue;
         }
         if path.extension().and_then(|s| s.to_str()) != Some("rs") {
             continue;
         }
-        let content = std::fs::read_to_string(&path).unwrap_or_else(|err| {
-            panic!(
-                "Reborn CLI runtime file {} unreadable: {err}",
-                path.display()
-            )
-        });
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("file {} unreadable: {err}", path.display()));
         out.push_str(&content);
         out.push('\n');
+        files += 1;
     }
+    files
 }
 
 fn collect_forbidden_runtime_network_uses(
@@ -4965,4 +5264,42 @@ fn collect_forbidden_uses_detects_violation() {
         "violation should report the forbidden-use reason: {:?}",
         violations
     );
+}
+
+/// Concatenate every `.rs` file under a crate's `src/` for substring scanning.
+///
+/// Every read is fatal: a scanner that silently skips an unreadable file
+/// reports success while measuring nothing (WS10's guardrail rule).
+fn concatenated_crate_sources(src_root: &std::path::Path) -> String {
+    fn walk(dir: &std::path::Path, out: &mut String) {
+        let entries = std::fs::read_dir(dir)
+            .unwrap_or_else(|error| panic!("read {}: {error}", dir.display()));
+        let mut paths: Vec<_> = entries
+            .map(|entry| {
+                entry
+                    .unwrap_or_else(|error| panic!("read entry under {}: {error}", dir.display()))
+                    .path()
+            })
+            .collect();
+        paths.sort();
+        for path in paths {
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push_str(
+                    &std::fs::read_to_string(&path)
+                        .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+                );
+                out.push('\n');
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(src_root, &mut out);
+    assert!(
+        !out.is_empty(),
+        "no Rust sources found under {}",
+        src_root.display()
+    );
+    out
 }

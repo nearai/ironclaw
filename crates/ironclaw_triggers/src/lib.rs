@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use ulid::Ulid;
 mod automation;
+mod fire_access;
 mod in_memory;
 mod libsql;
 mod postgres;
@@ -37,6 +38,15 @@ mod worker;
 /// `ironclaw_common`, which must hold no domain vocabulary); `MAX_TRIGGER_NAME_BYTES`
 /// below is the same bound under this crate's own noun.
 pub use automation::{AutomationName, AutomationNameError, MAX_AUTOMATION_NAME_BYTES};
+/// Fire-time access: the check contract plus the checkers that are pure
+/// trigger-scope policy. The deployment *grant* value and the identity-directory
+/// checker stay in the composition root — see `fire_access`'s module doc
+/// (CHECKLIST WS6 / PROPOSAL §6.10.1).
+pub use fire_access::{
+    CompositeTriggerFireChecker, StaticOwnerTriggerFireChecker, TriggerFireAccessCheck,
+    TriggerFireAccessChecker, TriggerFireAccessDecision, TriggerFireAccessError,
+    trigger_fire_access_denied, trigger_fire_scope_matches,
+};
 pub use ironclaw_host_api::outbound::OutboundDeliveryTargetId as TriggerDeliveryTargetId;
 pub use trusted_submit::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,

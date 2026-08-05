@@ -6,10 +6,26 @@ import argparse
 import json
 import re
 import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
 import tomllib
+
+# This script is invoked from a "release-tools" checkout while it judges a
+# separate "candidate" checkout (see .github/workflows/cut-ironclaw-release.yml
+# and _manifest_version below), so — like scripts/ci/regression-test-check.py —
+# an import failure must say which file is missing rather than dump a
+# traceback with no actionable next step.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+try:
+    from crate_tree import CrateTreeError, crate_directory  # noqa: E402
+except ImportError as error:  # pragma: no cover - deployment error, not logic
+    raise SystemExit(
+        "cut_ironclaw_release: cannot import scripts/ci/lib/crate_tree.py "
+        f"({error}). The candidate's crate manifest is resolved through the "
+        "crate inventory and this script will not run without it."
+    ) from error
 
 NUMERIC_IDENTIFIER = r"(?:0|[1-9][0-9]*)"
 PRERELEASE_IDENTIFIER = r"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
@@ -150,7 +166,20 @@ def _checked_out_sha(candidate_root: Path) -> str:
 
 
 def _manifest_version(candidate_root: Path) -> str:
-    manifest = candidate_root / "crates/ironclaw_reborn_cli/Cargo.toml"
+    # Resolved by crate NAME through the shared inventory
+    # (scripts/ci/lib/crate_tree.py) against the CANDIDATE checkout, not a
+    # literal `crates/ironclaw_reborn_cli` path — the target-architecture
+    # family move (PROPOSAL §5) would otherwise make this raise FileNotFoundError
+    # (or, worse, silently resolve nothing) once the candidate commit has moved
+    # past the flat layout (docs/reborn/target-architecture/CHECKLIST.md WS10).
+    try:
+        crate_dir = crate_directory("ironclaw_reborn_cli", candidate_root)
+    except CrateTreeError as error:
+        raise ReleaseTagError(
+            "cannot resolve the ironclaw_reborn_cli crate in the candidate "
+            f"checkout: {error}"
+        ) from error
+    manifest = candidate_root / crate_dir / "Cargo.toml"
     with manifest.open("rb") as manifest_file:
         return str(tomllib.load(manifest_file)["package"]["version"])
 

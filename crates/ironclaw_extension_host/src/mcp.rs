@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-use ironclaw_extensions::{
-    ExtensionPackage, ExtensionRuntime, SharedExtensionRegistry, is_hosted_http_mcp_package,
-};
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
+use ironclaw_extensions::{ExtensionPackage, SharedExtensionRegistry, is_hosted_http_mcp_package};
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     http::{RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeHttpEgress},
@@ -527,7 +526,7 @@ mod tests {
                         source: ManifestSource::HostBundled,
                         requested_trust: ironclaw_host_api::trust::RequestedTrustClass::ThirdParty,
                         descriptor_trust_default: TrustClass::Sandbox,
-                        runtime: ironclaw_extensions::ExtensionRuntime::Mcp {
+                        runtime: ironclaw_extension_contracts::runtime::ExtensionRuntime::Mcp {
                             transport: "http".to_string(),
                             command: None,
                             args: Vec::new(),

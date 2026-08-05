@@ -9,7 +9,8 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::{StreamExt, TryStreamExt, stream};
 use ironclaw_auth::{
-    AuthAccountLastError, AuthAccountState, CredentialAccountStatus, project_auth_account_state,
+    AuthAccountLastError, AuthAccountState, ChannelAuthAccountState, ChannelConnectionService,
+    CredentialAccountStatus, project_auth_account_state,
 };
 use ironclaw_extension_contracts::{
     state::{InstallationState, LifecyclePublicState},
@@ -21,11 +22,11 @@ use ironclaw_product_contracts::surface::{
 };
 
 use crate::{
-    ChannelAuthAccountState, ChannelConnectionService, LifecycleExtensionSummary,
-    LifecycleInstalledExtensionSummary, LifecycleProductAction, LifecycleProductPayload,
-    LifecycleProductResponse, ProductView, RebornAccountBindingSource, RebornAuthAccount,
-    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornExtensionSurface, RebornVendorAuthAccounts,
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecycleProductAction,
+    LifecycleProductPayload, LifecycleProductResponse, ProductView, RebornAccountBindingSource,
+    RebornAuthAccount, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSurface,
+    RebornVendorAuthAccounts,
 };
 
 use super::{
@@ -535,13 +536,14 @@ mod tests {
     use super::*;
     use crate::reborn_services::StaticChannelConnectionService;
     use crate::{
-        ChannelConnectionRequirement, ChannelConnectionService, ExtensionCredentialStatusRequest,
+        ChannelConnectionRequirement, ExtensionCredentialStatusRequest,
         ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
         LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding,
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
         LifecycleSearchExtensionSummary, RebornChannelConnectStrategy,
     };
+    use ironclaw_auth::ChannelConnectionService;
     use ironclaw_product_contracts::surface::{
         ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     };

@@ -396,7 +396,9 @@ impl SecretStoreOpener for StandaloneSecretStoreOpener {
             let store = ironclaw_reborn_composition::open_standalone_secret_store(&home_path)
                 .await
                 .map_err(anyhow::Error::from)?;
-            Ok::<_, anyhow::Error>(ironclaw_operator::LlmKeyStore::new(store))
+            Ok::<_, anyhow::Error>(ironclaw_operator::LlmKeyStore::new(
+                ironclaw_reborn_composition::RuntimeOperatorSecretValueStore::shared(store),
+            ))
         })
     }
 
@@ -478,7 +480,11 @@ mod tests {
                 .lock()
                 .expect("opened paths lock")
                 .push(home_path.to_path_buf());
-            Ok(ironclaw_operator::LlmKeyStore::new(self.store.clone()))
+            Ok(ironclaw_operator::LlmKeyStore::new(
+                ironclaw_reborn_composition::RuntimeOperatorSecretValueStore::shared(
+                    self.store.clone(),
+                ),
+            ))
         }
 
         fn open_google_oauth_secret_store(
@@ -860,9 +866,11 @@ mod tests {
         );
         let store = opener.store.clone();
         let stored = crate::runtime::block_on_cli(async move {
-            ironclaw_operator::LlmKeyStore::new(store)
-                .read("openai")
-                .await
+            ironclaw_operator::LlmKeyStore::new(
+                ironclaw_reborn_composition::RuntimeOperatorSecretValueStore::shared(store),
+            )
+            .read("openai")
+            .await
         })
         .expect("read store");
         let value = stored.expect("secret stored");

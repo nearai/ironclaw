@@ -1,36 +1,15 @@
+use ironclaw_extension_contracts::hosted_mcp::HostedMcpDiscoveredTool;
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_host_api::{
     capability::{CapabilityDescriptor, EffectKind, PermissionMode},
     capability_profile::CapabilityProfileSchemaRef,
     ids::CapabilityId,
     runtime::RuntimeKind,
 };
-use serde_json::Value;
 
 use crate::{
-    CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage, ExtensionRuntime,
-    ManifestSource,
+    CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage, ManifestSource,
 };
-
-/// MCP tool descriptor discovered from a hosted provider and converted by the
-/// extension domain into a dynamic capability.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HostedMcpDiscoveredTool {
-    pub name: String,
-    pub description: String,
-    pub input_schema: Value,
-    pub annotations: HostedMcpDiscoveredToolAnnotations,
-}
-
-/// Advisory MCP tool behavior hints returned by `tools/list`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct HostedMcpDiscoveredToolAnnotations {
-    pub title: Option<String>,
-    pub destructive_hint: bool,
-    pub side_effects_hint: bool,
-    pub read_only_hint: bool,
-    pub idempotent_hint: Option<bool>,
-    pub open_world_hint: Option<bool>,
-}
 
 pub fn is_hosted_http_mcp_package(package: &ExtensionPackage) -> bool {
     hosted_http_mcp_url(package).is_some()
@@ -257,6 +236,7 @@ fn invalid_hosted_mcp_manifest(reason: String) -> ExtensionError {
 mod tests {
     use super::*;
     use crate::{ExtensionManifest, HostPortCatalog, ManifestSource};
+    use ironclaw_extension_contracts::hosted_mcp::HostedMcpDiscoveredToolAnnotations;
     use ironclaw_host_api::{capability::EffectKind, path::VirtualPath, runtime::RuntimeKind};
 
     const NOTION_MANIFEST: &str = r#"

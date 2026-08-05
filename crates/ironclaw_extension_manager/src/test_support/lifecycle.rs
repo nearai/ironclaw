@@ -263,7 +263,7 @@ async fn build_lifecycle_test_services_over_backing(
             .expect("first-party extension catalog")
             .with_reserved_bundled_ids(first_party_reserved_ids.clone());
     let extension_host_ports =
-        ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
+        ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog");
     let extension_host_api_contracts =
         product_extension_host_api_contract_registry().expect("host contracts");
     let installation_store: Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort> = Arc::new(

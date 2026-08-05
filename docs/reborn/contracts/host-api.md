@@ -54,7 +54,7 @@ The first implementation PR should create this crate before implementing `ironcl
 - `ironclaw_extensions`
 - `ironclaw_wasm`
 - `ironclaw_mcp`
-- `ironclaw_scripts`
+- `ironclaw_sandbox`
 - `ironclaw_auth`
 - `ironclaw_network`
 - current `src/tools/*`
@@ -733,7 +733,7 @@ pub struct SandboxQuota {
 }
 ```
 
-`ironclaw_host_api` defines these shapes. `ironclaw_resources`, `ironclaw_scripts`, `ironclaw_wasm`, and sandbox backends enforce them.
+`ironclaw_host_api` defines these shapes. `ironclaw_resources`, `ironclaw_sandbox`, `ironclaw_wasm`, and sandbox backends enforce them.
 
 ---
 

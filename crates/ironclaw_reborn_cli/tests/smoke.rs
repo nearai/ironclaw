@@ -5047,10 +5047,12 @@ fn seed_stored_llm_key(reborn_home: &Path, provider_id: &str, key: &str) {
         let store = ironclaw_reborn_composition::open_standalone_secret_store(&reborn_home)
             .await
             .expect("open standalone secret store");
-        ironclaw_operator::LlmKeyStore::new(store)
-            .put(&provider_id, ironclaw_secrets::SecretMaterial::from(key))
-            .await
-            .expect("seed provider key");
+        ironclaw_operator::LlmKeyStore::new(
+            ironclaw_reborn_composition::RuntimeOperatorSecretValueStore::shared(store),
+        )
+        .put(&provider_id, ironclaw_secrets::SecretMaterial::from(key))
+        .await
+        .expect("seed provider key");
     });
 }
 

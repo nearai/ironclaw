@@ -132,9 +132,10 @@ run_runtimes() {
   run_test ironclaw_wasm wasm_dispatch_integration
   run_test ironclaw_wasm wasm_http_adapter_contract
   run_test ironclaw_wasm wit_tool_runtime_contract
-  run_test ironclaw_scripts script_dispatch_integration
-  run_test ironclaw_scripts script_http_adapter_contract
-  run_test ironclaw_scripts script_runner_contract
+  run_test ironclaw_sandbox script_dispatch_integration
+  run_test ironclaw_sandbox script_http_adapter_contract
+  run_test ironclaw_sandbox script_runner_contract
+  run_test ironclaw_sandbox docker_security
   run_test ironclaw_mcp mcp_adapter_contract
   run_test ironclaw_mcp mcp_dispatch_integration
   # Pins docs/reborn/contracts/trust-boundary-hardening.md through the whole

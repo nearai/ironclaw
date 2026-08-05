@@ -67,14 +67,14 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
         resource::ResourceScope,
-    };
-    use ironclaw_reborn_composition::{
-        RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
-        RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
-        test_support::{
-            build_oauth_product_auth_with_identity_for_test,
-            handle_oauth_callback_with_channel_identity_binding_for_test,
+        user_identity::{
+            RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
+            RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
         },
+    };
+    use ironclaw_reborn_composition::test_support::{
+        build_oauth_product_auth_with_identity_for_test,
+        handle_oauth_callback_with_channel_identity_binding_for_test,
     };
     use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort};
     use secrecy::SecretString;
@@ -220,9 +220,8 @@ app_id = "/app_id"
             Arc::new(InMemoryBackend::new()),
             VirtualPath::new("/system/extensions/.installations/oauth-popup")
                 .expect("valid installation root"),
-            ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
-            ironclaw_host_runtime::default_host_api_contract_registry()
-                .expect("host API contracts"),
+            ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
+            ironclaw_extensions::default_host_api_contract_registry().expect("host API contracts"),
         )
         .await
         .expect("filesystem installation store"),
@@ -230,9 +229,9 @@ app_id = "/app_id"
     let record = ExtensionManifestRecord::from_toml(
         &manifest,
         ManifestSource::HostBundled,
-        &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
+        &ironclaw_host_api::host_port::default_host_port_catalog().expect("catalog"),
         None,
-        &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+        &ironclaw_extensions::default_host_api_contract_registry().expect("contracts"),
         None,
     )
     .expect("fixture manifest parses");

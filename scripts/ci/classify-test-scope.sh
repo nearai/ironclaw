@@ -56,21 +56,31 @@ discover_crate_dirs() {
     exit 1
   fi
 
-  local manifest dir count
+  local manifest dir relative count
   while IFS= read -r manifest; do
-    dir="${manifest%/Cargo.toml}"
+    # `manifest` is relative to crates_root (the find below runs from inside
+    # it, see below) — `dir`/`relative` must be rebuilt from it, never from
+    # the search root's own absolute prefix. `-not -path '*/.*'` matches
+    # against find's PRINTED path: searching from an absolute crates_root
+    # would make it also match any dot-component OF THE REPO CHECKOUT PATH
+    # itself (e.g. a worktree under `.claude/worktrees/...`), excluding every
+    # result. Running `find .` from inside crates_root confines the exclusion
+    # to paths actually under crates/, matching what crate_tree.py's
+    # `_is_skipped` already does by checking relative parts only.
+    relative="${manifest#./}"
+    dir="crates/${relative%/Cargo.toml}"
     # `grep -q '^\[workspace\]$'` — line-anchored so `[workspace.dependencies]`
     # in a member manifest is not mistaken for a workspace root.
-    if grep -qx '\[workspace\]' "${manifest}" 2>/dev/null; then
-      workspace_root_dirs="${workspace_root_dirs}${dir#"${repo_root}/"}
+    if grep -qx '\[workspace\]' "${crates_root}/${relative}" 2>/dev/null; then
+      workspace_root_dirs="${workspace_root_dirs}${dir}
 "
       continue
     fi
-    crate_dirs="${crate_dirs}${dir#"${repo_root}/"}
+    crate_dirs="${crate_dirs}${dir}
 "
   done < <(
-    find "${crates_root}" -type f -name Cargo.toml \
-      -not -path '*/target/*' -not -path '*/.*' 2>/dev/null | sort
+    (cd "${crates_root}" && find . -type f -name Cargo.toml \
+      -not -path '*/target/*' -not -path '*/.*' 2>/dev/null) | sort
   )
 
   count="$(printf '%s' "${crate_dirs}" | grep -c . || true)"
@@ -112,15 +122,23 @@ owning_crate_dir() {
 
 # True when "$1" is package data under `extensions/packages/`. Anchored on the
 # support crate rather than a literal path, so a family move keeps it working:
-# `packages/` is that crate's sibling.
+# `packages/` is that crate's sibling. Sets PACKAGE_ASSET_PACKAGES_DIR to the
+# matched `packages/` directory (whatever depth it actually sits at) so the
+# caller can normalize the path onto it — see normalize_crate_path below.
+PACKAGE_ASSET_PACKAGES_DIR=""
 package_asset_dir() {
-  local path="$1" support_dir
+  local path="$1" support_dir packages_dir
+  PACKAGE_ASSET_PACKAGES_DIR=""
   while IFS= read -r support_dir; do
     [ -n "${support_dir}" ] || continue
     case "${support_dir}" in
       */ironclaw_extension_support)
+        packages_dir="${support_dir%/*}/packages"
         case "${path}" in
-          "${support_dir%/*}"/packages/*) return 0 ;;
+          "${packages_dir}"/*)
+            PACKAGE_ASSET_PACKAGES_DIR="${packages_dir}"
+            return 0
+            ;;
         esac
         ;;
     esac
@@ -184,16 +202,32 @@ normalize_crate_path() {
   # Two shapes under `crates/` own no crate BY DESIGN, and refusing on them
   # would be wrong — they are attributable, just not to a crate:
   #
-  #   * a separate cargo workspace (the `wasm-src/` guest components,
-  #     `ironclaw_silk_decoder`);
   #   * a data-only package directory under `extensions/packages/`, which is
   #     manifest + prompts + schemas + committed wasm and deliberately carries
   #     no `Cargo.toml` (PROPOSAL §5). Its data is embedded by
   #     `ironclaw_extension_support`, which is where it used to live, so it
   #     lights the same lane that crate does.
+  #   * a separate cargo workspace (the `wasm-src/` guest components,
+  #     `ironclaw_silk_decoder`).
   #
-  # Pass both through unchanged and let the arms below decide.
-  if nested_workspace_dir "${path}" || package_asset_dir "${path}"; then
+  # Checked in this order and NOT symmetrically: a package-asset path is
+  # rewritten onto the canonical `crates/extensions/packages/<rest>` identity
+  # (the same treatment the crate-owned branch above gives its match), while a
+  # non-package workspace root (ironclaw_silk_decoder) passes through
+  # unchanged, matching its literal-path arms below. Without the rewrite, a
+  # data-only package's path stays literally wherever `packages/` sits
+  # (`crates/<family>/packages/...`) after the family move (PROPOSAL §5), the
+  # `crates/extensions/packages/*` arms in is_shared_test_path stop matching,
+  # and the file falls through to `is_code_path`'s bare `crates/*` arm —
+  # bucketing it has_reborn_tests=false where it was true. A `wasm-src/` guest
+  # inside the SAME package would be caught by package_asset_dir first (it is
+  # also under `packages/`) and gets the identical rewrite, so its own
+  # `nested_workspace_dir` membership never needs to be consulted here.
+  if package_asset_dir "${path}"; then
+    NORMALIZED_PATH="crates/extensions/packages/${path#"${PACKAGE_ASSET_PACKAGES_DIR}/"}"
+    return 0
+  fi
+  if nested_workspace_dir "${path}"; then
     return 0
   fi
 

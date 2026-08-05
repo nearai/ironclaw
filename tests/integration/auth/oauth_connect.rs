@@ -616,8 +616,8 @@ async fn installed_store_for_users(packages: &[(&str, &str)]) -> Arc<ExtensionIn
         Arc::new(InMemoryBackend::new()),
         VirtualPath::new("/system/extensions/.installations/oauth-connect-multiuser")
             .expect("valid installation root"),
-        ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
-        ironclaw_host_runtime::default_host_api_contract_registry().expect("host API contracts"),
+        ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
+        ironclaw_extensions::default_host_api_contract_registry().expect("host API contracts"),
     )
     .await
     .expect("filesystem installation store");
@@ -656,8 +656,8 @@ async fn installed_store(packages: &[&str]) -> Arc<ExtensionInstallationStore> {
         Arc::new(InMemoryBackend::new()),
         VirtualPath::new("/system/extensions/.installations/oauth-connect")
             .expect("valid installation root"),
-        ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
-        ironclaw_host_runtime::default_host_api_contract_registry().expect("host API contracts"),
+        ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
+        ironclaw_extensions::default_host_api_contract_registry().expect("host API contracts"),
     )
     .await
     .expect("filesystem installation store");
@@ -687,7 +687,7 @@ async fn installed_store(packages: &[&str]) -> Arc<ExtensionInstallationStore> {
 /// Parse a real bundled package manifest the way the installation store does.
 fn bundled_manifest_record(package: &str) -> ExtensionManifestRecord {
     let host_ports =
-        ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog loads");
+        ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog loads");
     let contracts = ironclaw_extension_host::product_extension_host_api_contract_registry()
         .expect("host api contracts load");
     let path = format!(

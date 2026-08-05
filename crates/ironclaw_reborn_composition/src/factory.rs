@@ -331,7 +331,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) channel_dm_target_store:
         Arc<ironclaw_extension_host::FilesystemChannelDmTargetStore>,
     pub(crate) channel_disconnect_slot:
-        Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>>,
+        Arc<std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) ironhub_link_state: Arc<ironclaw_extension_manager::ironhub::IronhubLinkStateStore>,
     pub(crate) skill_mounts: MountView,
@@ -366,7 +366,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) broadcast_budget_event_sink: Arc<BroadcastBudgetEventSink>,
     pub(crate) event_log: Arc<dyn DurableEventLog>,
     pub(crate) audit_log: Arc<dyn DurableAuditLog>,
-    pub(crate) admin_secret_provisioner: Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
+    pub(crate) admin_secret_provisioner: Arc<dyn ironclaw_product::AdminSecretProvisioner>,
     pub(crate) project_service: Arc<dyn ProjectService>,
     pub(crate) trigger_conversation_services: RebornFilesystemConversationServices,
     /// Pre-minted scheduler wake wiring for the production composition path.

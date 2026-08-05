@@ -14,7 +14,11 @@ mod ratchet_support;
 
 use std::path::{Path, PathBuf};
 
-use ratchet_support::workspace_root;
+// Crate paths are spelled flat (`crates/ironclaw_x/...`) and RESOLVED through
+// the crate inventory, so the family move (PROPOSAL section 5) repoints them
+// without editing the literals. Identity on today's tree - pinned by
+// `reborn_crate_inventory.rs` (CHECKLIST WS10).
+use ratchet_support::{crate_path, workspace_root};
 
 /// The Telegram package's `src/` tree, refusing rather than returning a path
 /// that is not there.
@@ -28,7 +32,7 @@ use ratchet_support::workspace_root;
 /// `crates/extensions/packages/telegram/src`) is exactly the kind of change
 /// that would have exercised the hole.
 fn telegram_source_root() -> PathBuf {
-    let root = workspace_root().join("crates/extensions/packages/telegram/src");
+    let root = crate_path(&workspace_root(), "crates/extensions/packages/telegram/src");
     assert!(
         root.is_dir(),
         "the Telegram package source root {} does not exist, so every gate keyed on it \
@@ -131,7 +135,10 @@ fn absence_assertions_pass_when_the_parent_exists_and_the_file_does_not() {
 
 #[test]
 fn generic_channel_delivery_is_not_owned_by_composition() {
-    let outbound = workspace_root().join("crates/ironclaw_reborn_composition/src/outbound");
+    let outbound = crate_path(
+        &workspace_root(),
+        "crates/ironclaw_reborn_composition/src/outbound",
+    );
     assert_absent_within(
         &outbound,
         &outbound.join("channel_delivery.rs"),
@@ -141,7 +148,10 @@ fn generic_channel_delivery_is_not_owned_by_composition() {
 
 #[test]
 fn generic_extension_lifecycle_has_no_telegram_knowledge() {
-    let path = workspace_root().join("crates/ironclaw_extension_host/src/product_lifecycle.rs");
+    let path = crate_path(
+        &workspace_root(),
+        "crates/ironclaw_extension_host/src/product_lifecycle.rs",
+    );
     let source = std::fs::read_to_string(&path).expect("extension lifecycle source readable");
     let forbidden = [
         "telegram_paired_source",
@@ -256,7 +266,7 @@ fn telegram_composition_is_assembly_only() {
     // fold removed composition's telegram module entirely. Telegram host
     // behavior rides the generic channel-host/ingress/delivery seams, so
     // composition may not own any telegram-specific source at all.
-    let composition_src = workspace_root().join("crates/ironclaw_reborn_composition/src");
+    let composition_src = crate_path(&workspace_root(), "crates/ironclaw_reborn_composition/src");
     assert_absent_within(
         &composition_src,
         &composition_src.join("telegram"),

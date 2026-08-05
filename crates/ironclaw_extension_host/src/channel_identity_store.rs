@@ -11,6 +11,30 @@
 //! bindings. The index is advisory: a missing marker only falls back to the
 //! full scan, and readers verify the primary record before trusting a
 //! marker, so a stale marker can never be a false positive.
+//!
+//! # Not the principal identity store
+//!
+//! There are two durable external-identity stores in the Reborn stack and this
+//! is the *binding* one. It answers "which already-authenticated Reborn user is
+//! this channel actor?" and it **never mints a user**. Minting, the user
+//! profile, and the verified-email index belong to `ironclaw_reborn_identity`,
+//! which keys on `(tenant, surface_kind, provider_kind, provider_instance,
+//! subject)` and owns `resolve_or_create`. Neither store subsumes the other and
+//! neither is a migration target for the other; see
+//! `crates/ironclaw_reborn_identity/CONTRACT.md`, "Two external-identity
+//! stores", for the full split.
+//!
+//! Two consequences worth knowing before changing this file:
+//!
+//! * **The ports this implements stay in `ironclaw_host_api::user_identity`.**
+//!   Relocating them into `ironclaw_reborn_identity` was proposed and refuted
+//!   (2026-08-04): that crate implements none of them, and because it depends on
+//!   `ironclaw_host_api` rather than the reverse, the move would force *this*
+//!   crate to take a new dependency purely to name a port it implements.
+//! * **This store is fixed to one tenant at construction**, where the principal
+//!   store takes the tenant per call. That is a deliberate difference, not an
+//!   oversight — but it is the shape to revisit if multi-tenant channel binding
+//!   is ever required.
 
 use std::{
     collections::HashMap,

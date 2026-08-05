@@ -45,9 +45,8 @@ use chrono::Utc;
 use futures::future::try_join_all;
 use ironclaw_attachments::{InboundAttachmentLander, InboundAttachmentReader};
 use ironclaw_auth::{
-    AuthFlowStatus, AuthProductScope, AuthProviderId, CredentialAccountId,
-    CredentialAccountProjection, CredentialAccountStatus, CredentialAccountUpdateBinding,
-    ProviderScope,
+    AuthProductScope, AuthProviderId, ChannelConnectionService, CredentialAccountId,
+    CredentialAccountProjection, CredentialAccountUpdateBinding, ProviderScope,
 };
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, IdempotencyKey, SanitizedCancelReason, TurnActor, TurnGateRef, TurnRunId,
@@ -658,67 +657,6 @@ fn rejected_busy_notice(status: TurnStatus) -> String {
         TurnStatus::BlockedApproval => NOTICE_BLOCKED_APPROVAL.to_string(),
         TurnStatus::BlockedAuth => NOTICE_BLOCKED_AUTH.to_string(),
         _ => NOTICE_BUSY_GENERIC.to_string(),
-    }
-}
-
-/// The caller's durable auth-account signal for one channel extension's vendor
-/// — the raw inputs the extensions-list service feeds to
-/// [`ironclaw_auth::project_auth_account_state`] so an account renders its real
-/// §6.3 state (`expired` / `refresh-failed` / `authenticating`) plus a typed
-/// last error, instead of the connected/disconnected collapse the
-/// [`ChannelConnectionService::caller_channel_connections`] bool alone permits.
-///
-/// Both inputs are optional. A service that only knows the caller holds a live
-/// grant leaves both `None` and the projection falls back to the connection
-/// bool (a live grant backfills to `connected`, MIG-1); a service that reads the
-/// durable credential-account status supplies `account_status` (and, mid-flow,
-/// `active_flow_status`) so the wire surfaces the real state.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ChannelAuthAccountState {
-    /// The caller's durable credential-account status for the extension's
-    /// vendor, when the service can read it.
-    pub account_status: Option<CredentialAccountStatus>,
-    /// A live (non-terminal) auth flow for the extension's vendor, when one is
-    /// in progress — projects to `authenticating`.
-    pub active_flow_status: Option<AuthFlowStatus>,
-}
-
-/// Per-user channel connection state. Returns, for the calling user, which
-/// channel extensions they have personally connected (for example, Slack OAuth).
-/// Keyed by channel package id (e.g. `"slack"`) -> `true` when connected.
-/// Only channels that have a per-user connection concept appear in the map;
-/// absence means "no per-user connection concept for this channel".
-#[async_trait]
-pub trait ChannelConnectionService: Send + Sync {
-    async fn caller_channel_connections(
-        &self,
-        caller: ProductSurfaceCaller,
-    ) -> Result<std::collections::HashMap<String, bool>, ProductSurfaceError>;
-
-    /// The caller's durable auth-account signal per channel extension, keyed by
-    /// channel package id — richer than the connected/disconnected bool
-    /// [`Self::caller_channel_connections`] returns. Lets the extensions wire
-    /// project the shared §6.3 auth-account state (`expired` / `refresh-failed`)
-    /// and its typed last error for each vendor account.
-    ///
-    /// Default: empty. A service that does not yet read durable credential-account
-    /// status reports none and the wire falls back to the connection bool; the
-    /// production channel-connection service overrides this to project each
-    /// caller's account status.
-    async fn caller_channel_account_states(
-        &self,
-        _caller: ProductSurfaceCaller,
-    ) -> Result<std::collections::HashMap<String, ChannelAuthAccountState>, ProductSurfaceError>
-    {
-        Ok(std::collections::HashMap::new())
-    }
-
-    async fn disconnect_channel_for_caller(
-        &self,
-        _caller: ProductSurfaceCaller,
-        _channel: &str,
-    ) -> Result<(), ProductSurfaceError> {
-        Err(ProductSurfaceError::service_unavailable(false))
     }
 }
 

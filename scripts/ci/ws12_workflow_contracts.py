@@ -183,6 +183,141 @@ CODE_STYLE_WORKFLOW = ".github/workflows/code_style.yml"
 PLATFORM_WORKFLOW = ".github/workflows/platform-and-compat.yml"
 STRESS_WORKFLOW = ".github/workflows/ironclaw-stress.yml"
 
+# ---------------------------------------------------------------------------
+# Per-package clippy target selection (#6965)
+#
+# `Check production-target lints` runs `cargo clippy -p <changed package> …`,
+# so its command has to hold for every package shape in the workspace. Explicit
+# target filters do not:
+#
+#   * `--lib` is a hard error on a bin-only package ("no library targets found
+#     in package `ironclaw`"), so a PR whose only changed package is
+#     crates/ironclaw_reborn_cli fails the lane on the flag, not on a lint;
+#   * `--bins` on a lib-only package is "target filter `bins` specified, but no
+#     targets matched; this is a no-op" — the lane reports green having linted
+#     nothing, which is the worse failure of the two;
+#   * `--bin`/`--example`/`--test`/`--bench` and their plurals swap the
+#     package's default production targets for a hand-picked set.
+#
+# Cargo's default target set is already lib + bins, tests/examples/benches
+# excluded, so the lane needs no filter at all — and this contract keeps it
+# that way.
+#
+# The check reads the whole step body rather than locating the command and
+# parsing its arguments. That is deliberate: a matcher is a thing to fool, and
+# every attempt to write one leaked (a wrapper binary, a prefixed command, a
+# continuation line). Scanning the body has no match position to displace and
+# no formatting to get wrong. The trade is that a command deliberately written
+# to look inert — `echo cargo clippy … -- -D warnings` — would pass. This file
+# is repo-controlled and changed through reviewed PRs; the regression worth
+# catching is a flag added back by hand, not a disguise.
+#
+# Known gap, deliberately unguarded: a package with neither a lib nor a bin
+# target (today only `ironclaw_reborn_integration_tests`) lints nothing and
+# exits 0 without even the `no targets matched` warning. Unreachable while
+# `changed_workspace_packages.py` only selects the root package for a
+# `Cargo.toml`/`Cargo.lock` change — which selects every other package too — so
+# the assertion would have no failing case to pin.
+# ---------------------------------------------------------------------------
+
+PRODUCTION_LINT_STEP = "Check production-target lints"
+
+# One `- name:` step heading. The scan is bounded to its own step because the
+# neighbouring `Check all-target lints` legitimately passes `--tests
+# --examples`; unbounded, this contract would blame this step for them.
+STEP_HEADING = re.compile(r"^[ \t]*- name: (?P<name>.+)$", re.MULTILINE)
+
+# `${{ matrix.flags }}` is the lane's other flag channel: `clippy_matrix` is
+# defined in this same workflow and expands into the command, so a target
+# filter added there widens the lane exactly as one on the command line would.
+# Scoped to the lines defining that matrix — `clippy_matrix` is the only
+# `flags`-bearing matrix here today, and an unrelated one that legitimately
+# passes `--tests` should not be read as widening this lane.
+CLIPPY_MATRIX_ASSIGNMENT = "clippy_matrix"
+MATRIX_FLAGS = re.compile(r'"flags"[ \t]*:[ \t]*"(?P<flags>[^"]*)"')
+
+# Ways to keep the command intact while throwing away its verdict. These are
+# not the disguised-command case the block above rules out of scope: each is a
+# plausible edit someone makes on purpose and for a stated reason ("unblock the
+# queue", "this lane is flaky"), and each leaves a lane that runs clippy and
+# ignores it — the silent-green failure this contract exists to prevent.
+EXIT_STATUS_MASKS = (
+    ("|| true", "swallows a failing lint"),
+    ("|| :", "swallows a failing lint"),
+    ("set +e", "stops the shell failing on a failing lint"),
+    ("continue-on-error", "lets the job report success with the lane red"),
+)
+
+# Matched on word boundaries so `--bins` is not also reported as `--bin`, and
+# so value-bearing forms (`--bin ironclaw`, `--bench=throughput`) are caught.
+FORBIDDEN_PRODUCTION_LINT_FLAGS = tuple(
+    (flag, why, re.compile(rf"(?<![\w-]){re.escape(flag)}(?![\w-])"))
+    for flag, why in (
+        ("--lib", "is a hard error on a bin-only package"),
+        ("--bins", "silently lints nothing on a lib-only package"),
+        ("--bin", "pins the lane to one binary and skips the package's other targets"),
+        ("--all-targets", "widens the lane past production targets"),
+        ("--tests", "widens the lane past production targets"),
+        ("--test", "widens the lane past production targets"),
+        ("--examples", "widens the lane past production targets"),
+        ("--example", "widens the lane past production targets"),
+        ("--benches", "widens the lane past production targets"),
+        ("--bench", "widens the lane past production targets"),
+    )
+)
+
+
+def step_body(text: str, step_name: str) -> str | None:
+    """Return one workflow step's body, bounded by the next step heading."""
+    for heading in STEP_HEADING.finditer(text):
+        if heading.group("name").strip() != step_name:
+            continue
+        following = STEP_HEADING.search(text, heading.end())
+        return text[heading.end() : following.start() if following else len(text)]
+    return None
+
+
+def validate_production_lint_targets(text: str) -> list[str]:
+    """Return every way the per-package clippy lane could error or no-op."""
+    body = step_body(text, PRODUCTION_LINT_STEP)
+    if body is None:
+        return [
+            f"{CODE_STYLE_WORKFLOW}: could not find the {PRODUCTION_LINT_STEP!r} step "
+            "— it is the only clippy gate on pull requests and must stay assertable"
+        ]
+    # Comments in the step explain which flags are absent and why, so they name
+    # the very strings being rejected.
+    command = "\n".join(
+        line for line in body.splitlines() if not line.lstrip().startswith("#")
+    )
+    if "cargo clippy" not in command:
+        return [
+            f"{CODE_STYLE_WORKFLOW}: {PRODUCTION_LINT_STEP!r} no longer runs "
+            "`cargo clippy` — this contract can only pin a command it can see"
+        ]
+    errors = [
+        f"{CODE_STYLE_WORKFLOW}: {PRODUCTION_LINT_STEP!r} must not pass {flag} — it {why}"
+        for flag, why, pattern in FORBIDDEN_PRODUCTION_LINT_FLAGS
+        if pattern.search(command)
+    ]
+    errors.extend(
+        f"{CODE_STYLE_WORKFLOW}: {PRODUCTION_LINT_STEP!r} must not mask the lint's "
+        f"exit status with `{mask}` — it {why}"
+        for mask, why in EXIT_STATUS_MASKS
+        if mask in command
+    )
+    errors.extend(
+        f"{CODE_STYLE_WORKFLOW}: clippy_matrix flags {match.group('flags')!r} must not "
+        f"contain {flag} — it {why}, and the matrix expands into "
+        f"{PRODUCTION_LINT_STEP!r}"
+        for line in text.splitlines()
+        if CLIPPY_MATRIX_ASSIGNMENT in line
+        for match in MATRIX_FLAGS.finditer(line)
+        for flag, why, pattern in FORBIDDEN_PRODUCTION_LINT_FLAGS
+        if pattern.search(match.group("flags"))
+    )
+    return errors
+
 # Every single-quoted ERE in a workflow that looks like a path scope filter.
 # Both spellings in use are covered: `grep -Eq '^(...)'` and the `has_match
 # '^(...)'` helper. A filter is selected out of the result by an anchor
@@ -264,20 +399,39 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
     CrateScopeFilter(
         workflow=PLATFORM_WORKFLOW,
         name="has_direct_wasm_abi_risk",
-        anchor="wit/",
+        # Anchored on the build script rather than on a path prefix: the WIT
+        # directory moved inside `ironclaw_wasm` (CHECKLIST WS4), so the bare
+        # `wit/` alternative that used to anchor this filter is gone.
+        anchor="build-wasm-extensions",
         kind="regex",
         crates=(
             ("ironclaw_common", "src/lib.rs"),
             ("ironclaw_wasm", "src/lib.rs"),
         ),
-        # Probe derived from reality rather than from a guessed layout: the
-        # shipped package manifests are found on disk and every one of them
-        # must be in scope. Anchored on the support crate and hopping to its
-        # sibling `packages/` directory, which is where WS2 put them — if that
-        # moves again this stops discovering files or stops matching them,
-        # either way loudly.
-        crate_globs=(("ironclaw_extension_support", "../packages/*/manifest.toml"),),
-        in_scope=("wit/host.wit", "registry/tools/x.json", "scripts/build-wasm-extensions.sh"),
+        # Probes derived from reality rather than from a guessed layout: the
+        # files are found on disk and every one of them must be in scope.
+        #
+        #  * the shipped package manifests, anchored on the support crate and
+        #    hopping to its sibling `packages/` directory, which is where WS2
+        #    put them — if that moves again this stops discovering files or
+        #    stops matching them, either way loudly.
+        #  * the canonical WASM ABI contracts themselves. Naming them by glob
+        #    rather than by literal is the point: the filter's whole job is to
+        #    put a `tool.wit`/`channel.wit` edit in scope, and a literal probe
+        #    can only assert the path someone typed. `wit/*.wit` discovers
+        #    whatever the crate actually ships, so adding a third contract or
+        #    moving the directory out of the crate fails here instead of
+        #    passing on a stale name. (It replaces two `.../wit/host.wit`
+        #    probes: no `host.wit` exists in this repository, so they asserted
+        #    the crate-name alternative twice and nothing about the ABI files.)
+        crate_globs=(
+            ("ironclaw_extension_support", "../packages/*/manifest.toml"),
+            ("ironclaw_wasm", "wit/*.wit"),
+        ),
+        in_scope=(
+            "registry/tools/x.json",
+            "scripts/build-wasm-extensions.sh",
+        ),
         out_of_scope=(
             "crates/ironclaw_llm/src/lib.rs",
             f"crates/{NESTED_FAMILY}/ironclaw_llm/src/lib.rs",
@@ -497,6 +651,194 @@ def validate_crate_scope_filters(
     return errors
 
 
+# ---------------------------------------------------------------------------
+# WebUI frontend directory sites + crate-name residue (#7155 WS10: "loud
+# path-pattern inventory")
+#
+# 28 sites across seven workflows spelled `crates/ironclaw_webui/frontend`
+# directly: a `cache-dependency-path:` value (12), a `cd` inside a `run:`
+# block (12), and a `working-directory:` key (4). Two more workflows spelled a
+# single crate's Cargo.toml / source path directly: docker.yml's release
+# VERSION extraction (`ironclaw_reborn_cli`) and nightly-deep-ci.yml's
+# mutation-audit target (`ironclaw_capabilities`). All of these break the
+# moment their crate moves into a family directory (crates/<family>/
+# ironclaw_*, PROPOSAL §5).
+#
+# `cache-dependency-path` is a static YAML value `actions/setup-node` globs at
+# runtime rather than a shell site — verified against the pinned commit's
+# bundled dist/setup/index.js: `hashFiles` walks ONE globber built from every
+# newline-separated pattern, and `restoreCache` only throws when that COMBINED
+# walk finds nothing — so its fix twins the flat lockfile line with a nested
+# wildcard sibling instead of resolving dynamically. Every other site (`cd`,
+# `working-directory`, docker.yml's VERSION grep, nightly-deep-ci.yml's
+# mutation-audit path) resolves once through scripts/ci/crate-dir.sh
+# (scripts/ci/lib/crate_tree.py) and must carry no literal trace of the flat
+# path it replaced.
+#
+# Two contracts, one per site shape:
+#   `validate_webui_frontend_sites` scans every `.github/workflows/*.yml` for
+#   the flat WebUI frontend literal. The ONLY sanctioned shape is the
+#   cache-dependency-path pairing (flat line immediately followed by its
+#   nested sibling); anything else is the dynamic-site regression.
+#   `validate_crate_name_residue` pins docker.yml and nightly-deep-ci.yml to
+#   still name the crate they resolve, with that name still resolvable — the
+#   same `name in text` + `crate_directory(name)` shape CRATE_SCOPE_FILTERS
+#   already uses for its `crates=` tuples.
+# ---------------------------------------------------------------------------
+
+DOCKER_WORKFLOW = ".github/workflows/docker.yml"
+NIGHTLY_DEEP_CI_WORKFLOW = ".github/workflows/nightly-deep-ci.yml"
+
+WEBUI_FRONTEND_CRATE = "ironclaw_webui"
+WEBUI_NESTED_LOCKFILE_PATTERN = (
+    f"crates/*/{WEBUI_FRONTEND_CRATE}/frontend/pnpm-lock.yaml"
+)
+
+
+def _yaml_code_portion(line: str) -> str:
+    """`line` with any YAML comment suffix removed.
+
+    A `#` starts a comment only when it is at the start of the line or
+    preceded by whitespace (the YAML spec rule) — enough to separate workflow
+    CODE from an explanatory comment without a full parser.
+    """
+
+    for index, char in enumerate(line):
+        if char == "#" and (index == 0 or line[index - 1] in " \t"):
+            return line[:index]
+    return line
+
+
+def validate_webui_frontend_sites(
+    workflows: dict[str, str], root: Path = ROOT
+) -> list[str]:
+    """Return every way a WebUI frontend directory site could go dark.
+
+    The flat literal is sanctioned in exactly one shape: the
+    `cache-dependency-path` flat lockfile line, immediately followed by its
+    nested wildcard sibling on the next non-blank line. Anywhere else — a bare
+    `cd`, a `working-directory:` key, a cache-dependency-path line missing its
+    sibling, or a sibling that has drifted — is the WS10 regression this pin
+    exists to catch.
+    """
+
+    errors: list[str] = []
+    try:
+        webui_dir = crate_directory(WEBUI_FRONTEND_CRATE, root)
+    except CrateTreeError as error:
+        return [
+            f"crate inventory cannot resolve {WEBUI_FRONTEND_CRATE!r}, the crate "
+            f"every WebUI frontend workflow site is derived from: {error}"
+        ]
+    flat_frontend_dir = f"{webui_dir}/frontend"
+    flat_lockfile = f"{flat_frontend_dir}/pnpm-lock.yaml"
+
+    # The glob machinery itself, independent of any workflow text: the flat
+    # line must match today's real tree, the nested line must match a
+    # plausible moved tree, and the nested line must not ALREADY match today's
+    # tree — a pattern that matches everything is not depth-tolerant, it is
+    # just broad (the same principle CRATE_SCOPE_FILTERS enforces on `paths:`).
+    if not (root / flat_lockfile).is_file():
+        errors.append(
+            f"probe {flat_lockfile} does not exist on disk — the WebUI "
+            "cache-dependency-path pin is unmeasurable; repoint it to wherever "
+            "the frontend lockfile really is"
+        )
+    flat_pattern = github_glob_to_regex(flat_lockfile)
+    nested_pattern = github_glob_to_regex(WEBUI_NESTED_LOCKFILE_PATTERN)
+    nested_probe = (
+        f"crates/{NESTED_FAMILY}/{WEBUI_FRONTEND_CRATE}/frontend/pnpm-lock.yaml"
+    )
+    if not flat_pattern.match(flat_lockfile):
+        errors.append(
+            f"flat cache-dependency-path line {flat_lockfile!r} does not match itself"
+        )
+    if not nested_pattern.match(nested_probe):
+        errors.append(
+            f"nested cache-dependency-path line {WEBUI_NESTED_LOCKFILE_PATTERN!r} "
+            f"does not match a plausible moved location ({nested_probe})"
+        )
+    if nested_pattern.match(flat_lockfile):
+        errors.append(
+            f"nested cache-dependency-path line {WEBUI_NESTED_LOCKFILE_PATTERN!r} "
+            f"already matches today's flat location ({flat_lockfile}) — it must "
+            "stay depth-tolerant, not just broad"
+        )
+
+    cache_sites = 0
+    for path in sorted(workflows):
+        if not path.startswith(".github/workflows/") or not path.endswith(".yml"):
+            continue
+        lines = workflows[path].splitlines()
+        for index, raw_line in enumerate(lines):
+            code = _yaml_code_portion(raw_line)
+            if flat_frontend_dir not in code:
+                continue
+            stripped = code.strip()
+            if stripped == flat_lockfile:
+                rest = (candidate.strip() for candidate in lines[index + 1 :])
+                following = next((candidate for candidate in rest if candidate), "")
+                if following == WEBUI_NESTED_LOCKFILE_PATTERN:
+                    cache_sites += 1
+                    continue
+                errors.append(
+                    f"{path}:{index + 1}: cache-dependency-path flat lockfile line "
+                    f"is not twinned with {WEBUI_NESTED_LOCKFILE_PATTERN!r} on the "
+                    "next non-blank line — the family move will go dark here"
+                )
+                continue
+            errors.append(
+                f"{path}:{index + 1}: hardcodes {flat_frontend_dir!r} outside a "
+                "comment — resolve it through scripts/ci/crate-dir.sh "
+                f"{WEBUI_FRONTEND_CRATE} instead of the flat literal"
+            )
+
+    if cache_sites == 0:
+        errors.append(
+            "no workflow pairs the flat WebUI lockfile line with its nested "
+            "sibling — the cache-dependency-path probe set is empty"
+        )
+    return errors
+
+
+# (crate-governing workflow, crate name) — the workflow's text must still
+# spell the name as a token, and the inventory must still resolve it. Both
+# sites already resolve their PATH dynamically through scripts/ci/crate-dir.sh
+# once fixed (B1/B2 in #7155); this is the pin that catches the workflow TEXT
+# itself going stale — a rename or deletion the workflow never followed.
+CRATE_NAME_RESIDUE: tuple[tuple[str, str], ...] = (
+    (DOCKER_WORKFLOW, "ironclaw_reborn_cli"),
+    (NIGHTLY_DEEP_CI_WORKFLOW, "ironclaw_capabilities"),
+)
+
+
+def validate_crate_name_residue(
+    workflows: dict[str, str], root: Path = ROOT
+) -> list[str]:
+    """Return every way a governed crate name could go dark in its workflow."""
+
+    errors: list[str] = []
+    for workflow, name in CRATE_NAME_RESIDUE:
+        text = workflows.get(workflow)
+        if text is None:
+            errors.append(f"{workflow}: workflow not loaded")
+            continue
+        if name not in text:
+            errors.append(
+                f"{workflow}: no longer names crate {name!r} — the step that "
+                "resolves this crate's directory has nothing to resolve"
+            )
+        try:
+            crate_directory(name, root)
+        except CrateTreeError as error:
+            errors.append(
+                f"{workflow}: names crate {name!r}, which the crate inventory "
+                f"cannot resolve — repoint it rather than leaving a token that "
+                f"matches nothing ({error})"
+            )
+    return errors
+
+
 def validate_workflow_texts(
     workflows: dict[str, str], root: Path = ROOT
 ) -> list[str]:
@@ -515,15 +857,32 @@ def validate_workflow_texts(
     e2e = workflows.get(E2E_WORKFLOW)
     if e2e is not None:
         errors.extend(validate_e2e_scope_filters(e2e))
+    code_style = workflows.get(CODE_STYLE_WORKFLOW)
+    if code_style is not None:
+        errors.extend(validate_production_lint_targets(code_style))
     errors.extend(validate_crate_scope_filters(workflows, root))
+    errors.extend(validate_crate_name_residue(workflows, root))
+    errors.extend(validate_webui_frontend_sites(workflows, root))
     return errors
 
 
 def load_workflows(root: Path) -> dict[str, str]:
-    paths = dict.fromkeys(
-        (*REQUIRED_MARKERS, *(scope.workflow for scope in CRATE_SCOPE_FILTERS))
-    )
-    return {path: (root / path).read_text(encoding="utf-8") for path in paths}
+    """Every `.github/workflows/*.yml` file, repo-relative path -> text.
+
+    A handful of contracts key off one specific known path (REQUIRED_MARKERS,
+    CRATE_SCOPE_FILTERS, CRATE_NAME_RESIDUE); `validate_webui_frontend_sites`
+    must see EVERY workflow, since the whole point of that pin is to catch the
+    flat WebUI literal reappearing somewhere nobody enumerated. Loading every
+    (small) workflow file eagerly costs nothing and keeps one loader for every
+    consumer — a superset of the old explicit path list, so every existing
+    `workflows.get(path)` lookup keeps working unchanged.
+    """
+
+    workflows_dir = root / ".github" / "workflows"
+    return {
+        path.relative_to(root).as_posix(): path.read_text(encoding="utf-8")
+        for path in sorted(workflows_dir.glob("*.yml"))
+    }
 
 
 def main() -> int:

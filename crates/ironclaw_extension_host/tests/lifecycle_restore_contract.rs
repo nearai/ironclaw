@@ -24,7 +24,7 @@ use ironclaw_trust::{AdminConfig, HostTrustPolicy, InvalidationBus};
 use tokio::sync::Mutex;
 
 fn host_port_catalog() -> ironclaw_host_api::host_port::HostPortCatalog {
-    ironclaw_host_runtime::default_host_port_catalog().expect("default host port catalog")
+    ironclaw_host_api::host_port::default_host_port_catalog().expect("default host port catalog")
 }
 
 fn contracts() -> ironclaw_extensions::HostApiContractRegistry {

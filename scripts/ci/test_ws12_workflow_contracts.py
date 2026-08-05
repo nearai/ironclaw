@@ -12,15 +12,25 @@ from pathlib import Path
 import ws12_workflow_contracts
 from ws12_workflow_contracts import (
     CODE_STYLE_WORKFLOW,
+    CRATE_NAME_RESIDUE,
     CRATE_SCOPE_FILTERS,
+    DOCKER_WORKFLOW,
     E2E_WORKFLOW,
+    NIGHTLY_DEEP_CI_WORKFLOW,
     PLATFORM_WORKFLOW,
     REQUIRED_MARKERS,
     STRESS_WORKFLOW,
+    WEBUI_FRONTEND_CRATE,
+    WEBUI_NESTED_LOCKFILE_PATTERN,
+    crate_directory,
     github_glob_to_regex,
     load_workflows,
+    step_body,
+    validate_crate_name_residue,
     validate_crate_scope_filters,
     validate_e2e_scope_filters,
+    validate_production_lint_targets,
+    validate_webui_frontend_sites,
     validate_workflow_texts,
 )
 
@@ -132,6 +142,169 @@ class WorkflowContractSabotageTests(unittest.TestCase):
             any("could not find the `changes` job scope regex" in e for e in errors),
             errors,
         )
+
+    def test_production_lint_passes_as_checked_in_without_reading_its_neighbour(
+        self,
+    ) -> None:
+        """Passing here is itself the proof that the scan stays in its step.
+
+        `Check all-target lints` sits directly below and legitimately passes
+        the flags this contract forbids, so a scan that overran its own step
+        would fail on the checked-in workflow. The first assertion keeps that
+        proof honest: if the neighbour ever stops passing `--tests`, this test
+        would still pass while having stopped testing anything.
+        """
+        neighbour = step_body(
+            self.workflows[CODE_STYLE_WORKFLOW], "Check all-target lints"
+        )
+        self.assertIsNotNone(neighbour)
+        self.assertIn("--tests", neighbour or "")
+
+        self.assertEqual(
+            validate_production_lint_targets(self.workflows[CODE_STYLE_WORKFLOW]), []
+        )
+
+    def test_target_filters_on_the_production_lint_fail_loudly(self) -> None:
+        """Every explicit target selector, in bare and value-bearing form.
+
+        Regression for PR #6965: the lane ran `cargo clippy -p <pkg> --lib
+        --bins`, and the first PR whose only changed package was the bin-only
+        `ironclaw` died on `no library targets found in package` — exit 101,
+        no lint ever run. `--bins` alone is the quieter half of the same bug:
+        on a lib-only package cargo warns "no targets matched; this is a
+        no-op" and the lane reports green having linted nothing. The rest swap
+        the package's default production targets for a hand-picked set.
+
+        Exact-count, so `--bins` is never also reported as `--bin` — a
+        substring match would do exactly that.
+        """
+        for injected, flag in (
+            ("--lib", "--lib"),
+            ("--bins", "--bins"),
+            ("--bin ironclaw", "--bin"),
+            ("--all-targets", "--all-targets"),
+            ("--tests", "--tests"),
+            ("--test smoke", "--test"),
+            ("--examples", "--examples"),
+            ("--example demo", "--example"),
+            ("--benches", "--benches"),
+            ("--bench=throughput", "--bench"),
+        ):
+            with self.subTest(injected=injected):
+                sabotaged = self.workflows[CODE_STYLE_WORKFLOW].replace(
+                    'cargo clippy "${package_args[@]}" \\',
+                    f'cargo clippy "${{package_args[@]}}" {injected} \\',
+                )
+                self.assertNotEqual(sabotaged, self.workflows[CODE_STYLE_WORKFLOW])
+
+                errors = validate_production_lint_targets(sabotaged)
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(f"must not pass {flag} ", errors[0])
+
+    def test_widening_the_clippy_matrix_flags_fails_loudly(self) -> None:
+        """`${{ matrix.flags }}` is the lane's other flag channel."""
+        sabotaged = self.workflows[CODE_STYLE_WORKFLOW].replace(
+            '"flags":"--all-features"', '"flags":"--all-features --all-targets"'
+        )
+        self.assertNotEqual(sabotaged, self.workflows[CODE_STYLE_WORKFLOW])
+
+        errors = validate_production_lint_targets(sabotaged)
+        self.assertTrue(
+            any("clippy_matrix flags" in e and "--all-targets" in e for e in errors),
+            errors,
+        )
+
+        # …and only that matrix. Some other matrix in this workflow may
+        # legitimately carry `--tests`; reading it as widening *this* lane
+        # would be a false failure on an unrelated change.
+        unrelated = self.workflows[CODE_STYLE_WORKFLOW] + (
+            '\n          echo \'doc_matrix=[{"name":"docs","flags":"--tests"}]\''
+            ' >> "$GITHUB_OUTPUT"\n'
+        )
+        self.assertEqual(validate_production_lint_targets(unrelated), [])
+
+    def test_losing_the_step_or_its_command_fails_loudly(self) -> None:
+        """A contract that cannot see the command must say so, not pass."""
+        renamed = self.workflows[CODE_STYLE_WORKFLOW].replace(
+            "name: Check production-target lints", "name: Check nothing at all"
+        )
+        self.assertTrue(
+            any(
+                "could not find the 'Check production-target lints' step" in e
+                for e in validate_production_lint_targets(renamed)
+            )
+        )
+
+        moved = self.workflows[CODE_STYLE_WORKFLOW].replace(
+            'cargo clippy "${package_args[@]}" \\\n            ${{ matrix.flags }} -- -D warnings',
+            "bash scripts/ci/production-clippy.sh",
+        )
+        self.assertNotEqual(moved, self.workflows[CODE_STYLE_WORKFLOW])
+        self.assertTrue(
+            any(
+                "no longer runs `cargo clippy`" in e
+                for e in validate_production_lint_targets(moved)
+            )
+        )
+
+    def test_masking_the_production_lint_exit_status_fails_loudly(self) -> None:
+        """A lane that runs clippy and ignores it is the silent-green case.
+
+        Distinct from a disguised command, which this contract deliberately
+        does not chase: each of these is a plausible edit made on purpose and
+        for a stated reason — unblock the queue, quiet a flaky lane — and each
+        leaves the lint running and its verdict discarded.
+        """
+        for mask, injected in (
+            ("|| true", '${{ matrix.flags }} -- -D warnings || true'),
+            ("|| :", '${{ matrix.flags }} -- -D warnings || :'),
+            ("set +e", 'set +e\n          ${{ matrix.flags }} -- -D warnings'),
+        ):
+            with self.subTest(mask=mask):
+                sabotaged = self.workflows[CODE_STYLE_WORKFLOW].replace(
+                    "${{ matrix.flags }} -- -D warnings", injected
+                )
+                self.assertNotEqual(sabotaged, self.workflows[CODE_STYLE_WORKFLOW])
+
+                errors = validate_production_lint_targets(sabotaged)
+                self.assertTrue(
+                    any(f"must not mask the lint's exit status with `{mask}`" in e
+                        for e in errors),
+                    errors,
+                )
+
+        # The YAML-level equivalent: the command runs, fails, and the job
+        # reports success anyway.
+        tolerated = self.workflows[CODE_STYLE_WORKFLOW].replace(
+            "      - name: Check production-target lints\n",
+            "      - name: Check production-target lints\n        continue-on-error: true\n",
+        )
+        self.assertNotEqual(tolerated, self.workflows[CODE_STYLE_WORKFLOW])
+        self.assertTrue(
+            any(
+                "continue-on-error" in e
+                for e in validate_production_lint_targets(tolerated)
+            ),
+            validate_production_lint_targets(tolerated),
+        )
+
+    def test_production_lint_failures_reach_the_top_level_contract(self) -> None:
+        """The validator must stay wired into `validate_workflow_texts`.
+
+        Every assertion above calls it directly, so without this the guard
+        could be unhooked from the entry point CI runs and stay green.
+        """
+        sabotaged = dict(self.workflows)
+        sabotaged[CODE_STYLE_WORKFLOW] = self.workflows[CODE_STYLE_WORKFLOW].replace(
+            'cargo clippy "${package_args[@]}" \\',
+            'cargo clippy "${package_args[@]}" --lib \\',
+        )
+        self.assertNotEqual(
+            sabotaged[CODE_STYLE_WORKFLOW], self.workflows[CODE_STYLE_WORKFLOW]
+        )
+
+        errors = validate_workflow_texts(sabotaged)
+        self.assertTrue(any("must not pass --lib" in e for e in errors), errors)
 
     def test_code_style_runs_workflow_and_shard_sabotage_tests(self) -> None:
         workflow = (ROOT / ".github/workflows/code_style.yml").read_text(
@@ -257,8 +430,9 @@ class CrateScopeFilterSabotageTests(unittest.TestCase):
         )
         workflows = self.sabotage(
             PLATFORM_WORKFLOW,
-            "^(wit/|",
-            "^(wit/|crates/([^/]+/)*ironclaw_wasm_product_adapters/|",
+            "^(crates/([^/]+/)*ironclaw_common/|",
+            "^(crates/([^/]+/)*ironclaw_wasm_product_adapters/"
+            "|crates/([^/]+/)*ironclaw_common/|",
         )
         with self.patched_filters((stale,)):
             errors = validate_crate_scope_filters(workflows, ROOT)
@@ -401,6 +575,283 @@ class CrateScopeFilterSabotageTests(unittest.TestCase):
             ws12_workflow_contracts,
             "CRATE_SCOPE_FILTERS",
             ws12_workflow_contracts.CRATE_SCOPE_FILTERS,
+        )
+        return _Patch()
+
+
+class WebuiFrontendSiteSabotageTests(unittest.TestCase):
+    """#7155 WS10: the 28 `crates/ironclaw_webui/frontend` sites.
+
+    `cache-dependency-path` is a static YAML value, so its fix twins the flat
+    lockfile line with a nested wildcard sibling; every `cd` and
+    `working-directory:` site resolves dynamically through
+    scripts/ci/crate-dir.sh and must carry no literal trace of the flat path.
+    These are the sabotage cases that prove the pin catches both regressions.
+    """
+
+    def setUp(self) -> None:
+        self.workflows = load_workflows(ROOT)
+        # Resolved dynamically, never hardcoded as `crates/ironclaw_webui`:
+        # this repo's crate tree is mid-restructure and the concurrent WS10
+        # physical-move work observably flips `ironclaw_webui` between its
+        # flat and family-nested location while this suite runs. A sabotage
+        # string built from a stale assumption about the current location
+        # would stop matching real workflow text the moment the tree moves
+        # again — exactly the fragility this whole pin exists to eliminate.
+        self.webui_dir = crate_directory(WEBUI_FRONTEND_CRATE, ROOT)
+
+    def sabotage(self, workflow: str, old: str, new: str, count: int = -1) -> dict[str, str]:
+        mutated = copy.deepcopy(self.workflows)
+        replaced = mutated[workflow].replace(old, new, count) if count >= 0 else mutated[workflow].replace(old, new)
+        self.assertNotEqual(replaced, mutated[workflow], f"no-op sabotage: {old!r}")
+        mutated[workflow] = replaced
+        return mutated
+
+    def test_checked_in_webui_sites_pass(self) -> None:
+        self.assertEqual(validate_webui_frontend_sites(self.workflows, ROOT), [])
+
+    def test_every_site_was_actually_converted(self) -> None:
+        """Sanity floor: the checked-in tree must contain the expected number
+        of sanctioned cache-dependency-path pairings (12) — a pin that passes
+        vacuously because nobody scanned anything is the defect being fixed."""
+        flat_lockfile = f"{self.webui_dir}/frontend/pnpm-lock.yaml"
+        pairs = 0
+        for text in self.workflows.values():
+            lines = text.splitlines()
+            for index, line in enumerate(lines):
+                if line.strip() != flat_lockfile:
+                    continue
+                following = next(
+                    (c.strip() for c in lines[index + 1 :] if c.strip()), ""
+                )
+                if following == WEBUI_NESTED_LOCKFILE_PATTERN:
+                    pairs += 1
+        self.assertEqual(pairs, 12, "expected exactly 12 cache-dependency-path sites")
+
+    def test_reintroducing_a_bare_cd_site_fails_loudly(self) -> None:
+        """The exact pre-#7155 regression: a `cd` back to the flat literal."""
+        sabotaged = self.sabotage(
+            ".github/workflows/coverage.yml",
+            'set -euo pipefail\n          webui_dir="$(bash scripts/ci/crate-dir.sh '
+            'ironclaw_webui)"\n          cd "${webui_dir}/frontend"',
+            f"cd {self.webui_dir}/frontend",
+            count=1,
+        )
+        errors = validate_webui_frontend_sites(sabotaged, ROOT)
+
+        self.assertTrue(
+            any(
+                "coverage.yml" in error and "hardcodes" in error and "frontend'" in error
+                for error in errors
+            ),
+            errors,
+        )
+
+    def test_reintroducing_a_bare_working_directory_site_fails_loudly(self) -> None:
+        sabotaged = self.sabotage(
+            CODE_STYLE_WORKFLOW,
+            "working-directory: ${{ env.WEBUI_FRONTEND_DIR }}",
+            f"working-directory: {self.webui_dir}/frontend",
+            count=1,
+        )
+        errors = validate_webui_frontend_sites(sabotaged, ROOT)
+
+        self.assertTrue(
+            any(CODE_STYLE_WORKFLOW in error and "hardcodes" in error for error in errors),
+            errors,
+        )
+
+    def test_dropping_the_nested_cache_glob_sibling_fails_loudly(self) -> None:
+        sabotaged = self.sabotage(
+            ".github/workflows/reborn-playwright.yml",
+            f"            {self.webui_dir}/frontend/pnpm-lock.yaml\n"
+            f"            {WEBUI_NESTED_LOCKFILE_PATTERN}\n",
+            f"            {self.webui_dir}/frontend/pnpm-lock.yaml\n",
+        )
+        errors = validate_webui_frontend_sites(sabotaged, ROOT)
+
+        self.assertTrue(
+            any(
+                "reborn-playwright.yml" in error and "not twinned" in error
+                for error in errors
+            ),
+            errors,
+        )
+
+    def test_webui_crate_unresolvable_fails_loudly(self) -> None:
+        """The exact `ironclaw_webui` name must keep resolving — if renamed or
+        deleted from the inventory, this must refuse rather than pass with
+        nothing measured."""
+        with tempfile.TemporaryDirectory() as empty:
+            errors = validate_webui_frontend_sites(self.workflows, Path(empty))
+
+        self.assertTrue(
+            any(
+                "crate inventory cannot resolve" in error and WEBUI_FRONTEND_CRATE in error
+                for error in errors
+            ),
+            errors,
+        )
+
+    def test_empty_workflow_set_is_an_empty_probe_not_a_pass(self) -> None:
+        """A probe that discovers nothing must fail closed, matching the
+        `crate_globs` / `CRATE_SCOPE_FILTERS` fail-closed floor."""
+        errors = validate_webui_frontend_sites({}, ROOT)
+
+        self.assertTrue(
+            any("cache-dependency-path probe set is empty" in error for error in errors),
+            errors,
+        )
+
+    def test_flat_lockfile_missing_on_disk_fails_loudly(self) -> None:
+        """The real-file probe: if the lockfile this pin is measured against
+        stops existing, the pin must say so rather than silently matching
+        nothing (mirrors CRATE_SCOPE_FILTERS' `crate_globs` discovery floor)."""
+        with tempfile.TemporaryDirectory() as empty_str:
+            empty = Path(empty_str)
+            (empty / "crates" / WEBUI_FRONTEND_CRATE).mkdir(parents=True)
+            (empty / "crates" / WEBUI_FRONTEND_CRATE / "Cargo.toml").write_text(
+                "[package]\nname = \"ironclaw_webui\"\n"
+            )
+            # crate_directory() refuses under crate_tree.MIN_CRATE_DIRECTORIES
+            # (20) real crates — a deliberate fail-closed floor, not something
+            # this fixture should route around. Real filler directories, not
+            # symlinks: crate_directories() finds manifests via `rglob`, which
+            # does not descend into symlinked directories, so a symlink farm
+            # would silently under-count and trip the very floor this fixture
+            # exists to clear.
+            for n in range(25):
+                filler = empty / "crates" / f"ironclaw_filler_{n}"
+                filler.mkdir(parents=True)
+                (filler / "Cargo.toml").write_text(f'[package]\nname = "ironclaw_filler_{n}"\n')
+
+            errors = validate_webui_frontend_sites(self.workflows, empty)
+
+        self.assertTrue(
+            any("does not exist on disk" in error for error in errors), errors
+        )
+
+
+class CrateNameResidueSabotageTests(unittest.TestCase):
+    """#7155 WS10 B1/B2: docker.yml and nightly-deep-ci.yml resolve their
+    governed crate's PATH dynamically now, but still spell the crate NAME as a
+    bare token. This is the pin that catches that token going stale — a
+    rename or deletion the workflow text never followed.
+    """
+
+    def setUp(self) -> None:
+        self.workflows = load_workflows(ROOT)
+
+    def sabotage(self, workflow: str, old: str, new: str) -> dict[str, str]:
+        mutated = copy.deepcopy(self.workflows)
+        replaced = mutated[workflow].replace(old, new)
+        self.assertNotEqual(replaced, mutated[workflow], f"no-op sabotage: {old!r}")
+        mutated[workflow] = replaced
+        return mutated
+
+    def test_checked_in_residue_passes(self) -> None:
+        self.assertEqual(validate_crate_name_residue(self.workflows, ROOT), [])
+
+    def test_every_governed_workflow_declares_probes(self) -> None:
+        self.assertEqual(
+            {workflow for workflow, _ in CRATE_NAME_RESIDUE},
+            {DOCKER_WORKFLOW, NIGHTLY_DEEP_CI_WORKFLOW},
+        )
+
+    def test_dropping_the_docker_crate_name_fails_loudly(self) -> None:
+        sabotaged = self.sabotage(
+            DOCKER_WORKFLOW, "ironclaw_reborn_cli", "ironclaw_renamed_cli"
+        )
+        errors = validate_crate_name_residue(sabotaged, ROOT)
+
+        self.assertTrue(
+            any(
+                DOCKER_WORKFLOW in error
+                and "ironclaw_reborn_cli" in error
+                and "no longer names" in error
+                for error in errors
+            ),
+            errors,
+        )
+
+    def test_dropping_the_nightly_crate_name_fails_loudly(self) -> None:
+        sabotaged = self.sabotage(
+            NIGHTLY_DEEP_CI_WORKFLOW, "ironclaw_capabilities", "ironclaw_dispatch_only"
+        )
+        errors = validate_crate_name_residue(sabotaged, ROOT)
+
+        self.assertTrue(
+            any(
+                NIGHTLY_DEEP_CI_WORKFLOW in error
+                and "ironclaw_capabilities" in error
+                and "no longer names" in error
+                for error in errors
+            ),
+            errors,
+        )
+
+    def test_a_residue_crate_the_inventory_cannot_resolve_fails_loudly(self) -> None:
+        """A name that still appears as a token but the inventory can no
+        longer resolve (renamed elsewhere, deleted) must refuse."""
+        stale = ((DOCKER_WORKFLOW, "ironclaw_reborn_cli_renamed"),)
+        # Make the workflow text contain the stale name too, so the "no
+        # longer names" branch does not fire first and mask this one.
+        workflows = self.sabotage(
+            DOCKER_WORKFLOW, "ironclaw_reborn_cli", "ironclaw_reborn_cli_renamed"
+        )
+        with self.patched_residue(stale):
+            errors = validate_crate_name_residue(workflows, ROOT)
+
+        self.assertTrue(
+            any(
+                "ironclaw_reborn_cli_renamed" in error and "cannot resolve" in error
+                for error in errors
+            ),
+            errors,
+        )
+
+    def test_missing_workflow_fails_loudly(self) -> None:
+        mutated = copy.deepcopy(self.workflows)
+        del mutated[NIGHTLY_DEEP_CI_WORKFLOW]
+
+        errors = validate_crate_name_residue(mutated, ROOT)
+
+        self.assertTrue(
+            any(
+                NIGHTLY_DEEP_CI_WORKFLOW in error and "not loaded" in error
+                for error in errors
+            ),
+            errors,
+        )
+
+    def test_residue_failures_reach_the_top_level_contract(self) -> None:
+        sabotaged = self.sabotage(
+            NIGHTLY_DEEP_CI_WORKFLOW, "ironclaw_capabilities", "ironclaw_dispatch_only"
+        )
+
+        self.assertTrue(
+            any(
+                "no longer names crate 'ironclaw_capabilities'" in error
+                for error in validate_workflow_texts(sabotaged, ROOT)
+            )
+        )
+
+    def patched_residue(self, filters: tuple[tuple[str, str], ...]):
+        test = self
+
+        class _Patch:
+            def __enter__(self) -> None:
+                self.saved = ws12_workflow_contracts.CRATE_NAME_RESIDUE
+                ws12_workflow_contracts.CRATE_NAME_RESIDUE = filters
+
+            def __exit__(self, *_: object) -> None:
+                ws12_workflow_contracts.CRATE_NAME_RESIDUE = self.saved
+
+        test.addCleanup(
+            setattr,
+            ws12_workflow_contracts,
+            "CRATE_NAME_RESIDUE",
+            ws12_workflow_contracts.CRATE_NAME_RESIDUE,
         )
         return _Patch()
 

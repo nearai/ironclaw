@@ -32,8 +32,8 @@ use ironclaw_loop_host::{
     HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_reborn_composition::{
-    AdminApiTokenMinter, PollSettings, RebornHostBindings, RebornRuntime, RebornRuntimeIdentity,
-    RebornRuntimeInput, build_reborn_runtime,
+    PollSettings, RebornHostBindings, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
+    build_reborn_runtime,
 };
 use ironclaw_webui::{
     EnvBearerAuthenticator, SessionAuthenticator, SignedTokenSessionStore, signed_session_store,
@@ -74,7 +74,7 @@ struct SessionTokenMinter {
 }
 
 #[async_trait]
-impl AdminApiTokenMinter for SessionTokenMinter {
+impl ironclaw_product_contracts::admin_users::AdminApiTokenMinter for SessionTokenMinter {
     async fn mint(&self, tenant: &TenantId, user_id: &UserId) -> Result<SecretString, String> {
         self.store
             .create_session(
@@ -161,9 +161,10 @@ async fn build_admin_harness_from(
     // always accepted.
     let operator_secret = SecretString::from(OPERATOR_TOKEN.to_string());
     let session_store = signed_session_store(&operator_secret, &tenant);
-    let minter: Arc<dyn AdminApiTokenMinter> = Arc::new(SessionTokenMinter {
-        store: session_store.clone(),
-    });
+    let minter: Arc<dyn ironclaw_product_contracts::admin_users::AdminApiTokenMinter> =
+        Arc::new(SessionTokenMinter {
+            store: session_store.clone(),
+        });
 
     let input = RebornRuntimeInput::from_build_input(build_input)
         .with_identity(RebornRuntimeIdentity {
@@ -895,15 +896,15 @@ async fn malformed_inputs_are_4xx_not_500() {
 struct RecordingSandboxTransport;
 
 #[async_trait]
-impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTransport {
+impl ironclaw_host_api::process::SandboxCommandTransport for RecordingSandboxTransport {
     async fn run_command(
         &self,
-        _request: ironclaw_host_runtime::CommandExecutionRequest,
+        _request: ironclaw_host_api::process::CommandExecutionRequest,
     ) -> Result<
-        ironclaw_host_runtime::CommandExecutionOutput,
-        ironclaw_host_runtime::RuntimeProcessError,
+        ironclaw_host_api::process::CommandExecutionOutput,
+        ironclaw_host_api::process::RuntimeProcessError,
     > {
-        Ok(ironclaw_host_runtime::CommandExecutionOutput {
+        Ok(ironclaw_host_api::process::CommandExecutionOutput {
             output: String::new(),
             saved_output: None,
             exit_code: 0,

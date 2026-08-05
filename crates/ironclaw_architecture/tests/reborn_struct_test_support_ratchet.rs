@@ -14,7 +14,7 @@ mod ratchet_support;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use ratchet_support::workspace_root;
+use ratchet_support::{try_resolve_crate_relative, workspace_root};
 use syn::parse::Parser;
 use syn::spanned::Spanned;
 use syn::{Attribute, Fields, ImplItem, Item, Meta, Token};
@@ -56,8 +56,20 @@ struct FrozenPathCount {
 /// more line in a long list. Both only ever move down; lower them in the same
 /// PR that deletes debt (CHECKLIST WS8 flips `dead_code`/`unreachable_pub` on
 /// workspace-wide once this inventory is gone).
-const WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE: usize = 80;
-const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 277;
+///
+/// ✎ **80/277 → 79/276 (2026-08-04, #7147), and the totals check below is now
+/// an equality.** "Both only ever move down; lower them in the same PR that
+/// deletes debt" was honour-system, and it had already been skipped once: a
+/// `<=` ratchet is silent when the constant sits *above* the inventory, so the
+/// tree carried **one frozen path and one member of untracked slack** — enough
+/// for a whole new frozen dead-code path with one suppressed member to be
+/// appended and every gate stay green. That is precisely the growth this
+/// totals check exists to catch, and it could not see it. Recounted on
+/// `origin/main` @ `676d86ce02` by zeroing both constants and reading the
+/// panic (which prints `FROZEN_PATH_COUNTS.len()` and the member sum), not by
+/// eye: **79 paths / 276 members**.
+const WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE: usize = 79;
+const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 276;
 
 const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
@@ -104,20 +116,20 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "dead-code",
         item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/sandbox_process/ca.rs",
+        path: "crates/ironclaw_sandbox/src/sandbox_process/ca.rs",
         count: 4,
     },
     // Same W6 retirement trigger as the `ca.rs` entry above.
     FrozenPathCount {
         category: "dead-code",
         item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/sandbox_process/credential_firewall.rs",
+        path: "crates/ironclaw_sandbox/src/sandbox_process/credential_firewall.rs",
         count: 5,
     },
     FrozenPathCount {
         category: "dead-code",
         item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/sandbox_process/attribution.rs",
+        path: "crates/ironclaw_sandbox/src/sandbox_process/attribution.rs",
         count: 4,
     },
     FrozenPathCount {
@@ -291,25 +303,28 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/sandbox_process/ca.rs",
+        path: "crates/ironclaw_sandbox/src/sandbox_process/ca.rs",
         count: 2,
     },
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/sandbox_process/credential_firewall.rs",
+        path: "crates/ironclaw_sandbox/src/sandbox_process/credential_firewall.rs",
+        count: 1,
+    },
+    // WS3 split `obligations.rs` into one module per chartered owner; the
+    // single frozen test-support method travelled to the staged-handoff owner.
+    // Repointed, not re-baselined: the count is unchanged at 1.
+    FrozenPathCount {
+        category: "test-support",
+        item_kind: "method",
+        path: "crates/ironclaw_host_runtime/src/obligations/staged_handoffs.rs",
         count: 1,
     },
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/obligations.rs",
-        count: 1,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
-        path: "crates/ironclaw_host_runtime/src/sandbox_process/attribution.rs",
+        path: "crates/ironclaw_sandbox/src/sandbox_process/attribution.rs",
         count: 1,
     },
     FrozenPathCount {
@@ -417,7 +432,13 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
         category: "test-support",
         item_kind: "method",
-        path: "crates/ironclaw_reborn_composition/src/observability/trace_capture.rs",
+        // Re-keyed 2026-08-04 (WS6) from
+        // `ironclaw_reborn_composition/src/observability/trace_capture.rs`: the
+        // module moved to the turn-runner observer seam. Same struct, same
+        // `#[cfg(test)] with_history_source` seam, same count — a path-keyed
+        // inventory entry following its file, which is the WS10 hazard this
+        // gate exists to make loud rather than a new allowance.
+        path: "crates/ironclaw_runner/src/trace_capture.rs",
         count: 1,
     },
     FrozenPathCount {
@@ -758,12 +779,19 @@ fn reborn_production_struct_test_support_and_dead_code_members_do_not_grow() {
     let mut found = BTreeMap::new();
     scan_dir(&root, &root.join("crates"), &mut found);
 
+    // Frozen paths are compared against paths DISCOVERED on disk, so each is
+    // resolved through the crate inventory first: after the family move
+    // (PROPOSAL section 5) every entry naming a moved crate would otherwise
+    // read as BOTH "new occurrence" and "debt that no longer exists" in the
+    // same run - 79 of them (CHECKLIST WS10). A path naming a crate that is
+    // really gone keeps its literal and is still reported as removed debt.
     let mut frozen = BTreeMap::new();
     for entry in FROZEN_PATH_COUNTS {
         let key = (
             entry.category.to_string(),
             entry.item_kind.to_string(),
-            entry.path.to_string(),
+            try_resolve_crate_relative(&root, entry.path)
+                .unwrap_or_else(|_| entry.path.to_string()),
         );
         assert!(
             frozen.insert(key.clone(), entry.count).is_none(),
@@ -805,6 +833,14 @@ fn reborn_production_struct_test_support_and_dead_code_members_do_not_grow() {
     // can grow without any single path count rising.
     let frozen_members: usize = FROZEN_PATH_COUNTS.iter().map(|entry| entry.count).sum();
     assert!(
+        !FROZEN_PATH_COUNTS.is_empty() && frozen_members > 0,
+        "FROZEN_PATH_COUNTS is empty ({} paths / {frozen_members} members) — the totals ratchet \
+         below would pass having measured nothing. Either the inventory really reached zero \
+         (delete this check and both baselines together, and flip the workspace lints per \
+         CHECKLIST WS8) or the const was truncated.",
+        FROZEN_PATH_COUNTS.len()
+    );
+    assert!(
         FROZEN_PATH_COUNTS.len() <= WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE
             && frozen_members <= WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE,
         "production-struct debt inventory grew to {} paths / {} members (WS0 baseline {} / {}): \
@@ -815,6 +851,30 @@ fn reborn_production_struct_test_support_and_dead_code_members_do_not_grow() {
         frozen_members,
         WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE,
         WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE
+    );
+    // The slack half (#7147). A ceiling ABOVE the live inventory is an
+    // unclaimed budget for exactly the growth the assertion above refuses:
+    // with 80/277 recorded against 79/276 live, one new frozen path carrying
+    // one suppressed member landed green. Both totals must therefore *equal*
+    // the inventory, so a deletion that forgets to lower the constant is red
+    // rather than silently banked as headroom.
+    assert!(
+        FROZEN_PATH_COUNTS.len() >= WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE
+            && frozen_members >= WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE,
+        "production-struct debt inventory holds {} paths / {} members but the WS0 baselines are \
+         {} / {} — UNTRACKED SLACK of {} paths / {} members. That headroom is a free budget for \
+         new frozen debt: a path entry can be appended, or a frozen count raised, and every gate \
+         stays green. Lower WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE to {} and \
+         WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE to {} in the PR that deleted the debt, which \
+         is what the doc comment on them already required (#7147).",
+        FROZEN_PATH_COUNTS.len(),
+        frozen_members,
+        WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE,
+        WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE,
+        WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE.saturating_sub(FROZEN_PATH_COUNTS.len()),
+        WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE.saturating_sub(frozen_members),
+        FROZEN_PATH_COUNTS.len(),
+        frozen_members
     );
 }
 
