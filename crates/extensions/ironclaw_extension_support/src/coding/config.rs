@@ -47,4 +47,9 @@ pub(super) const DEFAULT_EXCLUDED_DIRS: &[&str] = &[
     ".venv",
     "venv",
     "__pycache__",
+    // Activated skill bundles are staged here so a host process can open them
+    // (`bundle_staging::STAGED_SKILLS_DIRNAME`). They are copies of read-only store content, not the
+    // user's own files, so a workspace `glob`/`list_dir`/`grep` must not surface them and an agent
+    // must not be able to mistake one for a file it wrote.
+    ".skills",
 ];

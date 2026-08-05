@@ -2094,8 +2094,14 @@ mod tests {
         let workspace_mounts =
             crate::runtime_mounts::workspace_mount_view(MountPermissions::read_write(), &[])
                 .expect("workspace mounts build");
-        let skill_mounts =
-            crate::runtime_mounts::skill_management_mount_view().expect("skill mounts build");
+        let skill_mounts = crate::runtime_mounts::db_backed_skill_management_mount_view(
+            &ironclaw_host_api::resource::ResourceScope::local_default(
+                ironclaw_host_api::ids::UserId::new("grant-coverage-user").expect("user id"),
+                ironclaw_host_api::ids::InvocationId::new(),
+            )
+            .expect("scope"),
+        )
+        .expect("skill mounts build");
         let memory_mounts =
             crate::runtime_mounts::memory_mount_view(MountPermissions::read_write_list_delete())
                 .expect("memory mounts build");
@@ -4173,7 +4179,7 @@ mod tests {
                     capability: &set_capability_id,
                 },
                 crate::factory::test_support::workspace_mounts_for_test(runtime_surfaces),
-                runtime_surfaces.skill_mounts_for_test(),
+                &crate::factory::test_support::skill_mounts_for_test(&missing_approval_scope),
                 runtime_surfaces.memory_mounts_for_test(),
                 runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
             )
@@ -4384,7 +4390,7 @@ mod tests {
                     capability: &set_capability_id,
                 },
                 crate::factory::test_support::workspace_mounts_for_test(runtime_surfaces),
-                runtime_surfaces.skill_mounts_for_test(),
+                &crate::factory::test_support::skill_mounts_for_test(&approval_scope),
                 runtime_surfaces.memory_mounts_for_test(),
                 runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
             )

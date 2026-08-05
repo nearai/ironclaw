@@ -277,11 +277,6 @@ pub async fn ensure_bundled_reborn_skills_installed_in(
         );
     }
     let install_lock = BundledSkillInstallLock::acquire(filesystem, system_skills_root).await?;
-    let filesystem_ref = filesystem;
-    let system_skills_root = system_skills_root.clone();
-    let system_skills_root = &system_skills_root;
-    let filesystem = filesystem_ref;
-
     let result = async {
         let bundled_names = bundled_skills
             .iter()

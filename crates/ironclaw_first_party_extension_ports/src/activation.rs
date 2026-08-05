@@ -380,6 +380,15 @@ where
     /// Copies an activated bundle's files where a host process can open them. `None` disables
     /// staging, which is correct for a deployment with no writable workspace.
     bundle_stager: Option<Arc<dyn crate::SkillBundleStager>>,
+    /// Bundles already staged in this process, keyed by caller + bundle + content hash.
+    ///
+    /// `body_context` runs on the activation path of EVERY turn, and without this each turn
+    /// re-walked the bundle directory, re-read every file, and re-wrote all of them -- for a skill
+    /// that had not changed since the previous turn. The value is the runnable directory, so a cache
+    /// hit still answers the question the caller asked. Keyed by content hash so an updated bundle
+    /// re-stages rather than serving a stale copy; a bundle whose source reports no hash is never
+    /// cached, because there is then no way to know it is unchanged.
+    staged_bundles: Mutex<HashMap<String, String>>,
     activation_observer: Mutex<Option<Arc<dyn SkillActivationObserver>>>,
     messages_by_run: Mutex<HashMap<SkillActivationMessageKey, SkillActivationMessage>>,
     activation_cache: Mutex<HashMap<ActivationCandidateCacheKey, CachedActivationCandidate>>,
@@ -410,6 +419,7 @@ where
             auto_activate_learned: Arc::new(AtomicBool::new(true)),
             setup_marker_source: None,
             bundle_stager: None,
+            staged_bundles: Mutex::new(HashMap::new()),
             activation_observer: Mutex::new(None),
             messages_by_run: Mutex::new(HashMap::new()),
             activation_cache: Mutex::new(HashMap::new()),
@@ -471,6 +481,32 @@ where
         let scope = run_context.scope.to_resource_scope();
         for candidate in candidates {
             let bundle_id = candidate.descriptor.id();
+            let cache_key = candidate
+                .descriptor
+                .provenance()
+                .content_hash
+                .as_ref()
+                .map(|hash| {
+                    format!(
+                        "{}|{}|{}|{}",
+                        scope.tenant_id.as_str(),
+                        scope.user_id.as_str(),
+                        bundle_id.name(),
+                        hash
+                    )
+                });
+            if let Some(key) = cache_key.as_ref()
+                && let Some(staged_dir) = self
+                    .staged_bundles
+                    .lock()
+                    .ok()
+                    .and_then(|staged| staged.get(key).cloned())
+            {
+                context
+                    .staged_paths
+                    .insert(bundle_id.name().to_string(), staged_dir);
+                continue;
+            }
             let files = match self
                 .bundle_source
                 .list_skill_bundle_files(run_context, bundle_id)
@@ -512,6 +548,11 @@ where
                 .stage_bundle(&scope, bundle_id.name(), &staged_files)
                 .await
             {
+                if let Some(key) = cache_key
+                    && let Ok(mut staged) = self.staged_bundles.lock()
+                {
+                    staged.insert(key, staged_dir.clone());
+                }
                 context
                     .staged_paths
                     .insert(bundle_id.name().to_string(), staged_dir);

@@ -66,7 +66,8 @@ pub(crate) fn ambient_workspace_mount_view(
 
 /// The single decision about where skills live. Every skill mount view is built from this.
 ///
-/// There were three views over two different trees, which is the whole of nearai/ironclaw#7168:
+/// There were three views over two different trees, which is the whole of nearai/ironclaw#7168
+/// (the two `scoped_*` names below no longer exist — they were deleted into this function):
 ///
 /// | view | used by | `/skills` resolved to |
 /// |---|---|---|
@@ -83,14 +84,16 @@ pub(crate) fn ambient_workspace_mount_view(
 /// Skills belong wholly in the database-backed virtual filesystem. Anything derived from this
 /// function agrees by construction, and no reader can drift from a writer again.
 ///
-/// `/system/skills` is the exception, and stays on the host disk: that is where
-/// `ensure_bundled_reborn_skills_installed` writes, and pointing it at the database would resolve
-/// bundled skills to an empty tree and lose all 32 with no error anywhere. Note the alias and the
-/// target are both `/system/skills` — the composite mounts that virtual root straight onto the same
-/// host directory the seeder reaches through `/projects/system/skills`, verified by a local-dev
-/// server listing all 32 through this exact target. Moving bundled seeding into the database is the
-/// remaining step toward skills being wholly DB-backed, and it also closes the hosted multi-tenant
-/// gap where no bundled skill is seeded at all (no tenant host disk exists to seed).
+/// `/system/skills` is spelled alias-equals-target on purpose, and which world it lands in is
+/// decided by the composite rather than here — that is the point of routing through one function.
+/// On the shapes that have a host disk (local-dev, hosted-single-tenant) the composite mounts
+/// `/system/skills` onto the same host directory `ensure_bundled_reborn_skills_installed` writes
+/// through `/projects/system/skills`; verified by a local-dev server listing all 32 through this
+/// exact target. On hosted multi-tenant there is no tenant host disk to seed, so
+/// `production_database_root_filesystem` routes the same root to Postgres and
+/// `build_postgres_production` seeds the bundle into it with
+/// `ensure_bundled_reborn_skills_installed_in`. Either way the alias resolves to wherever the
+/// bundle actually is, and neither reader nor writer has to know which.
 fn db_backed_skill_grants(
     scope: &ResourceScope,
     user_skill_permissions: MountPermissions,
@@ -116,13 +119,22 @@ fn db_backed_skill_grants(
 /// Read-side skill mounts: discovery, listing, and activation.
 ///
 /// Adds the tenant-shared root, which has no writer — a user cannot install into it.
+///
+/// The target is `/tenants/<t>/shared/skills`, which is where the rest of the system already puts
+/// tenant-shared state: `invocation_mount_view` resolves the `/tenant-shared` alias to
+/// `/tenants/<t>/shared`, and every sibling follows (`/tenant-shared/reborn-projects` ->
+/// `/tenants/<t>/shared/reborn-projects`, `/tenant-shared/reborn-identity` ->
+/// `/tenants/<t>/shared/reborn-identity`). Spelling this one `/tenants/<t>/tenant-shared/skills`
+/// -- repeating the alias inside the target -- pointed it at a subtree nothing writes and no
+/// migration populates, so a tenant that HAD shared skills would silently stop discovering them.
+/// Pinned by `tenant_shared_skills_resolve_under_the_canonical_shared_subtree`.
 pub(crate) fn db_backed_skill_context_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, HostApiError> {
     let mut grants = db_backed_skill_grants(scope, MountPermissions::read_only())?;
     grants.push(grant(
         "/tenant-shared/skills",
-        &format!("/tenants/{}/tenant-shared/skills", scope.tenant_id.as_str()),
+        &format!("/tenants/{}/shared/skills", scope.tenant_id.as_str()),
         MountPermissions::read_only(),
     )?);
     MountView::new(grants)
@@ -141,21 +153,6 @@ pub(crate) fn db_backed_skill_management_mount_view(
         scope,
         MountPermissions::read_write_list_delete(),
     )?)
-}
-
-pub(crate) fn skill_management_mount_view() -> Result<MountView, HostApiError> {
-    MountView::new(vec![
-        grant(
-            "/skills",
-            "/projects/skills",
-            MountPermissions::read_write_list_delete(),
-        )?,
-        grant(
-            "/system/skills",
-            "/projects/system/skills",
-            MountPermissions::read_only(),
-        )?,
-    ])
 }
 
 pub(crate) fn memory_mount_view(permissions: MountPermissions) -> Result<MountView, HostApiError> {

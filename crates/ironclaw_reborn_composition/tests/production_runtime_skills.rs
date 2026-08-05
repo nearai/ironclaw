@@ -380,6 +380,63 @@ async fn production_skill_read_and_write_mounts_resolve_to_the_same_tree() {
     );
 }
 
+/// `/tenant-shared/skills` must land where every other tenant-shared root lands.
+///
+/// The read view adds this grant so an operator-placed shared skill is discoverable. Its target was
+/// first written `/tenants/<t>/tenant-shared/skills`, repeating the alias inside the target. That is
+/// not where tenant-shared state lives: `invocation_mount_view` resolves `/tenant-shared` to
+/// `/tenants/<t>/shared`, and `/tenant-shared/reborn-projects` and `/tenant-shared/reborn-identity`
+/// both follow it. Nothing writes or migrates the misspelled subtree, so the failure mode is silent
+/// and total -- a tenant with shared skills simply stops discovering them, with no error anywhere.
+///
+/// Asserted by resolving through the view, and against the sibling root rather than a hardcoded
+/// string, so the two cannot drift apart later without this failing.
+#[tokio::test]
+async fn tenant_shared_skills_resolve_under_the_canonical_shared_subtree() {
+    use ironclaw_host_api::{
+        ids::{InvocationId, UserId},
+        resource::ResourceScope,
+    };
+
+    let scope = ResourceScope::local_default(
+        UserId::new("tenant-shared-user").expect("user id"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+
+    let read =
+        ironclaw_reborn_composition::test_support::production_skill_context_mount_view_for_test(
+            &scope,
+        )
+        .expect("read mount view");
+
+    let probe = read
+        .scoped_path("/tenant-shared/skills/team-review/SKILL.md")
+        .expect("scoped path");
+    let resolved = read
+        .resolve(&probe)
+        .expect("tenant-shared skills must resolve")
+        .as_str()
+        .to_string();
+
+    let expected = format!(
+        "/tenants/{}/shared/skills/team-review/SKILL.md",
+        scope.tenant_id.as_str()
+    );
+    assert_eq!(
+        resolved, expected,
+        "tenant-shared skills resolved to {resolved}, but tenant-shared state lives under \
+         /tenants/<t>/shared (see `invocation_mount_view` and its reborn-projects/reborn-identity \
+         siblings). Nothing populates any other subtree, so a tenant's shared skills would go \
+         undiscoverable with no error."
+    );
+    assert!(
+        !resolved.contains("/tenant-shared/"),
+        "the alias must not appear inside the resolved target -- that is the doubling that made \
+         this wrong: {resolved}"
+    );
+}
+
 /// The same parity requirement for the OTHER read branch: local-dev, local-storage production, and
 /// hosted single-tenant.
 ///

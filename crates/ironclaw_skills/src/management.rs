@@ -472,19 +472,6 @@ pub async fn install_skill(
     })
 }
 
-/// A skill the discovery layer will refuse must be refused HERE, at the write.
-///
-/// `FilesystemSkillBundleSource::validate_bundle_manifest` rejects a bundle whose `description:` is
-/// empty (`InvalidSkillBundle`) and only `warn!`s about it. So an install that omits the description
-/// used to succeed — `installed: true`, listed in Settings → Skills, readable — and then be skipped
-/// by every discovery pass for the rest of its existence. Nothing told the author, and the skill was
-/// indistinguishable from one that had never been written.
-///
-/// Measured, not hypothesised: asked to save a reusable skill, the model wrote frontmatter carrying
-/// `name:` alone, and the skill was accepted and then permanently unusable (nearai/ironclaw#7168).
-///
-/// The reason string is carried to the caller, so a model that omits it is told what to add and can
-/// retry within the same turn instead of silently producing a dead skill.
 /// Never persist a skill that discovery will skip. Repair the manifest instead of refusing it.
 ///
 /// `FilesystemSkillBundleSource::validate_bundle_manifest` rejects a bundle whose `description:` is
@@ -528,15 +515,22 @@ fn ensure_manifest_description(
 /// Placed directly after the opening delimiter so it survives any ordering of the remaining keys, and
 /// the rest of the document is passed through untouched.
 fn insert_frontmatter_description(content: &str, description: &str) -> String {
-    let mut lines = content.lines();
+    // The leading newlines are preserved rather than skipped past, because `parse_skill_md_impl`
+    // tolerates them (`trim_start_matches(['\n', '\r'])`) and this repair has to agree with the
+    // parser about where the frontmatter starts. Taking `lines().next()` unconditionally treated a
+    // leading blank line as the `---` delimiter and inserted `description:` above it, producing a
+    // document the parser then rejected -- turning a repairable skill into a failed install.
+    let leading = content.len() - content.trim_start_matches(['\n', '\r']).len();
+    let (prefix, body) = content.split_at(leading);
+    let mut lines = body.lines();
     let Some(opening) = lines.next() else {
         return content.to_string();
     };
-    let remainder = content
+    let remainder = body
         .strip_prefix(opening)
         .and_then(|rest| rest.strip_prefix('\n'))
         .unwrap_or("");
-    format!("{opening}\ndescription: {description}\n{remainder}")
+    format!("{prefix}{opening}\ndescription: {description}\n{remainder}")
 }
 
 fn prepare_install_content(

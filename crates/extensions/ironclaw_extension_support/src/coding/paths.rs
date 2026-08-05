@@ -154,9 +154,14 @@ fn writable_roots(mounts: &ironclaw_host_api::mount::MountView) -> String {
     roots.join(", ")
 }
 
-/// Is this grant one of the skill roots, whose writes belong to the skill capabilities?
+/// Is this grant the user's OWN skill root, whose writes belong to the skill capabilities?
+///
+/// Exact match, not `ends_with("skills")`. The suffix test also matched `/system/skills` and
+/// `/tenant-shared/skills`, which are read-only to everyone -- `skill_install`/`skill_update` write
+/// the caller's own root and cannot touch either. Suggesting them there sends an agent to a tool
+/// that will refuse it for a second, unexplained reason.
 fn is_skill_alias(grant: &ironclaw_host_api::mount::MountGrant) -> bool {
-    grant.alias.as_str().ends_with("skills")
+    grant.alias.as_str() == "/skills"
 }
 
 /// A path under the staged-skills directory names a skill that has not been activated yet.

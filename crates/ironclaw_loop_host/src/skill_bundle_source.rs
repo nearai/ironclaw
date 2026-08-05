@@ -45,7 +45,7 @@ pub trait SkillBundleSource: Send + Sync {
     /// consequence of having no enumeration: an agent that had just read its own script through
     /// `read_file` could not run it, and re-typed the algorithm into `python3 -c` instead.
     ///
-    /// Defaults to empty so a source that has no notion of enumeration (in-memory test doubles) keeps
+    /// Defaults to empty so a source that cannot enumerate at all (in-memory test doubles) keeps
     /// working -- an empty list means "nothing to stage", never an error. Excludes `SKILL.md`: the
     /// manifest is already delivered as model context, and a second copy invites edits that discovery
     /// never sees.

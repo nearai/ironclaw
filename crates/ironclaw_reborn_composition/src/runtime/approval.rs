@@ -24,7 +24,6 @@ pub(super) struct PolicyApprovalLeaseTermsProvider {
     /// Resolved per gate from the gate's own `ResourceScope`, so a lease minted
     /// for one caller can never grant another caller's workspace subtree.
     workspace_mounts: WorkspaceMountPolicy,
-    skill_mounts: MountView,
     memory_mounts: MountView,
     system_extensions_lifecycle_mounts: MountView,
     extension_surface_source: ExtensionCapabilitySurfaceSource,
@@ -35,7 +34,6 @@ impl PolicyApprovalLeaseTermsProvider {
         policy: Arc<BuiltinCapabilityPolicy>,
         registry: Arc<ExtensionRegistry>,
         workspace_mounts: WorkspaceMountPolicy,
-        skill_mounts: MountView,
         memory_mounts: MountView,
         system_extensions_lifecycle_mounts: MountView,
         extension_surface_source: ExtensionCapabilitySurfaceSource,
@@ -44,11 +42,28 @@ impl PolicyApprovalLeaseTermsProvider {
             policy,
             registry,
             workspace_mounts,
-            skill_mounts,
             memory_mounts,
             system_extensions_lifecycle_mounts,
             extension_surface_source,
         }
+    }
+
+    /// The skill view this gate's lease terms are minted from.
+    ///
+    /// Derived per gate from the gate's own scope, for the same reason the workspace view is: the
+    /// terms have to name the paths the capability will actually touch. A pre-built, scope-free view
+    /// cannot -- skills live at `/tenants/<t>/users/<u>/skills`, so a fixed view named
+    /// `/projects/skills` and the lease it minted described a tree the install never writes.
+    fn skill_mounts_for(
+        &self,
+        gate: &ApprovalGateRecord,
+    ) -> Result<MountView, ProductSurfaceFailure> {
+        crate::runtime_mounts::db_backed_skill_management_mount_view(gate.resource_scope()).map_err(
+            |error| {
+                tracing::error!(%error, "approval lease skill mounts could not be scoped");
+                lease_terms_unavailable()
+            },
+        )
     }
 
     /// The workspace view this gate's lease terms are minted from.
@@ -166,10 +181,11 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
             return Ok(approval);
         }
         let workspace_mounts = self.workspace_mounts_for(gate)?;
+        let skill_mounts = self.skill_mounts_for(gate)?;
         match self.policy.lease_approval_for(
             action,
             &workspace_mounts,
-            &self.skill_mounts,
+            &skill_mounts,
             &self.memory_mounts,
             &self.system_extensions_lifecycle_mounts,
         ) {
@@ -202,10 +218,11 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
         }
         if action.capability_id().as_str() == OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID {
             let workspace_mounts = self.workspace_mounts_for(gate)?;
+            let skill_mounts = self.skill_mounts_for(gate)?;
             match self.policy.lease_approval_for(
                 action,
                 &workspace_mounts,
-                &self.skill_mounts,
+                &skill_mounts,
                 &self.memory_mounts,
                 &self.system_extensions_lifecycle_mounts,
             ) {
@@ -287,7 +304,6 @@ mod tests {
             WorkspaceMountPolicy::Shared(MountView::default()),
             MountView::default(),
             MountView::default(),
-            MountView::default(),
             source,
         );
         let request_id = ApprovalRequestId::new();
@@ -360,7 +376,6 @@ mod tests {
             WorkspaceMountPolicy::Shared(MountView::default()),
             MountView::default(),
             MountView::default(),
-            MountView::default(),
             source,
         );
         let request_id = ApprovalRequestId::new();
@@ -414,7 +429,6 @@ mod tests {
             WorkspaceMountPolicy::Shared(MountView::default()),
             MountView::default(),
             MountView::default(),
-            MountView::default(),
             source,
         );
         let gate = approval_gate_record(
@@ -455,7 +469,6 @@ mod tests {
             WorkspaceMountPolicy::Shared(MountView::default()),
             MountView::default(),
             MountView::default(),
-            MountView::default(),
             source,
         );
         let gate = approval_gate_record(
@@ -482,7 +495,6 @@ mod tests {
             Arc::new(builtin_capability_policy().expect("policy parses")),
             Arc::new(ExtensionRegistry::new()),
             WorkspaceMountPolicy::Shared(MountView::default()),
-            MountView::default(),
             MountView::default(),
             MountView::default(),
             ExtensionCapabilitySurfaceSource::default(),
@@ -525,7 +537,6 @@ mod tests {
             WorkspaceMountPolicy::Shared(MountView::default()),
             MountView::default(),
             MountView::default(),
-            MountView::default(),
             source,
         );
         let gate = approval_gate_record(
@@ -560,7 +571,6 @@ mod tests {
             Arc::new(builtin_capability_policy().expect("policy parses")),
             Arc::new(ExtensionRegistry::new()),
             WorkspaceMountPolicy::PerCaller,
-            MountView::default(),
             MountView::default(),
             MountView::default(),
             ExtensionCapabilitySurfaceSource::default(),

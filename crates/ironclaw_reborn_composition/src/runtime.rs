@@ -742,7 +742,6 @@ pub(crate) struct InteractionServiceTestParts {
     capability_leases: Arc<crate::factory::ComposedCapabilityLeaseStore>,
     extension_registry: Arc<ExtensionRegistry>,
     workspace_mounts: crate::runtime_mounts::WorkspaceMountPolicy,
-    skill_mounts: MountView,
     memory_mounts: MountView,
     system_extensions_lifecycle_mounts: MountView,
     persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
@@ -4031,7 +4030,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
             capability_leases: Arc::clone(&local_runtime.capability_leases),
             extension_registry: Arc::clone(&local_runtime.extension_registry),
             workspace_mounts: local_runtime.workspace_mounts.clone(),
-            skill_mounts: local_runtime.skill_mounts.clone(),
             memory_mounts: local_runtime.memory_mounts.clone(),
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
@@ -4632,6 +4630,12 @@ fn filesystem_skill_context_source(
     // lands. Once `HostedMultiTenant` + `SecureDefault` resolves to `ProcessBackendKind::TenantSandbox`
     // instead of `None`, this returns true on its own and skills stop being told they cannot run
     // anything. See docs/skills/multi_tenant_enablement.md.
+    //
+    // `unwrap_or(true)` is not a fail-open: a real build cannot reach here without a resolved policy
+    // -- `build_runtime` rejects a services input that lacks one with `InvalidArgument` long before
+    // this point. The `Option` exists for test harnesses that construct stores directly, and those
+    // are local shapes with a `LocalHost` backend, so `true` is the truthful answer for every caller
+    // that can actually observe it.
     let process_execution_available = runtime
         .runtime_policy
         .as_ref()

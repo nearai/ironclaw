@@ -45,14 +45,34 @@ pub(crate) fn backfill_legacy_user_skills(
 ///   must not silently drop them.
 ///
 /// Copies, never moves: the disk copy is left in place so a downgrade is not destructive, and a
-/// database entry already present always wins, so this is idempotent across restarts and cannot
-/// clobber a newer edit made through the database.
+/// database entry already present always wins, so this cannot clobber a newer edit made through the
+/// database.
+///
+/// Runs ONCE per store, gated on [`SKILL_DISK_IMPORT_MARKER`]. "A database entry already present
+/// wins" is not on its own enough to make a per-boot import safe: the disk copy is deliberately
+/// left behind, so a skill the user later REMOVED through the database is absent on the next boot
+/// and gets copied straight back in. A removal that undoes itself at restart is worse than no
+/// migration at all, and the marker is what makes this a migration rather than a standing sync.
+/// One-shot marker recording that the host-disk skill import has run for this store.
+///
+/// Lives under `/system/settings`, which is database-backed on every shape, so it travels with the
+/// store it describes rather than with whatever host directory the server happened to boot from.
+const SKILL_DISK_IMPORT_MARKER: &str = "/system/settings/skill-disk-import.done";
+
 pub(crate) async fn import_host_disk_skills_into_database(
     storage_root: &Path,
     filesystem: &std::sync::Arc<ironclaw_filesystem::CompositeRootFilesystem>,
 ) -> Result<(), RebornBuildError> {
     use ironclaw_filesystem::RootFilesystem;
     use ironclaw_host_api::path::VirtualPath;
+
+    let marker = VirtualPath::new(SKILL_DISK_IMPORT_MARKER)?;
+    if RootFilesystem::stat(filesystem.as_ref(), &marker)
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
 
     let tenants_root = storage_root.join("tenants");
     let mut imported = 0usize;
@@ -79,6 +99,16 @@ pub(crate) async fn import_host_disk_skills_into_database(
         tracing::info!(
             imported,
             "imported host-disk skills into the database-backed skill tree"
+        );
+    }
+    // Written even when nothing was imported: "there was nothing on disk" is as final an answer as
+    // "everything was copied", and re-walking the tree on every boot to re-learn it is waste.
+    if let Err(error) = RootFilesystem::write_file(filesystem.as_ref(), &marker, b"1").await {
+        // Not fatal. The cost of a missing marker is that the next boot re-runs the import; the cost
+        // of failing the boot is that the runtime does not start at all.
+        tracing::debug!(
+            %error,
+            "could not record the skill disk-import marker; the import will be retried next boot"
         );
     }
     Ok(())

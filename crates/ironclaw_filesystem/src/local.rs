@@ -318,14 +318,6 @@ struct ResolvedMountPath<'a> {
 
 #[async_trait]
 impl RootFilesystem for DiskFilesystem {
-    fn host_path_for(&self, path: &VirtualPath) -> Option<std::path::PathBuf> {
-        // Reuses the same joiner every read and write goes through, so a host path reported here and
-        // a host path actually used cannot drift. Containment is re-checked on real access; this only
-        // answers "which host path is this".
-        self.resolve_joined(path)
-            .ok()
-            .map(|resolved| resolved.joined)
-    }
     /// Native `put` for the byte-only local filesystem. Opaque-file entries
     /// (`kind = None`, empty `indexed`) support `CasExpectation::Any` and
     /// `CasExpectation::Absent`; record-shaped entries, populated indexed

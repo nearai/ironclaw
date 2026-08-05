@@ -424,10 +424,6 @@ pub(super) async fn build_backend_production(
                 )
             }
         };
-    let skill_mounts =
-        skill_management_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
-            reason: error.to_string(),
-        })?;
     let memory_mounts =
         memory_mount_view(MountPermissions::read_write_list_delete()).map_err(|error| {
             RebornBuildError::InvalidConfig {
@@ -1254,7 +1250,6 @@ pub(super) async fn build_backend_production(
         channel_disconnect_slot,
         runtime_http_egress,
         ironhub_link_state,
-        skill_mounts,
         memory_mounts,
         system_extensions_lifecycle_mounts,
         skill_filesystem,
