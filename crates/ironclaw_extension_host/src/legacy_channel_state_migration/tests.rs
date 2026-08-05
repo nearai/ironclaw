@@ -32,7 +32,7 @@ service = "slack.fixture/v1"
     ExtensionManifestRecord::from_toml_with_root_binding(
         raw,
         ManifestSource::HostBundled,
-        &ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
+        &ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
         Some(hash),
         &crate::product_extension_host_api_contract_registry().expect("contracts"),
         PackageRootBinding::Virtual,
@@ -57,7 +57,7 @@ service = "telegram.fixture/v1"
     ExtensionManifestRecord::from_toml_with_root_binding(
         raw,
         ManifestSource::HostBundled,
-        &ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
+        &ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
         Some(hash),
         &crate::product_extension_host_api_contract_registry().expect("contracts"),
         PackageRootBinding::Virtual,
@@ -220,7 +220,7 @@ async fn caller_imports_rc1_slack_setup_and_secrets_idempotently() {
     let installation_store = ExtensionInstallationStore::load_at(
         Arc::clone(&filesystem),
         ExtensionInstallationStore::default_state_path().expect("state path"),
-        ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
+        ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
         crate::product_extension_host_api_contract_registry().expect("contracts"),
     )
     .await
@@ -510,7 +510,7 @@ async fn caller_imports_rc1_telegram_setup_and_reopens_every_usable_state() {
     let installation_store = ExtensionInstallationStore::load_at(
         Arc::clone(&filesystem),
         ExtensionInstallationStore::default_state_path().expect("state path"),
-        ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
+        ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
         crate::product_extension_host_api_contract_registry().expect("contracts"),
     )
     .await

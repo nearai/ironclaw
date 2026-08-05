@@ -508,7 +508,9 @@ class RebornPrTestPlanTests(unittest.TestCase):
         for path in (
             "scripts/no_panics_reborn_baseline.txt",
             "scripts/reborn-e2e-rust.sh",
+            "docker/reborn/entrypoint.sh",
             "tests/test_smoke_release_binary.py",
+            "tests/test_release_upgrade_canary.py",
         ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])
