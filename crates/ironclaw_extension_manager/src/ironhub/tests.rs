@@ -254,6 +254,7 @@ async fn install_rejects_catalog_tools_that_predate_published_extension_manifest
             capabilities: artifact,
             manifest: None,
             schemas: std::collections::BTreeMap::new(),
+            prompts: std::collections::BTreeMap::new(),
         }],
         skills: Vec::new(),
     };
@@ -580,6 +581,7 @@ fn catalog_validation_covers_published_tool_assets_and_origin_boundaries() {
             "schemas/input.json".to_string(),
             artifact("https://hub.ironclaw.com/input.json"),
         )]),
+        prompts: std::collections::BTreeMap::new(),
     };
     let manifest = IronHubManifest {
         version: "1".to_string(),
@@ -601,6 +603,17 @@ fn catalog_validation_covers_published_tool_assets_and_origin_boundaries() {
         })
         .collect();
     assert!(validate_manifest(&too_many).is_err());
+
+    let mut too_many_prompts = manifest.clone();
+    too_many_prompts.tools[0].prompts = (0..=super::model::MAX_TOOL_PROMPT_ARTIFACTS)
+        .map(|index| {
+            (
+                format!("prompts/{index}.md"),
+                artifact("https://hub.ironclaw.com/prompt.md"),
+            )
+        })
+        .collect();
+    assert!(validate_manifest(&too_many_prompts).is_err());
 
     let mut invalid_path = manifest;
     invalid_path.tools[0].schemas = std::collections::BTreeMap::from([(
@@ -873,6 +886,7 @@ async fn verified_tool_and_skill_install_through_real_managers() {
     let tool_manifest_url = "https://hub.ironclaw.com/tests/native-install/manifest.toml";
     let input_schema_url = "https://hub.ironclaw.com/tests/native-install/invoke.input.v1.json";
     let output_schema_url = "https://hub.ironclaw.com/tests/native-install/raw_output.v1.json";
+    let prompt_url = "https://hub.ironclaw.com/tests/native-install/invoke.md";
     let skill_url = "https://hub.ironclaw.com/tests/native-install/SKILL.md";
     let tool_bytes =
         include_bytes!("../../../extensions/packages/github/wasm/github_tool.wasm").to_vec();
@@ -880,6 +894,7 @@ async fn verified_tool_and_skill_install_through_real_managers() {
     let skill_bytes =
         b"---\nname: installed-skill\ndescription: Installed by IronHub\n---\n# Installed\n"
             .to_vec();
+    let prompt_bytes = published_tool_prompt();
     let manifest = signed_manifest(
         mixed_manifest_json(MixedManifestFixture {
             tool_url,
@@ -894,6 +909,7 @@ async fn verified_tool_and_skill_install_through_real_managers() {
             tool_manifest_url,
             input_schema_url,
             output_schema_url,
+            prompt_url,
         }),
         &test_signing_key(),
     );
@@ -901,9 +917,13 @@ async fn verified_tool_and_skill_install_through_real_managers() {
         (manifest_url, manifest),
         (tool_url, tool_bytes),
         (capabilities_url, capabilities_bytes),
-        (tool_manifest_url, published_tool_manifest("0.1.0")),
+        (
+            tool_manifest_url,
+            published_tool_manifest_with_prompt("0.1.0"),
+        ),
         (input_schema_url, published_input_schema()),
         (output_schema_url, published_output_schema()),
+        (prompt_url, prompt_bytes.clone()),
         (skill_url, skill_bytes),
     ]));
     let service = configure_test_catalog(
@@ -954,6 +974,17 @@ async fn verified_tool_and_skill_install_through_real_managers() {
             .expect("verified schema materialized"),
         published_input_schema(),
     );
+    let prompt_path =
+        VirtualPath::new("/system/extensions/installed-tool/prompts/installed-tool/invoke.md")
+            .expect("prompt path");
+    assert_eq!(
+        services
+            .filesystem
+            .read_file(&prompt_path)
+            .await
+            .expect("verified prompt materialized"),
+        prompt_bytes,
+    );
     assert!(
         services
             .extension_management
@@ -996,9 +1027,9 @@ async fn verified_tool_and_skill_install_through_real_managers() {
     assert!(installed_skill.content.contains("# Installed"));
 
     let requests = egress.requests();
-    // Catalog, then the tool's manifest, wasm, capabilities, and two schemas,
-    // then the skill.
-    assert_eq!(requests.len(), 7);
+    // Catalog, then the tool's manifest, wasm, capabilities, two schemas, and
+    // prompt document, then the skill.
+    assert_eq!(requests.len(), 8);
     assert!(requests.iter().all(|request| {
         request.runtime == RuntimeKind::FirstParty
             && request.policy.deny_private_ip_ranges
@@ -1987,6 +2018,7 @@ struct MixedManifestFixture<'a> {
     tool_manifest_url: &'a str,
     input_schema_url: &'a str,
     output_schema_url: &'a str,
+    prompt_url: &'a str,
 }
 
 fn mixed_manifest_json(fixture: MixedManifestFixture<'_>) -> String {
@@ -2003,6 +2035,7 @@ fn mixed_manifest_json(fixture: MixedManifestFixture<'_>) -> String {
         tool_manifest_url,
         input_schema_url,
         output_schema_url,
+        prompt_url,
     } = fixture;
     serde_json::json!({
         "version": "1",
@@ -2025,8 +2058,9 @@ fn mixed_manifest_json(fixture: MixedManifestFixture<'_>) -> String {
                 "size_bytes": capabilities_size,
                 "sha256": capabilities_sha
             },
-            "manifest": published_tool_manifest_artifact(tool_manifest_url, "0.1.0"),
-            "schemas": published_tool_schema_artifacts(input_schema_url, output_schema_url)
+            "manifest": published_tool_manifest_with_prompt_artifact(tool_manifest_url, "0.1.0"),
+            "schemas": published_tool_schema_artifacts(input_schema_url, output_schema_url),
+            "prompts": published_tool_prompt_artifacts(prompt_url)
         }],
         "skills": [{
             "name": "installed-skill",
@@ -2086,8 +2120,27 @@ output_schema_ref = "schemas/installed-tool/raw_output.v1.json"
     .into_bytes()
 }
 
+fn published_tool_manifest_with_prompt(version: &str) -> Vec<u8> {
+    String::from_utf8(published_tool_manifest(version))
+        .expect("fixture manifest is UTF-8")
+        .replace(
+            "output_schema_ref = \"schemas/installed-tool/raw_output.v1.json\"\n",
+            "output_schema_ref = \"schemas/installed-tool/raw_output.v1.json\"\nprompt_doc_ref = \"prompts/installed-tool/invoke.md\"\n",
+        )
+        .into_bytes()
+}
+
 fn published_tool_manifest_artifact(url: &str, version: &str) -> serde_json::Value {
     let bytes = published_tool_manifest(version);
+    serde_json::json!({
+        "url": url,
+        "size_bytes": bytes.len(),
+        "sha256": sha256_hex(&bytes),
+    })
+}
+
+fn published_tool_manifest_with_prompt_artifact(url: &str, version: &str) -> serde_json::Value {
+    let bytes = published_tool_manifest_with_prompt(version);
     serde_json::json!({
         "url": url,
         "size_bytes": bytes.len(),
@@ -2103,6 +2156,10 @@ fn published_output_schema() -> Vec<u8> {
     br#"{"description":"Raw JSON output"}"#.to_vec()
 }
 
+fn published_tool_prompt() -> Vec<u8> {
+    b"# Invoke\n\nUse this tool for the fixture action.\n".to_vec()
+}
+
 fn published_tool_schema_artifacts(input_url: &str, output_url: &str) -> serde_json::Value {
     let input = published_input_schema();
     let output = published_output_schema();
@@ -2116,6 +2173,17 @@ fn published_tool_schema_artifacts(input_url: &str, output_url: &str) -> serde_j
             "url": output_url,
             "size_bytes": output.len(),
             "sha256": sha256_hex(&output),
+        }
+    })
+}
+
+fn published_tool_prompt_artifacts(prompt_url: &str) -> serde_json::Value {
+    let prompt = published_tool_prompt();
+    serde_json::json!({
+        "prompts/installed-tool/invoke.md": {
+            "url": prompt_url,
+            "size_bytes": prompt.len(),
+            "sha256": sha256_hex(&prompt),
         }
     })
 }
