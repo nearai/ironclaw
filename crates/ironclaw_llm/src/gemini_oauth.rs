@@ -1562,10 +1562,13 @@ impl GeminiOauthProvider {
             let declarations: Vec<serde_json::Value> = tool_defs
                 .iter()
                 .map(|t| {
+                    let mut description = t.description.clone();
+                    let parameters =
+                        crate::gemini_schema::shape_tool_schema(&t.parameters, &mut description);
                     serde_json::json!({
                         "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters
+                        "description": description,
+                        "parameters": parameters
                     })
                 })
                 .collect();
@@ -2483,6 +2486,90 @@ mod tests {
         let decls = &req["tools"][0]["functionDeclarations"];
         assert_eq!(decls[0]["name"], "read_file");
         assert_eq!(decls[0]["description"], "Read a file");
+    }
+
+    #[test]
+    fn test_to_gemini_request_normalizes_tool_schemas() {
+        let messages = vec![ChatMessage::user("Update the file")];
+        let tools = vec![ToolDefinition {
+            name: "apply_patch".to_string(),
+            description: "Apply a patch".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "mode": { "const": "replace" },
+                    "headers": { "type": ["string", "object", "null"] },
+                    "payload": {
+                        "oneOf": [
+                            { "type": "string" },
+                            { "type": "object", "properties": { "value": { "type": "string" } } }
+                        ]
+                    },
+                    "schedule": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": { "const": "cron" },
+                                    "expression": { "type": "string" }
+                                }
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": { "const": "once" },
+                                    "at": { "type": "string" }
+                                }
+                            }
+                        ]
+                    },
+                    "requests": {
+                        "type": "array"
+                    }
+                },
+                "allOf": [{
+                    "if": { "properties": { "mode": { "const": "replace" } } },
+                    "then": { "required": ["payload"] }
+                }]
+            }),
+        }];
+
+        let req = GeminiOauthProvider::to_gemini_request(
+            &messages,
+            Some(&tools),
+            None,
+            None,
+            None,
+            None,
+            "gemini-2.5-flash",
+            &HashMap::new(),
+        );
+
+        let parameters = &req["tools"][0]["functionDeclarations"][0]["parameters"];
+        let encoded = parameters.to_string();
+        for keyword in [
+            "\"if\"",
+            "\"then\"",
+            "\"const\"",
+            "\"oneOf\"",
+            "\"anyOf\"",
+            "\"allOf\"",
+        ] {
+            assert!(
+                !encoded.contains(keyword),
+                "unsupported keyword survived: {encoded}"
+            );
+        }
+        assert_eq!(parameters["properties"]["headers"]["type"], "object");
+        assert_eq!(parameters["properties"]["payload"]["type"], "object");
+        assert_eq!(
+            parameters["properties"]["schedule"]["properties"]["kind"]["enum"],
+            serde_json::json!(["cron", "once"]),
+        );
+        assert_eq!(
+            parameters["properties"]["requests"]["items"]["type"],
+            "object",
+        );
     }
 
     #[test]

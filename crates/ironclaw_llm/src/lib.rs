@@ -22,6 +22,7 @@ pub mod config;
 pub mod error;
 pub mod failover;
 pub(crate) mod gemini_oauth;
+mod gemini_schema;
 mod github_copilot;
 pub(crate) mod github_copilot_auth;
 pub mod host;
@@ -821,6 +822,7 @@ fn create_gemini_from_registry(
     Ok(Arc::new(
         RigAdapter::new(model, &config.model)
             .with_provider_id(config.provider_id.clone())
+            .with_tool_schema_shaper(crate::gemini_schema::shape_tool_schema)
             .with_unsupported_params(config.unsupported_params.clone()),
     ))
 }
@@ -1332,6 +1334,60 @@ mod tests {
         }
     }
 
+    async fn capture_one_http_request() -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback capture server");
+        let addr = listener.local_addr().expect("capture server address");
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = socket.read(&mut buffer).await.expect("read request");
+                assert_ne!(read, 0, "connection closed before request was complete");
+                request.extend_from_slice(&buffer[..read]);
+                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers =
+                    std::str::from_utf8(&request[..header_end]).expect("request headers are UTF-8");
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then_some(value.trim())
+                    })
+                    .expect("content length header")
+                    .parse::<usize>()
+                    .expect("content length is numeric");
+                let body_start = header_end + 4;
+                if request.len() < body_start + content_length {
+                    continue;
+                }
+                sender
+                    .send(
+                        String::from_utf8(
+                            request[body_start..body_start + content_length].to_vec(),
+                        )
+                        .expect("request body is UTF-8"),
+                    )
+                    .expect("test receives captured request");
+                socket
+                    .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+                    .await
+                    .expect("write test response");
+                return;
+            }
+        });
+        (format!("http://{addr}"), receiver)
+    }
+
     #[test]
     fn test_create_cheap_llm_provider_returns_none_when_not_configured() {
         let config = test_llm_config();
@@ -1673,6 +1729,72 @@ mod tests {
         assert_eq!(
             sanitize_gemini_base_url("https://gemini-proxy.internal.example.com/"),
             "https://gemini-proxy.internal.example.com",
+        );
+    }
+
+    #[tokio::test]
+    async fn native_gemini_factory_shapes_tool_schema_before_request() {
+        use crate::provider::{ChatMessage, ToolCompletionRequest, ToolDefinition};
+
+        let (base_url, captured_request) = capture_one_http_request().await;
+        let config = RegistryProviderConfig::generic(
+            ProviderProtocol::Gemini,
+            "gemini",
+            Some(secrecy::SecretString::from("test-api-key".to_string())),
+            base_url,
+            "gemini-test-model",
+        );
+        let provider = create_registry_provider_inner(&config, 5)
+            .expect("native Gemini provider construction succeeds");
+        let request = ToolCompletionRequest::new(
+            vec![ChatMessage::user("create or read a document")],
+            vec![ToolDefinition {
+                name: "documents".to_string(),
+                description: "Manage documents".to_string(),
+                parameters: serde_json::json!({
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "action": { "const": "create" },
+                                "title": { "type": "string" }
+                            },
+                            "required": ["action", "title"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "action": { "const": "read" },
+                                "document_id": { "type": "string" }
+                            },
+                            "required": ["action", "document_id"]
+                        }
+                    ]
+                }),
+            }],
+        );
+
+        let result = provider.complete_with_tools(request).await;
+        assert!(
+            result.is_err(),
+            "the capture server deliberately returns 400"
+        );
+        let body = tokio::time::timeout(std::time::Duration::from_secs(5), captured_request)
+            .await
+            .expect("Gemini request reaches capture server")
+            .expect("capture task sends request body");
+        let request_json: serde_json::Value =
+            serde_json::from_str(&body).expect("Gemini request body is JSON");
+        let parameters = &request_json["tools"][0]["functionDeclarations"][0]["parameters"];
+
+        assert!(
+            parameters.get("oneOf").is_none(),
+            "native Gemini requests must not retain unsupported unions: {body}"
+        );
+        assert_eq!(
+            parameters["properties"]["action"]["enum"],
+            serde_json::json!(["create", "read"]),
+            "the factory-selected shaper must retain every discriminator value"
         );
     }
 

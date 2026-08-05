@@ -40,6 +40,8 @@ use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 use crate::tool_schema::{normalize_schema_strict, serialize_json_capped};
 use ironclaw_common::llm_costs as costs;
 
+type ToolSchemaShaper = fn(&serde_json::Value, &mut String) -> serde_json::Value;
+
 /// Adapter that wraps a rig-core `CompletionModel` and implements `LlmProvider`.
 pub struct RigAdapter<M: CompletionModel> {
     model: M,
@@ -63,6 +65,7 @@ pub struct RigAdapter<M: CompletionModel> {
     /// `CompletionModel` does not expose model discovery, so this is wired
     /// explicitly per protocol (OpenAI-compatible, Anthropic, Ollama).
     models_endpoint: Option<ModelsEndpoint>,
+    tool_schema_shaper: ToolSchemaShaper,
 }
 
 /// Auth scheme applied to a model-discovery request.
@@ -257,6 +260,7 @@ impl<M: CompletionModel> RigAdapter<M> {
             unsupported_params: HashSet::new(),
             default_additional_params: None,
             models_endpoint: None,
+            tool_schema_shaper: shape_strict_tool_schema,
         }
     }
 
@@ -267,6 +271,16 @@ impl<M: CompletionModel> RigAdapter<M> {
     /// its provider.
     pub(crate) fn with_provider_id(mut self, provider_id: impl Into<String>) -> Self {
         self.provider_id = provider_id.into();
+        self
+    }
+
+    /// Override the provider-boundary tool-schema shaper.
+    ///
+    /// Adapters default to strict OpenAI shaping. Native Gemini supplies its
+    /// provider-owned reducer so both streaming and non-streaming requests use
+    /// the Gemini function-declaration subset.
+    pub(crate) fn with_tool_schema_shaper(mut self, shaper: ToolSchemaShaper) -> Self {
+        self.tool_schema_shaper = shaper;
         self
     }
 
@@ -639,24 +653,28 @@ fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
     super::provider::generate_tool_call_id(seed, 0)
 }
 
-/// Convert IronClaw tool definitions to rig-core format.
-///
-/// Applies `normalize_schema_strict` at the boundary, which both
-/// strict-normalizes nested objects AND flattens any top-level
-/// `oneOf`/`anyOf`/`allOf`/`enum`/`not` (OpenAI's tool API rejects those at
-/// the top level even when the rest of the schema is valid). The flatten may
-/// append an advisory hint to the tool description, so we pass an owned
-/// clone through and read it back.
+#[cfg(test)]
 fn convert_tools(tools: &[IronToolDefinition]) -> Vec<RigToolDefinition> {
+    convert_tools_with_shaper(tools, shape_strict_tool_schema)
+}
+
+fn shape_strict_tool_schema(
+    schema: &serde_json::Value,
+    description: &mut String,
+) -> serde_json::Value {
+    shape_tool_schema(ToolSchemaPolicy::StrictOpenAi, schema, description)
+}
+
+/// Convert IronClaw tool definitions using the provider's schema shaper.
+fn convert_tools_with_shaper(
+    tools: &[IronToolDefinition],
+    shaper: ToolSchemaShaper,
+) -> Vec<RigToolDefinition> {
     tools
         .iter()
         .map(|t| {
             let mut description = t.description.clone();
-            let parameters = shape_tool_schema(
-                ToolSchemaPolicy::StrictOpenAi,
-                &t.parameters,
-                &mut description,
-            );
+            let parameters = shaper(&t.parameters, &mut description);
             RigToolDefinition {
                 name: t.name.clone(),
                 description,
@@ -1289,7 +1307,7 @@ where
         let mut messages = request.messages;
         crate::provider::sanitize_tool_messages(&mut messages);
         let (preamble, history) = convert_messages(&messages);
-        let tools = convert_tools(&request.tools);
+        let tools = convert_tools_with_shaper(&request.tools, self.tool_schema_shaper);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
 
         let mut rig_req = build_rig_request(
@@ -1379,7 +1397,7 @@ where
         let mut messages = request.messages;
         crate::provider::sanitize_tool_messages(&mut messages);
         let (preamble, history) = convert_messages(&messages);
-        let tools = convert_tools(&request.tools);
+        let tools = convert_tools_with_shaper(&request.tools, self.tool_schema_shaper);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
 
         let mut rig_req = build_rig_request(
@@ -2191,6 +2209,161 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct CapturingSchemaCompletionModel {
+        requests: Arc<std::sync::Mutex<Vec<RigRequest>>>,
+    }
+
+    impl CompletionModel for CapturingSchemaCompletionModel {
+        type Response = serde_json::Value;
+        type StreamingResponse = StubStreamingResponse;
+        type Client = ();
+
+        fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
+            unimplemented!("constructed directly in tests")
+        }
+
+        async fn completion(
+            &self,
+            request: RigRequest,
+        ) -> Result<rig::completion::CompletionResponse<Self::Response>, CompletionError> {
+            self.requests
+                .lock()
+                .expect("capture request lock")
+                .push(request);
+            Ok(rig::completion::CompletionResponse {
+                choice: OneOrMany::one(AssistantContent::text("ok")),
+                usage: RigUsage::new(),
+                raw_response: serde_json::json!({}),
+                message_id: None,
+            })
+        }
+
+        async fn stream(
+            &self,
+            request: RigRequest,
+        ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
+            self.requests
+                .lock()
+                .expect("capture request lock")
+                .push(request);
+            let stream = futures::stream::iter(vec![Ok(RawStreamingChoice::FinalResponse(
+                StubStreamingResponse {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+            ))]);
+            Ok(StreamingCompletionResponse::stream(Box::pin(stream)))
+        }
+    }
+
+    fn schema_capture_request() -> ToolCompletionRequest {
+        ToolCompletionRequest::new(
+            vec![ChatMessage::user("use the tool")],
+            vec![IronToolDefinition {
+                name: "schedule".to_string(),
+                description: "Schedule work".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "label": { "type": "string" },
+                        "schedule": {
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "kind": { "const": "cron" },
+                                        "expression": { "type": "string" }
+                                    }
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "kind": { "const": "once" },
+                                        "at": { "type": "string" }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "required": ["schedule"]
+                }),
+            }],
+        )
+    }
+
+    fn captured_schema(requests: &Arc<std::sync::Mutex<Vec<RigRequest>>>) -> serde_json::Value {
+        requests
+            .lock()
+            .expect("capture request lock")
+            .first()
+            .expect("one captured request")
+            .tools
+            .first()
+            .expect("one captured tool")
+            .parameters
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn default_adapter_preserves_strict_openai_tool_schema() {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let adapter = RigAdapter::new(
+            CapturingSchemaCompletionModel {
+                requests: Arc::clone(&requests),
+            },
+            "openai-compatible",
+        );
+
+        adapter
+            .complete_with_tools(schema_capture_request())
+            .await
+            .expect("capturing completion succeeds");
+
+        let schema = captured_schema(&requests);
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["label", "schedule"]),
+            "the default adapter must retain strict OpenAI required-field shaping"
+        );
+        assert_eq!(
+            schema["properties"]["label"]["type"],
+            serde_json::json!(["string", "null"]),
+            "optional fields must remain nullable on the default path"
+        );
+    }
+
+    #[tokio::test]
+    async fn gemini_streaming_request_uses_gemini_tool_schema_shaper() {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let adapter = RigAdapter::new(
+            CapturingSchemaCompletionModel {
+                requests: Arc::clone(&requests),
+            },
+            "gemini",
+        )
+        .with_tool_schema_shaper(crate::gemini_schema::shape_tool_schema);
+        let sink = Arc::new(RecordingCompletionStreamSink {
+            sender: mpsc::unbounded_channel().0,
+        });
+
+        adapter
+            .complete_with_tools_streaming(schema_capture_request(), sink)
+            .await
+            .expect("capturing stream succeeds");
+
+        let schema = captured_schema(&requests);
+        assert!(
+            schema["properties"]["schedule"].get("oneOf").is_none(),
+            "Gemini streaming requests must not retain unsupported unions"
+        );
+        assert_eq!(
+            schema["properties"]["schedule"]["properties"]["kind"]["enum"],
+            serde_json::json!(["cron", "once"]),
+            "the streaming caller must use the selected Gemini shaper"
+        );
+    }
+
+    #[derive(Clone)]
     struct StreamingOnlyCompletionModel;
 
     impl CompletionModel for StreamingOnlyCompletionModel {
@@ -2813,6 +2986,38 @@ mod tests {
             tool.description.contains("create_issue") && tool.description.contains("list_issues"),
             "variant info must be retained in the hint"
         );
+    }
+
+    #[test]
+    fn test_convert_tools_uses_gemini_schema_shaper_for_native_provider() {
+        let tools = vec![IronToolDefinition {
+            name: "http".to_string(),
+            description: "Make an HTTP request".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "headers": { "type": ["string", "object", "null"] },
+                    "method": { "const": "GET" }
+                },
+                "allOf": [{
+                    "if": { "properties": { "method": { "const": "POST" } } },
+                    "then": { "required": ["body"] }
+                }]
+            }),
+        }];
+
+        let converted = convert_tools_with_shaper(&tools, crate::gemini_schema::shape_tool_schema);
+        let parameters = &converted[0].parameters;
+        let encoded = parameters.to_string();
+
+        for keyword in ["\"if\"", "\"then\"", "\"const\"", "\"allOf\""] {
+            assert!(
+                !encoded.contains(keyword),
+                "unsupported keyword survived: {encoded}"
+            );
+        }
+        assert_eq!(parameters["properties"]["headers"]["type"], "object");
+        assert_eq!(parameters["properties"]["method"]["type"], "string");
     }
 
     /// End-to-end regression test using the google_docs_tool's actual schema

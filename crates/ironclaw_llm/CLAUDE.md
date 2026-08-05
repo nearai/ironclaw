@@ -30,6 +30,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `bedrock.rs` | AWS Bedrock provider via native Converse API (feature-gated: `--features bedrock`) |
 | `anthropic_oauth.rs` | Anthropic OAuth provider (Claude.ai subscription / OAuth tokens, fallback when no API key) |
 | `gemini_oauth.rs` | Gemini OAuth provider (Cloud OAuth credentials → `generativelanguage.googleapis.com`) |
+| `gemini_schema.rs` | Gemini-only function-declaration schema reduction shared by native Gemini and Gemini OAuth |
 | `github_copilot.rs` | GitHub Copilot Chat provider (uses dedicated reqwest client, not `RigAdapter`) |
 | `github_copilot_auth.rs` | Copilot session-token exchange and refresh (`CopilotTokenManager`) |
 | `host.rs` | Host-side trait surface: `SessionDb`, `SessionSecrets`, `SessionRenewer`, `SessionKeyPersistor` (adapters are the composing binary's to supply; none does today — see "Host Trait Surface") |
@@ -37,7 +38,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `registry.rs` | Provider registry (`ProviderDefinition`, `ProviderProtocol`); resolves backend strings to clients |
 | `resolution.rs` | Full `LlmConfig` resolution for composition roots that select from `providers.json` and need dedicated providers plus the shared provider chain |
 | `tool_args.rs` | Shared sub-step primitives for provider tool-call parsing: fail-loud and silent-fallback JSON arg parsing, ordered reasoning-field probe (Layer 2 of RC3/M9 framework) |
-| `tool_schema.rs` | Tool schema normalization policies (`FlattenOnly` for NearAI, strict OpenAI for `RigAdapter` / Codex) |
+| `tool_schema.rs` | Cross-provider schema normalization policies (`FlattenOnly` for OpenAI-compatible providers and strict OpenAI shaping) |
 | `transcription/{mod,openai,chat_completions}.rs` | Audio transcription pipeline (Whisper / chat-completions back-ends) |
 | `image_models.rs` | Image-generation model metadata table |
 | `vision_models.rs` | Vision-capable model registry for attachment routing |
@@ -63,7 +64,7 @@ owner, and a deleted one fails until its entry goes.
 | Sub-owner | Owns | Never contains | Files |
 |---|---|---|---|
 | `core-contract` | The `LlmProvider` trait, the request/response vocabulary, the error taxonomy, the config types, shared HTTP hardening, and the factory that assembles everything | A vendor protocol, or reliability behavior | `lib.rs`, `provider.rs`, `error.rs`, `config.rs`, `url_check.rs` |
-| `providers` | One concrete `LlmProvider` per vendor and the protocol shims used by that vendor alone | Cross-provider normalization (that is `normalization`), or credential lifecycle (that is `auth-sessions`) | `nearai_chat.rs`, `rig_adapter.rs`, `gemini_oauth.rs`, `codex_chatgpt.rs`, `bedrock.rs`, `openai_codex_provider.rs`, `anthropic_oauth.rs`, `github_copilot.rs`, `nearai_tool_message_flattening.rs`, `responses_reasoning.rs`, `anthropic_thinking.rs` |
+| `providers` | One concrete `LlmProvider` per vendor and the protocol shims used by that vendor alone | Cross-provider normalization (that is `normalization`), or credential lifecycle (that is `auth-sessions`) | `nearai_chat.rs`, `rig_adapter.rs`, `gemini_oauth.rs`, `gemini_schema.rs`, `codex_chatgpt.rs`, `bedrock.rs`, `openai_codex_provider.rs`, `anthropic_oauth.rs`, `github_copilot.rs`, `nearai_tool_message_flattening.rs`, `responses_reasoning.rs`, `anthropic_thinking.rs` |
 | `auth-sessions` | Acquiring, persisting, refreshing and revoking provider credentials, plus the host seam that stores them | Request/response shaping | `auth.rs`, `session.rs`, `openai_codex_session.rs`, `github_copilot_auth.rs`, `codex_auth.rs`, `token_refreshing.rs`, `host.rs` |
 | `registry` | The **provider** catalog: definitions, protocols, base-URL and api-key resolution | Model facts (that is `model-catalog`) | `registry.rs`, `resolution.rs` |
 | `decorators` | Anything that wraps `dyn LlmProvider` and is not credential work: retry, breaker, failover, cache, hot-reload, cost routing | Vendor protocol | `retry.rs`, `circuit_breaker.rs`, `failover.rs`, `response_cache.rs`, `runtime.rs`, `smart_routing.rs` |
@@ -160,7 +161,7 @@ ID, migrate to it immediately. Advanced users can override headers via
 
 **Tool message flattening:** Current NEAR AI cloud-api deployments support standard Chat Completions tool history, including assistant `tool_calls` followed by `role: "tool"` results. `nearai_chat.rs` therefore defaults `flatten_tool_messages = false`. The legacy compatibility rewrite remains opt-in via `NearAiChatProvider::new_with_options(..., true, ...)` for old OpenAI-compatible deployments that reject tool-role messages. That rewrite drops assistant messages that only carry provider tool-call protocol and turns tool results into user-side observations using the shared `ironclaw_common::provider_transcript` grammar (`Tool result from <name>: <content>`), which should not be used on compliant endpoints.
 
-**Tool schema normalization:** `nearai_chat.rs` uses the provider-safe `FlattenOnly` policy from `tool_schema.rs`: it still flattens top-level `oneOf`/`anyOf`/`allOf`/`enum`/`not` schemas that OpenAI-compatible tool APIs reject, but it does not rewrite optional object fields into required-nullable strict mode. `RigAdapter::convert_tools` and `openai_codex_provider.rs` continue to use the stricter OpenAI policy.
+**Tool schema normalization:** `nearai_chat.rs` uses the provider-safe `FlattenOnly` policy from `tool_schema.rs`: it still flattens top-level `oneOf`/`anyOf`/`allOf`/`enum`/`not` schemas that OpenAI-compatible tool APIs reject, but it does not rewrite optional object fields into required-nullable strict mode. `RigAdapter` defaults to the stricter OpenAI policy, while the native Gemini factory overrides that default with the Gemini-owned reducer in `gemini_schema.rs`; Gemini OAuth calls the same reducer directly.
 
 **Pricing auto-fetch:** On startup, `NearAiChatProvider` fires a background task to fetch per-model pricing from `/v1/model/list`. If the fetch fails, it silently falls back to `costs::model_cost()` / `costs::default_cost()`. Pricing is stored in-memory only.
 
@@ -280,7 +281,7 @@ Uses the Responses API at `chatgpt.com/backend-api/codex/responses` with ChatGPT
 **Key differences from other providers:**
 - Uses Responses API (not Chat Completions) — SSE streaming with different event types
 - System messages are sent as `instructions` field, not in `input` array
-- Tool schemas are shaped by `tool_schema.rs`: `NearAiChatProvider` uses `FlattenOnly` so top-level combinators still get flattened for OpenAI-compatible chat-completions requests, while `RigAdapter::convert_tools` and `OpenAiCodexProvider` use the strict OpenAI policy that also rewrites optional object fields into required-nullable strict mode
+- Tool schemas are shaped by the provider boundary: `NearAiChatProvider` uses `tool_schema.rs`'s `FlattenOnly` policy, `RigAdapter` defaults to strict OpenAI shaping, native Gemini and Gemini OAuth use `gemini_schema.rs`, and `OpenAiCodexProvider` uses strict OpenAI shaping
 - `cost_per_token()` returns `(0, 0)` — subscription-based billing
 - `set_model()` returns error — model is fixed at construction time
 - Image attachments are silently dropped with a warning log
@@ -337,9 +338,9 @@ Providers in this crate import it as `use ironclaw_common::llm_costs as costs;`
 
 ## rig_adapter.rs Details
 
-`RigAdapter<M>` bridges any rig-core `CompletionModel` to `LlmProvider`. It is actively used in production for all non-NEAR AI providers (OpenAI, Anthropic, Ollama, Tinfoil, OpenAI-compatible). Key behaviors:
+`RigAdapter<M>` bridges any rig-core `CompletionModel` to `LlmProvider`. It is actively used in production for native Gemini and the OpenAI-, Anthropic-, Ollama-, Tinfoil-, and OpenAI-compatible paths. Key behaviors:
 - **Per-request model overrides** are forwarded through rig-core's typed request model field, preserving one serialized top-level `model` key.
-- **OpenAI strict-mode schema normalization** is applied to all tool definitions: `additionalProperties: false`, all properties added to `required`, optional fields made nullable via `"type": ["T", "null"]`. This happens transparently at the provider boundary.
+- **Provider-boundary schema shaping** defaults to OpenAI strict mode (`additionalProperties: false`, every property required, optional fields nullable). The native Gemini factory overrides the shaper with `gemini_schema.rs`; both streaming and non-streaming adapter paths consume the selected shaper.
 - **System messages** are extracted into the rig-core `preamble` field (concatenated with newlines if multiple).
 - **Tool call IDs** are generated (`generated_tool_call_{seed}`) if the provider returns empty/whitespace IDs.
 - **Tool name normalization**: strips `proxy_` prefix if it matches a known tool (handles some proxy implementations).
