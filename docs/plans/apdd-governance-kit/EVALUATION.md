@@ -3,7 +3,7 @@
 **Status:** Evaluation (no code changes proposed in this branch — docs only)
 **Date:** 2026-08-04
 **Author:** Ron (with Claude Code)
-**Source:** [`rdisandro/apdd-kit`](https://github.com/rdisandro/apdd-kit) @ `61daaa2` ("APDD Kit") — evaluated from a local clone at `/Users/rondisandro/devprojects/github/apdd-kit`.
+**Source:** [`rdisandro/apdd-kit`](https://github.com/rdisandro/apdd-kit) @ `61daaa2` ("APDD Kit"), evaluated from a local clone.
 
 > This document evaluates the **APDD Kit** ("Agent Product Design &
 > Development") as a candidate governance framework for IronClaw. It describes
