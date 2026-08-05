@@ -533,7 +533,7 @@ async fn accepts_production_shell_mount_metadata_without_materializing_it() {
 }
 
 #[tokio::test]
-async fn ephemeral_worker_is_networkless_and_hardened() {
+async fn ephemeral_worker_defaults_to_networkless_and_hardened() {
     let cli = Arc::new(FakeRailwayCli::new());
     let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
     transport
@@ -543,6 +543,7 @@ async fn ephemeral_worker_is_networkless_and_hardened() {
     let invocations = cli.invocations().await;
     let argv = &model_container_runs(&invocations)[0].args;
     assert_pair(argv, "--network", "none");
+    assert_pair(argv, "--env", "IRONCLAW_REBORN_NETWORK_MODE=disabled");
     assert!(argv.contains(&"--read-only".to_string()));
     assert_pair(argv, "--user", WORKER_USER);
     assert_pair(argv, "--cap-drop", "ALL");
@@ -562,6 +563,30 @@ async fn ephemeral_worker_is_networkless_and_hardened() {
     );
     assert!(argv.contains(&"--rm".to_string()));
     assert!(!argv.contains(&"-d".to_string()));
+    assert!(!argv.iter().any(|arg| arg.contains("docker.sock")));
+}
+
+#[tokio::test]
+async fn explicit_direct_network_omits_network_none_without_weakening_worker_hardening() {
+    let cli = Arc::new(FakeRailwayCli::new());
+    let transport =
+        RailwayPreviewSandboxTransport::with_cli(config().with_network_enabled(), cli.clone());
+    transport
+        .run_command(request("tenant", "user", "true"))
+        .await
+        .unwrap();
+    let invocations = cli.invocations().await;
+    let argv = &model_container_runs(&invocations)[0].args;
+
+    assert!(
+        !argv.iter().any(|argument| argument == "--network"),
+        "direct mode must leave Docker's configured network enabled"
+    );
+    assert_pair(argv, "--env", "IRONCLAW_REBORN_NETWORK_MODE=direct");
+    assert!(argv.contains(&"--read-only".to_string()));
+    assert_pair(argv, "--user", WORKER_USER);
+    assert_pair(argv, "--cap-drop", "ALL");
+    assert_pair(argv, "--security-opt", "no-new-privileges:true");
     assert!(!argv.iter().any(|arg| arg.contains("docker.sock")));
 }
 

@@ -72,6 +72,7 @@ pub struct RailwayPreviewSandboxConfig {
     cli_path: PathBuf,
     idle_timeout_minutes: u16,
     worker_image: String,
+    disable_network: bool,
 }
 
 impl RailwayPreviewSandboxConfig {
@@ -85,6 +86,7 @@ impl RailwayPreviewSandboxConfig {
             cli_path: PathBuf::from("railway"),
             idle_timeout_minutes: DEFAULT_IDLE_TIMEOUT_MINUTES,
             worker_image: DEFAULT_WORKER_IMAGE.to_string(),
+            disable_network: true,
         })
     }
 
@@ -110,13 +112,40 @@ impl RailwayPreviewSandboxConfig {
         self.worker_image = required_config_value("worker image", image.into())?;
         Ok(self)
     }
+
+    /// Allow the inner worker to use the outer Railway sandbox's NAT egress.
+    ///
+    /// This is deliberately explicit: direct egress is enabled by the
+    /// sandbox deployment factory, while ad-hoc transport construction keeps
+    /// the fail-closed `--network none` default.
+    pub fn with_network_enabled(mut self) -> Self {
+        self.disable_network = false;
+        self
+    }
+
+    fn container_network_mode(&self) -> Option<String> {
+        self.disable_network.then(|| "none".to_string())
+    }
+
+    fn network_mode_env(&self) -> String {
+        format!(
+            "{}={}",
+            super::broker::REBORN_NETWORK_MODE_ENV,
+            if self.disable_network {
+                "disabled"
+            } else {
+                "direct"
+            }
+        )
+    }
 }
 
 /// Railway preview transport for a Docker daemon hosted inside a Railway
 /// sandbox VM. Live IDs are process-local; deterministic per-user checkpoints
 /// restore the outer workspace when a VM expires or IronClaw restarts. Each
-/// command receives a fresh networkless inner container so no mounted inner
-/// container has to survive across Railway exec calls.
+/// command receives a fresh inner container so no mounted inner container has
+/// to survive across Railway exec calls. Network access follows the explicit
+/// configuration posture; construction defaults to `--network none`.
 #[derive(Clone)]
 pub struct RailwayPreviewSandboxTransport {
     config: RailwayPreviewSandboxConfig,
@@ -921,10 +950,12 @@ fn ephemeral_worker_argv(
 ) -> Vec<String> {
     let mut command = vec!["docker".into(), "run".into(), "--rm".into()];
     command.extend(
-        super::worker_spec::DockerWorkerSecuritySpec::new(Some("none".to_string()))
+        super::worker_spec::DockerWorkerSecuritySpec::new(config.container_network_mode())
             .docker_run_args(),
     );
     command.extend([
+        "--env".into(),
+        config.network_mode_env(),
         "--mount".into(),
         format!("type=bind,src={railway_workspace},dst={WORKSPACE_ROOT}"),
         "--workdir".into(),

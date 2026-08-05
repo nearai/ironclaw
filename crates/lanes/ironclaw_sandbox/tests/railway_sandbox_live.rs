@@ -81,6 +81,7 @@ async fn railway_workspace_survives_transport_restart_without_credentials() {
         std::env::var("IRONCLAW_REBORN_RAILWAY_CLI_PATH").unwrap_or_else(|_| "railway".to_string());
     let config = RailwayPreviewSandboxConfig::new(project_id.clone(), environment_id.clone())
         .expect("Railway canary configuration is valid")
+        .with_network_enabled()
         .with_cli_path(cli.clone())
         .with_idle_timeout_minutes(5)
         .expect("canary idle timeout is valid");
@@ -123,16 +124,19 @@ async fn railway_workspace_survives_transport_restart_without_credentials() {
             format!(
                 "python - <<'PY'\n\
                  import os\n\
+                 import urllib.request\n\
                  from pathlib import Path\n\
                  assert os.getuid() == 1000\n\
                  assert Path('/.dockerenv').is_file()\n\
                  assert not Path('/var/run/docker.sock').exists()\n\
                  root = next(line.split() for line in Path('/proc/mounts').read_text().splitlines() if line.split()[1] == '/')\n\
                  assert 'ro' in root[3].split(',')\n\
-                 # Validate the inner Docker worker's --network none posture;\n\
-                 # Railway's outer ISOLATED sandbox may still have NAT egress.\n\
                  routes = [line.split() for line in Path('/proc/net/route').read_text().splitlines()[1:]]\n\
-                 assert not any(route[1] == '00000000' for route in routes)\n\
+                 assert any(route[1] == '00000000' for route in routes)\n\
+                 assert os.environ['IRONCLAW_REBORN_NETWORK_MODE'] == 'direct'\n\
+                 response = urllib.request.urlopen('https://example.com', timeout=15)\n\
+                 assert response.status == 200\n\
+                 response.close()\n\
                  Path('/tmp/ironclaw-write-probe').write_text('tmpfs-ok')\n\
                  Path('state.txt').write_text('{marker}')\n\
                  print('IRONCLAW_RAILWAY_SANDBOX_ISOLATION_OK')\n\

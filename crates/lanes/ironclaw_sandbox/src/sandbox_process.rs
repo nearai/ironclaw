@@ -224,6 +224,7 @@ impl RebornSandboxConfig {
         broker::push_broker_env(
             self.network_broker.as_ref(),
             self.secret_broker.as_ref(),
+            !self.disable_network,
             &mut env,
         )?;
         Ok(env)
@@ -711,6 +712,25 @@ mod tests {
         assert_eq!(config.container_network_mode(), Some("none".to_string()));
         assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=disabled".to_string()));
         assert!(env.contains(&"IRONCLAW_REBORN_SECRET_MODE=disabled".to_string()));
+    }
+
+    #[test]
+    fn explicit_direct_network_uses_docker_networking_and_reports_its_posture() {
+        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox").with_network_enabled();
+        let env = config.command_env(HashMap::new()).unwrap();
+
+        assert_eq!(config.container_network_mode(), None);
+        assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=direct".to_string()));
+        assert!(env.contains(&"IRONCLAW_REBORN_SECRET_MODE=disabled".to_string()));
+        assert!(
+            env.iter().all(|entry| {
+                !entry.starts_with("http_proxy=")
+                    && !entry.starts_with("https_proxy=")
+                    && !entry.starts_with("HTTP_PROXY=")
+                    && !entry.starts_with("HTTPS_PROXY=")
+            }),
+            "direct mode must not pretend that traffic is proxy-mediated"
+        );
     }
 
     #[test]

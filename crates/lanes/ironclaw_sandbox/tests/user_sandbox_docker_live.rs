@@ -52,9 +52,9 @@ async fn user_workspace_persists_across_turns_and_isolates_other_users() {
     // see; a worktree-local tempdir exercises the real bind contract instead.
     let temp =
         tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("Docker-visible workspace tempdir");
-    let transport = RebornScopedSandboxCommandTransport::connect(RebornSandboxConfig::new(
-        temp.path().join("sandbox-workspaces"),
-    ))
+    let transport = RebornScopedSandboxCommandTransport::connect(
+        RebornSandboxConfig::new(temp.path().join("sandbox-workspaces")).with_network_enabled(),
+    )
     .await
     .expect("Docker transport connects");
     let unique = InvocationId::new().to_string();
@@ -66,6 +66,7 @@ async fn user_workspace_persists_across_turns_and_isolates_other_users() {
             format!(
                 "python - <<'PY'\n\
                  import os\n\
+                 import urllib.request\n\
                  from pathlib import Path\n\
                  assert os.getuid() != 0\n\
                  assert Path('/.dockerenv').is_file()\n\
@@ -79,9 +80,13 @@ async fn user_workspace_persists_across_turns_and_isolates_other_users() {
                  root = next(line.split() for line in Path('/proc/mounts').read_text().splitlines() if line.split()[1] == '/')\n\
                  assert 'ro' in root[3].split(',')\n\
                  routes = [line.split() for line in Path('/proc/net/route').read_text().splitlines()[1:]]\n\
-                 assert not any(route[1] == '00000000' for route in routes)\n\
+                 assert any(route[1] == '00000000' for route in routes)\n\
+                 assert os.environ['IRONCLAW_REBORN_NETWORK_MODE'] == 'direct'\n\
+                 response = urllib.request.urlopen('https://example.com', timeout=15)\n\
+                 assert response.status == 200\n\
+                 response.close()\n\
                  Path('state.txt').write_text('{marker}')\n\
-                 print(f'LOCAL_DOCKER_SANDBOX_OK uid={{os.getuid()}}')\n\
+                 print(f'LOCAL_DOCKER_SANDBOX_OK uid={{os.getuid()}} egress=ok')\n\
                  PY"
             ),
         ))

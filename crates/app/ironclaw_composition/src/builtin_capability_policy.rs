@@ -71,14 +71,14 @@ impl BuiltinCapabilityPolicy {
         shell.effects.retain(|effect| {
             !matches!(
                 effect,
-                EffectKind::ReadFilesystem | EffectKind::WriteFilesystem | EffectKind::Network
+                EffectKind::ReadFilesystem | EffectKind::WriteFilesystem
             )
         });
         // The sandbox transport supplies its own per-user `/workspace` bind.
         // Passing the host runtime's tenant-workspace grant would either expose
         // the wrong storage boundary or fail its trusted-mount resolution.
         shell.mounts = CapabilityMountProfile::Ambient;
-        shell.network = CapabilityNetworkProfile::Default;
+        shell.network = CapabilityNetworkProfile::SandboxDirectPreview;
         Ok(self)
     }
 
@@ -301,6 +301,7 @@ pub(crate) enum CapabilityMountProfile {
 pub(crate) enum CapabilityNetworkProfile {
     Default,
     DevWildcard,
+    SandboxDirectPreview,
     IronhubArtifacts,
 }
 
@@ -472,6 +473,7 @@ fn constraint_terms(
     let network = match source.network() {
         CapabilityNetworkProfile::Default => NetworkPolicy::default(),
         CapabilityNetworkProfile::DevWildcard => dev_wildcard_network_policy(),
+        CapabilityNetworkProfile::SandboxDirectPreview => sandbox_direct_network_policy(),
         CapabilityNetworkProfile::IronhubArtifacts => {
             ironclaw_extension_manager::ironhub::artifact_network_policy()
         }
@@ -505,6 +507,22 @@ pub(crate) fn dev_wildcard_network_policy() -> NetworkPolicy {
         // link-local, multicast, loopback, and private IP targets remain
         // blocked by the shared network policy enforcer.
         deny_private_ip_ranges: true,
+        max_egress_bytes: None,
+    }
+}
+
+fn sandbox_direct_network_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: None,
+            host_pattern: "*".to_string(),
+            port: None,
+        }],
+        // PR1 intentionally gives sandbox-profile shell workers unrestricted
+        // provider-NAT egress. This policy records that authority honestly;
+        // it does not claim the private-address protection enforced by
+        // host-mediated HTTP clients or the follow-up sandbox egress relay.
+        deny_private_ip_ranges: false,
         max_egress_bytes: None,
     }
 }
@@ -773,7 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn user_sandbox_shell_grant_uses_transport_workspace_without_network() {
+    fn user_sandbox_shell_grant_uses_transport_workspace_and_direct_preview_network() {
         let policy = builtin_capability_policy()
             .expect("policy parses")
             .for_process_backend(ProcessBackendKind::UserSandbox)
@@ -782,15 +800,20 @@ mod tests {
             .grant(&CapabilityId::new("builtin.shell").expect("capability id"))
             .expect("shell grant");
 
-        for effect in [
-            EffectKind::ReadFilesystem,
-            EffectKind::WriteFilesystem,
-            EffectKind::Network,
-        ] {
+        for effect in [EffectKind::ReadFilesystem, EffectKind::WriteFilesystem] {
             assert!(!shell.effects.contains(&effect));
         }
-        assert_eq!(shell.network, CapabilityNetworkProfile::Default);
+        assert!(shell.effects.contains(&EffectKind::Network));
+        assert_eq!(
+            shell.network,
+            CapabilityNetworkProfile::SandboxDirectPreview
+        );
         assert_eq!(shell.mounts, CapabilityMountProfile::Ambient);
+
+        let network = sandbox_direct_network_policy();
+        assert_eq!(network.allowed_targets.len(), 1);
+        assert_eq!(network.allowed_targets[0].host_pattern, "*");
+        assert!(!network.deny_private_ip_ranges);
 
         let local_policy = builtin_capability_policy()
             .expect("policy parses")

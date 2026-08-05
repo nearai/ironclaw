@@ -28,6 +28,7 @@ pub(crate) async fn sandbox_shell_tools() -> HarnessResult<HostRuntimeCapability
             EffectKind::DispatchCapability,
             EffectKind::ExecuteCode,
             EffectKind::SpawnProcess,
+            EffectKind::Network,
         ],
         options,
         auto_approve_default: Some(true),

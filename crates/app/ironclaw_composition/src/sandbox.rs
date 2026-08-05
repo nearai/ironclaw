@@ -19,14 +19,13 @@ use crate::{RebornBuildError, RebornRuntimeProcessBinding};
 pub async fn build_local_docker_user_sandbox_binding(
     workspace_root: PathBuf,
 ) -> Result<RebornRuntimeProcessBinding, RebornBuildError> {
-    let transport =
-        RebornScopedSandboxCommandTransport::connect(RebornSandboxConfig::new(workspace_root))
-            .await
-            .map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!(
-                    "user-sandbox process backend requires a reachable Docker daemon: {error}"
-                ),
-            })?;
+    let transport = RebornScopedSandboxCommandTransport::connect(
+        RebornSandboxConfig::new(workspace_root).with_network_enabled(),
+    )
+    .await
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("user-sandbox process backend requires a reachable Docker daemon: {error}"),
+    })?;
     Ok(binding(Arc::new(transport)))
 }
 
@@ -41,7 +40,8 @@ pub fn build_railway_user_sandbox_binding(
     worker_image: Option<String>,
 ) -> Result<RebornRuntimeProcessBinding, RebornBuildError> {
     let mut config = RailwayPreviewSandboxConfig::new(project_id, environment_id)
-        .map_err(invalid_railway_config)?;
+        .map_err(invalid_railway_config)?
+        .with_network_enabled();
     if let Some(cli_path) = cli_path {
         config = config.with_cli_path(cli_path);
     }

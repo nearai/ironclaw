@@ -112,15 +112,15 @@ async fn production_backend_projects_user_sandbox_shell_constraints() {
         .find(|grant| grant.capability.as_str() == "builtin.shell")
         .expect("shell grant");
 
-    for effect in [
-        EffectKind::ReadFilesystem,
-        EffectKind::WriteFilesystem,
-        EffectKind::Network,
-    ] {
+    for effect in [EffectKind::ReadFilesystem, EffectKind::WriteFilesystem] {
         assert!(!shell.effects.contains(&effect));
     }
+    assert!(shell.effects.contains(&EffectKind::Network));
     assert_eq!(shell.mounts, CapabilityMountProfile::Ambient);
-    assert_eq!(shell.network, CapabilityNetworkProfile::Default);
+    assert_eq!(
+        shell.network,
+        CapabilityNetworkProfile::SandboxDirectPreview
+    );
 }
 
 #[tokio::test]
