@@ -1279,6 +1279,20 @@ class RebornPrTestPlanTests(unittest.TestCase):
 
         self.assertEqual(plan["integration_lanes"], [expected_lane])
 
+    def test_golden_payload_snapshots_select_their_owning_integration_lane(
+        self,
+    ) -> None:
+        prefix, owner = next(iter(planner.INTEGRATION_ARTIFACT_PREFIX_OWNERS.items()))
+        expected_lane = planner._integration_test_lanes()[owner]
+
+        plan = self.plan("pull_request", [f"{prefix}new_case.snap"])
+
+        self.assertEqual(plan["integration_lanes"], [expected_lane])
+
+    def test_unowned_snapshot_still_fails_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
+            self.plan("pull_request", ["tests/snapshots/unowned__case.snap"])
+
     def test_workspace_topology_change_defers_exhaustive_matrix_to_queue(self) -> None:
         plan = self.plan("pull_request", ["Cargo.toml"])
         self.assertEqual(plan["mode"], "none")

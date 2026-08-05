@@ -176,6 +176,9 @@ INTEGRATION_SUPPORT_OWNERS = {
         "tests/integration/hosted_mcp_registration.rs"
     ),
 }
+INTEGRATION_ARTIFACT_PREFIX_OWNERS = {
+    "tests/snapshots/golden_payload__": "tests/integration/golden_payload.rs",
+}
 PR_STATIC_CONTROL_PATHS = {
     "Cargo.toml",
     "rust-toolchain",
@@ -633,6 +636,18 @@ def build_plan(
             owner = INTEGRATION_SUPPORT_OWNERS[path]
             integration_lanes.add(integration_inventory[owner])
             reasons.append(f"integration test support changed: {path}")
+            continue
+        artifact_owner = next(
+            (
+                owner
+                for prefix, owner in INTEGRATION_ARTIFACT_PREFIX_OWNERS.items()
+                if path.startswith(prefix)
+            ),
+            None,
+        )
+        if artifact_owner is not None:
+            integration_lanes.add(integration_inventory[artifact_owner])
+            reasons.append(f"integration test artifact changed: {path}")
             continue
         if path.startswith("tests/integration/"):
             integration_lanes.add(0)
