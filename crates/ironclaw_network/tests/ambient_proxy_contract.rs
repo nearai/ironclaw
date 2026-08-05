@@ -104,12 +104,78 @@ async fn reqwest_transport_ignores_ambient_proxy_and_uses_pinned_address() {
     );
 }
 
+// The dual-phase test above sets HTTP_PROXY, HTTPS_PROXY, and ALL_PROXY
+// together, so reqwest's more-specific-wins precedence means only
+// HTTP_PROXY (for the http:// phase) and HTTPS_PROXY (for the https://
+// phase) are ever actually consulted; ALL_PROXY is masked in both phases.
+// Isolate it here so a regression that only re-enables the ALL_PROXY
+// fallback path would still be caught.
+#[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the process proxy environment must remain serialized until reqwest finishes"
+)]
+async fn reqwest_transport_ignores_isolated_all_proxy_env_var_and_uses_pinned_address() {
+    let _env_lock = PROXY_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let pinned = RecordingServer::start(b"pinned");
+    let target_authority = format!("ambient-proxy.example.test:{}", pinned.addr().port());
+    let proxy = RecordingServer::start(b"proxy");
+    let _proxy_env = ProxyEnvGuard::set_only(
+        &["ALL_PROXY", "all_proxy"],
+        &format!("http://{}", proxy.addr()),
+    );
+
+    let transport = ReqwestNetworkTransport::new(Duration::from_secs(2));
+    let response = transport
+        .execute(NetworkTransportRequest {
+            method: NetworkMethod::Get,
+            url: format!("http://{target_authority}/test"),
+            headers: vec![],
+            body: vec![],
+            resolved_ips: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+            response_body_limit: Some(1024),
+            timeout_ms: None,
+        })
+        .await
+        .expect("the request should reach the approved pinned address");
+
+    pinned.finish();
+    let proxy_request = proxy.finish();
+    assert!(
+        proxy_request.is_empty(),
+        "ambient ALL_PROXY received the vetted hostname:\n{}",
+        String::from_utf8_lossy(&proxy_request)
+    );
+    assert_eq!(response.body, b"pinned");
+}
+
 struct ProxyEnvGuard {
     previous: Vec<(&'static str, Option<OsString>)>,
 }
 
 impl ProxyEnvGuard {
     fn set(proxy_url: &str) -> Self {
+        Self::set_only(
+            &[
+                "HTTP_PROXY",
+                "http_proxy",
+                "HTTPS_PROXY",
+                "https_proxy",
+                "ALL_PROXY",
+                "all_proxy",
+            ],
+            proxy_url,
+        )
+    }
+
+    /// Sets only `names` to `proxy_url`, clearing every other ambient proxy
+    /// variable (including `NO_PROXY`). Used to isolate a single precedence
+    /// tier that would otherwise be masked when multiple proxy variables are
+    /// set at once (reqwest prefers `HTTP_PROXY`/`HTTPS_PROXY` over the more
+    /// general `ALL_PROXY`).
+    fn set_only(names: &[&'static str], proxy_url: &str) -> Self {
         let previous = PROXY_ENV_VARS
             .iter()
             .map(|name| (*name, std::env::var_os(name)))
@@ -118,10 +184,10 @@ impl ProxyEnvGuard {
         // dedicated test binary has no other tests that can read or mutate env.
         unsafe {
             for name in PROXY_ENV_VARS {
-                if name.eq_ignore_ascii_case("no_proxy") {
-                    std::env::remove_var(name);
-                } else {
+                if names.contains(&name) {
                     std::env::set_var(name, proxy_url);
+                } else {
+                    std::env::remove_var(name);
                 }
             }
         }
