@@ -47,8 +47,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use ratchet_support::{
-    TypeDefOccurrence, collect_type_defs, crate_dir, nested_workspace_roots, owning_crate_name,
-    workspace_root,
+    TypeDefOccurrence, collect_type_defs, crate_dir, is_rust_identifier, nested_workspace_roots,
+    owning_crate_name, workspace_root,
 };
 
 /// The crate that owns the product tier's contracts.
@@ -116,20 +116,6 @@ const FROZEN_CONTRACT_NAMES: &[&str] = &[
 /// not a contracts extraction. Recorded here so the finding is visible and
 /// attributable rather than silently passed.
 const COLLISION_EXEMPT: &[&str] = &["ProjectionCursor", "ProjectionSubscriptionRequest"];
-
-/// `macro_rules!` bodies declare types with metavariable names (`pub struct
-/// $name(String);` — the `bounded_lifecycle_string!` template this crate
-/// inherited with `package_lifecycle`). Those are not identifiers and must not
-/// enter the governed set, or every macro-declaring crate in the workspace
-/// matches the same non-name and the scan reports nonsense.
-fn is_rust_identifier(ident: &str) -> bool {
-    let mut chars = ident.chars();
-    match chars.next() {
-        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
-        _ => return false,
-    }
-    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-}
 
 /// The crate directory owning `path`, resolved through the crate inventory;
 /// `None` for a file that no crate of THIS workspace owns.

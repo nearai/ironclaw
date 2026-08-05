@@ -15,7 +15,7 @@ use serde_json::Value;
 // lockstep edit of the ~100 literals below. On today's tree resolution is the
 // identity — pinned by `reborn_crate_inventory.rs`.
 use ratchet_support::{
-    crate_path, owning_crate_name, production_rust_files, resolve_crate_relative,
+    crate_dir, crate_path, owning_crate_name, production_rust_files, resolve_crate_relative,
     strip_comments_and_strings, try_crate_directory, workspace_root,
 };
 
@@ -154,6 +154,63 @@ fn boundary_rule_names_are_package_names_not_crate_directories() {
     );
 }
 
+/// PROPOSAL §11.3: this is an internal-only workspace and **nothing publishes**.
+///
+/// The proposal recorded that as a fact plus one exception —
+/// *"nothing publishes; `skills` is the one manifest missing `publish = false`
+/// — fix"*. Measured 2026-08-05 the exception had grown to **three**
+/// (`ironclaw_skills`, `ironclaw_common`, `ironclaw_safety`), which is what a
+/// prose claim with no gate behind it does: every crate added or renamed since
+/// is a fresh chance to omit the key, and the omission is invisible until
+/// someone runs `cargo publish`. All three now declare it, and this test is why
+/// the count cannot drift back — a new crate that forgets the key fails here
+/// rather than being noticed by the next reader of the proposal.
+///
+/// Read from the manifests rather than from `cargo metadata`, deliberately:
+/// metadata reports `publish: null` both for "key absent" and for
+/// `publish = true`, so the distinction this test exists for is not in it.
+#[test]
+fn reborn_no_workspace_crate_is_publishable() {
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+
+    let mut missing = Vec::new();
+    let mut checked = 0usize;
+    for package in packages {
+        let Some(name) = package["name"].as_str() else {
+            continue;
+        };
+        let manifest_path = package["manifest_path"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{name} has no manifest_path"));
+        let manifest = std::fs::read_to_string(manifest_path)
+            .unwrap_or_else(|error| panic!("cannot read {manifest_path}: {error}"));
+        checked += 1;
+        if !manifest
+            .lines()
+            .any(|line| line.trim() == "publish = false")
+        {
+            missing.push(format!("{name} at {manifest_path}"));
+        }
+    }
+
+    // Fail-closed: a metadata query that returned nothing would otherwise pass
+    // this test having checked no manifest at all.
+    assert!(
+        checked >= 60,
+        "expected to check every workspace manifest; saw only {checked}"
+    );
+    assert!(
+        missing.is_empty(),
+        "every workspace package must declare `publish = false` — this workspace is \
+         internal-only and nothing is released to a registry (PROPOSAL §11.3, CHECKLIST \
+         WS10). Add the key to:\n{}",
+        missing.join("\n")
+    );
+}
+
 #[test]
 fn reborn_workspace_crates_declare_layers_and_follow_layer_matrix() {
     let metadata = cargo_metadata();
@@ -247,26 +304,10 @@ fn reborn_workspace_crates_declare_layers_and_follow_layer_matrix() {
             }
         }
 
-        for dependency in
-            workspace_dependency_names(package).filter(|dep| is_normal_dependency(dep))
-        {
-            let Some(dependency_name) = dependency["name"].as_str() else {
-                continue;
-            };
-            let Some(dependency_layer) = layers.get(dependency_name) else {
-                continue;
-            };
-            if dependency_layer == "legacy" && crate_name != "ironclaw_legacy" {
-                if let Some(exception) = layer_matrix_exception(crate_name, dependency_name) {
-                    used_exceptions.insert((exception.crate_name, exception.dependency_name));
-                    continue;
-                }
-                violations.push(format!(
-                    "{crate_name} ({crate_layer}) must not depend on legacy crate \
-                     {dependency_name} via a normal dependency"
-                ));
-            }
-        }
+        // A second pass rejecting a normal dep on a `legacy`-layer crate used to
+        // sit here. It was deleted with the variant (§11.3, 2026-08-05): no
+        // package has declared `layer = "legacy"` since the v1 tree went, so
+        // `layers` could never hold one and the loop could not fire.
     }
 
     assert!(
@@ -515,6 +556,108 @@ fn reborn_crate_dependency_boundaries_hold() {
     for rule in boundary_rules() {
         assert_no_normal_workspace_deps(&dependencies, rule.crate_name, rule.forbidden);
     }
+}
+
+/// PROPOSAL §11.2.3's **size-ceiling** clause: *"Each contracts crate also
+/// carries a checked size ceiling (a line-count ratchet raised only by explicit
+/// review) alongside its purity allowlist."*
+///
+/// ✎ **Added 2026-08-05 (CHECKLIST WS10, §11.2.3).** The Wave 2 truth audit
+/// recorded this clause as the one part of item 3 that *"does not exist
+/// anywhere"* — and as the clause that would now bite, because the contracts
+/// tier grew past every size a thin trait/DTO layer was supposed to have while
+/// only its *dependencies* were policed. A crate cannot import a framework, and
+/// could absorb an unbounded amount of logic instead; that substitution is
+/// exactly what this ratchet makes visible.
+///
+/// **Ceilings, not equalities**, unlike this file's other ratchets — and
+/// deliberately, because the two failure modes differ. A dependency allowlist
+/// with slack is an unclaimed budget for the specific debt it names (#7147); a
+/// line ceiling with slack just means the crate got smaller, which is the
+/// direction wanted, and equality here would red the build on every routine
+/// deletion. What must not happen silently is *growth*, so each ceiling sits a
+/// bounded `TOLERANCE` above the measured count and a crate that eats through it
+/// forces a reviewer to say so in writing.
+///
+/// The ceiling is also bounded from *below*: a crate more than one tolerance
+/// window under its ceiling has banked slack, which is how a ratchet goes inert
+/// (the exact way `composition-budget.toml`'s share ceiling did — 17.4pp of
+/// slack, constraining nothing, #7151). Re-capture at every wave close.
+///
+/// Measured through [`production_rust_files`], the suite's single definition of
+/// a production source file, so the numbers agree with every sibling gate
+/// rather than with a private walk.
+#[test]
+fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
+    /// How far above the measured count each ceiling sits, and the width of
+    /// the banked-slack window below it.
+    const TOLERANCE: usize = 400;
+
+    /// `(crate, production line ceiling)` — captured 2026-08-05 by running this
+    /// test with every ceiling at `0` and reading the counts out of its own
+    /// failure message. Never counted by eye.
+    const SIZE_CEILINGS: &[(&str, usize)] = &[
+        ("ironclaw_common", 3_793),
+        ("ironclaw_extension_contracts", 8_156),
+        ("ironclaw_host_api", 17_928),
+        ("ironclaw_loop_contracts", 14_479),
+        ("ironclaw_product_contracts", 14_471),
+        ("ironclaw_prompt_envelope", 832),
+    ];
+
+    let root = workspace_root();
+    let mut over = Vec::new();
+    let mut banked = Vec::new();
+    for (crate_name, ceiling) in SIZE_CEILINGS {
+        let src = crate_dir(&root, crate_name).join("src");
+        let files = production_rust_files(&src);
+        assert!(
+            !files.is_empty(),
+            "no production sources found under {} — this ratchet would pass having measured \
+             nothing",
+            src.display()
+        );
+        let lines: usize = files
+            .iter()
+            .map(|path| {
+                std::fs::read_to_string(path)
+                    .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+                    .lines()
+                    .count()
+            })
+            .sum();
+
+        if lines > *ceiling {
+            over.push(format!(
+                "{crate_name}: {lines} production lines over a ceiling of {ceiling}"
+            ));
+        } else if ceiling.saturating_sub(lines) > TOLERANCE {
+            banked.push(format!(
+                "{crate_name}: {lines} production lines against a ceiling of {ceiling} \
+                 ({} of slack, window is {TOLERANCE})",
+                ceiling - lines
+            ));
+        }
+    }
+
+    assert!(
+        over.is_empty(),
+        "a contracts crate grew past its §11.2.3 size ceiling:\n{}\n\nA contracts crate holds \
+         traits and DTOs. Growing one is how logic reaches the tier the dependency allowlist \
+         above already protects — the allowlist cannot see a crate that imports nothing and \
+         implements everything. Either move the growth to the crate that owns the behavior, or \
+         raise the ceiling HERE with the reason in the PR body, which is what \"raised only by \
+         explicit review\" means.",
+        over.join("\n")
+    );
+    assert!(
+        banked.is_empty(),
+        "a contracts crate is now far enough under its ceiling that the ceiling constrains \
+         nothing:\n{}\n\nRe-capture it in the PR that shrank the crate. A ratchet left above \
+         what it measures is an unclaimed budget for the next unreviewed growth — the specific \
+         way `composition-budget.toml`'s share ceiling went inert with 17.4pp of slack (#7151).",
+        banked.join("\n")
+    );
 }
 
 /// PROPOSAL §11.2.3, external half: a contracts crate never acquires a
@@ -4571,7 +4714,24 @@ fn boundary_rules() -> Vec<BoundaryRule> {
     ]
 }
 
-const IRONCLAW_CRATE_LAYERS: [&str; 8] = [
+/// The closed layer set — PROPOSAL §8.1 rule 1's seven-layer ladder, and
+/// nothing else.
+///
+/// ✎ **The vestigial `legacy` variant was deleted here 2026-08-05** (PROPOSAL
+/// §11.2.11 and §11.3, CHECKLIST WS10). It described the v1 package tree, which
+/// no longer exists: measured through `cargo metadata` across all 66 workspace
+/// packages, **zero** declared `layer = "legacy"`, so both rules keyed on it
+/// (`layer_allows_dependency`'s permissive `"legacy" => true` arm and the
+/// second dependency pass that rejected a normal dep on a legacy-layer crate)
+/// were unreachable — a `match` arm and a loop that could not fire.
+///
+/// ⚠ **Not to be confused with the ~60 `ironclaw_legacy` entries in
+/// `boundary_rules()`.** Those name a retired v1 *crate* and are live
+/// reintroduction pins, deliberately kept and deliberately matching nothing
+/// (`boundary_rule_names_are_package_names_not_crate_directories` documents
+/// exactly that distinction). Deleting a dead *layer* variant does not touch
+/// them.
+const IRONCLAW_CRATE_LAYERS: [&str; 7] = [
     "contracts",
     "substrates",
     "runtimes",
@@ -4579,7 +4739,6 @@ const IRONCLAW_CRATE_LAYERS: [&str; 8] = [
     "loops",
     "products",
     "app",
-    "legacy",
 ];
 
 struct LayerMatrixException {
@@ -4969,10 +5128,9 @@ fn layer_allows_dependency(crate_layer: &str, dependency_layer: &str) -> bool {
             dependency_layer,
             "contracts" | "substrates" | "runtimes" | "kernel" | "loops" | "products" | "app"
         ),
-        // The v1 package/crates may still depend on Reborn while parity work
-        // is in flight, but Reborn layers are intentionally not allowed to
-        // depend back on legacy.
-        "legacy" => true,
+        // No `legacy` arm: the variant is gone from `IRONCLAW_CRATE_LAYERS`, so
+        // a manifest declaring it now fails the unknown-layer assertion before
+        // this function is ever reached (§11.3, 2026-08-05).
         _ => false,
     }
 }
