@@ -23,7 +23,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
+use ironclaw_host_api::{
+    path::{ScopedPath, VirtualPath},
+    resource::ResourceScope,
+};
 
 /// Workspace-relative directory holding staged skill bundles.
 ///
@@ -65,6 +68,13 @@ where
     F: RootFilesystem + 'static,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
+    /// The backend-facing root the SHELL's `/workspace` alias resolves to.
+    ///
+    /// Not the same place this stager writes. Under per-caller scoping the file tools address
+    /// `<this>/tenants/<t>/users/<u>` while the shell's alias -- registered once at composition, with
+    /// no notion of a caller -- addresses `<this>`. The staged directory has to be expressed against
+    /// the shell's root or the model is handed a path that silently resolves somewhere else.
+    shell_workspace_root: VirtualPath,
 }
 
 impl<F> std::fmt::Debug for WorkspaceSkillBundleStager<F>
@@ -87,8 +97,11 @@ where
     /// The read-only workspace handle the activation path already holds (it backs setup-marker reads)
     /// fails closed on write, so it cannot be reused here. Composition supplies
     /// `read_write_workspace_filesystem`, which is the documented single owner of that recipe.
-    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
-        Self { filesystem }
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>, shell_workspace_root: VirtualPath) -> Self {
+        Self {
+            filesystem,
+            shell_workspace_root,
+        }
     }
 
     fn staged_path(skill_name: &str, relative_path: &str) -> Option<ScopedPath> {
@@ -179,27 +192,27 @@ where
     /// could run anything anyway.
     fn runnable_dir(&self, scope: &ResourceScope, skill_name: &str) -> String {
         let relative = format!("{STAGED_SKILLS_DIRNAME}/{skill_name}");
-        let Some(staged_scoped) = ScopedPath::new(format!("/workspace/{relative}")).ok() else {
-            return relative;
+        let fallback = format!("/workspace/{relative}");
+        let Ok(staged_scoped) = ScopedPath::new(format!("/workspace/{relative}")) else {
+            return fallback;
         };
+        // Where the bytes really landed, through this caller's own view.
         let Some(staged_host) = self.filesystem.host_path_for(scope, &staged_scoped) else {
-            return relative;
+            return fallback;
         };
-        // The shell resolves its `/workspace` alias to the workspace mount root, so express the
-        // staged directory relative to that same root.
-        let Some(workspace_root_scoped) = ScopedPath::new("/workspace").ok() else {
-            return relative;
-        };
-        let Some(workspace_host) = self.filesystem.host_path_for(scope, &workspace_root_scoped)
+        // Where the shell's `/workspace` really is -- deliberately NOT through this caller's view,
+        // which would cancel the per-caller segment and produce a path the shell resolves elsewhere.
+        let Some(shell_root_host) = self
+            .filesystem
+            .host_path_for_virtual(&self.shell_workspace_root)
         else {
-            return relative;
+            return fallback;
         };
-        match staged_host.strip_prefix(&workspace_host) {
+        match staged_host.strip_prefix(&shell_root_host) {
             Ok(tail) => format!("/workspace/{}", tail.to_string_lossy()),
-            // Per-caller scoping puts the staged tree under a subdirectory of what the shell calls
-            // `/workspace`, so the prefix normally matches. When it does not, the honest answer is the
-            // workspace-relative spelling rather than a host path the model must not see.
-            Err(_) => relative,
+            // Staged outside what the shell calls the workspace: no spelling of `/workspace` reaches
+            // it, so promising one would be worse than the plain relative form.
+            Err(_) => fallback,
         }
     }
 }

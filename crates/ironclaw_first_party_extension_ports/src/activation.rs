@@ -1332,17 +1332,18 @@ struct SkillBodyContext {
 
 /// Appended to a staged skill's body so its own commands work verbatim.
 ///
-/// The body says `python3 scripts/egfr.py`, which is only meaningful from the skill's own directory.
-/// Without being told where that is, agents guessed: one ran `cd /workspace && python3
-/// scripts/egfr.py` against a path three directories from where its file actually was, and then
-/// re-typed the whole algorithm into `python3 -c` — losing the exact thing the script existed to
-/// preserve. Naming the working directory is not prompt coaching; it is the one fact the body cannot
-/// contain, because it depends on the deployment.
+/// Names the shell's `workdir` parameter explicitly. Measured: with the directory merely stated, the
+/// model ran the body's `python3 scripts/egfr.py` with no working directory at all, from the shell's
+/// default cwd, and missed the file — then re-typed the whole algorithm into `python3 -c`, losing the
+/// exact thing a shipped script exists to preserve. The relative paths in a skill body are only
+/// meaningful from the skill's own directory, and which directory that is depends on the deployment,
+/// so it is the one fact the body cannot carry itself.
 fn staged_files_note(runnable_dir: &str) -> String {
     format!(
-        "\n\n---\n\nThis skill's files are available at `{runnable_dir}`. Run its commands with that \
-as the working directory, so the paths in the instructions above resolve as written. The copy under \
-`/skills/` is read-only and cannot be executed.\n"
+        "\n\n---\n\nThis skill's files are staged at `{runnable_dir}`. When running any command from \
+this skill, set the shell's `workdir` parameter to `{runnable_dir}` so the relative paths above \
+resolve as written — for example `workdir: \"{runnable_dir}\"` with `command: \"python3 \
+scripts/<script>.py\"`. The copy under `/skills/` is read-only and cannot be executed.\n"
     )
 }
 

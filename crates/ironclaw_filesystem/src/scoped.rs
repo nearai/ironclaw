@@ -261,6 +261,15 @@ where
         self.root.host_path_for(&virtual_path)
     }
 
+    /// The host path backing a backend-facing [`VirtualPath`], bypassing this scope's view.
+    ///
+    /// Needed when a caller must express one path relative to another that its own view cannot
+    /// address — e.g. locating a per-caller subtree relative to the shared workspace root the shell's
+    /// alias resolves to. Reports placement only; it grants nothing and performs no operation.
+    pub fn host_path_for_virtual(&self, path: &VirtualPath) -> Option<std::path::PathBuf> {
+        self.root.host_path_for(path)
+    }
+
     /// Return the per-scope [`MountView`] used to authorize ops at this
     /// scope. Each call resolves the view fresh; callers that need to inspect
     /// it repeatedly should cache the returned value.
