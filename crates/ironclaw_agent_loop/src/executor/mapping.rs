@@ -118,7 +118,7 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
         // kind + reason_kind (`model_credits_exhausted` vs
         // `model_credentials_unavailable`); classifying here would lose the
         // reason_kind distinction. See
-        // `ironclaw_runner::model_failure_mapping::host_stage_failure_category`.
+        // `ironclaw_turn_runner::model_failure_mapping::host_stage_failure_category`.
         AgentLoopHostErrorKind::CredentialUnavailable => None,
         // Model-fixable by rebuild: the request was built against a stale
         // surface or prompt bundle (surface refreshed mid-iteration, host
@@ -140,7 +140,7 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
         // policy denial and scope mismatch remain host/config-shaped. The
         // runner names each of these with its own failure category
         // (`model_stage_request_invalid` / `_policy_denied` / `_scope_mismatch`
-        // in `ironclaw_runner::failure_categories`), none of which is
+        // in `ironclaw_turn_runner::failure_categories`), none of which is
         // auto-retriable.
         //
         // This comment previously claimed the runner "preserves the original
@@ -353,7 +353,7 @@ pub(super) fn model_error_failure_category(
         ModelErrorClass::Internal => "model_internal",
         ModelErrorClass::StaleRequest => "model_stale_request",
         // Pinned category shared with the runner's CredentialUnavailable
-        // mapping (`ironclaw_runner::failure_categories`): an unauthorized
+        // mapping (`ironclaw_turn_runner::failure_categories`): an unauthorized
         // model call is a credentials/permission problem the user must fix.
         ModelErrorClass::Unauthorized => "model_credentials_unavailable",
         ModelErrorClass::CheckpointRejected => "checkpoint_rejected",

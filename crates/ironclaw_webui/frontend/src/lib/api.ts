@@ -10,8 +10,8 @@
 // stands for v1 gateway routes that lack a v2 counterpart.
 //
 // Request/response shapes mirror the Rust DTOs in
-// `ironclaw_product::product_surface_inbound` and
-// `ironclaw_product::reborn_services::types`. The error
+// `ironclaw_assistant::product_surface_inbound` and
+// `ironclaw_assistant::reborn_services::types`. The error
 // envelope mirrors `ProductSurfaceError`.
 
 const TOKEN_KEY = "ironclaw_token";

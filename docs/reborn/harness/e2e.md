@@ -6,19 +6,19 @@ This document is the branch-local map for the dedicated Reborn E2E gate. Reborn 
 
 | Area | Existing coverage |
 | --- | --- |
-| Architecture boundaries | `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` |
+| Architecture boundaries | `crates/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs` |
 | Host runtime facade and outcomes | `crates/ironclaw_host_runtime/tests/host_runtime_contract.rs` |
 | Host runtime production composition | `crates/ironclaw_host_runtime/tests/host_runtime_services_contract.rs` |
 | Dedicated Reborn E2E spine | `crates/ironclaw_host_runtime/tests/reborn_e2e_gate.rs` |
 | Capability host invoke/resume/spawn | `crates/ironclaw_capabilities/tests/capability_host_*` |
 | Dispatcher adapter selection | `crates/ironclaw_dispatcher/tests/vertical_slice_contract.rs` |
 | WASM runtime lane | `crates/ironclaw_wasm/tests/wasm_dispatch_integration.rs` and `wasm_http_adapter_contract.rs` |
-| Script runtime lane | `crates/ironclaw_scripts/tests/script_dispatch_integration.rs` and `script_http_adapter_contract.rs` |
+| Script runtime lane | `crates/ironclaw_sandbox/tests/script_dispatch_integration.rs` and `script_http_adapter_contract.rs` |
 | MCP runtime lane | `crates/ironclaw_mcp/tests/mcp_dispatch_integration.rs` and `mcp_adapter_contract.rs` |
 | Process lifecycle | `crates/ironclaw_processes/tests/process_dispatch_integration.rs` and process service/store contracts |
 | Network policy and host HTTP egress | `crates/ironclaw_network/tests/*` plus host-runtime HTTP egress tests |
 | Secret storage/leases | `crates/ironclaw_secrets/tests/secret_store_contract.rs` plus host-runtime staged-secret tests |
-| Events/audit replay | `crates/ironclaw_events/tests/durable_log_contract.rs` and host-runtime durable-event tests |
+| Events/audit replay | `crates/ironclaw_event_log/tests/durable_log_contract.rs` and host-runtime durable-event tests |
 | Gateway product smoke | Existing Playwright scenarios under `tests/e2e/scenarios/`, especially `test_v2_*` |
 
 ## Dedicated Reborn E2E goal

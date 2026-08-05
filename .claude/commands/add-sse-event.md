@@ -19,7 +19,7 @@ model: opus
 > **This command needs rewriting onto the `ironclaw_webui` streaming path** —
 > the Reborn projection/SSE frame served by `crates/ironclaw_webui`, with the
 > client side in `crates/ironclaw_webui/frontend/`, over the event-stream
-> substrate (`ironclaw_events` → `ironclaw_event_projections` →
+> substrate (`ironclaw_event_log` → `ironclaw_event_projections` →
 > `ironclaw_event_streams`). That rewrite has not been done: the correct
 > Reborn procedure is **not** written down here, and this banner deliberately
 > does not guess at it.

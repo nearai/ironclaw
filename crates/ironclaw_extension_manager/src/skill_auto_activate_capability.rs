@@ -5,7 +5,10 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use async_trait::async_trait;
-use ironclaw_extensions::{
+use ironclaw_assistant::{
+    RebornSkillActionResponse, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
+};
+use ironclaw_extension_registry::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
 };
 use ironclaw_host_api::{
@@ -20,7 +23,6 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
-use ironclaw_product::{RebornSkillActionResponse, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID};
 
 pub fn extend_builtin_first_party_package(
     mut package: ExtensionPackage,
@@ -458,15 +460,15 @@ mod tests {
     /// error rather than panicking or silently dropping the root.
     #[test]
     fn a_rootless_package_cannot_be_extended_with_this_capability() {
-        let manifest = ironclaw_extensions::ExtensionManifest::parse(
+        let manifest = ironclaw_extension_registry::ExtensionManifest::parse(
             VIRTUAL_MANIFEST,
-            ironclaw_extensions::ManifestSource::UserRegistered,
+            ironclaw_extension_registry::ManifestSource::UserRegistered,
             &ironclaw_host_api::host_port::HostPortCatalog::empty(),
             &{
-                let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+                let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
                 contracts
                     .register(Arc::new(
-                        ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                        ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                             .expect("capability-provider contract"),
                     ))
                     .expect("register contract");

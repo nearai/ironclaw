@@ -19,18 +19,21 @@ use ironclaw_authorization::{
     TrustAwareCapabilityDispatchAuthorizer, in_memory_backed_capability_lease_store,
 };
 use ironclaw_capabilities::{CapabilityHost, CapabilitySpawnRequest};
+use ironclaw_event_log::{
+    DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventCursor, EventError,
+    EventStreamKey, InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog,
+    InMemoryEventSink, ReadScope, RuntimeEventKind,
+};
 use ironclaw_event_projections::{
     AuditProjectionError, AuditProjectionRequest, AuditProjectionService, CapabilityActivityStatus,
     EventProjectionService, ProjectionCursor, ProjectionError, ProjectionRequest, ProjectionScope,
     ReplayAuditProjectionService, ReplayEventProjectionService, RunProjectionStatus,
     TimelineEntryKind,
 };
-use ironclaw_events::{
-    DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventCursor, EventError,
-    EventStreamKey, InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog,
-    InMemoryEventSink, ReadScope, RuntimeEventKind,
+use ironclaw_event_store::{
+    RebornEventStoreConfig, RebornEventStoreError, RebornProfile, build_reborn_event_stores,
 };
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_extension_registry::ExtensionRegistry;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, FilesystemOperation, RootFilesystem};
 use ironclaw_host_api::result_meta::FailureKind;
@@ -65,14 +68,11 @@ use ironclaw_processes::{
     ProcessJournalStore, ProcessManager, ProcessResultStore, ProcessRuntimePort, ProcessServices,
     ProcessStatus, capability_process_record, submit_capability_process,
 };
-use ironclaw_reborn_event_store::{
-    RebornEventStoreConfig, RebornEventStoreError, RebornProfile, build_reborn_event_stores,
-};
 use ironclaw_resources::{
     InMemoryResourceGovernor, JsonFileResourceGovernorStore, PersistentResourceGovernor,
     ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits, ResourceTally,
 };
-use ironclaw_scripts::{ScriptRuntime, ScriptRuntimeConfig};
+use ironclaw_sandbox::{ScriptRuntime, ScriptRuntimeConfig};
 use ironclaw_secrets::{InMemoryCredentialBroker, SecretMaterial, SecretStore, SecretStorePort};
 use ironclaw_triggers::InMemoryTriggerRepository;
 use ironclaw_turns::NoopTurnRunWakeNotifier;
@@ -2234,7 +2234,7 @@ async fn host_runtime_services_jsonl_approval_audit_projection_rejects_foreign_c
     .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
-    .with_audit_sink(Arc::new(ironclaw_events::DurableAuditSink::new(
+    .with_audit_sink(Arc::new(ironclaw_event_log::DurableAuditSink::new(
         Arc::clone(&audit_log),
     )))
     .with_script_runtime(Arc::new(ScriptRuntime::new(

@@ -6,8 +6,13 @@
 //! creator-owned target id, otherwise reads the creator's personal
 //! communication preference, routes that reply-target binding ref to the
 //! extension whose registered [`PreferenceTargetCodec`] decodes it, and drives
-//! that extension's generic [`TriggeredRunDeliveryDriver`]. The single poller
+//! that extension's generic [`TriggeredRunDelivery`] driver. The single poller
 //! hook slot stays — multiplexing happens inside this hook, by extension id.
+//!
+//! The drivers themselves are built by the product-side channel workflow
+//! factory and supplied by composition (§12.11 D-A): this module owns the
+//! *routing* policy — which extension a fire belongs to, and the fail-closed
+//! rules below — and names no product type to do it.
 //!
 //! Fail-closed routing: with no stored preference the fire routes to the
 //! only active codec-bearing channel extension when exactly one exists (its
@@ -21,11 +26,9 @@ use async_trait::async_trait;
 use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec;
 use ironclaw_outbound::{
     CommunicationPreferenceKey, CommunicationPreferenceRepository, DeliveryDefaultScope,
-    OutboundDeliveryTargetId, OutboundDeliveryTargetScope, TriggeredRunDeliveryOutcomeKind,
-    TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
-};
-use ironclaw_product::{
-    TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest, triggered_run_delivery_settings,
+    OutboundDeliveryTargetId, OutboundDeliveryTargetScope, TriggeredRunDelivery,
+    TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord, TriggeredRunDeliveryRequest,
+    TriggeredRunDeliveryStore,
 };
 use ironclaw_triggers::TriggerFire;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId, TurnScope};
@@ -49,7 +52,11 @@ pub struct GenericTriggeredRunDeliveryHook {
     delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
     preferences: Arc<dyn CommunicationPreferenceRepository>,
     delivery_targets: Arc<MutableOutboundDeliveryTargetRegistry>,
-    drivers: tokio::sync::Mutex<HashMap<String, Arc<TriggeredRunDeliveryDriver>>>,
+    /// One driver per channel extension, keyed by extension id, built by the
+    /// product-side workflow factory (§12.11 D-A) and supplied by composition
+    /// from the same channel-extension bindings that register the codecs this
+    /// hook routes across. Routing stays here; construction does not.
+    drivers: HashMap<String, Arc<dyn TriggeredRunDelivery>>,
 }
 
 impl GenericTriggeredRunDeliveryHook {
@@ -58,13 +65,14 @@ impl GenericTriggeredRunDeliveryHook {
         delivery_store: Arc<dyn TriggeredRunDeliveryStore>,
         preferences: Arc<dyn CommunicationPreferenceRepository>,
         delivery_targets: Arc<MutableOutboundDeliveryTargetRegistry>,
+        drivers: impl IntoIterator<Item = (String, Arc<dyn TriggeredRunDelivery>)>,
     ) -> Self {
         Self {
             assembly,
             delivery_store,
             preferences,
             delivery_targets,
-            drivers: tokio::sync::Mutex::new(HashMap::new()),
+            drivers: drivers.into_iter().collect(),
         }
     }
 
@@ -166,31 +174,17 @@ impl GenericTriggeredRunDeliveryHook {
         }))
     }
 
-    async fn driver_for_extension(
+    fn driver_for_extension(
         &self,
         extension_id: &str,
-        codec: Arc<dyn PreferenceTargetCodec>,
-    ) -> Result<Arc<TriggeredRunDeliveryDriver>, String> {
-        let mut drivers = self.drivers.lock().await;
-        if let Some(driver) = drivers.get(extension_id) {
-            return Ok(Arc::clone(driver));
-        }
-        let services = self
-            .assembly
-            .triggered_run_delivery_services(extension_id)
+    ) -> Result<Arc<dyn TriggeredRunDelivery>, String> {
+        self.drivers
+            .get(extension_id)
+            .map(Arc::clone)
             .ok_or_else(|| {
                 "composed runtime has no delivery coordinator; triggered delivery unavailable"
                     .to_string()
-            })?;
-        let driver = Arc::new(TriggeredRunDeliveryDriver::with_settings(
-            services,
-            triggered_run_delivery_settings(),
-            Arc::clone(&self.delivery_store),
-            codec,
-            self.assembly.identity().agent_id.clone(),
-        ));
-        drivers.insert(extension_id.to_string(), Arc::clone(&driver));
-        Ok(driver)
+            })
     }
 
     async fn record_failed(&self, run_id: TurnRunId) {
@@ -243,7 +237,7 @@ impl PostSubmitDeliveryHook for GenericTriggeredRunDeliveryHook {
                 return;
             }
         };
-        let (extension_id, codec) = match self
+        let (extension_id, _codec) = match self
             .route_extension(&scope, &fire.creator_user_id, delivery_target.as_ref())
             .await
         {
@@ -259,7 +253,7 @@ impl PostSubmitDeliveryHook for GenericTriggeredRunDeliveryHook {
                 return;
             }
         };
-        let driver = match self.driver_for_extension(&extension_id, codec).await {
+        let driver = match self.driver_for_extension(&extension_id) {
             Ok(driver) => driver,
             Err(reason) => {
                 tracing::warn!(

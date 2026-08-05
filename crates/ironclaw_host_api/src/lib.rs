@@ -69,6 +69,7 @@ pub mod user_identity;
 
 mod credential_redaction;
 pub mod model_result_preview;
+pub mod process;
 pub mod product_adapter;
 pub mod product_adapter_error;
 

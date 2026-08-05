@@ -17,12 +17,13 @@ use super::{
     diff_preview::{file_diff_preview, will_use_large_diff_path},
     input_error,
     inputs::{optional_usize, required_str},
-    operation_error_with_summary,
+    operation_error, operation_error_with_summary,
     patch::{parse_apply_patch_input, replacement_error},
     paths::{
-        create_parent_dir_unless_sensitive, deny_sensitive_existing_path, filesystem_error,
-        is_excluded_name, is_sensitive_scoped_path, is_workspace_path, operation_allowed,
-        resolve_optional_path, resolve_required_path, scoped_child_path, stat_optional,
+        create_parent_dir_unless_sensitive, filesystem_error, filesystem_error_with_summary,
+        is_excluded_name, is_sensitive_scoped_path, is_workspace_path,
+        list_dir_empty_if_missing_root, operation_allowed, resolve_optional_path,
+        resolve_required_path, safe_summary_path, scoped_child_path, stat_optional,
         virtual_to_relative,
     },
     state::{
@@ -328,6 +329,15 @@ fn extract_document_text_for_read_file(
     let Some(text) =
         ironclaw_extractors::extract_document_text_by_filename(bytes, Some(scoped_path)).map_err(
             |error| {
+                // The safe summary is model-facing, so only `Display` may go in
+                // it — `ExtractionError`'s `Display` is the classification and
+                // nothing else, which is what makes this interpolation safe.
+                // The parser diagnostic goes to the log via `Debug`.
+                tracing::debug!(
+                    path = %safe_summary_path(scoped_path),
+                    ?error,
+                    "read_file document text extraction failed"
+                );
                 operation_error_with_summary(format!(
                     "read_file failed for {}: document text extraction failed: {error}",
                     safe_summary_path(scoped_path)
@@ -468,6 +478,14 @@ async fn verify_read_before_edit(
             resolved.scoped_path.as_str(),
         ));
     }
+    if is_opaque_binary_document_path(resolved.scoped_path.as_str())
+        || is_pdf_document_path(resolved.scoped_path.as_str())
+    {
+        return Err(binary_document_write_error(
+            operation,
+            resolved.scoped_path.as_str(),
+        ));
+    }
     // A file grown past what read_file can return cannot match any recorded
     // read; report it as changed instead of fingerprinting unbounded bytes.
     if stat.len > MAX_READ_SIZE {
@@ -528,7 +546,19 @@ pub(super) async fn list_dir(
     request: &CodingCapabilityRequest<'_>,
 ) -> Result<Value, CodingCapabilityError> {
     let resolved = resolve_optional_path(request, FilesystemOperation::ListDir)?;
-    deny_sensitive_existing_path(request, &resolved.virtual_path).await?;
+    // A missing mount ROOT lists as empty (the grant names it; nothing has
+    // been written under it yet), so the sensitive-stat guard tolerates its
+    // absence. Any other missing path stays an error, as before.
+    match stat_optional(request, &resolved.virtual_path).await? {
+        Some(stat) if stat.sensitive => {
+            return Err(CodingCapabilityError::new(
+                RuntimeDispatchErrorKind::FilesystemDenied,
+            ));
+        }
+        Some(_) => {}
+        None if resolved.is_mount_root() => {}
+        None => return Err(operation_error()),
+    }
     let recursive = request
         .input
         .get("recursive")
@@ -558,11 +588,7 @@ async fn collect_list_entries(
     let mut stack = vec![(root.virtual_path.clone(), 0usize)];
     let mut visited = 0usize;
     while let Some((dir, depth)) = stack.pop() {
-        let entries = request
-            .filesystem
-            .list_dir(&dir)
-            .await
-            .map_err(filesystem_error)?;
+        let entries = list_dir_empty_if_missing_root(request, root, &dir).await?;
         for entry in entries {
             visited += 1;
             if visited > MAX_VISITED_ENTRIES {
@@ -741,46 +767,6 @@ pub(super) async fn apply_patch(
     ))
 }
 
-fn filesystem_error_with_summary(
-    operation: &str,
-    scoped_path: &str,
-    error: ironclaw_filesystem::FilesystemError,
-) -> CodingCapabilityError {
-    let scoped_path = safe_summary_path(scoped_path);
-    let summary = match &error {
-        ironclaw_filesystem::FilesystemError::NotFound { .. } => {
-            format!("{operation} failed for {scoped_path}: file not found")
-        }
-        ironclaw_filesystem::FilesystemError::PermissionDenied { .. }
-        | ironclaw_filesystem::FilesystemError::MountNotFound { .. }
-        | ironclaw_filesystem::FilesystemError::PathOutsideMount { .. }
-        | ironclaw_filesystem::FilesystemError::SymlinkEscape { .. }
-        | ironclaw_filesystem::FilesystemError::MountConflict { .. }
-        | ironclaw_filesystem::FilesystemError::VersionMismatch { .. }
-        | ironclaw_filesystem::FilesystemError::Unsupported { .. }
-        | ironclaw_filesystem::FilesystemError::IndexConflict { .. } => {
-            format!("{operation} failed for {scoped_path}: permission denied or unsupported path")
-        }
-        ironclaw_filesystem::FilesystemError::Backend { .. }
-        | ironclaw_filesystem::FilesystemError::BackendInfrastructure { .. } => {
-            format!("{operation} failed for {scoped_path}: filesystem backend error")
-        }
-        ironclaw_filesystem::FilesystemError::Contract(_) => {
-            format!("{operation} failed for {scoped_path}: invalid path")
-        }
-        _ => format!("{operation} failed for {scoped_path}: filesystem error"),
-    };
-    let kind = filesystem_error(error).kind();
-    CodingCapabilityError::with_safe_summary(kind, summary)
-}
-
-fn safe_summary_path(scoped_path: &str) -> String {
-    let path_hint = scoped_path
-        .trim_start_matches('/')
-        .replace(['/', '\\'], " ");
-    format!("path {path_hint}")
-}
-
 fn existing_text_for_preview(stat: &ironclaw_filesystem::FileStat, bytes: &[u8]) -> Option<String> {
     if stat.len > MAX_WRITE_SIZE as u64 {
         return None;
@@ -789,4 +775,57 @@ fn existing_text_for_preview(stat: &ironclaw_filesystem::FileStat, bytes: &[u8])
     reject_binary_probe(bytes).ok()?;
     let (content, _encoding, _line_ending) = decode_text(bytes).ok()?;
     Some(content)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: `read_file`'s extraction failure builds a **model-facing**
+    /// safe summary, and before `ExtractionError` existed it interpolated the
+    /// extractor's raw diagnostic string into it — the same string the
+    /// extractor's own docs said callers must never render. This drives the
+    /// call site, not `Display`: the wrapper is what composes the summary, so
+    /// a unit test on the error type alone would not have caught it.
+    #[test]
+    fn read_file_extraction_failure_summary_carries_no_parser_detail() {
+        // Bytes that look like a ZIP container but are not a valid DOCX, so
+        // the private `extract_docx` produces a `zip`-crate diagnostic.
+        let corrupt = b"PK\x03\x04not-a-real-docx";
+        let error = extract_document_text_for_read_file(corrupt, "/notes/quarterly.docx")
+            .expect_err("a corrupt DOCX must fail read_file");
+
+        let summary = error
+            .safe_summary()
+            .expect("extraction failure must carry a safe summary");
+
+        assert!(
+            summary.contains("document text extraction failed"),
+            "the model still needs to be told what went wrong, got {summary:?}"
+        );
+        assert!(
+            summary.contains("path notes quarterly.docx"),
+            "the redacted path hint is deliberate and must survive, got {summary:?}"
+        );
+        // The parser's own words must not be in it. `zip` reports invalid
+        // archives as "invalid Zip archive: …"; the extractor wraps that as
+        // "invalid Office XML archive: …". Neither may reach the model.
+        for leaked in ["archive", "Zip", "zip", "invalid"] {
+            assert!(
+                !summary.contains(leaked),
+                "parser diagnostic leaked into the model-facing summary \
+                 ({leaked:?} in {summary:?})"
+            );
+        }
+    }
+
+    /// The other half of the same seam: a filename with no document extension
+    /// is not a failure, it is "not my job" — `Ok(None)` so the caller falls
+    /// through to its normal text read.
+    #[test]
+    fn read_file_extraction_returns_none_for_a_non_document_extension() {
+        let result = extract_document_text_for_read_file(b"plain text", "/notes/todo.txt")
+            .expect("a non-document extension is not an error");
+        assert_eq!(result, None);
+    }
 }

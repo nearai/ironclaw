@@ -18,6 +18,7 @@ wasmtime = { workspace = true }
 wasmtime-wasi = { workspace = true }
 
 [dev-dependencies]
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 async-trait = "0.1"
 # Dev-only: `wasm_dispatch_integration` drives the real `RuntimeDispatcher`.
 # Previously reached through the `ironclaw_dispatcher` re-export shim (deleted
@@ -25,8 +26,8 @@ async-trait = "0.1"
 # `test-support` feature, so it is now declared directly.
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 ironclaw_host_api = { path = "../ironclaw_host_api", features = ["test-support"] }
-ironclaw_events = { path = "../ironclaw_events" }
-ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_event_log = { path = "../ironclaw_event_log" }
+ironclaw_extension_registry = { path = "../ironclaw_extension_registry" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 tempfile = "3"

@@ -12,9 +12,10 @@ use ironclaw_capabilities::{
     BoundCapabilityAdapter, ResolvedCapability, RuntimeAdapterResult, RuntimeDispatcher,
     ToolResolver,
 };
-use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
-use ironclaw_extensions::{
-    CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage, ExtensionRuntime,
+use ironclaw_event_log::{InMemoryEventSink, RuntimeEventKind};
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
+use ironclaw_extension_registry::{
+    CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage,
     HostApiContractRegistry, ManifestSource,
 };
 use ironclaw_filesystem::{DiskFilesystem, RootFilesystem};
@@ -652,17 +653,20 @@ impl WasmRuntimeAdapter {
         request: LocalLaneRequest<'_>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let module_path = match &request.package.manifest.runtime {
-            ExtensionRuntime::Wasm { module } => module
-                .resolve_under(request.package.materialized_root().map_err(|_| {
-                    DispatchError::Wasm {
+            ExtensionRuntime::Wasm { module } => ironclaw_extension_registry::resolve_asset_under(
+                module,
+                request
+                    .package
+                    .materialized_root()
+                    .map_err(|_| DispatchError::Wasm {
                         kind: RuntimeDispatchErrorKind::Manifest,
                         model_visible_cause: None,
-                    }
-                })?)
-                .map_err(|_| DispatchError::Wasm {
-                    kind: RuntimeDispatchErrorKind::Manifest,
-                    model_visible_cause: None,
-                })?,
+                    })?,
+            )
+            .map_err(|_| DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::Manifest,
+                model_visible_cause: None,
+            })?,
             other => {
                 return Err(DispatchError::Wasm {
                     kind: if other.kind() == RuntimeKind::Wasm {
@@ -729,7 +733,7 @@ struct LocalLaneRequest<'a> {
 /// Prebinds every registry capability to the file-local WASM lane adapter,
 /// mirroring the production registry-lane resolver's shape at test scale.
 fn dispatcher_for(
-    registry: &ironclaw_extensions::ExtensionRegistry,
+    registry: &ironclaw_extension_registry::ExtensionRegistry,
     filesystem: Arc<DiskFilesystem>,
     governor: Arc<InMemoryResourceGovernor>,
     adapter: &Arc<WasmRuntimeAdapter>,
@@ -909,8 +913,8 @@ fn has_accountable_effects(usage: &ResourceUsage) -> bool {
         || usage.process_count > 0
 }
 
-fn registry_with_package(manifest: &str) -> ironclaw_extensions::ExtensionRegistry {
-    let mut registry = ironclaw_extensions::ExtensionRegistry::new();
+fn registry_with_package(manifest: &str) -> ironclaw_extension_registry::ExtensionRegistry {
+    let mut registry = ironclaw_extension_registry::ExtensionRegistry::new();
     registry.insert(package_from_manifest(manifest)).unwrap();
     registry
 }
@@ -1050,7 +1054,7 @@ fn tool_component(wat_src: &str) -> Vec<u8> {
     let mut module = wat::parse_str(wat_src).expect("fixture WAT must parse");
     let mut resolve = Resolve::default();
     let package = resolve
-        .push_str("tool.wit", include_str!("../../../wit/tool.wit"))
+        .push_str("tool.wit", ironclaw_wasm::TOOL_WIT)
         .expect("tool WIT must parse");
     let world = resolve
         .select_world(&[package], Some("sandboxed-tool"))

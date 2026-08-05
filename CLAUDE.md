@@ -6,11 +6,11 @@
 
 This repo can be indexed into a **codebase knowledge graph** (the `codebase-memory` MCP server) over `crates/`. For any *where-is / who-calls / how-does-data-flow / what-does-this-touch* question, **probe the graph before reaching for `Grep`** — text search cannot see cross-crate call chains. A WebUI feature normally crosses `webui → ProductSurface → product → composition → runtime`, with the frontend inside `ironclaw_webui`.
 
-**Where it lives:** `.codebase-memory/graph.db.zst` — a **git-ignored build artifact, not source**. One per environment, rebuilt from code. Never commit it.
+**Where it lives:** `.codebase-memory/graph.db.zst` is a committed, compressed bootstrap snapshot shared by the team. The MCP imports it and incrementally catches up to the current checkout; local databases and `.codebase-memory/artifact.json` remain git-ignored per-environment state. Refresh the shared snapshot from a clean `main` checkout with `index_repository(repo_path=".", persistence=true)`.
 
 **Freshness (check at the start of a discovery task):** run `bash scripts/codebase-graph.sh status` — it compares the graph's indexed commit against `HEAD`. Then:
-- **Missing** → `index_repository(repo_path=".")` once to build it.
-- **Stale** → `detect_changes(since="<indexed-commit>")` for the changed symbols + blast radius, or re-run `index_repository` to fully refresh.
+- **Missing** → `index_repository(repo_path=".", persistence=true)` once to build it.
+- **Stale** → `detect_changes(since="<indexed-commit>")` for the changed symbols + blast radius, or re-run `index_repository(repo_path=".", persistence=true)` to fully refresh the shared snapshot.
 - The graph is a point-in-time index — verify anything it asserts against live code before acting.
 
 **Discovery recipes (use these instead of `Grep` for code structure):**
@@ -30,11 +30,11 @@ This repo can be indexed into a **codebase knowledge graph** (the `codebase-memo
 **All new work lives in the Reborn stack under `crates/`.** There is no longer a
 v1 `src/` monolith or a legacy crate enclave to route around — `crates/` is the
 whole production tree. A Reborn WebUI feature crosses
-`ironclaw_webui → ProductSurface → ironclaw_product → composition → runtime`;
-the binary entry point is `crates/ironclaw_reborn_cli` (binary name `ironclaw`).
+`ironclaw_webui → ProductSurface → ironclaw_assistant → composition → runtime`;
+the binary entry point is `crates/ironclaw_cli` (binary name `ironclaw`).
 Start from the `reborn-feature` skill — it maps those layers so you wire a
 feature in one pass instead of layer-by-layer. The workspace root
-(`Cargo.toml`, package `ironclaw_reborn_integration_tests`) now hosts only the
+(`Cargo.toml`, package `ironclaw_integration_tests`) now hosts only the
 Reborn integration test suite (`tests/integration/*`); it has no lib/bin of its
 own.
 
@@ -117,7 +117,7 @@ product identity (`slack`, `github`, `gmail`); `ProviderId` is the credential
 authority namespace and may be shared across extensions (`google` backs
 gmail + drive + calendar + …). There is no separate channel registry, no
 `slack_bot`/`slack_personal` split, and no extension `kind` wire string —
-`crates/ironclaw_architecture/tests/reborn_retired_taxonomy.rs` pins the
+`crates/ironclaw_architecture_tests/tests/reborn_retired_taxonomy.rs` pins the
 retired vocabulary at zero. Start from the `reborn-extension-surfaces` skill
 when adding an integration. The identity rules below predate the unified model
 and remain binding wherever credential/extension identities appear:
@@ -149,7 +149,7 @@ The `credential_name` / `extension_name` newtypes live in
 resolver/auth-flow ownership (`src/auth/extension.rs`, the web `pending_auth`
 path, the `ironclaw_gateway` onboarding JS) was deleted under Tier B; the Reborn
 identity/product-auth model lives in the Reborn crates
-(`crates/ironclaw_reborn_identity/CONTRACT.md`, `crates/ironclaw_auth` — which
+(`crates/ironclaw_identity/CONTRACT.md`, `crates/ironclaw_auth` — which
 also owns the OAuth transport) and its WebUI onboarding in
 `crates/ironclaw_webui/frontend`.
 
@@ -171,14 +171,14 @@ binary). For where a symbol or subsystem lives, query the codebase knowledge
 graph (see "Code Discovery" above) or read the relevant crate's `CLAUDE.md` /
 `AGENTS.md`; `crates/AGENTS.md` is the crate-level map. The reborn-feature
 flow is described in `.claude/skills/reborn-feature/SKILL.md` (binary
-`ironclaw` in `crates/ironclaw_reborn_cli`).
+`ironclaw` in `crates/ironclaw_cli`).
 
 ```
 crates/                     # all production code (see crates/AGENTS.md for the full map)
-├── ironclaw_reborn_cli/    # binary entry point (binary name `ironclaw`)
-├── ironclaw_reborn_composition/  # wires storage/runtime services by profile
-├── ironclaw_product/             # product-facing orchestration and surface
-├── ironclaw_runner/ ironclaw_turns/ ironclaw_agent_loop/  # turn runtime + agent loop
+├── ironclaw_cli/    # binary entry point (binary name `ironclaw`)
+├── ironclaw_composition/  # wires storage/runtime services by profile
+├── ironclaw_assistant/             # product-facing orchestration and surface
+├── ironclaw_turn_runner/ ironclaw_turns/ ironclaw_agent_loop/  # turn runtime + agent loop
 ├── ironclaw_webui/         # WebChat v2 routes, SPA (frontend/) + serve wiring
 ├── ironclaw_filesystem/    # RootFilesystem mount catalog (persistence plane)
 ├── ironclaw_llm/ ironclaw_safety/ ironclaw_skills/  # extracted subsystems
@@ -204,15 +204,15 @@ backends, keep behavioral parity via a shared conformance suite. See
 
 When modifying a module with a spec, read the spec first. Code follows spec; spec is the tiebreaker.
 
-**Module-owned initialization:** Module-specific initialization logic (storage connection, transport creation, service wiring) must live in the owning crate as a public factory function — not reconstructed at the composition/route layer. Composition (`ironclaw_reborn_composition`) orchestrates calls to crate factories and chooses concrete backends by profile.
+**Module-owned initialization:** Module-specific initialization logic (storage connection, transport creation, service wiring) must live in the owning crate as a public factory function — not reconstructed at the composition/route layer. Composition (`ironclaw_composition`) orchestrates calls to crate factories and chooses concrete backends by profile.
 
 | Module | Spec |
 |--------|------|
 | `crates/ironclaw_llm/` | `crates/ironclaw_llm/CLAUDE.md` |
 | `crates/ironclaw_filesystem/` | `crates/ironclaw_filesystem/CLAUDE.md` |
 | `crates/ironclaw_webui/` | `crates/ironclaw_webui/CLAUDE.md` |
-| `crates/ironclaw_reborn_composition/` | `crates/ironclaw_reborn_composition/CLAUDE.md` |
-| `crates/ironclaw_reborn_identity/` | `crates/ironclaw_reborn_identity/CONTRACT.md` |
+| `crates/ironclaw_composition/` | `crates/ironclaw_composition/CLAUDE.md` |
+| `crates/ironclaw_identity/` | `crates/ironclaw_identity/CONTRACT.md` |
 | `tests/` (scenario coverage map) | `tests/CLAUDE.md` |
 | `tests/integration/` | `tests/integration/CLAUDE.md` |
 | `tests/support/reborn_parity_qa/` | `tests/support/reborn_parity_qa/CLAUDE.md` |
@@ -248,7 +248,7 @@ the extension's tools and auth recipes, and the extension's `ChannelAdapter`
 (`crates/ironclaw_host_api/src/product_adapter/channel_adapter.rs`) implements inbound normalize / deliver /
 activate / cleanup. Binaries supply adapters through
 `RebornHostBindings::with_channel_extension_bindings`
-(`crates/ironclaw_reborn_composition/src/input.rs`); composition wires the
+(`crates/ironclaw_composition/src/input.rs`); composition wires the
 generic ingress router, pairing seam, identity bindings, and the host-owned
 delivery coordinator — never per-channel host code. Start from the
 `reborn-extension-surfaces` skill; the worked example is the Slack package

@@ -26,7 +26,7 @@
 - Fast local check: `cargo test -p ironclaw_outbound`
 - Backend parity check without live Postgres: `IRONCLAW_SKIP_POSTGRES_TESTS=1 cargo test -p ironclaw_outbound --all-features`
 - Lint check: `cargo clippy -p ironclaw_outbound --all-targets --all-features -- -D warnings`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests reborn_crate_dependency_boundaries_hold`
 
 ## Agent Notes
 

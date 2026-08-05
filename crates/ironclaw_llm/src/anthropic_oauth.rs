@@ -6,9 +6,13 @@
 //!
 //! Pattern follows `nearai_chat.rs`: direct HTTP calls via `reqwest::Client`.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use eventsource_stream::Eventsource;
+use futures::StreamExt;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use secrecy::{ExposeSecret, SecretString};
@@ -18,9 +22,9 @@ use crate::anthropic_thinking::{AnthropicThinking, thinking_for_request};
 use crate::config::RegistryProviderConfig;
 use crate::error::LlmError;
 use crate::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmProvider,
-    Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    strip_unsupported_completion_params, strip_unsupported_tool_params,
+    ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
+    FinishReason, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    ToolDefinition, strip_unsupported_completion_params, strip_unsupported_tool_params,
 };
 use ironclaw_common::llm_costs as costs;
 
@@ -90,6 +94,8 @@ const DEFAULT_MAX_TOKENS: u32 = 8192;
 /// Anthropic provider using OAuth Bearer authentication.
 pub(crate) struct AnthropicOAuthProvider {
     client: Client,
+    streaming_client: Client,
+    stream_idle_timeout: Duration,
     /// OAuth token, wrapped in RwLock so it can be updated after a successful
     /// Keychain refresh (fixes #1136: stale token reuse after expiry).
     token: std::sync::RwLock<SecretString>,
@@ -116,6 +122,12 @@ impl AnthropicOAuthProvider {
                     provider: "anthropic_oauth".to_string(),
                     reason: format!("Failed to build HTTP client: {}", e),
                 })?;
+        let streaming_client = crate::config::hardened_streaming_client_builder()
+            .build()
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "anthropic_oauth".to_string(),
+                reason: format!("Failed to build streaming HTTP client: {e}"),
+            })?;
 
         let active_model = std::sync::RwLock::new(config.model.clone());
         let base_url = if config.base_url.is_empty() {
@@ -129,6 +141,8 @@ impl AnthropicOAuthProvider {
 
         Ok(Self {
             client,
+            streaming_client,
+            stream_idle_timeout: Duration::from_secs(crate::config::DEFAULT_REQUEST_TIMEOUT_SECS),
             token: std::sync::RwLock::new(token),
             model: config.model.clone(),
             base_url,
@@ -310,6 +324,138 @@ impl AnthropicOAuthProvider {
             }
         })
     }
+
+    async fn send_streaming_request(
+        &self,
+        body: &AnthropicRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<AnthropicStreamingResponse, LlmError> {
+        let url = self.api_url();
+        let current_token = self.current_token();
+        let mut response = self
+            .send_streaming_http_request(&url, body, &current_token)
+            .await?;
+
+        if response.status().as_u16() == 401 {
+            drop(response);
+            // OAuth tokens from `claude login` expire in ~8-12h. Match the
+            // buffered request path by allowing Claude Code's asynchronous
+            // credential-store refresh to settle, then retry exactly once.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let Some(fresh) = refresh_claude_oauth_token() else {
+                return Err(LlmError::AuthFailed {
+                    provider: "anthropic_oauth".to_string(),
+                });
+            };
+            let fresh_token = SecretString::from(fresh);
+            response = self
+                .send_streaming_http_request(&url, body, fresh_token.expose_secret())
+                .await?;
+            if response.status().is_success() {
+                self.update_token(fresh_token);
+                tracing::info!("Anthropic OAuth token refreshed from credential store");
+            }
+        }
+
+        let status = response.status();
+        if !status.is_success() {
+            let retry_after = crate::retry::retry_after_for_status(
+                status.as_u16(),
+                response.headers().get("retry-after"),
+            );
+            if status.as_u16() == 401 {
+                return Err(LlmError::AuthFailed {
+                    provider: "anthropic_oauth".to_string(),
+                });
+            }
+            // silent-ok: the bounded provider error body is diagnostic only;
+            // status-based classification remains authoritative if reading it fails.
+            let response_body = tokio::time::timeout(
+                Duration::from_secs(5),
+                crate::error::read_bounded_provider_error_body(response),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
+            let response_text = String::from_utf8_lossy(&response_body);
+            return Err(crate::error::map_provider_http_error(
+                crate::error::ProviderHttpError {
+                    adapter: crate::error::ProductionModelAdapter::AnthropicOauth,
+                    model: &self.active_model_name(),
+                    status: status.as_u16(),
+                    body: response_text.as_ref(),
+                    retry_after,
+                },
+            ));
+        }
+
+        let mut events = response
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(|error| error.to_string()))
+            .eventsource();
+        let mut streamed = AnthropicStreamingResponse::default();
+        loop {
+            let next = tokio::time::timeout(self.stream_idle_timeout, events.next())
+                .await
+                .map_err(|_| LlmError::StreamInterrupted {
+                    provider: "anthropic_oauth".to_string(),
+                    reason: format!(
+                        "SSE stream was idle for {} seconds",
+                        self.stream_idle_timeout.as_secs()
+                    ),
+                })?;
+            let Some(event) = next else {
+                break;
+            };
+            let event = event.map_err(|error| LlmError::StreamInterrupted {
+                provider: "anthropic_oauth".to_string(),
+                reason: format!("Failed to read SSE stream: {error}"),
+            })?;
+            ingest_anthropic_event(&mut streamed, &event.event, &event.data, sink.as_ref()).await?;
+            if streamed.terminal {
+                break;
+            }
+        }
+        if !streamed.terminal {
+            return Err(LlmError::StreamInterrupted {
+                provider: "anthropic_oauth".to_string(),
+                reason: "stream ended before message_stop or a stop reason".to_string(),
+            });
+        }
+        streamed.finish()
+    }
+
+    async fn send_streaming_http_request(
+        &self,
+        url: &str,
+        body: &AnthropicRequest,
+        token: &str,
+    ) -> Result<reqwest::Response, LlmError> {
+        tokio::time::timeout(
+            self.stream_idle_timeout,
+            self.streaming_client
+                .post(url)
+                .bearer_auth(token)
+                .header("anthropic-version", ANTHROPIC_API_VERSION)
+                .header("anthropic-beta", ANTHROPIC_OAUTH_BETA)
+                .header("Content-Type", "application/json")
+                .json(body)
+                .send(),
+        )
+        .await
+        .map_err(|_| LlmError::RequestFailed {
+            provider: "anthropic_oauth".to_string(),
+            reason: format!(
+                "timed out waiting {}s for streaming response headers",
+                self.stream_idle_timeout.as_secs()
+            ),
+        })?
+        .map_err(|e| LlmError::RequestFailed {
+            provider: "anthropic_oauth".to_string(),
+            reason: e.to_string(),
+        })
+    }
 }
 
 #[async_trait]
@@ -327,6 +473,7 @@ impl LlmProvider for AnthropicOAuthProvider {
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
         let request = AnthropicRequest {
+            stream: false,
             thinking: thinking_for_request(&model, max_tokens, req.temperature, false),
             model,
             messages,
@@ -358,6 +505,40 @@ impl LlmProvider for AnthropicOAuthProvider {
         })
     }
 
+    async fn complete_streaming(
+        &self,
+        mut req: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        let model = req
+            .take_model_override()
+            .unwrap_or_else(|| self.active_model_name());
+        self.strip_unsupported_completion_params(&mut req);
+        let (system, messages) = convert_messages(req.messages);
+        let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        let request = AnthropicRequest {
+            stream: true,
+            thinking: thinking_for_request(&model, max_tokens, req.temperature, false),
+            model,
+            messages,
+            system,
+            max_tokens,
+            temperature: req.temperature,
+            tools: None,
+            tool_choice: None,
+        };
+        let response = self.send_streaming_request(&request, sink).await?;
+        Ok(CompletionResponse {
+            content: response.content,
+            finish_reason: map_anthropic_finish_reason(response.stop_reason.as_deref(), false),
+            input_tokens: response.usage.input_tokens,
+            output_tokens: response.usage.output_tokens,
+            reasoning: response.reasoning,
+            cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
+            cache_read_input_tokens: response.usage.cache_read_input_tokens,
+        })
+    }
+
     async fn complete_with_tools(
         &self,
         mut req: ToolCompletionRequest,
@@ -368,35 +549,8 @@ impl LlmProvider for AnthropicOAuthProvider {
         self.strip_unsupported_tool_params(&mut req);
         let (system, messages) = convert_messages(req.messages);
 
-        let tools: Vec<AnthropicTool> = req
-            .tools
-            .into_iter()
-            .map(|t| AnthropicTool {
-                name: t.name,
-                description: t.description,
-                input_schema: t.parameters,
-            })
-            .collect();
-
-        // Map tool_choice from OpenAI format to Anthropic format
-        let tool_choice = req.tool_choice.map(|tc| match tc.as_str() {
-            "auto" => AnthropicToolChoice {
-                choice_type: "auto".to_string(),
-                name: None,
-            },
-            "required" => AnthropicToolChoice {
-                choice_type: "any".to_string(),
-                name: None,
-            },
-            "none" => AnthropicToolChoice {
-                choice_type: "none".to_string(),
-                name: None,
-            },
-            specific => AnthropicToolChoice {
-                choice_type: "tool".to_string(),
-                name: Some(specific.to_string()),
-            },
-        });
+        let tools = convert_anthropic_tools(req.tools);
+        let tool_choice = convert_anthropic_tool_choice(req.tool_choice);
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
         // Suppress thinking for tool-capable requests to avoid signature round-trip issues.
@@ -407,6 +561,7 @@ impl LlmProvider for AnthropicOAuthProvider {
         let opt_tools = if has_tools { Some(tools) } else { None };
 
         let request = AnthropicRequest {
+            stream: false,
             thinking: if has_tools {
                 None
             } else {
@@ -450,6 +605,53 @@ impl LlmProvider for AnthropicOAuthProvider {
         })
     }
 
+    async fn complete_with_tools_streaming(
+        &self,
+        mut req: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let model = req
+            .take_model_override()
+            .unwrap_or_else(|| self.active_model_name());
+        self.strip_unsupported_tool_params(&mut req);
+        let (system, messages) = convert_messages(req.messages);
+        let tools = convert_anthropic_tools(req.tools);
+        let tool_choice = convert_anthropic_tool_choice(req.tool_choice);
+        let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        let has_tools = !tools.is_empty();
+        let request = AnthropicRequest {
+            stream: true,
+            thinking: if has_tools {
+                None
+            } else {
+                thinking_for_request(&model, max_tokens, req.temperature, false)
+            },
+            model,
+            messages,
+            system,
+            max_tokens,
+            temperature: req.temperature,
+            tools: has_tools.then_some(tools),
+            tool_choice,
+        };
+        let response = self.send_streaming_request(&request, sink).await?;
+        let has_tool_calls = !response.tool_calls.is_empty();
+        Ok(ToolCompletionResponse {
+            content: (!response.content.is_empty()).then_some(response.content),
+            tool_calls: response.tool_calls,
+            finish_reason: map_anthropic_finish_reason(
+                response.stop_reason.as_deref(),
+                has_tool_calls,
+            ),
+            input_tokens: response.usage.input_tokens,
+            output_tokens: response.usage.output_tokens,
+            cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
+            cache_read_input_tokens: response.usage.cache_read_input_tokens,
+            reasoning: response.reasoning,
+            reasoning_details: None,
+        })
+    }
+
     fn model_name(&self) -> &str {
         &self.model
     }
@@ -483,6 +685,7 @@ impl LlmProvider for AnthropicOAuthProvider {
 
 #[derive(Debug, Serialize)]
 struct AnthropicRequest {
+    stream: bool,
     model: String,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -590,7 +793,7 @@ enum AnthropicResponseBlock {
     Other,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct AnthropicUsage {
     #[serde(default)]
     input_tokens: u32,
@@ -600,6 +803,221 @@ struct AnthropicUsage {
     cache_creation_input_tokens: u32,
     #[serde(default)]
     cache_read_input_tokens: u32,
+}
+
+#[derive(Debug, Default)]
+struct AnthropicStreamingToolCall {
+    id: String,
+    name: String,
+    input_json: String,
+}
+
+#[derive(Debug, Default)]
+struct AnthropicStreamingResponse {
+    content: String,
+    reasoning_parts: Vec<String>,
+    tool_call_parts: BTreeMap<u64, AnthropicStreamingToolCall>,
+    reasoning: Option<String>,
+    tool_calls: Vec<ToolCall>,
+    stop_reason: Option<String>,
+    usage: AnthropicUsage,
+    terminal: bool,
+}
+
+impl AnthropicStreamingResponse {
+    fn finish(mut self) -> Result<Self, LlmError> {
+        for state in self.tool_call_parts.values() {
+            if state.id.is_empty() || state.name.is_empty() {
+                return Err(LlmError::InvalidResponse {
+                    provider: "anthropic_oauth".to_string(),
+                    reason: "streamed tool_use block is missing its id or name".to_string(),
+                });
+            }
+        }
+        self.tool_calls = std::mem::take(&mut self.tool_call_parts)
+            .into_values()
+            .map(|state| {
+                let arguments = if state.input_json.is_empty() {
+                    serde_json::json!({})
+                } else {
+                    serde_json::from_str(&state.input_json).map_err(|error| {
+                        LlmError::InvalidResponse {
+                            provider: "anthropic_oauth".to_string(),
+                            reason: format!("streamed tool arguments are invalid JSON: {error}"),
+                        }
+                    })?
+                };
+                Ok(ToolCall {
+                    id: state.id,
+                    name: state.name,
+                    arguments,
+                    reasoning: None,
+                    signature: None,
+                    arguments_parse_error: None,
+                })
+            })
+            .collect::<Result<Vec<_>, LlmError>>()?;
+        self.reasoning = (!self.reasoning_parts.is_empty()).then(|| self.reasoning_parts.join(""));
+        Ok(self)
+    }
+}
+
+async fn ingest_anthropic_event(
+    response: &mut AnthropicStreamingResponse,
+    event_name: &str,
+    data: &str,
+    sink: &dyn CompletionStreamSink,
+) -> Result<(), LlmError> {
+    let body: serde_json::Value =
+        serde_json::from_str(data).map_err(|error| LlmError::InvalidResponse {
+            provider: "anthropic_oauth".to_string(),
+            reason: format!(
+                "stream JSON parse error: {error}. Raw: {}",
+                ironclaw_common::truncate_for_preview(data, 512)
+            ),
+        })?;
+    let event_type = body
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or(event_name);
+    match event_type {
+        "message_start" => {
+            if let Some(usage) = body.get("message").and_then(|message| message.get("usage")) {
+                update_anthropic_usage(&mut response.usage, usage);
+            }
+        }
+        "content_block_start" => {
+            let index = body
+                .get("index")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let block = body
+                .get("content_block")
+                .unwrap_or(&serde_json::Value::Null);
+            match block.get("type").and_then(|value| value.as_str()) {
+                Some("text") => {
+                    if let Some(text) = block.get("text").and_then(|value| value.as_str())
+                        && !text.is_empty()
+                    {
+                        response.content.push_str(text);
+                        sink.text_delta(text.to_string()).await;
+                    }
+                }
+                Some("tool_use") => {
+                    response.tool_call_parts.insert(
+                        index,
+                        AnthropicStreamingToolCall {
+                            id: block
+                                .get("id")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            name: block
+                                .get("name")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            input_json: String::new(),
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+        "content_block_delta" => {
+            let index = body
+                .get("index")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let delta = body.get("delta").unwrap_or(&serde_json::Value::Null);
+            match delta.get("type").and_then(|value| value.as_str()) {
+                Some("text_delta") => {
+                    if let Some(text) = delta.get("text").and_then(|value| value.as_str())
+                        && !text.is_empty()
+                    {
+                        response.content.push_str(text);
+                        sink.text_delta(text.to_string()).await;
+                    }
+                }
+                Some("thinking_delta") => {
+                    if let Some(thinking) = delta.get("thinking").and_then(|value| value.as_str()) {
+                        response.reasoning_parts.push(thinking.to_string());
+                    }
+                }
+                Some("input_json_delta") => {
+                    if let Some(partial) =
+                        delta.get("partial_json").and_then(|value| value.as_str())
+                    {
+                        response
+                            .tool_call_parts
+                            .entry(index)
+                            .or_default()
+                            .input_json
+                            .push_str(partial);
+                    }
+                }
+                _ => {}
+            }
+        }
+        "message_delta" => {
+            if let Some(stop_reason) = body
+                .get("delta")
+                .and_then(|delta| delta.get("stop_reason"))
+                .and_then(|value| value.as_str())
+            {
+                response.stop_reason = Some(stop_reason.to_string());
+                response.terminal = true;
+            }
+            if let Some(usage) = body.get("usage") {
+                update_anthropic_usage(&mut response.usage, usage);
+            }
+        }
+        "message_stop" => response.terminal = true,
+        "error" => {
+            let reason = body
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("Anthropic streaming error");
+            return Err(LlmError::RequestFailed {
+                provider: "anthropic_oauth".to_string(),
+                reason: reason.to_string(),
+            });
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn update_anthropic_usage(usage: &mut AnthropicUsage, value: &serde_json::Value) {
+    if let Some(tokens) = value.get("input_tokens").and_then(|value| value.as_u64()) {
+        usage.input_tokens = tokens.min(u32::MAX as u64) as u32;
+    }
+    if let Some(tokens) = value.get("output_tokens").and_then(|value| value.as_u64()) {
+        usage.output_tokens = tokens.min(u32::MAX as u64) as u32;
+    }
+    if let Some(tokens) = value
+        .get("cache_creation_input_tokens")
+        .and_then(|value| value.as_u64())
+    {
+        usage.cache_creation_input_tokens = tokens.min(u32::MAX as u64) as u32;
+    }
+    if let Some(tokens) = value
+        .get("cache_read_input_tokens")
+        .and_then(|value| value.as_u64())
+    {
+        usage.cache_read_input_tokens = tokens.min(u32::MAX as u64) as u32;
+    }
+}
+
+fn map_anthropic_finish_reason(reason: Option<&str>, has_tool_calls: bool) -> FinishReason {
+    match reason {
+        Some("end_turn" | "stop_sequence" | "stop") => FinishReason::Stop,
+        Some("max_tokens") => FinishReason::Length,
+        Some("tool_use") => FinishReason::ToolUse,
+        _ if has_tool_calls => FinishReason::ToolUse,
+        _ => FinishReason::Unknown,
+    }
 }
 
 /// Build Anthropic `image` content blocks from a user message's multimodal
@@ -623,6 +1041,38 @@ fn user_image_blocks(parts: &[ContentPart]) -> Vec<AnthropicContentBlock> {
             ContentPart::Text { .. } => None,
         })
         .collect()
+}
+
+fn convert_anthropic_tools(tools: Vec<ToolDefinition>) -> Vec<AnthropicTool> {
+    tools
+        .into_iter()
+        .map(|tool| AnthropicTool {
+            name: tool.name,
+            description: tool.description,
+            input_schema: tool.parameters,
+        })
+        .collect()
+}
+
+fn convert_anthropic_tool_choice(choice: Option<String>) -> Option<AnthropicToolChoice> {
+    choice.map(|choice| match choice.as_str() {
+        "auto" => AnthropicToolChoice {
+            choice_type: "auto".to_string(),
+            name: None,
+        },
+        "required" => AnthropicToolChoice {
+            choice_type: "any".to_string(),
+            name: None,
+        },
+        "none" => AnthropicToolChoice {
+            choice_type: "none".to_string(),
+            name: None,
+        },
+        specific => AnthropicToolChoice {
+            choice_type: "tool".to_string(),
+            name: Some(specific.to_string()),
+        },
+    })
 }
 
 /// Convert ChatMessage list to Anthropic format.
@@ -800,6 +1250,133 @@ fn extract_response_content(response: &AnthropicResponse) -> ExtractedAnthropicR
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct RecordingSink(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait]
+    impl CompletionStreamSink for RecordingSink {
+        async fn text_delta(&self, delta: String) {
+            self.0
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(delta);
+        }
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_emits_text_and_preserves_terminal_tools_and_usage() {
+        let sink = RecordingSink::default();
+        let mut response = AnthropicStreamingResponse::default();
+        ingest_anthropic_event(
+            &mut response,
+            "message_start",
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":11,"cache_read_input_tokens":3}}}"#,
+            &sink,
+        )
+        .await
+        .expect("message start");
+        ingest_anthropic_event(
+            &mut response,
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello "}}"#,
+            &sink,
+        )
+        .await
+        .expect("text delta");
+        assert_eq!(
+            sink.0
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_slice(),
+            ["hello "]
+        );
+        assert!(!response.terminal, "text must arrive before completion");
+        ingest_anthropic_event(
+            &mut response,
+            "content_block_start",
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call-1","name":"weather","input":{}}}"#,
+            &sink,
+        )
+        .await
+        .expect("tool start");
+        for partial_json in ["{\"city\":\"", "Istanbul\"}"] {
+            ingest_anthropic_event(
+                &mut response,
+                "content_block_delta",
+                &format!(
+                    r#"{{"type":"content_block_delta","index":1,"delta":{{"type":"input_json_delta","partial_json":{}}}}}"#,
+                    serde_json::to_string(partial_json).expect("partial JSON string")
+                ),
+                &sink,
+            )
+            .await
+            .expect("tool delta");
+        }
+        ingest_anthropic_event(
+            &mut response,
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":7}}"#,
+            &sink,
+        )
+        .await
+        .expect("terminal delta");
+        let response = response.finish().expect("complete stream");
+        assert_eq!(response.content, "hello ");
+        assert_eq!(response.stop_reason.as_deref(), Some("tool_use"));
+        assert_eq!(response.usage.input_tokens, 11);
+        assert_eq!(response.usage.output_tokens, 7);
+        assert_eq!(response.usage.cache_read_input_tokens, 3);
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "weather");
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            serde_json::json!({"city":"Istanbul"})
+        );
+    }
+
+    #[test]
+    fn anthropic_stream_rejects_tool_state_missing_id_or_name() {
+        for (id, name) in [("", "weather"), ("call-1", "")] {
+            let mut response = AnthropicStreamingResponse::default();
+            response.tool_call_parts.insert(
+                0,
+                AnthropicStreamingToolCall {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    input_json: "{}".to_string(),
+                },
+            );
+
+            assert!(matches!(
+                response.finish(),
+                Err(LlmError::InvalidResponse { provider, reason })
+                    if provider == "anthropic_oauth"
+                        && reason == "streamed tool_use block is missing its id or name"
+            ));
+        }
+    }
+
+    #[test]
+    fn anthropic_stream_rejects_malformed_accumulated_tool_arguments() {
+        let mut response = AnthropicStreamingResponse::default();
+        response.tool_call_parts.insert(
+            0,
+            AnthropicStreamingToolCall {
+                id: "call-1".to_string(),
+                name: "weather".to_string(),
+                input_json: r#"{"city":"Istanbul""#.to_string(),
+            },
+        );
+
+        match response.finish() {
+            Err(LlmError::InvalidResponse { provider, reason }) => {
+                assert_eq!(provider, "anthropic_oauth");
+                assert!(reason.starts_with("streamed tool arguments are invalid JSON: "));
+            }
+            other => panic!("expected invalid streamed tool arguments, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn complete_preserves_missing_retry_after_on_headerless_502() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -851,6 +1428,73 @@ mod tests {
                 retry_after: None,
             } if provider == "anthropic_oauth"
         ));
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_rejects_eof_without_terminal_event() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let base_url = format!(
+            "http://{}",
+            listener.local_addr().expect("loopback address")
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = vec![0_u8; 4096];
+            let _ = socket.read(&mut request).await.expect("read request");
+            let body = concat!(
+                "event: message_start\n",
+                "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n",
+                "event: content_block_delta\n",
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                 content-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write streaming response");
+        });
+
+        let mut config = RegistryProviderConfig::generic(
+            crate::registry::ProviderProtocol::Anthropic,
+            "anthropic_oauth",
+            None,
+            base_url,
+            "claude-test",
+        );
+        config.oauth_token = Some(SecretString::from("test-token".to_string()));
+        let provider = AnthropicOAuthProvider::new(&config).expect("provider");
+        let sink = Arc::new(RecordingSink::default());
+        let error = provider
+            .complete_streaming(
+                CompletionRequest::new(vec![ChatMessage::user("hello")]),
+                sink.clone(),
+            )
+            .await
+            .expect_err("unterminated stream must fail");
+        server.await.expect("loopback server");
+
+        assert!(matches!(
+            error,
+            LlmError::StreamInterrupted { provider, reason }
+                if provider == "anthropic_oauth"
+                    && reason == "stream ended before message_stop or a stop reason"
+        ));
+        assert_eq!(
+            sink.0
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_slice(),
+            ["partial"]
+        );
     }
 
     #[test]

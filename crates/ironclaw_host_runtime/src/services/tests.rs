@@ -12,7 +12,9 @@ use ironclaw_capabilities::{
     CapabilityObligationFailureKind, CapabilityObligationHandler, CapabilityObligationPhase,
     CapabilityObligationRequest,
 };
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_extension_registry::{
+    ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+};
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{
     action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
@@ -58,10 +60,10 @@ use super::{
     RuntimeAdapterResult, RuntimeLaneExecutor, RuntimeLaneRequest, RuntimeProfile, SecretMode,
     ServiceResolvedRuntimeAdapter,
 };
-#[cfg(unix)]
-use crate::CommandExecutionRequest;
 use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 use crate::{HostRuntimeCredentialMaterial, HostRuntimeHttpEgressRequest};
+#[cfg(unix)]
+use ironclaw_host_api::process::CommandExecutionRequest;
 
 mod extension_tool_binder;
 mod first_party_runtime_adapter;
@@ -679,7 +681,7 @@ async fn scrubbed_runtime_policy_resets_managed_local_process_port_after_inherit
 
 #[tokio::test]
 async fn host_runtime_services_with_security_audit_sink_records_leak_block() {
-    use ironclaw_events::{InMemorySecurityAuditSink, SecurityBoundary, SecurityDecision};
+    use ironclaw_event_log::{InMemorySecurityAuditSink, SecurityBoundary, SecurityDecision};
 
     let security_sink = Arc::new(InMemorySecurityAuditSink::new());
     let services = test_services().with_security_audit_sink(Arc::clone(&security_sink));
@@ -1702,11 +1704,11 @@ async fn registered_runtime_health_returns_empty_when_all_required_available() {
     );
 }
 
-fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
-    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+fn capability_provider_contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
+    let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
     contracts
         .register(std::sync::Arc::new(
-            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+            ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                 .expect("capability provider contract"),
         ))
         .expect("register capability provider contract");

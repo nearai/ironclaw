@@ -13,9 +13,10 @@ A type is admitted iff all four hold (the contracts-family test, §6.1):
 3. two or more consumers need it without importing an owner;
 4. it carries no execution, persistence, policy engine, or workflow.
 
-Today that is seventeen modules (WS1.4 corrected the stale "thirteen" carried
-over from WS1.3 to sixteen; WS1.5's `verified_inbound` makes seventeen — the
-number is checked against `src/lib.rs`, not incremented by hand):
+Today that is eighteen modules (WS1.4 corrected the stale "thirteen" carried
+over from WS1.3 to sixteen; WS1.5's `verified_inbound` made seventeen; WS5's
+`product_adapter_section` makes eighteen — the number is checked against
+`src/lib.rs`, not incremented by hand):
 
 | Module | Owns |
 | --- | --- |
@@ -25,11 +26,12 @@ number is checked against `src/lib.rs`, not incremented by hand):
 | `channel_identity` | The channel-identity hooks a host runs around binding: `ChannelConnectionScopeSource`, `ChannelIdentityPostBind(Factory)`, `ChannelIdentityOverride`. |
 | `egress` | Channel egress transport vocabulary: `ProtocolHttpEgress`, the `Egress*` request/response types, `DeliveryStatus`/`OutboundDeliverySink`, `DeclaredEgressHost`/`Target` — arrived with WS1.4. |
 | `extension` | `Extension`, `ExtensionContract`, `ExtensionRuntimeIdentity`, `ExtensionInstanceId`, `ExtensionHostAssemblyConfig`. |
-| `external` | Vendor-side refs the adapter cone names: `ExternalActorRef`, `ExternalConversationRef`, `ExternalEventId`, `ProductAttachmentDescriptor`/`Kind` — arrived with WS1.4. |
+| `external` | Vendor-side refs the adapter cone names: `ExternalActorRef`, `ExternalActorBindingEpoch`, `ExternalConversationRef`, `ExternalEventId`, `ProductAttachmentDescriptor`/`Kind` — arrived with WS1.4; `ExternalActorBindingEpoch` joined with WS2.5's binding-epoch move. |
 | `hosted_mcp` | Untrusted registration input for user-registered hosted MCP servers: `RegisterHostedMcpRequest`, `HostedMcpEndpoint`, `HostedMcpAuthSelection`, `McpAuthChallenge`, and the auth-metadata extraction helper. |
 | `lifecycle_id` | The bounded package-identity newtypes both tiers need: `LifecyclePackageId` (which `hosted_mcp` names structurally) and `LifecycleBlockerRef`. |
 | `memory` | The `[memory]` manifest surface: `MemoryDescriptor`, `MemoryLifecycleHook`. |
 | `preference_target` | `PreferenceTargetCodec` + `PreferenceTargetEncodeRequest` — the one vendor-implemented port here. |
+| `product_adapter_section` | The `[product_adapter.*]` manifest surface: `PRODUCT_ADAPTER_HOST_API_ID`/`PRODUCT_ADAPTER_SECTION_PREFIX`, `ProductAdapterSectionDeclaration` (the `Deserialize` wire shape), `ProductAdapterSection` (resolved + validated), `HostIngressRoute`, `ProductAdapterSectionError`. Arrived with WS5 from `ironclaw_assistant::adapter_registry`. Same split as `channel`: the schema and its cross-field invariants are here; the *manifest parsing* — the `HostApiManifestContract`, the raw-TOML inline-secret guard, and pairing a resolved section with its `ManifestSectionPath` — is `ironclaw_extension_registry::host_api::product_adapter` (§6.8.1), because this crate parses no manifests. |
 | `recipe` | The auth recipe schema: `VendorAuthRecipe`, `OAuth2CodeRecipe`, `PkceMode`, ingress-verification recipes, and friends. |
 | `state` | The installation state machine: `InstallationState`, `LifecyclePublicState`. |
 | `surface` | `CapabilitySurfaceKind` — the manifest surface kinds an extension may declare. |
@@ -39,7 +41,7 @@ number is checked against `src/lib.rs`, not incremented by hand):
 
 ## What must never be here
 
-The registry or installation stores (`ironclaw_extensions`); lifecycle
+The registry or installation stores (`ironclaw_extension_registry`); lifecycle
 execution, binding orchestration, or ingress routing
 (`ironclaw_extension_host`); product workflow; WASM/MCP mechanics; vendor names
 (the specificity scanner polices this crate like any other); any implementation
@@ -82,7 +84,7 @@ failures.
 ## Admission tests
 
 Three architecture tests hold the line, all runnable with
-`cargo test -p ironclaw_architecture`:
+`cargo test -p ironclaw_architecture_tests`:
 
 - `reborn_dependency_boundaries.rs` — the §11.2.3 internal-dependency allowlist
   (`ironclaw_host_api` only, an allowlist so a future edge cannot slip past a
@@ -114,7 +116,7 @@ names its UI projections explicitly), and the one type `hosted_mcp` structurally
 needs — `LifecyclePackageId` — stayed on this side in the new `lifecycle_id`
 module, with `package_lifecycle` importing it from below. The alternative,
 dragging `hosted_mcp` up into `product_contracts` with the projections, would
-have handed `ironclaw_mcp`, `ironclaw_extensions`, and `ironclaw_auth` a
+have handed `ironclaw_mcp`, `ironclaw_extension_registry`, and `ironclaw_auth` a
 product-tier edge — exactly what §6.1.2 exists to prevent.
 
 ## Resolved placements (WS1.4)

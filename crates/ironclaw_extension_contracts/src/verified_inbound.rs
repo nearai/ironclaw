@@ -28,7 +28,7 @@
 //! without either crate handing out an unguarded constructor.
 //!
 //! Before WS1.5 this family sat in `ironclaw_host_api` behind a `host-auth-mint`
-//! cargo feature and was reached through two `ironclaw_product` re-export paths.
+//! cargo feature and was reached through two `ironclaw_assistant` re-export paths.
 //! The feature sealed nothing — cargo unifies features across a build, so one
 //! consumer's opt-in compiled the family open workspace-wide. See
 //! `crates/ironclaw_host_api/src/product_adapter/auth.rs` for the measurement.

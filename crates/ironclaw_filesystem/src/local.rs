@@ -1000,7 +1000,7 @@ mod tests {
     /// boundary `mount_local_per_leaf` exists to eliminate). Today every
     /// legitimate grant against such a mount always resolves to a
     /// leaf-prefixed target (`sandbox_user_workspace_mount_view` in
-    /// `ironclaw_reborn_composition`), but that is an invariant enforced one
+    /// `ironclaw_composition`), but that is an invariant enforced one
     /// layer up, not by this crate — so a bare-root request must fail closed
     /// here rather than silently fall back to the full shared parent.
     #[tokio::test]

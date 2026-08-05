@@ -14,7 +14,7 @@
 
 use std::collections::BTreeSet;
 
-use ironclaw_extensions::{ExtensionInstallation, InstallationOwner};
+use ironclaw_extension_registry::{ExtensionInstallation, InstallationOwner};
 use ironclaw_host_api::ids::UserId;
 use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::package_lifecycle::LifecycleInstallScope;
@@ -134,7 +134,7 @@ pub fn install_scope_for_owner(owner: &InstallationOwner) -> LifecycleInstallSco
 mod tests {
     use super::*;
     use chrono::Utc;
-    use ironclaw_extensions::{ExtensionInstallationId, ExtensionManifestRef};
+    use ironclaw_extension_registry::{ExtensionInstallationId, ExtensionManifestRef};
     use ironclaw_host_api::ids::ExtensionId;
 
     fn user(id: &str) -> UserId {

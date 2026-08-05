@@ -13,8 +13,8 @@ async-trait = "0.1"
 # (`Timestamp = chrono::DateTime<Utc>`) via `Utc::now() + Duration::minutes(5)`.
 chrono = "0.4"
 ironclaw_authorization = { path = "../ironclaw_authorization" }
-ironclaw_events = { path = "../ironclaw_events" }
-ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_event_log = { path = "../ironclaw_event_log" }
+ironclaw_extension_registry = { path = "../ironclaw_extension_registry" }
 # Storage substrate: the host-private ReplayPayloadStore persists behind a
 # ScopedFilesystem over the shared CAS lane (mirrors run_state's Filesystem*Store).
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
@@ -44,7 +44,7 @@ ironclaw_approvals = { path = "../ironclaw_approvals", features = ["test-support
 ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test-support"] }
 # Enables the in-memory-backed process store constructors for tests only.
 ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
-ironclaw_events = { path = "../ironclaw_events" }
+ironclaw_event_log = { path = "../ironclaw_event_log" }
 # Enables the shared TestDispatcher CapabilityDispatcher double for tests only.
 ironclaw_host_api = { path = "../ironclaw_host_api", features = ["test-support"] }
 tokio = { version = "1", features = ["macros", "rt"] }

@@ -11,7 +11,7 @@ declares, exactly like tools and auth. Runtime (`wasm` / `mcp` /
 `first_party`) is implementation only and never taxonomy. The retired
 vocabulary (connectable channels, `slack_bot`, `slack_personal`, extension
 `kind` strings) is pinned at zero by
-`crates/ironclaw_architecture/tests/reborn_retired_taxonomy.rs` — if your
+`crates/ironclaw_architecture_tests/tests/reborn_retired_taxonomy.rs` — if your
 change trips that gate, you are re-introducing a deleted model.
 
 **Schema is `reborn.extension_manifest.v3`** — v2 plus explicit `[channel]`
@@ -104,7 +104,7 @@ Re-verify the module list: `grep -n 'ID,' crates/extensions/ironclaw_extension_s
    vendor wiring) — see the trait doc for the method contract. The binary
    supplies the adapter to composition through the
    `RebornHostBindings::with_channel_extension_bindings` seam
-   (`crates/ironclaw_reborn_composition/src/input.rs`, `ChannelExtensionBinding`);
+   (`crates/ironclaw_composition/src/input.rs`, `ChannelExtensionBinding`);
    composition iterates it by `extension_id` and never names a concrete crate.
 4. Conversation/actor binding is **data, not per-channel code**: the
    `conversation_model` value + the identity resolver drive it. Contract:
@@ -145,7 +145,7 @@ Re-verify the module list: `grep -n 'ID,' crates/extensions/ironclaw_extension_s
    (`RETIRED_SLACK_USER_EXTENSION_ID`). The two `migrate_retired_*` symbols this
    skill used to name by hand no longer exist (`rg -n "migrate_retired" crates/`
    → nothing); the live pin on retired vocabulary is
-   `crates/ironclaw_architecture/tests/reborn_retired_taxonomy.rs`. These are
+   `crates/ironclaw_architecture_tests/tests/reborn_retired_taxonomy.rs`. These are
    sanctioned to name the retired vocabulary (both the retired-taxonomy and
    specificity gates carve migration code out).
 
@@ -160,9 +160,9 @@ tool surface (overview §3.1). Worked example:
 
 ## Testing surfaces
 
-- Manifest projection (v3): `crates/ironclaw_extensions/tests/manifest_v3_contract.rs`;
+- Manifest projection (v3): `crates/ironclaw_extension_registry/tests/manifest_v3_contract.rs`;
   channel ingestion through the real contract:
-  `crates/ironclaw_product/tests/adapter_registry_manifest_ingestion.rs`. Extend
+  `crates/ironclaw_assistant/tests/adapter_registry_manifest_ingestion.rs`. Extend
   these rather than adding parallel suites.
 - Adapter behavior: the exported conformance suites — channel in
   `crates/ironclaw_host_api/src/product_adapter/test_support/conformance.rs`
@@ -173,7 +173,7 @@ tool surface (overview §3.1). Worked example:
   fixture (`tests/fixtures/extensions/acme-messenger/`). Real extensions add one
   end-to-end integration proof each (`tests/integration/`).
 - Frontend: `pnpm --dir crates/ironclaw_webui/frontend test`.
-- Always finish with `cargo test -p ironclaw_architecture` — the specificity,
+- Always finish with `cargo test -p ironclaw_architecture_tests` — the specificity,
   dependency-direction, and retired-taxonomy gates are the machine reviewers.
   Generic code naming your extension trips
   `reborn_extension_specificity.rs`: put the name in the package/CLI, not

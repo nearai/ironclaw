@@ -30,8 +30,7 @@ use axum::response::{IntoResponse, Response};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::SinkExt;
 use futures::stream::Stream;
-use ironclaw_attachments::{AttachmentCapabilities, attachment_capabilities};
-use ironclaw_product::{
+use ironclaw_assistant::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_VIEW, ADMIN_USER_CREATE_COMMAND,
     ADMIN_USER_DELETE_CAPABILITY, ADMIN_USER_DELETE_SECRET_COMMAND,
     ADMIN_USER_PUT_SECRET_CAPABILITY, ADMIN_USER_SECRETS_VIEW, ADMIN_USER_SET_ROLE_CAPABILITY,
@@ -63,6 +62,7 @@ use ironclaw_product::{
     TRACE_ACCOUNT_LOGIN_LINK_COMMAND, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
     TRACE_HOLD_AUTHORIZE_COMMAND,
 };
+use ironclaw_attachments::{AttachmentCapabilities, attachment_capabilities};
 use ironclaw_product_contracts::admin_users::{
     RebornAdminCreateUserRequest, RebornAdminDeleteSecretProductRequest,
     RebornAdminPutSecretProductRequest, RebornAdminPutSecretRequest,
@@ -166,9 +166,9 @@ pub struct WebUiV2SessionResponse {
     pub tenant_id: String,
     pub user_id: String,
     pub capabilities: WebUiV2Capabilities,
-    /// Deployment-wide feature gates the browser uses to show/hide
-    /// not-yet-finished surfaces. Distinct from `capabilities`, which are
-    /// per-token authorization flags.
+    /// Effective feature gates the browser uses to show/hide or constrain
+    /// surfaces. Distinct from `capabilities`, which are per-token
+    /// authorization flags.
     pub features: WebUiV2Features,
     /// Inline-attachment contract (allowed `accept` tokens + size budgets)
     /// the browser advertises on its file picker. Generated from the shared
@@ -177,10 +177,11 @@ pub struct WebUiV2SessionResponse {
     pub attachments: AttachmentCapabilities,
 }
 
-/// Deployment-wide WebUI feature gates surfaced to the browser on
-/// `GET /session`. These are global "is this surface ready to show"
-/// toggles, not per-caller authorization — keep authorization in
-/// [`WebUiV2Capabilities`].
+/// Effective WebUI feature gates surfaced to the browser on `GET /session`.
+/// Most are deployment-level "is this surface ready to show" toggles. Keep
+/// authorization in [`WebUiV2Capabilities`]; feature values may still be
+/// derived from capabilities when they describe effective browser behavior for
+/// the authenticated bearer.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct WebUiV2Features {
     /// Reborn Projects surface (the conversations-panel entry + the
@@ -188,6 +189,11 @@ pub struct WebUiV2Features {
     /// `IRONCLAW_REBORN_PROJECTS`, while the surface is still being
     /// finished.
     pub reborn_projects: bool,
+    /// Whether the browser must hide raw workspace fallback and only show the
+    /// caller-scoped workspace projection. Hosted deployments enable this to
+    /// avoid showing artifacts from a shared `/workspace` root; local
+    /// deployments keep it disabled so single-user workspaces remain visible.
+    pub workspace_requires_scoped_projection: bool,
     /// QA-only run and full-thread artifact export surface. Hidden and
     /// unmounted unless the deployment explicitly opts in.
     pub regression_artifact_export: bool,
@@ -214,12 +220,15 @@ pub async fn get_session(
     let tenant_id = caller.tenant_id.to_string();
     let user_id = caller.user_id.to_string();
     let global_auto_approve = global_auto_approve_enabled(&state, caller).await;
+    let workspace_requires_scoped_projection =
+        workspace_scoped_projection_required(&state, &capabilities);
     Json(WebUiV2SessionResponse {
         tenant_id,
         user_id,
         capabilities,
         features: WebUiV2Features {
             reborn_projects: state.reborn_projects_enabled(),
+            workspace_requires_scoped_projection,
             regression_artifact_export: state.regression_artifact_export_enabled(),
             global_auto_approve,
         },
@@ -768,19 +777,48 @@ pub async fn list_fs_mounts(
 pub async fn browse_fs_dir(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Query(query): Query<FsBrowseQuery>,
 ) -> Result<Json<RebornFsListResponse>, WebUiV2HttpError> {
+    let requested_path = query
+        .path
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or_default();
+    let projection = workspace_projection_for(&state, &caller, &capabilities)?;
+    let (served_path, scoped_prefix) =
+        workspace_served_path(&query.mount, &requested_path, projection)?;
+    let surface = state.bind_services(caller);
+    let mount = query.mount;
     let request = RebornFsListRequest {
         mount: query.mount,
-        // Absent, empty, or whitespace-only path lists the mount root.
-        path: query
-            .path
-            .filter(|path| !path.trim().is_empty())
-            .unwrap_or_default(),
+        path: served_path,
         project_id: query.project_id,
     };
-    let surface = state.bind_services(caller);
-    let response = FS_LIST_VIEW.query_on(&surface, request, None).await?;
+    let mut response = match FS_LIST_VIEW.query_on(&surface, request, None).await {
+        // A caller's own projection ROOT exists by authorization: it is the
+        // subtree their identity keys, not a path they chose. It has no
+        // backing directory until their first write, so a fresh user opening
+        // the Workspace tab must see an empty workspace, not an error. Deeper
+        // paths under it keep reporting NotFound.
+        Err(error)
+            if error.code == ProductSurfaceErrorCode::NotFound
+                && scoped_prefix.is_some()
+                && requested_path.trim_matches('/').is_empty() =>
+        {
+            RebornFsListResponse {
+                mount,
+                path: String::new(),
+                entries: Vec::new(),
+            }
+        }
+        other => other?,
+    };
+    response.path = requested_path;
+    if let Some(prefix) = scoped_prefix {
+        for entry in response.entries.iter_mut() {
+            entry.path = strip_workspace_prefix(&prefix, &entry.path);
+        }
+    }
     Ok(Json(response))
 }
 
@@ -790,15 +828,23 @@ pub async fn browse_fs_dir(
 pub async fn stat_fs_path(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Query(query): Query<FsBrowseQuery>,
 ) -> Result<Json<RebornFsStatResponse>, WebUiV2HttpError> {
+    let requested_path = require_fs_browse_path(query.path)?;
+    let projection = workspace_projection_for(&state, &caller, &capabilities)?;
+    let (served_path, scoped_prefix) =
+        workspace_served_path(&query.mount, &requested_path, projection)?;
+    let surface = state.bind_services(caller);
     let request = RebornFsStatRequest {
         mount: query.mount,
-        path: require_fs_browse_path(query.path)?,
+        path: served_path,
         project_id: query.project_id,
     };
-    let surface = state.bind_services(caller);
-    let response = FS_STAT_VIEW.query_on(&surface, request, None).await?;
+    let mut response = FS_STAT_VIEW.query_on(&surface, request, None).await?;
+    if let Some(prefix) = scoped_prefix {
+        response.stat.path = strip_workspace_prefix(&prefix, &response.stat.path);
+    }
     Ok(Json(response))
 }
 
@@ -809,14 +855,23 @@ pub async fn stat_fs_path(
 pub async fn read_fs_file(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Query(query): Query<FsBrowseQuery>,
 ) -> Result<Response, WebUiV2HttpError> {
+    let requested_path = require_fs_browse_path(query.path)?;
+    let projection = workspace_projection_for(&state, &caller, &capabilities)?;
+    let (served_path, scoped_prefix) =
+        workspace_served_path(&query.mount, &requested_path, projection)?;
     let request = RebornFsReadRequest {
         mount: query.mount,
-        path: require_fs_browse_path(query.path)?,
+        path: served_path,
         project_id: query.project_id,
     };
-    let file = invoke_product_command(state.services(), caller, FS_READ_COMMAND, request).await?;
+    let mut file =
+        invoke_product_command(state.services(), caller, FS_READ_COMMAND, request).await?;
+    if let Some(prefix) = scoped_prefix {
+        file.path = strip_workspace_prefix(&prefix, &file.path);
+    }
     project_fs_download_response(file)
 }
 
@@ -829,6 +884,101 @@ fn require_fs_browse_path(path: Option<String>) -> Result<String, WebUiV2HttpErr
             Err(ProductSurfaceError::validation("path", ProductSurfaceValidationCode::Blank).into())
         }
     }
+}
+
+/// Effective scoped-workspace mode for one authenticated caller. The deployment
+/// gate and the operator bypass are one policy; `/session` and the `/fs/*`
+/// handlers must never compute it differently.
+fn workspace_scoped_projection_required(
+    state: &WebUiV2State,
+    capabilities: &WebUiV2Capabilities,
+) -> bool {
+    state.workspace_requires_scoped_projection() || !capabilities.operator_webui_config
+}
+
+/// Effective caller-scoped workspace projection for an authenticated `/fs/*`
+/// request. The browser must confine Workspace reads to the caller's own
+/// subtree (`tenants/{tenant}/users/{user}`) when scoped projection is
+/// required. Memory is already caller-scoped server-side; Workspace is shared
+/// by default, so this projection is what prevents one user from listing
+/// another user's workspace artifacts through the browser.
+///
+/// Returns the per-caller prefix to prepend when `Ok(Some)`; `Ok(None)` means
+/// the raw shared workspace root is served (local/operator fallback). `Err`
+/// fails closed: scoped projection is required but the caller identity cannot
+/// key a subtree, so serving the shared root would reintroduce the leak the
+/// projection exists to prevent.
+fn workspace_projection_for(
+    state: &WebUiV2State,
+    caller: &ProductSurfaceCaller,
+    capabilities: &WebUiV2Capabilities,
+) -> Result<Option<String>, WebUiV2HttpError> {
+    if !workspace_scoped_projection_required(state, capabilities) {
+        return Ok(None);
+    }
+    let tenant = caller.tenant_id.as_str();
+    let user = caller.user_id.as_str();
+    if tenant.is_empty() || user.is_empty() {
+        return Err(
+            ProductSurfaceError::validation("caller", ProductSurfaceValidationCode::Blank).into(),
+        );
+    }
+    Ok(Some(format!("tenants/{tenant}/users/{user}")))
+}
+
+/// Translate a mount-relative browser path into the path the product layer
+/// should read. For `Workspace` under scoped projection, the caller prefix is
+/// prepended so the product layer reads inside the caller's subtree; a missing
+/// subtree surfaces as a clean empty/404 rather than the shared root. Other
+/// mounts (Memory is already caller-scoped) pass through unchanged.
+///
+/// Returns the served path plus the prefix that must be stripped from any
+/// paths the product layer echoes back, so the browser keeps round-tripping
+/// mount-relative paths.
+fn workspace_served_path(
+    mount: &FsMount,
+    requested: &str,
+    projection: Option<String>,
+) -> Result<(String, Option<String>), WebUiV2HttpError> {
+    if *mount == FsMount::Workspace
+        && let Some(prefix) = projection
+    {
+        let trimmed = requested.trim_matches('/');
+        // Reject parent-directory traversal before prepending the caller prefix.
+        // A `..` segment would otherwise become `tenants/{tenant}/users/{user}/../other`,
+        // which the product layer rejects too, but defense in depth keeps the
+        // browser from ever dispatching an escape attempt to the product layer.
+        if trimmed.split('/').any(|segment| segment == "..") {
+            return Err(ProductSurfaceError::validation(
+                "path",
+                ProductSurfaceValidationCode::InvalidValue,
+            )
+            .into());
+        }
+        let served = if trimmed.is_empty() {
+            prefix.clone()
+        } else {
+            format!("{prefix}/{trimmed}")
+        };
+        return Ok((served, Some(prefix)));
+    }
+    Ok((requested.to_string(), None))
+}
+
+/// Strip a caller-scoped workspace prefix from a path the product layer echoed
+/// back, yielding the mount-relative path the browser round-trips. A path that
+/// does not carry the prefix (e.g. a NotFound response that echoes the raw
+/// request) is returned trimmed of surrounding slashes.
+fn strip_workspace_prefix(prefix: &str, path: &str) -> String {
+    let base = prefix.trim_matches('/');
+    let value = path.trim_matches('/');
+    if value.is_empty() {
+        return String::new();
+    }
+    value
+        .strip_prefix(&format!("{base}/"))
+        .map(|rest| rest.trim_start_matches('/').to_string())
+        .unwrap_or_else(|| value.to_string())
 }
 
 /// Reject a missing or blank `?path=` on the stat/download routes with a
@@ -1691,7 +1841,7 @@ pub async fn execute_command(
     Extension(caller): Extension<ProductSurfaceCaller>,
     Path(thread_id): Path<String>,
     Json(body): Json<ExecuteCommandBody>,
-) -> Result<Json<ironclaw_product::RebornExecuteProductCommandResponse>, WebUiV2HttpError> {
+) -> Result<Json<ironclaw_assistant::RebornExecuteProductCommandResponse>, WebUiV2HttpError> {
     let response = invoke_product_command(
         state.services(),
         caller,
@@ -2581,7 +2731,7 @@ async fn extension_install_succeeded(
 /// The install landed: the caller can see their membership, in any resting
 /// public state. `Uninstalled` is never a listed entry, so this rejects only a
 /// projection that somehow reports the caller as a non-member.
-fn membership_is_visible(extension: &ironclaw_product::RebornExtensionInfo) -> bool {
+fn membership_is_visible(extension: &ironclaw_assistant::RebornExtensionInfo) -> bool {
     matches!(
         extension.installation_state,
         LifecyclePublicState::Active | LifecyclePublicState::SetupNeeded
@@ -2592,7 +2742,7 @@ fn membership_is_visible(extension: &ironclaw_product::RebornExtensionInfo) -> b
 /// auth, or channel pairing). This is the expected readback when the mutation
 /// reported a blocked-auth or transient outcome: membership exists, readiness
 /// does not.
-fn membership_landed_pending_setup(extension: &ironclaw_product::RebornExtensionInfo) -> bool {
+fn membership_landed_pending_setup(extension: &ironclaw_assistant::RebornExtensionInfo) -> bool {
     extension.installation_state == LifecyclePublicState::SetupNeeded
 }
 
@@ -2600,7 +2750,7 @@ async fn ensure_extension_inventory_readback(
     services: &std::sync::Arc<dyn ProductSurface>,
     caller: ProductSurfaceCaller,
     package_ref: &LifecyclePackageRef,
-    accepts: impl Fn(&ironclaw_product::RebornExtensionInfo) -> bool,
+    accepts: impl Fn(&ironclaw_assistant::RebornExtensionInfo) -> bool,
 ) -> Result<(), ProductSurfaceError> {
     let page = query_product_page(
         services,

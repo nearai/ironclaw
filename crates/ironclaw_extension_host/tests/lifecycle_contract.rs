@@ -63,7 +63,7 @@ async fn harness_full(bindings: ExtensionBindings, fail_load: bool) -> Harness {
 
 fn record(
     extension_id: &str,
-    resolved: ironclaw_extensions::ResolvedExtensionManifest,
+    resolved: ironclaw_extension_registry::ResolvedExtensionManifest,
 ) -> InstallationRecord {
     InstallationRecord {
         extension_id: extension_id.to_string(),

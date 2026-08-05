@@ -24,13 +24,11 @@
 //! no asset materialization is required.
 
 use ironclaw_extension_contracts::memory::MemoryDescriptor;
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     ExtensionError, ExtensionInstallationError, ExtensionManifestRecord, ExtensionManifestV2,
-    ExtensionPackage, ManifestSource,
+    ExtensionPackage, ManifestSource, default_host_api_contract_registry,
 };
-use ironclaw_host_api::path::VirtualPath;
-
-use crate::extension_contracts::{default_host_api_contract_registry, default_host_port_catalog};
+use ironclaw_host_api::{host_port::default_host_port_catalog, path::VirtualPath};
 
 /// Reserved host-bundled extension id for the native memory provider.
 pub const NATIVE_MEMORY_EXTENSION_ID: &str = "ironclaw.memory";
@@ -186,7 +184,7 @@ mod tests {
         MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
         MEMORY_WRITE_CAPABILITY_ID,
     };
-    use ironclaw_extensions::{CapabilityVisibility, ExtensionRuntimeV2};
+    use ironclaw_extension_registry::{CapabilityVisibility, ExtensionRuntimeV2};
 
     /// The bundle loader is only for `[memory]`-declaring providers; a
     /// bundled manifest that lost its `[memory]` section must fail loud, not

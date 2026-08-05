@@ -7,15 +7,15 @@ operator log ring, and OS service lifecycle. PROPOSAL §6.9.2; the crate map is
 Both files are new with the WS5 operator row. Before it, this crate had
 **neither guidance nor a boundary rule** — the audit's clearest correlation was
 guidance-presence ↔ discipline, and this crate is the worked example: its
-`ironclaw_product` dependency survived every earlier sweep because nothing was
+`ironclaw_assistant` dependency survived every earlier sweep because nothing was
 watching.
 
 ## The one rule
 
 **This crate implements ports; it does not declare them, and it does not
-depend on `ironclaw_product`.**
+depend on `ironclaw_assistant`.**
 
-`ironclaw_operator` and `ironclaw_product` both sit in the `products` layer.
+`ironclaw_operator` and `ironclaw_assistant` both sit in the `products` layer.
 They are siblings. The layer matrix permits `products → products`, so the
 dependency was *legal and invisible* — which is why it needed a purpose-built
 gate rather than a matrix entry.
@@ -31,7 +31,7 @@ Every product-facing port this crate satisfies is declared in
 | `OperatorServiceLifecycleService` | `operator_service` | `operator_service_lifecycle::OperatorServiceLifecycle` |
 
 A fifth, `OperatorStatusService`, is declared in the same `operator_service`
-module and implemented by `ironclaw_reborn_composition` — readiness is the one
+module and implemented by `ironclaw_composition` — readiness is the one
 answer only the assembly root can compute.
 
 > Corrected 2026-08-02 (Wave 2 docs-truth audit): the first two rows read module

@@ -3,7 +3,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use ironclaw_product::ResolvedBinding;
+use ironclaw_assistant::ResolvedBinding;
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{

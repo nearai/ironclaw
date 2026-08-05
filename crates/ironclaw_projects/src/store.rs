@@ -8,7 +8,7 @@
 //!
 //! Layout (opaque key parts are base64url-encoded into their own segments so a
 //! delimiter-like id cannot collide with a path boundary, mirroring
-//! `ironclaw_reborn_identity`):
+//! `ironclaw_identity`):
 //!
 //! ```text
 //! /tenant-shared/reborn-projects/<tenant>/records/<project_id>.json

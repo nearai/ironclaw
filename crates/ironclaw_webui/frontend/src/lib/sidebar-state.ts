@@ -28,7 +28,16 @@ export function writeDesktopSidebarOpen(open, storage = browserStorage()) {
   }
 }
 
-export function isDesktopSidebarViewport(win = browserWindow()) {
+// Only the `matchMedia` capability is required, so tests can hand this a stub
+// and a caller can pass a `Window` that TypeScript has not widened to
+// `typeof globalThis`.
+export type ViewportQuerySource = {
+  matchMedia?: (query: string) => { matches: boolean };
+} | null | undefined;
+
+export function isDesktopSidebarViewport(
+  win: ViewportQuerySource = browserWindow(),
+) {
   try {
     return win?.matchMedia?.("(min-width: 768px)").matches === true;
   } catch (_) {

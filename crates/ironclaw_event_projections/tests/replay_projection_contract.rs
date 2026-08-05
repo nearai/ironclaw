@@ -2,6 +2,11 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_event_log::{
+    DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry, EventReplay,
+    EventStreamKey, InMemoryDurableAuditLog, InMemoryDurableEventLog, ReadScope, RuntimeEvent,
+    RuntimeEventId, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND,
+};
 use ironclaw_event_projections::{
     AuditProjectionCursor, AuditProjectionEntry, AuditProjectionError, AuditProjectionRequest,
     AuditProjectionService, CapabilityActivityStatus, EventProjectionService,
@@ -9,11 +14,7 @@ use ironclaw_event_projections::{
     ProjectionRequest, ProjectionScope, ReplayAuditProjectionService, ReplayEventProjectionService,
     RunProjectionStatus, TimelineEntryKind,
 };
-use ironclaw_events::{
-    DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry, EventReplay,
-    EventStreamKey, InMemoryDurableAuditLog, InMemoryDurableEventLog, ReadScope, RuntimeEvent,
-    RuntimeEventId, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND,
-};
+use ironclaw_event_store::FilesystemDurableEventLog;
 use ironclaw_filesystem::{
     Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
 };
@@ -31,7 +32,6 @@ use ironclaw_host_api::{
     resource::ResourceScope,
     runtime::{RuntimeKind, TrustClass},
 };
-use ironclaw_reborn_event_store::FilesystemDurableEventLog;
 
 #[test]
 fn audit_projection_stage_wire_strings_stay_compatible_with_audit_stage() {

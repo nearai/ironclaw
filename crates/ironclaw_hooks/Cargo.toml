@@ -7,8 +7,8 @@ publish = false
 [package.metadata.ironclaw]
 # PROPOSAL §6.7.4: loop-tier middleware implementing `loop_contracts` ports.
 # `loops` states what it is and legalizes `hooks -> wasm_limiter` (`runtimes`),
-# dissolving the W6 exception. Its consumers are `ironclaw_runner` (`loops`)
-# and `ironclaw_reborn_composition` (`app`); nothing below `loops` depends on it.
+# dissolving the W6 exception. Its consumers are `ironclaw_turn_runner` (`loops`)
+# and `ironclaw_composition` (`app`); nothing below `loops` depends on it.
 layer = "loops"
 description = "Reborn loop hook framework: trust-tiered points/kinds/decisions, sealed witness types, dispatcher contract."
 
@@ -25,7 +25,7 @@ description = "Reborn loop hook framework: trust-tiered points/kinds/decisions, 
 # Production builds MUST NOT enable this: the constructors would let untrusted
 # code bypass the sanitizer-only-on-trusted-path invariant. Intended exclusively
 # as a `dev-dependency` feature for hook authors writing predicate tests outside
-# `ironclaw_runner`. Named `test-support` to match every other crate's dev seam.
+# `ironclaw_turn_runner`. Named `test-support` to match every other crate's dev seam.
 test-support = []
 # Gates the heavy multi-host adversarial suite (folded in from the former
 # `ironclaw_hooks_parity` crate) so a bare `cargo test` stays fast and only the
@@ -41,7 +41,7 @@ deadpool-postgres = "0.14"
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
 futures = "0.3"
-ironclaw_events = { path = "../ironclaw_events" }
+ironclaw_event_log = { path = "../ironclaw_event_log" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_prompt_envelope = { path = "../ironclaw_prompt_envelope" }
 ironclaw_loop_contracts = { path = "../ironclaw_loop_contracts", version = "0.1.0" }

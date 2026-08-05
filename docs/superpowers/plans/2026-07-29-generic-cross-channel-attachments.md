@@ -112,14 +112,14 @@ git commit -m "feat(filesystem): add atomic subtree creation"
 - Modify: `crates/ironclaw_attachments/src/landing.rs`
 - Modify: `crates/ironclaw_attachments/src/inbound.rs`
 - Modify: `crates/ironclaw_attachments/src/lib.rs`
-- Modify: `crates/ironclaw_product/src/scoped_fs/attachment_landing.rs`
-- Modify: `crates/ironclaw_product/src/inbound_turn.rs`
-- Modify: `crates/ironclaw_product/src/inbound_turn/tests/attachments.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/factory.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/factory/tests.rs`
+- Modify: `crates/ironclaw_assistant/src/scoped_fs/attachment_landing.rs`
+- Modify: `crates/ironclaw_assistant/src/inbound_turn.rs`
+- Modify: `crates/ironclaw_assistant/src/inbound_turn/tests/attachments.rs`
+- Modify: `crates/ironclaw_composition/src/factory.rs`
+- Modify: `crates/ironclaw_composition/src/factory/tests.rs`
 - Test: `crates/ironclaw_attachments/src/inbound.rs`
-- Test: `crates/ironclaw_product/tests/inbound_turn_contract.rs`
-- Test: `crates/ironclaw_reborn_composition/src/runtime/tests/core.rs`
+- Test: `crates/ironclaw_assistant/tests/inbound_turn_contract.rs`
+- Test: `crates/ironclaw_composition/src/runtime/tests/core.rs`
 
 ### Contract
 
@@ -146,15 +146,15 @@ Validation and document extraction happen before the atomic write. A later valid
 
 ```bash
 cargo test -p ironclaw_attachments
-cargo test -p ironclaw_product inbound_turn --all-features
-cargo test -p ironclaw_reborn_composition attachment --all-features
+cargo test -p ironclaw_assistant inbound_turn --all-features
+cargo test -p ironclaw_composition attachment --all-features
 ```
 
 - [x] Run targeted clippy for the three changed crates.
 - [x] Commit:
 
 ```bash
-git add crates/ironclaw_attachments crates/ironclaw_product crates/ironclaw_reborn_composition
+git add crates/ironclaw_attachments crates/ironclaw_assistant crates/ironclaw_composition
 git commit -m "fix(attachments): land inbound batches atomically"
 ```
 
@@ -231,10 +231,10 @@ git commit -m "feat(outbound): persist reply attachment intents"
 - Modify: `crates/ironclaw_host_runtime/src/first_party_tools/schemas.rs`
 - Modify: `crates/ironclaw_host_runtime/src/lib.rs`
 - Modify: `crates/ironclaw_host_runtime/Cargo.toml`
-- Modify: `crates/ironclaw_reborn_composition/src/factory.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/runtime.rs`
+- Modify: `crates/ironclaw_composition/src/factory.rs`
+- Modify: `crates/ironclaw_composition/src/runtime.rs`
 - Test: `crates/ironclaw_host_runtime/src/services/tests/first_party_runtime_adapter.rs`
-- Test: `crates/ironclaw_reborn_composition/src/runtime/tests/outbound_delivery.rs`
+- Test: `crates/ironclaw_composition/src/runtime/tests/outbound_delivery.rs`
 
 ### Contract
 
@@ -264,14 +264,14 @@ Register `builtin.attach_workspace_file_to_reply` with input:
 
 ```bash
 cargo test -p ironclaw_host_runtime reply_attachment --all-features
-cargo test -p ironclaw_reborn_composition reply_attachment --all-features
-cargo test -p ironclaw_architecture
+cargo test -p ironclaw_composition reply_attachment --all-features
+cargo test -p ironclaw_architecture_tests
 ```
 
 - [x] Run targeted clippy and commit:
 
 ```bash
-git add crates/ironclaw_host_runtime crates/ironclaw_reborn_composition
+git add crates/ironclaw_host_runtime crates/ironclaw_composition
 git commit -m "feat(runtime): add explicit reply attachment capability"
 ```
 
@@ -283,12 +283,12 @@ git commit -m "feat(runtime): add explicit reply attachment capability"
 
 - Modify: `crates/ironclaw_loop_host/src/lib.rs`
 - Modify: `crates/ironclaw_loop_host/Cargo.toml`
-- Modify: `crates/ironclaw_runner/src/loop_driver_host.rs`
-- Modify: `crates/ironclaw_runner/Cargo.toml`
-- Modify: `crates/ironclaw_reborn_composition/src/factory.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/runtime.rs`
+- Modify: `crates/ironclaw_turn_runner/src/loop_driver_host.rs`
+- Modify: `crates/ironclaw_turn_runner/Cargo.toml`
+- Modify: `crates/ironclaw_composition/src/factory.rs`
+- Modify: `crates/ironclaw_composition/src/runtime.rs`
 - Test: `crates/ironclaw_loop_host/tests/thread_loop_host_contract.rs`
-- Test: `crates/ironclaw_runner/tests/loop_driver_host.rs`
+- Test: `crates/ironclaw_turn_runner/tests/loop_driver_host.rs`
 
 ### Contract
 
@@ -309,19 +309,19 @@ Drafts remain text-only. Idempotent finalization compares text and attachment re
 - [x] Convert `ThreadScope` plus the canonical run ID to the outbound store key without re-deriving identity from display strings or transport metadata.
 - [x] Seal immediately before final append; preserve the sealed record for idempotent retries.
 - [x] Compare complete `MessageContent`, not only `content.as_deref()`, when recovering an already-finalized message.
-- [x] Wire the shared port through `ironclaw_runner` and production composition.
+- [x] Wire the shared port through `ironclaw_turn_runner` and production composition.
 - [x] Run:
 
 ```bash
 cargo test -p ironclaw_loop_host finalized_assistant --all-features
-cargo test -p ironclaw_runner reborn_driver --all-features
-cargo test -p ironclaw_architecture
+cargo test -p ironclaw_turn_runner reborn_driver --all-features
+cargo test -p ironclaw_architecture_tests
 ```
 
 - [x] Run targeted clippy and commit:
 
 ```bash
-git add crates/ironclaw_loop_host crates/ironclaw_runner crates/ironclaw_reborn_composition
+git add crates/ironclaw_loop_host crates/ironclaw_turn_runner crates/ironclaw_composition
 git commit -m "feat(loop): finalize replies with attachment refs"
 ```
 
@@ -331,11 +331,11 @@ git commit -m "feat(loop): finalize replies with attachment refs"
 
 **Files:**
 
-- Modify: `crates/ironclaw_product/src/run_delivery/observer.rs`
-- Modify: `crates/ironclaw_product/src/delivery_coordinator.rs`
-- Modify: `crates/ironclaw_product/src/outbound_delivery.rs`
-- Modify: `crates/ironclaw_product/tests/run_delivery_contract.rs`
-- Modify: `crates/ironclaw_product/tests/outbound_delivery_contract.rs`
+- Modify: `crates/ironclaw_assistant/src/run_delivery/observer.rs`
+- Modify: `crates/ironclaw_assistant/src/delivery_coordinator.rs`
+- Modify: `crates/ironclaw_assistant/src/outbound_delivery.rs`
+- Modify: `crates/ironclaw_assistant/tests/run_delivery_contract.rs`
+- Modify: `crates/ironclaw_assistant/tests/outbound_delivery_contract.rs`
 - Modify: `crates/ironclaw_webui/frontend/src/pages/chat/components/message-bubble.tsx`
 - Modify: `crates/ironclaw_webui/frontend/src/pages/chat/components/project-file-chips.tsx`
 - Modify: `crates/ironclaw_webui/frontend/src/pages/chat/components/message-bubble.test.ts`
@@ -353,7 +353,7 @@ WebUI renders attachment chips from message attachment refs. Legacy text-path pa
 
 - [x] Add red delivery tests proving a finalized attachment ref produces a file part and prose-only `/workspace/report.csv` does not.
 - [x] Add tests for ref ordering, missing files, oversized files, aggregate limit, MIME preservation, filename sanitization, and caller-supplied bytes rejection.
-- [x] Run `cargo test -p ironclaw_product delivery_attachment --all-features` and confirm current prose scanning violates the negative test.
+- [x] Run `cargo test -p ironclaw_assistant delivery_attachment --all-features` and confirm current prose scanning violates the negative test.
 - [x] Change the observer to load the final message record and pass its attachment refs into the coordinator.
 - [x] Replace `extract_workspace_attachment_paths` in materialization with ref-driven scoped reads.
 - [x] Keep bytes transient inside a single delivery attempt; persist only semantic refs and provider evidence.
@@ -363,7 +363,7 @@ WebUI renders attachment chips from message attachment refs. Legacy text-path pa
 - [x] Run:
 
 ```bash
-cargo test -p ironclaw_product delivery --all-features
+cargo test -p ironclaw_assistant delivery --all-features
 cd crates/ironclaw_webui/frontend && npm test -- --run
 cargo test -p ironclaw_webui static_assets --all-features
 ```
@@ -372,7 +372,7 @@ cargo test -p ironclaw_webui static_assets --all-features
 - [x] Commit:
 
 ```bash
-git add crates/ironclaw_product crates/ironclaw_webui
+git add crates/ironclaw_assistant crates/ironclaw_webui
 git commit -m "feat(product): deliver finalized attachment refs"
 ```
 
@@ -388,7 +388,7 @@ git commit -m "feat(product): deliver finalized attachment refs"
 - Modify: `crates/ironclaw_slack_extension/Cargo.toml`
 - Modify: `crates/ironclaw_slack_extension/tests/channel_conformance.rs`
 - Modify: `crates/ironclaw_first_party_extensions/assets/slack/manifest.toml`
-- Modify: `crates/ironclaw_reborn_composition/tests/first_party_manifest_v3_parity.rs`
+- Modify: `crates/ironclaw_composition/tests/first_party_manifest_v3_parity.rs`
 - Modify: `docs/channels/slack.mdx`
 - Modify: `docs/reborn/setup-slack-for-reborn-binary.md`
 
@@ -415,13 +415,13 @@ The parser stores only stable Slack file IDs plus safe descriptor metadata. `Sla
 
 ```bash
 cargo test -p ironclaw_slack_extension --all-features
-cargo test -p ironclaw_reborn_composition slack --all-features
+cargo test -p ironclaw_composition slack --all-features
 ```
 
 - [x] Run targeted clippy and commit:
 
 ```bash
-git add crates/ironclaw_slack_extension crates/ironclaw_first_party_extensions crates/ironclaw_reborn_composition/tests/first_party_manifest_v3_parity.rs docs/channels/slack.mdx docs/reborn/setup-slack-for-reborn-binary.md
+git add crates/ironclaw_slack_extension crates/ironclaw_first_party_extensions crates/ironclaw_composition/tests/first_party_manifest_v3_parity.rs docs/channels/slack.mdx docs/reborn/setup-slack-for-reborn-binary.md
 git commit -m "feat(slack): fetch inbound attachments"
 ```
 
@@ -435,7 +435,7 @@ git commit -m "feat(slack): fetch inbound attachments"
 - Modify: `crates/ironclaw_slack_extension/src/delivery.rs`
 - Modify: `crates/ironclaw_slack_extension/tests/channel_conformance.rs`
 - Modify: `crates/ironclaw_first_party_extensions/assets/slack/manifest.toml`
-- Modify: `crates/ironclaw_reborn_composition/tests/first_party_manifest_v3_parity.rs`
+- Modify: `crates/ironclaw_composition/tests/first_party_manifest_v3_parity.rs`
 - Modify: `docs/channels/slack.mdx`
 - Modify: `docs/reborn/setup-slack-for-reborn-binary.md`
 
@@ -463,13 +463,13 @@ An attempt is successful only when text and every file have authoritative provid
 
 ```bash
 cargo test -p ironclaw_slack_extension --all-features
-cargo test -p ironclaw_product outbound_delivery --all-features
+cargo test -p ironclaw_assistant outbound_delivery --all-features
 ```
 
 - [x] Run targeted clippy and commit:
 
 ```bash
-git add crates/ironclaw_slack_extension crates/ironclaw_first_party_extensions crates/ironclaw_reborn_composition/tests/first_party_manifest_v3_parity.rs docs/channels/slack.mdx docs/reborn/setup-slack-for-reborn-binary.md
+git add crates/ironclaw_slack_extension crates/ironclaw_first_party_extensions crates/ironclaw_composition/tests/first_party_manifest_v3_parity.rs docs/channels/slack.mdx docs/reborn/setup-slack-for-reborn-binary.md
 git commit -m "feat(slack): upload outbound attachments"
 ```
 
@@ -480,11 +480,11 @@ git commit -m "feat(slack): upload outbound attachments"
 **Files:**
 
 - Modify: `crates/ironclaw_telegram_extension/tests/channel_conformance.rs`
-- Modify: `crates/ironclaw_product/tests/inbound_turn_contract.rs`
-- Modify: `crates/ironclaw_product/tests/run_delivery_contract.rs`
+- Modify: `crates/ironclaw_assistant/tests/inbound_turn_contract.rs`
+- Modify: `crates/ironclaw_assistant/tests/run_delivery_contract.rs`
 - Modify: `crates/ironclaw_webui/tests/webui_v2_handlers_contract.rs`
 - Modify: `crates/ironclaw_webui/tests/session_round_trip.rs`
-- Modify: `crates/ironclaw_reborn_composition/tests/product_live_adapters.rs`
+- Modify: `crates/ironclaw_composition/tests/product_live_adapters.rs`
 
 ### Scenarios
 
@@ -513,15 +513,15 @@ Run the same fixture matrix for WebUI, Telegram, and Slack:
 cargo test -p ironclaw_telegram_extension --all-features
 cargo test -p ironclaw_slack_extension --all-features
 cargo test -p ironclaw_webui attachment --all-features
-cargo test -p ironclaw_reborn_composition --test product_live_adapters --all-features
+cargo test -p ironclaw_composition --test product_live_adapters --all-features
 ```
 
-- [x] Run `cargo test -p ironclaw_architecture`.
+- [x] Run `cargo test -p ironclaw_architecture_tests`.
 - [x] Run clippy for every changed Rust package and frontend tests/typecheck.
 - [x] Commit:
 
 ```bash
-git add crates/ironclaw_telegram_extension crates/ironclaw_product crates/ironclaw_webui crates/ironclaw_reborn_composition
+git add crates/ironclaw_telegram_extension crates/ironclaw_assistant crates/ironclaw_webui crates/ironclaw_composition
 git commit -m "test(attachments): cover cross-channel end to end flow"
 ```
 
@@ -573,8 +573,8 @@ also passed:
 ```bash
 cargo test -p ironclaw_slack_extension --all-features
 cargo clippy -p ironclaw_slack_extension --all-targets --all-features -- -D warnings
-cargo test -p ironclaw_product --test outbound_delivery_contract --all-features
-cargo test -p ironclaw_architecture
+cargo test -p ironclaw_assistant --test outbound_delivery_contract --all-features
+cargo test -p ironclaw_architecture_tests
 cargo fmt --all --check
 git diff --check
 ```

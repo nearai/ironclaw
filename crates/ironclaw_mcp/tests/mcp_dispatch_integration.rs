@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage,
     HostApiContractRegistry, ManifestSource,
 };
@@ -29,7 +29,10 @@ async fn mcp_lane_executes_manifest_transport_and_reconciles_resources() {
     let (governor, account) = mcp_governor();
 
     let result = runtime
-        .execute_extension_json(&governor, mcp_request(json!({"query":"ironclaw"})))
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            mcp_request(json!({"query":"ironclaw"})),
+        )
         .await
         .unwrap();
 
@@ -61,7 +64,10 @@ async fn mcp_lane_client_failure_releases_reservation() {
     let (governor, account) = mcp_governor();
 
     let err = runtime
-        .execute_extension_json(&governor, mcp_request(json!({"query":"fail"})))
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            mcp_request(json!({"query":"fail"})),
+        )
         .await
         .unwrap_err();
 
@@ -79,7 +85,10 @@ async fn mcp_lane_invalid_tool_catalog_remains_typed_and_releases_reservation() 
     let (governor, account) = mcp_governor();
 
     let error = runtime
-        .execute_extension_json(&governor, mcp_request(json!({"query":"fail"})))
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            mcp_request(json!({"query":"fail"})),
+        )
         .await
         .unwrap_err();
 
@@ -96,7 +105,7 @@ async fn mcp_lane_auth_failure_returns_manifest_credential_context_and_releases_
 
     let err = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             mcp_request_from_manifest(MCP_PRODUCT_AUTH_MANIFEST, json!({"query":"auth"})),
         )
         .await
@@ -144,7 +153,10 @@ async fn mcp_lane_output_limit_releases_reservation() {
     let (governor, account) = mcp_governor();
 
     let err = runtime
-        .execute_extension_json(&governor, mcp_request(json!({"query":"large"})))
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            mcp_request(json!({"query":"large"})),
+        )
         .await
         .unwrap_err();
 
@@ -238,7 +250,9 @@ fn mcp_request_from_manifest(
     let package = Box::leak(Box::new(package_from_manifest(manifest)));
     let capability_id = Box::leak(Box::new(CapabilityId::new("github-mcp.search").unwrap()));
     McpExecutionRequest {
-        package,
+        extension: &package.id,
+        capabilities: &package.capabilities,
+        runtime: &package.manifest.runtime,
         capability_id,
         scope: sample_scope(),
         estimate: ResourceEstimate::default()

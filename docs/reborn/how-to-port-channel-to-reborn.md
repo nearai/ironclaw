@@ -38,7 +38,7 @@ Native host checklist:
 
 - [ ] route policy, body limits, rate limits, origin checks, and auth are explicit;
 - [ ] handler uses `ProductSurfaceCaller` and `BoundProductSurface`;
-- [ ] product DTOs/descriptors live in `ironclaw_product`;
+- [ ] product DTOs/descriptors live in `ironclaw_assistant`;
 - [ ] frontend code lives under `crates/ironclaw_webui/frontend`;
 - [ ] caller-level route tests cover success, denial, scope, and failure paths;
 - [ ] whole-path integration coverage is added when behavior crosses turns,
@@ -91,11 +91,11 @@ Start with the owning crate's guidance and the nearest existing caller test:
 
 ```bash
 bash scripts/codebase-graph.sh status
-rg -n "ProductSurface|ProductView|ProductSurfaceCommandDescriptor|ProductCapabilityDescriptor" crates/ironclaw_product crates/ironclaw_host_api crates/ironclaw_webui
+rg -n "ProductSurface|ProductView|ProductSurfaceCommandDescriptor|ProductCapabilityDescriptor" crates/ironclaw_assistant crates/ironclaw_host_api crates/ironclaw_webui
 rg -n "trait ChannelAdapter|impl ChannelAdapter" crates
-cargo test -p ironclaw_product
+cargo test -p ironclaw_assistant
 cargo test -p ironclaw_webui --all-features
-cargo test -p ironclaw_architecture
+cargo test -p ironclaw_architecture_tests
 ```
 
 Run `bash scripts/reborn-e2e-rust.sh` when the change affects a whole Reborn

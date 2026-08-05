@@ -1,6 +1,6 @@
 use axum::Json;
 use axum::extract::{Extension, Path, State};
-use ironclaw_product::{
+use ironclaw_assistant::{
     RUN_ARTIFACT_VIEW, RebornRunArtifact, RebornThreadArtifact, THREAD_ARTIFACT_VIEW,
 };
 use ironclaw_product_contracts::product_wire::{

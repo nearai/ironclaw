@@ -3,7 +3,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signer, SigningKey};
 use hmac::{Hmac, KeyInit, Mac};
-use ironclaw_extensions::{ExtensionInstallationStorePort, InstallationOwner};
+use ironclaw_extension_registry::{ExtensionInstallationStorePort, InstallationOwner};
 use ironclaw_filesystem::{
     Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
 };
@@ -959,7 +959,7 @@ async fn verified_tool_and_skill_install_through_real_managers() {
             .extension_management
             .installation_store_handle()
             .get_installation(
-                &ironclaw_extensions::ExtensionInstallationId::new("installed-tool")
+                &ironclaw_extension_registry::ExtensionInstallationId::new("installed-tool")
                     .expect("installation id")
             )
             .await
@@ -1262,7 +1262,7 @@ async fn forced_tool_replacement_failure_preserves_tenant_shared_scope() {
         .extension_management
         .installation_store_handle()
         .get_installation(
-            &ironclaw_extensions::ExtensionInstallationId::new("installed-tool")
+            &ironclaw_extension_registry::ExtensionInstallationId::new("installed-tool")
                 .expect("installation id"),
         )
         .await
@@ -1712,8 +1712,9 @@ async fn fail_forced_tool_replacement(
 
     if tenant_shared {
         let store = services.extension_management.installation_store_handle();
-        let installation_id = ironclaw_extensions::ExtensionInstallationId::new("installed-tool")
-            .expect("installation id");
+        let installation_id =
+            ironclaw_extension_registry::ExtensionInstallationId::new("installed-tool")
+                .expect("installation id");
         let installation = store
             .get_installation(&installation_id)
             .await

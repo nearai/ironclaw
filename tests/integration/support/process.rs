@@ -12,9 +12,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_host_runtime::{
-    CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, RuntimeProcessPort,
+use ironclaw_host_api::process::{
+    CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError,
 };
+use ironclaw_host_runtime::RuntimeProcessPort;
 
 /// Sticky scripted `run_command` result: once set, EVERY subsequent call
 /// returns it (after recording the command) — a retryable failure surfaces

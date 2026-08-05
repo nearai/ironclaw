@@ -307,7 +307,7 @@ pub struct SubagentThreadMetadata {
     pub handoff: Option<String>,
     /// The spawning parent's `LoopRunContext`, cached verbatim at spawn time
     /// (`finish_spawn` already has it in hand — no new store fetch). Lets
-    /// `ironclaw_runner`'s `reconstruct_edge` rebuild a lost/never-opened
+    /// `ironclaw_turn_runner`'s `reconstruct_edge` rebuild a lost/never-opened
     /// await-edge with zero live `agent_turn_runtime` lookups for the parent,
     /// avoiding the re-entrant deadlock of querying the store from inside
     /// the child's own commit-observer callback. New field on fresh threads

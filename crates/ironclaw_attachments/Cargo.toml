@@ -24,7 +24,7 @@ ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 # product surface and the WebUI bytes endpoint maps the error code straight onto
 # an HTTP status. `ironclaw_product_contracts` is the neutral product-tier
 # contract crate and sits in the `contracts` layer, so this is a downward edge
-# like `host_api` — never a dependency on `ironclaw_product` itself.
+# like `host_api` — never a dependency on `ironclaw_assistant` itself.
 ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version = "0.1.0" }
 # `ThreadScope` — the ports are scoped per canonical thread.
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }

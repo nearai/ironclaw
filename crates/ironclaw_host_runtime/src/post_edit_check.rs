@@ -42,7 +42,8 @@ use ironclaw_host_api::{
 };
 use serde_json::{Value, json};
 
-use crate::{CommandExecutionRequest, RuntimeProcessError, RuntimeProcessPort};
+use crate::RuntimeProcessPort;
+use ironclaw_host_api::process::{CommandExecutionRequest, RuntimeProcessError};
 
 /// The operator post-edit check config bundled with the process port that must
 /// run it, resolved to the deployment's process-isolation boundary.
@@ -108,7 +109,7 @@ impl PostEditCheckConfig {
     /// Resolve the config from the process environment.
     ///
     /// Module-owned factory intended to be called once from the composition
-    /// layer (see `ironclaw_reborn_composition::factory`); per-call handlers
+    /// layer (see `ironclaw_composition::factory`); per-call handlers
     /// must consume the already-resolved config instead of reading env.
     /// Returns `Ok(None)` when `IRONCLAW_POST_EDIT_CHECK` is unset or blank.
     pub fn from_env() -> Result<Option<Self>, PostEditCheckConfigError> {
@@ -389,7 +390,9 @@ mod tests {
         path::{MountAlias, VirtualPath},
     };
 
-    use crate::{CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError};
+    use ironclaw_host_api::process::{
+        CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError,
+    };
 
     fn scope(user: &str) -> ResourceScope {
         ResourceScope::local_default(UserId::new(user).unwrap(), InvocationId::new()).unwrap()

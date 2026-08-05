@@ -90,13 +90,13 @@ impl NetworkTargetPattern {
     /// host-authored `NetworkPolicy` construction — where a bare `*`
     /// legitimately means "every host", e.g.
     /// `CapabilityNetworkProfile::DevWildcard`'s local-dev shell profile
-    /// (`ironclaw_reborn_composition::builtin_capability_policy::dev_wildcard_network_policy`).
+    /// (`ironclaw_composition::builtin_capability_policy::dev_wildcard_network_policy`).
     /// The two validators diverge INTENTIONALLY on this point: do not
     /// tighten this one to match `parse_host_pattern`'s wildcard rejection —
     /// doing so breaks `DevWildcard`'s declared full-access grant. (Extension
     /// manifest credential audiences are stricter still and already reject a
     /// wildcard host at parse time — `ManifestV3Error::WildcardAudienceHost`
-    /// in `crates/ironclaw_extensions/src/v3.rs` — so they are not an example
+    /// in `crates/ironclaw_extension_registry/src/v3.rs` — so they are not an example
     /// of something this permissiveness exists for.)
     pub fn validate_declaration(&self) -> Result<(), crate::error::HostApiError> {
         validate_network_host_pattern(&self.host_pattern)?;

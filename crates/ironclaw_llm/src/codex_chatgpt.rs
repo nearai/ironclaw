@@ -22,6 +22,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 
@@ -29,8 +30,9 @@ use super::codex_auth;
 use crate::error::LlmError;
 
 use super::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmProvider,
-    Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
+    FinishReason, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    ToolDefinition,
 };
 
 /// Sanitize a tool name to match the Responses API pattern `^[a-zA-Z0-9_-]+$`.
@@ -168,6 +170,7 @@ fn build_sanitized_tool_name_map(
 /// Provider that speaks the Responses API protocol against the ChatGPT backend.
 pub(crate) struct CodexChatGptProvider {
     client: Client,
+    streaming_client: Client,
     base_url: String,
     api_key: RwLock<SecretString>,
     /// User-configured model name (or empty/"default" for auto-detect).
@@ -189,6 +192,7 @@ impl CodexChatGptProvider {
     fn new(base_url: &str, api_key: &str, model: &str) -> Self {
         Self {
             client: Client::new(),
+            streaming_client: Client::new(),
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: RwLock::new(SecretString::from(api_key.to_string())),
             configured_model: model.to_string(),
@@ -226,18 +230,22 @@ impl CodexChatGptProvider {
              Terms of Service and could break without notice."
         );
 
-        // The total request timeout is applied per-request (see
-        // `send_http_request`); the shared builder adds the connect/keepalive/
-        // pool-idle hygiene at the client level.
         let client = crate::config::hardened_client_builder(request_timeout_secs)
             .build()
             .map_err(|e| crate::LlmError::RequestFailed {
                 provider: "codex_chatgpt".to_string(),
                 reason: format!("Failed to build HTTP client: {e}"),
             })?;
+        let streaming_client = crate::config::hardened_streaming_client_builder()
+            .build()
+            .map_err(|e| crate::LlmError::RequestFailed {
+                provider: "codex_chatgpt".to_string(),
+                reason: format!("Failed to build streaming HTTP client: {e}"),
+            })?;
 
         Ok(Self {
             client,
+            streaming_client,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: RwLock::new(api_key),
             configured_model: configured_model.to_string(),
@@ -535,7 +543,11 @@ impl CodexChatGptProvider {
     ///
     /// On HTTP 401, if a refresh token is available, attempts to refresh
     /// the access token and retry the request once.
-    async fn send_request(&self, body: Value) -> Result<ResponsesResult, LlmError> {
+    async fn send_request_with_sink(
+        &self,
+        body: Value,
+        sink: Option<Arc<dyn CompletionStreamSink>>,
+    ) -> Result<ResponsesResult, LlmError> {
         let url = format!("{}/responses", self.base_url);
 
         tracing::debug!(
@@ -550,9 +562,14 @@ impl CodexChatGptProvider {
             .to_string();
 
         let api_key = self.api_key.read().await.clone();
-        let resp =
-            Self::send_http_request(&self.client, &url, &api_key, &body, self.request_timeout)
-                .await?;
+        let resp = Self::send_http_request(
+            &self.streaming_client,
+            &url,
+            &api_key,
+            &body,
+            self.request_timeout,
+        )
+        .await?;
 
         let status = resp.status();
         if status.as_u16() == 401 {
@@ -564,7 +581,7 @@ impl CodexChatGptProvider {
                 if current_token.expose_secret() != api_key.expose_secret() {
                     tracing::info!("Received 401, but another request already refreshed the token");
                     let retry_resp = Self::send_http_request(
-                        &self.client,
+                        &self.streaming_client,
                         &url,
                         &current_token,
                         &body,
@@ -575,7 +592,8 @@ impl CodexChatGptProvider {
                     if !retry_status.is_success() {
                         return Err(Self::map_failed_response(retry_resp, &request_model).await);
                     }
-                    return Self::parse_sse_response_stream(retry_resp, self.request_timeout).await;
+                    return Self::parse_sse_response_stream(retry_resp, self.request_timeout, sink)
+                        .await;
                 }
 
                 tracing::info!("Received 401, attempting token refresh");
@@ -589,7 +607,7 @@ impl CodexChatGptProvider {
 
                     // Retry the request with the new token
                     let retry_resp = Self::send_http_request(
-                        &self.client,
+                        &self.streaming_client,
                         &url,
                         &new_token,
                         &body,
@@ -602,7 +620,8 @@ impl CodexChatGptProvider {
                         return Err(Self::map_failed_response(retry_resp, &request_model).await);
                     }
 
-                    return Self::parse_sse_response_stream(retry_resp, self.request_timeout).await;
+                    return Self::parse_sse_response_stream(retry_resp, self.request_timeout, sink)
+                        .await;
                 } else {
                     tracing::warn!(
                         "Token refresh failed. Please re-authenticate with: codex --login"
@@ -611,8 +630,7 @@ impl CodexChatGptProvider {
             }
 
             // No refresh token or refresh failed — return the 401 error
-            // Drain the response body to release the connection
-            let _ = resp.text().await;
+            drop(resp);
             return Err(LlmError::AuthFailed {
                 provider: "codex_chatgpt".to_string(),
             });
@@ -622,7 +640,7 @@ impl CodexChatGptProvider {
             return Err(Self::map_failed_response(resp, &request_model).await);
         }
 
-        Self::parse_sse_response_stream(resp, self.request_timeout).await
+        Self::parse_sse_response_stream(resp, self.request_timeout, sink).await
     }
 
     /// Low-level HTTP POST to the /responses endpoint.
@@ -633,34 +651,45 @@ impl CodexChatGptProvider {
         body: &Value,
         timeout: Duration,
     ) -> Result<reqwest::Response, LlmError> {
-        client
-            .post(url)
-            .bearer_auth(api_key.expose_secret())
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            .json(body)
-            .timeout(timeout)
-            .send()
-            .await
-            .map_err(|e| LlmError::RequestFailed {
-                provider: "codex_chatgpt".to_string(),
-                reason: format!("HTTP request failed: {e}"),
-            })
+        tokio::time::timeout(
+            timeout,
+            client
+                .post(url)
+                .bearer_auth(api_key.expose_secret())
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .json(body)
+                .send(),
+        )
+        .await
+        .map_err(|_| LlmError::RequestFailed {
+            provider: "codex_chatgpt".to_string(),
+            reason: format!(
+                "timed out waiting {}s for streaming response headers",
+                timeout.as_secs()
+            ),
+        })?
+        .map_err(|e| LlmError::RequestFailed {
+            provider: "codex_chatgpt".to_string(),
+            reason: format!("HTTP request failed: {e}"),
+        })
     }
 
     async fn parse_sse_response_stream(
         resp: reqwest::Response,
         idle_timeout: Duration,
+        sink: Option<Arc<dyn CompletionStreamSink>>,
     ) -> Result<ResponsesResult, LlmError> {
         let stream = resp
             .bytes_stream()
             .map(|chunk| chunk.map_err(|e| e.to_string()));
-        Self::parse_sse_stream(stream, idle_timeout).await
+        Self::parse_sse_stream(stream, idle_timeout, sink).await
     }
 
     async fn parse_sse_stream<S>(
         stream: S,
         idle_timeout: Duration,
+        sink: Option<Arc<dyn CompletionStreamSink>>,
     ) -> Result<ResponsesResult, LlmError>
     where
         S: Stream<Item = Result<bytes::Bytes, String>> + Unpin,
@@ -688,8 +717,22 @@ impl CodexChatGptProvider {
                     };
 
                     let event_type = Self::resolve_sse_event_type(event.event.as_str(), &parsed);
+                    let text_delta = if event_type == "response.output_text.delta" {
+                        parsed
+                            .get("delta")
+                            .and_then(Value::as_str)
+                            .filter(|delta| !delta.is_empty())
+                            .map(str::to_string)
+                    } else {
+                        None
+                    };
                     if Self::handle_sse_event(&mut result, event_type.as_ref(), &parsed)? {
                         return Ok(result);
+                    }
+                    if let Some(delta) = text_delta
+                        && let Some(sink) = sink.as_ref()
+                    {
+                        sink.text_delta(delta).await;
                     }
                 }
                 Ok(Some(Err(e))) => {
@@ -1110,6 +1153,87 @@ impl CodexChatGptProvider {
             }
         }
     }
+
+    async fn complete_inner(
+        &self,
+        request: CompletionRequest,
+        sink: Option<Arc<dyn CompletionStreamSink>>,
+    ) -> Result<CompletionResponse, LlmError> {
+        let model = self.resolve_model().await;
+        let mut messages = request.messages;
+        crate::provider::sanitize_tool_messages(&mut messages);
+        let body = self.build_request_body(model, &messages, &[], None);
+        let result = self.send_request_with_sink(body, sink).await?;
+
+        Ok(CompletionResponse {
+            content: result.text,
+            input_tokens: result.input_tokens,
+            output_tokens: result.output_tokens,
+            finish_reason: crate::provider::resolve_finish_reason(result.finish_reason, false),
+            reasoning: crate::responses_reasoning::finish_summary(result.reasoning),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        })
+    }
+
+    async fn complete_with_tools_inner(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Option<Arc<dyn CompletionStreamSink>>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let mut messages = request.messages;
+        crate::provider::sanitize_tool_messages(&mut messages);
+        let name_map = build_sanitized_tool_name_map(&request.tools)?;
+        let model = self.resolve_model().await;
+        let body = self.build_request_body(
+            model,
+            &messages,
+            &request.tools,
+            request.tool_choice.as_deref(),
+        );
+        let result = self.send_request_with_sink(body, sink).await?;
+
+        let mut tool_calls: Vec<ToolCall> = result
+            .pending_tool_calls
+            .into_values()
+            .map(|tool_call| {
+                let returned_name = tool_call.name;
+                let name = name_map
+                    .get(&returned_name)
+                    .cloned()
+                    .unwrap_or(returned_name);
+                let arguments = serde_json::from_str(&tool_call.arguments)
+                    .unwrap_or_else(|_| json!(tool_call.arguments));
+                ToolCall {
+                    id: tool_call.call_id,
+                    name,
+                    arguments,
+                    reasoning: None,
+                    signature: None,
+                    arguments_parse_error: None,
+                }
+            })
+            .collect();
+        crate::tool_schema::strip_unset_optional_fields(
+            &mut tool_calls,
+            &request.tools,
+            crate::tool_schema::PlaceholderStrippingMode::NullAndEmptyStrings,
+        );
+        let finish_reason =
+            crate::provider::resolve_finish_reason(result.finish_reason, !tool_calls.is_empty());
+
+        Ok(ToolCompletionResponse {
+            content: (!result.text.is_empty()).then_some(result.text),
+            tool_calls,
+            input_tokens: result.input_tokens,
+            output_tokens: result.output_tokens,
+            finish_reason,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning: crate::responses_reasoning::finish_summary(result.reasoning),
+            reasoning_details: None,
+        })
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1155,88 +1279,30 @@ impl LlmProvider for CodexChatGptProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let model = self.resolve_model().await;
-        let mut messages = request.messages;
-        crate::provider::sanitize_tool_messages(&mut messages);
-        let body = self.build_request_body(model, &messages, &[], None);
-        let result = self.send_request(body).await?;
+        self.complete_inner(request, None).await
+    }
 
-        Ok(CompletionResponse {
-            content: result.text,
-            input_tokens: result.input_tokens,
-            output_tokens: result.output_tokens,
-            finish_reason: crate::provider::resolve_finish_reason(result.finish_reason, false),
-            reasoning: crate::responses_reasoning::finish_summary(result.reasoning),
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-        })
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.complete_inner(request, Some(sink)).await
     }
 
     async fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let mut messages = request.messages;
-        crate::provider::sanitize_tool_messages(&mut messages);
-        let name_map = build_sanitized_tool_name_map(&request.tools)?;
-        let model = self.resolve_model().await;
-        let body = self.build_request_body(
-            model,
-            &messages,
-            &request.tools,
-            request.tool_choice.as_deref(),
-        );
-        let result = self.send_request(body).await?;
+        self.complete_with_tools_inner(request, None).await
+    }
 
-        let mut tool_calls: Vec<ToolCall> = result
-            .pending_tool_calls
-            .into_values()
-            .map(|tc| {
-                let returned_name = tc.name;
-                let name = name_map
-                    .get(&returned_name)
-                    .cloned()
-                    .unwrap_or(returned_name);
-                let args: Value =
-                    serde_json::from_str(&tc.arguments).unwrap_or_else(|_| json!(tc.arguments));
-                ToolCall {
-                    id: tc.call_id,
-                    name,
-                    arguments: args,
-                    reasoning: None,
-                    signature: None,
-                    arguments_parse_error: None,
-                }
-            })
-            .collect();
-        // Strict-mode tool schemas advertise every optional as required+nullable,
-        // so the model fills unset optionals with `null` (or `""` for some codex
-        // models). Strip those placeholders against each tool's original schema
-        // so only genuinely-provided values reach the tool.
-        crate::tool_schema::strip_unset_optional_fields(
-            &mut tool_calls,
-            &request.tools,
-            crate::tool_schema::PlaceholderStrippingMode::NullAndEmptyStrings,
-        );
-
-        let finish_reason =
-            crate::provider::resolve_finish_reason(result.finish_reason, !tool_calls.is_empty());
-
-        Ok(ToolCompletionResponse {
-            content: if result.text.is_empty() {
-                None
-            } else {
-                Some(result.text)
-            },
-            tool_calls,
-            input_tokens: result.input_tokens,
-            output_tokens: result.output_tokens,
-            finish_reason,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-            reasoning: crate::responses_reasoning::finish_summary(result.reasoning),
-            reasoning_details: None,
-        })
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.complete_with_tools_inner(request, Some(sink)).await
     }
 }
 
@@ -1245,6 +1311,45 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use futures::stream;
+
+    struct RecordingStreamSink {
+        sender: tokio::sync::mpsc::UnboundedSender<String>,
+    }
+
+    #[async_trait]
+    impl CompletionStreamSink for RecordingStreamSink {
+        async fn text_delta(&self, delta: String) {
+            let _ = self.sender.send(delta);
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_parser_publishes_text_deltas_and_preserves_final_response() {
+        let stream = stream::iter(vec![
+            Ok(Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello \"}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"world\"}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n",
+            )),
+        ]);
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let sink = Arc::new(RecordingStreamSink { sender });
+
+        let result =
+            CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1), Some(sink))
+                .await
+                .expect("completed stream");
+
+        assert_eq!(receiver.recv().await.as_deref(), Some("Hello "));
+        assert_eq!(receiver.recv().await.as_deref(), Some("world"));
+        assert_eq!(result.text, "Hello world");
+        assert_eq!(result.input_tokens, 3);
+        assert_eq!(result.output_tokens, 2);
+    }
 
     #[test]
     fn parse_codex_cli_version_standard_output() {
@@ -1681,7 +1786,7 @@ data: {"response":{"usage":{"input_tokens":20,"output_tokens":15}}}
             )),
         ]);
 
-        let result = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1))
+        let result = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1), None)
             .await
             .unwrap();
         assert_eq!(result.text, "Hello world");
@@ -1703,7 +1808,7 @@ data: {"response":{"usage":{"input_tokens":20,"output_tokens":15}}}
             )),
         ]);
 
-        let result = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1))
+        let result = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1), None)
             .await
             .unwrap();
         assert_eq!(result.text, "Hello world");
@@ -1740,7 +1845,7 @@ data: {"type":"response.output_text.delta","delta":" ignored"}
                 b"data: {\"type\":\"response.output_text.delta\",\"delta\":\" ignored\"}\n\n",
             )),
         ]);
-        let result = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1))
+        let result = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1), None)
             .await
             .unwrap();
         assert_eq!(result.text, "hello");
@@ -1768,7 +1873,8 @@ data: [DONE]
             )),
             Ok(Bytes::from_static(b"data: [DONE]\n\n")),
         ]);
-        let result = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1)).await;
+        let result =
+            CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1), None).await;
         assert!(matches!(result, Err(LlmError::StreamInterrupted { .. })));
     }
 
@@ -1777,7 +1883,8 @@ data: [DONE]
     #[tokio::test]
     async fn test_parse_sse_stream_eof_empty_is_error() {
         let stream = stream::iter(Vec::<Result<Bytes, String>>::new());
-        let result = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1)).await;
+        let result =
+            CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1), None).await;
         assert!(
             matches!(result, Err(LlmError::StreamInterrupted { .. })),
             "empty stream must be StreamInterrupted, got {result:?}"
@@ -1791,7 +1898,8 @@ data: [DONE]
         let stream = stream::iter(vec![Ok(Bytes::from_static(
             b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
         ))]);
-        let result = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1)).await;
+        let result =
+            CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1), None).await;
         match result {
             Err(LlmError::StreamInterrupted { reason, .. }) => {
                 assert!(reason.contains("response.completed"), "reason: {reason}");

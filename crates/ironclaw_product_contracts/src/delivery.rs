@@ -1,7 +1,7 @@
 //! Delivery-resolution ports (PROPOSAL §6.1.3).
 //!
 //! The outbound delivery coordinator is product-tier *semantics* and stays in
-//! `ironclaw_product`. What crosses the product boundary is the pair of ports
+//! `ironclaw_assistant`. What crosses the product boundary is the pair of ports
 //! it reads through: "which channel extension is active right now" and "what
 //! opaque vendor reply context did that extension attach to the originating
 //! inbound message". Both are implemented **below** product by

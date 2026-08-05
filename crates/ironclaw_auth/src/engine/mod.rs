@@ -22,6 +22,32 @@
 //!
 //! Vendor response bodies are size-capped and never logged or embedded in
 //! errors; only stable OAuth error codes (`invalid_grant`, …) are extracted.
+//!
+//! # Module charter
+//!
+//! This is **the first of this crate's two engines** (PROPOSAL §6.4.8).
+//!
+//! **Owns:** every conversation with a vendor. Authorize-URL construction,
+//! scope validation against the recipe ceiling, `oauth2_code` + PKCE,
+//! `api_key` + probe, RFC 7591 dynamic client registration, token exchange and
+//! refresh, bounded JSON-pointer extraction of token/identity fields, the
+//! keepalive refresh sweep and its leader lock, authorization-server and
+//! protected-resource admission metadata, and the auth-account state machine
+//! ([`crate::AuthAccountState`]).
+//!
+//! **Never contains:** a vendor-conditional code path (a vendor difference is
+//! recipe *data*, or — last resort, with an ADR — a narrow declared quirk
+//! hook), and none of the durable product-auth lifecycle: flow records,
+//! credential-account projections, secure interactions, and cleanup are
+//! [`crate::product_auth`]'s.
+//!
+//! **The severance is the point, and it is enforced.** This module must not
+//! name `product_auth`, and `product_auth` must not name this module —
+//! measured at zero references in both directions and pinned by
+//! `tests/module_charter.rs::the_two_engines_do_not_name_each_other`. The two
+//! engines meet only through the shared vocabulary re-exported from the crate
+//! root, which is a **third** owner in `CLAUDE.md`'s sub-owner map rather than
+//! being charged to either engine.
 
 pub mod admission;
 mod dcr;

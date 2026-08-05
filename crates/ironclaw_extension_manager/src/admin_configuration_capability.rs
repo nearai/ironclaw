@@ -5,11 +5,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use ironclaw_assistant::ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID;
 use ironclaw_extension_host::{
     AdminConfigurationGroupState, AdminConfigurationIdempotencyKey, AdminConfigurationServiceError,
     AdminConfigurationSubmittedValue, ChannelConfigReactivation,
 };
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     AdminConfigurationGroupId, CapabilityManifest, CapabilityVisibility, ExtensionError,
     ExtensionPackage,
 };
@@ -25,7 +26,6 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
-use ironclaw_product::ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID;
 use ironclaw_secrets::SecretMaterial;
 use serde::Deserialize;
 

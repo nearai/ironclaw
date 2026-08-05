@@ -7,25 +7,30 @@ use ironclaw_conversations::{
     AcceptConversationMessageRequest, AcceptedConversationMessage,
     AcceptedConversationMessageLookup, AcceptedConversationMessageReplay, AdapterInstallationId,
     AdapterKind, ConditionalUnpairOutcome, ConversationBindingResolution,
-    ConversationBindingService, ConversationRouteKind, ExpectedExternalActorOwner,
-    ExternalActorBindingEpoch, ExternalConversationIdentity, ExternalEventId,
-    InMemoryConversationServices, InboundConversationService, InboundMessageContentRef,
-    InboundTurnError, InboundTurnRequest, InboundTurnService, LinkConversationRequest,
-    LinkedConversationBinding, MessageIdempotencyStatus, ReplyTargetBinding,
-    ResolveStoredReplyTargetRequest, StoredReplyTargetAccess, ThreadAccessDecision,
-    ValidateReplyTargetRequest,
+    ConversationBindingService, ConversationInboundClassification, ConversationRouteKind,
+    ConversationTurnSubmission, ConversationTurnSubmitter, ExpectedExternalActorOwner,
+    ExternalConversationIdentity, ExternalEventId, InMemoryConversationServices,
+    InboundConversationService, InboundMessageContentRef, InboundTurnError, InboundTurnRequest,
+    InboundTurnService, LinkConversationRequest, LinkedConversationBinding,
+    MessageIdempotencyStatus, ReplyTargetBinding, ResolveStoredReplyTargetRequest,
+    StoredReplyTargetAccess, ThreadAccessDecision, TurnSubmissionError,
+    TurnSubmissionErrorCategory, TurnSubmissionRetry, ValidateReplyTargetRequest,
 };
-use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
+use ironclaw_extension_contracts::external::{
+    ExternalActorBindingEpoch, ExternalActorRef, ExternalConversationRef,
+};
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileId, RunProfileRequest,
-    RunProfileVersion, SourceBindingRef, TurnActor, TurnRunId, TurnScope, TurnStatus,
+    RunProfileVersion, SourceBindingRef, SubmitTurnResponse, TurnActor, TurnRunId, TurnScope,
+    TurnStatus,
 };
-use ironclaw_turns::{
-    CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
-    RetryTurnRequest, RetryTurnResponse, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
-    TurnCoordinator, TurnError, TurnRunState,
-};
+// Dev-only: `ironclaw_turns` is a dev-dependency of this crate, never a normal
+// one. The fakes below stand in for the composition adapter that implements the
+// submission port, so they mint the same `SubmitTurnRequest` the real adapter
+// mints and these tests keep asserting on that exact value. See
+// `submit_turn_request` at the bottom of this file and the manifest comment.
+use ironclaw_turns::{SubmitTurnRequest, product_context};
 
 #[tokio::test]
 async fn paired_actor_without_binding_creates_thread_binding_message_and_submits_turn() {
@@ -2087,9 +2092,15 @@ async fn turn_submission_failure_preserves_structured_turn_error() {
     };
     assert_eq!(
         error.category(),
-        ironclaw_turns::TurnErrorCategory::InvalidRequest
+        TurnSubmissionErrorCategory::InvalidRequest
     );
     assert_eq!(error.adapter_status_code(), 400);
+    assert_eq!(error.retry(), TurnSubmissionRetry::Permanent);
+    assert_eq!(
+        error.to_string(),
+        "invalid turn request: permanent invalid request",
+        "the host's rendered cause must survive the port boundary verbatim"
+    );
 }
 
 #[tokio::test]
@@ -3758,192 +3769,166 @@ impl CapacityFailureTurnCoordinator {
     }
 }
 
+/// Mirror of the production port adapter
+/// (`ironclaw_composition::automation::conversation_turn_submitter`): it
+/// derives the owner and resolves the classification through the same
+/// `product_context::resolve_inbound` call, producing the same
+/// `SubmitTurnRequest` the real adapter hands the coordinator. The fakes below
+/// record that request, so every product-context, run-profile and
+/// idempotency-key assertion in this file keeps asserting on the exact value a
+/// coordinator receives rather than a paraphrase of it. The production copy is
+/// pinned by that adapter's own seam tests.
+fn submit_turn_request(submission: ConversationTurnSubmission) -> SubmitTurnRequest {
+    let product_context = product_context::resolve_inbound(
+        inbound_classification(submission.classification),
+        submission.origin_adapter,
+        submission.surface_type,
+        submission.scope.product_owner(&submission.actor),
+    );
+    SubmitTurnRequest {
+        requested_model: None,
+        scope: submission.scope,
+        actor: submission.actor,
+        accepted_message_ref: submission.accepted_message_ref,
+        source_binding_ref: submission.source_binding_ref,
+        reply_target_binding_ref: submission.reply_target_binding_ref,
+        requested_run_profile: submission.requested_run_profile,
+        idempotency_key: submission.idempotency_key,
+        received_at: submission.received_at,
+        requested_run_id: None,
+        parent_run_id: None,
+        subagent_depth: 0,
+        spawn_tree_root_run_id: None,
+        product_context: Some(product_context),
+    }
+}
+
+fn inbound_classification(
+    classification: ConversationInboundClassification,
+) -> product_context::InboundClassification {
+    match classification {
+        ConversationInboundClassification::TrustedTrigger => {
+            product_context::InboundClassification::TrustedTrigger
+        }
+        ConversationInboundClassification::TrustedOther => {
+            product_context::InboundClassification::TrustedOther
+        }
+        ConversationInboundClassification::Untrusted => {
+            product_context::InboundClassification::Untrusted
+        }
+    }
+}
+
+/// The submission port's rendering of `TurnError::InvalidRequest` — the
+/// `(category, retry, detail)` triple the production adapter maps that failure
+/// onto, pinned there by
+/// `conversation_turn_submitter_maps_every_turn_error_to_its_class`.
+fn permanent_invalid_request_failure() -> TurnSubmissionError {
+    TurnSubmissionError::new(
+        TurnSubmissionErrorCategory::InvalidRequest,
+        TurnSubmissionRetry::Permanent,
+        "invalid turn request: permanent invalid request",
+    )
+}
+
+/// The port's rendering of `TurnError::capacity_exceeded(SubmitTurn, 1)`:
+/// retryable, but WITHOUT rotating the submit idempotency key.
+fn capacity_exceeded_failure() -> TurnSubmissionError {
+    TurnSubmissionError::new(
+        TurnSubmissionErrorCategory::CapacityExceeded,
+        TurnSubmissionRetry::RetryableWithSameKey,
+        "turn capacity exceeded for submit_turn: cap 1",
+    )
+}
+
+/// The port's rendering of `TurnError::Unavailable` — transient, and the submit
+/// idempotency key must rotate before the retry.
+fn transient_unavailable_failure() -> TurnSubmissionError {
+    TurnSubmissionError::new(
+        TurnSubmissionErrorCategory::Unavailable,
+        TurnSubmissionRetry::RetryableAfterKeyRotation,
+        "turn service unavailable: transient outage",
+    )
+}
+
+/// The port's rendering of `TurnError::ThreadBusy` — transient, key rotates.
+fn thread_busy_failure() -> TurnSubmissionError {
+    TurnSubmissionError::new(
+        TurnSubmissionErrorCategory::ThreadBusy,
+        TurnSubmissionRetry::RetryableAfterKeyRotation,
+        "thread already has an active run",
+    )
+}
+
 #[async_trait]
-impl TurnCoordinator for PermanentFailureTurnCoordinator {
-    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
-        Ok(TurnRunId::new())
-    }
-
-    async fn submit_turn(
+impl ConversationTurnSubmitter for PermanentFailureTurnCoordinator {
+    async fn submit_conversation_turn(
         &self,
-        request: SubmitTurnRequest,
-    ) -> Result<SubmitTurnResponse, TurnError> {
-        self.submissions.lock().unwrap().push(request);
-        Err(TurnError::InvalidRequest {
-            reason: "permanent invalid request".to_string(),
-        })
-    }
-
-    async fn resume_turn(
-        &self,
-        _request: ResumeTurnRequest,
-    ) -> Result<ResumeTurnResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        unimplemented!("not used by inbound service tests")
+        submission: ConversationTurnSubmission,
+    ) -> Result<SubmitTurnResponse, TurnSubmissionError> {
+        self.submissions
+            .lock()
+            .unwrap()
+            .push(submit_turn_request(submission));
+        Err(permanent_invalid_request_failure())
     }
 }
 
 #[async_trait]
-impl TurnCoordinator for CapacityFailureTurnCoordinator {
-    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
-        Ok(TurnRunId::new())
-    }
-
-    async fn submit_turn(
+impl ConversationTurnSubmitter for CapacityFailureTurnCoordinator {
+    async fn submit_conversation_turn(
         &self,
-        request: SubmitTurnRequest,
-    ) -> Result<SubmitTurnResponse, TurnError> {
-        self.submissions.lock().unwrap().push(request);
-        Err(TurnError::capacity_exceeded(
-            ironclaw_turns::TurnCapacityResource::SubmitTurn,
-            1,
-        ))
-    }
-
-    async fn resume_turn(
-        &self,
-        _request: ResumeTurnRequest,
-    ) -> Result<ResumeTurnResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        unimplemented!("not used by inbound service tests")
+        submission: ConversationTurnSubmission,
+    ) -> Result<SubmitTurnResponse, TurnSubmissionError> {
+        self.submissions
+            .lock()
+            .unwrap()
+            .push(submit_turn_request(submission));
+        Err(capacity_exceeded_failure())
     }
 }
 
 #[async_trait]
-impl TurnCoordinator for BusyFirstUniqueKeyCoordinator {
-    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
-        Ok(TurnRunId::new())
-    }
-
-    async fn submit_turn(
+impl ConversationTurnSubmitter for BusyFirstUniqueKeyCoordinator {
+    async fn submit_conversation_turn(
         &self,
-        request: SubmitTurnRequest,
-    ) -> Result<SubmitTurnResponse, TurnError> {
+        submission: ConversationTurnSubmission,
+    ) -> Result<SubmitTurnResponse, TurnSubmissionError> {
+        let request = submit_turn_request(submission);
         let mut submissions = self.submissions.lock().unwrap();
         submissions.push(request.clone());
         if submissions.len() == 1 {
-            return Err(TurnError::ThreadBusy(ThreadBusy {
-                active_run_id: TurnRunId::new(),
-                status: TurnStatus::Running,
-                event_cursor: ironclaw_host_api::turn::EventCursor(1),
-            }));
+            return Err(thread_busy_failure());
         }
         Ok(accepted_response(request))
-    }
-
-    async fn resume_turn(
-        &self,
-        _request: ResumeTurnRequest,
-    ) -> Result<ResumeTurnResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        unimplemented!("not used by inbound service tests")
     }
 }
 
 #[async_trait]
-impl TurnCoordinator for FailFirstTurnCoordinator {
-    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
-        Ok(TurnRunId::new())
-    }
-
-    async fn submit_turn(
+impl ConversationTurnSubmitter for FailFirstTurnCoordinator {
+    async fn submit_conversation_turn(
         &self,
-        request: SubmitTurnRequest,
-    ) -> Result<SubmitTurnResponse, TurnError> {
+        submission: ConversationTurnSubmission,
+    ) -> Result<SubmitTurnResponse, TurnSubmissionError> {
+        let request = submit_turn_request(submission);
         let mut submissions = self.submissions.lock().unwrap();
         submissions.push(request.clone());
         if submissions.len() == 1 {
-            return Err(TurnError::Unavailable {
-                reason: "transient outage".to_string(),
-            });
+            return Err(transient_unavailable_failure());
         }
         Ok(accepted_response(request))
-    }
-
-    async fn resume_turn(
-        &self,
-        _request: ResumeTurnRequest,
-    ) -> Result<ResumeTurnResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        unimplemented!("not used by inbound service tests")
     }
 }
 
 #[async_trait]
-impl TurnCoordinator for RecordingTurnCoordinator {
-    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
-        Ok(TurnRunId::new())
-    }
-
-    async fn submit_turn(
+impl ConversationTurnSubmitter for RecordingTurnCoordinator {
+    async fn submit_conversation_turn(
         &self,
-        request: SubmitTurnRequest,
-    ) -> Result<SubmitTurnResponse, TurnError> {
+        submission: ConversationTurnSubmission,
+    ) -> Result<SubmitTurnResponse, TurnSubmissionError> {
+        let request = submit_turn_request(submission);
         self.submissions.lock().unwrap().push(request.clone());
         Ok(accepted_response(request))
-    }
-
-    async fn resume_turn(
-        &self,
-        _request: ResumeTurnRequest,
-    ) -> Result<ResumeTurnResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        unimplemented!("not used by inbound service tests")
     }
 }
 

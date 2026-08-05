@@ -3,10 +3,10 @@
 //! whose implementations sit beside or below product — expressed so WebUI, the
 //! OpenAI-compatible adapter, the operator surface, the extension host, and
 //! channel packages can all compile against the product boundary without
-//! compiling `ironclaw_product`.
+//! compiling `ironclaw_assistant`.
 //!
 //! This crate is vocabulary and ports only. It implements no surface, admits
-//! nothing, delivers nothing, and speaks no HTTP. `ironclaw_product` owns the
+//! nothing, delivers nothing, and speaks no HTTP. `ironclaw_assistant` owns the
 //! `ProductSurface` implementation and the frozen inventory of concrete
 //! commands, views, and capabilities; this crate owns only their shapes. See
 //! `docs/reborn/target-architecture/PROPOSAL.md` §6.1.3 and
@@ -19,7 +19,7 @@
 //! engine, or workflow.
 //!
 //! Two rules this crate is enforced against, both in
-//! `crates/ironclaw_architecture/tests/`:
+//! `crates/ironclaw_architecture_tests/tests/`:
 //!
 //! - **Contracts purity** (§11.2.3, `reborn_dependency_boundaries.rs`): the
 //!   only internal dependencies are `ironclaw_host_api` and
@@ -34,8 +34,12 @@
 
 pub mod account_setup;
 pub mod action;
+pub mod actor_identity;
 pub mod admin_users;
+pub mod approval_prompt;
+pub mod binding;
 pub mod channel_config;
+pub mod channel_workflow;
 pub mod command;
 pub mod delivery;
 pub mod descriptors;
@@ -46,6 +50,7 @@ pub mod interaction_commands;
 pub mod ironhub;
 pub mod lifecycle_service;
 pub mod operator_llm;
+pub mod operator_secrets;
 pub mod operator_service;
 pub mod operator_tools;
 pub mod outbound;

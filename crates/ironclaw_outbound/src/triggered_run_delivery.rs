@@ -13,9 +13,14 @@
 //!   managed task lifecycle instead of reporting an unpersisted completion.
 //! - Personal scope only: non-personal triggers fail closed with `Denied`.
 
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::turn::TurnRunId;
+use ironclaw_host_api::ids::UserId;
+use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
+
+use crate::delivery_resolution::TriggerCommunicationContext;
 
 /// Terminal outcome of a triggered-run delivery attempt.
 ///
@@ -63,6 +68,55 @@ pub trait TriggeredRunDeliveryStore: Send + Sync {
         &self,
         run_id: TurnRunId,
     ) -> Result<Option<TriggeredRunDeliveryRecord>, String>;
+}
+
+/// One trigger-submitted run to watch and deliver, in generic vocabulary.
+/// The generic post-submit hook translates its trigger-fire type into this.
+#[derive(Debug, Clone)]
+pub struct TriggeredRunDeliveryRequest {
+    pub run_id: TurnRunId,
+    pub scope: TurnScope,
+    /// The trigger creator; delivery goes to their personal preference
+    /// target.
+    pub creator_user_id: UserId,
+    /// Fail closed for non-personal triggers: a project-scoped trigger is
+    /// never delivered to a personal channel.
+    pub project_scoped: bool,
+    /// The trigger prompt; its first line becomes the short footer label.
+    pub prompt: String,
+    /// Optional per-trigger target resolved from the creator-scoped outbound
+    /// target registry. When present, ordinary results route here instead of
+    /// consulting the user's mutable global default.
+    pub delivery_target: Option<ReplyTargetBindingRef>,
+    pub trigger_context: TriggerCommunicationContext,
+}
+
+/// The proactive delivery driver for one channel extension, as its caller
+/// consumes it.
+///
+/// **Declared here rather than beside the implementation** (§12.11 D-A, the
+/// same move WS2.5 made for the auth ports): every type in the signature is
+/// either this crate's own triggered-delivery vocabulary or
+/// `ironclaw_host_api` turn vocabulary, and the caller — the generic
+/// post-submit hook in `ironclaw_extension_host` — sits below the crate that
+/// implements it. Declaring it in the vocabulary's own home costs zero type
+/// weakening; narrowing it into a contracts crate would have cost
+/// [`TriggerCommunicationContext`] its typed refs.
+#[async_trait::async_trait]
+pub trait TriggeredRunDelivery: Send + Sync {
+    /// Watch the submitted run and deliver its outputs to the creator's
+    /// resolved target, recording the terminal outcome in the store.
+    async fn on_trigger_submitted(&self, request: TriggeredRunDeliveryRequest);
+}
+
+#[async_trait::async_trait]
+impl<T> TriggeredRunDelivery for Arc<T>
+where
+    T: TriggeredRunDelivery + ?Sized,
+{
+    async fn on_trigger_submitted(&self, request: TriggeredRunDeliveryRequest) {
+        self.as_ref().on_trigger_submitted(request).await;
+    }
 }
 
 #[cfg(test)]

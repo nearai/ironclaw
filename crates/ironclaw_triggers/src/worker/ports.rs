@@ -26,16 +26,26 @@ impl TrustedTriggerSubmitRequest {
     /// supplied here. The worker is the only crate allowed to pair those values,
     /// so downstream trusted submitters cannot forge or mix prompt content and
     /// trigger identity.
+    ///
+    /// Minting also runs the trusted-trigger prompt safety scan
+    /// ([`crate::prompt_safety`]), which makes "the prompt passed the scan" an
+    /// invariant of this type rather than a step one implementation of
+    /// [`TrustedTriggerFireSubmitter`] happens to perform. The scan used to
+    /// live inside the conversations-owned submitter, where swapping or adding
+    /// a submitter silently dropped it; PROPOSAL §6.4.2 moved it behind this
+    /// seam. A trusted trigger fire executes from durable host state with no
+    /// live user turn to re-confirm intent, so this must fail closed.
     pub(crate) fn new(
         fire: TriggerFire,
         materialized_prompt: TriggerMaterializedPrompt,
         received_at: Timestamp,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, TriggerError> {
+        crate::prompt_safety::validate_trusted_trigger_fire_prompt(&fire.prompt)?;
+        Ok(Self {
             fire,
             materialized_prompt,
             received_at,
-        }
+        })
     }
 
     pub fn fire(&self) -> &TriggerFire {
@@ -66,12 +76,16 @@ impl TrustedTriggerSubmitRequest {
     /// `ironclaw_conversations`) test their `TrustedTriggerFireSubmitter` impls
     /// without pulling in the full worker. Gated on `test-support` feature so
     /// it ships zero bytes in production binaries.
+    ///
+    /// It bypasses the *visibility* seal only, never the safety scan: it
+    /// delegates to [`Self::new`], so a downstream test cannot hand its
+    /// submitter a request whose prompt production could not have produced.
     #[cfg(any(test, feature = "test-support"))]
     pub fn new_for_test(
         fire: TriggerFire,
         materialized_prompt: TriggerMaterializedPrompt,
         received_at: Timestamp,
-    ) -> Self {
+    ) -> Result<Self, TriggerError> {
         Self::new(fire, materialized_prompt, received_at)
     }
 }

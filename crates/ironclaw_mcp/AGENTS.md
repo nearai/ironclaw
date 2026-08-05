@@ -9,6 +9,23 @@
 - `docs/reborn/contracts/runtime-workflows.md`
 - `docs/reborn/contracts/processes.md`
 
+## Module Charter
+
+The crate is **seven private modules**, each with a stated owner; `lib.rs`
+carries the charter table (PROPOSAL §6.6.3) and re-exports every public item,
+so `ironclaw_mcp::X` remains the only import path. Consult the table in
+`src/lib.rs` before adding a file:
+
+| Module | Owns |
+|---|---|
+| `contract` | The vocabulary a caller names: config, DTOs, the `McpClient`/`McpExecutor` traits, the `McpError`/`McpClientError` taxonomy |
+| `runtime` | Resource-governed execution: descriptor admission, reserve → call → reconcile/release, the manifest credential context |
+| `client` | The Streamable-HTTP `McpClient`: handshake, per-invocation session lifecycle, the `tools/list` paging loop |
+| `jsonrpc` | The JSON-RPC 2.0 codec and response hygiene: framing, id matching, session id / protocol version, auth challenge, per-method credential routing |
+| `discovery` | `tools/list` catalog admission: host ceilings, per-tool classification, schema bounds, tool-name grammar |
+| `egress` | The host-mediated HTTP seam: the `McpHostHttp` port and the host-owned egress plan/planner |
+| `diagnostics` | Every stable, bounded failure token the lane surfaces |
+
 ## What This Crate Owns
 
 - The Reborn MCP runtime lane (fail-closed process policy, host-mediated egress), currently:
@@ -26,7 +43,7 @@
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_mcp`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
 - If production persistence behavior changes, add/maintain PostgreSQL and libSQL parity tests.
 
 ## Agent Notes

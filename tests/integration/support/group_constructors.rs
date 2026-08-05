@@ -227,6 +227,13 @@ impl RebornIntegrationGroup {
         Self::builder().multiuser_approvals().await
     }
 
+    /// Group over a per-caller-scoped workspace deployment (C-MULTIUSER +
+    /// the `serve` scoping raise). See
+    /// [`RebornIntegrationGroupBuilder::multiuser_scoped_workspace`].
+    pub async fn multiuser_scoped_workspace() -> HarnessResult<Self> {
+        Self::builder().multiuser_scoped_workspace().await
+    }
+
     /// Group surfacing the two synthetic `outbound_delivery_*` capabilities over
     /// an injected service double (C-SYNTH outbound seam). `target_set` requires
     /// approval; global auto-approve defaults ON so the happy/`NotFound` arms
@@ -401,11 +408,11 @@ impl RebornIntegrationGroupBuilder {
         // so the service's tenant check matches dispatch-time callers.
         let scope = &base.product_harness.scope;
         let channel_connection =
-            ironclaw_reborn_composition::test_support::build_channel_connection_for_test(
+            ironclaw_composition::test_support::build_channel_connection_for_test(
                 host_runtime
                     .reborn_services_for_test()
                     .ok_or("extension_lifecycle harness is missing its RebornServices bundle")?,
-                ironclaw_reborn_composition::test_support::ChannelConnectionTestConfig {
+                ironclaw_composition::test_support::ChannelConnectionTestConfig {
                     tenant_id: scope.tenant_id.as_str().to_string(),
                     agent_id: scope
                         .agent_id
@@ -433,11 +440,11 @@ impl RebornIntegrationGroupBuilder {
         // `RebornServices`, keyed to the group's dispatch scope.
         let scope = &base.product_harness.scope;
         let channel_connection =
-            ironclaw_reborn_composition::test_support::build_channel_connection_for_test(
+            ironclaw_composition::test_support::build_channel_connection_for_test(
                 host_runtime
                     .reborn_services_for_test()
                     .ok_or("extension_runtime_acme harness is missing its RebornServices bundle")?,
-                ironclaw_reborn_composition::test_support::ChannelConnectionTestConfig {
+                ironclaw_composition::test_support::ChannelConnectionTestConfig {
                     tenant_id: scope.tenant_id.as_str().to_string(),
                     agent_id: scope
                         .agent_id
@@ -463,11 +470,11 @@ impl RebornIntegrationGroupBuilder {
         .with_run_owner_scoped_capability_dispatch();
         let scope = &base.product_harness.scope;
         let channel_connection =
-            ironclaw_reborn_composition::test_support::build_channel_connection_for_test(
+            ironclaw_composition::test_support::build_channel_connection_for_test(
                 host_runtime
                     .reborn_services_for_test()
                     .ok_or("extension_delivery harness is missing its RebornServices bundle")?,
-                ironclaw_reborn_composition::test_support::ChannelConnectionTestConfig {
+                ironclaw_composition::test_support::ChannelConnectionTestConfig {
                     tenant_id: scope.tenant_id.as_str().to_string(),
                     agent_id: scope
                         .agent_id
@@ -640,6 +647,63 @@ impl RebornIntegrationGroupBuilder {
     pub async fn multiuser_approvals(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
         let host_runtime = super::super::harness::profiles::file::file_tools_requiring_approval()
+            .await?
+            .with_run_owner_scoped_capability_dispatch();
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.into_group(base, capability).await
+    }
+
+    /// C-MULTIUSER over a PER-CALLER-SCOPED workspace: the runtime is built
+    /// with the same raise `serve` applies unconditionally
+    /// (`RebornRuntimeInput::with_workspace_scoped_per_caller_services`), and
+    /// the harness's capability grants confine to the canonical subject's own
+    /// `tenants/{tenant}/users/{user}` subtree via the SAME production
+    /// resolver a scoped deployment's factory uses
+    /// (`scoped_workspace_mount_view_for_test`). File tools stay at `Ask`
+    /// (per-owner auto-approve toggles like `multiuser_approvals`) and the
+    /// coding-read verbs (`list_dir`/`glob`/`grep`) are surfaced so a fresh
+    /// caller's never-written workspace root is read through the production
+    /// turn path.
+    ///
+    /// SINGLE-CALLER GROUP — do not add a second actor. The harness's grant
+    /// view is resolved ONCE for the canonical subject, while
+    /// `with_run_owner_scoped_capability_dispatch` resolves the execution
+    /// user per run: a thread built `.with_actor_id(..)` would execute under
+    /// its own owner while holding the canonical subject's subtree grant,
+    /// silently inverting the isolation this group exists to prove.
+    /// Cross-actor mount isolation is pinned where the grant is per-caller by
+    /// construction: `workspace_scoping_tests` (crate tier) and the two-user
+    /// `webui_v2_e2e` workspace test.
+    pub async fn multiuser_scoped_workspace(self) -> HarnessResult<RebornIntegrationGroup> {
+        use ironclaw_host_api::ids::CapabilityId;
+        let base = self.build_base().await?;
+        let subject_user = base.canonical_subject_user()?;
+        let product_scope = &base.product_harness.scope;
+        let caller_scope = ironclaw_host_api::resource::ResourceScope {
+            tenant_id: product_scope.tenant_id.clone(),
+            user_id: subject_user,
+            agent_id: product_scope.agent_id.clone(),
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+        };
+        let scoped_view = ironclaw_composition::test_support::scoped_workspace_mount_view_for_test(
+            &caller_scope,
+            ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
+        )
+        .map_err(|error| format!("scoped workspace mount view: {error}"))?;
+        let mut profile =
+            super::super::harness::profiles::file::file_tools_requiring_approval_profile()?;
+        profile.capability_ids.extend([
+            CapabilityId::new(ironclaw_host_runtime::LIST_DIR_CAPABILITY_ID)?,
+            CapabilityId::new(ironclaw_host_runtime::GLOB_CAPABILITY_ID)?,
+            CapabilityId::new(ironclaw_host_runtime::GREP_CAPABILITY_ID)?,
+        ]);
+        profile.options.mounts = scoped_view;
+        profile.options = profile.options.with_workspace_scoped_per_caller();
+        let host_runtime = profile
+            .build()
             .await?
             .with_run_owner_scoped_capability_dispatch();
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));

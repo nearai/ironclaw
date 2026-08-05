@@ -53,7 +53,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Triggers / automations / routines | 10 | 2 | ✓ | ✓ |
 | Memory & workspace | 5 | 2 | — | ✓ |
 | Skills | 1 | 1 | — | ✓ |
-| Multi-user / scope isolation | 4 | 2 | 9 | ✓ |
+| Multi-user / scope isolation | 5 | 2 | 9 | ✓ |
 | Tools & tool dispatch | — | 10 | ✓ | ✓ |
 | Turn lifecycle (cancel/steer/retry/restart) | — | 8 | ✓ | ✓ |
 | WebUI surfaces & APIs | 2 | 2 | — | ✓ (largest) |
@@ -62,13 +62,13 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **50** group scenarios · **54** flat integration bins (48 in
+Totals: **51** group scenarios · **54** flat integration bins (48 in
 `tests/integration/`, 6 in `tests/integration/auth/`) · **39** top-level Rust bins ·
-**102** Python scenario files (**867** test functions).
+**102** Python scenario files (**868** test functions).
 
 ---
 
-## 3. Group scenarios — `tests/integration/group_*/` (50)
+## 3. Group scenarios — `tests/integration/group_*/` (51)
 
 Multi-thread journeys over ONE shared runtime and ONE shared set of stores. These are
 the canonical "a user does X in one conversation and sees the effect in another" tests.
@@ -126,7 +126,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Run a build with memory disabled and have the assistant not even see memory tools | `scenario_disabled_binding_offers_no_memory_tools.rs` |
 | Trust that only the memory hooks the provider declares actually fire | `scenario_lifecycle_gates_host_memory_calls.rs` |
 
-### 3.5 Multi-user — `group_multiuser/` (4)
+### 3.5 Multi-user — `group_multiuser/` (5)
 
 | The user can… | Evidence |
 |---|---|
@@ -134,6 +134,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Not read another user's memories (and still read their own) | `scenario_memory_isolation_across_actors.rs` |
 | Not have another user's "always allow" apply to them | `scenario_auto_approve_isolation_across_actors.rs` |
 | Not see another user's run/turn state | `scenario_turn_state_isolation_across_actors.rs` |
+| On a per-caller-scoped (served) deployment: read their brand-new workspace as empty instead of an error, approve a gated write that lands in their own `tenants/{tenant}/users/{user}` subtree (never the shared root), and read it back — while a missing sub-path stays a hard error | `scenario_scoped_workspace_isolation.rs` |
 
 ### 3.6 Skills — `group_skills/` (1)
 
@@ -288,7 +289,7 @@ enums), `trace_format.rs`, `trace_llm_tests.rs`,
 
 ---
 
-## 6. Python E2E scenarios — `tests/e2e/scenarios/` (102 files, 867 tests)
+## 6. Python E2E scenarios — `tests/e2e/scenarios/` (102 files, 868 tests)
 
 This is an exhaustive inventory, not a claim that every retained scenario is
 currently executable. Current Reborn coverage starts `ironclaw serve` through the
@@ -307,6 +308,7 @@ entries.
 | See their message immediately, keep it through a reconnect/reload, and not see it duplicated once confirmed | `test_reborn_webui_v2_legacy_pending_messages.py` (12), `test_pending_user_messages.py` (8) |
 | Reload the page and still see history, tool cards, and in-progress turns | `test_reborn_webui_v2_legacy_sse_history.py` (10), `test_reborn_webui_v2_legacy_message_persistence.py`, `test_message_persistence.py` (10) |
 | Type a draft while a run is processing | `test_reborn_webui_v2_smoke.py::test_reborn_v2_composer_accepts_draft_while_run_is_processing` |
+| Click "+ New" or open a thread and start typing immediately — focus lands in the composer without a second click | `test_reborn_webui_v2_smoke.py::test_reborn_v2_composer_takes_focus_from_sidebar_navigation` |
 | Start a new chat while a run is active (the #5256 deadlock regression) | `test_reborn_webui_v2_smoke.py` |
 | Page through older messages/threads without losing scroll position | `test_reborn_webui_v2_smoke.py::test_reborn_v2_timeline_pagination`, `…::test_reborn_v2_loading_older_messages_preserves_viewport` |
 | Keep DOM bounded on huge histories, without SSE timer leaks | `test_reborn_webui_v2_legacy_dom_resource_limits.py` (4) |
@@ -367,7 +369,7 @@ entries.
 ### 6.6 Automations, routines & projects
 | The user can… | Evidence |
 |---|---|
-| Create/rename/filter automations in the UI, retry failed runs, dismiss error toasts | `test_reborn_webui_v2_smoke.py` (automation tests), `test_reborn_webui_v2_automation_trace_outbound_api.py` (4) |
+| Create an automation through chat; rename, pause, resume, reload, and delete it through the UI with persisted API state; filter automations, retry failed runs, and dismiss error toasts | `test_reborn_webui_v2_smoke.py::test_reborn_v2_automation_lifecycle_persists_from_ui`, other automation tests in that file, `test_reborn_webui_v2_automation_trace_outbound_api.py` (4) |
 | Create event-triggered routines, have them fire on match, respect cooldown, pause/resume | `test_routine_event_batch.py` (8) |
 | Run a full-job routine end-to-end with tools, trigger it manually, see failures in the UI | `test_routine_full_job.py` (3) |
 | Have routines run with injected OAuth credentials | `test_routine_oauth_credential_injection.py` (3) |

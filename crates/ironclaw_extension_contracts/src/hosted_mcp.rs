@@ -220,6 +220,33 @@ pub struct RegisterHostedMcpRequest {
     pub auth_selection: Option<HostedMcpAuthSelection>,
 }
 
+/// MCP tool descriptor discovered from a hosted provider's `tools/list`.
+///
+/// The MCP lane parses `tools/list` straight into this shape and the extension
+/// domain converts it into a dynamic capability, so there is no lane-local
+/// mirror of the descriptor. It lives here rather than in the registry crate
+/// because the lane that *produces* it sits in the runtimes layer and may not
+/// depend on the registry — the type itself names nothing but `String`,
+/// `serde_json::Value`, and its own annotations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedMcpDiscoveredTool {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+    pub annotations: HostedMcpDiscoveredToolAnnotations,
+}
+
+/// Advisory MCP tool behavior hints returned by `tools/list`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostedMcpDiscoveredToolAnnotations {
+    pub title: Option<String>,
+    pub destructive_hint: bool,
+    pub side_effects_hint: bool,
+    pub read_only_hint: bool,
+    pub idempotent_hint: Option<bool>,
+    pub open_world_hint: Option<bool>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

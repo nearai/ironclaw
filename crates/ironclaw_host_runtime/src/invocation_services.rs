@@ -11,7 +11,7 @@
 use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_events::AuditSink;
+use ironclaw_event_log::AuditSink;
 use ironclaw_filesystem::{
     BackendCapabilities, CasExpectation, DirEntry, Entry, EventRecord, FileStat, FilesystemError,
     FilesystemOperation, Filter, IndexSpec, Page, RecordVersion, RootFilesystem, SeqNo, StorageTxn,
@@ -420,6 +420,32 @@ impl MountScopedRootFilesystem {
         }
         Ok(path.clone())
     }
+
+    /// Whether `path` IS one of this view's mount roots.
+    ///
+    /// A mount root the caller is authorized for exists by definition: it is
+    /// the namespace their grant names, not a path they chose. A backend with
+    /// nothing written under it reports `NotFound`, which is right for an
+    /// ordinary path and wrong for the root --- and it broke every brand-new
+    /// per-caller workspace, whose `tenants/{tenant}/users/{user}` directory
+    /// does not exist until the first write, so `list_dir` and `glob` failed
+    /// instead of reporting an empty workspace. Roots read as EMPTY; anything
+    /// deeper keeps reporting `NotFound`.
+    fn is_mount_root(&self, path: &VirtualPath) -> bool {
+        self.mounts.mounts.iter().any(|grant| &grant.target == path)
+    }
+}
+
+/// `NotFound` on a mount root becomes an empty result; every other error, and
+/// every other path, passes through untouched.
+fn empty_when_missing_root<T: Default>(
+    result: Result<T, FilesystemError>,
+    is_mount_root: bool,
+) -> Result<T, FilesystemError> {
+    match result {
+        Err(FilesystemError::NotFound { .. }) if is_mount_root => Ok(T::default()),
+        other => other,
+    }
 }
 
 fn permission_denied(path: &VirtualPath, operation: FilesystemOperation) -> FilesystemError {
@@ -484,7 +510,7 @@ impl RootFilesystem for MountScopedRootFilesystem {
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
         let path = self.resolve(path, FilesystemOperation::ListDir)?;
-        self.root.list_dir(&path).await
+        empty_when_missing_root(self.root.list_dir(&path).await, self.is_mount_root(&path))
     }
 
     async fn list_dir_bounded(
@@ -493,7 +519,10 @@ impl RootFilesystem for MountScopedRootFilesystem {
         max_entries: usize,
     ) -> Result<Vec<DirEntry>, FilesystemError> {
         let path = self.resolve(path, FilesystemOperation::ListDir)?;
-        self.root.list_dir_bounded(&path, max_entries).await
+        empty_when_missing_root(
+            self.root.list_dir_bounded(&path, max_entries).await,
+            self.is_mount_root(&path),
+        )
     }
 
     async fn query(
@@ -517,7 +546,18 @@ impl RootFilesystem for MountScopedRootFilesystem {
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         let path = self.resolve(path, FilesystemOperation::Stat)?;
-        self.root.stat(&path).await
+        match self.root.stat(&path).await {
+            // Same rule as `list_dir`: callers stat parents before listing, so
+            // without this the listing below never runs for a fresh caller.
+            Err(FilesystemError::NotFound { .. }) if self.is_mount_root(&path) => Ok(FileStat {
+                path: path.clone(),
+                file_type: ironclaw_filesystem::FileType::Directory,
+                len: 0,
+                modified: None,
+                sensitive: false,
+            }),
+            other => other,
+        }
     }
 
     async fn read_file_bounded(

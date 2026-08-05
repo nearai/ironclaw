@@ -24,7 +24,9 @@ use crate::{
 };
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_events::{SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision};
+use ironclaw_event_log::{
+    SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision,
+};
 use ironclaw_host_api::ids::ExtensionId;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};

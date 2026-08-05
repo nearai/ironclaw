@@ -58,7 +58,7 @@ assert_empty_scope() {
 
 assert_scope \
   "reborn binary crate" \
-  "crates/ironclaw_reborn_cli/src/main.rs" \
+  "crates/ironclaw_cli/src/main.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -163,7 +163,7 @@ has_reborn_tests=true"
 
 assert_scope \
   "named critical product invariant" \
-  "crates/ironclaw_product/src/run_delivery/observer.rs" \
+  "crates/ironclaw_assistant/src/run_delivery/observer.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -382,7 +382,7 @@ has_reborn_tests=false"
 
 assert_scope \
   "nested markdown is not docs only" \
-  "crates/ironclaw_runner/CLAUDE.md" \
+  "crates/ironclaw_turn_runner/CLAUDE.md" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -399,7 +399,7 @@ has_reborn_tests=true"
 assert_scope \
   "mixed tests and reborn" \
   "tests/e2e/scenarios/test_live_flow.py
-crates/ironclaw_reborn_composition/src/lib.rs" \
+crates/ironclaw_composition/src/lib.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
@@ -407,7 +407,7 @@ has_reborn_tests=true"
 
 assert_scope_no_trailing_newline \
   "final path without trailing newline" \
-  "crates/ironclaw_reborn_cli/src/main.rs" \
+  "crates/ironclaw_cli/src/main.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -522,6 +522,18 @@ for i in $(seq 1 20); do
     > "${nested_root}/crates/domains/ironclaw_filler_${i}/Cargo.toml"
 done
 
+# ironclaw_extension_support and its sibling packages/ tree, nested one family
+# level down too — the fixture package_asset_dir's own WS10 case needs: a
+# data-only package (github, no Cargo.toml) whose real location has moved out
+# from under the literal `crates/extensions/packages/*` arms in
+# is_shared_test_path.
+mkdir -p "${nested_root}/crates/substrates/ironclaw_extension_support"
+printf '[package]\nname = "ironclaw_extension_support"\n' \
+  > "${nested_root}/crates/substrates/ironclaw_extension_support/Cargo.toml"
+mkdir -p "${nested_root}/crates/substrates/packages/github"
+printf 'id = "github"\n' \
+  > "${nested_root}/crates/substrates/packages/github/manifest.toml"
+
 assert_scope_with_root() {
   local name="$1" root="$2" files="$3" expected="$4" actual
   actual="$(printf '%s\n' "$files" | IRONCLAW_REPO_ROOT="$root" "$classifier" | sort)"
@@ -571,6 +583,15 @@ assert_scope_with_root \
 has_core_code=true
 has_legacy_tests=true
 has_reborn_tests=false"
+
+assert_scope_with_root \
+  "nested data-only package manifest still classifies as shared (package_asset_dir normalization)" \
+  "${nested_root}" \
+  "crates/substrates/packages/github/manifest.toml" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
 
 assert_refusal_with_root \
   "a crates/ path attributable to no crate is refused, not bucketed" \
@@ -643,3 +664,129 @@ if [ "${classifier_floor}" != "${python_floor}" ]; then
   exit 1
 fi
 printf 'PASS bash and python discovery floors agree (%s)\n' "${python_floor}"
+
+# Every `crates/...` pattern in the classifier must match at least one real
+# path. This is the check that was missing when the WS6 renames dropped the
+# `ironclaw_reborn_` prefix: the arm `crates/ironclaw_reborn_*/*` stopped
+# matching anything, and all seven of those crates silently reclassified as
+# legacy. A pattern that matches nothing fails OPEN — the classifier keeps
+# answering, just wrongly — so only the downstream self-test assertion caught
+# it, and only for the one crate that had a fixture. Same shape as
+# `sanctioned_paths_all_match_real_files` in reborn_retired_taxonomy.rs: an
+# exemption may not outlive the code it exempts.
+#
+# KNOWN-DEAD, shrink-only. Both predate WS6 and both match nothing today, so
+# neither is load-bearing. They are listed rather than repointed because
+# repointing changes which tests a change to those crates selects, which is a
+# behaviour change and not this PR's business:
+#   * crates/ironclaw_extension_support/ -- crate lives at
+#     crates/extensions/ironclaw_extension_support (already matched elsewhere
+#     by the `*/ironclaw_extension_support` arm).
+#   * crates/ironclaw_oauth/ -- no such crate anywhere in the tree.
+known_dead_patterns="crates/ironclaw_extension_support/
+crates/ironclaw_oauth/"
+
+dead_found=0
+while IFS= read -r pattern; do
+  [ -n "${pattern}" ] || continue
+  case "${known_dead_patterns}" in
+    *"${pattern}"*) continue ;;
+  esac
+  # shellcheck disable=SC2086
+  if ! compgen -G "${pattern}"* >/dev/null 2>&1; then
+    printf 'FAIL classifier pattern matches no real path: %s\n' "${pattern}" >&2
+    dead_found=1
+  fi
+done <<PATTERNS
+$(grep -oE 'crates/ironclaw_[A-Za-z0-9_]*/' scripts/ci/classify-test-scope.sh | sort -u || true)
+PATTERNS
+
+if [ "${dead_found}" -ne 0 ]; then
+  printf 'FAIL a classifier arm names a crate directory that does not exist\n' >&2
+  exit 1
+fi
+printf 'PASS every classifier crates/ pattern matches a real path\n'
+# ---------------------------------------------------------------------------
+# crate_tree.py --directory and its scripts/ci/crate-dir.sh shell wrapper
+# (CHECKLIST WS10, #6963 idiom)
+#
+# These two are otherwise untested: `--directory` is a new CLI flag on the
+# module this file already pins above, and crate-dir.sh is a one-line wrapper
+# around it. Pinned here rather than in a new file — this is the file that
+# already invokes crate_tree.py as a subprocess and already owns the
+# `nested_root` WS10 fixture, so reusing both keeps one home for "does the
+# shared crate-resolution machinery survive a family move" instead of a third
+# copy of the fixture.
+# ---------------------------------------------------------------------------
+
+first_python_crate="$(printf '%s\n' "${python_inventory}" | head -1)"
+first_python_crate_name="${first_python_crate##*/}"
+
+directory_flag_output="$(
+  python3 "${script_dir}/lib/crate_tree.py" --directory "${first_python_crate_name}" "${repo_root_for_inventory}"
+)"
+if [ "${directory_flag_output}" != "${first_python_crate}" ]; then
+  printf 'FAIL crate_tree.py --directory resolves the same directory as the plain listing\n' >&2
+  printf 'expected %s got %s\n' "${first_python_crate}" "${directory_flag_output}" >&2
+  exit 1
+fi
+printf 'PASS crate_tree.py --directory resolves the same directory as the plain listing (%s)\n' \
+  "${first_python_crate_name}"
+
+nested_directory_output="$(
+  python3 "${script_dir}/lib/crate_tree.py" --directory ironclaw_webui "${nested_root}"
+)"
+if [ "${nested_directory_output}" != "crates/substrates/ironclaw_webui" ]; then
+  printf 'FAIL crate_tree.py --directory resolves a family-nested crate\n' >&2
+  printf 'got %s\n' "${nested_directory_output}" >&2
+  exit 1
+fi
+printf 'PASS crate_tree.py --directory resolves a family-nested crate (crates/substrates/ironclaw_webui)\n'
+
+missing_directory_error="$(
+  python3 "${script_dir}/lib/crate_tree.py" --directory "ironclaw_ws10_probe_missing" "${repo_root_for_inventory}" 2>&1 >/dev/null
+)" && missing_directory_rc=0 || missing_directory_rc=$?
+if [ "${missing_directory_rc}" -eq 0 ] || [ "${missing_directory_error#*"found 0"}" = "${missing_directory_error}" ]; then
+  printf 'FAIL crate_tree.py --directory refuses an absent crate name\n' >&2
+  printf 'rc=%s output=%s\n' "${missing_directory_rc}" "${missing_directory_error}" >&2
+  exit 1
+fi
+printf 'PASS crate_tree.py --directory refuses an absent crate name\n'
+
+# Two crates sharing a basename in different families: `crate_directory`'s own
+# "found N, expected 1" refusal, exercised through the CLI flag. Appended to
+# nested_root at the very end, after every other assertion that depends on
+# its crate SET has already run.
+mkdir -p "${nested_root}/crates/substrates/ironclaw_ambiguous_probe" \
+  "${nested_root}/crates/domains/ironclaw_ambiguous_probe"
+printf '[package]\nname = "ironclaw_ambiguous_probe"\n' \
+  > "${nested_root}/crates/substrates/ironclaw_ambiguous_probe/Cargo.toml"
+printf '[package]\nname = "ironclaw_ambiguous_probe"\n' \
+  > "${nested_root}/crates/domains/ironclaw_ambiguous_probe/Cargo.toml"
+ambiguous_directory_error="$(
+  python3 "${script_dir}/lib/crate_tree.py" --directory "ironclaw_ambiguous_probe" "${nested_root}" 2>&1 >/dev/null
+)" && ambiguous_directory_rc=0 || ambiguous_directory_rc=$?
+if [ "${ambiguous_directory_rc}" -eq 0 ] || [ "${ambiguous_directory_error#*"found 2"}" = "${ambiguous_directory_error}" ]; then
+  printf 'FAIL crate_tree.py --directory refuses an ambiguous crate name\n' >&2
+  printf 'rc=%s output=%s\n' "${ambiguous_directory_rc}" "${ambiguous_directory_error}" >&2
+  exit 1
+fi
+printf 'PASS crate_tree.py --directory refuses an ambiguous crate name\n'
+
+# scripts/ci/crate-dir.sh: a thin exec wrapper, pinned for correctness
+# (matches crate_tree.py --directory) and for propagating a non-zero exit.
+crate_dir_sh="${script_dir}/crate-dir.sh"
+crate_dir_sh_output="$("${crate_dir_sh}" "${first_python_crate_name}" "${repo_root_for_inventory}")"
+if [ "${crate_dir_sh_output}" != "${first_python_crate}" ]; then
+  printf 'FAIL crate-dir.sh resolves the same directory as crate_tree.py --directory\n' >&2
+  printf 'expected %s got %s\n' "${first_python_crate}" "${crate_dir_sh_output}" >&2
+  exit 1
+fi
+printf 'PASS crate-dir.sh resolves the same directory as crate_tree.py --directory (%s)\n' \
+  "${first_python_crate_name}"
+
+if "${crate_dir_sh}" "ironclaw_ws10_probe_missing" "${repo_root_for_inventory}" >/dev/null 2>&1; then
+  printf 'FAIL crate-dir.sh refuses an absent crate name\n' >&2
+  exit 1
+fi
+printf 'PASS crate-dir.sh refuses an absent crate name\n'

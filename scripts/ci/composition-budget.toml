@@ -1,10 +1,10 @@
-# Composition mass budget — ratchet gate for the ironclaw_reborn_composition crate.
+# Composition mass budget — ratchet gate for the ironclaw_composition crate.
 #
 # Enforced by scripts/ci/check-composition-budget.sh (CI: .github/workflows/code_style.yml;
 # local: scripts/pre-commit-safety.sh when composition files are staged).
 #
 # WHY THIS EXISTS
-#   ironclaw_reborn_composition's charter is service-graph *assembly*
+#   ironclaw_composition's charter is service-graph *assembly*
 #   (build_*/with_* wiring) — see .claude/skills/ironclaw-reborn-architecture-review.
 #   In practice it has accreted behavior (slack delivery, product_auth, extension
 #   lifecycle, projections) and is now ~27% of ALL production crate code. The
@@ -12,7 +12,7 @@
 #   mass piling up *inside* one crate. This gate is that missing guard.
 #
 # THE METRIC
-#   observed_bp = 10000 * (LOC of crates/ironclaw_reborn_composition/src/**.rs)
+#   observed_bp = 10000 * (LOC of crates/ironclaw_composition/src/**.rs)
 #                       / (LOC of all crates/*/src/**.rs)
 #   Production src only, in basis points (1 bp = 0.01 percentage point).
 #   Test-only FILES are excluded from both numerator and denominator (basenames
@@ -30,6 +30,21 @@
 #   ceiling_bp here to lock the improvement in (the gate prints a NUDGE when
 #   slack exceeds ~1pp). Raising ceiling_bp is allowed but must carry a one-line
 #   rationale in the PR — it is a visible, reviewed decision, not a silent drift.
+#
+# WHY THERE IS ALSO AN ABSOLUTE LOC CEILING (#7151)
+#   The share metric has a POISONED DENOMINATOR. It is composition's fraction of
+#   *all* production crate code, so feature inflow anywhere else in the workspace
+#   improves composition's score while composition's own mass grows. That is not
+#   theoretical: between 2026-08-02 and 2026-08-04 composition took +619 lines of
+#   feature inflow, against -23 lines removed by an entire eviction wave, and the
+#   share still fell (658 bp -> 634 bp) because the denominator grew faster. The
+#   gate was also inert in absolute terms: 634 bp observed against a 2398 bp
+#   ceiling is ~17.4pp of slack — composition could roughly QUADRUPLE and the
+#   mass metric would never fire. CHECKLIST WS0 records that slack itself.
+#   So `loc_ceiling` below bounds composition's production `.rs` LOC directly, on
+#   the same numerator the share metric already computes (one definition, two
+#   bounds). It is the metric that actually constrains; the share stays as the
+#   relative view and as the WS0 continuity record.
 
 [gate]
 # false = DRY-RUN (prints "[dry-run, would FAIL]" but never fails the build).
@@ -47,6 +62,72 @@ tolerance_bp = 30
 # consulted for the pass/fail decision.
 observed_bp = 2398
 observed_date = "2026-07-16"
+
+# --- Absolute mass (production LOC) ---------------------------------------
+# The BINDING mass bound. Same numerator as the share metric — production `.rs`
+# LOC under the composition crate's src tree, test-only files excluded — but no
+# denominator, so nobody else's feature work can buy composition headroom.
+#
+# 44021 was the count on origin/main @ 676d86ce02 (2026-08-04), cross-checked
+# two ways that agree exactly: the gate's own `find`-based counter, and a
+# git-tracked-only count (`git ls-files … | xargs cat | wc -l`) so a stray
+# untracked file in a working tree cannot be what set the baseline. Set to
+# current, not padded — a true ratchet.
+#
+# Re-seeded 44021 -> 44392 on 2026-08-04 after merging main @ be33ae138f into
+# this branch: #7062 (workspace/memory view scoping) landed +371 production LOC
+# of composition wiring between this gate's seeding and its merge, and the gate
+# correctly went red against its own merge context. Re-measured with
+# `bash scripts/ci/check-composition-budget.sh --print` on the merged tree
+# (44392 exactly, matching the CI failure output). Still set to current, not
+# padded.
+#
+# Re-seeded again on 2026-08-04 for the Waves 0-4 batch (#7141+#7160+#7159+
+# #7161+#7156 in one branch): the batch's own movers add composition wiring
+# (the conversations port adapter +158, consolidation wiring) and the gate
+# lands WITH them, seeded to the batch tree's measured count — which
+# dissolves the gates-before-movers ordering collision measured earlier
+# (the ceiling seeded pre-batch red the batch by 115 LOC).
+#
+# Re-ratcheted 45127 -> 42938 on 2026-08-04 by the WS6 service-cluster eviction
+# (admin-user directory + blocked-auth resume fan-out -> ironclaw_assistant; turn-end
+# trace capture -> ironclaw_trace_commons::capture + ironclaw_turn_runner::trace_capture).
+# -2189 LOC, measured on this branch with
+# `bash scripts/ci/check-composition-budget.sh --print`. Set to current, not
+# padded. Sibling WS6 slices lower it further; numeric conflicts belong to the
+# coordinator, who takes the LOWEST measured value of the merged tree.
+#
+# RE-RATCHET AT EVERY WAVE CLOSE. When a wave evicts behavior from composition,
+# lower loc_ceiling to the new observed count in the same PR; the gate prints a
+# NUDGE once observed sits more than loc_nudge_slack below the ceiling, so the
+# obligation is visible in CI output rather than remembered. Raising it is
+# allowed but must carry a one-line PR rationale, same rule as ceiling_bp.
+#
+# Re-ratcheted 45127 -> 42688 on 2026-08-04 by the WS6 policy evictions
+# (approval gate -> ironclaw_approvals, fire-time trigger access ->
+# ironclaw_triggers): -2,439 production LOC. This is the "RE-RATCHET AT EVERY
+# WAVE CLOSE" rule below being executed, not headroom being claimed — measured
+# with `bash scripts/ci/check-composition-budget.sh --print` on the post-
+# eviction tree. Sibling WS6 branches are shrinking composition too, so a
+# numeric conflict here is expected and trivial: take the LOWER number, then
+# re-measure on the merged tree rather than trusting either side's figure.
+#
+# Union re-seed on the waves-0-4 batch, 2026-08-04: the WS6 service-cluster
+# eviction (-2,189) and the WS6 policy eviction (-2,439) are disjoint; on the
+# merged tree the deltas add exactly: 45,127 - 2,189 - 2,439 = 40,499.
+loc_ceiling = 40499
+# Working slack for in-flight PRs. Deliberately small: the inflow this gate
+# exists to catch was +619 lines, and a tolerance that would have absorbed it
+# is a gate that constrains nothing. A change adding more than this to
+# composition is a reviewed decision, not routine wiring.
+loc_tolerance = 150
+# Print the down-ratchet NUDGE once the ceiling sits more than this far above
+# the observed count — i.e. once a wave's eviction has not been locked in.
+loc_nudge_slack = 200
+# Informational — observed when this file was last updated. Not consulted for
+# the pass/fail decision.
+loc_observed = 40499
+loc_observed_date = "2026-08-04"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the

@@ -625,13 +625,44 @@ def rust_lexical_structure(source: str) -> tuple[list[str], list[int]]:
 
 def mechanically_uninstrumentable_lines(source: str) -> set[int]:
     """Return Rust scaffolding spans that LLVM cannot execute."""
-    lexical_lines, _brace_deltas = rust_lexical_structure(source)
+    lexical_lines, brace_deltas = rust_lexical_structure(source)
     uninstrumentable: set[int] = set()
     attribute_depth = 0
     in_use = False
     in_const = False
+    # Enum bodies are pure declaration: variants (unit, tuple, or struct
+    # shaped) and their fields carry no LLVM coverage region, and even a
+    # discriminant initializer is const-evaluated. One unclassified variant
+    # line is enough to defeat the `candidate_lines <= uninstrumentable_lines`
+    # escape and read a declaration-only file as "absent from coverage" — the
+    # same single-line failure mode the inner-attribute fix above this one
+    # documents. Tracked by brace depth so multi-line struct variants and
+    # `where`-claused headers classify whole.
+    depth = 0
+    enum_body_floor: int | None = None
+    enum_header_pending = False
     for line_number, line in enumerate(lexical_lines, start=1):
         stripped = line.strip()
+        pre_depth = depth
+        depth += brace_deltas[line_number - 1]
+        if enum_body_floor is not None:
+            uninstrumentable.add(line_number)
+            if depth < enum_body_floor:
+                enum_body_floor = None
+            continue
+        if enum_header_pending:
+            uninstrumentable.add(line_number)
+            if depth > pre_depth:
+                enum_body_floor = pre_depth + 1
+                enum_header_pending = False
+            continue
+        if re.match(r"^(?:pub(?:\([^)]*\))?\s+)?enum\s+[A-Za-z_]\w*", stripped):
+            uninstrumentable.add(line_number)
+            if depth > pre_depth:
+                enum_body_floor = pre_depth + 1
+            else:
+                enum_header_pending = True
+            continue
         if attribute_depth:
             uninstrumentable.add(line_number)
             attribute_depth += stripped.count("[") - stripped.count("]")

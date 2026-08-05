@@ -457,7 +457,7 @@ pub(crate) fn map_provider_finish_token(token: &str) -> Option<FinishReason> {
 ///
 /// The provider's own word wins. `Length` and `ContentFilter` win even when
 /// tool calls were parsed — truncated tool arguments must not be executed, and
-/// `ironclaw_runner`'s model gateway only forwards provider tool calls when the
+/// `ironclaw_turn_runner`'s model gateway only forwards provider tool calls when the
 /// finish reason is `ToolUse` or `Stop`, so reporting the truth here is what
 /// turns a silently-truncated run into a surfaced failure.
 ///

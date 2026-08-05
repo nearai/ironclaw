@@ -222,6 +222,9 @@ export function AutomationDetailPanel({
                 type="button"
                 variant={canResume ? "primary" : "secondary"}
                 size="icon-sm"
+                data-testid="automation-action-button"
+                data-automation-id={automation.automation_id}
+                data-automation-action={canResume ? "resume" : "pause"}
                 aria-label={actionTitle}
                 title={actionTitle}
                 disabled={isMutating}
@@ -234,6 +237,8 @@ export function AutomationDetailPanel({
               type="button"
               variant="danger"
               size="icon-sm"
+              data-testid="automation-delete-button"
+              data-automation-id={automation.automation_id}
               aria-label={deleteTitle}
               title={deleteTitle}
               disabled={isMutating}
@@ -290,14 +295,19 @@ export function AutomationDetailPanel({
               )}
         </div>
       </div>
-      <ConfirmDialog
-        open={deleteDialogOpen}
-        title={deleteTitle}
-        confirmLabel={t("common.delete")}
-        isConfirming={isMutating}
-        onConfirm={handleConfirmDelete}
-        onCancel={() => setDeleteDialogOpen(false)}
-      />
+      <div
+        data-testid="automation-delete-dialog"
+        data-automation-id={automation.automation_id}
+      >
+        <ConfirmDialog
+          open={deleteDialogOpen}
+          title={deleteTitle}
+          confirmLabel={t("common.delete")}
+          isConfirming={isMutating}
+          onConfirm={handleConfirmDelete}
+          onCancel={() => setDeleteDialogOpen(false)}
+        />
+      </div>
     </Panel>
   );
 }

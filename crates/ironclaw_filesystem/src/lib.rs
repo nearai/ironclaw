@@ -49,7 +49,7 @@ pub use index::{
 };
 pub use libsql::LibSqlRootFilesystem;
 pub use local::DiskFilesystem;
-pub use postgres::PostgresRootFilesystem;
+pub use postgres::{PostgresConnectionPool, PostgresRootFilesystem};
 pub use record::{
     CasExpectation, ContentType, Entry, RecordKind, RecordVersion, SeqNo, VersionedEntry,
 };

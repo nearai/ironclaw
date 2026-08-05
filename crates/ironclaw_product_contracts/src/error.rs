@@ -10,12 +10,12 @@
 //!   ceiling (`ironclaw_host_api` + `ironclaw_extension_contracts`, §6.1.3).
 //!   A port implementor never needs more than this to describe its own
 //!   failure.
-//! - **`ironclaw_product::ProductSurfaceFailure`** — the workflow vocabulary.
+//! - **`ironclaw_assistant::ProductSurfaceFailure`** — the workflow vocabulary.
 //!   It is a strict superset: it adds the turn-coordinator, interaction, and
 //!   idempotency variants whose payloads are kernel types
 //!   (`ironclaw_turns::TurnError`) or product-internal rejection kinds, which
 //!   only the workflow crate produces and only the workflow crate reads.
-//!   `ironclaw_product` absorbs this type into that one with a total,
+//!   `ironclaw_assistant` absorbs this type into that one with a total,
 //!   information-preserving `From`, so `?` at a product call site keeps
 //!   working unchanged.
 //!
@@ -35,7 +35,7 @@ use crate::surface::{ProductSurfaceError, ProductSurfaceErrorCode};
 /// Constructed by whichever crate implements the port — the extension host,
 /// the extension manager, the operator surface, or composition — and either
 /// projected to [`ProductSurfaceError`] for a caller across the membrane, or
-/// absorbed into `ironclaw_product::ProductSurfaceFailure` when product itself
+/// absorbed into `ironclaw_assistant::ProductSurfaceFailure` when product itself
 /// is the caller.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ProductOperationFailure {
@@ -44,9 +44,24 @@ pub enum ProductOperationFailure {
     #[error("binding resolution failed: {reason}")]
     BindingResolutionFailed { reason: String },
 
+    /// The external actor has no trusted binding to a canonical user.
+    ///
+    /// **Distinct from [`Self::BindingResolutionFailed`], and the difference is
+    /// user-visible.** `BindingResolutionFailed` is an internal invariant (500);
+    /// this one is the fail-closed "you are not paired yet" answer the workflow
+    /// turns into a `ProductRejectionKind::BindingRequired` acknowledgement with
+    /// its own onboarding hint. Collapsing the two would change what an unpaired
+    /// external actor is told.
+    #[error("binding required: {reason}")]
+    BindingRequired { reason: String },
+
     /// The actor or route is not allowed to use the resolved thread.
     #[error("binding access denied")]
     BindingAccessDenied,
+
+    /// The adapter installation is not mapped to a tenant.
+    #[error("unknown adapter installation")]
+    UnknownInstallation,
 
     /// The request is invalid and should not be retried unchanged.
     #[error("invalid binding request: {reason}")]
@@ -71,6 +86,18 @@ pub enum ProductOperationFailure {
     #[error("unsupported action kind: {kind}")]
     UnsupportedActionKind { kind: String },
 
+    /// The turn coordinator rejected a submission before typed turn errors
+    /// were available, carrying only the rendered cause.
+    ///
+    /// The untyped half of `ironclaw_assistant::ProductSurfaceFailure`'s
+    /// submission pair: the typed half (`TurnSubmissionFailed { error:
+    /// TurnError }`) is minted only by product's own turn path and stays
+    /// there, because `TurnError` is a kernel type this crate's ceiling
+    /// forbids. A port implementor reaches this variant when the conversation
+    /// binding store surfaces a submission rejection it can only render.
+    #[error("turn submission rejected: {reason}")]
+    TurnSubmissionRejected { reason: String },
+
     /// A transient store or service failure.
     #[error("transient workflow failure: {reason}")]
     Transient { reason: String },
@@ -88,7 +115,7 @@ impl From<HostApiError> for ProductOperationFailure {
 /// only speaks [`ProductSurfaceError`].
 ///
 /// This is the *single* mapping table for these six discriminants —
-/// `ironclaw_product`'s `lifecycle_product_surface_error` delegates its
+/// `ironclaw_assistant`'s `lifecycle_product_surface_error` delegates its
 /// matching arms here rather than repeating the status choices, so the two
 /// paths cannot drift. It is a projection between two types this crate owns,
 /// not workflow classification: no reason text crosses (the wire contract has
@@ -113,7 +140,15 @@ impl From<ProductOperationFailure> for ProductSurfaceError {
             ProductOperationFailure::Transient { .. } => {
                 ProductSurfaceError::service_unavailable(true)
             }
-            ProductOperationFailure::BindingResolutionFailed { .. } => {
+            // No boundary image: the membrane renders these as an internal
+            // invariant and the caller-facing answer is produced upstream —
+            // `BindingRequired` and `UnknownInstallation` become typed
+            // `ProductRejectionKind` acknowledgements on the inbound path, and
+            // a rendered submission rejection is never a client's fault.
+            ProductOperationFailure::BindingResolutionFailed { .. }
+            | ProductOperationFailure::BindingRequired { .. }
+            | ProductOperationFailure::UnknownInstallation
+            | ProductOperationFailure::TurnSubmissionRejected { .. } => {
                 ProductSurfaceError::internal_invariant()
             }
         }
@@ -178,6 +213,28 @@ mod tests {
                 500,
                 false,
             ),
+            (
+                ProductOperationFailure::BindingRequired {
+                    reason: "actor is not paired".into(),
+                },
+                ProductSurfaceErrorCode::Internal,
+                500,
+                false,
+            ),
+            (
+                ProductOperationFailure::UnknownInstallation,
+                ProductSurfaceErrorCode::Internal,
+                500,
+                false,
+            ),
+            (
+                ProductOperationFailure::TurnSubmissionRejected {
+                    reason: "thread busy".into(),
+                },
+                ProductSurfaceErrorCode::Internal,
+                500,
+                false,
+            ),
         ];
 
         for (failure, expected_code, expected_status, expected_retryable) in cases {
@@ -223,7 +280,20 @@ mod tests {
                 },
                 Some("no tenant"),
             ),
+            (
+                ProductOperationFailure::BindingRequired {
+                    reason: "actor is not paired".into(),
+                },
+                Some("actor is not paired"),
+            ),
             (ProductOperationFailure::BindingAccessDenied, None),
+            (ProductOperationFailure::UnknownInstallation, None),
+            (
+                ProductOperationFailure::TurnSubmissionRejected {
+                    reason: "thread busy".into(),
+                },
+                Some("thread busy"),
+            ),
             (
                 ProductOperationFailure::InvalidBindingRequest {
                     reason: "bad ref".into(),
@@ -288,7 +358,7 @@ mod tests {
     /// **Every variant is enumerated**, `InvariantViolation` included. That one
     /// is an internal protocol mismatch rather than caller input, so its 400
     /// arguably overstates client responsibility — but the classification is
-    /// not this slice's: `ironclaw_product`'s `From<HostApiError> for
+    /// not this slice's: `ironclaw_assistant`'s `From<HostApiError> for
     /// ProductSurfaceFailure` has always been the same blanket mapping, and the
     /// impl under test mirrors it so the two absorption paths cannot disagree.
     /// It is pinned here rather than changed so that reclassifying it is a

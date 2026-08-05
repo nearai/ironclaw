@@ -20,10 +20,10 @@ Placement decision, in order:
 2. **Domain type** (thread/turn/run/resource/capability/... shapes shared
    across crates) → the **domain vocabulary crate** that already owns that
    concept: `ironclaw_turns`, `ironclaw_threads`, `ironclaw_resources`,
-   `ironclaw_events`, `ironclaw_processes`, `ironclaw_host_api`, ...
+   `ironclaw_event_log`, `ironclaw_processes`, `ironclaw_host_api`, ...
 3. **API contract type** (request/response/config for a trait or HTTP surface)
    → the crate that **defines the contract**. ProductSurface DTOs and
-   descriptors live in `ironclaw_product`; host caller/error vocabulary lives
+   descriptors live in `ironclaw_assistant`; host caller/error vocabulary lives
    in `ironclaw_host_api`; route-only wire types live in `ironclaw_webui`.
    Consumers import from the contract owner.
 4. **Cross-domain primitive** (identity newtypes, paths, hashing, attachment
@@ -104,7 +104,7 @@ path-preservation re-export §-item-1 and item-4 above forbid. A plain private
 import, not a re-export); a crate-root `pub use` that keeps the old public path
 alive is not. Worked example: the LLM cost table moved
 `ironclaw_llm::costs` → `ironclaw_common::llm_costs`, and each consumer
-(`ironclaw_llm` providers, `ironclaw_runner`, `ironclaw_reborn_composition`,
+(`ironclaw_llm` providers, `ironclaw_turn_runner`, `ironclaw_composition`,
 the root crate) had its import repointed — no shim was left behind.
 
 ## Duplicate detection — signatures, not names

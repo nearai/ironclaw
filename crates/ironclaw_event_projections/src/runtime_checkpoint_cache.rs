@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use ironclaw_events::EventCursor;
+use ironclaw_event_log::EventCursor;
 
 use crate::ProjectionScope;
 use crate::runtime_projection::RuntimeProjectionState;
@@ -123,7 +123,7 @@ fn checkpoint(cursor: EventCursor, state: RuntimeProjectionState) -> RuntimeProj
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_events::{EventStreamKey, ReadScope};
+    use ironclaw_event_log::{EventStreamKey, ReadScope};
     use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
 
     use super::*;

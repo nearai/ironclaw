@@ -15,7 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_auth::{AuthRecipeResolver, ResolvedVendorAuthRecipe};
 use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
-use ironclaw_extensions::{ExtensionInstallationStorePort, ResolvedExtensionManifest};
+use ironclaw_extension_registry::{ExtensionInstallationStorePort, ResolvedExtensionManifest};
 use ironclaw_host_api::ids::{ExtensionId, UserId};
 
 /// Two active extensions declared incompatible recipes for one vendor.
@@ -206,7 +206,7 @@ impl AuthRecipeResolver for InstalledManifestAuthRecipeResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_extensions::ResolvedAuthSurface;
+    use ironclaw_extension_registry::ResolvedAuthSurface;
     use ironclaw_host_api::{capability::RuntimeCredentialAccountSetup, ids::ExtensionId};
 
     fn oauth_recipe(scopes: &[&str], token_endpoint: &str) -> VendorAuthRecipe {
@@ -233,10 +233,10 @@ mod tests {
             version: "0.1.0".to_string(),
             description: String::new(),
             requested_trust: ironclaw_host_api::trust::RequestedTrustClass::ThirdParty,
-            runtime: ironclaw_extensions::ExtensionRuntimeV2::FirstParty {
+            runtime: ironclaw_extension_registry::ExtensionRuntimeV2::FirstParty {
                 service: format!("{extension}/v1"),
             },
-            root_binding: ironclaw_extensions::PackageRootBinding::FabricateOnLoad,
+            root_binding: ironclaw_extension_registry::PackageRootBinding::FabricateOnLoad,
             mcp: None,
             tools: Vec::new(),
             channel: None,

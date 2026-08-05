@@ -155,7 +155,7 @@ async fn capability_host_rejects_mutated_github_comment_issue_replay_before_disp
 }
 
 struct GitHubCommentApprovalFixture {
-    registry: ironclaw_extensions::ExtensionRegistry,
+    registry: ironclaw_extension_registry::ExtensionRegistry,
     dispatcher: TestDispatcher,
     run_state:
         ironclaw_processes::ProcessInvocationStateStore<ironclaw_filesystem::InMemoryBackend>,

@@ -29,11 +29,11 @@ assert_flags() {
 assert_flags ironclaw_telegram_extension ""
 
 # The runner restart regression is active without a crate feature gate.
-assert_flags ironclaw_runner ""
+assert_flags ironclaw_turn_runner ""
 
 # Guard the case-arm structure itself. Composition also carries `memory-mem0`
 # (the off-by-default mem0 third-party memory provider, #5264) so this lane
-# compiles it — see package-feature-flags.sh's ironclaw_reborn_composition arm.
-assert_flags ironclaw_reborn_composition "--features test-support,memory-mem0"
+# compiles it — see package-feature-flags.sh's ironclaw_composition arm.
+assert_flags ironclaw_composition "--features test-support,memory-mem0"
 
 echo "PASS package-feature-flags recipes"

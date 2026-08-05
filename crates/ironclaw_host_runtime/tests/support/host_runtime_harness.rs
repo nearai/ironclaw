@@ -23,17 +23,22 @@ use ironclaw_capabilities::{
     CapabilityObligationRequest, CapabilitySpawnRequest, CredentialPresence, HostPolicyFacts,
     PolicyAction,
 };
-use ironclaw_events::{
+use ironclaw_event_log::{
     DurableAuditLog, EventCursor, EventError, EventReplay, EventStreamKey, InMemoryAuditSink,
     InMemoryEventSink, ReadScope,
 };
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_extension_registry::{
+    ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+};
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{
     DiskFilesystem, Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
     ScopedFilesystem,
 };
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
+use ironclaw_host_api::process::{
+    CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
+};
 use ironclaw_host_api::result_meta::FailureKind;
 use ironclaw_host_api::{
     Timestamp,
@@ -59,7 +64,7 @@ use ironclaw_host_api::{
     path::{HostPath, MountAlias, VirtualPath},
     resource::{
         CapabilityHostResult, ResourceEstimate, ResourceReceipt, ResourceReservation,
-        ResourceScope, ResourceUsage,
+        ResourceScope, ResourceUsage, RuntimeResourceBudget,
     },
     runtime::{RuntimeKind, TrustClass},
     runtime_policy::{
@@ -70,10 +75,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
-    CommandExecutionOutput, CommandExecutionRequest, DefaultHostRuntime, HostRuntime,
-    HostRuntimeServices, ProcessObligationLifecycleStore, ProductionWiringComponent,
-    ProductionWiringConfig, ProductionWiringIssueKind, RuntimeCapabilityOutcome, RuntimeInvocation,
-    RuntimeProcessError, RuntimeProcessPort, SandboxCommandTransport, builtin_first_party_package,
+    DefaultHostRuntime, HostRuntime, HostRuntimeServices, ProcessObligationLifecycleStore,
+    ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssueKind,
+    RuntimeCapabilityOutcome, RuntimeInvocation, RuntimeProcessPort, builtin_first_party_package,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
 use ironclaw_network::{
@@ -89,7 +93,7 @@ use ironclaw_processes::{
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
 };
-use ironclaw_scripts::{
+use ironclaw_sandbox::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptExecutionRequest,
     ScriptExecutionResult, ScriptExecutor, ScriptRuntime, ScriptRuntimeConfig,
 };
@@ -744,16 +748,16 @@ impl RecordingScriptExecutor {
 impl ScriptExecutor for RecordingScriptExecutor {
     fn execute_extension_json(
         &self,
-        governor: &dyn ResourceGovernor,
+        budget: &dyn RuntimeResourceBudget,
         request: ScriptExecutionRequest<'_>,
-    ) -> Result<ScriptExecutionResult, ironclaw_scripts::ScriptError> {
+    ) -> Result<ScriptExecutionResult, ironclaw_sandbox::ScriptError> {
         self.mounts.lock().unwrap().push(request.mounts.clone());
         let reservation = match request.resource_reservation.clone() {
             Some(reservation) => reservation,
-            None => governor.reserve(request.scope.clone(), request.estimate.clone())?,
+            None => budget.reserve(request.scope.clone(), request.estimate.clone())?,
         };
         let usage = ResourceUsage::default();
-        let receipt = governor.reconcile(reservation.id, usage.clone())?;
+        let receipt = budget.reconcile(reservation.id, usage.clone())?;
         Ok(ScriptExecutionResult {
             result: CapabilityHostResult {
                 output: request.invocation.input,
@@ -795,7 +799,7 @@ impl DurableAuditLog for FailingDurableAuditLog {
     async fn append(
         &self,
         _record: AuditEnvelope,
-    ) -> Result<ironclaw_events::EventLogEntry<AuditEnvelope>, EventError> {
+    ) -> Result<ironclaw_event_log::EventLogEntry<AuditEnvelope>, EventError> {
         Err(EventError::DurableLog {
             reason: "simulated audit backend failure at /tmp/audit-backend-secret".to_string(),
         })
@@ -1585,7 +1589,7 @@ pub(crate) struct ClientErrorMcpExecutor;
 impl McpExecutor for ClientErrorMcpExecutor {
     async fn execute_extension_json(
         &self,
-        _governor: &dyn ResourceGovernor,
+        _budget: &dyn RuntimeResourceBudget,
         _request: McpExecutionRequest<'_>,
     ) -> Result<McpExecutionResult, McpError> {
         Err(McpError::Client {
@@ -1600,7 +1604,7 @@ pub(crate) struct InvalidToolCatalogMcpExecutor;
 impl McpExecutor for InvalidToolCatalogMcpExecutor {
     async fn execute_extension_json(
         &self,
-        _governor: &dyn ResourceGovernor,
+        _budget: &dyn RuntimeResourceBudget,
         _request: McpExecutionRequest<'_>,
     ) -> Result<McpExecutionResult, McpError> {
         Err(McpError::InvalidToolCatalog {
@@ -1615,7 +1619,7 @@ pub(crate) struct PanicMcpExecutor;
 impl McpExecutor for PanicMcpExecutor {
     async fn execute_extension_json(
         &self,
-        _governor: &dyn ResourceGovernor,
+        _budget: &dyn RuntimeResourceBudget,
         _request: McpExecutionRequest<'_>,
     ) -> Result<McpExecutionResult, McpError> {
         panic!("health-only test must not execute MCP runtime")
@@ -2211,7 +2215,7 @@ pub(crate) fn tool_component(wat_src: &str) -> Vec<u8> {
     let mut module = wat::parse_str(wat_src).unwrap();
     let mut resolve = Resolve::default();
     let package = resolve
-        .push_str("tool.wit", include_str!("../../../../wit/tool.wit"))
+        .push_str("tool.wit", ironclaw_wasm::TOOL_WIT)
         .unwrap();
     let world = resolve
         .select_world(&[package], Some("sandboxed-tool"))
@@ -2583,11 +2587,11 @@ pub(crate) const HTTP_TOOL_WAT: &str = r#"
 )
 "#;
 
-fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
-    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+fn capability_provider_contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
+    let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
     contracts
         .register(std::sync::Arc::new(
-            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+            ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                 .expect("capability provider contract"),
         ))
         .expect("register capability provider contract");

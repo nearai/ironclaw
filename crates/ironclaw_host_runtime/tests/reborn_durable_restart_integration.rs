@@ -11,10 +11,15 @@ use ironclaw_authorization::{
     CapabilityLeaseStatus, CapabilityLeaseStore, CapabilityLeaseStorePort, GrantAuthorizer,
     TrustAwareCapabilityDispatchAuthorizer,
 };
-use ironclaw_events::{
+use ironclaw_event_log::{
     DurableAuditSink, DurableEventSink, EventStreamKey, ReadScope, RuntimeEventKind,
 };
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_event_store::{
+    RebornEventStoreConfig, RebornEventStores, RebornProfile, build_reborn_event_stores,
+};
+use ironclaw_extension_registry::{
+    ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+};
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::result_meta::FailureKind;
@@ -45,11 +50,8 @@ use ironclaw_processes::{
     ProcessInvocationStatus, ProcessInvocationStore, ProcessJournalStore, ProcessManager,
     ProcessRuntimePort, ProcessServices, ProcessStart, ProcessStatus, capability_process_record,
 };
-use ironclaw_reborn_event_store::{
-    RebornEventStoreConfig, RebornEventStores, RebornProfile, build_reborn_event_stores,
-};
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_scripts::{
+use ironclaw_sandbox::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
 use ironclaw_trust::{
@@ -676,7 +678,7 @@ async fn libsql_process_services(db_path: &Path) -> DurableProcessServices {
 
 /// Mount view granting the migrated consumer crates full per-user-owner
 /// permissions on their canonical aliases. Test-only: production
-/// composition (`ironclaw_reborn_composition::default_singleton_mount_view`)
+/// composition (`ironclaw_composition::default_singleton_mount_view`)
 /// has the equivalent shape but is `pub(crate)`.
 fn durable_mount_view() -> MountView {
     MountView::new(vec![
@@ -1076,11 +1078,11 @@ default_permission = "allow"
 parameters_schema = { type = "object" }
 "#;
 
-fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
-    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+fn capability_provider_contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
+    let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
     contracts
         .register(std::sync::Arc::new(
-            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+            ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                 .expect("capability provider contract"),
         ))
         .expect("register capability provider contract");

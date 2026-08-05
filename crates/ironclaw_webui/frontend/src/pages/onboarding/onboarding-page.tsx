@@ -79,6 +79,7 @@ function NearAiSetupMenu({ provider, isBusy, login, t, onSetUp }) {
   return (
     <div ref={ref} className="relative shrink-0">
       <Button
+        data-testid="onboarding-provider-setup"
         type="button"
         variant="primary"
         size="sm"
@@ -142,13 +143,26 @@ function FeaturedProviderRow({ entry, provider, configured, isBusy, login, t, on
       {t("llm.use")}
     </Button>);
   } else {
-    actions = (<Button type="button" variant="primary" size="sm" disabled={isBusy} onClick={() => onSetUp(provider)}>
-      {t("onboarding.setUp")}
-    </Button>);
+    actions = (
+      <Button
+        data-testid="onboarding-provider-setup"
+        type="button"
+        variant="primary"
+        size="sm"
+        disabled={isBusy}
+        onClick={() => onSetUp(provider)}
+      >
+        {t("onboarding.setUp")}
+      </Button>
+    );
   }
 
   return (
-    <Card className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:gap-4">
+    <Card
+      data-testid="onboarding-provider-card"
+      data-provider-id={entry.id}
+      className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:gap-4"
+    >
       <div className="flex min-w-0 flex-1 items-center gap-3">
         <ProviderLogo id={entry.id} name={name} />
         <div className="min-w-0">
