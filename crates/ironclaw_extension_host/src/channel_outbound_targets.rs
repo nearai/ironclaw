@@ -5,9 +5,10 @@
 //! registered a [`PreferenceTargetCodec`] in the assembly extras. Targets
 //! come from generic state only:
 //!
-//! - **Shared conversations** — the extension's `*_subject_routes`
-//!   `[channel.config]` value: entries whose subject is the caller become
-//!   the caller's shared-conversation targets.
+//! - **Shared conversations** — the extension's `*_subject_routes` and
+//!   `*_allowed_channels` `[channel.config]` values. Explicit routes retain
+//!   their configured owner; allowed-only channels use the canonical managed
+//!   channel subject.
 //! - **Personal direct messages** — the generic per-(extension, user)
 //!   DM-target store seeded by post-bind provisioning (and the H.4 fold).
 //!
@@ -19,7 +20,7 @@
 //! so saved targets keep resolving across the setup→durable-id migration
 //! (each resolve returns a freshly encoded ref carrying the durable id).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -41,7 +42,9 @@ use ironclaw_extension_host::{
     ChannelDmTargetRecord, DM_TARGET_CONVERSATION_ID_KEY, DM_TARGET_SPACE_ID_KEY,
     FilesystemChannelDmTargetStore,
 };
-use ironclaw_extension_host::{handle_declares_field, shared_channel_admission_handles};
+use ironclaw_extension_host::{
+    handle_declares_field, managed_channel_subject_user_id, shared_channel_admission_handles,
+};
 use ironclaw_outbound::{
     DeliveryTargetCapabilities, MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetEntry,
     OutboundDeliveryTargetId, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
@@ -99,6 +102,9 @@ struct ChannelTargetContext {
     /// Explicit subject routes (`*_subject_routes`): conversation id → the
     /// subject user id delivery in that conversation belongs to.
     subject_routes: BTreeMap<String, String>,
+    /// Admin-allowed shared conversations (`*_allowed_channels`). Explicit
+    /// subject routes take precedence when a conversation appears in both.
+    allowed_channels: BTreeSet<String>,
 }
 
 impl GenericChannelOutboundTargetProvider {
@@ -169,6 +175,7 @@ impl GenericChannelOutboundTargetProvider {
         }
 
         let mut subject_routes = BTreeMap::new();
+        let mut allowed_channels = BTreeSet::new();
         let handles = shared_channel_admission_handles(&fields);
         if let Some(handle) = handles.subject_routes.as_deref()
             && let Some(raw) = self.config_value(&extension_id, handle).await?
@@ -187,6 +194,27 @@ impl GenericChannelOutboundTargetProvider {
                 }
             }
         }
+        // Allowed-only channels need the connection-scoping claim to produce
+        // an authoritative external conversation ref. Do not derive a
+        // space-less managed owner that a caller could reproduce.
+        if space_id.is_some()
+            && let Some(handle) = handles.allowed_channels.as_deref()
+            && let Some(raw) = self.config_value(&extension_id, handle).await?
+        {
+            match serde_json::from_str::<Vec<String>>(&raw) {
+                Ok(allowed) => allowed_channels.extend(allowed),
+                Err(error) => {
+                    tracing::warn!(
+                        target = "ironclaw::reborn::channel_outbound_targets",
+                        extension_id = %active.extension_id,
+                        handle,
+                        %error,
+                        "allowed-channel config value is not a JSON array; \
+                         treating as no allowed channels"
+                    );
+                }
+            }
+        }
 
         Ok(Some(ChannelTargetContext {
             extension_id: active.extension_id.clone(),
@@ -195,6 +223,7 @@ impl GenericChannelOutboundTargetProvider {
             codec,
             space_id,
             subject_routes,
+            allowed_channels,
         }))
     }
 
@@ -243,8 +272,20 @@ impl GenericChannelOutboundTargetProvider {
         // The owner is derived from the route's subject (the resolved
         // resource), never echoed from the caller, so the registry's
         // caller-scoping filter stays genuine defense in depth.
-        let subject = context.subject_routes.get(conversation_id)?;
-        let owner_user = UserId::new(subject.clone()).ok()?;
+        let owner_user = if let Some(subject) = context.subject_routes.get(conversation_id) {
+            UserId::new(subject.clone()).ok()?
+        } else if context.allowed_channels.contains(conversation_id) {
+            managed_channel_subject_user_id(
+                context.extension_id.as_str(),
+                &self.deps.identity.tenant_id,
+                &context.installation_id,
+                context.space_id.as_deref(),
+                conversation_id,
+            )
+            .ok()?
+        } else {
+            return None;
+        };
         let conversation =
             ExternalConversationRef::new(context.space_id.as_deref(), conversation_id, None, None)
                 .ok()?;
@@ -355,16 +396,27 @@ impl GenericChannelOutboundTargetProvider {
         caller.tenant_id == self.deps.identity.tenant_id
     }
 
-    /// Whether the routed subject for one conversation is the caller.
+    /// Whether the explicit or managed subject for one conversation is the caller.
     fn conversation_routed_to_caller(
         context: &ChannelTargetContext,
         conversation_id: &str,
         caller: &OutboundDeliveryTargetScope,
     ) -> bool {
-        context
-            .subject_routes
-            .get(conversation_id)
-            .is_some_and(|subject| subject == caller.user_id.as_str())
+        let owner = if let Some(subject) = context.subject_routes.get(conversation_id) {
+            UserId::new(subject.clone()).ok()
+        } else if context.allowed_channels.contains(conversation_id) {
+            managed_channel_subject_user_id(
+                context.extension_id.as_str(),
+                &caller.tenant_id,
+                &context.installation_id,
+                context.space_id.as_deref(),
+                conversation_id,
+            )
+            .ok()
+        } else {
+            None
+        };
+        owner.as_ref() == Some(&caller.user_id)
     }
 }
 
@@ -379,8 +431,13 @@ impl OutboundDeliveryTargetProvider for GenericChannelOutboundTargetProvider {
         }
         let mut entries = Vec::new();
         for context in self.contexts().await? {
-            for (conversation_id, subject) in &context.subject_routes {
-                if subject != caller.user_id.as_str() {
+            for conversation_id in context
+                .subject_routes
+                .keys()
+                .chain(context.allowed_channels.iter())
+                .collect::<BTreeSet<_>>()
+            {
+                if !Self::conversation_routed_to_caller(&context, conversation_id, caller) {
                     continue;
                 }
                 if let Some(entry) = self.shared_entry(&context, conversation_id) {

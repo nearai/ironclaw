@@ -4389,7 +4389,9 @@ use crate::channel_outbound_targets::{
 use crate::channel_triggered_delivery::GenericTriggeredRunDeliveryHook;
 use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec as _;
 use ironclaw_extension_contracts::state::InstallationState;
-use ironclaw_extension_host::{FilesystemChannelDmTargetStore, dm_target_payload};
+use ironclaw_extension_host::{
+    FilesystemChannelDmTargetStore, dm_target_payload, managed_channel_subject_user_id,
+};
 use ironclaw_outbound::OutboundDeliveryTargetProvider;
 use ironclaw_outbound::{OutboundDeliveryTargetScope, TriggeredRunDeliveryStore};
 
@@ -4399,6 +4401,7 @@ use ironclaw_outbound::{OutboundDeliveryTargetScope, TriggeredRunDeliveryStore};
 const RETIRED_INSTALLATION: &str = "retired-setup-install";
 /// A shared channel routed to the operator through `slack_subject_routes`.
 const ROUTED_CHANNEL: &str = "C777";
+const ALLOWED_CHANNEL: &str = "C888";
 
 fn generic_dm_target_store() -> Arc<FilesystemChannelDmTargetStore> {
     Arc::new(FilesystemChannelDmTargetStore::new(
@@ -4459,6 +4462,42 @@ async fn save_outbound_target_config(harness: &Harness) {
         .expect("save outbound target config"); // safety: manifest declares the handles.
 }
 
+async fn save_allowed_outbound_target_config(harness: &Harness, include_team: bool, raw: &str) {
+    let mut values = vec![("slack_allowed_channels".to_string(), raw.to_string())];
+    if include_team {
+        values.push(("slack_team_id".to_string(), TEAM.to_string()));
+    }
+    harness
+        .channel_config
+        .save(
+            &ExtensionId::new(ADAPTER).expect("extension id"), // safety: static id is valid.
+            values,
+        )
+        .await
+        .expect("save allowed outbound target config"); // safety: manifest declares the handles.
+}
+
+fn managed_channel_caller_with_space(
+    conversation_id: &str,
+    space_id: Option<&str>,
+) -> OutboundDeliveryTargetScope {
+    let tenant_id = TenantId::new(TENANT).expect("tenant"); // safety: static id is valid.
+    let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation"); // safety: static id is valid.
+    let user_id = managed_channel_subject_user_id(
+        ADAPTER,
+        &tenant_id,
+        &installation_id,
+        space_id,
+        conversation_id,
+    )
+    .expect("managed channel subject"); // safety: static inputs derive a valid id.
+    OutboundDeliveryTargetScope::new(tenant_id, user_id)
+}
+
+fn managed_channel_caller(conversation_id: &str) -> OutboundDeliveryTargetScope {
+    managed_channel_caller_with_space(conversation_id, Some(TEAM))
+}
+
 #[tokio::test]
 async fn generic_outbound_target_registration_exposes_provider_through_registry() {
     let harness = build_harness(TurnMode::Running).await;
@@ -4492,6 +4531,128 @@ async fn generic_outbound_target_registration_exposes_provider_through_registry(
         .expect("registered target should retain its Slack destination");
     assert_eq!(conversation.space_id(), Some(TEAM));
     assert_eq!(conversation.conversation_id(), ROUTED_CHANNEL);
+}
+
+/// REGRESSION: admin admission of a shared channel is also sufficient to
+/// address it for host-mediated outbound delivery. The canonical managed
+/// channel subject owns it; unrelated human callers cannot enumerate it.
+#[tokio::test]
+async fn generic_outbound_targets_list_admin_allowed_channel_for_managed_subject() {
+    let harness = build_harness(TurnMode::Running).await;
+    save_allowed_outbound_target_config(
+        &harness,
+        true,
+        &format!(r#"["{ALLOWED_CHANNEL}","", "{ALLOWED_CHANNEL}"]"#),
+    )
+    .await;
+    let registry = ironclaw_outbound::MutableOutboundDeliveryTargetRegistry::default();
+    register_generic_channel_outbound_targets(
+        &registry,
+        generic_outbound_target_deps(&harness, generic_dm_target_store()),
+    );
+
+    let caller = managed_channel_caller(ALLOWED_CHANNEL);
+    let listed = registry
+        .list_outbound_delivery_targets(&caller)
+        .await
+        .expect("registered provider should be queryable");
+    assert_eq!(listed.len(), 1, "duplicates and invalid ids are skipped");
+    let target = &listed[0];
+    assert_eq!(
+        target.summary.target_id.as_str(),
+        format!("slack:shared-channel:{TEAM}:{ALLOWED_CHANNEL}")
+    );
+    assert!(target.owner.matches_scope(&caller));
+
+    assert!(
+        registry
+            .list_outbound_delivery_targets(&operator_caller())
+            .await
+            .expect("other-user list succeeds")
+            .is_empty(),
+        "a human caller must not acquire the managed channel subject's target"
+    );
+    assert!(
+        registry
+            .resolve_outbound_delivery_target(&operator_caller(), &target.summary.target_id)
+            .await
+            .expect("other-user resolve succeeds")
+            .is_none(),
+        "a human caller must not resolve the managed channel subject's target"
+    );
+}
+
+#[tokio::test]
+async fn generic_outbound_targets_explicit_route_wins_over_allowed_channel() {
+    let harness = build_harness(TurnMode::Running).await;
+    harness
+        .channel_config
+        .save(
+            &ExtensionId::new(ADAPTER).expect("extension id"), // safety: static id is valid.
+            vec![
+                ("slack_team_id".to_string(), TEAM.to_string()),
+                (
+                    "slack_allowed_channels".to_string(),
+                    format!(r#"["{ROUTED_CHANNEL}"]"#),
+                ),
+                (
+                    "slack_subject_routes".to_string(),
+                    format!(r#"{{"{ROUTED_CHANNEL}":"{USER}"}}"#),
+                ),
+            ],
+        )
+        .await
+        .expect("save overlapping outbound target config");
+    let provider = generic_outbound_target_provider(&harness, generic_dm_target_store());
+
+    let listed = provider
+        .list_outbound_delivery_targets(&operator_caller())
+        .await
+        .expect("target list");
+    assert_eq!(listed.len(), 1, "overlapping config emits no duplicate");
+    assert_eq!(
+        listed[0].summary.target_id.as_str(),
+        format!("slack:shared-channel:{TEAM}:{ROUTED_CHANNEL}")
+    );
+    assert!(listed[0].owner.matches_scope(&operator_caller()));
+    assert!(
+        provider
+            .list_outbound_delivery_targets(&managed_channel_caller(ROUTED_CHANNEL))
+            .await
+            .expect("managed-subject list succeeds")
+            .is_empty(),
+        "the managed subject must not override the explicit owner"
+    );
+}
+
+#[tokio::test]
+async fn generic_outbound_targets_allowed_channels_fail_closed_without_space_or_valid_json() {
+    for (raw, description) in [
+        (format!(r#"["{ALLOWED_CHANNEL}"]"#), "missing space id"),
+        ("not-json".to_string(), "malformed allowlist"),
+    ] {
+        let harness = build_harness(TurnMode::Running).await;
+        save_allowed_outbound_target_config(
+            &harness,
+            description != "missing space id",
+            raw.as_str(),
+        )
+        .await;
+        let provider = generic_outbound_target_provider(&harness, generic_dm_target_store());
+        let caller = if description == "missing space id" {
+            managed_channel_caller_with_space(ALLOWED_CHANNEL, None)
+        } else {
+            managed_channel_caller(ALLOWED_CHANNEL)
+        };
+        assert!(
+            provider
+                .list_outbound_delivery_targets(&caller)
+                .await
+                .expect("target list")
+                .is_empty(),
+            "{description} must produce no targets"
+        );
+    }
 }
 
 /// The generic provider lists the operator's routed shared channel (from
