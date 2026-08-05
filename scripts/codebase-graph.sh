@@ -39,15 +39,6 @@ status() {
     return 0
   fi
 
-  # Publishing a persisted snapshot necessarily creates the commit after the
-  # source commit recorded inside it. Treat that one-step publication as fresh.
-  if [ "$(git rev-parse HEAD^ 2>/dev/null || true)" = "$indexed" ] &&
-     [ "$(git diff-tree --no-commit-id --name-only -r HEAD -- \
-       .codebase-memory/graph.db.zst)" = ".codebase-memory/graph.db.zst" ]; then
-    echo "status:  FRESH (shared snapshot indexes the publication commit's parent)"
-    return 0
-  fi
-
   if git merge-base --is-ancestor "$indexed" HEAD 2>/dev/null; then
     local n
     n="$(git rev-list --count "$indexed"..HEAD 2>/dev/null || echo '?')"

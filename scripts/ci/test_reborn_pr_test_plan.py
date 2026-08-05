@@ -707,6 +707,25 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertEqual(plan["root_partitions"], [], path)
                 self.assertEqual(plan["integration_lanes"], [], path)
 
+    def test_codebase_memory_artifacts_select_no_rust_lane(self) -> None:
+        """Shared agent graph data has no Reborn product or test surface."""
+        for path in (
+            ".codebase-memory/.gitattributes",
+            ".codebase-memory/graph.db.zst",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none", path)
+                self.assertEqual(plan["crate_buckets"], [], path)
+                self.assertEqual(plan["root_partitions"], [], path)
+                self.assertEqual(plan["integration_lanes"], [], path)
+
+                paired = self.plan(
+                    "pull_request", [path, "crates/alpha/src/lib.rs"]
+                )
+                self.assertEqual(paired["mode"], "selected", path)
+                self.assertNotEqual(paired["crate_buckets"], [], path)
+
     def test_repo_wide_test_guidance_selects_no_rust_lane(self) -> None:
         for path in ("tests/CLAUDE.md", "tests/integration/CLAUDE.md"):
             with self.subTest(path=path):
@@ -773,6 +792,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "scripts/reborn-e2e-rust.sh",
             "scripts/check-version-bumps.sh",
             "scripts/run-reborn-webui.sh",
+            "scripts/codebase-graph.sh",
             ".gitignore",
         ):
             with self.subTest(path=path):
