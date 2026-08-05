@@ -158,6 +158,7 @@ struct DiagnosticRunState {
     model_calls: VecDeque<ModelCallDiagnostic>,
     tool_executions: VecDeque<ToolExecutionDiagnostic>,
     activity: VecDeque<DiagnosticActivityEntry>,
+    stats: SessionDiagnosticStats,
     updates: VecDeque<DiagnosticUpdateEnvelope>,
     latest_sequence: DiagnosticSequence,
 }
@@ -170,6 +171,7 @@ impl Default for DiagnosticRunState {
             model_calls: VecDeque::new(),
             tool_executions: VecDeque::new(),
             activity: VecDeque::new(),
+            stats: SessionDiagnosticStats::default(),
             updates: VecDeque::new(),
             latest_sequence: DiagnosticSequence::ZERO,
         }
@@ -180,7 +182,6 @@ impl Default for DiagnosticRunState {
 struct DiagnosticSessionState {
     runs: HashMap<TurnRunId, DiagnosticRunState>,
     run_order: VecDeque<TurnRunId>,
-    stats: SessionDiagnosticStats,
 }
 
 #[derive(Debug, Default)]
@@ -237,10 +238,6 @@ impl DiagnosticStoreState {
             .get(&DiagnosticSessionKey::from(scope))?
             .runs
             .get(&scope.run_id)
-    }
-
-    fn session(&self, scope: &DiagnosticScope) -> Option<&DiagnosticSessionState> {
-        self.sessions.get(&DiagnosticSessionKey::from(scope))
     }
 
     fn subscribe(
@@ -394,11 +391,10 @@ impl InMemoryDiagnosticStore {
         stats: SessionDiagnosticStats,
     ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
         let stats = stats.into_bounded();
-        self.record_with_session(
+        self.record(
             scope,
             DiagnosticUpdateKind::Stats(stats.clone()),
-            |_, _| {},
-            move |session| session.stats = stats,
+            move |run, _| run.stats = stats,
         )
     }
 
@@ -413,10 +409,6 @@ impl InMemoryDiagnosticStore {
         let Some(run) = state.run(scope) else {
             return Ok(None);
         };
-        let stats = state
-            .session(scope)
-            .map(|session| session.stats.clone())
-            .unwrap_or_default();
         Ok(Some(DiagnosticSnapshot {
             scope: scope.clone(),
             stream_id: run.stream_id,
@@ -424,7 +416,7 @@ impl InMemoryDiagnosticStore {
             model_calls: run.model_calls.iter().cloned().collect(),
             tool_executions: run.tool_executions.iter().cloned().collect(),
             activity: run.activity.iter().cloned().collect(),
-            stats,
+            stats: run.stats.clone(),
             latest_sequence: run.latest_sequence,
         }))
     }
@@ -443,7 +435,7 @@ impl InMemoryDiagnosticStore {
                 updates: Vec::new(),
                 retention_floor: None,
                 latest_cursor: None,
-                rebase_required: false,
+                rebase_required: after.is_some(),
             });
         };
         let retention_floor = run.updates.front().map(DiagnosticUpdateEnvelope::cursor);
@@ -495,17 +487,6 @@ impl InMemoryDiagnosticStore {
         update: DiagnosticUpdateKind,
         mutate: impl FnOnce(&mut DiagnosticRunState, DiagnosticSequence),
     ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
-        self.record_with_session(scope, update, mutate, |_| {})
-    }
-
-    fn record_with_session(
-        &self,
-        scope: DiagnosticScope,
-        update: DiagnosticUpdateKind,
-        mutate_run: impl FnOnce(&mut DiagnosticRunState, DiagnosticSequence),
-        mutate_session: impl FnOnce(&mut DiagnosticSessionState),
-    ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
-        let session_key = DiagnosticSessionKey::from(&scope);
         let mut state = self
             .state
             .lock()
@@ -517,7 +498,7 @@ impl InMemoryDiagnosticStore {
             .checked_add(1)
             .ok_or(DiagnosticStoreError::SequenceExhausted)?;
         let sequence = DiagnosticSequence::new(next);
-        mutate_run(run, sequence);
+        mutate(run, sequence);
         let cursor = DiagnosticCursor::new(run.stream_id, sequence);
         let envelope = DiagnosticUpdateEnvelope {
             scope,
@@ -532,11 +513,6 @@ impl InMemoryDiagnosticStore {
             envelope.clone(),
             self.limits.max_updates_per_run,
         );
-        let session = state
-            .sessions
-            .get_mut(&session_key)
-            .ok_or(DiagnosticStoreError::Invariant)?;
-        mutate_session(session);
         state.send_live_update(envelope);
         Ok(cursor)
     }
@@ -942,6 +918,32 @@ mod tests {
     }
 
     #[test]
+    fn cursor_for_an_evicted_run_requires_rebase() {
+        let store = InMemoryDiagnosticStore::new(tiny_limits()).expect("store");
+        let first = scope("tenant", "user", "thread", TurnRunId::new());
+        let second = scope("tenant", "user", "thread", TurnRunId::new());
+        let third = scope("tenant", "user", "thread", TurnRunId::new());
+        let original = store
+            .record_activity(first.clone(), activity("first"))
+            .expect("first");
+        store
+            .record_activity(second, activity("second"))
+            .expect("second");
+        store
+            .record_activity(third, activity("third"))
+            .expect("third");
+
+        let batch = store
+            .updates_after(&first, Some(original))
+            .expect("evicted run batch");
+
+        assert!(batch.rebase_required);
+        assert!(batch.updates.is_empty());
+        assert_eq!(batch.retention_floor, None);
+        assert_eq!(batch.latest_cursor, None);
+    }
+
+    #[test]
     fn future_cursor_in_the_current_stream_requires_rebase() {
         let store = InMemoryDiagnosticStore::new(tiny_limits()).expect("store");
         let scope = scope("tenant", "user", "thread", TurnRunId::new());
@@ -1099,6 +1101,50 @@ mod tests {
         assert!(matches!(update.update, DiagnosticUpdateKind::Stats(_)));
         let snapshot = store.snapshot(&scope).expect("snapshot").expect("present");
         assert_eq!(snapshot.stats.total_model_calls, 7);
+    }
+
+    #[test]
+    fn stats_remain_scoped_to_the_run_that_published_them() {
+        let store = InMemoryDiagnosticStore::new(tiny_limits()).expect("store");
+        let first = scope("tenant", "user", "thread", TurnRunId::new());
+        let second = scope("tenant", "user", "thread", TurnRunId::new());
+        store
+            .record_stats(
+                first.clone(),
+                SessionDiagnosticStats {
+                    total_model_calls: 3,
+                    ..SessionDiagnosticStats::default()
+                },
+            )
+            .expect("first stats");
+        store
+            .record_stats(
+                second.clone(),
+                SessionDiagnosticStats {
+                    total_model_calls: 8,
+                    ..SessionDiagnosticStats::default()
+                },
+            )
+            .expect("second stats");
+
+        assert_eq!(
+            store
+                .snapshot(&first)
+                .expect("first snapshot")
+                .expect("first run")
+                .stats
+                .total_model_calls,
+            3
+        );
+        assert_eq!(
+            store
+                .snapshot(&second)
+                .expect("second snapshot")
+                .expect("second run")
+                .stats
+                .total_model_calls,
+            8
+        );
     }
 
     #[test]
