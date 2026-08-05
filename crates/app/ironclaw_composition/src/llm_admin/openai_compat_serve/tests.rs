@@ -1165,67 +1165,10 @@ async fn read_run_output_in_progress_surfaces_tool_output_without_final_message(
     ));
 }
 
-fn provider_view(
-    id: &str,
-    default_model: &str,
-    active: bool,
-    active_model: Option<&str>,
-) -> ironclaw_product_contracts::operator_llm::LlmProviderView {
-    ironclaw_product_contracts::operator_llm::LlmProviderView {
-        id: id.to_string(),
-        description: String::new(),
-        adapter: "open_ai_completions".to_string(),
-        default_model: default_model.to_string(),
-        base_url: None,
-        builtin: true,
-        active,
-        active_model: active_model.map(str::to_string),
-        api_key_required: false,
-        accepts_api_key: true,
-        api_key_set: false,
-        can_list_models: true,
-    }
-}
-
-#[test]
-fn model_entries_list_active_first_then_providers_deduped() {
-    let snapshot = ironclaw_product_contracts::operator_llm::LlmConfigSnapshot {
-        providers: vec![
-            provider_view("openai", "gpt-4o", true, Some("gpt-4o")),
-            provider_view("anthropic", "claude-opus-4", false, None),
-            // Duplicate model id (same default) must not be listed twice.
-            provider_view("openai-mirror", "gpt-4o", false, None),
-        ],
-        active: Some(
-            ironclaw_product_contracts::operator_llm::LlmActiveSelection {
-                provider_id: "openai".to_string(),
-                model: Some("gpt-4o".to_string()),
-            },
-        ),
-    };
-
-    let entries = model_entries_from_snapshot(&snapshot);
-
-    assert_eq!(entries.len(), 2, "duplicate model id must be de-duplicated");
-    assert_eq!(entries[0].id, "gpt-4o", "active selection listed first");
-    assert_eq!(entries[0].owned_by.as_deref(), Some("openai"));
-    assert_eq!(entries[1].id, "claude-opus-4");
-    assert_eq!(entries[1].owned_by.as_deref(), Some("anthropic"));
-}
-
-#[test]
-fn model_entries_fall_back_to_default_model_when_no_active_selection() {
-    let snapshot = ironclaw_product_contracts::operator_llm::LlmConfigSnapshot {
-        providers: vec![provider_view("anthropic", "claude-opus-4", false, None)],
-        active: None,
-    };
-
-    let entries = model_entries_from_snapshot(&snapshot);
-
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].id, "claude-opus-4");
-    assert_eq!(entries[0].owned_by.as_deref(), Some("anthropic"));
-}
+// `model_entries_list_active_first_then_providers_deduped`,
+// `model_entries_fall_back_to_default_model_when_no_active_selection` and their
+// `provider_view` fixture travelled with `model_entries_from_snapshot` to
+// `ironclaw_openai_compat::mount` (WS6 OpenAI-compat eviction, 2026-08-05).
 
 #[test]
 fn response_usage_reports_total_input_including_cache_and_breaks_out_cached_tokens() {

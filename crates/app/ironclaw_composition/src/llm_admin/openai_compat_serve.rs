@@ -1,9 +1,18 @@
 // arch-exempt: large_file, §4.4.1 mechanical inline of the redundant local-root filesystem alias -> CompositeRootFilesystem (no logic change), plan #6168
 //! Reborn host composition for OpenAI-compatible API routes.
 //!
-//! The route crate owns DTOs and HTTP handlers, but the Reborn host owns the
-//! authority-bearing wiring: authenticated callers, ProductSurface, durable
-//! idempotency/ref stores, and projection reads.
+//! What is left here after the WS6 OpenAI-compat eviction (2026-08-05) is the
+//! half that cannot leave: the **port implementations** that reach runtime
+//! services. Every adapter below names `ironclaw_threads`, `ironclaw_turns` or
+//! `ironclaw_event_streams` — all three on `ironclaw_openai_compat`'s own armed
+//! `BoundaryRule` forbidden list, which is exactly the shape that rule exists
+//! to require: the owner crate declares the port, the host implements it.
+//!
+//! The **assembly** moved to `ironclaw_openai_compat::mount`. This module now
+//! builds the runtime-backed adapters, fills in `OpenAiCompatRouteMountPorts`,
+//! and hands them over; the route crate owns the builder order, the shared
+//! projection streamer, the `/v1/models` catalog, and the fail-closed rule for
+//! a deployment with no LLM config.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,31 +35,22 @@ use ironclaw_loop_contracts::LoopModelUsage;
 use ironclaw_openai_compat::OpenAiCompatRefStore;
 use ironclaw_openai_compat::{
     OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
-    OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow,
-    OpenAiChatProjectionStreamRequest, OpenAiCompatActorScope, OpenAiCompatErrorKind,
-    OpenAiCompatHttpError, OpenAiCompatProjectionStreamer, OpenAiCompatRefStorePort,
-    OpenAiCompatResourceBinding, OpenAiCompatResourceMapping, OpenAiCompatRouterState,
-    OpenAiResponseErrorObject, OpenAiResponseId, OpenAiResponseObject, OpenAiResponseOutputItem,
-    OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
-    OpenAiResponseProjectionStreamRequest, OpenAiResponseReadRequest, OpenAiResponseStatus,
-    OpenAiResponseUsage, OpenAiResponseWaitRequest, OpenAiResponsesMessageRole,
-    OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow, openai_compat_router_with_state,
-    openai_compat_routes,
+    OpenAiChatCompletionProjectionRequest, OpenAiCompatActorScope, OpenAiCompatErrorKind,
+    OpenAiCompatHttpError, OpenAiCompatRefStorePort, OpenAiCompatResourceBinding,
+    OpenAiCompatResourceMapping, OpenAiCompatRouteMountPorts, OpenAiResponseErrorObject,
+    OpenAiResponseId, OpenAiResponseObject, OpenAiResponseOutputItem,
+    OpenAiResponseOutputItemStatus, OpenAiResponseProjection, OpenAiResponseReadRequest,
+    OpenAiResponseStatus, OpenAiResponseUsage, OpenAiResponseWaitRequest,
+    OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader, openai_compat_route_mount,
+    product_surface_caller_from_openai_scope,
 };
 use ironclaw_openai_compat::{OpenAiCompatCost, OpenAiResponseInputTokensDetails};
 use ironclaw_openai_compat::{
     OpenAiCompatExternalToolResume, OpenAiCompatExternalToolResumeRequest,
     OpenAiCompatExternalToolSpec, OpenAiCompatExternalToolStore, OpenAiCompatTurnRunRef,
 };
-use ironclaw_openai_compat::{OpenAiCompatModelCatalog, OpenAiCompatModelEntry};
-use ironclaw_product_contracts::operator_llm::{
-    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot,
-};
 use ironclaw_product_contracts::projection::ProjectionStream;
-use ironclaw_product_contracts::surface::{
-    BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
-    ProductSurfaceStreamRequest,
-};
+use ironclaw_product_contracts::surface::{BoundProductSurface, ProductSurface};
 use ironclaw_threads::{
     FinalizedAssistantMessageByRunRequest, LoadContextMessagesRequest, MessageKind, MessageStatus,
     ProviderToolCallReferenceEnvelope, SessionThreadError, SessionThreadService,
@@ -104,211 +104,21 @@ pub async fn build_openai_compat_route_mount(
         )
         .with_turn_coordinator(runtime.product_turn_coordinator()),
     );
-    let projection_streamer = Arc::new(OpenAiCompatRuntimeProjectionStreamer::new(
-        product_surface.clone(),
-    ));
-    let chat_workflow = Arc::new(
-        OpenAiChatCompletionsWorkflow::new(
-            product_surface.clone(),
-            ref_store.clone(),
-            chat_projection_reader,
-        )
-        .with_projection_streamer(projection_streamer.clone()),
-    );
-    let external_tool_store: Arc<dyn OpenAiCompatExternalToolStore> =
-        Arc::new(OpenAiCompatRuntimeExternalToolStore {
+    // Composition supplies the ports; the route crate owns the builder order,
+    // the projection streamer, and the `/v1/models` catalog (WS6 eviction).
+    Ok(openai_compat_route_mount(OpenAiCompatRouteMountPorts {
+        product_surface,
+        ref_store,
+        chat_projection_reader,
+        responses_projection_reader,
+        external_tool_store: Arc::new(OpenAiCompatRuntimeExternalToolStore {
             catalog: external_tool_catalog,
-        });
-    let external_tool_resume: Arc<dyn OpenAiCompatExternalToolResume> =
-        Arc::new(OpenAiCompatRuntimeExternalToolResume {
+        }),
+        external_tool_resume: Arc::new(OpenAiCompatRuntimeExternalToolResume {
             coordinator: runtime.product_turn_coordinator(),
-        });
-    let responses_workflow = Arc::new(
-        OpenAiResponsesWorkflow::new(product_surface, ref_store, responses_projection_reader)
-            .with_projection_streamer(projection_streamer)
-            .with_external_tools(external_tool_store, external_tool_resume),
-    );
-    let router_state = OpenAiCompatRouterState::with_chat_completions(chat_workflow)
-        .with_responses_workflow(responses_workflow);
-    // `GET /v1/models` lists the deployment's configured models from the same
-    // LLM-config source the operator WebUI uses. Wired only when the root LLM
-    // provider is compiled in; otherwise the route stays fail-closed (501).
-    let router_state = match crate::product_surface::build_llm_config_service(runtime) {
-        Some(llm_config) => {
-            let catalog: Arc<dyn OpenAiCompatModelCatalog> =
-                Arc::new(LlmConfigModelCatalog::new(llm_config));
-            router_state.with_models_catalog(catalog)
-        }
-        None => router_state,
-    };
-    Ok(ProtectedRouteMount::new(
-        openai_compat_router_with_state(router_state),
-        openai_compat_routes(),
-    ))
-}
-
-/// Maps an [`LlmConfigSnapshot`] to the OpenAI-compatible `/v1/models` listing.
-///
-/// The active selection (if any) is listed first, then every configured
-/// provider's active or default model, de-duplicated by model id while
-/// preserving order. Each entry's `owned_by` is the provider id.
-fn model_entries_from_snapshot(snapshot: &LlmConfigSnapshot) -> Vec<OpenAiCompatModelEntry> {
-    let mut candidates: Vec<(String, String)> = Vec::new();
-    if let Some(active) = &snapshot.active
-        && let Some(model) = &active.model
-    {
-        candidates.push((model.clone(), active.provider_id.clone()));
-    }
-    for provider in &snapshot.providers {
-        let model = provider
-            .active_model
-            .clone()
-            .unwrap_or_else(|| provider.default_model.clone());
-        candidates.push((model, provider.id.clone()));
-    }
-    let mut seen = std::collections::HashSet::new();
-    candidates
-        .into_iter()
-        .filter(|(id, _)| !id.is_empty() && seen.insert(id.clone()))
-        .map(|(id, owner)| OpenAiCompatModelEntry::new(id).with_owner(owner))
-        .collect()
-}
-
-/// [`OpenAiCompatModelCatalog`] backed by the runtime's operator LLM-config
-/// service. Lists the deployment's configured models for `GET /v1/models`.
-struct LlmConfigModelCatalog {
-    llm_config: Arc<dyn LlmConfigService>,
-}
-
-impl LlmConfigModelCatalog {
-    fn new(llm_config: Arc<dyn LlmConfigService>) -> Self {
-        Self { llm_config }
-    }
-}
-
-#[async_trait]
-impl OpenAiCompatModelCatalog for LlmConfigModelCatalog {
-    async fn list_models(
-        &self,
-        caller: &ironclaw_openai_compat::OpenAiCompatAuthenticatedCaller,
-    ) -> Result<Vec<OpenAiCompatModelEntry>, OpenAiCompatHttpError> {
-        // The route authenticated the caller; carry its tenant/user scope into
-        // the LLM-config read so the snapshot is scoped to the same identity.
-        let product_caller = ProductSurfaceCaller::new(
-            caller.scope().tenant_id().clone(),
-            caller.scope().user_id().clone(),
-            caller.scope().agent_id().cloned(),
-            caller.scope().project_id().cloned(),
-        );
-        let snapshot = self
-            .llm_config
-            .snapshot(product_caller)
-            .await
-            .map_err(map_llm_config_error_to_openai)?;
-        Ok(model_entries_from_snapshot(&snapshot))
-    }
-}
-
-fn map_llm_config_error_to_openai(error: LlmConfigServiceError) -> OpenAiCompatHttpError {
-    match error {
-        LlmConfigServiceError::InvalidRequest { .. } => {
-            OpenAiCompatHttpError::invalid_request(None)
-        }
-        LlmConfigServiceError::NotFound => OpenAiCompatHttpError::not_found(None),
-        LlmConfigServiceError::Unavailable => OpenAiCompatHttpError::from_kind(
-            503,
-            true,
-            OpenAiCompatErrorKind::ServiceUnavailable,
-            None,
-        ),
-        LlmConfigServiceError::Internal => OpenAiCompatHttpError::internal(),
-    }
-}
-
-fn product_surface_caller_from_openai_scope(
-    scope: &OpenAiCompatActorScope,
-) -> ProductSurfaceCaller {
-    ProductSurfaceCaller::new(
-        scope.tenant_id().clone(),
-        scope.user_id().clone(),
-        scope.agent_id().cloned(),
-        scope.project_id().cloned(),
-    )
-}
-
-struct OpenAiCompatRuntimeProjectionStreamer {
-    product_surface: Arc<dyn ProductSurface>,
-}
-
-impl OpenAiCompatRuntimeProjectionStreamer {
-    fn new(product_surface: Arc<dyn ProductSurface>) -> Self {
-        Self { product_surface }
-    }
-}
-
-#[async_trait]
-impl OpenAiCompatProjectionStreamer for OpenAiCompatRuntimeProjectionStreamer {
-    async fn drain_chat(
-        &self,
-        request: OpenAiChatProjectionStreamRequest,
-    ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
-        let surface = BoundProductSurface::new(
-            Arc::clone(&self.product_surface),
-            product_surface_caller_from_openai_scope(&request.actor_scope),
-        );
-        let response = surface
-            .stream_events(ProductSurfaceStreamRequest {
-                stream_id: Some(
-                    request
-                        .projection_subscription
-                        .scope
-                        .thread_id
-                        .as_str()
-                        .to_string(),
-                ),
-                after_cursor: request
-                    .after_cursor
-                    .map(|cursor| cursor.as_str().to_string()),
-            })
-            .await?;
-        decode_product_outbound_events(response.events)
-    }
-
-    async fn drain_response(
-        &self,
-        request: OpenAiResponseProjectionStreamRequest,
-    ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
-        let surface = BoundProductSurface::new(
-            Arc::clone(&self.product_surface),
-            product_surface_caller_from_openai_scope(&request.actor_scope),
-        );
-        let response = surface
-            .stream_events(ProductSurfaceStreamRequest {
-                stream_id: Some(
-                    request
-                        .projection_subscription
-                        .scope
-                        .thread_id
-                        .as_str()
-                        .to_string(),
-                ),
-                after_cursor: request
-                    .after_cursor
-                    .map(|cursor| cursor.as_str().to_string()),
-            })
-            .await?;
-        decode_product_outbound_events(response.events)
-    }
-}
-
-fn decode_product_outbound_events(
-    events: Vec<serde_json::Value>,
-) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
-    events
-        .into_iter()
-        .map(serde_json::from_value)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| ProductSurfaceError::internal_from(error).into())
+        }),
+        llm_config: crate::product_surface::build_llm_config_service(runtime),
+    }))
 }
 
 struct OpenAiChatCompletionThreadProjectionReader {

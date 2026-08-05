@@ -24,7 +24,18 @@ This crate is a product/API route surface, not a host runtime:
 - It must not bind sockets, call `axum::serve`, read v1 gateway state, or proxy
   directly to `ironclaw_llm`.
 - Host composition owns listener binding, bearer/session auth, CORS/origin,
-  body/rate limits, mounting, audit, and product surface wiring.
+  body/rate limits, audit, and the port *implementations* that reach runtime
+  services.
+- **Router assembly is this crate's, not composition's** (WS6 OpenAI-compat
+  eviction, 2026-08-05). `mount.rs` takes an `OpenAiCompatRouteMountPorts` —
+  product surface, ref store, the two projection readers, the external-tool
+  store/resume pair, and an optional `LlmConfigService` — and returns a
+  `ProtectedRouteMount`. Which workflow gets which port, the builder order, the
+  shared projection streamer, and "no LLM config means `/v1/models` stays
+  fail-closed at 501" are this surface's own rules and belong to its owner.
+  Composition builds the port implementations (they name `ironclaw_threads` /
+  `ironclaw_turns` / `ironclaw_event_streams`, all on this crate's forbidden
+  list) and hands them over; it no longer knows the builder order.
 - Chat, Responses, and streaming paths route through the channel-neutral
   `ProductSurface` plus projection-reader/streamer ports rather than
   recreating v1 `/v1/chat/completions` LLM proxy behavior.
@@ -56,8 +67,9 @@ The `refs` module owns the OpenAI-compatible identity contract:
 The default router remains fail-closed unless host composition injects
 `OpenAiCompatRouterState::with_chat_completions(...)`.
 `ironclaw_composition::build_openai_compat_route_mount` performs that
-host wiring for `ironclaw serve` by mounting the router inside the
-protected Reborn route stack. The injected `OpenAiChatCompletionsWorkflow`
+host wiring for `ironclaw serve` — since 2026-08-05 by filling in
+`OpenAiCompatRouteMountPorts` and calling this crate's own
+`openai_compat_route_mount` (`mount.rs`), which does the injection. The injected `OpenAiChatCompletionsWorkflow`
 handles Chat Completions create and optional projection-backed SSE streaming:
 
 - `POST /v1/chat/completions` parses the OpenAI-compatible DTO, reserves an
@@ -113,9 +125,12 @@ configured models for OpenAI-compatible clients (model pickers, etc.).
   (mirroring the projection reader/streamer ports). When no catalog is wired the
   route fails closed with `501`, exactly like the chat/responses surfaces before
   composition wiring.
-- `ironclaw_composition::build_openai_compat_route_mount` wires a catalog
-  backed by the operator `LlmConfigService` snapshot (the same configured-model
-  source the operator WebUI uses).
+- The catalog is `mount::LlmConfigModelCatalog`, this crate's own projection of
+  the operator `LlmConfigService` snapshot (the same configured-model source the
+  operator WebUI uses). Composition supplies the service —
+  `OpenAiCompatRouteMountPorts::llm_config`, an `Option` — and `None` is what
+  produces the fail-closed `501` above; the mapping itself, including the
+  `LlmConfigServiceError` → status/retryability table, lives here.
 - The crate maps catalog entries into the OpenAI list envelope
   (`{ object: "list", data: [{ id, object: "model", created, owned_by }] }`);
   it does not reach into `ironclaw_llm` or the runtime directly.
