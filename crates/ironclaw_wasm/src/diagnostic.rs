@@ -92,9 +92,9 @@ mod tests {
 
     #[test]
     fn truncate_log_message_respects_utf8_boundaries() {
-        let message = "é".repeat(WASM_DIAGNOSTIC_MAX_BYTES);
+        let message = format!("{}é", "x".repeat(WASM_DIAGNOSTIC_MAX_BYTES - 1));
         let truncated = truncate_log_message(message);
-        assert!(truncated.len() <= WASM_DIAGNOSTIC_MAX_BYTES);
-        assert!(truncated.is_char_boundary(truncated.len()));
+        assert_eq!(truncated.len(), WASM_DIAGNOSTIC_MAX_BYTES - 1);
+        assert_eq!(truncated, "x".repeat(WASM_DIAGNOSTIC_MAX_BYTES - 1));
     }
 }
