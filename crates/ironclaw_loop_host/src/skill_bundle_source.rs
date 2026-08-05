@@ -1,6 +1,6 @@
 use async_trait::async_trait;
+use ironclaw_loop_contracts::{LoopRunContext, SkillVisibility};
 use ironclaw_skills::{SkillTrust, validate_skill_name};
-use ironclaw_turns::run_profile::{LoopRunContext, SkillVisibility};
 use thiserror::Error;
 
 const SKILL_MD_FILE: &str = "SKILL.md";

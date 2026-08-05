@@ -40,14 +40,12 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
-use ironclaw_host_api::{
-    ids::{AgentId, ProjectId, TenantId, UserId},
-    product_surface::ProductSurface,
-};
 use ironclaw_host_ingress::{
     ProtectedRouteMount, PublicRouteDrains, PublicRouteMount, SplitRouteMount,
 };
+use ironclaw_product_contracts::surface::ProductSurface;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -59,8 +57,10 @@ use crate::webui_operator_auth::{
 };
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
 use crate::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
-use ironclaw_host_api::product_surface::ProductSurfaceCaller;
-use ironclaw_product::mark_bearer_token_verified_for_tenant;
+use ironclaw_host_api::product_adapter::auth::{
+    HostProtocolAuthenticator, mark_bearer_token_verified_for_tenant,
+};
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use serde::Serialize;
 
 /// Default per-request body limit (14 MiB) — sized to cover ~10 MiB of
@@ -217,6 +217,14 @@ pub struct WebuiServeConfig {
     /// the same-origin check pass for a forged Origin. Defaults to
     /// `None` (fall back to Host-header comparison + allowlist).
     pub(crate) canonical_host: Option<String>,
+    /// Whether `/fs/*` workspace list/stat/read handlers must confine reads to
+    /// the caller's own subtree (`tenants/{tenant}/users/{user}`) instead of
+    /// the shared `/projects/workspace` root, and the `/session` feature flag
+    /// advertises the same mode to the browser. Hosted profiles enable this so
+    /// one user cannot list another user's workspace artifacts; local/operator
+    /// profiles keep it off so single-user workspaces stay visible. The flag
+    /// controls filesystem-handler path selection, not only UI display.
+    pub(crate) workspace_requires_scoped_projection: bool,
     /// Trusted default agent id stamped onto every
     /// [`ProductSurfaceCaller`]. The browser body cannot influence
     /// this — it comes from host installation config / runtime
@@ -277,6 +285,7 @@ impl WebuiServeConfig {
             allowed_origins,
             csp_header: None,
             canonical_host: None,
+            workspace_requires_scoped_projection: false,
             default_agent_id: None,
             default_project_id: None,
             public_mounts: Vec::new(),
@@ -339,6 +348,14 @@ impl WebuiServeConfig {
     /// trusting the request's `Host` header.
     pub fn with_canonical_host(mut self, host: impl Into<String>) -> Self {
         self.canonical_host = Some(host.into());
+        self
+    }
+
+    /// Require the WebUI workspace browser to show only caller-scoped
+    /// workspace projections. Local development should leave this disabled so
+    /// raw single-user `/workspace` roots remain visible.
+    pub fn with_workspace_requires_scoped_projection(mut self, enabled: bool) -> Self {
+        self.workspace_requires_scoped_projection = enabled;
         self
     }
 
@@ -596,6 +613,7 @@ pub fn webui_v2_app_with_lifecycle(
     };
     let v2_state = WebUiV2State::new(product_surface, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
         .with_reborn_projects_enabled(reborn_projects_enabled())
+        .with_workspace_requires_scoped_projection(config.workspace_requires_scoped_projection)
         .with_regression_artifact_export_enabled(regression_artifact_export_enabled);
     let v2_inner: Router<()> = webui_v2_router_with_options(v2_state, route_options).with_state(());
 
@@ -750,6 +768,20 @@ struct AuthLayerState {
     operator_routes: OperatorWebuiConfigRouteState,
 }
 
+/// This crate is the host transport that performs bearer/session authentication
+/// — trust stage T1 — so it holds the one production `HostProtocolAuthenticator`
+/// implementation in the workspace, and `reborn_sealed_evidence_mint_ratchet`
+/// keeps it that way.
+///
+/// The impl sits on `AuthLayerState`, which is **private to this module**, so
+/// the grant source is not even nameable outside the crate: the only place a
+/// `HostAuthenticationGrant` can come from is a few lines below, immediately
+/// after `authenticator.authenticate(&token)` returned `Some`. Before WS1.5 the
+/// same mint was reached through `ironclaw_product`'s re-export behind a
+/// `host-auth-mint` cargo feature that cargo's feature unification made
+/// vacuous — see `ironclaw_host_api::product_adapter::auth`.
+impl HostProtocolAuthenticator for AuthLayerState {}
+
 /// Resolve `Authorization: Bearer <token>` for any v2 route, OR the
 /// `?token=…` query parameter only on the v2 SSE stream endpoint
 /// (mirrors the browser's `EventSource` limitation — it cannot set
@@ -803,8 +835,14 @@ async fn authenticate_request(
             state.default_agent_id.clone(),
             state.default_project_id.clone(),
         );
-        let auth_evidence =
-            mark_bearer_token_verified_for_tenant(openai_user_id.as_str(), state.tenant_id.clone());
+        // The grant is minted from `state` — the middleware value that just ran
+        // `authenticate()` — so the evidence cannot be produced by any code path
+        // that did not authenticate the request.
+        let auth_evidence = mark_bearer_token_verified_for_tenant(
+            state.host_authentication_grant(),
+            openai_user_id.as_str(),
+            state.tenant_id.clone(),
+        );
         let caller = match ironclaw_reborn_openai_compat::OpenAiCompatAuthenticatedCaller::new(
             scope,
             auth_evidence,

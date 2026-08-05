@@ -738,21 +738,21 @@ async fn standalone_yolo_explicit_ask_each_time_still_requires_approval_gate() {
 
 #[derive(Debug, Default)]
 struct RecordingSandboxTransport {
-    requests: Mutex<Vec<ironclaw_host_runtime::CommandExecutionRequest>>,
+    requests: Mutex<Vec<ironclaw_host_api::process::CommandExecutionRequest>>,
 }
 
 #[async_trait::async_trait]
-impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTransport {
+impl ironclaw_host_api::process::SandboxCommandTransport for RecordingSandboxTransport {
     async fn run_command(
         &self,
-        request: ironclaw_host_runtime::CommandExecutionRequest,
+        request: ironclaw_host_api::process::CommandExecutionRequest,
     ) -> Result<
-        ironclaw_host_runtime::CommandExecutionOutput,
-        ironclaw_host_runtime::RuntimeProcessError,
+        ironclaw_host_api::process::CommandExecutionOutput,
+        ironclaw_host_api::process::RuntimeProcessError,
     > {
         let command = request.command.clone();
         self.requests.lock().unwrap().push(request); // safety: test transport records requests under #[cfg(test)].
-        Ok(ironclaw_host_runtime::CommandExecutionOutput {
+        Ok(ironclaw_host_api::process::CommandExecutionOutput {
             output: format!("sandbox port: {command}"),
             saved_output: None,
             exit_code: 0,

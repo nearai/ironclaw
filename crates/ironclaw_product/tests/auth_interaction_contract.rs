@@ -13,6 +13,11 @@ use ironclaw_auth::{
     OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput, Timestamp,
     TurnRunRef,
 };
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, IdempotencyKey, ReplyTargetBindingRef, RunProfileId,
+    RunProfileVersion, SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
+    TurnStatus,
+};
 use ironclaw_host_api::{
     ids::{AgentId, ExtensionId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
     resource::ResourceScope,
@@ -24,11 +29,9 @@ use ironclaw_product::{
     ProductSurfaceFailure, ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-    GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
-    ResumeTurnPrecondition, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    CancelRunRequest, CancelRunResponse, GateResumeDisposition, GetRunStateRequest,
+    ResumeTurnPrecondition, ResumeTurnRequest, ResumeTurnResponse, SubmitTurnRequest,
+    SubmitTurnResponse, TurnCoordinator, TurnError, TurnRunState,
 };
 
 #[derive(Default)]
@@ -57,7 +60,7 @@ impl AuthInteractionReadModel for FakeAuthReadModel {
         &self,
         _scope: &AuthInteractionScope,
         run_id_hint: Option<TurnRunId>,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> Result<Option<AuthGateRecord>, ProductSurfaceFailure> {
         Ok(self
             .gates
@@ -243,7 +246,7 @@ impl AuthFlowManager for RecordingFlowManager {
 struct RecordingTurnCoordinator {
     actor: TurnActor,
     status: Mutex<TurnStatus>,
-    gate_ref: Mutex<Option<GateRef>>,
+    gate_ref: Mutex<Option<TurnGateRef>>,
     resumes: Mutex<Vec<ResumeTurnRequest>>,
     cancellations: Mutex<Vec<CancelRunRequest>>,
     get_run_state_error: Mutex<Option<TurnError>>,
@@ -255,7 +258,7 @@ struct RecordingTurnCoordinator {
 }
 
 impl RecordingTurnCoordinator {
-    fn blocked_auth(actor: TurnActor, gate_ref: GateRef) -> Self {
+    fn blocked_auth(actor: TurnActor, gate_ref: TurnGateRef) -> Self {
         Self {
             actor,
             status: Mutex::new(TurnStatus::BlockedAuth),
@@ -384,6 +387,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply:auth").expect("valid"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
+            allow_steering: true,
             resolved_model_route: None,
             model_usage: None,
             received_at: Utc::now(),
@@ -1742,7 +1746,7 @@ fn service(
     flow: AuthFlowRecord,
     gates: Vec<AuthFlowRecord>,
     actor: TurnActor,
-    gate_ref: GateRef,
+    gate_ref: TurnGateRef,
 ) -> DefaultAuthInteractionService {
     service_parts(flow, gates, actor, gate_ref).0
 }
@@ -1751,7 +1755,7 @@ fn service_parts(
     flow: AuthFlowRecord,
     gates: Vec<AuthFlowRecord>,
     actor: TurnActor,
-    gate_ref: GateRef,
+    gate_ref: TurnGateRef,
 ) -> (
     DefaultAuthInteractionService,
     Arc<RecordingFlowManager>,
@@ -1772,7 +1776,7 @@ fn service_parts(
                 else {
                     panic!("test flow must be turn-gate resume");
                 };
-                AuthGateRecord::new(run_id, GateRef::new(gate_ref.as_str()).unwrap(), flow)
+                AuthGateRecord::new(run_id, TurnGateRef::new(gate_ref.as_str()).unwrap(), flow)
                     .expect("auth gate")
             })
             .collect(),
@@ -1791,12 +1795,13 @@ fn auth_flow(
     scope: &TurnScope,
     actor: &TurnActor,
     run_id: TurnRunId,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
     credential_account_id: Option<CredentialAccountId>,
     challenge: AuthChallenge,
 ) -> AuthFlowRecord {
     let now = Utc::now();
     AuthFlowRecord {
+        requested_scopes: Vec::new(),
         id: AuthFlowId::new(),
         scope: auth_scope(scope, actor),
         kind: AuthFlowKind::IntegrationCredential,
@@ -1817,6 +1822,8 @@ fn auth_flow(
         updated_at: now,
         expires_at: now + Duration::minutes(10),
         continuation_emitted_at: None,
+        // Generic auth-interaction contract fixture, not extension-owned.
+        requester_extension: None,
     }
 }
 
@@ -1842,8 +1849,8 @@ fn turn_scope(user: &str, thread: &str) -> TurnScope {
     )
 }
 
-fn make_gate_ref(value: &str) -> GateRef {
-    GateRef::new(value).unwrap()
+fn make_gate_ref(value: &str) -> TurnGateRef {
+    TurnGateRef::new(value).unwrap()
 }
 
 fn provider() -> ironclaw_auth::AuthProviderId {

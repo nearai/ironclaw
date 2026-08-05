@@ -191,29 +191,28 @@ IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI=https://<railway-domain>/api/reborn/pr
 
 ## Slack
 
-Slack routes are compiled into the image, but they are disabled by the default
-config. On Railway, prefer the env toggle so the seeded config can stay
-unchanged:
+Slack routes are compiled into the image and mounted unconditionally. No
+environment variable and no `config.toml` key enables or disables Slack for a
+deployment, so there is nothing Slack-specific to add to the Railway service
+variables or to a mounted config file. The Slack webhook answers
+`503 temporarily_unavailable` until the Slack extension's ingress signing
+secret is registered.
 
-```bash
-IRONCLAW_REBORN_SLACK_ENABLED=true
-```
-
-The env var overrides only the Slack route enablement gate. `true`/`1` enables
-Slack, while `false`/`0` forces Slack off for the deployment.
-
-You can also enable Slack by editing `$IRONCLAW_REBORN_HOME/config.toml` or
-mounting a config file with:
-
-```toml
-[slack]
-enabled = true
-```
-
-Then configure Slack app ids, the bot token, signing secret, and channel
-mappings from WebUI channel setup after the container starts.
+Once the container is running, open the WebUI at `/extensions`, install the
+Slack extension, and complete its setup. Slack app ids, the bot token, the
+signing secret, and channel mappings are all configured there after the
+container starts.
 
 Set the WebUI identity environment variables as usual.
 
 Do not store OAuth, Slack, or LLM secrets in `config.toml`. Slack bot tokens
-and signing secrets are stored from WebUI channel setup.
+and signing secrets are stored from the WebUI extension setup.
+
+Migrating an existing config file: a mounted or previously seeded
+`config.toml` that still carries a `[slack]` or `[telegram]` section keeps
+parsing. A leftover Slack *setup* field (`installation_id`, `team_id`,
+`api_app_id`, `slack_user_id`, `user_id`, `shared_subject_user_id`,
+`channel_routes`, `signing_secret_env`, `bot_token_env`) fails container
+startup with a migration pointer rather than being silently ignored; a section
+left with only inert keys still starts, and logs a deprecation notice. Delete
+the section from the mounted file — nothing reads it.

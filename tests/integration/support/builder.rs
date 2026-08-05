@@ -28,6 +28,10 @@ use std::time::Duration;
 use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
+use ironclaw_host_api::turn::{
+    IdempotencyKey, ReplyTargetBindingRef, SanitizedCancelReason, SourceBindingRef, TurnActor,
+    TurnGateRef, TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
     http::RuntimeHttpEgressRequest,
     ids::{CapabilityId, InvocationId, UserId},
@@ -36,6 +40,10 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_llm::Role;
+use ironclaw_loop_contracts::{
+    CommunicationContextProvider, InstructionSafetyContext, LoopHostMilestone,
+};
+use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product::{
     ConversationBindingService, DefaultProductSurface, ProductConversationRouteKind,
@@ -43,16 +51,10 @@ use ironclaw_product::{
 };
 use ironclaw_product::{ProductInboundAck, ProductTriggerReason};
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
-use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_threads::ThreadScope;
-use ironclaw_turns::run_profile::{
-    CommunicationContextProvider, InstructionSafetyContext, LoopHostMilestone,
-};
 use ironclaw_turns::{
-    AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, GateRef, GateResumeDisposition,
-    IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator, TurnRunId, TurnRunState,
-    TurnScope, TurnStatus,
+    AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, GateResumeDisposition,
+    ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnRunState,
 };
 
 use super::capability_backend::{
@@ -80,6 +82,9 @@ type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub(crate) const HARNESS_ACTOR_ID: &str = "host-user";
 /// Model profile the planned runtime requests; the gateway policy permits it.
 pub(crate) const INTERACTIVE_MODEL_PROFILE: &str = "interactive_model";
+/// Coverage-instrumented real-runtime paths (notably bundled WASM startup) can
+/// take more than 30 seconds when several tests run concurrently in CI.
+const RUN_STATE_SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Selects the durable storage backend mounted into the integration harness's
 /// `CompositeRootFilesystem`. Both modes ride **one** composite at the
@@ -1117,14 +1122,14 @@ impl RebornIntegrationHarness {
     }
 
     /// Submit a user turn and wait until it blocks on an approval gate, returning
-    /// the run id and the raised `GateRef`. The named C1 fixture: a scripted
+    /// the run id and the raised `TurnGateRef`. The named C1 fixture: a scripted
     /// destructive tool call in a `RebornIntegrationGroup::live_approvals` thread
     /// blocks here; the test then calls `approve_gate`/`deny_gate` and
     /// `wait_for_status(Completed)`.
     pub async fn submit_turn_until_blocked(
         &self,
         text: &str,
-    ) -> HarnessResult<(TurnRunId, GateRef)> {
+    ) -> HarnessResult<(TurnRunId, TurnGateRef)> {
         let run_id = self.submit_turn_async(text).await?;
         let state = self
             .wait_for_status(run_id, TurnStatus::BlockedApproval)
@@ -1139,14 +1144,14 @@ impl RebornIntegrationHarness {
     }
 
     /// Submit a user turn and wait until it blocks on an **auth** gate, returning
-    /// the run id and the raised `GateRef`. Mirror of `submit_turn_until_blocked`
+    /// the run id and the raised `TurnGateRef`. Mirror of `submit_turn_until_blocked`
     /// for the `RebornIntegrationGroup::live_auth_gate` fixture: a scripted
     /// capability whose credential account resolves to `AuthRequired` blocks here
     /// at `TurnStatus::BlockedAuth` (E-AUTHGATE seam).
     pub async fn submit_turn_until_auth_blocked(
         &self,
         text: &str,
-    ) -> HarnessResult<(TurnRunId, GateRef)> {
+    ) -> HarnessResult<(TurnRunId, TurnGateRef)> {
         let run_id = self.submit_turn_async(text).await?;
         let state = self
             .wait_for_status(run_id, TurnStatus::BlockedAuth)
@@ -1168,7 +1173,7 @@ impl RebornIntegrationHarness {
     /// payload outright.
     pub async fn submit_approval_resolution(
         &self,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
         decision: ironclaw_product::ApprovalDecision,
     ) -> HarnessResult<ProductInboundAck> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
@@ -1188,7 +1193,7 @@ impl RebornIntegrationHarness {
     /// `deny_auth_gate`'s direct coordinator resume.
     pub async fn submit_auth_resolution(
         &self,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
         result: ironclaw_product::AuthResolutionResult,
     ) -> HarnessResult<ProductInboundAck> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
@@ -1280,7 +1285,7 @@ impl RebornIntegrationHarness {
     pub async fn assert_gate_survives_reopen(
         &self,
         run_id: TurnRunId,
-        expected_gate_ref: &GateRef,
+        expected_gate_ref: &TurnGateRef,
     ) -> HarnessResult<()> {
         let StorageReopen::LibSql { db_path } = &self._shared.storage_reopen else {
             return Err("assert_gate_survives_reopen requires StorageMode::LibSql".into());
@@ -1303,7 +1308,7 @@ impl RebornIntegrationHarness {
                 .get_run_state(&self.turn_scope, run_id)
                 .await?;
             if state.status == TurnStatus::BlockedApproval {
-                return match state.gate_ref.as_ref().map(GateRef::as_str) {
+                return match state.gate_ref.as_ref().map(TurnGateRef::as_str) {
                     Some(seen) if seen == expected_gate_ref.as_str() => Ok(()),
                     other => Err(format!(
                         "gate ref after reopen was {other:?}, expected {:?}",
@@ -1535,6 +1540,20 @@ impl RebornIntegrationHarness {
             .collect()
     }
 
+    /// Every User-role message across the captured model requests, in call
+    /// order. Same per-thread `scripted_llm` source (and the same no-baseline
+    /// rationale) as `captured_system_prompts`. Read by
+    /// `assert_model_saw_user_message` in `assertions.rs`.
+    pub(super) fn captured_model_user_messages(&self) -> Vec<String> {
+        self.scripted_llm
+            .captured_requests()
+            .into_iter()
+            .flatten()
+            .filter(|message| matches!(message.role, Role::User))
+            .map(|message| message.content)
+            .collect()
+    }
+
     pub(super) fn captured_system_prompts(&self) -> Vec<String> {
         self.scripted_llm
             .captured_requests()
@@ -1728,7 +1747,7 @@ impl RebornIntegrationHarness {
         mut decide: impl FnMut(&TurnRunState) -> ControlFlow<HarnessResult<TurnRunState>>,
         timeout_context: &str,
     ) -> HarnessResult<TurnRunState> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let deadline = tokio::time::Instant::now() + RUN_STATE_SETTLE_TIMEOUT;
         loop {
             let state = self
                 .turn_runtime
@@ -1820,7 +1839,11 @@ impl RebornIntegrationHarness {
     /// stale or wrong (non-approval) gate ref fails the resume with
     /// `TurnError::InvalidTransition` instead of silently resuming whatever
     /// gate class happens to be blocked.
-    pub async fn approve_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub async fn approve_gate(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: &TurnGateRef,
+    ) -> HarnessResult<()> {
         self.capability_recorder
             .approve_standalone_gate(gate_ref)
             .await?;
@@ -1842,8 +1865,8 @@ impl RebornIntegrationHarness {
     pub async fn approve_gate_with_stale_resume_ref(
         &self,
         run_id: TurnRunId,
-        real_gate_ref: &GateRef,
-        stale_gate_ref: &GateRef,
+        real_gate_ref: &TurnGateRef,
+        stale_gate_ref: &TurnGateRef,
     ) -> HarnessResult<()> {
         self.capability_recorder
             .approve_standalone_gate(real_gate_ref)
@@ -1864,7 +1887,11 @@ impl RebornIntegrationHarness {
     /// stale-ref resume: the record is already `Approved`, so re-calling
     /// `approve_gate` would hit a double-resolve `NotPending` error instead of
     /// completing the still-blocked run.
-    pub async fn resume_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub async fn resume_gate(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: &TurnGateRef,
+    ) -> HarnessResult<()> {
         self.resume_run(
             run_id,
             gate_ref.clone(),
@@ -1881,7 +1908,7 @@ impl RebornIntegrationHarness {
     ///
     /// See [`approve_gate`](Self::approve_gate) for why this resumes with
     /// `ResumeTurnPrecondition::BlockedApprovalGate`.
-    pub async fn deny_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub async fn deny_gate(&self, run_id: TurnRunId, gate_ref: &TurnGateRef) -> HarnessResult<()> {
         self.capability_recorder
             .deny_standalone_gate(gate_ref)
             .await?;
@@ -1905,7 +1932,11 @@ impl RebornIntegrationHarness {
     /// (server-enforced: `resume_turn_once` requires `status == BlockedAuth`),
     /// same shape as `deny_gate`'s `BlockedApprovalGate`. A client-side
     /// `gate:auth-` prefix check adds cheap defense-in-depth on top.
-    pub async fn deny_auth_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub async fn deny_auth_gate(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: &TurnGateRef,
+    ) -> HarnessResult<()> {
         if !gate_ref.as_str().starts_with("gate:auth-") {
             return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
         }
@@ -1933,7 +1964,7 @@ impl RebornIntegrationHarness {
     pub async fn resolve_auth_gate(
         &self,
         run_id: TurnRunId,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> HarnessResult<()> {
         if !gate_ref.as_str().starts_with("gate:auth-") {
             return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
@@ -2121,7 +2152,7 @@ impl RebornIntegrationHarness {
     async fn resume_run(
         &self,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         resume_disposition: Option<GateResumeDisposition>,
         precondition: ResumeTurnPrecondition,
     ) -> HarnessResult<()> {
@@ -2143,7 +2174,7 @@ impl RebornIntegrationHarness {
         &self,
         scope: TurnScope,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         resume_disposition: Option<GateResumeDisposition>,
         precondition: ResumeTurnPrecondition,
     ) -> HarnessResult<()> {
@@ -2421,7 +2452,7 @@ pub(crate) fn apply_hermetic_env() {
             // No integration test should inherit the ambient tool-disclosure
             // knob. Builders pin Off and disclosure tests opt into Bridged;
             // scrubbing is defense in depth for the retained env fallback.
-            std::env::remove_var(ironclaw_runner::runtime::REBORN_TOOL_DISCLOSURE_ENV);
+            std::env::remove_var(ironclaw_loop_host::REBORN_TOOL_DISCLOSURE_ENV);
         }
     });
 }

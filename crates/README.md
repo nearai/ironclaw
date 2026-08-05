@@ -49,12 +49,13 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | --- | --- | --- |
 | `ironclaw_capabilities` | `ironclaw_capabilities` | Caller-facing capability invocation host. Coordinates authorization, approvals, process transitions, and neutral runtime dispatch. |
 | `ironclaw_processes` | `ironclaw_processes` | Host-tracked background process lifecycle. Owns lifecycle mechanics, not capability policy. |
-| `ironclaw_scripts` | `ironclaw_scripts` | Script/CLI capability runner contracts. Executes declared commands through a host-selected backend. |
+| `ironclaw_sandbox` | `ironclaw_sandbox` | The sandboxed-process lane: `SandboxProcessPlan` validation, the Docker/broker/credential-firewall/CA machinery behind `SandboxCommandTransport`, and the script/CLI capability runner. |
 | `ironclaw_mcp` | `ironclaw_mcp` | Adapts manifest-declared MCP tools into IronClaw capabilities without granting ambient filesystem, secret, or network authority. |
 | `ironclaw_wasm` | `ironclaw_wasm` | Reborn WASM component runtime lane. Owns component-model/WIT runtime surface plus the folded domain-free `wasm_sandbox_core` primitives. |
 | `ironclaw_wasm_limiter` | `ironclaw_wasm_limiter` | Shared `wasmtime::ResourceLimiter` used by WASM tool and hook runtimes so memory/table/instance limits do not drift. |
 | `ironclaw_extensions` | `ironclaw_extensions` | Extension manifest, lifecycle, and registration contracts. Owns install/readiness/remove semantics; runtime crates consume validated descriptors from here. |
 | `ironclaw_extension_host` | `ironclaw_extension_host` | Generic channel-host assembly: binds installed extensions to inbound/outbound channel surfaces (ingress registration, delivery, per-extension idempotency ledgers) for the Reborn product surface. |
+| `ironclaw_extension_manager` | `ironclaw_extension_manager` | The product face of extensions: lifecycle capabilities and commands, the lifecycle product service, admin/operator/skill capability handlers, credential views, and the IronHub extension hub. Calls the host's authority; the host never calls back. |
 | `ironclaw_host_runtime` | `ironclaw_host_runtime` | Narrow service upper Reborn services depend on. Provides `HostRuntime` plus production composition around capability hosting. |
 
 ### Durable state, eventing, and read models
@@ -85,9 +86,9 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_agent_loop` | `ironclaw_agent_loop` | Agent-loop framework state, planner/executor, strategy/family contracts, and test support. |
 | `ironclaw_loop_host` | `ironclaw_loop_host` | Adapts durable Reborn support boundaries into the narrow agent-loop host port. It should not own provider clients or runtime dispatchers. |
 | `ironclaw_turns` | `ironclaw_turns` | Host-layer turn coordination contracts. Use it for turn lifecycle boundaries between loop/product code and host services. |
-| `ironclaw_first_party_extensions` | `ironclaw_first_party_extensions` | Concrete first-party userland extension implementations behind scoped handles. |
+| `ironclaw_extension_support` | `ironclaw_extension_support` | Concrete first-party userland extension implementations behind scoped handles. |
 | `ironclaw_first_party_extension_ports` | `ironclaw_first_party_extension_ports` | Loop-facing adapters for first-party extensions: skill activation/context/execution ports over loop-host and turn-run contracts. |
-| `ironclaw_product` | `ironclaw_product` | Product contracts and orchestration: adapter shapes, inbound turns, idempotency, binding resolution, ProductSurface descriptors, and the durable ledger adapters (unconditional — the crate's only features are `test-support` and `host-auth-mint`). |
+| `ironclaw_product` | `ironclaw_product` | Product contracts and orchestration: adapter shapes, inbound turns, idempotency, binding resolution, ProductSurface descriptors, and the durable ledger adapters (unconditional — the crate's only feature is `test-support`; the `host-auth-mint` mint gate went with WS1.5's sealed-evidence consolidation). |
 | `ironclaw_skills` | `ironclaw_skills` | Skill selection, scoring, and management. |
 | `ironclaw_slack_extension` | `ironclaw_slack_extension` | Slack v2 channel extension for the Reborn product surface: protocol parsing and rendering (payloads, mrkdwn, delivery DTOs). |
 | `ironclaw_telegram_extension` | `ironclaw_telegram_extension` | Telegram v2 channel adapter for the Reborn product surface. Maps Telegram traffic into Reborn capability and turn contracts. |

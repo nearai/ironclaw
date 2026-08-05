@@ -1,4 +1,4 @@
-import { useNavigate, useParams } from "react-router";
+import { useNavigate, useOutletContext, useParams } from "react-router";
 import { Button } from "../../design-system/button";
 import { StatusPill } from "../../design-system/primitives";
 import React from "react";
@@ -14,14 +14,31 @@ export function WorkspacePage() {
   const t = useT();
   const navigate = useNavigate();
   const params = useParams();
+  const {
+    currentUser = null,
+    workspaceRequiresScopedProjection = true,
+  } = useOutletContext() as {
+    currentUser?: { tenant_id?: string | null; user_id?: string | null } | null;
+    workspaceRequiresScopedProjection?: boolean;
+  };
+  const workspaceThreadId = params.workspaceThreadId || null;
   const selectedPath = params["*"] || DEFAULT_WORKSPACE_PATH;
-  const workspace = useWorkspaceBrowser(selectedPath);
+  const workspace = useWorkspaceBrowser(selectedPath, {
+    currentUser,
+    requireScopedWorkspace: workspaceRequiresScopedProjection,
+    threadId: workspaceThreadId,
+  });
+
+  const navigateWithinWorkspace = React.useCallback(
+    (path) => navigate(routeForWorkspacePath(path, workspaceThreadId)),
+    [navigate, workspaceThreadId],
+  );
 
   const handleSelectFile = React.useCallback(
     (path) => {
-      navigate(routeForWorkspacePath(path));
+      navigateWithinWorkspace(path);
     },
-    [navigate]
+    [navigateWithinWorkspace]
   );
 
   return (
@@ -71,6 +88,8 @@ export function WorkspacePage() {
               selectedPath={selectedPath}
               expandedPaths={workspace.expandedPaths}
               filter={workspace.filter}
+              scopeKey={workspace.scopeKey}
+              listDirectory={workspace.listDirectory}
               onFilterChange={workspace.setFilter}
               isLoadingTree={workspace.isLoadingTree}
               onToggleDirectory={workspace.toggleDirectory}
@@ -84,7 +103,7 @@ export function WorkspacePage() {
                     isLoading={workspace.isLoadingListing}
                     filter={workspace.filter}
                     onOpen={handleSelectFile}
-                    onNavigate={navigate}
+                    onNavigate={navigateWithinWorkspace}
                   />
                 )
               : (
@@ -92,7 +111,7 @@ export function WorkspacePage() {
                     path={selectedPath}
                     file={workspace.file}
                     isLoading={workspace.isLoadingFile}
-                    onNavigate={navigate}
+                    onNavigate={navigateWithinWorkspace}
                   />
                 )}
           </div>

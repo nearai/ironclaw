@@ -2,13 +2,17 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use crate::{AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ProductAdapterId};
+use crate::{AdapterInstallationId, ExternalActorRef, ProductAdapterId};
 use async_trait::async_trait;
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 
 use crate::{
     ConversationBindingService, ProductConversationRouteKind, ProductSurfaceFailure,
     ResolveBindingRequest, ResolvedBinding,
+};
+use ironclaw_product_contracts::subject_route::{
+    ProductConversationRouteKey, ProductConversationSubjectRouteResolutionRequest,
+    ProductConversationSubjectRouteResolver,
 };
 
 /// Tenant-scoped installation identity used before external actor/conversation
@@ -17,48 +21,6 @@ use crate::{
 pub struct ProductInstallationKey {
     pub adapter_id: ProductAdapterId,
     pub installation_id: AdapterInstallationId,
-}
-
-/// Stable conversation route key used by hosts to assign shared-route subjects.
-///
-/// The key intentionally ignores topic/thread ids. For Slack this maps to
-/// `(team_id, channel_id)`, so each Slack thread in a configured channel runs
-/// under the same shared subject while retaining its own conversation context.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ProductConversationRouteKey {
-    space_id: Option<String>,
-    conversation_id: String,
-}
-
-impl ProductConversationRouteKey {
-    pub fn new(
-        space_id: Option<String>,
-        conversation_id: String,
-    ) -> Result<Self, ProductSurfaceFailure> {
-        ExternalConversationRef::new(space_id.as_deref(), conversation_id.as_str(), None, None)
-            .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
-                reason: format!("invalid conversation route key: {error}"),
-            })?;
-        Ok(Self {
-            space_id,
-            conversation_id,
-        })
-    }
-
-    pub fn space_id(&self) -> Option<&str> {
-        self.space_id.as_deref()
-    }
-
-    pub fn conversation_id(&self) -> &str {
-        &self.conversation_id
-    }
-
-    fn from_external_conversation_ref(conversation_ref: &ExternalConversationRef) -> Self {
-        Self {
-            space_id: conversation_ref.space_id().map(str::to_string),
-            conversation_id: conversation_ref.conversation_id().to_string(),
-        }
-    }
 }
 
 impl ProductInstallationKey {
@@ -138,32 +100,22 @@ pub trait ProductActorUserResolver: Send + Sync {
     }
 }
 
-/// Request passed to host-owned shared-route subject resolvers.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ProductConversationSubjectRouteResolutionRequest {
-    pub adapter_id: ProductAdapterId,
-    pub installation_id: AdapterInstallationId,
-    pub route_key: ProductConversationRouteKey,
-}
-
-impl ProductConversationSubjectRouteResolutionRequest {
-    fn from_binding_request(request: &ResolveBindingRequest) -> Self {
-        Self {
-            adapter_id: request.adapter_id.clone(),
-            installation_id: request.installation_id.clone(),
-            route_key: ProductConversationRouteKey::from_external_conversation_ref(
-                &request.external_conversation_ref,
-            ),
-        }
+/// Build a subject-route resolution request from an inbound binding request.
+///
+/// A free function rather than an associated one: the request type is declared
+/// in `ironclaw_product_contracts` (so the extension host can implement the
+/// resolver without depending on product), and `ResolveBindingRequest` is
+/// product's own, so the bridge between them belongs here.
+fn subject_route_request_from_binding_request(
+    request: &ResolveBindingRequest,
+) -> ProductConversationSubjectRouteResolutionRequest {
+    ProductConversationSubjectRouteResolutionRequest {
+        adapter_id: request.adapter_id.clone(),
+        installation_id: request.installation_id.clone(),
+        route_key: ProductConversationRouteKey::from_external_conversation_ref(
+            &request.external_conversation_ref,
+        ),
     }
-}
-
-#[async_trait]
-pub trait ProductConversationSubjectRouteResolver: Send + Sync + std::fmt::Debug {
-    async fn resolve_product_conversation_subject_route(
-        &self,
-        request: ProductConversationSubjectRouteResolutionRequest,
-    ) -> Result<Option<UserId>, ProductSurfaceFailure>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -346,7 +298,7 @@ impl ProductInstallationScope {
         if let Some(resolver) = &self.conversation_subject_route_resolver
             && let Some(subject_user_id) = resolver
                 .resolve_product_conversation_subject_route(
-                    ProductConversationSubjectRouteResolutionRequest::from_binding_request(request),
+                    subject_route_request_from_binding_request(request),
                 )
                 .await?
         {
@@ -355,7 +307,7 @@ impl ProductInstallationScope {
         let route_key = ProductConversationRouteKey::from_external_conversation_ref(
             &request.external_conversation_ref,
         );
-        if route_key.space_id.is_none() && !self.conversation_subject_routes.is_empty() {
+        if route_key.space_id().is_none() && !self.conversation_subject_routes.is_empty() {
             tracing::warn!(
                 "conversation ref has no space_id; channel route lookup will not match configured routes"
             );
@@ -475,7 +427,7 @@ impl ProductConversationBindingService {
         let tenant_id = installation_scope.tenant_id.clone();
         let adapter_kind = conversation_adapter_kind(&request.adapter_id)?;
         let installation_id = conversation_installation_id(&request.installation_id)?;
-        let external_actor_ref = conversation_actor_ref(&request.external_actor_ref)?;
+        let external_actor_ref = request.external_actor_ref.clone();
         match resolved_actor.binding_epoch.clone() {
             Some(binding_epoch) => {
                 actor_pairings
@@ -536,7 +488,7 @@ impl ProductConversationBindingService {
                 &installation_scope.tenant_id,
                 &conversation_adapter_kind(&request.adapter_id)?,
                 &conversation_installation_id(&request.installation_id)?,
-                &conversation_actor_ref(&request.external_actor_ref)?,
+                &request.external_actor_ref,
                 &ironclaw_conversations::ExpectedExternalActorOwner {
                     user_id: expected_actor.user_id.clone(),
                     binding_epoch: expected_actor.binding_epoch.clone(),
@@ -785,10 +737,8 @@ fn conversation_request(
         tenant_id,
         adapter_kind: conversation_adapter_kind(&request.adapter_id)?,
         adapter_installation_id: conversation_installation_id(&request.installation_id)?,
-        external_actor_ref: conversation_actor_ref(&request.external_actor_ref)?,
-        external_conversation_ref: conversation_conversation_ref(
-            &request.external_conversation_ref,
-        )?,
+        external_actor_ref: request.external_actor_ref.clone(),
+        external_conversation_ref: request.external_conversation_ref.clone(),
         external_event_id: conversation_event_id(&request.external_event_id)?,
         route_kind: conversation_route_kind(request.route_kind),
         requested_agent_id: None,
@@ -813,25 +763,6 @@ fn conversation_event_id(
     event_id: &crate::ExternalEventId,
 ) -> Result<ironclaw_conversations::ExternalEventId, ProductSurfaceFailure> {
     ironclaw_conversations::ExternalEventId::new(event_id.as_str()).map_err(map_conversation_error)
-}
-
-fn conversation_actor_ref(
-    actor_ref: &crate::ExternalActorRef,
-) -> Result<ironclaw_conversations::ExternalActorRef, ProductSurfaceFailure> {
-    ironclaw_conversations::ExternalActorRef::new(actor_ref.kind(), actor_ref.id())
-        .map_err(map_conversation_error)
-}
-
-fn conversation_conversation_ref(
-    conversation_ref: &crate::ExternalConversationRef,
-) -> Result<ironclaw_conversations::ExternalConversationRef, ProductSurfaceFailure> {
-    ironclaw_conversations::ExternalConversationRef::new(
-        conversation_ref.space_id(),
-        conversation_ref.conversation_id(),
-        conversation_ref.topic_id(),
-        conversation_ref.reply_target_message_id(),
-    )
-    .map_err(map_conversation_error)
 }
 
 fn conversation_route_kind(
@@ -871,8 +802,26 @@ fn map_conversation_error(
                 reason: "conversation binding store unavailable".into(),
             }
         }
+        // Unreachable on this surface, and kept only for exhaustiveness. Every
+        // `InboundTurnError` this function sees comes from
+        // `ConversationBindingService` — resolve/lookup/link/validate and the
+        // id constructors — which never submits a turn; the submission
+        // orchestration is `ironclaw_conversations::InboundTurnService`, which
+        // this crate does not use (it has its own `DefaultInboundTurnService`
+        // calling the coordinator directly, and that is where every live
+        // `ProductSurfaceFailure::TurnSubmissionFailed` is minted, with a real
+        // `TurnError`).
+        //
+        // Since WS5's port inversion, conversations carries the *port's*
+        // `TurnSubmissionError` here rather than a `TurnError`. A `TurnError`
+        // is deliberately NOT synthesized back from it: fabricating a kernel
+        // error to satisfy a variant no caller can reach would be a shim.
+        // The port error's own rendering is carried through instead, so the
+        // typed cause is preserved in the message rather than dropped.
         ironclaw_conversations::InboundTurnError::TurnSubmissionFailed { error } => {
-            ProductSurfaceFailure::TurnSubmissionFailed { error }
+            ProductSurfaceFailure::TurnSubmissionRejected {
+                reason: error.to_string(),
+            }
         }
     }
 }

@@ -34,9 +34,10 @@
 //!      per-descriptor self-consistency check, applied to the TOML source);
 //!    - any `ungated` `loop_run` has its id in the reviewed allowlist.
 //!
-//!    The scan covers both the first-party extension assets and the
-//!    host-bundled always-on package assets (`ironclaw_host_runtime/assets`,
-//!    the `ironclaw.memory` manifests). Today the only `ungated` TOML
+//!    The scan covers every shipped package manifest under
+//!    `crates/extensions/packages/` — the twelve extension packages and the
+//!    two host-bundled always-on `ironclaw.memory` providers, which WS2's
+//!    colocation brought under the same root. Today the only `ungated` TOML
 //!    capabilities are the allowlisted read-only memory tools
 //!    (`ironclaw.memory.read`/`search`/`tree`); every installable extension
 //!    capability remains gated.
@@ -72,6 +73,9 @@
 //!   - bundled extensions — `ironclaw_reborn_composition` →
 //!     `bundled_extension_capabilities_carry_behavior_neutral_origin_gate_matrix`.
 
+#[allow(dead_code)]
+mod ratchet_support;
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -80,6 +84,8 @@ use ironclaw_host_api::{
     capability::{OriginGateMatrix, OriginGatePolicy, UNGATED_LOOP_RUN_CAPABILITIES},
     ids::CapabilityId,
 };
+
+use ratchet_support::{crate_dir, workspace_root};
 
 /// The reviewed S5 seed of builtins the model may invoke UNGATED (§5.2.1/§10).
 /// Any drift from this list is a reviewed diff — see the module header. Adding an
@@ -109,26 +115,28 @@ const EXPECTED_UNGATED_SEED: &[&str] = &[
     "builtin.extension_search",
 ];
 
-fn workspace_root() -> PathBuf {
-    // CARGO_MANIFEST_DIR = crates/ironclaw_architecture; up two to the workspace.
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("architecture crate must live under crates/ironclaw_architecture")
-        .to_path_buf()
-}
-
+/// The shipped package assets, anchored on the crate that owns them rather
+/// than on the literal `crates/extensions/packages`. A package directory is
+/// owned by no crate (PROPOSAL section 5) so it cannot be resolved by name, but
+/// its owning support crate can be and `packages/` is that crate's sibling.
+/// `collect_manifest_tomls` returns quietly on an unreadable directory, so a
+/// wrong root here would leave this ratchet asserting over an empty matrix
+/// (CHECKLIST WS10).
 fn first_party_assets_dir() -> PathBuf {
-    workspace_root().join("crates/ironclaw_first_party_extensions/assets")
-}
-
-/// Host-bundled always-on packages (the `ironclaw.memory` native/mem0
-/// manifests) are hand-authored TOML exactly like the first-party extension
-/// assets, so the same matrix scan applies. Missing coverage here let the
-/// memory manifests ship with no `origin_gate_matrix`, which the S4 fold
-/// fail-closes to Forbidden for every origin-stamped dispatch.
-fn host_runtime_assets_dir() -> PathBuf {
-    workspace_root().join("crates/ironclaw_host_runtime/assets")
+    let root = workspace_root();
+    let support = crate_dir(&root, "ironclaw_extension_support");
+    let packages = support
+        .parent()
+        .expect("the package-support crate must have a parent directory")
+        .join("packages");
+    assert!(
+        packages.is_dir(),
+        "first-party package assets root {} does not exist; the origin-gate matrix would \
+         ratchet over nothing. `packages/` is resolved as a sibling of the \
+         ironclaw_extension_support crate - repoint the hop if the packages moved.",
+        packages.display()
+    );
+    packages
 }
 
 fn collect_manifest_tomls(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -221,24 +229,29 @@ fn ungated_loop_run_allowlist_is_pinned_to_reviewed_seed() {
 /// off-allowlist `ungated` loop_run. See the header.
 #[test]
 fn extension_toml_capabilities_declare_wellformed_origin_gate_matrix() {
+    // One scan root now: WS2's package colocation put every shipped package —
+    // the twelve extension packages and the two `ironclaw.memory` provider
+    // packages, which used to sit apart under `ironclaw_host_runtime/assets/`
+    // — under `crates/extensions/packages/`. The memory manifests are still
+    // named explicitly below, because "the directory has enough files in it"
+    // is not the same claim as "these two specific manifests are in the scan".
     let mut manifests = Vec::new();
     collect_manifest_tomls(&first_party_assets_dir(), &mut manifests);
     assert!(
-        manifests.len() >= 12,
-        "expected at least the 12 first-party extension manifest assets, found {} — did the \
-         assets directory move? ({})",
+        manifests.len() >= 14,
+        "expected at least the 14 shipped package manifests (12 extension packages + the two \
+         memory providers), found {} — did the packages directory move? ({})",
         manifests.len(),
         first_party_assets_dir().display()
     );
-    collect_manifest_tomls(&host_runtime_assets_dir(), &mut manifests);
-    for required in ["memory_native/manifest.toml", "memory_mem0/manifest.toml"] {
+    for required in ["memory-native/manifest.toml", "mem0/manifest.toml"] {
         assert!(
             manifests
                 .iter()
                 .any(|path| path.ends_with(Path::new(required))),
             "expected the host-bundled {required} under {} — a missing or moved memory manifest \
              would silently drop it from this origin-gate scan",
-            host_runtime_assets_dir().display()
+            first_party_assets_dir().display()
         );
     }
 

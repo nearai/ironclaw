@@ -4,25 +4,32 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_conversations::{
-    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
-    AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind, ConditionalUnpairOutcome,
-    ConversationBindingResolution, ConversationBindingService, ConversationRouteKind,
-    ExpectedExternalActorOwner, ExternalActorBindingEpoch, ExternalActorRef,
-    ExternalConversationIdentity, ExternalConversationRef, ExternalEventId,
-    InMemoryConversationServices, InboundMessageContentRef, InboundTurnError, InboundTurnRequest,
-    InboundTurnService, LinkConversationRequest, LinkedConversationBinding,
-    MessageIdempotencyStatus, ReplyTargetBinding, ResolveStoredReplyTargetRequest,
-    SessionThreadService, StoredReplyTargetAccess, ThreadAccessDecision,
+    AcceptConversationMessageRequest, AcceptedConversationMessage,
+    AcceptedConversationMessageLookup, AcceptedConversationMessageReplay, AdapterInstallationId,
+    AdapterKind, ConditionalUnpairOutcome, ConversationBindingResolution,
+    ConversationBindingService, ConversationInboundClassification, ConversationRouteKind,
+    ConversationTurnSubmission, ConversationTurnSubmitter, ExpectedExternalActorOwner,
+    ExternalActorBindingEpoch, ExternalConversationIdentity, ExternalEventId,
+    InMemoryConversationServices, InboundConversationService, InboundMessageContentRef,
+    InboundTurnError, InboundTurnRequest, InboundTurnService, LinkConversationRequest,
+    LinkedConversationBinding, MessageIdempotencyStatus, ReplyTargetBinding,
+    ResolveStoredReplyTargetRequest, StoredReplyTargetAccess, ThreadAccessDecision,
+    TurnSubmissionError, TurnSubmissionErrorCategory, TurnSubmissionRetry,
     ValidateReplyTargetRequest,
 };
+use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
-    ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
-    RetryTurnResponse, RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor, TurnCoordinator, TurnError,
-    TurnRunId, TurnRunState, TurnScope, TurnStatus,
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileId, RunProfileRequest,
+    RunProfileVersion, SourceBindingRef, SubmitTurnResponse, TurnActor, TurnRunId, TurnScope,
+    TurnStatus,
 };
+// Dev-only: `ironclaw_turns` is a dev-dependency of this crate, never a normal
+// one. The fakes below stand in for the composition adapter that implements the
+// submission port, so they mint the same `SubmitTurnRequest` the real adapter
+// mints and these tests keep asserting on that exact value. See
+// `submit_turn_request` at the bottom of this file and the manifest comment.
+use ironclaw_turns::{SubmitTurnRequest, product_context};
 
 #[tokio::test]
 async fn paired_actor_without_binding_creates_thread_binding_message_and_submits_turn() {
@@ -1181,7 +1188,7 @@ async fn external_ref_keying_cannot_be_collided_with_delimiter_characters() {
             tenant(),
             telegram(),
             default_installation(),
-            ExternalActorRef::new("user;id=x", "y").unwrap(),
+            ExternalActorRef::new("user;id=x", "y", None::<String>).unwrap(),
             user("alice"),
         )
         .await;
@@ -1189,7 +1196,7 @@ async fn external_ref_keying_cannot_be_collided_with_delimiter_characters() {
     let colliding_actor = services
         .resolve_or_create_binding(resolve_request(
             telegram(),
-            ExternalActorRef::new("user", "x;id=y").unwrap(),
+            ExternalActorRef::new("user", "x;id=y", None::<String>).unwrap(),
             external_conversation("chat-1", None),
             "actor-collision-event",
         ))
@@ -1303,11 +1310,15 @@ async fn per_message_external_ids_do_not_fork_conversation_bindings() {
         .await
         .unwrap();
     assert_eq!(
-        first_target.external_conversation_ref.message_id(),
+        first_target
+            .external_conversation_ref
+            .reply_target_message_id(),
         Some("message-1")
     );
     assert_eq!(
-        second_target.external_conversation_ref.message_id(),
+        second_target
+            .external_conversation_ref
+            .reply_target_message_id(),
         Some("message-2")
     );
     assert_eq!(coordinator.submissions().len(), 2);
@@ -1449,11 +1460,11 @@ async fn validated_reply_target_preserves_adapter_installation_and_external_rout
         "channel-1"
     );
     assert_eq!(
-        target.external_conversation_ref.thread_id(),
+        target.external_conversation_ref.topic_id(),
         Some("thread-1")
     );
     assert_eq!(
-        target.external_conversation_ref.message_id(),
+        target.external_conversation_ref.reply_target_message_id(),
         None,
         "binding-level reply targets must not preserve stale per-message routing"
     );
@@ -2080,9 +2091,15 @@ async fn turn_submission_failure_preserves_structured_turn_error() {
     };
     assert_eq!(
         error.category(),
-        ironclaw_turns::TurnErrorCategory::InvalidRequest
+        TurnSubmissionErrorCategory::InvalidRequest
     );
     assert_eq!(error.adapter_status_code(), 400);
+    assert_eq!(error.retry(), TurnSubmissionRetry::Permanent);
+    assert_eq!(
+        error.to_string(),
+        "invalid turn request: permanent invalid request",
+        "the host's rendered cause must survive the port boundary verbatim"
+    );
 }
 
 #[tokio::test]
@@ -2302,7 +2319,7 @@ async fn direct_route_rejects_borrowed_owner_actor_key() {
     assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
 
     let err = services
-        .accept_inbound_message(AcceptInboundMessageRequest {
+        .accept_inbound_message(AcceptConversationMessageRequest {
             tenant_id: tenant(),
             thread_id: resolution.turn_scope.thread_id,
             actor: TurnActor::new(user("bob")),
@@ -2501,7 +2518,7 @@ async fn shared_route_rejects_wrong_adapter_context() {
     assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
 
     let err = services
-        .accept_inbound_message(AcceptInboundMessageRequest {
+        .accept_inbound_message(AcceptConversationMessageRequest {
             tenant_id: tenant(),
             thread_id: resolution.turn_scope.thread_id,
             actor: resolution.actor,
@@ -2938,7 +2955,7 @@ async fn accept_inbound_message_rejects_stale_message_scoped_reply_ref() {
     inbound.handle_inbound_turn(widen).await.unwrap();
 
     let err = services
-        .accept_inbound_message(AcceptInboundMessageRequest {
+        .accept_inbound_message(AcceptConversationMessageRequest {
             tenant_id: tenant(),
             thread_id: first.resolution.turn_scope.thread_id,
             actor: first.resolution.actor,
@@ -2986,7 +3003,7 @@ async fn message_scoped_reply_target_rejects_same_thread_different_actor_route()
         .await
         .unwrap();
     let accepted = services
-        .accept_inbound_message(AcceptInboundMessageRequest {
+        .accept_inbound_message(AcceptConversationMessageRequest {
             tenant_id: tenant(),
             thread_id: resolution.turn_scope.thread_id.clone(),
             actor: resolution.actor,
@@ -3096,7 +3113,7 @@ async fn accept_inbound_message_rejects_external_route_mismatch() {
         .unwrap();
 
     let err = services
-        .accept_inbound_message(AcceptInboundMessageRequest {
+        .accept_inbound_message(AcceptConversationMessageRequest {
             tenant_id: tenant(),
             thread_id: resolution.turn_scope.thread_id,
             actor: resolution.actor,
@@ -3141,7 +3158,7 @@ async fn duplicate_accept_rejects_external_route_mismatch() {
         .unwrap();
 
     services
-        .accept_inbound_message(AcceptInboundMessageRequest {
+        .accept_inbound_message(AcceptConversationMessageRequest {
             tenant_id: tenant(),
             thread_id: resolution.turn_scope.thread_id.clone(),
             actor: resolution.actor.clone(),
@@ -3162,7 +3179,7 @@ async fn duplicate_accept_rejects_external_route_mismatch() {
         .unwrap();
 
     let err = services
-        .accept_inbound_message(AcceptInboundMessageRequest {
+        .accept_inbound_message(AcceptConversationMessageRequest {
             tenant_id: tenant(),
             thread_id: resolution.turn_scope.thread_id,
             actor: resolution.actor,
@@ -3217,7 +3234,7 @@ async fn accept_inbound_message_rejects_mixed_source_and_reply_bindings() {
         .unwrap();
 
     let err = services
-        .accept_inbound_message(AcceptInboundMessageRequest {
+        .accept_inbound_message(AcceptConversationMessageRequest {
             tenant_id: tenant(),
             thread_id: first.turn_scope.thread_id,
             actor: first.actor,
@@ -3249,16 +3266,32 @@ fn serde_deserialization_revalidates_external_ref_invariants() {
     assert!(serde_json::from_str::<InboundMessageContentRef>("\"\"").is_err());
     assert!(serde_json::from_str::<ExternalActorBindingEpoch>("\"\"").is_err());
     assert!(serde_json::from_str::<ExternalActorBindingEpoch>("\"bad\\u0000epoch\"").is_err());
+    // The external actor/conversation pair is now the canonical
+    // `ironclaw_extension_contracts` type, so these invariants are asserted
+    // against that type's field spelling (`topic_id` /
+    // `reply_target_message_id`). The *durable* spelling this crate's own
+    // records use — which still accepts the pre-unification `thread_id` /
+    // `message_id` — is pinned by `stored_refs::tests`.
     assert!(serde_json::from_str::<ExternalActorRef>(r#"{"kind":"user","id":""}"#).is_err());
-    assert!(serde_json::from_str::<ExternalConversationRef>(
-        r#"{"space_id":null,"conversation_id":"chat-1","thread_id":"ok","message_id":"bad\u0001"}"#
-    )
-    .is_err());
     assert!(
-        serde_json::from_str::<ExternalConversationIdentity>(
-            r#"{"space_id":null,"conversation_id":"","thread_id":null}"#
+        serde_json::from_str::<ExternalConversationRef>(
+            r#"{"space_id":null,"conversation_id":"chat-1","topic_id":"ok","reply_target_message_id":"bad\u0001"}"#
         )
         .is_err()
+    );
+    assert!(
+        serde_json::from_str::<ExternalConversationIdentity>(
+            r#"{"space_id":null,"conversation_id":"","topic_id":null}"#
+        )
+        .is_err()
+    );
+    // The route identity keeps reading the pre-unification `thread_id` key, so
+    // durable binding keys written by released builds resolve unchanged.
+    assert!(
+        serde_json::from_str::<ExternalConversationIdentity>(
+            r#"{"space_id":null,"conversation_id":"chat-1","thread_id":"topic-9"}"#
+        )
+        .is_ok()
     );
 }
 
@@ -3439,7 +3472,7 @@ fn default_installation() -> AdapterInstallationId {
 }
 
 fn external_actor(id: &str) -> ExternalActorRef {
-    ExternalActorRef::new("user", id).unwrap()
+    ExternalActorRef::new("user", id, None::<String>).unwrap()
 }
 
 fn external_conversation(
@@ -3451,7 +3484,7 @@ fn external_conversation(
 
 struct FixedMessageSessionService {
     message_ref: AcceptedMessageRef,
-    accepted: Mutex<Option<AcceptedInboundMessage>>,
+    accepted: Mutex<Option<AcceptedConversationMessage>>,
     submitted: Mutex<Option<SubmitTurnResponse>>,
 }
 
@@ -3466,18 +3499,18 @@ impl FixedMessageSessionService {
 }
 
 #[async_trait]
-impl SessionThreadService for FixedMessageSessionService {
+impl InboundConversationService for FixedMessageSessionService {
     async fn accept_inbound_message(
         &self,
-        request: AcceptInboundMessageRequest,
-    ) -> Result<AcceptedInboundMessage, InboundTurnError> {
+        request: AcceptConversationMessageRequest,
+    ) -> Result<AcceptedConversationMessage, InboundTurnError> {
         let mut accepted = self.accepted.lock().unwrap();
         if let Some(existing) = accepted.clone() {
             let mut duplicate = existing;
             duplicate.idempotency = MessageIdempotencyStatus::Duplicate;
             return Ok(duplicate);
         }
-        let message = AcceptedInboundMessage {
+        let message = AcceptedConversationMessage {
             tenant_id: request.tenant_id,
             thread_id: request.thread_id,
             actor: request.actor,
@@ -3494,8 +3527,8 @@ impl SessionThreadService for FixedMessageSessionService {
 
     async fn replay_accepted_inbound_message(
         &self,
-        _lookup: AcceptedInboundMessageLookup,
-    ) -> Result<Option<AcceptedInboundMessageReplay>, InboundTurnError> {
+        _lookup: AcceptedConversationMessageLookup,
+    ) -> Result<Option<AcceptedConversationMessageReplay>, InboundTurnError> {
         Ok(None)
     }
 
@@ -3735,203 +3768,177 @@ impl CapacityFailureTurnCoordinator {
     }
 }
 
+/// Mirror of the production port adapter
+/// (`ironclaw_reborn_composition::automation::conversation_turn_submitter`): it
+/// derives the owner and resolves the classification through the same
+/// `product_context::resolve_inbound` call, producing the same
+/// `SubmitTurnRequest` the real adapter hands the coordinator. The fakes below
+/// record that request, so every product-context, run-profile and
+/// idempotency-key assertion in this file keeps asserting on the exact value a
+/// coordinator receives rather than a paraphrase of it. The production copy is
+/// pinned by that adapter's own seam tests.
+fn submit_turn_request(submission: ConversationTurnSubmission) -> SubmitTurnRequest {
+    let product_context = product_context::resolve_inbound(
+        inbound_classification(submission.classification),
+        submission.origin_adapter,
+        submission.surface_type,
+        submission.scope.product_owner(&submission.actor),
+    );
+    SubmitTurnRequest {
+        requested_model: None,
+        scope: submission.scope,
+        actor: submission.actor,
+        accepted_message_ref: submission.accepted_message_ref,
+        source_binding_ref: submission.source_binding_ref,
+        reply_target_binding_ref: submission.reply_target_binding_ref,
+        requested_run_profile: submission.requested_run_profile,
+        idempotency_key: submission.idempotency_key,
+        received_at: submission.received_at,
+        requested_run_id: None,
+        parent_run_id: None,
+        subagent_depth: 0,
+        spawn_tree_root_run_id: None,
+        product_context: Some(product_context),
+    }
+}
+
+fn inbound_classification(
+    classification: ConversationInboundClassification,
+) -> product_context::InboundClassification {
+    match classification {
+        ConversationInboundClassification::TrustedTrigger => {
+            product_context::InboundClassification::TrustedTrigger
+        }
+        ConversationInboundClassification::TrustedOther => {
+            product_context::InboundClassification::TrustedOther
+        }
+        ConversationInboundClassification::Untrusted => {
+            product_context::InboundClassification::Untrusted
+        }
+    }
+}
+
+/// The submission port's rendering of `TurnError::InvalidRequest` — the
+/// `(category, retry, detail)` triple the production adapter maps that failure
+/// onto, pinned there by
+/// `conversation_turn_submitter_maps_every_turn_error_to_its_class`.
+fn permanent_invalid_request_failure() -> TurnSubmissionError {
+    TurnSubmissionError::new(
+        TurnSubmissionErrorCategory::InvalidRequest,
+        TurnSubmissionRetry::Permanent,
+        "invalid turn request: permanent invalid request",
+    )
+}
+
+/// The port's rendering of `TurnError::capacity_exceeded(SubmitTurn, 1)`:
+/// retryable, but WITHOUT rotating the submit idempotency key.
+fn capacity_exceeded_failure() -> TurnSubmissionError {
+    TurnSubmissionError::new(
+        TurnSubmissionErrorCategory::CapacityExceeded,
+        TurnSubmissionRetry::RetryableWithSameKey,
+        "turn capacity exceeded for submit_turn: cap 1",
+    )
+}
+
+/// The port's rendering of `TurnError::Unavailable` — transient, and the submit
+/// idempotency key must rotate before the retry.
+fn transient_unavailable_failure() -> TurnSubmissionError {
+    TurnSubmissionError::new(
+        TurnSubmissionErrorCategory::Unavailable,
+        TurnSubmissionRetry::RetryableAfterKeyRotation,
+        "turn service unavailable: transient outage",
+    )
+}
+
+/// The port's rendering of `TurnError::ThreadBusy` — transient, key rotates.
+fn thread_busy_failure() -> TurnSubmissionError {
+    TurnSubmissionError::new(
+        TurnSubmissionErrorCategory::ThreadBusy,
+        TurnSubmissionRetry::RetryableAfterKeyRotation,
+        "thread already has an active run",
+    )
+}
+
 #[async_trait]
-impl TurnCoordinator for PermanentFailureTurnCoordinator {
-    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
-        Ok(TurnRunId::new())
-    }
-
-    async fn submit_turn(
+impl ConversationTurnSubmitter for PermanentFailureTurnCoordinator {
+    async fn submit_conversation_turn(
         &self,
-        request: SubmitTurnRequest,
-    ) -> Result<SubmitTurnResponse, TurnError> {
-        self.submissions.lock().unwrap().push(request);
-        Err(TurnError::InvalidRequest {
-            reason: "permanent invalid request".to_string(),
-        })
-    }
-
-    async fn resume_turn(
-        &self,
-        _request: ResumeTurnRequest,
-    ) -> Result<ResumeTurnResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        unimplemented!("not used by inbound service tests")
+        submission: ConversationTurnSubmission,
+    ) -> Result<SubmitTurnResponse, TurnSubmissionError> {
+        self.submissions
+            .lock()
+            .unwrap()
+            .push(submit_turn_request(submission));
+        Err(permanent_invalid_request_failure())
     }
 }
 
 #[async_trait]
-impl TurnCoordinator for CapacityFailureTurnCoordinator {
-    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
-        Ok(TurnRunId::new())
-    }
-
-    async fn submit_turn(
+impl ConversationTurnSubmitter for CapacityFailureTurnCoordinator {
+    async fn submit_conversation_turn(
         &self,
-        request: SubmitTurnRequest,
-    ) -> Result<SubmitTurnResponse, TurnError> {
-        self.submissions.lock().unwrap().push(request);
-        Err(TurnError::capacity_exceeded(
-            ironclaw_turns::TurnCapacityResource::SubmitTurn,
-            1,
-        ))
-    }
-
-    async fn resume_turn(
-        &self,
-        _request: ResumeTurnRequest,
-    ) -> Result<ResumeTurnResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        unimplemented!("not used by inbound service tests")
+        submission: ConversationTurnSubmission,
+    ) -> Result<SubmitTurnResponse, TurnSubmissionError> {
+        self.submissions
+            .lock()
+            .unwrap()
+            .push(submit_turn_request(submission));
+        Err(capacity_exceeded_failure())
     }
 }
 
 #[async_trait]
-impl TurnCoordinator for BusyFirstUniqueKeyCoordinator {
-    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
-        Ok(TurnRunId::new())
-    }
-
-    async fn submit_turn(
+impl ConversationTurnSubmitter for BusyFirstUniqueKeyCoordinator {
+    async fn submit_conversation_turn(
         &self,
-        request: SubmitTurnRequest,
-    ) -> Result<SubmitTurnResponse, TurnError> {
+        submission: ConversationTurnSubmission,
+    ) -> Result<SubmitTurnResponse, TurnSubmissionError> {
+        let request = submit_turn_request(submission);
         let mut submissions = self.submissions.lock().unwrap();
         submissions.push(request.clone());
         if submissions.len() == 1 {
-            return Err(TurnError::ThreadBusy(ThreadBusy {
-                active_run_id: TurnRunId::new(),
-                status: TurnStatus::Running,
-                event_cursor: ironclaw_turns::events::EventCursor(1),
-            }));
+            return Err(thread_busy_failure());
         }
         Ok(accepted_response(request))
-    }
-
-    async fn resume_turn(
-        &self,
-        _request: ResumeTurnRequest,
-    ) -> Result<ResumeTurnResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        unimplemented!("not used by inbound service tests")
     }
 }
 
 #[async_trait]
-impl TurnCoordinator for FailFirstTurnCoordinator {
-    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
-        Ok(TurnRunId::new())
-    }
-
-    async fn submit_turn(
+impl ConversationTurnSubmitter for FailFirstTurnCoordinator {
+    async fn submit_conversation_turn(
         &self,
-        request: SubmitTurnRequest,
-    ) -> Result<SubmitTurnResponse, TurnError> {
+        submission: ConversationTurnSubmission,
+    ) -> Result<SubmitTurnResponse, TurnSubmissionError> {
+        let request = submit_turn_request(submission);
         let mut submissions = self.submissions.lock().unwrap();
         submissions.push(request.clone());
         if submissions.len() == 1 {
-            return Err(TurnError::Unavailable {
-                reason: "transient outage".to_string(),
-            });
+            return Err(transient_unavailable_failure());
         }
         Ok(accepted_response(request))
-    }
-
-    async fn resume_turn(
-        &self,
-        _request: ResumeTurnRequest,
-    ) -> Result<ResumeTurnResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        unimplemented!("not used by inbound service tests")
     }
 }
 
 #[async_trait]
-impl TurnCoordinator for RecordingTurnCoordinator {
-    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
-        Ok(TurnRunId::new())
-    }
-
-    async fn submit_turn(
+impl ConversationTurnSubmitter for RecordingTurnCoordinator {
+    async fn submit_conversation_turn(
         &self,
-        request: SubmitTurnRequest,
-    ) -> Result<SubmitTurnResponse, TurnError> {
+        submission: ConversationTurnSubmission,
+    ) -> Result<SubmitTurnResponse, TurnSubmissionError> {
+        let request = submit_turn_request(submission);
         self.submissions.lock().unwrap().push(request.clone());
         Ok(accepted_response(request))
-    }
-
-    async fn resume_turn(
-        &self,
-        _request: ResumeTurnRequest,
-    ) -> Result<ResumeTurnResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        unimplemented!("not used by inbound service tests")
-    }
-
-    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        unimplemented!("not used by inbound service tests")
     }
 }
 
 fn accepted_response(request: SubmitTurnRequest) -> SubmitTurnResponse {
     SubmitTurnResponse::Accepted {
-        turn_id: ironclaw_turns::TurnId::new(),
+        turn_id: ironclaw_host_api::turn::TurnId::new(),
         run_id: TurnRunId::new(),
         status: TurnStatus::Queued,
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
-        event_cursor: ironclaw_turns::events::EventCursor(1),
+        event_cursor: ironclaw_host_api::turn::EventCursor(1),
         accepted_message_ref: request.accepted_message_ref,
         reply_target_binding_ref: request.reply_target_binding_ref,
     }

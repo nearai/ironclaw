@@ -7,13 +7,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_turns::run_profile::{LoopCancelReasonKind, LoopCancellationPort};
+use ironclaw_loop_contracts::{AgentLoopHostError, RunProfileResolver};
+use ironclaw_loop_contracts::{LoopCancelReasonKind, LoopCancellationPort};
 use ironclaw_turns::{
     AcceptedMessageRef, AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, EventCursor,
     GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-    RunProfileResolver, RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
-    TurnActor, TurnAdmissionPolicy, TurnError, TurnId, TurnRunId, TurnRunState, TurnRunWake,
-    TurnRunWakeNotifier, TurnScope, TurnStatus, run_profile::AgentLoopHostError,
+    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnAdmissionPolicy, TurnError, TurnId, TurnRunId, TurnRunState, TurnRunWake,
+    TurnRunWakeNotifier, TurnScope, TurnStatus,
 };
 
 use super::{
@@ -163,6 +164,7 @@ fn test_run_state(status: TurnStatus) -> TurnRunState {
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-cancel-factory").unwrap(),
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
+        allow_steering: true,
         resolved_model_route: None,
         model_usage: None,
         received_at: Utc::now(),

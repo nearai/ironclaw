@@ -17,6 +17,7 @@ mod support;
 
 mod scenario_auto_approve_isolation_across_actors;
 mod scenario_memory_isolation_across_actors;
+mod scenario_scoped_workspace_isolation;
 mod scenario_turn_state_isolation_across_actors;
 mod scenario_two_actors_own_threads;
 
@@ -64,6 +65,18 @@ async fn multiuser_group_e2e() {
     report.record(
         "turn_state_isolation_across_actors",
         scenario_turn_state_isolation_across_actors::run(&g).await,
+    );
+
+    // Scenario 5 (C-MULTIUSER + PR #7062): per-caller-scoped workspace —
+    // writes land in each actor's own subtree, a fresh actor reads an empty
+    // workspace, and approval leases confine to the gate's own caller. See
+    // scenario_scoped_workspace_isolation for the seam.
+    let scoped_group = RebornIntegrationGroup::multiuser_scoped_workspace()
+        .await
+        .expect("multiuser scoped-workspace group builds");
+    report.record(
+        "scoped_workspace_isolation",
+        scenario_scoped_workspace_isolation::run(&scoped_group).await,
     );
 
     report.assert_all_passed();

@@ -18,7 +18,7 @@ use ironclaw_host_api::{
     path::VirtualPath,
     resource::{
         ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceReservation, ResourceScope,
-        ResourceUsage,
+        ResourceUsage, RuntimeResourceErrorKind,
     },
     runtime::RuntimeKind,
 };
@@ -48,9 +48,11 @@ async fn mcp_runtime_reserves_calls_adapter_and_reconciles_success() {
 
     let result = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             McpExecutionRequest {
-                package: &package,
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
                 estimate: ResourceEstimate::default()
@@ -107,9 +109,11 @@ async fn mcp_runtime_requires_host_mediated_egress_for_http_transports() {
 
     let err = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             McpExecutionRequest {
-                package: &package,
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope: sample_scope(),
                 estimate: ResourceEstimate::default(),
@@ -300,6 +304,94 @@ async fn concrete_mcp_http_client_routes_json_rpc_through_shared_egress() {
         vec!["tools/call", "initialize", "notifications/initialized"]
     );
     assert_eq!(planner_calls[0].json_rpc_id, json_rpc_id(&requests[2].body));
+}
+
+#[tokio::test]
+async fn concrete_mcp_http_auth_probe_stops_after_the_initialization_handshake() {
+    let egress = RecordingRuntimeEgress::json_rpc();
+    let planner = RecordingEgressPlanner::new(host_http_plan());
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        planner.clone(),
+    );
+
+    let request = McpClientRequest {
+        provider: ExtensionId::new("hosted-docs").unwrap(),
+        capability_id: CapabilityId::new("hosted-docs.connection").unwrap(),
+        scope: sample_scope(),
+        transport: "http".to_string(),
+        command: None,
+        args: vec![],
+        url: Some("https://mcp.example.test/mcp".to_string()),
+        input: json!({}),
+        max_output_bytes: 4096,
+    };
+    client
+        .probe_auth(request.clone())
+        .await
+        .expect("credential-free initialization succeeds");
+
+    client
+        .call_tool(request)
+        .await
+        .expect("a later tool call starts its own session");
+
+    let requests = egress.requests();
+    let methods = requests
+        .iter()
+        .map(|request| json_rpc_method(&request.body))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        methods,
+        vec![
+            "initialize",
+            "notifications/initialized",
+            "initialize",
+            "notifications/initialized",
+            "tools/call",
+        ]
+    );
+    assert_eq!(
+        header_value(&requests[2].headers, "Mcp-Session-Id"),
+        None,
+        "the runtime initialize must not reuse the probe session",
+    );
+    assert_eq!(planner.calls().len(), 5);
+}
+
+#[tokio::test]
+async fn concrete_mcp_http_auth_probe_rejects_non_http_or_missing_url_without_egress() {
+    for (transport, url, expected_reason) in [
+        (
+            "stdio",
+            Some("https://mcp.example.test/mcp"),
+            "mcp_unsupported_transport",
+        ),
+        ("http", None, "mcp_missing_url"),
+    ] {
+        let egress = RecordingRuntimeEgress::json_rpc();
+        let client = McpHostHttpClient::new(
+            McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+            StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+        );
+        let error = client
+            .probe_auth(McpClientRequest {
+                provider: ExtensionId::new("hosted-docs").unwrap(),
+                capability_id: CapabilityId::new("hosted-docs.connection").unwrap(),
+                scope: sample_scope(),
+                transport: transport.to_string(),
+                command: None,
+                args: vec![],
+                url: url.map(str::to_string),
+                input: json!({}),
+                max_output_bytes: 4096,
+            })
+            .await
+            .expect_err("an invalid auth probe must fail closed");
+
+        assert_eq!(error.stable_reason(), expected_reason);
+        assert!(egress.requests().is_empty());
+    }
 }
 
 #[tokio::test]
@@ -689,9 +781,11 @@ async fn mcp_runtime_with_concrete_http_client_consumes_shared_egress_end_to_end
 
     let result = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             McpExecutionRequest {
-                package: &package,
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope: sample_scope(),
                 estimate: ResourceEstimate::default(),
@@ -1157,9 +1251,11 @@ async fn mcp_runtime_fails_closed_for_external_stdio_process_egress() {
 
     let err = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             McpExecutionRequest {
-                package: &package,
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope: sample_scope(),
                 estimate: ResourceEstimate::default(),
@@ -1189,11 +1285,24 @@ async fn mcp_runtime_denies_budget_before_adapter_call() {
         )
         .unwrap();
 
+    // What the budget authority itself says about this request. The lane may
+    // narrow the *structure* it carries across the port, but the model-visible
+    // cause it forwards must stay the authority's own words (#7067).
+    let authority_reason = governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate::default().set_output_bytes(10_000),
+        )
+        .unwrap_err()
+        .to_string();
+
     let err = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             McpExecutionRequest {
-                package: &package,
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
                 estimate: ResourceEstimate::default().set_output_bytes(10_000),
@@ -1204,7 +1313,138 @@ async fn mcp_runtime_denies_budget_before_adapter_call() {
         .await
         .unwrap_err();
 
-    assert!(matches!(err, McpError::Resource(_)));
+    let McpError::Resource(denial) = &err else {
+        panic!("expected a resource denial, got {err:?}");
+    };
+    assert_eq!(denial.kind(), RuntimeResourceErrorKind::LimitExceeded);
+    assert_eq!(denial.reason(), authority_reason);
+    assert_eq!(
+        err.to_string(),
+        format!("resource governor error: {authority_reason}")
+    );
+    assert!(client.requests.lock().unwrap().is_empty());
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+}
+
+/// A prepared reservation handed down from the host is spent, not duplicated —
+/// and only if it actually covers the request. The mismatch check is the one
+/// budget failure the lane raises itself, so it must classify as
+/// `ReservationMismatch` and must fire before any side effect, leaving the
+/// host's hold untouched for the host to release. Regression for #7067: this
+/// path moved from constructing the kernel's `ResourceError` to constructing
+/// the port's error.
+#[tokio::test]
+async fn mcp_runtime_reuses_a_matching_prepared_reservation_and_rejects_a_mismatched_one() {
+    let package = package_from_manifest(MCP_MANIFEST);
+    let client = RecordingMcpClient::new(Ok(McpClientOutput::json(json!({"ok": true}))));
+    let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client.clone());
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits::default().set_max_output_bytes(10_000),
+        )
+        .unwrap();
+    let estimate = ResourceEstimate::default().set_output_bytes(1_000);
+    let prepared = governor.reserve(scope.clone(), estimate.clone()).unwrap();
+
+    // Mismatched: same reservation, different estimate. Rejected before the
+    // adapter runs, and the hold is left exactly as the host opened it.
+    let err = runtime
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            McpExecutionRequest {
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
+                capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
+                scope: scope.clone(),
+                estimate: ResourceEstimate::default().set_output_bytes(2_000),
+                resource_reservation: Some(prepared.clone()),
+                invocation: McpInvocation { input: json!({}) },
+            },
+        )
+        .await
+        .unwrap_err();
+    let McpError::Resource(mismatch) = &err else {
+        panic!("expected a reservation mismatch, got {err:?}");
+    };
+    assert_eq!(
+        mismatch.kind(),
+        RuntimeResourceErrorKind::ReservationMismatch
+    );
+    assert!(client.requests.lock().unwrap().is_empty());
+    assert_eq!(governor.reserved_for(&account).output_bytes, 1_000);
+
+    // Matching: the prepared hold is reconciled, not re-reserved.
+    let result = runtime
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            McpExecutionRequest {
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
+                capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
+                scope,
+                estimate,
+                resource_reservation: Some(prepared.clone()),
+                invocation: McpInvocation { input: json!({}) },
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.receipt.id, prepared.id);
+    assert_eq!(result.receipt.status, ReservationStatus::Reconciled);
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(client.requests.lock().unwrap().len(), 1);
+}
+
+/// A budget *pause* is not a budget *stop*: crossing the approval threshold
+/// must reach the lane as `RequiresApproval`, so the caller above it opens an
+/// approval gate instead of reporting a refusal. Regression for #7067 — the
+/// narrow port must not collapse the denial cone into one undifferentiated
+/// "resource error". Fail-closed either way: the adapter is never called.
+#[tokio::test]
+async fn mcp_runtime_surfaces_approval_pause_distinctly_from_a_hard_denial() {
+    let package = package_from_manifest(MCP_MANIFEST);
+    let client = RecordingMcpClient::new(Ok(McpClientOutput::json(json!({"ok": true}))));
+    let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client.clone());
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits::default()
+                .set_max_output_bytes(1_000)
+                .set_thresholds(BudgetThresholds::RECOMMENDED),
+        )
+        .unwrap();
+
+    // 95% of the cap: past the 90% pause threshold, still under the hard limit.
+    let err = runtime
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            McpExecutionRequest {
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
+                capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
+                scope,
+                estimate: ResourceEstimate::default().set_output_bytes(950),
+                resource_reservation: None,
+                invocation: McpInvocation { input: json!({}) },
+            },
+        )
+        .await
+        .unwrap_err();
+
+    let McpError::Resource(pause) = &err else {
+        panic!("expected a resource pause, got {err:?}");
+    };
+    assert_eq!(pause.kind(), RuntimeResourceErrorKind::RequiresApproval);
     assert!(client.requests.lock().unwrap().is_empty());
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
 }
@@ -1220,9 +1460,11 @@ async fn mcp_runtime_releases_reservation_when_adapter_fails() {
 
     let err = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             McpExecutionRequest {
-                package: &package,
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
                 estimate: ResourceEstimate::default().set_concurrency_slots(1),
@@ -1248,9 +1490,11 @@ async fn mcp_runtime_preserves_adapter_error_when_release_cleanup_fails() {
 
     let err = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             McpExecutionRequest {
-                package: &package,
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope: sample_scope(),
                 estimate: ResourceEstimate::default().set_concurrency_slots(1),
@@ -1282,9 +1526,11 @@ async fn mcp_runtime_rejects_non_mcp_or_undeclared_capability_before_reserving()
 
     let non_mcp_err = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             McpExecutionRequest {
-                package: &non_mcp,
+                extension: &non_mcp.id,
+                capabilities: &non_mcp.capabilities,
+                runtime: &non_mcp.manifest.runtime,
                 capability_id: &CapabilityId::new("script.echo").unwrap(),
                 scope: scope.clone(),
                 estimate: ResourceEstimate::default().set_concurrency_slots(1),
@@ -1304,9 +1550,11 @@ async fn mcp_runtime_rejects_non_mcp_or_undeclared_capability_before_reserving()
 
     let missing_err = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             McpExecutionRequest {
-                package: &mcp,
+                extension: &mcp.id,
+                capabilities: &mcp.capabilities,
+                runtime: &mcp.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.missing").unwrap(),
                 scope,
                 estimate: ResourceEstimate::default().set_concurrency_slots(1),
@@ -1342,9 +1590,11 @@ async fn mcp_runtime_enforces_output_limit_and_releases_reservation() {
 
     let err = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             McpExecutionRequest {
-                package: &package,
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
                 estimate: ResourceEstimate::default()
@@ -1382,9 +1632,11 @@ async fn mcp_runtime_can_enforce_client_reported_output_size_without_serializing
 
     let err = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             McpExecutionRequest {
-                package: &package,
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
                 estimate: ResourceEstimate::default()
@@ -1425,9 +1677,11 @@ async fn mcp_runtime_rejects_output_when_adapter_under_reports_size() {
 
     let err = runtime
         .execute_extension_json(
-            &governor,
+            &GovernorRuntimeBudget::new(&governor),
             McpExecutionRequest {
-                package: &package,
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
                 estimate: ResourceEstimate::default()

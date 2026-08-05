@@ -23,15 +23,24 @@ use ironclaw_event_projections::{
 };
 use ironclaw_events::InMemoryDurableEventLog;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
+use ironclaw_host_api::turn::{
+    IdempotencyKey, ReplyTargetBindingRef, SanitizedCancelReason, SourceBindingRef, TurnActor,
+    TurnGateRef, TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
     action::NetworkPolicy,
     http::RuntimeHttpEgressRequest,
     ids::{CapabilityId, InvocationId, ProviderToolName, ThreadId},
     resource::ResourceScope,
 };
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, CapabilityCallCandidate, CapabilityInputRef, CapabilitySurfaceVersion,
+    LoopBlockedKind, LoopCheckpointKind, LoopHostMilestone, LoopHostMilestoneKind,
+    LoopHostMilestoneSink, LoopRequest, ParentLoopOutput, ProviderToolCallReplay,
+};
 use ironclaw_loop_host::{
     EmptyUserProfileSource, HostIdentityContextSource, HostManagedModelRequest,
-    JsonSpawnSubagentInputCodec,
+    JsonSpawnSubagentInputCodec, RejectingInputEnqueue,
 };
 use ironclaw_network::NetworkHttpRequest;
 use ironclaw_product::{
@@ -50,10 +59,7 @@ use ironclaw_runner::subagent::{
 };
 use ironclaw_runner::turn_scheduler::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
 use ironclaw_runner::{
-    loop_exit_applier::{
-        BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
-        FinalCheckpointEvidenceRequest, LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
-    },
+    loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
     milestone_events::{DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink},
     runtime::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, ProcessRuntimeSystem,
@@ -64,17 +70,14 @@ use ironclaw_threads::{
     FilesystemSessionThreadService, SessionThreadService, ThreadHistoryRequest,
     ThreadMessageRecord, ThreadScope,
 };
+use ironclaw_turns::loop_exit::{
+    BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
+    FinalCheckpointEvidenceRequest, LoopExitEvidencePort,
+};
 use ironclaw_turns::{
-    AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort, CancelRunRequest, GateRef,
-    GetLoopCheckpointRequest, IdempotencyKey, LoopBlockedKind, LoopCheckpointKind,
-    LoopCheckpointStore, ProcessLoopCheckpointStore, ReplyTargetBindingRef, ResumeTurnRequest,
-    RetryTurnRequest, RetryTurnResponse, SanitizedCancelReason, SourceBindingRef, TurnActor,
-    TurnCoordinator, TurnError, TurnRunId, TurnRunRecord, TurnRunState, TurnScope, TurnStatus,
-    run_profile::{
-        AgentLoopHostError, CapabilityCallCandidate, CapabilityInputRef, CapabilitySurfaceVersion,
-        LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopRequest,
-        ParentLoopOutput, ProviderToolCallReplay,
-    },
+    AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort, CancelRunRequest,
+    GetLoopCheckpointRequest, LoopCheckpointStore, ProcessLoopCheckpointStore, ResumeTurnRequest,
+    RetryTurnRequest, RetryTurnResponse, TurnCoordinator, TurnError, TurnRunRecord, TurnRunState,
 };
 use serde_json::json;
 
@@ -109,7 +112,7 @@ pub struct RebornBinaryE2EHarness {
     thread_harness: RebornThreadHarness,
     model_gateway: RebornTraceReplayModelGateway,
     capability_recorder: HarnessCapabilityRecorder,
-    milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+    milestone_sink: Arc<ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink>,
     runtime_event_log: Arc<InMemoryDurableEventLog>,
     scheduler_handle: Option<TurnRunSchedulerHandle>,
     scheduler_notifier: Arc<SchedulerTurnRunWakeNotifier>,
@@ -790,7 +793,7 @@ impl RebornBinaryE2EHarness {
             ProcessLoopCheckpointStore::new(process_system.checkpoints()),
         );
         let milestone_sink =
-            Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+            Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
         let runtime_event_log = Arc::new(InMemoryDurableEventLog::new());
         let durable_milestone_sink = Arc::new(DurableLoopHostMilestoneSink::new(
             Arc::clone(&runtime_event_log) as Arc<dyn ironclaw_events::DurableEventLog>,
@@ -887,6 +890,7 @@ impl RebornBinaryE2EHarness {
             cancellation_factory: None,
             skill_context_source: None,
             input_queue: None,
+            input_queue_reconcile: None,
             identity_context_source,
             user_profile_source: Arc::new(EmptyUserProfileSource),
             memory_context_service: None,
@@ -912,6 +916,7 @@ impl RebornBinaryE2EHarness {
             Arc::clone(&binding_service),
             thread_harness.service_instance()?,
             composition.coordinator.clone(),
+            Arc::new(RejectingInputEnqueue),
         ));
         let ledger: Arc<dyn IdempotencyLedger> = Arc::new(product_harness.idempotency_ledger());
         let workflow = DefaultProductSurface::new(inbound, ledger, binding_service);
@@ -948,7 +953,7 @@ impl RebornBinaryE2EHarness {
         thread_harness: RebornThreadHarness,
         model_gateway: RebornTraceReplayModelGateway,
         capability_recorder: HarnessCapabilityRecorder,
-        milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+        milestone_sink: Arc<ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink>,
         runtime_event_log: Arc<InMemoryDurableEventLog>,
         composition: RebornRuntimeLoopComposition<
             dyn SessionThreadService,
@@ -1079,7 +1084,7 @@ impl RebornBinaryE2EHarness {
     pub async fn approve_and_resume_standalone_gate(
         &self,
         run_id: TurnRunId,
-    ) -> HarnessResult<GateRef> {
+    ) -> HarnessResult<TurnGateRef> {
         let blocked = self
             .run_state(run_id)
             .await?
@@ -1110,7 +1115,7 @@ impl RebornBinaryE2EHarness {
     pub async fn resume_with_gate(
         &self,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
     ) -> HarnessResult<()> {
         self.resume_with_gate_as(
             self.turn_scope.clone(),
@@ -1127,7 +1132,7 @@ impl RebornBinaryE2EHarness {
         scope: TurnScope,
         actor: TurnActor,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         idempotency_key: impl Into<String>,
     ) -> HarnessResult<()> {
         let response = self
@@ -1416,7 +1421,7 @@ impl RebornBinaryE2EHarness {
 
 #[derive(Clone)]
 struct HarnessLoopHostMilestoneSink {
-    recorded: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+    recorded: Arc<ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink>,
     durable: Arc<DurableLoopHostMilestoneSink>,
 }
 
@@ -1478,7 +1483,7 @@ impl LoopExitEvidencePort for HarnessLoopExitEvidencePort {
         if !matches!(
             request.blocked.kind,
             LoopBlockedKind::Approval | LoopBlockedKind::AwaitDependentRun
-        ) || GateRef::new(request.blocked.gate_ref.as_str()).is_err()
+        ) || TurnGateRef::new(request.blocked.gate_ref.as_str()).is_err()
         {
             return Ok(false);
         }
@@ -1522,7 +1527,7 @@ impl LoopExitEvidencePort for HarnessLoopExitEvidencePort {
         scope: &TurnScope,
         turn_id: ironclaw_turns::TurnId,
         run_id: TurnRunId,
-    ) -> Result<Option<ironclaw_turns::LoopCheckpointKind>, TurnError> {
+    ) -> Result<Option<ironclaw_loop_contracts::LoopCheckpointKind>, TurnError> {
         self.inner
             .latest_checkpoint_kind(scope, turn_id, run_id)
             .await

@@ -16,10 +16,12 @@ import {
   listThreads as apiListThreads,
 } from "../../../lib/api";
 
+// Fetch the largest supported card page. Lifecycle totals are independent
+// authoritative fields in the list response.
+const PROJECTS_OVERVIEW_LIMIT = 500;
+
 // Map a wire `RebornProjectInfo` to the shape the Projects page components
-// expect. Mission/spend/gate metrics default to 0 in the components (`|| 0`),
-// so they render cleanly before those endpoints exist. `goals` is read from the
-// extensible `metadata` bag.
+// expect. `goals` is read from the extensible `metadata` bag.
 function toPageProject(project) {
   if (!project) return null;
   // The server constrains `metadata` to a JSON object or null
@@ -43,7 +45,6 @@ function toPageProject(project) {
     metadata,
     created_at: project.created_at,
     updated_at: project.updated_at,
-    health: project.state === "archived" ? "muted" : "green",
   };
 }
 
@@ -59,9 +60,16 @@ function toPageThread(thread) {
 }
 
 export async function fetchProjectsOverview() {
-  const response = await apiListProjects({ limit: 200 });
+  const response = await apiListProjects({ limit: PROJECTS_OVERVIEW_LIMIT });
   const projects = (response?.projects || []).map(toPageProject);
-  return { attention: [], projects };
+  return {
+    projects,
+    lifecycleCounts: {
+      total: response?.total_projects ?? 0,
+      active: response?.active_projects ?? 0,
+      archived: response?.archived_projects ?? 0,
+    },
+  };
 }
 
 export async function fetchProjectDetail(projectId) {

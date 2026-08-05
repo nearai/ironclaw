@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BlockedReason, CapabilityActivityId, ResolvedRunProfile, SanitizedFailure, TurnCheckpointId,
-    TurnLeaseToken, TurnRunState, TurnRunnerId, run_profile::LoopCheckpointStateRef,
+    BlockedReason, CapabilityActivityId, SanitizedFailure, TurnCheckpointId, TurnLeaseToken,
+    TurnRunState, TurnRunnerId,
 };
+use ironclaw_loop_contracts::{LoopCheckpointStateRef, ResolvedRunProfile};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimedTurnRun {

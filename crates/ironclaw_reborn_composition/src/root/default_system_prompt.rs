@@ -6,44 +6,21 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_loop_contracts::{LoopRunContext, PromptMode};
+// The prompt *content* is owned by the loop tier — `ironclaw_loop_host`, beside
+// its other `prompts/*.md` assets and beside the `HostIdentityContextSource`
+// this module implements (PROPOSAL §6.10.1). What stays here is assembly and
+// the boot-time seeding of the user-editable `SYSTEM.md`, which is `std::fs`
+// work on a real host path and belongs to the composition root.
 use ironclaw_loop_host::{
-    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
-    HostIdentityMessageContent, IdentityApplicability, IdentityFileName, identity_message_ref,
+    BENCHMARKING_MODE_PROTOCOL_PROMPT, DEFAULT_SYSTEM_PROMPT, HostIdentityContextBuildError,
+    HostIdentityContextCandidate, HostIdentityContextSource, HostIdentityMessageContent,
+    IdentityApplicability, IdentityFileName, SELF_KNOWLEDGE_PROTOCOL_PROMPT,
+    TOOL_DISCLOSURE_PROTOCOL_PROMPT, identity_message_ref,
 };
-use ironclaw_turns::{
-    LoopMessageRef,
-    run_profile::{LoopRunContext, PromptMode},
-};
+use ironclaw_turns::LoopMessageRef;
 
 const DEFAULT_SYSTEM_PROMPT_NAME: &str = "SYSTEM.md";
-const DEFAULT_SYSTEM_PROMPT_EMBEDDED: &str = include_str!("../../assets/prompts/default-system.md");
-/// Progressive tool-disclosure protocol, appended to the system prompt only when
-/// disclosure is active (bridged mode). A weak model will not adopt the
-/// search/describe/call protocol from the `tool_search` tool description alone —
-/// it needs an explicit, imperative system-prompt instruction telling it that its
-/// visible tools are a subset and to search before concluding a capability is
-/// missing. This text references the bridge tools, so it must NOT appear when
-/// disclosure is off (no bridges exist on that surface).
-const TOOL_DISCLOSURE_PROTOCOL_EMBEDDED: &str =
-    include_str!("../../assets/prompts/tool-disclosure-protocol.md");
-/// Docs-grounding self-knowledge protocol, appended to the system prompt
-/// unconditionally. This is ground knowledge about the running system, not a
-/// user preference: without it the model answers questions about IronClaw's own
-/// capabilities from training data instead of the published docs. Seeding it
-/// into the user-editable file would only reach fresh installs, so it is
-/// appended in memory on every resolve — the same mechanism the tool-disclosure
-/// protocol uses.
-const SELF_KNOWLEDGE_PROTOCOL_EMBEDDED: &str =
-    include_str!("../../assets/prompts/self-knowledge.md");
-/// Appended only when benchmarking mode is active (see
-/// `DefaultSystemPromptIdentitySource::benchmarking_mode_active`). Tells the
-/// model there is no human to ask, overriding the "ask the user...a product
-/// decision" escape valve in the base prompt's Tool Continuation section —
-/// that escape valve is correct for real product usage but causes an agent
-/// running unattended dataset evaluation to stall a turn on a clarifying
-/// question no one will ever answer.
-const BENCHMARKING_MODE_PROTOCOL_EMBEDDED: &str =
-    include_str!("../../assets/prompts/benchmarking-mode.md");
 const MAX_DEFAULT_SYSTEM_PROMPT_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -102,12 +79,12 @@ impl DefaultSystemPromptIdentitySource {
         // sections are system invariants independent of user edits to SYSTEM.md
         // — and so existing installs get them, not just freshly seeded ones.
         let mut content = read_default_system_prompt(&self.storage_root, &self.prompt_path)?;
-        append_section(&mut content, SELF_KNOWLEDGE_PROTOCOL_EMBEDDED);
+        append_section(&mut content, SELF_KNOWLEDGE_PROTOCOL_PROMPT);
         if self.disclosure_protocol_active {
-            append_section(&mut content, TOOL_DISCLOSURE_PROTOCOL_EMBEDDED);
+            append_section(&mut content, TOOL_DISCLOSURE_PROTOCOL_PROMPT);
         }
         if self.benchmarking_mode_active {
-            append_section(&mut content, BENCHMARKING_MODE_PROTOCOL_EMBEDDED);
+            append_section(&mut content, BENCHMARKING_MODE_PROTOCOL_PROMPT);
         }
         Ok(content)
     }
@@ -152,7 +129,7 @@ pub(crate) fn seed_default_system_prompt(
         .open(path)
     {
         Ok(mut file) => file
-            .write_all(DEFAULT_SYSTEM_PROMPT_EMBEDDED.as_bytes())
+            .write_all(DEFAULT_SYSTEM_PROMPT.as_bytes())
             .map_err(|source| DefaultSystemPromptError::Io {
                 path: path.to_path_buf(),
                 source,
@@ -342,10 +319,10 @@ impl HostIdentityContextSource for DefaultSystemPromptIdentitySource {
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::ids::{TenantId, ThreadId};
-    use ironclaw_turns::{
-        RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
-        run_profile::{InMemoryRunProfileResolver, LoopRunContext},
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest, RunProfileResolver,
     };
+    use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
     use super::*;
 

@@ -2,13 +2,29 @@ name: IronClaw Stress
 
 on:
   pull_request:
+    # Each governed crate is listed twice on purpose: at its flat path and one
+    # family directory down (crates/<family>/ironclaw_*, PROPOSAL §5). A
+    # `paths:` filter that matches nothing does not fail — the workflow simply
+    # stops triggering, which is the WS10 silent failure mode (#6963). GitHub's
+    # `*` does not cross `/` and `**` cannot express "here or one level down",
+    # so the two forms are written out. This stays an enumerated scope rather
+    # than `crates/**` because the PR lane runs a 20-minute libsql suite;
+    # scripts/ci/ws12_workflow_contracts.py pins every name here against the
+    # real crate inventory and asserts a glob matches each crate's ACTUAL
+    # directory, so a rename or a deeper move fails loudly in Code Style
+    # instead of silently unhooking this workflow.
     paths:
       - "tools/ironclaw_stress/**"
       - "crates/ironclaw_filesystem/**"
+      - "crates/*/ironclaw_filesystem/**"
       - "crates/ironclaw_threads/**"
+      - "crates/*/ironclaw_threads/**"
       - "crates/ironclaw_turns/**"
+      - "crates/*/ironclaw_turns/**"
       - "crates/ironclaw_resources/**"
+      - "crates/*/ironclaw_resources/**"
       - "crates/ironclaw_host_api/**"
+      - "crates/*/ironclaw_host_api/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/ironclaw-stress.yml"
@@ -248,7 +264,9 @@ jobs:
 
       - name: Install WebUI frontend dependencies
         run: |
-          cd crates/ironclaw_webui/frontend
+          set -euo pipefail
+          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
+          cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2

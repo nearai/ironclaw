@@ -5,6 +5,7 @@ import {
   areaDisplayName,
   expandWorkspaceSelection,
   formatWorkspaceFileSize,
+  routeForWorkspacePath,
   sortEntries,
 } from "./workspace-presenters";
 
@@ -50,6 +51,17 @@ test("workspace deep links expand every parent without collapsing other branches
     "workspace/projects/ironclaw/notes",
   ]);
   assert.deepEqual([...expanded], ["memory", "workspace/other"]);
+});
+
+test("workspace routes retain an optional source thread scope", () => {
+  assert.equal(
+    routeForWorkspacePath("workspace/reports/report final.md", "thread-project-beta"),
+    "/workspace/thread/thread-project-beta/workspace/reports/report%20final.md",
+  );
+  assert.equal(
+    routeForWorkspacePath("workspace/reports/report.md"),
+    "/workspace/workspace/reports/report.md",
+  );
 });
 
 test("workspace selection expansion reuses state when all parents are already open", () => {

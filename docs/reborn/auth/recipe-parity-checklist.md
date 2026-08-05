@@ -17,14 +17,14 @@ provenance — they are NOT live pointers on this branch. The structural map:
    `crates/ironclaw_auth/src/engine/`
    (`AuthEngine`, `scopes_for_exchange`, `MissingScopeBehavior`). On the
    rollup it is the recipe-driven `AuthEngine` in **`crates/ironclaw_auth/src/engine/`**
-   (`exchange.rs` + `mod.rs`), executing `ironclaw_host_api::recipe::OAuth2CodeRecipe` data.
+   (`exchange.rs` + `mod.rs`), executing `ironclaw_extension_contracts::recipe::OAuth2CodeRecipe` data.
    Scope extraction is `extract_token_response` and the exchange-scope policy enum is
    `MissingScopeBehavior::{Reject, FallbackToRequested}` (not `ExchangeScopePolicy`).
    "Recipe-only" still holds: a vendor difference is recipe data, never engine
    `if vendor == …`.
 2. **The OAuth "recipe" is Rust/manifest data, not `[auth.*.token_response]` TOML on
    main** — but on this rollup the first-party recipes ARE bundled TOML under
-   `crates/ironclaw_first_party_extensions/assets/<pkg>/manifest.toml` (`[auth.<vendor>]`
+   `crates/extensions/packages/<pkg>/manifest.toml` (`[auth.<vendor>]`
    with `[token_response]` / `[token_response.scope]`), resolved into `OAuth2CodeRecipe`.
    The engine suite (`crates/ironclaw_auth/tests/auth_engine_contract.rs`) runs against
    those real bundled manifests.

@@ -4,7 +4,9 @@
 //! `ironclaw_mcp` adapts manifest-declared MCP tools into IronClaw
 //! capabilities. It does not grant MCP servers ambient filesystem, secret, or
 //! network authority; the host-selected client is the only integration point and
-//! resource accounting still happens through the host governor.
+//! resource accounting still happens host-side, through the narrow
+//! [`RuntimeResourceBudget`] port — this lane holds no budget authority of its
+//! own and can only reserve, reconcile, and release.
 
 use std::{
     collections::HashMap,
@@ -17,12 +19,16 @@ use std::{
 
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
-use ironclaw_extensions::{
-    ExtensionPackage, ExtensionRuntime, HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations,
+use ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge;
+use ironclaw_extension_contracts::hosted_mcp::{
+    HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations,
 };
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_host_api::{
     action::{NetworkMethod, NetworkPolicy},
-    capability::{RuntimeCredentialRequirement, RuntimeCredentialRequirementSource},
+    capability::{
+        CapabilityDescriptor, RuntimeCredentialRequirement, RuntimeCredentialRequirementSource,
+    },
     decision::RuntimeCredentialAuthRequirement,
     http::{
         CapabilityHostHttpRequest, RuntimeCredentialInjection, RuntimeCredentialSource,
@@ -30,16 +36,30 @@ use ironclaw_host_api::{
     },
     ids::{CapabilityId, ExtensionId, ResourceReservationId, SecretHandle},
     resource::{
-        CapabilityHostResult, ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
+        CapabilityHostResult, ResourceEstimate, ResourceReceipt, ResourceReservation,
+        ResourceScope, ResourceUsage, RuntimeResourceBudget, RuntimeResourceError,
     },
     runtime::RuntimeKind,
 };
-use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
 use thiserror::Error;
 
 const STREAMABLE_HTTP_MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MCP_PROTOCOL_VERSION_HEADER: &str = "MCP-Protocol-Version";
+
+/// Maximum number of tools accepted from a hosted MCP `tools/list` discovery
+/// pass, across all pages. Shared by the discovery loop's running-total check
+/// and [`parse_tools_list_result`]'s per-page cap so the two enforcement
+/// points cannot drift apart.
+const MAX_DISCOVERED_MCP_TOOLS: usize = 1024;
+
+/// Maximum number of `tools/list` pagination pages followed during a single
+/// discovery pass.
+const MAX_MCP_TOOLS_LIST_PAGES: usize = 50;
+
+/// Maximum aggregate serialized bytes accepted across all `tools/list` pages
+/// during a single discovery pass.
+const MAX_MCP_TOOLS_CATALOG_BYTES: usize = 16 * 1024 * 1024;
 
 /// Host-owned MCP adapter limits.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +92,32 @@ pub struct McpInvocation {
 /// Full resource-governed MCP execution request.
 #[derive(Debug)]
 pub struct McpExecutionRequest<'a> {
-    pub package: &'a ExtensionPackage,
+    /// The extension whose manifest declares this lane.
+    ///
+    /// The lane deliberately does **not** receive the `ExtensionPackage`: it
+    /// read only the id, the capability descriptors, and the runtime stanza,
+    /// and taking the package forced a `runtimes -> loops` dependency on the
+    /// registry crate (the W7 `ironclaw_mcp -> ironclaw_extensions` exception).
+    /// The caller, which owns the package, projects those three.
+    ///
+    /// **Caller obligation (the cost of that carve-out).** `extension`,
+    /// `capabilities`, and `runtime` are three independent borrows, so the type
+    /// no longer *structurally* guarantees they came from one package the way
+    /// `&ExtensionPackage` did. `execute_extension_json` re-checks the
+    /// descriptor half (`descriptor.provider == extension`), but nothing in an
+    /// `&ExtensionRuntime` identifies its owning extension, so the runtime half
+    /// cannot be re-derived here — a caller that paired extension A's
+    /// descriptors with extension B's runtime stanza would authenticate as A
+    /// and dial B. **Always project all three from the same `ExtensionPackage`
+    /// in one expression.** The single production caller
+    /// (`ironclaw_host_runtime::services::runtime_adapters`) does exactly that.
+    /// Restoring the compile-time binding needs a sealed projection minted by
+    /// the package owner — it cannot be a check inside this lane, and it must
+    /// not be a re-addition of the registry edge; tracked with the WS3 lane
+    /// work.
+    pub extension: &'a ExtensionId,
+    pub capabilities: &'a [CapabilityDescriptor],
+    pub runtime: &'a ExtensionRuntime,
     pub capability_id: &'a CapabilityId,
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
@@ -178,6 +223,11 @@ pub enum McpClientError {
         reason: String,
     },
     AuthRequired,
+    /// A hosted server returned 401/403. The challenge is header-derived and
+    /// deliberately redacted; it contains no remote response body or tokens.
+    AuthChallenge {
+        challenge: McpAuthChallenge,
+    },
 }
 
 impl McpClientError {
@@ -196,7 +246,7 @@ impl McpClientError {
     pub fn stable_reason(&self) -> &str {
         match self {
             Self::Client { reason } | Self::InvalidToolCatalog { reason } => reason,
-            Self::AuthRequired => "auth_required",
+            Self::AuthRequired | Self::AuthChallenge { .. } => "auth_required",
         }
     }
 }
@@ -457,6 +507,29 @@ where
         self.state.next_id.fetch_add(1, Ordering::SeqCst)
     }
 
+    /// Perform only the MCP initialization handshake.
+    ///
+    /// Registration uses this to distinguish credential-free access from an
+    /// authentication challenge without fetching or admitting the tool
+    /// catalog. The temporary session is always discarded before returning.
+    pub async fn probe_auth(
+        &self,
+        request: McpClientRequest,
+    ) -> Result<ResourceUsage, McpClientError> {
+        if !requires_host_http_egress(&request.transport) {
+            return Err(McpClientError::client(request_denied(
+                McpRequestDeniedCause::UnsupportedTransport,
+            )));
+        }
+        let url = request.url.as_deref().ok_or_else(|| {
+            McpClientError::client(request_denied(McpRequestDeniedCause::MissingUrl))
+        })?;
+        let session_key = McpHostHttpSessionKey::new(&request.scope, &request.provider, url);
+        let _session_cleanup =
+            McpHostHttpSessionCleanup::new(Arc::clone(&self.state), session_key.clone());
+        self.initialize_session(&request, &session_key).await
+    }
+
     async fn send_json_rpc(
         &self,
         request: &McpClientRequest,
@@ -555,7 +628,19 @@ where
 
         if !(200..300).contains(&response.status) {
             if is_mcp_auth_response_status(response.status) {
-                return Err(McpClientError::AuthRequired);
+                // Bare `AuthRequired` when the response gives us nothing to
+                // act on; `AuthChallenge` only when it actually carries
+                // WWW-Authenticate/resource-metadata to resolve.
+                let challenge = mcp_auth_challenge_from_response(&response);
+                return Err(
+                    if challenge.www_authenticate_metadata.is_empty()
+                        && challenge.protected_resource_metadata.is_empty()
+                    {
+                        McpClientError::AuthRequired
+                    } else {
+                        McpClientError::AuthChallenge { challenge }
+                    },
+                );
             }
             return Err(McpClientError::client(response_error(
                 McpResponseErrorCause::HttpStatus(response.status),
@@ -774,36 +859,101 @@ where
         let _session_cleanup =
             McpHostHttpSessionCleanup::new(Arc::clone(&self.state), session_key.clone());
 
-        let tools_list_id = self.next_request_id();
-        let tools_list_plan = self.plan_json_rpc(
+        if max_tools == 0 {
+            return Err(McpClientError::invalid_tool_catalog(invalid_tool_list(
+                McpInvalidToolListCause::TooManyTools,
+            )));
+        }
+
+        // The first page's plan is built before `initialize_session` runs (not
+        // inside the loop below) so the planner observes `tools/list` before
+        // `initialize`/`notifications/initialized`, matching the original
+        // single-page discovery ordering that callers and tests depend on.
+        // Only pages after the first are planned lazily inside the loop, once
+        // a `nextCursor` is known.
+        let first_tools_list_id = self.next_request_id();
+        let first_tools_list_plan = self.plan_json_rpc(
             &request,
-            Some(tools_list_id),
+            Some(first_tools_list_id),
             McpJsonRpcMethod::ToolsList,
             None,
         )?;
-        validate_staged_credential_injections(&tools_list_plan.plan.credential_injections)
+        validate_staged_credential_injections(&first_tools_list_plan.plan.credential_injections)
             .map_err(McpClientError::client)?;
 
         let mut usage = self.initialize_session(&request, &session_key).await?;
-        let tools = self
-            .send_planned_json_rpc(&request, &session_key, tools_list_plan)
-            .await?;
-        accumulate_usage(&mut usage, tools.usage);
-        self.update_session_id(&session_key, tools.session_id.clone())?;
-        if let Some(error) = tools.response.error {
-            return Err(McpClientError::client(response_error(
-                McpResponseErrorCause::JsonRpcError {
-                    code: error.code,
-                    message: error.message,
-                },
-            )));
+        let mut discovered = Vec::new();
+        let mut accepted_catalog_bytes = 0usize;
+        let mut cursor = None;
+        let mut pending_plan = Some(first_tools_list_plan);
+        for page in 1..=MAX_MCP_TOOLS_LIST_PAGES {
+            let tools_list_plan = match pending_plan.take() {
+                Some(plan) => plan,
+                None => {
+                    let tools_list_id = self.next_request_id();
+                    let plan = self.plan_json_rpc(
+                        &request,
+                        Some(tools_list_id),
+                        McpJsonRpcMethod::ToolsList,
+                        cursor
+                            .as_ref()
+                            .map(|cursor| serde_json::json!({ "cursor": cursor })),
+                    )?;
+                    validate_staged_credential_injections(&plan.plan.credential_injections)
+                        .map_err(McpClientError::client)?;
+                    plan
+                }
+            };
+
+            let tools = self
+                .send_planned_json_rpc(&request, &session_key, tools_list_plan)
+                .await?;
+            accumulate_usage(&mut usage, tools.usage);
+            self.update_session_id(&session_key, tools.session_id.clone())?;
+            if let Some(error) = tools.response.error {
+                return Err(McpClientError::client(response_error(
+                    McpResponseErrorCause::JsonRpcError {
+                        code: error.code,
+                        message: error.message,
+                    },
+                )));
+            }
+            let result = tools.response.result.ok_or_else(|| {
+                McpClientError::client(response_error(McpResponseErrorCause::MissingResult))
+            })?;
+            let page_bytes = result
+                .get("tools")
+                .and_then(Value::as_array)
+                .and_then(|tools| serde_json::to_vec(tools).ok())
+                .map_or(usize::MAX, |bytes| bytes.len());
+            let (page_tools, next_cursor) =
+                parse_tools_list_page(&result).map_err(McpClientError::invalid_tool_catalog)?;
+            accepted_catalog_bytes = accepted_catalog_bytes.saturating_add(page_bytes);
+            if discovered.len().saturating_add(page_tools.len()) > MAX_DISCOVERED_MCP_TOOLS
+                || discovered.len().saturating_add(page_tools.len()) > max_tools as usize
+            {
+                return Err(McpClientError::invalid_tool_catalog(invalid_tool_list(
+                    McpInvalidToolListCause::TooManyTools,
+                )));
+            }
+            if accepted_catalog_bytes > MAX_MCP_TOOLS_CATALOG_BYTES {
+                return Err(McpClientError::invalid_tool_catalog(invalid_tool_list(
+                    McpInvalidToolListCause::CatalogTooLarge,
+                )));
+            }
+            discovered.extend(page_tools);
+            match next_cursor {
+                Some(_next_cursor) if page == MAX_MCP_TOOLS_LIST_PAGES => {
+                    return Err(McpClientError::invalid_tool_catalog(invalid_tool_list(
+                        McpInvalidToolListCause::TooManyPages,
+                    )));
+                }
+                Some(next_cursor) => cursor = Some(next_cursor),
+                None => break,
+            }
         }
-        let result = tools.response.result.ok_or_else(|| {
-            McpClientError::client(response_error(McpResponseErrorCause::MissingResult))
-        })?;
         Ok(McpToolDiscoveryOutput {
-            tools: parse_tools_list_result(&result, max_tools)
-                .map_err(McpClientError::invalid_tool_catalog)?,
+            tools: discovered,
             usage,
         })
     }
@@ -905,6 +1055,31 @@ fn mcp_client_http_error(error: McpHostHttpError) -> McpClientError {
 
 fn is_mcp_auth_response_status(status: u16) -> bool {
     matches!(status, 401 | 403)
+}
+
+fn mcp_auth_challenge_from_response(response: &McpHostHttpResponse) -> McpAuthChallenge {
+    let mut www_authenticate_metadata = Vec::new();
+    let mut protected_resource_metadata = Vec::new();
+    for (name, value) in &response.headers {
+        if name.eq_ignore_ascii_case("www-authenticate") {
+            www_authenticate_metadata.extend(
+                ironclaw_extension_contracts::hosted_mcp::extract_mcp_auth_metadata_locations(
+                    value,
+                ),
+            );
+        } else if name.eq_ignore_ascii_case("protected-resource-metadata") {
+            protected_resource_metadata.extend(
+                ironclaw_extension_contracts::hosted_mcp::extract_mcp_auth_metadata_locations(
+                    value,
+                ),
+            );
+        }
+    }
+    McpAuthChallenge {
+        status: response.status,
+        www_authenticate_metadata,
+        protected_resource_metadata,
+    }
 }
 
 fn effective_mcp_response_body_limit(host_limit: Option<u64>, client_limit: u64) -> Option<u64> {
@@ -1079,7 +1254,6 @@ fn parse_tools_list_result(
     value: &Value,
     manifest_max_tools: u32,
 ) -> Result<Vec<HostedMcpDiscoveredTool>, String> {
-    const HOST_MAX_DISCOVERED_TOOLS: usize = 1024;
     const MAX_TOOL_NAME_BYTES: usize = 128;
     const MAX_TOOL_DESCRIPTION_BYTES: usize = 2048;
     const MAX_SCHEMA_DEPTH: u8 = 32;
@@ -1091,8 +1265,8 @@ fn parse_tools_list_result(
         .and_then(Value::as_array)
         .ok_or_else(|| invalid_tool_list(McpInvalidToolListCause::MissingToolsArray))?;
     let manifest_max_tools = usize::try_from(manifest_max_tools)
-        .unwrap_or(HOST_MAX_DISCOVERED_TOOLS)
-        .min(HOST_MAX_DISCOVERED_TOOLS);
+        .unwrap_or(MAX_DISCOVERED_MCP_TOOLS)
+        .min(MAX_DISCOVERED_MCP_TOOLS);
     if manifest_max_tools == 0 || tools.len() > manifest_max_tools {
         return Err(invalid_tool_list(McpInvalidToolListCause::TooManyTools));
     }
@@ -1144,6 +1318,24 @@ fn parse_tools_list_result(
         return Err(invalid_tool_list(cause));
     }
     Ok(published)
+}
+
+fn parse_tools_list_page(
+    value: &Value,
+) -> Result<(Vec<HostedMcpDiscoveredTool>, Option<String>), String> {
+    let tools = parse_tools_list_result(value, MAX_DISCOVERED_MCP_TOOLS as u32)?;
+    let next_cursor = match value.get("nextCursor") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(cursor))
+            if !cursor.is_empty()
+                && cursor.len() <= 4_096
+                && !cursor.chars().any(|character| character.is_control()) =>
+        {
+            Some(cursor.clone())
+        }
+        Some(_) => return Err(invalid_tool_list(McpInvalidToolListCause::InvalidCursor)),
+    };
+    Ok((tools, next_cursor))
 }
 
 /// Result of classifying one advertised MCP tool during discovery.
@@ -1262,15 +1454,17 @@ fn validate_mcp_schema_value(
                 nodes,
             )
         }),
-        Value::Object(values) => values.values().all(|value| {
-            validate_mcp_schema_value(
-                value,
-                depth + 1,
-                max_depth,
-                max_nodes,
-                max_string_bytes,
-                nodes,
-            )
+        Value::Object(values) => values.iter().all(|(key, value)| {
+            key.len() <= max_string_bytes
+                && !key.chars().any(is_unsupported_description_char)
+                && validate_mcp_schema_value(
+                    value,
+                    depth + 1,
+                    max_depth,
+                    max_nodes,
+                    max_string_bytes,
+                    nodes,
+                )
         }),
         _ => true,
     }
@@ -1317,7 +1511,17 @@ fn parse_tool_annotations(
     let object = value
         .as_object()
         .ok_or(McpInvalidToolListCause::InvalidAnnotations)?;
+    let title = object
+        .get("title")
+        .map(|value| {
+            value
+                .as_str()
+                .and_then(|title| bound_mcp_tool_description(title, 2_048))
+                .ok_or(McpInvalidToolListCause::InvalidAnnotations)
+        })
+        .transpose()?;
     Ok(HostedMcpDiscoveredToolAnnotations {
+        title,
         destructive_hint: object
             .get("destructiveHint")
             .and_then(Value::as_bool)
@@ -1330,6 +1534,8 @@ fn parse_tool_annotations(
             .get("readOnlyHint")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        idempotent_hint: object.get("idempotentHint").and_then(Value::as_bool),
+        open_world_hint: object.get("openWorldHint").and_then(Value::as_bool),
     })
 }
 
@@ -1489,6 +1695,9 @@ enum McpInvalidToolListCause {
     MissingInputSchema,
     UnsafeInputSchema,
     InvalidAnnotations,
+    InvalidCursor,
+    TooManyPages,
+    CatalogTooLarge,
 }
 
 impl McpInvalidToolListCause {
@@ -1501,6 +1710,9 @@ impl McpInvalidToolListCause {
             Self::MissingInputSchema => "missing_input_schema",
             Self::UnsafeInputSchema => "unsafe_input_schema",
             Self::InvalidAnnotations => "invalid_annotations",
+            Self::InvalidCursor => "invalid_cursor",
+            Self::TooManyPages => "too_many_pages",
+            Self::CatalogTooLarge => "catalog_too_large",
         }
     }
 }
@@ -1551,7 +1763,7 @@ fn invalid_tool_list(cause: McpInvalidToolListCause) -> String {
 #[derive(Debug, Error)]
 pub enum McpError {
     #[error("resource governor error: {0}")]
-    Resource(Box<ResourceError>),
+    Resource(RuntimeResourceError),
     #[error("MCP client error: {reason}")]
     Client { reason: String },
     #[error("MCP server advertised an invalid tool catalog: {reason}")]
@@ -1582,9 +1794,9 @@ pub enum McpError {
     OutputLimitExceeded { limit: u64, actual: u64 },
 }
 
-impl From<ResourceError> for McpError {
-    fn from(error: ResourceError) -> Self {
-        Self::Resource(Box::new(error))
+impl From<RuntimeResourceError> for McpError {
+    fn from(error: RuntimeResourceError) -> Self {
+        Self::Resource(error)
     }
 }
 
@@ -1607,13 +1819,13 @@ where
         &self.config
     }
 
-    pub async fn execute_extension_json<G>(
+    pub async fn execute_extension_json<Budget>(
         &self,
-        governor: &G,
+        budget: &Budget,
         request: McpExecutionRequest<'_>,
     ) -> Result<McpExecutionResult, McpError>
     where
-        G: ResourceGovernor + ?Sized,
+        Budget: RuntimeResourceBudget + ?Sized,
     {
         let client_request = self.prepare_client_request(&request)?;
         let auth_context = client_request.auth_context;
@@ -1623,7 +1835,7 @@ where
             return Err(McpError::HostHttpEgressRequired { transport });
         }
         let reservation = reserve_or_use_existing(
-            governor,
+            budget,
             request.scope.clone(),
             request.estimate.clone(),
             request.resource_reservation.clone(),
@@ -1633,7 +1845,7 @@ where
             Ok(output) => output,
             Err(error) => {
                 return Err(release_after_failure(
-                    governor,
+                    budget,
                     reservation.id,
                     mcp_error_from_client_error(error, auth_context),
                 ));
@@ -1643,7 +1855,7 @@ where
         let serialized_len = serde_json::to_vec(&output.output)
             .map_err(|error| {
                 release_after_failure(
-                    governor,
+                    budget,
                     reservation.id,
                     McpError::InvalidInvocation {
                         reason: error.to_string(),
@@ -1657,7 +1869,7 @@ where
             .max(serialized_len);
         if output_bytes > self.config.max_output_bytes {
             return Err(release_after_failure(
-                governor,
+                budget,
                 reservation.id,
                 McpError::OutputLimitExceeded {
                     limit: self.config.max_output_bytes,
@@ -1671,7 +1883,7 @@ where
         if transport == "stdio" {
             usage.process_count = usage.process_count.max(1);
         }
-        let receipt = governor.reconcile(reservation.id, usage.clone())?;
+        let receipt = budget.reconcile(reservation.id, usage.clone())?;
         Ok(McpExecutionResult {
             result: CapabilityHostResult {
                 output: output.output,
@@ -1688,7 +1900,6 @@ where
         request: &McpExecutionRequest<'_>,
     ) -> Result<PreparedMcpClientRequest, McpError> {
         let descriptor = request
-            .package
             .capabilities
             .iter()
             .find(|descriptor| &descriptor.id == request.capability_id)
@@ -1699,20 +1910,20 @@ where
 
         if descriptor.runtime != RuntimeKind::Mcp {
             return Err(McpError::ExtensionRuntimeMismatch {
-                extension: request.package.id.clone(),
+                extension: request.extension.clone(),
                 actual: descriptor.runtime,
             });
         }
-        if descriptor.provider != request.package.id {
+        if descriptor.provider != *request.extension {
             return Err(McpError::DescriptorMismatch {
                 reason: format!(
                     "descriptor {} provider {} does not match package {}",
-                    descriptor.id, descriptor.provider, request.package.id
+                    descriptor.id, descriptor.provider, *request.extension
                 ),
             });
         }
 
-        let (transport, command, args, url) = match &request.package.manifest.runtime {
+        let (transport, command, args, url) = match request.runtime {
             ExtensionRuntime::Mcp {
                 transport,
                 command,
@@ -1721,7 +1932,7 @@ where
             } => (transport, command, args, url),
             other => {
                 return Err(McpError::ExtensionRuntimeMismatch {
-                    extension: request.package.id.clone(),
+                    extension: request.extension.clone(),
                     actual: other.kind(),
                 });
             }
@@ -1745,7 +1956,7 @@ where
 
         Ok(PreparedMcpClientRequest {
             request: McpClientRequest {
-                provider: request.package.id.clone(),
+                provider: request.extension.clone(),
                 capability_id: request.capability_id.clone(),
                 scope: request.scope.clone(),
                 transport: transport.clone(),
@@ -1764,10 +1975,12 @@ fn mcp_error_from_client_error(error: McpClientError, auth_context: McpAuthConte
     match error {
         McpClientError::Client { reason } => McpError::Client { reason },
         McpClientError::InvalidToolCatalog { reason } => McpError::InvalidToolCatalog { reason },
-        McpClientError::AuthRequired => McpError::AuthRequired {
-            required_secrets: auth_context.required_secrets,
-            credential_requirements: auth_context.credential_requirements,
-        },
+        McpClientError::AuthRequired | McpClientError::AuthChallenge { .. } => {
+            McpError::AuthRequired {
+                required_secrets: auth_context.required_secrets,
+                credential_requirements: auth_context.credential_requirements,
+            }
+        }
     }
 }
 
@@ -1802,7 +2015,7 @@ fn mcp_auth_context(
 pub trait McpExecutor: Send + Sync {
     async fn execute_extension_json(
         &self,
-        governor: &dyn ResourceGovernor,
+        budget: &dyn RuntimeResourceBudget,
         request: McpExecutionRequest<'_>,
     ) -> Result<McpExecutionResult, McpError>;
 }
@@ -1814,10 +2027,10 @@ where
 {
     async fn execute_extension_json(
         &self,
-        governor: &dyn ResourceGovernor,
+        budget: &dyn RuntimeResourceBudget,
         request: McpExecutionRequest<'_>,
     ) -> Result<McpExecutionResult, McpError> {
-        McpRuntime::execute_extension_json(self, governor, request).await
+        McpRuntime::execute_extension_json(self, budget, request).await
     }
 }
 
@@ -1825,35 +2038,35 @@ fn requires_host_http_egress(transport: &str) -> bool {
     matches!(transport, "http" | "sse")
 }
 
-fn reserve_or_use_existing<G>(
-    governor: &G,
+fn reserve_or_use_existing<Budget>(
+    budget: &Budget,
     scope: ResourceScope,
     estimate: ResourceEstimate,
     reservation: Option<ResourceReservation>,
 ) -> Result<ResourceReservation, McpError>
 where
-    G: ResourceGovernor + ?Sized,
+    Budget: RuntimeResourceBudget + ?Sized,
 {
     if let Some(reservation) = reservation {
         if reservation.scope != scope || reservation.estimate != estimate {
-            return Err(McpError::Resource(Box::new(
-                ResourceError::ReservationMismatch { id: reservation.id },
-            )));
+            return Err(McpError::Resource(
+                RuntimeResourceError::reservation_mismatch(reservation.id),
+            ));
         }
         return Ok(reservation);
     }
-    governor.reserve(scope, estimate).map_err(McpError::from)
+    budget.reserve(scope, estimate).map_err(McpError::from)
 }
 
-fn release_after_failure<G>(
-    governor: &G,
+fn release_after_failure<Budget>(
+    budget: &Budget,
     reservation_id: ResourceReservationId,
     original: McpError,
 ) -> McpError
 where
-    G: ResourceGovernor + ?Sized,
+    Budget: RuntimeResourceBudget + ?Sized,
 {
-    let _ = governor.release(reservation_id);
+    let _ = budget.release(reservation_id);
     original
 }
 
@@ -2386,6 +2599,77 @@ data: }
             message: error.message,
         });
         assert_eq!(reason, "mcp_jsonrpc_error");
+    }
+
+    #[test]
+    fn auth_challenge_redacts_response_body_and_preserves_only_metadata_locations() {
+        let response = McpHostHttpResponse {
+            status: 401,
+            headers: vec![
+                (
+                    "WWW-Authenticate".to_string(),
+                    "Bearer resource_metadata=\"https://issuer.example.test/.well-known/oauth-protected-resource?access_token=secret\"".to_string(),
+                ),
+                (
+                    "protected-resource-metadata".to_string(),
+                    "https://resource.example.test/.well-known/oauth-protected-resource#secret"
+                        .to_string(),
+                ),
+            ],
+            body: b"token=super-secret remote diagnostic".to_vec(),
+            saved_body: None,
+            request_bytes: 0,
+            response_bytes: 42,
+            redaction_applied: false,
+        };
+
+        let challenge = mcp_auth_challenge_from_response(&response);
+        assert_eq!(challenge.status, 401);
+        assert_eq!(
+            challenge.www_authenticate_metadata[0].as_str(),
+            "https://issuer.example.test/.well-known/oauth-protected-resource"
+        );
+        assert_eq!(
+            challenge.protected_resource_metadata[0].as_str(),
+            "https://resource.example.test/.well-known/oauth-protected-resource"
+        );
+        let rendered = format!("{challenge:?}");
+        assert!(!rendered.contains("super-secret"));
+        assert!(!rendered.contains("access_token"));
+    }
+
+    #[test]
+    fn tools_list_page_preserves_accepted_catalog_fields_exactly() {
+        let schema = json!({"type": "object", "properties": {"q": {"type": "string"}}});
+        let value = json!({
+            "tools": [{
+                "name": "search.docs",
+                "description": "Find docs\nwithout rewriting provider text.",
+                "inputSchema": schema,
+                "annotations": {"readOnlyHint": true}
+            }],
+            "nextCursor": "second-page"
+        });
+
+        let (tools, cursor) = parse_tools_list_page(&value).expect("valid page");
+        assert_eq!(cursor.as_deref(), Some("second-page"));
+        assert_eq!(tools[0].name, "search.docs");
+        assert_eq!(
+            tools[0].description,
+            "Find docs\nwithout rewriting provider text."
+        );
+        assert_eq!(tools[0].input_schema, schema);
+        assert!(tools[0].annotations.read_only_hint);
+    }
+
+    #[test]
+    fn tools_list_page_rejects_non_string_cursor() {
+        let error = parse_tools_list_page(&json!({
+            "tools": [valid_tool("search", json!({"type": "object"}))],
+            "nextCursor": 12
+        }))
+        .expect_err("cursor is protocol data, not a value to normalize");
+        assert_eq!(error, "mcp_invalid_tool_list: invalid_cursor");
     }
 
     #[test]

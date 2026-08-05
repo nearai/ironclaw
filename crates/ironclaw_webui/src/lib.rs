@@ -19,6 +19,11 @@
 //!   reads v1 secrets / settings / DB.
 
 mod auth;
+// Bearer-authed generic channel-pairing routes (`/api/webchat/v2/extensions/
+// {extension_id}/pairing/*`). Moved here from `ironclaw_extension_host` —
+// PROPOSAL §6.8.2 sheds "Axum pairing routes → `webui`" and §6.9.4 has this
+// crate gain them; the pairing service core stays in the extension host.
+mod channel_pairing;
 mod cli_token_login;
 mod oidc;
 mod product_auth;
@@ -43,6 +48,7 @@ mod webui_ws_origin;
 // Route-mount carriers live in `ironclaw_host_ingress`: composition can build
 // mounts and this ingress crate can consume them without a reverse dependency
 // on WebUI.
+pub use channel_pairing::channel_pairing_route_mount;
 pub use ironclaw_host_ingress::{
     ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount, SplitRouteMount,
 };

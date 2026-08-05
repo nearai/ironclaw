@@ -29,6 +29,7 @@ mod config_seed;
 mod doctor;
 mod home;
 mod profile;
+mod retired_sections;
 mod secrets_guard;
 
 pub use boot::RebornBootConfig;
@@ -47,10 +48,9 @@ pub use config_file::{
     GoogleFieldUpdate, GoogleOauthConfigUpdate, GoogleOauthConfigUpdateSession, GoogleSection,
     HarnessSection, IdentitySection, LlmSlotFieldUpdate, LlmSlotSelection, MemoryAdminOverride,
     MemorySection, PolicySection, REBORN_CONFIG_API_VERSION, RebornConfigFile,
-    RebornConfigFileError, RebornConfigFileUpdateError, RunnerSection, SlackChannelRouteSection,
-    SlackSection, StorageBackend, StorageSection, TelegramSection, TriggerPollerConfigSection,
-    begin_default_llm_slot_update, begin_google_oauth_config_update, update_default_llm_slot,
-    update_google_oauth_config, update_slack_enabled,
+    RebornConfigFileError, RebornConfigFileUpdateError, RunnerSection, StorageBackend,
+    StorageSection, TriggerPollerConfigSection, begin_default_llm_slot_update,
+    begin_google_oauth_config_update, update_default_llm_slot, update_google_oauth_config,
 };
 pub use config_seed::{
     RebornConfigSeedError, RebornConfigSeedOutcome, seed_default_config_file_if_missing,
@@ -58,4 +58,5 @@ pub use config_seed::{
 pub use doctor::RebornDoctorReport;
 pub use home::{REBORN_HOME_ENV, RebornConfigError, RebornHome, RebornHomeSource};
 pub use profile::{REBORN_PROFILE_ENV, RebornProfile};
+pub use retired_sections::{RetiredSectionError, RetiredSections, retired_config_key_guidance};
 pub use secrets_guard::{InlineSecretError, reject_inline_secret};

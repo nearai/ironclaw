@@ -5,7 +5,7 @@
 //! subsequent read/write for the run must resolve the SAME owner — the
 //! loop host's thread ports, runner completion-evidence reads, and any
 //! composition-side durable thread append that is keyed by a
-//! [`LoopRunContext`](ironclaw_turns::run_profile::LoopRunContext).
+//! [`LoopRunContext`](ironclaw_loop_contracts::LoopRunContext).
 //!
 //! [`ThreadScopeResolver::resolve`] is the single definition of that
 //! owner-rewrite rule. Both subsystems call it, so the rule cannot drift

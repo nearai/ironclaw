@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_turns::run_profile::AgentLoopDriverHost;
+use ironclaw_loop_contracts::AgentLoopDriverHost;
 
 use crate::planner::AgentLoopPlannerInternal;
 

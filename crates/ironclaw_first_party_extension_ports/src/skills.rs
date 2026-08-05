@@ -302,17 +302,15 @@ mod tests {
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
     };
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest,
+        RunProfileResolver, SkillActivationState, SkillTrustLevel, SkillVisibility,
+    };
     use ironclaw_loop_host::{
         SkillBundleContextSource, SkillBundleSource, build_skill_run_snapshot,
     };
     use ironclaw_skills::SkillTrust;
-    use ironclaw_turns::{
-        AcceptedMessageRef, TurnActor, TurnId, TurnRunId, TurnScope,
-        run_profile::{
-            InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest,
-            RunProfileResolver, SkillActivationState, SkillTrustLevel, SkillVisibility,
-        },
-    };
+    use ironclaw_turns::{AcceptedMessageRef, TurnActor, TurnId, TurnRunId, TurnScope};
 
     fn skill_md(name: &str, description: &str, prompt: &str) -> Vec<u8> {
         format!("---\nname: {name}\ndescription: {description}\n---\n{prompt}\n").into_bytes()

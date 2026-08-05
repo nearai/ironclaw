@@ -225,6 +225,12 @@ mounts = "system_extensions_lifecycle"
 network = "default"
 
 [[grants]]
+capability = "builtin.extension_register_hosted_mcp"
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "network"]
+mounts = "system_extensions_lifecycle"
+network = "dev_wildcard"
+
+[[grants]]
 capability = "builtin.extension_install"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "network"]
 mounts = "system_extensions_lifecycle"
@@ -240,19 +246,19 @@ network = "default"
 capability = "builtin.ironhub_search"
 effects = ["dispatch_capability", "network"]
 mounts = "ambient"
-network = "dev_wildcard"
+network = "ironhub_artifacts"
 
 [[grants]]
 capability = "builtin.ironhub_info"
 effects = ["dispatch_capability", "network"]
 mounts = "ambient"
-network = "dev_wildcard"
+network = "ironhub_artifacts"
 
 [[grants]]
 capability = "builtin.ironhub_install"
 effects = ["dispatch_capability", "network", "read_filesystem", "write_filesystem"]
 mounts = "system_extensions_lifecycle"
-network = "dev_wildcard"
+network = "ironhub_artifacts"
 
 [[grants]]
 capability = "builtin.operator_config_set_auto_approve"

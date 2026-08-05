@@ -20,6 +20,14 @@ use ironclaw_host_api::{
     scope::Principal,
 };
 use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind};
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
+    CapabilitySurfaceVersion, ConcurrencyHint, InMemoryLoopHostMilestoneSink,
+    InstructionSafetyContext, LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken,
+    LoopInputCursorToken, LoopRequest, LoopRequestBatch, LoopRunContext, NoOpBudgetAccountant,
+    NoOpPolicyGuard, ParentLoopOutput, PromptMode, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, resolution,
+};
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     EmptyLoopCapabilityPort, EmptyUserProfileSource, HostIdentityContextBuildError,
@@ -27,7 +35,10 @@ use ironclaw_loop_host::{
     HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse, JsonSpawnSubagentInputCodec,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
-    RunCancellationFactory, RunCancellationHandle,
+    RejectingInputEnqueue, RunCancellationFactory, RunCancellationHandle,
+};
+use ironclaw_loop_host::{
+    ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
 };
 use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
@@ -47,9 +58,6 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_runner::{
     loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
-    model_routes::{
-        ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
-    },
     runtime::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, ProcessRuntimeSystem,
         RebornRuntimeLoopComposition, build_product_live_planned_runtime,
@@ -67,14 +75,6 @@ use ironclaw_turns::ProcessLoopCheckpointStore;
 use ironclaw_turns::{
     AgentTurnRuntimePort, CancelRunRequest, IdempotencyKey, LoopResultRef, SanitizedCancelReason,
     TurnActor, TurnCoordinator, TurnRunId, TurnRunState, TurnRunWake, TurnScope, TurnStatus,
-    run_profile::{
-        AgentLoopHostError, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilitySurfaceVersion, ConcurrencyHint, InMemoryLoopHostMilestoneSink,
-        InstructionSafetyContext, LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken,
-        LoopInputCursorToken, LoopRequest, LoopRequestBatch, LoopRunContext, NoOpBudgetAccountant,
-        NoOpPolicyGuard, ParentLoopOutput, PromptMode, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, resolution,
-    },
 };
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
@@ -422,6 +422,7 @@ impl ProductLiveAgentLoopHarness {
             cancellation_factory: Some(cancellation_factory.clone()),
             skill_context_source: None,
             input_queue: Some(Arc::new(EmptyInputQueue)),
+            input_queue_reconcile: None,
             identity_context_source: Arc::new(EmptyIdentityContextSource),
             user_profile_source: Arc::new(EmptyUserProfileSource),
             memory_context_service: None,
@@ -516,6 +517,7 @@ impl ProductLiveAgentLoopHarness {
             self.binding_service.clone(),
             self.thread_service.clone(),
             Arc::clone(&self.composition.coordinator),
+            Arc::new(RejectingInputEnqueue),
         );
         service.accept_user_message(envelope).await
     }
@@ -871,7 +873,7 @@ impl RecordingDelegatingCapabilityPort {
         };
         let result_ref = LoopResultRef::new(origin.as_str()).map_err(|error| {
             AgentLoopHostError::new(
-                ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation,
+                ironclaw_loop_contracts::AgentLoopHostErrorKind::InvalidInvocation,
                 format!("invalid preserved loop result ref: {error}"),
             )
         })?;
@@ -956,7 +958,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             LoopResultRef::new(self.capability.result_ref.clone())
                 .expect("valid harness result ref"),
             self.capability.safe_summary.clone(),
-            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
             self.capability.terminate_hint,
             0,
             None,
@@ -1225,7 +1227,7 @@ fn dispatch_grants_for_user<const N: usize>(
 
 fn adapter_error(error: impl Display) -> AgentLoopHostError {
     AgentLoopHostError::new(
-        ironclaw_turns::run_profile::AgentLoopHostErrorKind::Internal,
+        ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
         error.to_string(),
     )
 }

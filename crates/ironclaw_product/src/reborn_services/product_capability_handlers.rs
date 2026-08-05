@@ -1,4 +1,5 @@
 use super::*;
+use crate::LifecycleProductAction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProductCommandHandler {
@@ -16,6 +17,7 @@ pub(super) enum ProductCommandHandler {
     ProjectFsRead,
     FsRead,
     AttachmentRead,
+    IronhubDeliverInstall,
     TraceAccountLoginLink,
     TraceHoldAuthorize,
     OperatorConfigSetKey,
@@ -50,6 +52,7 @@ impl ProductCommandHandler {
             PROJECT_FS_READ_COMMAND_ID => Some(Self::ProjectFsRead),
             FS_READ_COMMAND_ID => Some(Self::FsRead),
             ATTACHMENT_READ_COMMAND_ID => Some(Self::AttachmentRead),
+            IRONHUB_DELIVER_INSTALL_COMMAND_ID => Some(Self::IronhubDeliverInstall),
             TRACE_ACCOUNT_LOGIN_LINK_COMMAND_ID => Some(Self::TraceAccountLoginLink),
             TRACE_HOLD_AUTHORIZE_COMMAND_ID => Some(Self::TraceHoldAuthorize),
             OPERATOR_CONFIG_SET_KEY_COMMAND_ID => Some(Self::OperatorConfigSetKey),
@@ -173,6 +176,11 @@ impl ProductCommandHandler {
                     .read_attachment(caller, product_command_input(input)?)
                     .await?,
             ),
+            Self::IronhubDeliverInstall => command_output(
+                services
+                    .ironhub_deliver_install(caller, product_command_input(input)?)
+                    .await?,
+            ),
             Self::TraceAccountLoginLink => {
                 let _: EmptyProductCommandInput = product_command_input(input)?;
                 command_output(services.trace_account_login_link(caller).await?)
@@ -292,6 +300,7 @@ pub(super) enum ProductCapabilityHandler {
     LlmProviderUpsert,
     LlmProviderDelete,
     LlmActiveSet,
+    ExtensionRegisterHostedMcp,
     ExtensionImport,
     ExtensionSetupSubmit,
     ProjectUpdate,
@@ -319,6 +328,7 @@ impl ProductCapabilityHandler {
             LLM_PROVIDER_UPSERT_CAPABILITY_ID => Some(Self::LlmProviderUpsert),
             LLM_PROVIDER_DELETE_CAPABILITY_ID => Some(Self::LlmProviderDelete),
             LLM_ACTIVE_SET_CAPABILITY_ID => Some(Self::LlmActiveSet),
+            EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID => Some(Self::ExtensionRegisterHostedMcp),
             EXTENSION_IMPORT_CAPABILITY_ID => Some(Self::ExtensionImport),
             EXTENSION_SETUP_SUBMIT_CAPABILITY_ID => Some(Self::ExtensionSetupSubmit),
             PROJECT_UPDATE_CAPABILITY_ID => Some(Self::ProjectUpdate),
@@ -347,6 +357,7 @@ impl ProductCapabilityHandler {
             Self::LlmProviderUpsert => "llm provider updated",
             Self::LlmProviderDelete => "llm provider deleted",
             Self::LlmActiveSet => "llm active provider updated",
+            Self::ExtensionRegisterHostedMcp => "hosted MCP registration accepted",
             Self::ExtensionImport => "extension imported",
             Self::ExtensionSetupSubmit => "extension setup updated",
             Self::ProjectUpdate => "project updated",
@@ -386,6 +397,35 @@ impl ProductCapabilityHandler {
             }
             Self::LlmProviderDelete => services.invoke_llm_provider_delete(caller, input).await,
             Self::LlmActiveSet => services.invoke_llm_active_set(caller, input).await,
+            Self::ExtensionRegisterHostedMcp => {
+                let request: ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest =
+                    product_command_input(input)?;
+                let response = services
+                    .lifecycle_service
+                    .execute(
+                        LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+                            tenant_id: caller.tenant_id,
+                            user_id: caller.user_id,
+                            agent_id: caller.agent_id,
+                            project_id: caller.project_id,
+                        }),
+                        LifecycleProductAction::ExtensionRegisterHostedMcp { request },
+                    )
+                    .await?;
+                if response.blockers.iter().any(|blocker| matches!(
+                    blocker,
+                    ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
+                        ref_id: Some(ref_id),
+                    } if ref_id.as_str()
+                        == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
+                )) {
+                    return Err(ProductSurfaceError::validation(
+                        "auth_selection",
+                        ProductSurfaceValidationCode::AuthSelectionRequired,
+                    ));
+                }
+                Ok(())
+            }
             Self::ExtensionImport => {
                 extensions::import_extension_capability(
                     services.lifecycle_service.as_ref(),
@@ -547,6 +587,7 @@ mod tests {
             LLM_PROVIDER_UPSERT_CAPABILITY_ID,
             LLM_PROVIDER_DELETE_CAPABILITY_ID,
             LLM_ACTIVE_SET_CAPABILITY_ID,
+            EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
             EXTENSION_IMPORT_CAPABILITY_ID,
             EXTENSION_SETUP_SUBMIT_CAPABILITY_ID,
             PROJECT_UPDATE_CAPABILITY_ID,

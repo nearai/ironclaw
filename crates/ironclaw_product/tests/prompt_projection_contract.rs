@@ -2,6 +2,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use ironclaw_auth::{AuthProductError, AuthProviderId, OAuthAuthorizationUrl};
+use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnScope};
 use ironclaw_host_api::{
     capability::RuntimeCredentialAccountSetup,
     decision::RuntimeCredentialAuthRequirement,
@@ -9,10 +10,10 @@ use ironclaw_host_api::{
 };
 use ironclaw_product::AuthPromptChallengeKind;
 use ironclaw_product::{
-    AuthChallengeProvider, AuthChallengeView, BlockedAuthPromptRequest, approval_prompt_lookup,
+    AuthChallengeProvider, AuthChallengeView, approval_prompt_lookup,
     auth_prompt_view_for_blocked_auth,
 };
-use ironclaw_turns::{GateRef, TurnRunId, TurnScope};
+use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
 
 #[derive(Debug)]
 struct OAuthChallenge {
@@ -85,12 +86,13 @@ async fn auth_prompt_enrichment_accepts_the_owned_view_without_a_crossing_reques
     let challenge = OAuthChallenge {
         captured: Mutex::new(None),
     };
+    let gate_ref = TurnGateRef::new("auth:github").expect("valid gate ref");
     let enriched = auth_prompt_view_for_blocked_auth(
         BlockedAuthPromptRequest {
             fallback_owner_user_id: &owner_user_id,
             scope: &scope,
             run_id,
-            gate_ref: "auth:github",
+            gate_ref: &gate_ref,
             invocation_id: None,
             body: "Connect GitHub".to_string(),
             credential_requirements: &credential_requirements,
@@ -104,6 +106,12 @@ async fn auth_prompt_enrichment_accepts_the_owned_view_without_a_crossing_reques
         enriched.challenge_kind,
         Some(AuthPromptChallengeKind::OAuthUrl)
     );
+    // The request's `gate_ref` — now a `&TurnGateRef`, matching the sibling
+    // approval port — is what becomes the view's auth request ref. Before it
+    // was typed, any of the request's other borrowed strings could have been
+    // put in its place without a compile error; this pins that the one that
+    // lands is the gate.
+    assert_eq!(enriched.auth_request_ref, gate_ref.as_str());
     assert_eq!(enriched.provider.as_deref(), Some("github"));
     assert_eq!(
         enriched.authorization_url.as_deref(),
@@ -125,7 +133,7 @@ async fn auth_prompt_enrichment_accepts_the_owned_view_without_a_crossing_reques
 async fn approval_prompt_lookup_without_a_store_is_empty() {
     let lookup = approval_prompt_lookup(
         None,
-        &GateRef::new("approval:missing").expect("gate ref"),
+        &TurnGateRef::new("approval:missing").expect("gate ref"),
         &UserId::new("owner-prompt").expect("owner"),
         &turn_scope(),
     )

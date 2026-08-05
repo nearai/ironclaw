@@ -16,7 +16,12 @@ layer = "products"
 [features]
 # Lightweight in-crate test fakes (fixtures, scripted adapters) reused by
 # downstream integration tests. Zero-byte in production.
-test-support = ["dep:ironclaw_first_party_extensions", "ironclaw_auth/test-support"]
+test-support = [
+    "ironclaw_auth/test-support",
+    "ironclaw_filesystem/test-support",
+    "ironclaw_host_api/test-support",
+    "ironclaw_processes/test-support",
+]
 # Dormant marker for the two moved test modules that still require composition
 # runtime-substrate fixtures. Keep disabled until those tests are rewritten over
 # extension-host-local fakes.
@@ -24,21 +29,26 @@ composition-substrate-tests = []
 
 [dependencies]
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
-ed25519-dalek = "2.2.0"
 hmac = "0.13"
 hex = "0.4.3"
 ironclaw_auth = { path = "../ironclaw_auth" }
+# `InboundAttachmentLander` — the channel host lands inbound attachment bytes
+# before accepting a message.
+ironclaw_attachments = { path = "../ironclaw_attachments" }
 ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
+ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version = "0.1.0" }
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_host_ingress = { path = "../ironclaw_host_ingress" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
-ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions", optional = true }
+ironclaw_extension_support = { path = "../extensions/ironclaw_extension_support" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_llm = { path = "../ironclaw_llm", default-features = false }
 ironclaw_loop_host = { path = "../ironclaw_loop_host" }
@@ -46,7 +56,7 @@ ironclaw_mcp = { path = "../ironclaw_mcp" }
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
-ironclaw_product = { path = "../ironclaw_product", features = ["host-auth-mint"] }
+ironclaw_product = { path = "../ironclaw_product" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_safety = { path = "../ironclaw_safety" }
@@ -55,6 +65,7 @@ ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_trust = { path = "../ironclaw_trust" }
+ironclaw_loop_contracts = { path = "../ironclaw_loop_contracts", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 axum = { version = "0.8" }
 fs4 = "1.1"
@@ -84,18 +95,25 @@ proptest = "1"
 ironclaw_auth = { path = "../ironclaw_auth", features = ["test-support"] }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
-ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
 ironclaw_host_api = { path = "../ironclaw_host_api", features = ["test-support"] }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime", features = ["test-support"] }
 ironclaw_outbound = { path = "../ironclaw_outbound", features = ["test-support"] }
 ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
 ironclaw_product = { path = "../ironclaw_product", features = ["test-support"] }
 ironclaw_resources = { path = "../ironclaw_resources", features = ["test-support"] }
-ironclaw_slack_extension = { path = "../ironclaw_slack_extension" }
+ironclaw_slack_extension = { path = "../extensions/packages/slack" }
 http-body-util = "0.1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
+# Installs a level-appropriate subscriber so a `tracing` body actually runs
+# under test: `tracing` short-circuits on the null dispatcher, so without one
+# the log a sanitization test needs to inspect is never formatted, and a test
+# cannot tell "logged the cause" apart from "dropped it". Both halves of this
+# crate's log guards depend on that distinction — the DEBUG-level lifecycle
+# sanitization tests and the WARN-level transient-cause test, whose 503 body is
+# deliberately sanitized.
+tracing-subscriber = "0.3"
 
 [[test]]
 name = "lifecycle_contract"
@@ -110,3 +128,6 @@ name = "admin_configuration_store_contract"
 
 [[test]]
 name = "admin_configuration_service_contract"
+
+[[test]]
+name = "lifecycle_restore_contract"

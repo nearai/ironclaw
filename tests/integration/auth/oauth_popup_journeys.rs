@@ -220,9 +220,8 @@ app_id = "/app_id"
             Arc::new(InMemoryBackend::new()),
             VirtualPath::new("/system/extensions/.installations/oauth-popup")
                 .expect("valid installation root"),
-            ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
-            ironclaw_host_runtime::default_host_api_contract_registry()
-                .expect("host API contracts"),
+            ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
+            ironclaw_extensions::default_host_api_contract_registry().expect("host API contracts"),
         )
         .await
         .expect("filesystem installation store"),
@@ -230,9 +229,9 @@ app_id = "/app_id"
     let record = ExtensionManifestRecord::from_toml(
         &manifest,
         ManifestSource::HostBundled,
-        &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
+        &ironclaw_host_api::host_port::default_host_port_catalog().expect("catalog"),
         None,
-        &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+        &ironclaw_extensions::default_host_api_contract_registry().expect("contracts"),
         None,
     )
     .expect("fixture manifest parses");
@@ -332,6 +331,7 @@ app_id = "/app_id"
                 .services
                 .flow_manager()
                 .create_flow(NewAuthFlow {
+                    requested_scopes: Vec::new(),
                     id: None,
                     scope: scope.clone(),
                     kind: AuthFlowKind::IntegrationCredential,
@@ -348,6 +348,8 @@ app_id = "/app_id"
                     opaque_state_hash: Some(state_hash.clone()),
                     pkce_verifier_hash: Some(PkceVerifierHash::new(hex64(fill)).unwrap()),
                     expires_at,
+                    // User-driven connect flow in this fixture, not extension-owned.
+                    requester_extension: None,
                 })
                 .await
                 .expect("create_flow must succeed");

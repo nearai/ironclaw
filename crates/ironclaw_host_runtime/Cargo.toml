@@ -12,8 +12,7 @@ test-support = []
 
 [dependencies]
 async-trait = "0.1"
-base64 = "0.22.1"
-bollard = "0.18"
+base64 = "0.23.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 chrono-tz = "0.10"
 deadpool-postgres = "0.14"
@@ -29,15 +28,16 @@ ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 # honors the same runtime-override precedence the rest of Reborn uses instead
 # of a second, bare `std::env::var` lookup.
 ironclaw_common = { path = "../ironclaw_common" }
-ironclaw_process_sandbox = { path = "../ironclaw_process_sandbox" }
+ironclaw_sandbox = { path = "../ironclaw_sandbox" }
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_extractors = { path = "../ironclaw_extractors" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
-ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
+ironclaw_extension_support = { path = "../extensions/ironclaw_extension_support" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_memory = { path = "../ironclaw_memory" }
-ironclaw_memory_native = { path = "../ironclaw_memory_native" }
+ironclaw_memory_native = { path = "../extensions/packages/memory-native" }
 ironclaw_mcp = { path = "../ironclaw_mcp" }
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_observability = { path = "../ironclaw_observability" }
@@ -49,21 +49,19 @@ ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
 ironclaw_safety = { path = "../ironclaw_safety" }
-ironclaw_scripts = { path = "../ironclaw_scripts" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
-ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_trust = { path = "../ironclaw_trust" }
+ironclaw_loop_contracts = { path = "../ironclaw_loop_contracts", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 ironclaw_wasm = { path = "../ironclaw_wasm" }
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
-jsonschema = { version = "0.46", default-features = false }
+jsonschema = { version = "0.49", default-features = false }
 libc = "0.2"
 # Internal per-tenant CA for the sandbox egress proxy (W5, design doc
 # 2026-07-26-sandbox-credential-firewall-design.md §4). Generates the root
 # key/cert in-memory and issues short-lived leaf certs; ships unwired until
 # W6 (proxy TLS termination) exists to call it.
-rcgen = "0.14"
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
@@ -71,19 +69,24 @@ serde_json = "1"
 sha2 = "0.11"
 static_assertions = "1"
 thiserror = "2"
-# rcgen's `CertificateParams::not_before`/`not_after` are `time::OffsetDateTime`
 # — needed directly to compute the CA's leaf-cert validity window.
-time = { version = "0.3", default-features = false }
 tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
 tokio-util = { version = "0.7" }
 tracing = "0.1"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
-zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["json"] }
 hex = "0.4"
+# Test-only since WS3: the skill-install bundle limits these tests exercise are
+# owned by `ironclaw_skills`, but the executor that enforces them now lives in
+# `ironclaw_extension_support::skills` — a normal dep here would re-open the
+# kernel→domain edge the move closed.
+ironclaw_skills = { path = "../ironclaw_skills" }
+# Test-only since WS3: the ZIP-bundle fixtures these tests build stay here; the
+# extractor moved to `ironclaw_extension_support::skills::url_install`.
+zip = { version = "8", default-features = false, features = ["deflate"] }
 # Enables the in-memory-backed approval store constructors for tests only.
 ironclaw_approvals = { path = "../ironclaw_approvals", features = ["test-support"] }
 # Enables the in-memory-backed capability-lease store constructor for tests only.
@@ -108,9 +111,7 @@ zeroize = "1"
 wat = "1.245.1"
 wit-component = "0.254.0"
 wit-parser = "0.254.0"
-# Test-only: parses/verifies the sandbox CA's issued certs in sandbox_process::ca
 # tests (chain-of-trust, SAN, validity window) without hand-rolling ASN.1.
-x509-parser = { version = "0.18", features = ["verify"] }
 
 [lints]
 workspace = true

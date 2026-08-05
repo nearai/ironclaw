@@ -1,6 +1,7 @@
 use std::{error::Error, fmt};
 
-use ironclaw_turns::{run_profile::LoopRunContext, runner::ClaimedTurnRun};
+use ironclaw_loop_contracts::LoopRunContext;
+use ironclaw_turns::runner::ClaimedTurnRun;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextOnlyLoopHostConfig {

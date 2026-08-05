@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::routing::{delete, get, post, put};
-use ironclaw_host_api::product_surface::{
+use ironclaw_product_contracts::surface::{
     BoundProductSurface, ProductSurface, ProductSurfaceCaller,
 };
 use serde::Serialize;
@@ -27,23 +27,24 @@ use crate::webui_v2::descriptors::{
     WEBUI_V2_PATTERN_GET_RUN_ARTIFACT, WEBUI_V2_PATTERN_GET_SESSION,
     WEBUI_V2_PATTERN_GET_THREAD_ARTIFACT, WEBUI_V2_PATTERN_GET_TIMELINE,
     WEBUI_V2_PATTERN_IMPORT_EXTENSION, WEBUI_V2_PATTERN_INSTALL_EXTENSION,
-    WEBUI_V2_PATTERN_INSTALL_SKILL, WEBUI_V2_PATTERN_LIST_AUTOMATIONS,
-    WEBUI_V2_PATTERN_LIST_COMMANDS, WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,
-    WEBUI_V2_PATTERN_LIST_EXTENSIONS, WEBUI_V2_PATTERN_LIST_FS_MOUNTS,
-    WEBUI_V2_PATTERN_LIST_LLM_MODELS, WEBUI_V2_PATTERN_LIST_PROJECT_FILES,
-    WEBUI_V2_PATTERN_LIST_PROJECTS, WEBUI_V2_PATTERN_LIST_SKILLS, WEBUI_V2_PATTERN_LOGS,
-    WEBUI_V2_PATTERN_OPERATOR_CONFIG, WEBUI_V2_PATTERN_OPERATOR_CONFIG_KEY,
-    WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE, WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS,
-    WEBUI_V2_PATTERN_OPERATOR_EXTENSION_CONFIGURATION,
+    WEBUI_V2_PATTERN_INSTALL_SKILL, WEBUI_V2_PATTERN_IRONHUB_DELIVER_INSTALL,
+    WEBUI_V2_PATTERN_LIST_AUTOMATIONS, WEBUI_V2_PATTERN_LIST_COMMANDS,
+    WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY, WEBUI_V2_PATTERN_LIST_EXTENSIONS,
+    WEBUI_V2_PATTERN_LIST_FS_MOUNTS, WEBUI_V2_PATTERN_LIST_LLM_MODELS,
+    WEBUI_V2_PATTERN_LIST_PROJECT_FILES, WEBUI_V2_PATTERN_LIST_PROJECTS,
+    WEBUI_V2_PATTERN_LIST_SKILLS, WEBUI_V2_PATTERN_LOGS, WEBUI_V2_PATTERN_OPERATOR_CONFIG,
+    WEBUI_V2_PATTERN_OPERATOR_CONFIG_KEY, WEBUI_V2_PATTERN_OPERATOR_CONFIG_VALIDATE,
+    WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS, WEBUI_V2_PATTERN_OPERATOR_EXTENSION_CONFIGURATION,
     WEBUI_V2_PATTERN_OPERATOR_EXTENSION_CONFIGURATION_GROUP, WEBUI_V2_PATTERN_OPERATOR_LOGS,
     WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE, WEBUI_V2_PATTERN_OPERATOR_SETUP,
     WEBUI_V2_PATTERN_OPERATOR_STATUS, WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS,
     WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES, WEBUI_V2_PATTERN_PAUSE_AUTOMATION,
     WEBUI_V2_PATTERN_PROJECT_DETAIL, WEBUI_V2_PATTERN_PROJECT_MEMBER_DETAIL,
     WEBUI_V2_PATTERN_PROJECT_MEMBERS, WEBUI_V2_PATTERN_READ_FS_FILE,
-    WEBUI_V2_PATTERN_READ_PROJECT_FILE, WEBUI_V2_PATTERN_REMOVE_EXTENSION,
-    WEBUI_V2_PATTERN_RESOLVE_GATE, WEBUI_V2_PATTERN_RESUME_AUTOMATION, WEBUI_V2_PATTERN_RETRY_RUN,
-    WEBUI_V2_PATTERN_SEARCH_SKILLS, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
+    WEBUI_V2_PATTERN_READ_PROJECT_FILE, WEBUI_V2_PATTERN_REGISTER_HOSTED_MCP_EXTENSION,
+    WEBUI_V2_PATTERN_REMOVE_EXTENSION, WEBUI_V2_PATTERN_RESOLVE_GATE,
+    WEBUI_V2_PATTERN_RESUME_AUTOMATION, WEBUI_V2_PATTERN_RETRY_RUN, WEBUI_V2_PATTERN_SEARCH_SKILLS,
+    WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
     WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED, WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE,
     WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION, WEBUI_V2_PATTERN_SETTINGS_TOOLS,
     WEBUI_V2_PATTERN_SETUP_EXTENSION, WEBUI_V2_PATTERN_SKILL_DETAIL,
@@ -97,6 +98,7 @@ pub struct WebUiV2State {
     services: Arc<dyn ProductSurface>,
     sse_capacity: Arc<SseCapacity>,
     reborn_projects_enabled: bool,
+    workspace_requires_scoped_projection: bool,
     regression_artifact_export_enabled: bool,
 }
 
@@ -114,6 +116,7 @@ impl WebUiV2State {
             services,
             sse_capacity: Arc::new(SseCapacity::new(max_concurrent_streams_per_caller)),
             reborn_projects_enabled: false,
+            workspace_requires_scoped_projection: false,
             regression_artifact_export_enabled: false,
         }
     }
@@ -130,6 +133,20 @@ impl WebUiV2State {
 
     pub fn reborn_projects_enabled(&self) -> bool {
         self.reborn_projects_enabled
+    }
+
+    /// Deployment gate for WebUI workspace fallback behavior. Hosted
+    /// deployments set this so the browser fails closed instead of showing a
+    /// raw shared workspace root when a caller-specific workspace subtree has
+    /// not been created yet. Local development leaves it off so `/workspace`
+    /// remains browseable without tenant-shaped storage.
+    pub fn with_workspace_requires_scoped_projection(mut self, enabled: bool) -> Self {
+        self.workspace_requires_scoped_projection = enabled;
+        self
+    }
+
+    pub fn workspace_requires_scoped_projection(&self) -> bool {
+        self.workspace_requires_scoped_projection
     }
 
     /// Deployment gate for QA-only run and full-thread artifact exports.
@@ -351,6 +368,14 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         .route(
             WEBUI_V2_PATTERN_INSTALL_EXTENSION,
             post(handlers::install_extension),
+        )
+        .route(
+            WEBUI_V2_PATTERN_IRONHUB_DELIVER_INSTALL,
+            post(handlers::ironhub_deliver_install),
+        )
+        .route(
+            WEBUI_V2_PATTERN_REGISTER_HOSTED_MCP_EXTENSION,
+            post(handlers::register_hosted_mcp_extension),
         )
         .route(
             WEBUI_V2_PATTERN_REMOVE_EXTENSION,

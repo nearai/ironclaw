@@ -765,13 +765,13 @@ impl OutboundStateStorePort for FailingOutboundStore {
 
     async fn load_run_final_reply_handoff_cursor(
         &self,
-    ) -> Result<ironclaw_turns::EventCursor, OutboundError> {
+    ) -> Result<ironclaw_host_api::turn::EventCursor, OutboundError> {
         Err(OutboundError::Backend)
     }
 
     async fn advance_run_final_reply_handoff_cursor(
         &self,
-        _cursor: ironclaw_turns::EventCursor,
+        _cursor: ironclaw_host_api::turn::EventCursor,
     ) -> Result<(), OutboundError> {
         Err(OutboundError::Backend)
     }

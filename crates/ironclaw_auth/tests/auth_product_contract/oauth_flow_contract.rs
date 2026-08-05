@@ -152,10 +152,12 @@ async fn credential_selection_completes_account_selection_flow_once() {
         .expect("account");
     let flow = services
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: owner.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
+            requester_extension: None,
             challenge: AuthChallenge::AccountSelectionRequired {
                 provider: provider(),
                 accounts: vec![account.projection()],
@@ -237,10 +239,12 @@ async fn credential_selection_rejects_unlisted_or_cross_scope_account() {
         .expect("account");
     let flow = services
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: owner.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
+            requester_extension: None,
             challenge: AuthChallenge::AccountSelectionRequired {
                 provider: provider(),
                 accounts: vec![account.projection()],
@@ -613,10 +617,12 @@ async fn create_flow_rejects_invalid_update_binding() {
 
     let missing = services
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: owner.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: authorization_url("https://provider.example/oauth"),
                 expires_at: Utc::now() + Duration::minutes(5),
@@ -654,10 +660,12 @@ async fn create_flow_rejects_invalid_update_binding() {
     };
     let authority_mismatch = services
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: owner,
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: authorization_url("https://provider.example/oauth"),
                 expires_at: Utc::now() + Duration::minutes(5),
@@ -789,10 +797,12 @@ async fn terminal_flow_status_is_not_rewritten_after_expiry() {
     let owner = scope("alice");
     let flow = services
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: owner.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: authorization_url("https://provider.example/oauth"),
                 expires_at: Utc::now() - Duration::seconds(1),
@@ -836,10 +846,12 @@ async fn oauth_callback_marks_expired_flow_and_rejects_completion() {
     let owner = scope("alice");
     let flow = services
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: owner.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: authorization_url("https://provider.example/oauth"),
                 expires_at: Utc::now() - Duration::seconds(1),
@@ -910,10 +922,12 @@ async fn setup_flow_with(
 ) -> ironclaw_auth::AuthFlowRecord {
     services
         .create_flow(NewAuthFlow {
+            requested_scopes: Vec::new(),
             id: None,
             scope: owner,
             kind: AuthFlowKind::IntegrationCredential,
             provider: flow_provider,
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: authorization_url("https://provider.example/oauth"),
                 expires_at: Utc::now() + Duration::minutes(5),

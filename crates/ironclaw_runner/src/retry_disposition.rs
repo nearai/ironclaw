@@ -162,7 +162,7 @@ mod tests {
             "model_spend_budget_exhausted",
             // Re-driving automatically would issue another model call before
             // the transcript store is known to be writable again.
-            crate::failure_categories::TRANSCRIPT_WRITE_FAILED_CATEGORY,
+            ironclaw_host_api::failure::categories::TRANSCRIPT_WRITE_FAILED_CATEGORY,
             "capability_input_invalid",
             "capability_policy_denied",
             "policy_denied",

@@ -7,6 +7,7 @@ use ironclaw_host_api::{
     ids::{CapabilityGrantId, ExtensionId},
     scope::Principal,
 };
+use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
 #[cfg(feature = "test-support")]
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
@@ -161,8 +162,12 @@ impl RebornRuntimeStores {
         &self.extension_filesystem
     }
 
+    /// The deployment's workspace mount policy, for tests that build a
+    /// production-shaped capability-port factory.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn workspace_mounts_for_test(&self) -> &MountView {
+    pub(crate) fn workspace_mount_policy_for_test(
+        &self,
+    ) -> &crate::runtime_mounts::WorkspaceMountPolicy {
         &self.workspace_mounts
     }
 
@@ -200,7 +205,7 @@ impl RebornRuntimeStores {
 
     /// Mint (or rotate) a pairing code through the composed generic pairing
     /// service — tests only. Mirrors the production `pairing/mint` route
-    /// handler in `channel_pairing_serve`; returns the code text.
+    /// handler in `ironclaw_webui::channel_pairing`; returns the code text.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn pairing_mint_for_test(
         &self,
@@ -326,12 +331,10 @@ impl RebornRuntimeStores {
     /// §6.4): the production surface the WebUI setup service and the
     /// lifecycle configure action route operator channel config through.
     /// `None` without a standalone runtime.
-    pub(crate) fn channel_config_service(
-        &self,
-    ) -> Option<Arc<dyn ironclaw_product::ChannelConfigProductService>> {
+    pub(crate) fn channel_config_service(&self) -> Option<Arc<dyn ChannelConfigProductService>> {
         let service = self.channel_config_service.clone();
         Some(Arc::new(
-            ironclaw_extension_host::RebornChannelConfigProductService::new(service),
+            ironclaw_extension_manager::RebornChannelConfigProductService::new(service),
         ))
     }
 
@@ -354,6 +357,7 @@ impl RebornRuntimeStores {
             crate::extension_host_assembly::ChannelHostAssemblyWiring {
                 thread_service: wiring.thread_service,
                 turn_coordinator: wiring.turn_coordinator,
+                input_enqueue: Arc::new(ironclaw_loop_host::RejectingInputEnqueue),
                 approval_interaction: None,
                 auth_interaction: None,
                 identity: wiring.identity,
@@ -389,15 +393,10 @@ impl RebornRuntimeStores {
     pub(crate) fn read_write_workspace_filesystem(
         &self,
     ) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
-        let attachment_mounts = crate::runtime_mounts::workspace_mount_view(
-            ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
-            &[],
+        crate::runtime_mounts::read_write_workspace_filesystem(
+            &self.extension_filesystem,
+            &self.workspace_mounts,
         )
-        .ok()?;
-        Some(Arc::new(ScopedFilesystem::with_fixed_view(
-            Arc::clone(&self.extension_filesystem),
-            attachment_mounts,
-        )))
     }
 
     #[cfg(feature = "test-support")]
@@ -546,7 +545,7 @@ impl RebornRuntimeStores {
         let read_write_workspace_filesystem = self.read_write_workspace_filesystem()?;
         Some(AttachmentTestSupport {
             read_port,
-            lander: Arc::new(ironclaw_product::ProjectScopedAttachmentLander::new(
+            lander: Arc::new(ironclaw_attachments::ProjectScopedAttachmentLander::new(
                 read_write_workspace_filesystem,
             )),
         })
@@ -604,9 +603,9 @@ impl RebornRuntimeStores {
     #[cfg(feature = "test-support")]
     pub(crate) fn standalone_inbound_attachment_reader_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product::InboundAttachmentReader>> {
+    ) -> Option<Arc<dyn ironclaw_attachments::InboundAttachmentReader>> {
         Some(self.standalone_workspace_attachment_reader_for_test()?
-            as Arc<dyn ironclaw_product::InboundAttachmentReader>)
+            as Arc<dyn ironclaw_attachments::InboundAttachmentReader>)
     }
 
     /// C-JOURNEY: publish a bundled first-party WASM extension package (e.g. a
@@ -631,7 +630,8 @@ impl RebornRuntimeStores {
         Some(
             extension_management
                 .publish_bundled_package_for_test(package, resolved)
-                .await,
+                .await
+                .map_err(ironclaw_product::ProductSurfaceFailure::from),
         )
     }
 
@@ -792,7 +792,7 @@ fn active_extension_network_policy_for_test(
 #[derive(Clone)]
 pub struct AttachmentTestSupport {
     pub read_port: Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>,
-    pub lander: Arc<dyn ironclaw_product::InboundAttachmentLander>,
+    pub lander: Arc<dyn ironclaw_attachments::InboundAttachmentLander>,
 }
 
 #[cfg(feature = "test-support")]
@@ -878,11 +878,12 @@ pub(crate) async fn open_standalone_extension_installation_store_for_test(
             reason: format!("extension installation state path invalid: {error}"),
         }
     })?;
-    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        RebornBuildError::InvalidConfig {
-            reason: format!("extension host port catalog could not be loaded: {error}"),
-        }
-    })?;
+    let host_ports =
+        ironclaw_host_api::host_port::default_host_port_catalog().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("extension host port catalog could not be loaded: {error}"),
+            }
+        })?;
     let host_api_contracts = product_extension_host_api_contract_registry().map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("extension host API contracts could not be loaded: {error}"),
@@ -992,4 +993,161 @@ pub(crate) async fn open_standalone_trigger_repository_for_test(
     let mut composite = CompositeRootFilesystem::new();
     let backend = build_default_database_roots(storage_root, &mut composite).await?;
     trigger_repository_for_durable_backend(&backend).await
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod attachment_seam_tests {
+    use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
+    use ironclaw_threads::ThreadScope;
+
+    /// Store-level regression for the two C-ATTACH accessors
+    /// (`RebornRuntimeStores::standalone_attachment_test_support_for_test` and
+    /// `RebornRuntimeStores::standalone_inbound_attachment_reader_for_test`).
+    /// The downstream integration harness reaches this seam through the
+    /// `RebornRuntime` wrapper's same-named methods, so nothing ever drove the
+    /// store-level recipe itself: a regression here — a lander built over the
+    /// read-only `workspace_filesystem` handle (which fails closed with
+    /// `PermissionDenied`), or a reader pointed at a different mount view than
+    /// the lander wrote through — would only surface downstream. Landing real
+    /// bytes and reading them back through BOTH returned read views proves the
+    /// two accessors hand out usable, mutually consistent ports.
+    #[tokio::test]
+    async fn standalone_attachment_seams_land_and_read_back_the_same_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::factory::build_runtime_substrate(
+            crate::deployment::local_filesystem_build_input(
+                "attachment-seam-owner",
+                dir.path().join("standalone"),
+            ),
+        )
+        .await
+        .expect("standalone services build");
+
+        let support = services
+            .standalone_attachment_test_support_for_test()
+            .expect("a standalone composition exposes the C-ATTACH seam");
+        let inbound_reader = services
+            .standalone_inbound_attachment_reader_for_test()
+            .expect("a standalone composition exposes the WebUI-facing inbound reader");
+
+        let thread_scope = ThreadScope {
+            tenant_id: TenantId::new("attachment-seam-tenant").expect("tenant id"),
+            agent_id: AgentId::new("attachment-seam-agent").expect("agent id"),
+            project_id: None,
+            owner_user_id: Some(UserId::new("attachment-seam-owner").expect("user id")),
+            mission_id: None,
+        };
+
+        let refs = support
+            .lander
+            .land(
+                &thread_scope,
+                "msg-attachment-seam",
+                vec![ironclaw_host_api::attachment::InboundAttachment {
+                    id: "att-0".to_string(),
+                    mime_type: "image/png".to_string(),
+                    filename: Some("seam.png".to_string()),
+                    bytes: b"attachment-seam-bytes".to_vec(),
+                }],
+            )
+            .await
+            .expect("the seam's lander writes through a read-write workspace view");
+        let storage_key = refs[0]
+            .storage_key
+            .as_deref()
+            .expect("a landed attachment carries a storage_key");
+
+        assert_eq!(
+            support
+                .read_port
+                .read_attachment_bytes(&thread_scope.to_resource_scope(), storage_key)
+                .await
+                .expect("the seam's model-injection read port reads the landed bytes"),
+            b"attachment-seam-bytes".to_vec(),
+        );
+        assert_eq!(
+            inbound_reader
+                .read(&thread_scope, storage_key)
+                .await
+                .expect("the WebUI-facing inbound reader reads the same landed bytes"),
+            b"attachment-seam-bytes".to_vec(),
+        );
+    }
+
+    /// Store-level regression for `RebornRuntimeStores::channel_config_service`
+    /// (extension-runtime §6.4): the port the WebUI setup service and the
+    /// lifecycle configure action route operator channel config through.
+    ///
+    /// Nothing drove this accessor -- the integration harness reaches the seam
+    /// through the `RebornRuntime` wrapper's same-named method, so the store
+    /// recipe (build the manager-side product port over the composed
+    /// `ChannelConfigService`) was only ever compiled, never run. A regression
+    /// here -- a port built over the wrong service handle, or one that panics
+    /// on its first read -- would surface only downstream. Asking the returned
+    /// port about an extension the composition has not installed proves it is
+    /// live and answers on the contract's terms: an extension with nothing to
+    /// configure projects an empty field list rather than erroring, which is
+    /// what makes the WebUI setup view render for it.
+    #[tokio::test]
+    async fn the_channel_config_seam_hands_out_a_usable_product_port() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::factory::build_runtime_substrate(
+            crate::deployment::local_filesystem_build_input(
+                "channel-config-seam-owner",
+                dir.path().join("standalone"),
+            ),
+        )
+        .await
+        .expect("standalone services build");
+
+        let channel_config = services
+            .channel_config_service()
+            .expect("a standalone composition exposes the §6.4 configure port");
+        assert_eq!(
+            channel_config
+                .field_status(
+                    &ironclaw_host_api::ids::ExtensionId::new("not-installed-extension")
+                        .expect("extension id")
+                )
+                .await
+                .expect(
+                    "an uninstalled extension has nothing to configure, and that is not an error"
+                ),
+            Vec::new(),
+        );
+    }
+}
+
+/// The ambient shared workspace view a deployment carries, or `None` under a
+/// per-caller policy.
+///
+/// Test-support only: a per-caller deployment has no shared view, and
+/// production resolves its view from the run/gate scope instead. Lives here
+/// rather than on `WorkspaceMountPolicy` so the production type carries no
+/// test-only member.
+/// The ambient shared workspace view a test runtime carries.
+///
+/// A free function rather than a `RebornRuntimeStores` method: the
+/// struct-member ratchet
+/// (`ironclaw_architecture::reborn_struct_test_support_ratchet`) counts
+/// `#[cfg(test-support)]` *members* on production structs, while
+/// `check_no_panics.py` requires the item-level `#[cfg]` for the `.expect()`
+/// below. A gated free function satisfies both.
+///
+/// Panics under a per-caller policy, which has no shared view --- such a
+/// deployment must be driven through the production seam instead.
+#[cfg(test)]
+pub(crate) fn workspace_mounts_for_test(stores: &RebornRuntimeStores) -> &MountView {
+    shared_workspace_view(&stores.workspace_mounts)
+        .expect("test runtime uses a shared workspace mount policy")
+}
+
+#[cfg(test)]
+pub(crate) fn shared_workspace_view(
+    policy: &crate::runtime_mounts::WorkspaceMountPolicy,
+) -> Option<&MountView> {
+    match policy {
+        crate::runtime_mounts::WorkspaceMountPolicy::Shared(view) => Some(view),
+        crate::runtime_mounts::WorkspaceMountPolicy::PerCaller => None,
+    }
 }

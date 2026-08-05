@@ -13,8 +13,9 @@ use ironclaw_capabilities::{
     ToolResolver,
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_extensions::{
-    CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage, ExtensionRuntime,
+    CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage,
     HostApiContractRegistry, ManifestSource,
 };
 use ironclaw_filesystem::{DiskFilesystem, RootFilesystem};
@@ -652,12 +653,20 @@ impl WasmRuntimeAdapter {
         request: LocalLaneRequest<'_>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let module_path = match &request.package.manifest.runtime {
-            ExtensionRuntime::Wasm { module } => module
-                .resolve_under(&request.package.root)
-                .map_err(|_| DispatchError::Wasm {
-                    kind: RuntimeDispatchErrorKind::Manifest,
-                    model_visible_cause: None,
-                })?,
+            ExtensionRuntime::Wasm { module } => ironclaw_extensions::resolve_asset_under(
+                module,
+                request
+                    .package
+                    .materialized_root()
+                    .map_err(|_| DispatchError::Wasm {
+                        kind: RuntimeDispatchErrorKind::Manifest,
+                        model_visible_cause: None,
+                    })?,
+            )
+            .map_err(|_| DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::Manifest,
+                model_visible_cause: None,
+            })?,
             other => {
                 return Err(DispatchError::Wasm {
                     kind: if other.kind() == RuntimeKind::Wasm {
@@ -1045,7 +1054,7 @@ fn tool_component(wat_src: &str) -> Vec<u8> {
     let mut module = wat::parse_str(wat_src).expect("fixture WAT must parse");
     let mut resolve = Resolve::default();
     let package = resolve
-        .push_str("tool.wit", include_str!("../../../wit/tool.wit"))
+        .push_str("tool.wit", ironclaw_wasm::TOOL_WIT)
         .expect("tool WIT must parse");
     let world = resolve
         .select_world(&[package], Some("sandboxed-tool"))

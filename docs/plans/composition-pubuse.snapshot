@@ -1,4 +1,5 @@
 pub use admin_token::AdminApiTokenMinter;
+pub use automation::conversation_turn_submitter::conversation_turn_submitter;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;
 #[cfg(feature = "test-support")]
@@ -40,19 +41,17 @@ pub use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
 };
-pub use ironclaw_product::PreferenceTargetCodec;
-pub use ironclaw_product::{ChannelAdapter, NormalizedInboundMessage};
-pub use ironclaw_product::{
-    ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
-    RebornChannelConnectStrategy,
-};
+pub use ironclaw_product::RebornChannelConnectStrategy;
 pub use ironclaw_product::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
+pub use ironclaw_product_contracts::account_setup::{
+    ChannelConnectionNoticePolicy, ExtensionAccountSetupDescriptor,
+};
+pub use ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement;
 pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
-pub use ironclaw_runner::failure_summary::reborn_failure_summary_for_category;
 pub use ironclaw_runtime_policy::{
     ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
 };
@@ -68,6 +67,7 @@ pub use memory_provider_factory::{
     Mem0ConnectionConfig, MemoryLifecycleConsumers, MemoryProviderDeps, ResolvedMemoryProvider,
     create_provider, memory_lifecycle_consumers, resolve_memory_provider,
 };
+pub use operator_secret_store::RuntimeOperatorSecretValueStore;
 pub use deployment::{
     RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
     hosted_single_tenant_volume_runtime_policy, local_runtime_build_input,
@@ -83,7 +83,9 @@ pub use ironclaw_host_api::user_identity::{
     RebornUserIdentityBindingStore, RebornUserIdentityLookup, RebornUserIdentityLookupError,
     installation_scoped_provider_user_id,
 };
-pub use ironclaw_product::mark_bearer_token_verified_for_tenant;
+pub use ironhub_link_serve::{
+    IRONHUB_REGISTER_PATH, IronhubRegisterRouteState, ironhub_register_route_mount,
+};
 pub use observability::budget::build_default_budget_accountant;
 pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use observability::hooks::{
@@ -112,8 +114,8 @@ pub use root::profile::{RebornCompositionProfile, RebornCompositionProfileParseE
 pub use runtime::RebornTurnDriveOutcome;
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
-    RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
-    RebornSkillExecutionResult, RebornSkillSourceKind, blocked_auth_flow_canceller,
+    RebornSkillActivationMode, RebornSkillActivationSource, RebornSkillAsset, RebornSkillBundle,
+    RebornSkillExecutionPlan, RebornSkillExecutionResult, blocked_auth_flow_canceller,
     build_reborn_runtime, build_runtime, product_auth_challenge_provider,
 };
 pub use runtime_input::{

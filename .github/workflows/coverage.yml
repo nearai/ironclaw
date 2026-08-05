@@ -33,6 +33,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: code-coverage-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   # Tests must never touch the real OS keychain (macOS Keychain auth dialog /
   # Linux Secret Service). Guarded by
@@ -156,7 +160,16 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+          # actions/setup-node hashes this list to build the cache key
+          # (verified against the pinned commit's bundled dist/setup/index.js:
+          # `hashFiles` walks one globber built from every newline-separated
+          # pattern and only throws when the COMBINED walk finds nothing), so
+          # the flat line stays live for today's tree and the nested line picks
+          # up the family move (crates/<family>/ironclaw_webui, PROPOSAL §5)
+          # without either one needing to be conditional.
+          cache-dependency-path: |
+            crates/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         if: contains(matrix.flags, '--all-features')
@@ -165,7 +178,9 @@ jobs:
       - name: Install WebUI frontend dependencies
         if: contains(matrix.flags, '--all-features')
         run: |
-          cd crates/ironclaw_webui/frontend
+          set -euo pipefail
+          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
+          cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
 
       - name: Generate coverage
@@ -234,14 +249,25 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+          # actions/setup-node hashes this list to build the cache key
+          # (verified against the pinned commit's bundled dist/setup/index.js:
+          # `hashFiles` walks one globber built from every newline-separated
+          # pattern and only throws when the COMBINED walk finds nothing), so
+          # the flat line stays live for today's tree and the nested line picks
+          # up the family move (crates/<family>/ironclaw_webui, PROPOSAL §5)
+          # without either one needing to be conditional.
+          cache-dependency-path: |
+            crates/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         run: corepack enable pnpm
 
       - name: Install WebUI frontend dependencies
         run: |
-          cd crates/ironclaw_webui/frontend
+          set -euo pipefail
+          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
+          cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
 
       # Pre-build the reborn binary under the same llvm-cov env so the E2E

@@ -18,10 +18,11 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::RunProfileResolver;
+use ironclaw_loop_contracts::{
     InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest,
 };
-use ironclaw_turns::{RunProfileResolver, TurnActor, TurnId, TurnRunId, TurnScope};
+use ironclaw_turns::{TurnActor, TurnId, TurnRunId, TurnScope};
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 

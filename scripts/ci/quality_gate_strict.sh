@@ -39,8 +39,14 @@ require_command pnpm "enable with: corepack enable pnpm"
 pnpm --version
 
 echo "==> WebUI frontend build"
+# Resolved by crate NAME through the shared inventory
+# (scripts/ci/lib/crate_tree.py) rather than a literal `crates/ironclaw_webui`
+# path, so the target-architecture family move (PROPOSAL §5) cannot leave this
+# `cd` pointed at a directory that no longer exists
+# (docs/reborn/target-architecture/CHECKLIST.md WS10).
+webui_frontend_dir="$("$(git rev-parse --show-toplevel)/scripts/ci/crate-dir.sh" ironclaw_webui)/frontend"
 (
-    cd crates/ironclaw_webui/frontend
+    cd "$webui_frontend_dir"
     pnpm install --frozen-lockfile
     pnpm build
 )

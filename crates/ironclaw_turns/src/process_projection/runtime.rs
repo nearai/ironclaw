@@ -33,17 +33,20 @@ use super::{
     store_adapter::ProcessJournalStoreTurnAdapter,
 };
 use crate::{
-    AdmissionRejection, AdmissionRejectionReason, BlockedReason, GateKind, ProductTurnContext,
-    RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver,
-    SubmitChildRunRequest, TurnAdmissionPolicy, TurnCheckpointId, TurnCommittedEventObserver,
-    TurnError, TurnEventKind, TurnEventSink, TurnId, TurnLifecycleEvent, TurnOriginKind, TurnRunId,
-    TurnRunProfile, TurnRunRecord, TurnRunState, TurnRunnerId, TurnScope, TurnStatus,
+    AdmissionRejection, AdmissionRejectionReason, BlockedReason, EventCursor, GateKind,
+    ProductTurnContext, SubmitChildRunRequest, SubmitTurnResponse, TurnAdmissionPolicy,
+    TurnCheckpointId, TurnCommittedEventObserver, TurnError, TurnEventKind, TurnEventSink, TurnId,
+    TurnLifecycleEvent, TurnOriginKind, TurnRunId, TurnRunProfile, TurnRunRecord, TurnRunState,
+    TurnRunnerId, TurnScope, TurnStatus,
     agent_turn_runtime::SpawnTreeReservation,
-    events::{EventCursor, TurnBlockedGateKind},
+    events::TurnBlockedGateKind,
     request::{CancelRunRequest, ResumeTurnRequest, RetryTurnRequest, SubmitTurnRequest},
-    response::{CancelRunResponse, ResumeTurnResponse, RetryTurnResponse, SubmitTurnResponse},
-    run_profile::{LoopCheckpointKind, LoopModelRouteSnapshot},
+    response::{CancelRunResponse, ResumeTurnResponse, RetryTurnResponse},
     runner::{ClaimedTurnRun, TurnRunnerOutcome},
+};
+use ironclaw_loop_contracts::{
+    LoopCheckpointKind, LoopModelRouteSnapshot, RunProfileResolutionError,
+    RunProfileResolutionRequest, RunProfileResolver,
 };
 
 pub const AGENT_TURN_PROCESS_KIND: &str = "agent_turn";
@@ -201,6 +204,7 @@ impl AgentTurnProcessRuntime {
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
             resolved_run_profile_id: profile.id.clone(),
             resolved_run_profile_version: profile.version,
+            allow_steering: profile.allow_steering,
             resolved_run_profile: Some(resolved),
             resolved_model_route: request
                 .requested_model
@@ -305,6 +309,7 @@ impl AgentTurnProcessRuntime {
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
             resolved_run_profile_id: profile.id.clone(),
             resolved_run_profile_version: profile.version,
+            allow_steering: profile.allow_steering,
             resolved_run_profile: Some(resolved),
             resolved_model_route: None,
             model_usage: None,
@@ -608,7 +613,7 @@ impl AgentTurnProcessRuntime {
 }
 
 fn failure_prohibits_retry(failure: &SanitizedFailure) -> bool {
-    failure.category() == crate::LoopFailureKind::CheckpointRejected.as_str()
+    failure.category() == ironclaw_loop_contracts::LoopFailureKind::CheckpointRejected.as_str()
 }
 
 #[async_trait]
@@ -1123,6 +1128,7 @@ pub fn turn_run_state_from_process_snapshot(
         reply_target_binding_ref: metadata.reply_target_binding_ref,
         resolved_run_profile_id: metadata.resolved_run_profile_id,
         resolved_run_profile_version: metadata.resolved_run_profile_version,
+        allow_steering: metadata.allow_steering,
         resolved_model_route: metadata.resolved_model_route,
         model_usage: metadata.model_usage,
         received_at: snapshot.created_at,

@@ -225,6 +225,32 @@ impl<'de> Deserialize<'de> for HostPortCatalog {
     }
 }
 
+/// Build the default host-port validation catalog: every port name this module
+/// defines above, in one [`HostPortCatalog`].
+///
+/// The catalog is validation vocabulary only. It does not grant authority or
+/// construct the concrete runtime HTTP egress / storage / audit adapters; those
+/// live in host/runtime service crates and are scoped into a [`HostPortView`]
+/// after authorization. Registering a port here only allows a manifest to
+/// *declare* it without failing closed on an unknown-port error — which is why
+/// the default set lives beside the names it enumerates rather than in the
+/// kernel that happened to be its first caller.
+///
+/// The memory ports (`host.storage.sql_transaction.first_party`,
+/// `host.events.audit`) are future storage/audit vocabulary for the deferred
+/// SQL-backed memory milestone (issue #3537, ADR 0002), not a live backing
+/// today: the bundled `ironclaw.memory` extension is filesystem-backed
+/// and declares no host ports (see `native_memory_declares_no_host_ports`).
+pub fn default_host_port_catalog() -> Result<HostPortCatalog, HostApiError> {
+    HostPortCatalog::new(vec![
+        HostPortCatalogEntry::new(HostPortId::new(HOST_RUNTIME_HTTP_EGRESS_PORT_ID)?),
+        HostPortCatalogEntry::new(HostPortId::new(
+            HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID,
+        )?),
+        HostPortCatalogEntry::new(HostPortId::new(HOST_EVENTS_AUDIT_PORT_ID)?),
+    ])
+}
+
 /// Scoped set of host ports available to an invocation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HostPortView {
@@ -285,5 +311,23 @@ impl HostPortView {
 impl Default for HostPortView {
     fn default() -> Self {
         Self::empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_catalog_registers_egress_storage_and_audit_ports() {
+        let catalog = default_host_port_catalog().expect("default host port catalog must build");
+        for id in [
+            HOST_RUNTIME_HTTP_EGRESS_PORT_ID,
+            HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID,
+            HOST_EVENTS_AUDIT_PORT_ID,
+        ] {
+            let port = HostPortId::new(id).expect("port id must validate");
+            assert!(catalog.contains(&port), "default catalog must contain {id}");
+        }
     }
 }

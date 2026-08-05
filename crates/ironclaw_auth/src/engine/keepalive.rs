@@ -43,11 +43,12 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::credential::{
-    CredentialAccount, CredentialAccountService, CredentialAccountStatus, CredentialRefreshReport,
-    CredentialRefreshRequest, ProviderBackedCredentialAccountService,
+    CredentialAccount, CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
+    CredentialRefreshReport, CredentialRefreshRequest, ProviderBackedCredentialAccountService,
 };
 use crate::engine::AuthRecipeResolver;
 use crate::error::AuthProductError;
+use ironclaw_host_api::ids::ExtensionId;
 
 /// How long shutdown waits for an in-flight sweep before aborting the task.
 pub const KEEPALIVE_SWEEP_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -300,12 +301,31 @@ pub async fn sweep_once(
 
     // Keep accounts whose vendor's active recipe declares an idle lifetime;
     // everything else opts out of the sweep entirely.
-    let mut declaring: Vec<(CredentialAccount, chrono::Duration)> = Vec::new();
+    let mut declaring: Vec<(CredentialAccount, chrono::Duration, Option<ExtensionId>)> = Vec::new();
     for account in candidates {
         if !is_refreshable(&account) {
             continue;
         }
-        let Some(resolved) = deps.recipes.recipe_for_vendor(account.provider.as_str()) else {
+        let requester_extension = match account.ownership {
+            CredentialOwnership::ExtensionOwned => {
+                // An extension-owned account cannot outlive the installed
+                // manifest that declared its recipe.
+                let Some(extension) = account.owner_extension.clone() else {
+                    continue;
+                };
+                Some(extension)
+            }
+            _ => None,
+        };
+        let Some(resolved) = deps
+            .recipes
+            .resolve(
+                requester_extension.as_ref(),
+                Some(&account.scope.resource.user_id),
+                account.provider.as_str(),
+            )
+            .await
+        else {
             continue;
         };
         let Some(lifetime) = resolved.recipe.keepalive_idle_threshold() else {
@@ -316,7 +336,7 @@ pub async fn sweep_once(
             // skip rather than panic if a resolver hands back raw data.
             continue;
         };
-        declaring.push((account, lifetime));
+        declaring.push((account, lifetime, requester_extension));
     }
 
     let (due, dropped) = select_due_candidates(declaring, now, settings.max_per_tick);
@@ -340,12 +360,15 @@ pub async fn sweep_once(
     let mut skipped = 0usize;
     let mut failed = 0usize;
 
-    for account in due {
-        let request = CredentialRefreshRequest::new(
+    for (account, requester_extension) in due {
+        let mut request = CredentialRefreshRequest::new(
             account.scope.clone(),
             account.provider.clone(),
             account.id,
         );
+        if let Some(extension) = requester_extension {
+            request = request.for_extension(extension);
+        }
         // Race each refresh against cancellation so shutdown never waits on a
         // slow token endpoint. `biased` checks cancellation first.
         let outcome = tokio::select! {
@@ -401,26 +424,28 @@ pub async fn sweep_once(
 /// (`updated_at + lifetime`, ascending), capped at `max_per_tick`. Returns
 /// the selected accounts and the number dropped by the cap.
 fn select_due_candidates(
-    candidates: Vec<(CredentialAccount, chrono::Duration)>,
+    candidates: Vec<(CredentialAccount, chrono::Duration, Option<ExtensionId>)>,
     now: DateTime<Utc>,
     max_per_tick: usize,
-) -> (Vec<CredentialAccount>, usize) {
+) -> (Vec<(CredentialAccount, Option<ExtensionId>)>, usize) {
     // Due at half the declared lifetime: sweeping only past the full lifetime
     // would refresh tokens the vendor already killed; half-life leaves
     // headroom for downtime while staying derived from the vendor constraint.
     let mut due: Vec<_> = candidates
         .into_iter()
-        .filter(|(account, lifetime)| {
+        .filter(|(account, lifetime, _)| {
             now.signed_duration_since(account.updated_at) >= *lifetime / 2
         })
         .collect();
     // Soonest projected death first, so the cap cannot starve the accounts
     // closest to expiry.
-    due.sort_by_key(|(account, lifetime)| account.updated_at + *lifetime);
+    due.sort_by_key(|(account, lifetime, _)| account.updated_at + *lifetime);
     let dropped = due.len().saturating_sub(max_per_tick);
     due.truncate(max_per_tick);
     (
-        due.into_iter().map(|(account, _)| account).collect(),
+        due.into_iter()
+            .map(|(account, _, requester_extension)| (account, requester_extension))
+            .collect(),
         dropped,
     )
 }
@@ -515,14 +540,14 @@ mod tests {
         let gamma = candidate("gamma", now - chrono::Duration::days(3));
 
         let candidates = vec![
-            (beta.clone(), month),
-            (gamma.clone(), week),
-            (alpha.clone(), week),
+            (beta.clone(), month, None),
+            (gamma.clone(), week, None),
+            (alpha.clone(), week, None),
         ];
 
         let (selected, dropped) = select_due_candidates(candidates.clone(), now, 10);
         assert_eq!(
-            selected.iter().map(|a| a.id).collect::<Vec<_>>(),
+            selected.iter().map(|(a, _)| a.id).collect::<Vec<_>>(),
             vec![alpha.id, beta.id],
             "due accounts only, soonest projected death first"
         );
@@ -531,7 +556,7 @@ mod tests {
         // Cap below the due count: the account dying soonest wins the slot.
         let (selected, dropped) = select_due_candidates(candidates, now, 1);
         assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].id, alpha.id, "cap keeps the soonest death");
+        assert_eq!(selected[0].0.id, alpha.id, "cap keeps the soonest death");
         assert_eq!(dropped, 1);
     }
 
@@ -540,8 +565,12 @@ mod tests {
         let now = Utc::now();
         let week = chrono::Duration::days(7);
         let candidates = vec![
-            (candidate("alpha", now), week),
-            (candidate("alpha", now - chrono::Duration::days(1)), week),
+            (candidate("alpha", now), week, None),
+            (
+                candidate("alpha", now - chrono::Duration::days(1)),
+                week,
+                None,
+            ),
         ];
         let (selected, dropped) = select_due_candidates(candidates, now, 5);
         assert!(selected.is_empty());
@@ -561,6 +590,120 @@ mod tests {
         let mut no_refresh = candidate("alpha", now);
         no_refresh.refresh_secret = None;
         assert!(!is_refreshable(&no_refresh));
+    }
+
+    #[tokio::test]
+    async fn sweep_refreshes_extension_owned_account_only_when_extension_context_is_threaded() {
+        // Regression pin (extension-owned keepalive refresh silently never
+        // firing): before this fix, sweep_once resolved recipes by vendor
+        // alone and never carried `owner_extension` into the resolver call.
+        // A real installed-manifest resolver fails closed when the
+        // requester extension is absent (`AuthRecipeResolver::resolve`'s
+        // documented contract), so an extension-owned hosted-MCP account
+        // would never resolve a recipe, never appear in the due list, and
+        // never refresh again — with no error, log, or test failure
+        // anywhere. This test drives the real caller seam (`sweep_once`,
+        // the entry point used by `tick_once`/`run_keepalive_sweep`) with a
+        // resolver shaped like that real contract.
+        let now = Utc::now();
+        let extension = ExtensionId::new("acme-mcp").unwrap();
+
+        let mut account = candidate("acme-mcp-vendor", now - chrono::Duration::days(10));
+        account.ownership = CredentialOwnership::ExtensionOwned;
+        account.owner_extension = Some(extension.clone());
+
+        let recipe: ironclaw_extension_contracts::recipe::VendorAuthRecipe =
+            serde_json::from_value(serde_json::json!({
+                "method": "oauth2_code",
+                "display_name": "Acme MCP",
+                "authorization_endpoint": "https://auth.acme.example/authorize",
+                "token_endpoint": "https://auth.acme.example/token",
+                "scopes": [],
+                "client_credentials": { "client_id_handle": "acme_client_id" },
+                "token_response": { "access_token": "/access_token" },
+                "refresh": { "keepalive_idle_seconds": 604_800 },
+            }))
+            .expect("recipe parses");
+        let resolved = crate::engine::ResolvedVendorAuthRecipe {
+            vendor: "acme-mcp-vendor".to_string(),
+            recipe,
+            token_exchange_resource: None,
+            protected_resource_metadata_url: None,
+        };
+
+        /// Shaped like a real installed-manifest resolver: only resolves
+        /// this vendor's recipe for its owning extension, and fails closed
+        /// (returns `None`) for any other requester — including `None`.
+        #[derive(Debug)]
+        struct ExtensionScopedResolver {
+            extension: ExtensionId,
+            recipe: crate::engine::ResolvedVendorAuthRecipe,
+        }
+        #[async_trait]
+        impl AuthRecipeResolver for ExtensionScopedResolver {
+            async fn resolve(
+                &self,
+                requester_extension: Option<&ExtensionId>,
+                _caller: Option<&ironclaw_host_api::ids::UserId>,
+                vendor: &str,
+            ) -> Option<crate::engine::ResolvedVendorAuthRecipe> {
+                if requester_extension == Some(&self.extension) && vendor == self.recipe.vendor {
+                    Some(self.recipe.clone())
+                } else {
+                    None
+                }
+            }
+        }
+
+        struct FixedSource(CredentialAccount);
+        #[async_trait]
+        impl KeepaliveCandidateSource for FixedSource {
+            async fn list_keepalive_candidates(&self) -> Vec<CredentialAccount> {
+                vec![self.0.clone()]
+            }
+        }
+
+        #[derive(Default)]
+        struct RecordingRefresh {
+            requests: tokio::sync::Mutex<Vec<CredentialRefreshRequest>>,
+        }
+        #[async_trait]
+        impl KeepaliveRefreshPort for RecordingRefresh {
+            async fn refresh_account(
+                &self,
+                request: CredentialRefreshRequest,
+            ) -> Result<CredentialRefreshReport, AuthProductError> {
+                self.requests.lock().await.push(request);
+                Err(AuthProductError::MalformedConfig)
+            }
+        }
+
+        let refresh = Arc::new(RecordingRefresh::default());
+        let deps = KeepaliveSweepDeps {
+            candidates: Arc::new(FixedSource(account)),
+            recipes: Arc::new(ExtensionScopedResolver {
+                extension: extension.clone(),
+                recipe: resolved,
+            }),
+            refresh: refresh.clone(),
+            leader_lock: Arc::new(AlwaysLeaderKeepaliveLock),
+        };
+        let settings = KeepaliveSweepSettings::enabled();
+        let cancel = CancellationToken::new();
+
+        sweep_once(&deps, &settings, &cancel, now).await;
+
+        let requests = refresh.requests.lock().await;
+        assert_eq!(
+            requests.len(),
+            1,
+            "extension-owned account must be swept, not silently dropped"
+        );
+        assert_eq!(
+            requests[0].requester_extension.as_ref(),
+            Some(&extension),
+            "refresh request must carry the owning extension so the resolver can find its recipe"
+        );
     }
 
     #[test]

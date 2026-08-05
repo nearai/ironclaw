@@ -58,6 +58,7 @@ use ironclaw_host_runtime::{
     ProductionWiringIssueKind, RuntimeCapabilityOutcome, RuntimeStatusRequest, RuntimeWorkId,
     TenantSandboxProcessPort, builtin_first_party_handlers,
 };
+use ironclaw_loop_contracts::InMemoryRunProfileResolver;
 use ironclaw_processes::{
     BackgroundProcessManager, ProcessError, ProcessInvocationError, ProcessInvocationRecord,
     ProcessInvocationStart, ProcessInvocationStatePort, ProcessInvocationStatus,
@@ -71,13 +72,11 @@ use ironclaw_resources::{
     InMemoryResourceGovernor, JsonFileResourceGovernorStore, PersistentResourceGovernor,
     ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits, ResourceTally,
 };
-use ironclaw_scripts::{ScriptRuntime, ScriptRuntimeConfig};
+use ironclaw_sandbox::{ScriptRuntime, ScriptRuntimeConfig};
 use ironclaw_secrets::{InMemoryCredentialBroker, SecretMaterial, SecretStore, SecretStorePort};
 use ironclaw_triggers::InMemoryTriggerRepository;
 use ironclaw_turns::NoopTurnRunWakeNotifier;
-use ironclaw_turns::{
-    AgentTurnProcessRuntime, InMemoryRunProfileResolver, SubmitTurnResponse, TurnCoordinator,
-};
+use ironclaw_turns::{AgentTurnProcessRuntime, SubmitTurnResponse, TurnCoordinator};
 use ironclaw_wasm::{
     RecordingWasmHostHttp, WasmHttpResponse, WasmStagedRuntimeCredential,
     WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,

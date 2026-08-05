@@ -40,7 +40,7 @@ For `market-data`, seed the shared key before activating:
 ├── wasm/           # built module at the path [runtime].module declares
 ├── schemas/        # capability input/output JSON schemas
 ├── prompts/        # capability prompt docs
-└── wasm-src/       # cargo source (cdylib + wit-bindgen against /wit/tool.wit)
+└── wasm-src/       # cargo source (cdylib + wit-bindgen against crates/ironclaw_wasm/wit/tool.wit)
 ```
 
 The import path requires every manifest-declared asset (module, schemas,

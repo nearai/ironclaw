@@ -23,13 +23,12 @@
 //! lane (see `first_party_tools::resolve_native_memory_input_schema_ref`), so
 //! no asset materialization is required.
 
+use ironclaw_extension_contracts::memory::MemoryDescriptor;
 use ironclaw_extensions::{
     ExtensionError, ExtensionInstallationError, ExtensionManifestRecord, ExtensionManifestV2,
-    ExtensionPackage, ManifestSource,
+    ExtensionPackage, ManifestSource, default_host_api_contract_registry,
 };
-use ironclaw_host_api::{memory::MemoryDescriptor, path::VirtualPath};
-
-use crate::extension_contracts::{default_host_api_contract_registry, default_host_port_catalog};
+use ironclaw_host_api::{host_port::default_host_port_catalog, path::VirtualPath};
 
 /// Reserved host-bundled extension id for the native memory provider.
 pub const NATIVE_MEMORY_EXTENSION_ID: &str = "ironclaw.memory";
@@ -54,7 +53,8 @@ pub const NATIVE_MEMORY_PROVIDER_SERVICE: &str = "native_memory_provider";
 const NATIVE_MEMORY_PACKAGE_ROOT: &str = "/system/extensions/ironclaw.memory";
 
 /// Raw bundled manifest TOML for the native memory extension.
-pub const NATIVE_MEMORY_MANIFEST_TOML: &str = include_str!("../assets/memory_native/manifest.toml");
+pub const NATIVE_MEMORY_MANIFEST_TOML: &str =
+    include_str!("../../extensions/packages/memory-native/manifest.toml");
 
 /// Reserved (host-bundled) extension id for the mem0 memory backend. Mirrors
 /// `ironclaw_memory_mem0::MEM0_MEMORY_EXTENSION_ID`; the `[memory]` binding
@@ -69,7 +69,8 @@ pub const MEM0_MEMORY_PROVIDER_SERVICE: &str = "mem0_memory_provider";
 /// declarations (under the stable `ironclaw.memory.*` ids) plus its honest
 /// lifecycle set. The mem0 `MemoryService` is constructed from `[memory]`
 /// config in composition, gated by the `memory-mem0` feature.
-pub const MEM0_MEMORY_MANIFEST_TOML: &str = include_str!("../assets/memory_mem0/manifest.toml");
+pub const MEM0_MEMORY_MANIFEST_TOML: &str =
+    include_str!("../../extensions/packages/mem0/manifest.toml");
 
 /// Parse the bundled `ironclaw.memory` manifest into the internal manifest
 /// model. Fail-closed: the reserved id, `first_party` runtime, `[memory]`
@@ -278,7 +279,7 @@ service = "acme_memoryless_provider"
 
     #[test]
     fn native_provider_bundle_declares_the_full_lifecycle() {
-        use ironclaw_host_api::memory::MemoryLifecycleHook;
+        use ironclaw_extension_contracts::memory::MemoryLifecycleHook;
         let bundle = native_memory_provider_bundle().expect("native bundle builds");
         assert_eq!(
             bundle.package.manifest.id.as_str(),
@@ -294,7 +295,7 @@ service = "acme_memoryless_provider"
 
     #[test]
     fn mem0_provider_bundle_builds_with_its_honest_lifecycle_and_tools() {
-        use ironclaw_host_api::memory::MemoryLifecycleHook;
+        use ironclaw_extension_contracts::memory::MemoryLifecycleHook;
         let bundle = mem0_memory_provider_bundle().expect("mem0 bundle builds");
         assert_eq!(
             bundle.package.manifest.id.as_str(),
@@ -374,7 +375,7 @@ service = "acme_memoryless_provider"
         // long-term retrieval lane and profile reads, has no thread
         // partitioning (no short-term lane), and does not record
         // interactions — undeclared hooks are never called by the host.
-        use ironclaw_host_api::memory::MemoryLifecycleHook;
+        use ironclaw_extension_contracts::memory::MemoryLifecycleHook;
         assert!(memory.declares(MemoryLifecycleHook::ReadLongTerm));
         assert!(memory.declares(MemoryLifecycleHook::ProfileRead));
         assert!(!memory.declares(MemoryLifecycleHook::ReadShortTerm));

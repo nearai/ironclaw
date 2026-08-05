@@ -29,6 +29,7 @@ use ironclaw_capabilities::{
 };
 use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
+use ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID;
 use ironclaw_host_api::{
     approval::sha256_digest_token,
     decision::{DenyReason, RuntimeCredentialAuthRequirement},
@@ -40,18 +41,16 @@ use ironclaw_host_api::{
     runtime_policy::EffectiveRuntimePolicy,
     scope::Principal,
 };
+use ironclaw_loop_contracts::LoopSafeSummary;
 use ironclaw_observability::live_latency_started_at;
-use ironclaw_process_sandbox::{
-    PROCESS_SANDBOX_CAPABILITY_ID, SandboxProcessPlan, ValidatedSandboxProcessPlan,
-};
 use ironclaw_processes::{
     ProcessError, ProcessInvocationError, ProcessInvocationStatePort, ProcessInvocationStatus,
     ProcessKind, ProcessManager, ProcessRuntimePort, ProcessServices, ProcessStart, ProcessStatus,
     map_process_journal_error, process_record_from_snapshot,
 };
+use ironclaw_sandbox::{SandboxProcessPlan, ValidatedSandboxProcessPlan};
 use ironclaw_secrets::SecretStorePort;
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
-use ironclaw_turns::run_profile::LoopSafeSummary;
 
 fn trace_capability_latency_ok(
     operation: &'static str,
@@ -1761,9 +1760,7 @@ fn dispatch_failure_message(
     // sentence. The full descriptive cause is NOT lost — it rides the private
     // `model_visible_cause` channel to the model-visible Diagnostic seam.
     safe_summary
-        .and_then(|summary| {
-            ironclaw_turns::run_profile::LoopSafeSummary::new(summary.to_string()).ok()
-        })
+        .and_then(|summary| ironclaw_loop_contracts::LoopSafeSummary::new(summary.to_string()).ok())
         .map(|summary| summary.as_str().to_string())
         .unwrap_or_else(|| kind.human_summary().to_string())
 }

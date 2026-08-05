@@ -40,7 +40,33 @@
 //! evaluation matrix, and `docs/reborn/contracts/host-api.md` (in the
 //! staging-track docs) for the broader Reborn vocabulary.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
+
+use crate::ids::CapabilityId;
+
+/// Untrusted input to the host trust policy engine.
+///
+/// Assembled by whoever holds a manifest-bearing package — the extension
+/// registry builds one from a resolved package — and consumed by
+/// `ironclaw_trust::TrustPolicy::evaluate`. It lives here rather than in
+/// `ironclaw_trust` because it is *requested-trust vocabulary*, like every
+/// other type in this module: it names no decision, no ceiling, and no
+/// provenance, only what a package asserts about itself. Keeping it here lets
+/// a package producer describe its trust request without depending on the
+/// policy engine that judges it (PROPOSAL §6.8.1: "`trust`-vocabulary via
+/// `host_api`").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustPolicyInput {
+    pub identity: PackageIdentity,
+    pub requested_trust: RequestedTrustClass,
+    /// Set of capabilities the package is requesting authority over.
+    /// Typed as `BTreeSet` (not `Vec`) so the policy engine sees a
+    /// canonicalized set — capability authority is conceptually a set,
+    /// not a multiset, and `[a, a, b]` should never differ from `[a, b]`.
+    pub requested_authority: BTreeSet<CapabilityId>,
+}
 
 /// Trust class declared by an untrusted package manifest or registry entry.
 ///
@@ -100,6 +126,10 @@ pub enum PackageSource {
     /// Fetched from a remote registry. Trust requires signature verification
     /// and a host-policy entry; PR1b only validates the source tag.
     Registry { url: String },
+    /// A tenant-registered remote package whose exact canonical endpoint is
+    /// part of its trust identity. Untrusted by default; policy may only match
+    /// the complete source value, including endpoint.
+    DirectRemote { endpoint: String },
     /// Operator/admin configuration assertion (e.g., trusted-package list set
     /// outside any user-controlled file).
     Admin,

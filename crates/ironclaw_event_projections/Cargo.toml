@@ -11,7 +11,6 @@ layer = "substrates"
 async-trait = "0.1"
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
-ironclaw_turns = { path = "../ironclaw_turns" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 

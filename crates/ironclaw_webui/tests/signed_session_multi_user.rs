@@ -21,11 +21,11 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
-use ironclaw_host_api::{
-    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
-    product_surface::{ProductSurface, ProductSurfaceCaller, ProductSurfaceError},
-};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product::RebornCreateThreadResponse;
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
+};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_webui::{
     EnvBearerAuthenticator, OAuthProvider, OAuthProviderName, OAuthUserProfile,
@@ -53,9 +53,11 @@ impl ProductSurface for RecordingServices {
     async fn invoke(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse, ProductSurfaceError>
-    {
+        request: ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
+        ProductSurfaceError,
+    > {
         if request.operation_id.as_str() != "thread.create" {
             return Err(ProductSurfaceError::service_unavailable(false));
         }
@@ -85,14 +87,14 @@ impl ProductSurface for RecordingServices {
             },
         })
         .map_err(ProductSurfaceError::internal_from)?;
-        Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
+        Ok(ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output })
     }
 
     async fn query(
         &self,
         _caller: ProductSurfaceCaller,
-        _request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+        _request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_product_contracts::surface::ProductSurfaceQueryPage, ProductSurfaceError>
     {
         Err(ProductSurfaceError::service_unavailable(false))
     }
@@ -100,9 +102,11 @@ impl ProductSurface for RecordingServices {
     async fn stream_events(
         &self,
         _caller: ProductSurfaceCaller,
-        _request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceStreamResponse, ProductSurfaceError>
-    {
+        _request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
+        ProductSurfaceError,
+    > {
         Err(ProductSurfaceError::service_unavailable(false))
     }
 }

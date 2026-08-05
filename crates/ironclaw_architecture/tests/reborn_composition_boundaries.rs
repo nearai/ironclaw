@@ -1,3 +1,6 @@
+#[allow(dead_code)]
+mod ratchet_support;
+
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -7,6 +10,12 @@ use std::{
 use serde_json::Value;
 
 const COMPOSITION_CRATE: &str = "ironclaw_reborn_composition";
+
+// Crate paths are spelled flat (`crates/ironclaw_x/...`) and RESOLVED through
+// the crate inventory, so the family move (PROPOSAL section 5) repoints them
+// without editing the literals. Identity on today's tree - pinned by
+// `reborn_crate_inventory.rs` (CHECKLIST WS10).
+use ratchet_support::{crate_path, workspace_root};
 
 const SUBSTRATE_CRATES: &[&str] = &[
     "ironclaw_auth",
@@ -29,7 +38,7 @@ const SUBSTRATE_CRATES: &[&str] = &[
     "ironclaw_memory",
     "ironclaw_host_runtime",
     "ironclaw_mcp",
-    "ironclaw_scripts",
+    "ironclaw_sandbox",
     "ironclaw_wasm",
     "ironclaw_turns",
     "ironclaw_threads",
@@ -64,17 +73,20 @@ fn composition_root_is_workspace_member() {
 
 #[test]
 fn composition_public_api_is_service_shaped() {
-    let lib = std::fs::read_to_string(
-        workspace_root().join("crates/ironclaw_reborn_composition/src/lib.rs"),
-    )
+    let lib = std::fs::read_to_string(crate_path(
+        &workspace_root(),
+        "crates/ironclaw_reborn_composition/src/lib.rs",
+    ))
     .expect("composition lib readable");
-    let input = std::fs::read_to_string(
-        workspace_root().join("crates/ironclaw_reborn_composition/src/input.rs"),
-    )
+    let input = std::fs::read_to_string(crate_path(
+        &workspace_root(),
+        "crates/ironclaw_reborn_composition/src/input.rs",
+    ))
     .expect("composition input readable");
-    let factory = std::fs::read_to_string(
-        workspace_root().join("crates/ironclaw_reborn_composition/src/factory.rs"),
-    )
+    let factory = std::fs::read_to_string(crate_path(
+        &workspace_root(),
+        "crates/ironclaw_reborn_composition/src/factory.rs",
+    ))
     .expect("composition factory readable");
     let public_surface = format!("{lib}\n{input}\n{factory}");
 
@@ -109,6 +121,68 @@ fn composition_public_api_is_service_shaped() {
             "composition root public API must not expose `{forbidden}`"
         );
     }
+}
+
+/// The composition root owns assembly, not prompt text. Prompt content is a
+/// behavior of the crate that puts it in front of a model, so it lives in that
+/// crate's `prompts/` directory (`ironclaw_loop_host` for the system prompt and
+/// the identity-context protocols; `ironclaw_skills`, `ironclaw_turns` and the
+/// extension packages for theirs) — CHECKLIST WS6 "system-prompt content →
+/// owning prompt asset", PROPOSAL §6.10.1, and the house rule that prompt
+/// templates live in files inside the crate that owns the behavior.
+///
+/// Embedding *config-as-data* is still composition's charter, so this scan is
+/// keyed on markdown, not on `include_str!` (`builtin_capability_policy.toml`
+/// is deliberately unaffected).
+#[test]
+fn composition_root_embeds_no_prompt_content() {
+    let crate_root = workspace_root().join("crates/ironclaw_reborn_composition");
+
+    let sources = rust_sources(&crate_root.join("src"));
+    // `rust_sources` panics on an unreadable directory or entry, so an
+    // *incomplete* walk is already loud. This floor covers the case that stays
+    // silent: a walk that reads a perfectly good directory which is no longer
+    // the crate — after the WS7 family move relocates `crates/…` under a family
+    // directory, a stale path can resolve to something small and readable
+    // rather than erroring.
+    assert!(
+        sources.len() >= 50,
+        "expected the composition source walk to reach at least 50 files, saw {} — \
+         the scan below cannot be trusted",
+        sources.len()
+    );
+
+    let embedded_markdown: Vec<String> = sources
+        .iter()
+        .flat_map(|(path, contents)| {
+            markdown_include_sites(contents)
+                .into_iter()
+                .map(|site| format!("{}: {site}", path.display()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(
+        embedded_markdown.is_empty(),
+        "the composition root must not embed markdown prompt content; move the asset \
+         into the `prompts/` directory of the crate that owns the behavior and export \
+         it as a `pub const` (see PROPOSAL §6.10.1). Offending sites:\n{}",
+        embedded_markdown.join("\n")
+    );
+
+    // A prompt asset that is *shipped* but not yet embedded is the same debt one
+    // commit earlier, so the directory itself is pinned rather than only its
+    // `include_str!` call sites. Crate guides (`AGENTS.md` / `CLAUDE.md`) are
+    // documentation, not prompt content.
+    let shipped_markdown: Vec<String> = shipped_non_guidance_markdown(&crate_root)
+        .into_iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    assert!(
+        shipped_markdown.is_empty(),
+        "the composition root ships markdown assets that are not crate guidance; \
+         prompt content belongs to its owning crate's `prompts/` directory. Found:\n{}",
+        shipped_markdown.join("\n")
+    );
 }
 
 #[test]
@@ -165,8 +239,9 @@ fn extension_host_cluster_stays_internal() {
 #[test]
 fn reborn_binary_main_is_thin_bootstrap() {
     let root = workspace_root();
-    let reborn_main = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/src/main.rs"))
-        .expect("reborn cli main.rs readable");
+    let reborn_main =
+        std::fs::read_to_string(crate_path(&root, "crates/ironclaw_reborn_cli/src/main.rs"))
+            .expect("reborn cli main.rs readable");
 
     assert!(
         reborn_main.contains("cli::run()"),
@@ -208,7 +283,7 @@ fn reborn_binary_main_is_thin_bootstrap() {
 /// is `HookRegistrar::install`.
 #[test]
 fn composition_crate_installs_installed_tier_only_through_registrar() {
-    let crate_src = workspace_root().join("crates/ironclaw_reborn_composition/src");
+    let crate_src = crate_path(&workspace_root(), "crates/ironclaw_reborn_composition/src");
     let sources = rust_sources(&crate_src);
     assert!(
         !sources.is_empty(),
@@ -320,7 +395,7 @@ const EXTENSION_HOST_EXTERNALIZED_GENERIC_MODULES: &[&str] = &[
 ];
 
 fn composition_src_path() -> PathBuf {
-    workspace_root().join("crates/ironclaw_reborn_composition/src")
+    crate_path(&workspace_root(), "crates/ironclaw_reborn_composition/src")
 }
 
 fn extract_pub_use_surface(contents: &str) -> String {
@@ -381,17 +456,93 @@ fn is_test_module_file(path: &Path) -> bool {
             .any(|component| component.as_os_str() == "tests")
 }
 
+/// Is this file crate guidance rather than a shipped asset?
+///
+/// `CONTRACT.MD` belongs here for the same reason as the other three: the repo
+/// already ships it as crate-local guidance (`ironclaw_reborn_identity`,
+/// `ironclaw_trust`) and CLAUDE.md's module-spec table names it. Without it, a
+/// composition `CONTRACT.md` would be reported as prompt content and send the
+/// author to the wrong fix.
+fn is_crate_guidance(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            matches!(
+                name.to_ascii_uppercase().as_str(),
+                "AGENTS.MD" | "CLAUDE.MD" | "README.MD" | "CONTRACT.MD"
+            )
+        })
+}
+
+/// The markdown a crate *ships* — every `.md` under it that is not crate
+/// guidance.
+///
+/// The gate and its test both go through this, so a change to the guidance
+/// allowlist cannot pass because the test carries its own stale copy of it.
+fn shipped_non_guidance_markdown(dir: &Path) -> Vec<PathBuf> {
+    markdown_assets(dir)
+        .into_iter()
+        .filter(|path| !is_crate_guidance(path))
+        .collect()
+}
+
+/// Refuse a symlink handed in as the *root* of either walk.
+///
+/// `reject_symlink` below only sees entries `read_dir` yields, and both walks
+/// push their root onto the stack before that ever runs — so a symlinked root
+/// was followed to its target silently, which is the same hole one level up.
+fn reject_symlink_root(dir: &Path) {
+    let metadata = std::fs::symlink_metadata(dir)
+        .unwrap_or_else(|error| panic!("readable walk root {dir:?}: {error}"));
+    reject_symlink(&metadata.file_type(), dir);
+}
+
+/// Refuse a symlink encountered by either ownership walk.
+///
+/// `DirEntry::file_type()` reports the **link's** type without following it, so
+/// a symlink pointing at a source directory is neither `is_dir()` nor an `.rs`
+/// file — the walk would step over the whole subtree and the gate would report
+/// clean on source it never opened. That is the same "uninspected reads as
+/// absent" failure the fail-closed reads above exist to prevent.
+///
+/// Rejecting is chosen over following: following needs canonical-root
+/// containment plus cycle detection to be safe, and neither crate scanned here
+/// has ever contained a symlink. If one is ever wanted, this panic is where the
+/// decision gets made deliberately rather than silently.
+fn reject_symlink(file_type: &std::fs::FileType, path: &Path) {
+    assert!(
+        !file_type.is_symlink(),
+        "{path:?} is a symlink; the composition ownership walks do not follow \
+         symlinks, and stepping over one would let the gate report clean on a \
+         subtree it never read. Replace it with a real path, or teach both walks \
+         to follow links with canonical-root and cycle protection."
+    );
+}
+
 /// Recursively collect `(path, contents)` for every `.rs` file under `dir`.
 fn rust_sources(dir: &Path) -> Vec<(PathBuf, String)> {
+    reject_symlink_root(dir);
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
-        let Ok(read) = std::fs::read_dir(&current) else {
-            continue;
-        };
-        for entry in read.flatten() {
+        // Fail closed: this walk feeds ownership gates, and a skipped directory
+        // makes "could not look" indistinguishable from "nothing there". The
+        // file-contents read below has always panicked on failure; the
+        // directory read now matches it.
+        let read = std::fs::read_dir(&current)
+            .unwrap_or_else(|error| panic!("readable directory {current:?}: {error}"));
+        for entry in read {
+            let entry =
+                entry.unwrap_or_else(|error| panic!("readable entry under {current:?}: {error}"));
             let path = entry.path();
-            if path.is_dir() {
+            // `Path::is_dir()` returns `false` on a metadata error, which would
+            // silently drop an unreadable directory out of the walk. Ask the
+            // entry and fail loud instead, matching `markdown_assets`.
+            let file_type = entry
+                .file_type()
+                .unwrap_or_else(|error| panic!("readable file type for {path:?}: {error}"));
+            reject_symlink(&file_type, &path);
+            if file_type.is_dir() {
                 stack.push(path);
             } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
                 let contents = std::fs::read_to_string(&path)
@@ -425,14 +576,6 @@ fn cargo_metadata() -> Value {
     serde_json::from_slice(&output.stdout).expect("metadata json")
 }
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("architecture crate under crates")
-        .to_path_buf()
-}
-
 fn package_dependencies(package: &Value) -> Option<(String, Vec<String>)> {
     let name = package["name"].as_str()?.to_string();
     let dependencies = package["dependencies"]
@@ -450,4 +593,409 @@ fn package_dependencies(package: &Value) -> Option<(String, Vec<String>)> {
         .map(ToString::to_string)
         .collect();
     Some((name, dependencies))
+}
+
+/// Every `include_str!` / `include_bytes!` invocation in `contents` whose
+/// argument names a markdown file, rendered as a normalized single line.
+///
+/// Scans from each macro-name occurrence to the end of its **statement** (the
+/// next `;`) rather than to the first `)`. Parsing the argument is what makes
+/// this class of gate leaky, and every leak is silent: `rustfmt` wraps a long
+/// argument onto its own line, so a per-line scan misses it;
+/// `include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/prompt.md"))` closes its
+/// *first* `)` before the path is ever seen, so a first-paren scan misses it;
+/// and `include_str !(…)` plus comments inside the argument are both legal and
+/// defeat naive tokenizing. A statement-bounded span is immune to all three:
+/// whatever the nesting, spacing or line breaks, the path literal is inside it.
+///
+/// It errs toward **over**-reporting — a comment mentioning `.md` inside an
+/// include statement is flagged. That direction is deliberate: a false positive
+/// is a loud failure a human resolves in one line, a false negative is prompt
+/// content silently back in the composition root.
+fn markdown_include_sites(contents: &str) -> Vec<String> {
+    let bytes = contents.as_bytes();
+    let mut out = Vec::new();
+    for macro_name in ["include_str", "include_bytes"] {
+        let mut cursor = 0usize;
+        while let Some(offset) = contents[cursor..].find(macro_name) {
+            let start = cursor + offset;
+            cursor = start + macro_name.len();
+
+            // Whole identifier only: `my_include_str!` is a different macro.
+            if start > 0 {
+                let previous = bytes[start - 1];
+                if previous.is_ascii_alphanumeric() || previous == b'_' {
+                    continue;
+                }
+            }
+            // It must actually be invoked as a macro; whitespace between the
+            // name and `!` is legal Rust.
+            let mut probe = cursor;
+            while probe < bytes.len() && bytes[probe].is_ascii_whitespace() {
+                probe += 1;
+            }
+            if bytes.get(probe) != Some(&b'!') {
+                continue;
+            }
+
+            let statement_end = statement_end_after(contents, start);
+            let statement = &contents[start..statement_end];
+            if statement.to_ascii_lowercase().contains(".md") {
+                out.push(statement.split_whitespace().collect::<Vec<_>>().join(" "));
+            }
+            cursor = statement_end;
+        }
+    }
+    out
+}
+
+/// Index of the first `;` at or after `from` that actually terminates a Rust
+/// statement — i.e. one that is not inside a string literal, a raw string, a
+/// char literal, a line comment, or a (nestable) block comment. Returns
+/// `contents.len()` if there is none.
+///
+/// A plain `.find(';')` is wrong in both directions that matter here: a `;` in
+/// a doc-ish comment above the path (`// see note; below`) or inside the path
+/// literal itself would end the span *before* the `.md`, and the gate would go
+/// quiet. Skipping trivia is the smallest correct thing — this only has to find
+/// a delimiter, not parse the expression.
+fn statement_end_after(contents: &str, from: usize) -> usize {
+    let bytes = contents.as_bytes();
+    let mut i = from;
+    let mut block_depth = 0usize;
+    while i < bytes.len() {
+        let rest = &bytes[i..];
+        if block_depth > 0 {
+            if rest.starts_with(b"/*") {
+                block_depth += 1;
+                i += 2;
+            } else if rest.starts_with(b"*/") {
+                block_depth -= 1;
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if rest.starts_with(b"//") {
+            i += contents[i..].find('\n').map_or(bytes.len() - i, |n| n + 1);
+            continue;
+        }
+        if rest.starts_with(b"/*") {
+            block_depth = 1;
+            i += 2;
+            continue;
+        }
+        // Raw string: `r` followed by any number of `#` then `"`.
+        if bytes[i] == b'r' {
+            let mut hashes = 0usize;
+            while bytes.get(i + 1 + hashes) == Some(&b'#') {
+                hashes += 1;
+            }
+            if bytes.get(i + 1 + hashes) == Some(&b'"') {
+                let terminator = format!("\"{}", "#".repeat(hashes));
+                let body = i + 2 + hashes;
+                i = contents[body..]
+                    .find(&terminator)
+                    .map_or(bytes.len(), |n| body + n + terminator.len());
+                continue;
+            }
+        }
+        if bytes[i] == b'"' {
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' {
+                i += if bytes[i] == b'\\' { 2 } else { 1 };
+            }
+            i += 1;
+            continue;
+        }
+        // Char literal, but not a lifetime (`'a`) — a lifetime has no closing
+        // quote, so require one within three bytes (`'x'` / `'\n'`).
+        if bytes[i] == b'\'' {
+            let escaped = bytes.get(i + 1) == Some(&b'\\');
+            let close = if escaped { i + 3 } else { i + 2 };
+            if bytes.get(close) == Some(&b'\'') {
+                i = close + 1;
+                continue;
+            }
+        }
+        if bytes[i] == b';' {
+            return i;
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+/// Recursively collect every markdown file under `dir`, skipping build output.
+///
+/// Fails closed: an unreadable directory or entry panics rather than being
+/// skipped, because "the walk could not see it" and "there is nothing there"
+/// must not look the same to an ownership gate. Extensions are compared
+/// case-insensitively so a `.MD` asset cannot slip past.
+fn markdown_assets(dir: &Path) -> Vec<PathBuf> {
+    reject_symlink_root(dir);
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let read = std::fs::read_dir(&current)
+            .unwrap_or_else(|error| panic!("readable directory {current:?}: {error}"));
+        for entry in read {
+            let entry =
+                entry.unwrap_or_else(|error| panic!("readable entry under {current:?}: {error}"));
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .unwrap_or_else(|error| panic!("readable file type for {path:?}: {error}"));
+            reject_symlink(&file_type, &path);
+            if file_type.is_dir() {
+                if path.file_name().and_then(|name| name.to_str()) == Some("target") {
+                    continue;
+                }
+                stack.push(path);
+            } else if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+            {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[cfg(test)]
+mod markdown_include_scan_tests {
+    use super::markdown_include_sites;
+
+    #[test]
+    fn single_line_markdown_include_is_detected() {
+        assert_eq!(
+            markdown_include_sites("const A: &str = include_str!(\"../a/prompt.md\");").len(),
+            1
+        );
+    }
+
+    /// `rustfmt` wrapping a long path onto its own line used to make the site
+    /// invisible to a per-line scan.
+    #[test]
+    fn multiline_markdown_include_is_detected() {
+        assert_eq!(
+            markdown_include_sites(
+                "const A: &str = include_str!(\n    \"../../assets/prompts/a-very-long-name.md\"\n);",
+            ),
+            vec!["include_str!( \"../../assets/prompts/a-very-long-name.md\" )".to_string()]
+        );
+    }
+
+    /// A nested argument macro closes an inner `)` before the path appears, so
+    /// a first-paren scan reported clean.
+    #[test]
+    fn nested_argument_macro_is_detected() {
+        assert_eq!(
+            markdown_include_sites(
+                "const A: &str = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/prompt.md\"));",
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn whitespace_before_the_bang_is_detected() {
+        assert_eq!(
+            markdown_include_sites("const A: &str = include_str !(\"../prompt.md\");").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn comment_inside_the_argument_does_not_hide_the_path() {
+        assert_eq!(
+            markdown_include_sites(
+                "const A: &str = include_str!(\n    // seeded once at boot\n    \"../prompt.md\",\n);",
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn uppercase_markdown_extension_is_detected() {
+        assert_eq!(
+            markdown_include_sites("const A: &[u8] = include_bytes!(\"../PROMPT.MD\");").len(),
+            1
+        );
+    }
+
+    /// Config-as-data stays composition's charter, so a non-markdown include is
+    /// not a finding.
+    #[test]
+    fn non_markdown_include_is_not_a_finding() {
+        assert!(
+            markdown_include_sites(
+                "const P: &str = include_str!(\"builtin_capability_policy.toml\");"
+            )
+            .is_empty()
+        );
+    }
+
+    /// A `;` in a comment above the path used to end the span before the path
+    /// was reached, which made the gate go quiet on real content.
+    #[test]
+    fn semicolon_in_a_comment_does_not_end_the_statement() {
+        assert_eq!(
+            markdown_include_sites(
+                "const A: &str = include_str!(\n    // see the note; below\n    \"../prompt.md\",\n);",
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            markdown_include_sites(
+                "const A: &str = include_str!(\n    /* one; two */\n    \"../prompt.md\",\n);",
+            )
+            .len(),
+            1
+        );
+    }
+
+    /// The same hole one level in: a `;` inside the path literal itself.
+    #[test]
+    fn semicolon_inside_a_string_literal_does_not_end_the_statement() {
+        assert_eq!(
+            markdown_include_sites("const A: &str = include_str!(\"../a;b/prompt.md\");").len(),
+            1
+        );
+        assert_eq!(
+            markdown_include_sites("const A: &str = include_str!(r#\"../a;b/prompt.md\"#);").len(),
+            1
+        );
+    }
+
+    /// The span must still *stop*: a markdown path in the next statement is not
+    /// this include's finding, or every non-markdown include would false-positive.
+    #[test]
+    fn the_span_stops_at_the_real_statement_end() {
+        assert!(
+            markdown_include_sites(
+                "const P: &str = include_str!(\"policy.toml\");\nconst Q: &str = \"../prompt.md\";"
+            )
+            .is_empty()
+        );
+    }
+
+    /// `markdown_assets` had no test beyond the symlink panic, so two behaviours
+    /// the gate's message depends on were unpinned: the case-insensitive `.md`
+    /// match, and the guidance-file exemption applied by the caller. Both drift
+    /// in the *quiet* direction — a missed asset makes the shipped-asset
+    /// assertion pass on a crate it never really checked.
+    #[test]
+    fn markdown_assets_matches_any_case_and_the_caller_keeps_only_non_guidance() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("AGENTS.md"), "# guidance\n").expect("write guidance");
+        std::fs::write(root.path().join("CONTRACT.md"), "# contract\n").expect("write contract");
+        std::fs::create_dir(root.path().join("prompts")).expect("create prompts dir");
+        std::fs::write(root.path().join("prompts/seed.MD"), "# prompt\n").expect("write prompt");
+        std::fs::write(root.path().join("policy.toml"), "k = 1\n").expect("write config");
+
+        let mut found: Vec<String> = super::markdown_assets(root.path())
+            .into_iter()
+            .map(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("utf-8 file name")
+                    .to_string()
+            })
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            vec!["AGENTS.md", "CONTRACT.md", "seed.MD"],
+            "the walk must find markdown in any case and must not pick up `policy.toml` \
+             (config-as-data is squarely composition's charter)"
+        );
+
+        // Drives the **production** filter, not a copy of it. A copied
+        // allowlist would keep returning `seed.MD` even if the real gate
+        // started dropping `CONTRACT.MD` — the gate would go quiet and this
+        // test would not notice ("test through the caller").
+        let mut shipped: Vec<String> = super::shipped_non_guidance_markdown(root.path())
+            .into_iter()
+            .map(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("utf-8 file name")
+                    .to_string()
+            })
+            .collect();
+        shipped.sort();
+        assert_eq!(
+            shipped,
+            vec!["seed.MD"],
+            "only the non-guidance asset may survive the filter, and `.MD` must survive it"
+        );
+
+        // Each guidance name individually, so dropping one from the allowlist
+        // fails here rather than only when someone adds that file to the
+        // composition crate.
+        for name in ["AGENTS.md", "CLAUDE.md", "README.md", "CONTRACT.md"] {
+            assert!(
+                super::is_crate_guidance(std::path::Path::new(name)),
+                "{name} must be treated as crate guidance, not as a shipped asset"
+            );
+        }
+    }
+
+    /// A symlinked subtree used to be stepped over silently by both walks,
+    /// because `DirEntry::file_type()` reports the link, not its target.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_subtree_fails_the_walk_instead_of_being_skipped() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).expect("create real dir");
+        std::fs::write(real.join("a.rs"), "// nothing\n").expect("write source");
+        std::os::unix::fs::symlink(&real, root.path().join("linked")).expect("symlink");
+
+        let panicked = std::panic::catch_unwind(|| super::rust_sources(root.path()));
+        assert!(
+            panicked.is_err(),
+            "a symlinked subtree must fail the walk, not be skipped"
+        );
+
+        let panicked = std::panic::catch_unwind(|| super::markdown_assets(root.path()));
+        assert!(
+            panicked.is_err(),
+            "a symlinked subtree must fail the markdown walk too"
+        );
+
+        // The root itself is pushed onto the stack before `read_dir` ever runs,
+        // so a symlinked *root* used to be followed to its target silently.
+        let linked_root = root.path().join("linked_root");
+        std::os::unix::fs::symlink(&real, &linked_root).expect("symlink root");
+        for label in ["rust_sources", "markdown_assets"] {
+            let linked_root = linked_root.clone();
+            let panicked = std::panic::catch_unwind(move || {
+                if label == "rust_sources" {
+                    super::rust_sources(&linked_root);
+                } else {
+                    super::markdown_assets(&linked_root);
+                }
+            });
+            assert!(
+                panicked.is_err(),
+                "a symlinked walk root must fail {label}, not be followed"
+            );
+        }
+    }
+
+    /// The macro name must be a whole identifier and must be invoked.
+    #[test]
+    fn similar_identifiers_are_not_findings() {
+        assert!(markdown_include_sites("let my_include_str = \"a.md\";").is_empty());
+        assert!(markdown_include_sites("let include_str_path = \"a.md\";").is_empty());
+    }
 }

@@ -7,7 +7,9 @@ use ironclaw_host_api::{
     ids::{ExtensionId, UserId},
     runtime::RuntimeKind,
 };
-use ironclaw_product::{RebornOperatorToolCatalog, RebornOperatorToolInfo};
+use ironclaw_product_contracts::operator_tools::{
+    RebornOperatorToolCatalog, RebornOperatorToolInfo,
+};
 
 use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 

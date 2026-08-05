@@ -35,6 +35,17 @@ boundary. The current rule is codified in
   `LibSqlRootFilesystem`, `InMemoryBackend`, `HsmBackend`. All implement
   `RootFilesystem` (re-derive with
   `rg -n "impl RootFilesystem for" src/`).
+- `PostgresConnectionPool` (`src/postgres.rs`) — the workspace's own carrier for
+  an opened `deadpool_postgres::Pool`. This crate is the Postgres substrate, so
+  the driver is a chartered dependency *here*; crates above that only pass a
+  pool along name this type instead, so a third-party type stops appearing in
+  their public APIs (PROPOSAL §6.3.2/§11.2.6). It is a carrier, not an
+  abstraction — `driver()` / `into_driver()` hand the pool to code that actually
+  runs SQL — and it deliberately does **not** implement `Deref` (an implicit
+  unwrap would let the driver back into a signature unnoticed) or a derived
+  `Debug` (the driver's own `Debug` prints host/user/dbname/port).
+  `crates/ironclaw_architecture/tests/reborn_persistence_driver_boundary.rs`
+  pins which crates may link the driver at all.
 - Backend containment checks (symlink traversal, mount escape, raw-host
   path prevention).
 - `FaultInjecting` (`src/fault.rs`, behind the `test-support` feature) — a

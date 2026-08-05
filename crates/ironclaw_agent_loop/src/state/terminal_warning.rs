@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use ironclaw_turns::LoopFailureKind;
+use ironclaw_loop_contracts::LoopFailureKind;
 
 const TERMINAL_WARNING_SCHEMA_VERSION: u32 = 1;
 

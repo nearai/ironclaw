@@ -5,6 +5,9 @@
 //! execute WASM modules, start Docker containers, connect to MCP servers, resolve
 //! secrets, or reserve resources.
 
+use ironclaw_extension_contracts::runtime::{
+    ExtensionAssetPath, ExtensionAssetPathError, ExtensionRuntime,
+};
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     action::ExtensionLifecycleOperation,
@@ -16,6 +19,8 @@ use ironclaw_host_api::{
     trust::RequestedTrustClass,
 };
 use thiserror::Error;
+
+mod definition_admission;
 
 /// Extension manifest and registry failures.
 #[derive(Debug, Error)]
@@ -51,99 +56,64 @@ pub enum ExtensionError {
     Filesystem(#[from] FilesystemError),
 }
 
-/// Manifest-local path for assets such as WASM modules.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ExtensionAssetPath(String);
-
-impl ExtensionAssetPath {
-    pub fn new(value: impl Into<String>) -> Result<Self, ExtensionError> {
-        let value = value.into();
-        validate_asset_path(&value)?;
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn resolve_under(&self, root: &VirtualPath) -> Result<VirtualPath, ExtensionError> {
-        VirtualPath::new(format!(
-            "{}/{}",
-            root.as_str().trim_end_matches('/'),
-            self.0
-        ))
-        .map_err(ExtensionError::from)
+impl From<ExtensionAssetPathError> for ExtensionError {
+    fn from(error: ExtensionAssetPathError) -> Self {
+        Self::InvalidAssetPath {
+            path: error.path,
+            reason: error.reason,
+        }
     }
 }
 
-/// Declarative runtime metadata for an extension package after boundary
-/// validation has converted manifest strings into typed internal values.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExtensionRuntime {
-    Wasm {
-        module: ExtensionAssetPath,
-    },
-    Script {
-        runner: String,
-        image: Option<String>,
-        command: String,
-        args: Vec<String>,
-    },
-    Mcp {
-        transport: String,
-        command: Option<String>,
-        args: Vec<String>,
-        url: Option<String>,
-    },
-    FirstParty {
-        service: String,
-    },
-    System {
-        service: String,
-    },
+/// Resolve a manifest-local asset path under a package root.
+///
+/// A free function rather than an inherent method: [`ExtensionAssetPath`] is
+/// declared in `ironclaw_extension_contracts` (which may not name
+/// `ironclaw_filesystem`), and the orphan rule forbids an inherent impl on a
+/// foreign type. Same cost the WS1.4 DTO moves recorded.
+pub fn resolve_asset_under(
+    asset: &ExtensionAssetPath,
+    root: &VirtualPath,
+) -> Result<VirtualPath, ExtensionError> {
+    VirtualPath::new(format!(
+        "{}/{}",
+        root.as_str().trim_end_matches('/'),
+        asset.as_str()
+    ))
+    .map_err(ExtensionError::from)
 }
 
-impl ExtensionRuntime {
-    pub fn kind(&self) -> RuntimeKind {
-        match self {
-            Self::Wasm { .. } => RuntimeKind::Wasm,
-            Self::Script { .. } => RuntimeKind::Script,
-            Self::Mcp { .. } => RuntimeKind::Mcp,
-            Self::FirstParty { .. } => RuntimeKind::FirstParty,
-            Self::System { .. } => RuntimeKind::System,
-        }
-    }
-
-    fn from_v2(runtime: ExtensionRuntimeV2) -> Result<Self, ExtensionError> {
-        match runtime {
-            ExtensionRuntimeV2::Wasm { module } => Ok(Self::Wasm {
-                module: ExtensionAssetPath::new(module)?,
-            }),
-            ExtensionRuntimeV2::Script {
-                runner,
-                image,
-                command,
-                args,
-            } => Ok(Self::Script {
-                runner,
-                image,
-                command,
-                args,
-            }),
-            ExtensionRuntimeV2::Mcp {
-                transport,
-                command,
-                args,
-                url,
-            } => Ok(Self::Mcp {
-                transport,
-                command,
-                args,
-                url,
-            }),
-            ExtensionRuntimeV2::FirstParty { service } => Ok(Self::FirstParty { service }),
-            ExtensionRuntimeV2::System { service } => Ok(Self::System { service }),
-        }
+fn extension_runtime_from_v2(
+    runtime: ExtensionRuntimeV2,
+) -> Result<ExtensionRuntime, ExtensionError> {
+    match runtime {
+        ExtensionRuntimeV2::Wasm { module } => Ok(ExtensionRuntime::Wasm {
+            module: ExtensionAssetPath::new(module)?,
+        }),
+        ExtensionRuntimeV2::Script {
+            runner,
+            image,
+            command,
+            args,
+        } => Ok(ExtensionRuntime::Script {
+            runner,
+            image,
+            command,
+            args,
+        }),
+        ExtensionRuntimeV2::Mcp {
+            transport,
+            command,
+            args,
+            url,
+        } => Ok(ExtensionRuntime::Mcp {
+            transport,
+            command,
+            args,
+            url,
+        }),
+        ExtensionRuntimeV2::FirstParty { service } => Ok(ExtensionRuntime::FirstParty { service }),
+        ExtensionRuntimeV2::System { service } => Ok(ExtensionRuntime::System { service }),
     }
 }
 
@@ -207,7 +177,7 @@ impl TryFrom<ExtensionManifestV2> for ExtensionManifest {
             source: manifest.source,
             requested_trust: manifest.requested_trust,
             descriptor_trust_default: manifest.descriptor_trust_default,
-            runtime: ExtensionRuntime::from_v2(manifest.runtime)?,
+            runtime: extension_runtime_from_v2(manifest.runtime)?,
             host_apis: manifest.host_apis,
             capabilities: manifest.capabilities,
             host_api_surfaces: manifest.host_api_surfaces,
@@ -228,6 +198,7 @@ pub mod resolved;
 pub mod v2;
 pub mod v3;
 
+pub use definition_admission::{PackageDefinitionAdmissionOutcome, PackageDefinitionRetention};
 pub use package::{CapabilityDescriptorSchemaMode, ExtensionPackage};
 
 pub use admin_configuration::{
@@ -237,13 +208,17 @@ pub use admin_configuration::{
 pub use host_api::capability_provider::{
     CAPABILITY_PROVIDER_HOST_API_ID, CAPABILITY_PROVIDER_SECTION, CapabilityProviderHostApiContract,
 };
+pub use host_api::default_host_api_contract_registry;
+// `HostedMcpDiscoveredTool`/`HostedMcpDiscoveredToolAnnotations` are NOT
+// re-exported here: they now live in
+// `ironclaw_extension_contracts::hosted_mcp`, and §11.2.4's one-import-path
+// rule forbids a second path to a contract.
 pub use hosted_mcp_discovery::{
-    HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations, is_hosted_http_mcp_package,
-    package_with_discovered_hosted_mcp_tools,
+    is_hosted_http_mcp_package, package_with_discovered_hosted_mcp_tools,
 };
 pub use resolved::{
-    ResolvedAuthSurface, ResolvedExtensionManifest, ResolvedHostApiRef, ResolvedMcpDeclaration,
-    ResolvedSectionSurface,
+    PackageRootBinding, PackageRootError, ResolvedAuthSurface, ResolvedExtensionManifest,
+    ResolvedHostApiRef, ResolvedMcpDeclaration, ResolvedSectionSurface,
 };
 pub use v2::{
     CapabilityDeclV2, CapabilitySurfaceDeclV2, CapabilityVisibility, ExtensionManifestV2,
@@ -251,7 +226,7 @@ pub use v2::{
     HostApiManifestContext, HostApiManifestContract, HostApiManifestProjection,
     HostApiMultiplicity, HostApiRefV2, HostApiSectionError, MANIFEST_SCHEMA_VERSION,
     MAX_HOOK_ENTRY_BYTES, MAX_MANIFEST_BYTES, MAX_MANIFEST_HOOKS, ManifestSectionPath,
-    ManifestSource, ManifestV2Error, RESERVED_HOST_BUNDLED_ID_PREFIX,
+    ManifestSource, ManifestV2Error, RESERVED_HOST_BUNDLED_ID_PREFIX, RESERVED_MCP_ID_PREFIX,
 };
 pub use v3::{MANIFEST_SCHEMA_VERSION_V3, ManifestV3Error};
 
@@ -263,8 +238,8 @@ pub use installations::{
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
     ExtensionInstallationStore, ExtensionInstallationStorePort, ExtensionManifestRecord,
     ExtensionManifestRef, ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId,
-    ExtensionRemovalCleanupBinding, ExtensionRemovalCleanupRequirement, InstallationOwner,
-    ManifestHash, MembershipDeactivation,
+    ExtensionRemovalCleanupBinding, ExtensionRemovalCleanupRequirement, InstallationIncarnationId,
+    InstallationOwner, ManifestHash, MembershipDeactivation,
 };
 pub use lifecycle::{
     ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
@@ -500,52 +475,4 @@ pub struct DiscoveryQuarantine {
 pub struct TolerantBoundedDiscovery {
     pub registry: ExtensionRegistry,
     pub quarantined: Vec<DiscoveryQuarantine>,
-}
-
-fn validate_asset_path(value: &str) -> Result<(), ExtensionError> {
-    if value.is_empty() {
-        return Err(ExtensionError::InvalidAssetPath {
-            path: value.to_string(),
-            reason: "asset path must not be empty".to_string(),
-        });
-    }
-    if value.contains('\0') || value.chars().any(char::is_control) {
-        return Err(ExtensionError::InvalidAssetPath {
-            path: value.to_string(),
-            reason: "NUL/control characters are not allowed".to_string(),
-        });
-    }
-    if value.contains("://") {
-        return Err(ExtensionError::InvalidAssetPath {
-            path: value.to_string(),
-            reason: "URLs are not extension asset paths".to_string(),
-        });
-    }
-    if value.starts_with('/') {
-        return Err(ExtensionError::InvalidAssetPath {
-            path: value.to_string(),
-            reason: "asset path must be relative".to_string(),
-        });
-    }
-    if looks_like_windows_path(value) || value.contains('\\') {
-        return Err(ExtensionError::InvalidAssetPath {
-            path: value.to_string(),
-            reason: "host path separators are not allowed".to_string(),
-        });
-    }
-    for segment in value.split('/') {
-        if segment.is_empty() || segment == "." || segment == ".." {
-            return Err(ExtensionError::InvalidAssetPath {
-                path: value.to_string(),
-                reason: "empty or dot path segments are not allowed".to_string(),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn looks_like_windows_path(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
-        || (bytes.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/'))
 }

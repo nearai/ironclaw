@@ -1,12 +1,8 @@
-use std::sync::Arc;
-
 use ironclaw_extensions::InstallationOwner;
 use ironclaw_host_api::{
     action::NetworkTargetPattern,
     capability::{CapabilityDescriptor, EffectKind, PermissionMode, RuntimeCredentialRequirement},
-    http::RuntimeHttpEgress,
     ids::{CapabilityId, ExtensionId},
-    resource::ResourceScope,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,15 +20,6 @@ pub struct ActiveExtensionCapability {
     pub owner: InstallationOwner,
 }
 
-#[derive(Clone)]
-pub enum ExtensionActivationMode {
-    Static,
-    HostedMcpDiscovery {
-        scope: ResourceScope,
-        runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
-    },
-}
-
 impl ActiveExtensionCapability {
     pub fn from_descriptor(descriptor: &CapabilityDescriptor, owner: InstallationOwner) -> Self {
         Self {
@@ -44,21 +31,6 @@ impl ActiveExtensionCapability {
             network_targets: descriptor.network_targets.clone(),
             max_egress_bytes: descriptor.max_egress_bytes,
             owner,
-        }
-    }
-}
-
-impl ExtensionActivationMode {
-    pub fn from_dispatch_context(
-        scope: ResourceScope,
-        runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
-    ) -> Self {
-        match runtime_http_egress {
-            Some(runtime_http_egress) => Self::HostedMcpDiscovery {
-                scope,
-                runtime_http_egress,
-            },
-            None => Self::Static,
         }
     }
 }

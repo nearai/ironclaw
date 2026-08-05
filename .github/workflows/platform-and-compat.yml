@@ -106,7 +106,23 @@ jobs:
           printf '%s\n' "$CHANGED_FILES" | scripts/ci/classify-test-scope.sh >> "$GITHUB_OUTPUT"
 
           has_direct_wasm_abi_risk=false
-          if has_match '^(wit/|crates/ironclaw_common/|crates/ironclaw_wasm/|crates/ironclaw_wasm_product_adapters/|crates/ironclaw_first_party_extensions/assets/.*/(manifest\.toml|wasm-src/)|registry/|scripts/build-wasm-extensions\.sh$|scripts/check-version-bumps\.sh$|\.github/workflows/(platform-and-compat|nightly-deep-ci)\.yml$)'; then
+          # Crate scopes are matched by NAME at any depth: `crates/([^/]+/)*<name>/`
+          # keeps matching once crates move into family directories
+          # (crates/<family>/ironclaw_*, PROPOSAL §5). A flat `crates/<name>/`
+          # prefix stops matching there, `has_direct_wasm_abi_risk` goes false,
+          # and every WASM ABI check silently skips — the WS10 failure mode
+          # (#6963). `crates/ironclaw_wasm_product_adapters/` was also dropped:
+          # that crate no longer exists, so the alternative had been matching
+          # nothing. The bare `wit/` alternative went the same way when the WIT
+          # directory moved inside its owning crate (CHECKLIST WS4): the ABI
+          # files are `crates/ironclaw_wasm/wit/*.wit` now, already in scope via
+          # the `ironclaw_wasm` crate alternative, which unlike a repo-root
+          # prefix survives the WS7 family move too.
+          # scripts/ci/ws12_workflow_contracts.py pins this regex
+          # against the real crate inventory and against a real first-party
+          # extension manifest path, so a renamed, moved or deleted crate fails
+          # loudly here instead of quietly falling out of scope.
+          if has_match '^(crates/([^/]+/)*ironclaw_common/|crates/([^/]+/)*ironclaw_wasm/|crates/([^/]+/)*packages/[^/]+/(manifest\.toml|wasm-src/)|registry/|scripts/build-wasm-extensions\.sh$|scripts/check-version-bumps\.sh$|\.github/workflows/(platform-and-compat|nightly-deep-ci)\.yml$)'; then
             has_direct_wasm_abi_risk=true
           fi
           echo "has_direct_wasm_abi_risk=$has_direct_wasm_abi_risk" >> "$GITHUB_OUTPUT"
@@ -253,12 +269,16 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+          cache-dependency-path: |
+            crates/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
       - name: Enable pnpm
         run: corepack enable pnpm
       - name: Install WebUI frontend dependencies
         run: |
-          cd crates/ironclaw_webui/frontend
+          set -euo pipefail
+          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
+          cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -299,12 +319,16 @@ jobs:
         with:
           node-version: "22"
           cache: "pnpm"
-          cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
+          cache-dependency-path: |
+            crates/ironclaw_webui/frontend/pnpm-lock.yaml
+            crates/*/ironclaw_webui/frontend/pnpm-lock.yaml
       - name: Enable pnpm
         run: corepack enable pnpm
       - name: Install WebUI frontend dependencies
         run: |
-          cd crates/ironclaw_webui/frontend
+          set -euo pipefail
+          webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
+          cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:

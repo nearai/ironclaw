@@ -2,7 +2,7 @@
 //! capability backend. Actor A writes a private memory; a DISTINCT actor B
 //! cannot read or search it, while A still can — the tool-tier proof that
 //! Reborn memory is scoped by the run's owner (`MemoryDocumentScope` keys the
-//! path on the caller's user id, `crates/ironclaw_memory_native/src/path.rs`).
+//! path on the caller's user id, `crates/extensions/packages/memory-native/src/path.rs`).
 //!
 //! Related QA: issue #5460 ("memories visible to every user in the workspace")
 //! — the reporter noted the TOOL path is already isolated; this scenario pins

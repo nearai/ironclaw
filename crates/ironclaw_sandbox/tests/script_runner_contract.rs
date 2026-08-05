@@ -1,0 +1,655 @@
+use std::sync::{Arc, Mutex};
+
+use ironclaw_extensions::*;
+use ironclaw_host_api::{
+    host_port::HostPortCatalog,
+    ids::{CapabilityId, InvocationId, ProjectId, ResourceReservationId, TenantId, UserId},
+    path::VirtualPath,
+    resource::{
+        ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceReservation, ResourceScope,
+        ResourceUsage, RuntimeResourceErrorKind,
+    },
+};
+use ironclaw_resources::*;
+use ironclaw_sandbox::*;
+use serde_json::json;
+
+#[test]
+fn script_runtime_reserves_executes_and_reconciles_success() {
+    let backend = RecordingScriptBackend::success(ScriptBackendOutput {
+        exit_code: 0,
+        stdout: br#"{"message":"hello script"}"#.to_vec(),
+        stderr: Vec::new(),
+        wall_clock_ms: 7,
+    });
+    let runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend.clone());
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits::default()
+                .set_max_concurrency_slots(1)
+                .set_max_process_count(10)
+                .set_max_output_bytes(10_000),
+        )
+        .unwrap();
+    let capability_id = CapabilityId::new("script.echo").unwrap();
+
+    let execution = runtime
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            ScriptExecutionRequest {
+                extension: &script_package().id,
+                capabilities: &script_package().capabilities,
+                runtime: &script_package().manifest.runtime,
+                capability_id: &capability_id,
+                scope,
+                estimate: ResourceEstimate::default()
+                    .set_concurrency_slots(1)
+                    .set_process_count(1)
+                    .set_output_bytes(10_000),
+                mounts: None,
+                resource_reservation: None,
+                invocation: ScriptInvocation {
+                    input: json!({"message":"hello script", "command":"malicious override"}),
+                },
+            },
+        )
+        .unwrap();
+
+    assert_eq!(execution.result.output, json!({"message":"hello script"}));
+    assert_eq!(execution.receipt.status, ReservationStatus::Reconciled);
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account).process_count, 1);
+    assert!(governor.usage_for(&account).output_bytes > 0);
+
+    let requests = backend.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].runner, "docker");
+    assert_eq!(requests[0].image.as_deref(), Some("alpine:latest"));
+    assert_eq!(requests[0].command, "script-echo");
+    assert_eq!(requests[0].args, vec!["--json".to_string()]);
+    assert_eq!(requests[0].capability_id, capability_id);
+    assert!(requests[0].stdin_json.contains("hello script"));
+    assert_eq!(
+        requests[0].max_stdout_bytes,
+        ScriptRuntimeConfig::for_testing().max_stdout_bytes
+    );
+    assert_eq!(
+        requests[0].max_stderr_bytes,
+        ScriptRuntimeConfig::for_testing().max_stderr_bytes
+    );
+    assert_eq!(
+        requests[0].max_wall_clock_ms,
+        ScriptRuntimeConfig::for_testing().max_wall_clock_ms
+    );
+    assert!(!requests[0].command.contains("malicious"));
+}
+
+#[test]
+fn script_runtime_denies_budget_before_backend_execution() {
+    let backend = RecordingScriptBackend::success(ScriptBackendOutput::json(json!({"ok": true})));
+    let runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend.clone());
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits::default().set_max_output_bytes(1),
+        )
+        .unwrap();
+    let capability_id = CapabilityId::new("script.echo").unwrap();
+
+    // What the budget authority itself says about this request. The lane may
+    // narrow the *structure* it carries across the port, but the model-visible
+    // cause it forwards must stay the authority's own words (#7067).
+    let authority_reason = governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate::default().set_output_bytes(10_000),
+        )
+        .unwrap_err()
+        .to_string();
+
+    let err = runtime
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            ScriptExecutionRequest {
+                extension: &script_package().id,
+                capabilities: &script_package().capabilities,
+                runtime: &script_package().manifest.runtime,
+                capability_id: &capability_id,
+                scope,
+                estimate: ResourceEstimate::default().set_output_bytes(10_000),
+                mounts: None,
+                resource_reservation: None,
+                invocation: ScriptInvocation { input: json!({}) },
+            },
+        )
+        .unwrap_err();
+
+    let ScriptError::Resource(denial) = &err else {
+        panic!("expected a resource denial, got {err:?}");
+    };
+    assert_eq!(denial.kind(), RuntimeResourceErrorKind::LimitExceeded);
+    assert_eq!(denial.reason(), authority_reason);
+    assert_eq!(
+        err.to_string(),
+        format!("resource governor error: {authority_reason}")
+    );
+    assert!(backend.requests.lock().unwrap().is_empty());
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
+}
+
+/// A prepared reservation handed down from the host is spent, not duplicated —
+/// and only if it actually covers the request. The mismatch check is the one
+/// budget failure the lane raises itself, so it must classify as
+/// `ReservationMismatch` and must fire before any side effect, leaving the
+/// host's hold untouched for the host to release. Regression for #7067: this
+/// path moved from constructing the kernel's `ResourceError` to constructing
+/// the port's error.
+#[test]
+fn script_runtime_reuses_a_matching_prepared_reservation_and_rejects_a_mismatched_one() {
+    let backend = RecordingScriptBackend::success(ScriptBackendOutput::json(json!({"ok": true})));
+    let runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend.clone());
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits::default()
+                .set_max_output_bytes(10_000)
+                .set_max_process_count(4),
+        )
+        .unwrap();
+    let capability_id = CapabilityId::new("script.echo").unwrap();
+    let estimate = ResourceEstimate::default().set_output_bytes(1_000);
+    let prepared = governor.reserve(scope.clone(), estimate.clone()).unwrap();
+
+    // Mismatched: same reservation, different estimate. Rejected before the
+    // backend runs, and the hold is left exactly as the host opened it.
+    let err = runtime
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            ScriptExecutionRequest {
+                extension: &script_package().id,
+                capabilities: &script_package().capabilities,
+                runtime: &script_package().manifest.runtime,
+                capability_id: &capability_id,
+                scope: scope.clone(),
+                estimate: ResourceEstimate::default().set_output_bytes(2_000),
+                mounts: None,
+                resource_reservation: Some(prepared.clone()),
+                invocation: ScriptInvocation { input: json!({}) },
+            },
+        )
+        .unwrap_err();
+    let ScriptError::Resource(mismatch) = &err else {
+        panic!("expected a reservation mismatch, got {err:?}");
+    };
+    assert_eq!(
+        mismatch.kind(),
+        RuntimeResourceErrorKind::ReservationMismatch
+    );
+    assert!(backend.requests.lock().unwrap().is_empty());
+    assert_eq!(governor.reserved_for(&account).output_bytes, 1_000);
+
+    // Matching: the prepared hold is reconciled, not re-reserved.
+    let result = runtime
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            ScriptExecutionRequest {
+                extension: &script_package().id,
+                capabilities: &script_package().capabilities,
+                runtime: &script_package().manifest.runtime,
+                capability_id: &capability_id,
+                scope,
+                estimate,
+                mounts: None,
+                resource_reservation: Some(prepared.clone()),
+                invocation: ScriptInvocation { input: json!({}) },
+            },
+        )
+        .unwrap();
+    assert_eq!(result.receipt.id, prepared.id);
+    assert_eq!(result.receipt.status, ReservationStatus::Reconciled);
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(backend.requests.lock().unwrap().len(), 1);
+}
+
+/// A budget *pause* is not a budget *stop*: crossing the approval threshold
+/// must reach the lane as `RequiresApproval`, so the caller above it opens an
+/// approval gate instead of reporting a refusal. Regression for #7067 — the
+/// narrow port must not collapse the denial cone into one undifferentiated
+/// "resource error". Fail-closed either way: the backend is never executed.
+#[test]
+fn script_runtime_surfaces_approval_pause_distinctly_from_a_hard_denial() {
+    let backend = RecordingScriptBackend::success(ScriptBackendOutput::json(json!({"ok": true})));
+    let runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend.clone());
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits::default()
+                .set_max_output_bytes(1_000)
+                .set_thresholds(BudgetThresholds::RECOMMENDED),
+        )
+        .unwrap();
+    let capability_id = CapabilityId::new("script.echo").unwrap();
+
+    // 95% of the cap: past the 90% pause threshold, still under the hard limit.
+    let err = runtime
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            ScriptExecutionRequest {
+                extension: &script_package().id,
+                capabilities: &script_package().capabilities,
+                runtime: &script_package().manifest.runtime,
+                capability_id: &capability_id,
+                scope,
+                estimate: ResourceEstimate::default().set_output_bytes(950),
+                mounts: None,
+                resource_reservation: None,
+                invocation: ScriptInvocation { input: json!({}) },
+            },
+        )
+        .unwrap_err();
+
+    let ScriptError::Resource(pause) = &err else {
+        panic!("expected a resource pause, got {err:?}");
+    };
+    assert_eq!(pause.kind(), RuntimeResourceErrorKind::RequiresApproval);
+    assert!(backend.requests.lock().unwrap().is_empty());
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
+}
+
+#[test]
+fn script_runtime_releases_reservation_when_backend_exits_nonzero() {
+    let backend = RecordingScriptBackend::success(ScriptBackendOutput {
+        exit_code: 2,
+        stdout: Vec::new(),
+        stderr: b"failed".to_vec(),
+        wall_clock_ms: 4,
+    });
+    let runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend);
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits::default().set_max_concurrency_slots(1),
+        )
+        .unwrap();
+    let capability_id = CapabilityId::new("script.echo").unwrap();
+
+    let err = runtime
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            ScriptExecutionRequest {
+                extension: &script_package().id,
+                capabilities: &script_package().capabilities,
+                runtime: &script_package().manifest.runtime,
+                capability_id: &capability_id,
+                scope,
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
+                mounts: None,
+                resource_reservation: None,
+                invocation: ScriptInvocation { input: json!({}) },
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(err, ScriptError::ExitFailure { code: 2, .. }));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
+}
+
+#[test]
+fn script_runtime_preserves_backend_error_when_release_cleanup_fails() {
+    let backend = RecordingScriptBackend::failure("backend unavailable");
+    let runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend);
+    let governor = ReleaseFailingGovernor::new();
+    let capability_id = CapabilityId::new("script.echo").unwrap();
+
+    let err = runtime
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            ScriptExecutionRequest {
+                extension: &script_package().id,
+                capabilities: &script_package().capabilities,
+                runtime: &script_package().manifest.runtime,
+                capability_id: &capability_id,
+                scope: sample_scope(),
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
+                mounts: None,
+                resource_reservation: None,
+                invocation: ScriptInvocation { input: json!({}) },
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(err, ScriptError::Backend { .. }));
+}
+
+#[test]
+fn script_runtime_releases_reservation_when_output_limit_fails() {
+    let backend = RecordingScriptBackend::success(ScriptBackendOutput {
+        exit_code: 0,
+        stdout: br#"{"too":"large"}"#.to_vec(),
+        stderr: Vec::new(),
+        wall_clock_ms: 1,
+    });
+    let runtime = ScriptRuntime::new(
+        ScriptRuntimeConfig {
+            max_stdout_bytes: 4,
+            ..ScriptRuntimeConfig::for_testing()
+        },
+        backend,
+    );
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits::default().set_max_concurrency_slots(1),
+        )
+        .unwrap();
+    let capability_id = CapabilityId::new("script.echo").unwrap();
+
+    let err = runtime
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            ScriptExecutionRequest {
+                extension: &script_package().id,
+                capabilities: &script_package().capabilities,
+                runtime: &script_package().manifest.runtime,
+                capability_id: &capability_id,
+                scope,
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
+                mounts: None,
+                resource_reservation: None,
+                invocation: ScriptInvocation { input: json!({}) },
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(err, ScriptError::OutputLimitExceeded { .. }));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
+}
+
+#[test]
+fn script_runtime_rejects_non_script_package_before_reserving() {
+    let backend = RecordingScriptBackend::success(ScriptBackendOutput::json(json!({"ok": true})));
+    let runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend);
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits::default().set_max_concurrency_slots(0),
+        )
+        .unwrap();
+    let capability_id = CapabilityId::new("echo.say").unwrap();
+
+    let err = runtime
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            ScriptExecutionRequest {
+                extension: &wasm_package().id,
+                capabilities: &wasm_package().capabilities,
+                runtime: &wasm_package().manifest.runtime,
+                capability_id: &capability_id,
+                scope,
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
+                mounts: None,
+                resource_reservation: None,
+                invocation: ScriptInvocation { input: json!({}) },
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(err, ScriptError::ExtensionRuntimeMismatch { .. }));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
+}
+
+#[test]
+fn script_runtime_rejects_undeclared_capability_before_reserving() {
+    let backend = RecordingScriptBackend::success(ScriptBackendOutput::json(json!({"ok": true})));
+    let runtime = ScriptRuntime::new(ScriptRuntimeConfig::for_testing(), backend);
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits::default().set_max_concurrency_slots(0),
+        )
+        .unwrap();
+    let capability_id = CapabilityId::new("script.missing").unwrap();
+
+    let err = runtime
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            ScriptExecutionRequest {
+                extension: &script_package().id,
+                capabilities: &script_package().capabilities,
+                runtime: &script_package().manifest.runtime,
+                capability_id: &capability_id,
+                scope,
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
+                mounts: None,
+                resource_reservation: None,
+                invocation: ScriptInvocation { input: json!({}) },
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(err, ScriptError::CapabilityNotDeclared { .. }));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
+}
+
+#[derive(Clone)]
+struct RecordingScriptBackend {
+    output: Arc<Mutex<Result<ScriptBackendOutput, String>>>,
+    requests: Arc<Mutex<Vec<ScriptBackendRequest>>>,
+}
+
+impl RecordingScriptBackend {
+    fn success(output: ScriptBackendOutput) -> Self {
+        Self {
+            output: Arc::new(Mutex::new(Ok(output))),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn failure(reason: &str) -> Self {
+        Self {
+            output: Arc::new(Mutex::new(Err(reason.to_string()))),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl ScriptBackend for RecordingScriptBackend {
+    fn execute(&self, request: ScriptBackendRequest) -> Result<ScriptBackendOutput, String> {
+        self.requests.lock().unwrap().push(request);
+        self.output.lock().unwrap().clone()
+    }
+}
+
+struct ReleaseFailingGovernor {
+    inner: InMemoryResourceGovernor,
+}
+
+impl ReleaseFailingGovernor {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryResourceGovernor::new(),
+        }
+    }
+}
+
+impl ResourceGovernor for ReleaseFailingGovernor {
+    fn set_limit(
+        &self,
+        account: ResourceAccount,
+        limits: ResourceLimits,
+    ) -> Result<(), ResourceError> {
+        self.inner.set_limit(account, limits)
+    }
+
+    fn reserve_with_outcome(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+    ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
+        self.inner.reserve_with_outcome(scope, estimate)
+    }
+
+    fn reserve_with_id_and_outcome(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
+        self.inner
+            .reserve_with_id_and_outcome(scope, estimate, reservation_id)
+    }
+
+    fn reconcile(
+        &self,
+        reservation_id: ResourceReservationId,
+        actual: ResourceUsage,
+    ) -> Result<ResourceReceipt, ResourceError> {
+        self.inner.reconcile(reservation_id, actual)
+    }
+
+    fn validate_reservation(&self, reservation: &ResourceReservation) -> Result<(), ResourceError> {
+        self.inner.validate_reservation(reservation)
+    }
+
+    fn release(
+        &self,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ResourceReceipt, ResourceError> {
+        Err(ResourceError::UnknownReservation { id: reservation_id })
+    }
+
+    fn account_snapshot(
+        &self,
+        account: &ResourceAccount,
+    ) -> Result<Option<ironclaw_resources::AccountSnapshot>, ResourceError> {
+        self.inner.account_snapshot(account)
+    }
+}
+
+fn script_package() -> ExtensionPackage {
+    package_from_manifest(SCRIPT_MANIFEST)
+}
+
+fn wasm_package() -> ExtensionPackage {
+    package_from_manifest(WASM_MANIFEST)
+}
+
+fn package_from_manifest(manifest: &str) -> ExtensionPackage {
+    let manifest = ExtensionManifest::parse(
+        manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
+    )
+    .unwrap();
+    let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
+    ExtensionPackage::from_manifest(manifest, root).unwrap()
+}
+
+fn capability_provider_contracts() -> HostApiContractRegistry {
+    let mut contracts = HostApiContractRegistry::new();
+    contracts
+        .register(Arc::new(CapabilityProviderHostApiContract::new().unwrap()))
+        .unwrap();
+    contracts
+}
+
+fn sample_scope() -> ResourceScope {
+    ResourceScope {
+        tenant_id: TenantId::new("tenant1").unwrap(),
+        user_id: UserId::new("user1").unwrap(),
+        agent_id: None,
+        project_id: Some(ProjectId::new("project1").unwrap()),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
+const SCRIPT_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
+id = "script"
+name = "Script Echo"
+version = "0.1.0"
+description = "Script demo extension"
+trust = "untrusted"
+
+[runtime]
+kind = "script"
+runner = "docker"
+image = "alpine:latest"
+command = "script-echo"
+args = ["--json"]
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "script.echo"
+description = "Echo text"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "api"
+input_schema_ref = "schemas/script/echo.input.v1.json"
+output_schema_ref = "schemas/script/echo.output.v1.json"
+"#;
+
+const WASM_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
+id = "echo"
+name = "Echo"
+version = "0.1.0"
+description = "Echo demo extension"
+trust = "untrusted"
+
+[runtime]
+kind = "wasm"
+module = "wasm/echo.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "echo.say"
+description = "Echo text"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "api"
+input_schema_ref = "schemas/echo/say.input.v1.json"
+output_schema_ref = "schemas/echo/say.output.v1.json"
+"#;

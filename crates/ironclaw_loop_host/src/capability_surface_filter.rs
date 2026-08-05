@@ -8,14 +8,14 @@ use ironclaw_host_api::{
     ids::CapabilityId,
     resolution::{Resolution, ResolutionBatch},
 };
-use ironclaw_turns::CapabilityActivityId;
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
     CapabilityDeniedReasonKind, CapabilitySurfaceProfileId, LoopCapabilityPort, LoopRequest,
     LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
     ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
     VisibleCapabilitySurface, resolution,
 };
+use ironclaw_turns::CapabilityActivityId;
 
 use crate::{CapabilityAllowSet, LoopCapabilityPortDecorator, capability_info};
 
@@ -741,7 +741,8 @@ mod tests {
         resolution::Blocked,
         runtime::RuntimeKind,
     };
-    use ironclaw_turns::run_profile::{
+    use ironclaw_loop_contracts::{AgentLoopDriverDescriptor, RunClassId, RunProfileFingerprint};
+    use ironclaw_loop_contracts::{
         CancellationPolicy, CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion,
         CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ConcurrencyHint, ContextProfileId,
         LoopDriverId, ModelProfileId, PersonalContextPolicy, RedactedRunProfileProvenance,
@@ -749,8 +750,7 @@ mod tests {
         SchedulingClass, SteeringPolicy, resolution,
     };
     use ironclaw_turns::{
-        AgentLoopDriverDescriptor, LoopGateRef, LoopResultRef, RunClassId, RunProfileFingerprint,
-        RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
+        LoopGateRef, LoopResultRef, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
     };
 
     use super::*;
@@ -822,8 +822,7 @@ mod tests {
         async fn register_provider_tool_call(
             &self,
             request: RegisterProviderToolCallRequest,
-        ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError>
-        {
+        ) -> Result<ironclaw_loop_contracts::CapabilityCallCandidate, AgentLoopHostError> {
             let RegisterProviderToolCallRequest {
                 tool_call,
                 activity_id,
@@ -838,7 +837,7 @@ mod tests {
                 .expect("registered candidate capability ids lock")
                 .clone()
                 .unwrap_or_else(|| provider_call_capability_ids(&["demo.allowed"]));
-            Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
+            Ok(ironclaw_loop_contracts::CapabilityCallCandidate {
                 activity_id: activity_id.unwrap_or_default(),
                 surface_version: surface_version(),
                 capability_id: capability_ids.provider_capability_id,
@@ -934,6 +933,7 @@ mod tests {
             capability_id: capability_id(capability),
             name: ProviderToolName::new(name).expect("provider tool name"),
             description: format!("{capability} description"),
+            description_trust: Default::default(),
             parameters: serde_json::json!({"type":"object"}),
         }
     }
@@ -973,7 +973,7 @@ mod tests {
         resolution::completed(
             LoopResultRef::new(result_ref).expect("test result ref is valid"),
             "done".to_string(),
-            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
             false,
             0,
             None,

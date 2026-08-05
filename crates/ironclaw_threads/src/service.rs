@@ -53,6 +53,35 @@ pub trait SessionThreadService: Send + Sync {
         message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError>;
 
+    async fn mark_message_queued(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+        active_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let _ = (scope, thread_id, message_id, active_run_id);
+        Err(SessionThreadError::Backend(
+            "mark_message_queued is not implemented by this thread service".to_string(),
+        ))
+    }
+
+    /// Read one message row by id, or `None` when the thread or message does
+    /// not exist. A point read for race reconciliation (e.g. the busy-steering
+    /// admission checking what a failed status transition actually raced
+    /// with); listing the whole history to inspect one row is the wrong tool.
+    async fn read_thread_message(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        let _ = (scope, thread_id, message_id);
+        Err(SessionThreadError::Backend(
+            "read_thread_message is not implemented by this thread service".to_string(),
+        ))
+    }
+
     async fn append_assistant_draft(
         &self,
         request: AppendAssistantDraftRequest,
@@ -390,6 +419,29 @@ where
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         self.as_ref()
             .mark_message_rejected_busy(scope, thread_id, message_id)
+            .await
+    }
+
+    async fn mark_message_queued(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+        active_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.as_ref()
+            .mark_message_queued(scope, thread_id, message_id, active_run_id)
+            .await
+    }
+
+    async fn read_thread_message(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        self.as_ref()
+            .read_thread_message(scope, thread_id, message_id)
             .await
     }
 

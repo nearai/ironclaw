@@ -16,7 +16,6 @@ mod reply_attachment;
 mod schemas;
 mod shell;
 mod skill_management;
-mod skill_url_install;
 mod spawn_subagent;
 mod time;
 mod trace_commons;
@@ -26,12 +25,13 @@ use std::{future::Future, panic::AssertUnwindSafe, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
+use ironclaw_extension_contracts::runtime::ExtensionRuntime;
+use ironclaw_extension_support::coding::{
+    CodingCapabilityError, CodingCapabilityKind, CodingCapabilityRequest, CodingCapabilityState,
+};
 use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionManifest, ExtensionPackage,
-    ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
-};
-use ironclaw_first_party_extensions::coding::{
-    CodingCapabilityError, CodingCapabilityKind, CodingCapabilityRequest, CodingCapabilityState,
+    MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
 use ironclaw_host_api::{
     capability::{EffectKind, OriginGateMatrix, OriginGatePolicy, PermissionMode},
@@ -76,7 +76,6 @@ pub use skill_management::{
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID,
 };
-pub use skill_url_install::is_allowed_code_artifact_host;
 pub use spawn_subagent::SPAWN_SUBAGENT_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
 pub use trace_commons::{

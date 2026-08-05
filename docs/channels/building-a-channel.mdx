@@ -75,7 +75,8 @@ Implement the channel guest interface from `wit/channel.wit`:
 // Generate bindings from the WIT file
 wit_bindgen::generate!({
     world: "sandboxed-channel",
-    path: "../../wit/channel.wit",  // Adjust path as needed
+    // Relative to the guest crate, e.g. crates/extensions/packages/<name>/wasm-src.
+    path: "../../../../ironclaw_wasm/wit/channel.wit",
 });
 
 use serde::{Deserialize, Serialize};

@@ -8,7 +8,7 @@
 //! see or execute an admin-only command through the browser just because the
 //! channel-side admission gate does not apply here.
 
-use ironclaw_host_api::state::{InstallationState, LifecyclePublicState};
+use ironclaw_extension_contracts::state::{InstallationState, LifecyclePublicState};
 
 use crate::{
     LifecycleExtensionSummary, LifecyclePackageKind, LifecycleProductAction,
@@ -324,7 +324,7 @@ fn lifecycle_command_title(action: &LifecycleProductAction) -> String {
 ///   mutation itself succeeded, and the resulting public lifecycle state.
 ///
 /// Every variant reports [`LifecyclePublicState`], never the raw internal
-/// [`InstallationState`] checkpoint — `ironclaw_host_api::state` documents
+/// [`InstallationState`] checkpoint — `ironclaw_extension_contracts::state` documents
 /// that a product surface must not expose those checkpoints directly.
 fn lifecycle_command_view(title: String, response: &LifecycleProductResponse) -> CommandResultView {
     match &response.payload {
