@@ -1283,6 +1283,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self,
     ) -> None:
         prefix, owner = next(iter(planner.INTEGRATION_ARTIFACT_PREFIX_OWNERS.items()))
+        self.assertEqual(prefix, "tests/snapshots/golden_payload__")
+        self.assertEqual(owner, "tests/integration/golden_payload.rs")
         expected_lane = planner._integration_test_lanes()[owner]
 
         plan = self.plan("pull_request", [f"{prefix}new_case.snap"])

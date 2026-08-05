@@ -113,11 +113,11 @@ impl RebornIntegrationGroupBuilder {
     /// reproduce a narrowed profile atop bridged deferral; requires
     /// `.with_tool_disclosure_bridged()` too — `into_group` fails fast otherwise.
     /// Mirrors the production resolve-once wiring in
-    /// `crates/ironclaw_turn_runner/src/runtime.rs`:
+    /// `crates/loop/ironclaw_turn_runner/src/runtime.rs`:
     /// `RuntimeProfiledCapabilityPortFactory::create_capability_port` shares the
     /// resolved policy between `ToolDisclosureCapabilityDecorator` and the
     /// capability-surface filter before `RebornLoopDriverHostFactory::create_host`
-    /// in `crates/ironclaw_turn_runner/src/loop_driver_host.rs` calls
+    /// in `crates/loop/ironclaw_turn_runner/src/loop_driver_host.rs` calls
     /// `build_text_only_host_with_capabilities`. The explicit
     /// `build_text_only_host_with_profiled_capabilities` form is for test
     /// construction.
