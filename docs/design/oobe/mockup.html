@@ -198,8 +198,10 @@ h1,h2,h3,p{margin:0}
 #drawerToggle svg{width:16px;height:16px;transition:transform .18s ease}
 #carouselBlock.collapsed #drawerToggle svg{transform:rotate(180deg)}
 /* Foundational: section-level dismiss X (top-right, both card + pill states) */
-#drawerDismiss{position:absolute;top:11px;right:11px;z-index:4;width:26px;height:26px;display:none;place-items:center;border:0;border-radius:8px;background:var(--v2-surface);box-shadow:-12px 0 12px 5px var(--v2-surface);color:var(--v2-text-muted);cursor:pointer}
+#drawerDismiss{position:absolute;top:-3px;right:2px;z-index:4;width:26px;height:26px;display:none;place-items:center;border:0;border-radius:8px;background:var(--v2-surface);box-shadow:-12px 0 12px 5px var(--v2-surface);color:var(--v2-text-muted);cursor:pointer}
 .v-foundational #drawerDismiss{display:grid}
+/* expanded: centre on the "Suggested for you" header; collapsed: centre on the pill row */
+#carouselBlock.collapsed #drawerDismiss{top:5px}
 #drawerDismiss:hover{color:var(--v2-text-strong)}
 #drawerDismiss svg{width:15px;height:15px}
 #carouselBlock.dismissed{display:none}
