@@ -67,9 +67,11 @@ struct FrozenPathCount {
 /// totals check exists to catch, and it could not see it. Recounted on
 /// `origin/main` @ `676d86ce02` by zeroing both constants and reading the
 /// panic (which prints `FROZEN_PATH_COUNTS.len()` and the member sum), not by
-/// eye: **79 paths / 276 members**.
+/// eye: **79 paths / 276 members**. Lowered to **79/275** when the sandbox
+/// profile wiring made `RebornRuntimeStores::capability_policy` production-used
+/// instead of test-support-only.
 const WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE: usize = 79;
-const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 276;
+const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 275;
 
 const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
@@ -154,7 +156,7 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "test-support",
         item_kind: "field",
         path: "crates/ironclaw_reborn_composition/src/factory.rs",
-        count: 9,
+        count: 8,
     },
     FrozenPathCount {
         category: "test-support",
