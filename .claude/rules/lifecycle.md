@@ -4,7 +4,7 @@ paths:
   - "crates/extensions/ironclaw_extension_support/**"
   - "crates/app/ironclaw_composition/**"
   - "crates/lanes/ironclaw_mcp/**"
-  - "crates/ironclaw_wasm/**"
+  - "crates/lanes/ironclaw_wasm/**"
 ---
 # Discovery, installation, and activation
 

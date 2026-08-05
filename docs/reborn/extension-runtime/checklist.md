@@ -375,7 +375,7 @@ Rules — kept short on purpose:
   (`compose_provider_client`,
   `crates/app/ironclaw_composition/src/factory.rs`);
   the `ironclaw_auth` engine crate carries zero concrete-vendor literals and the
-  extension ABI (`crates/ironclaw_wasm/wit/channel.wit`) has no auth trait. CAVEAT: the parenthetical
+  extension ABI (`crates/lanes/ironclaw_wasm/wit/channel.wit`) has no auth trait. CAVEAT: the parenthetical
   "no vendor-conditional in composition" is not yet literal — the specificity
   gate `reborn_generic_code_names_no_concrete_extension` passes against a
   non-empty allowlist that still lists composition vendor branches (e.g.

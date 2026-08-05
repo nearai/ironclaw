@@ -20,7 +20,7 @@
 
 ## Validation
 
-- Build/check from repo root: `cargo build --manifest-path crates/ironclaw_silk_decoder/Cargo.toml`
+- Build/check from repo root: `cargo build --manifest-path tools/ironclaw_silk_decoder/Cargo.toml`
 - Follow `README.md` install/protocol checks for manual validation.
 - Do not use workspace-wide checks to prove this helper unless explicitly included.
 

@@ -32,7 +32,7 @@ This repo exposes Reborn structure primarily through implementation crates, crat
 | Approval substrate | `crates/kernel/ironclaw_approvals/` |
 | Process lifecycle state | `crates/kernel/ironclaw_processes/` |
 | Approval and gate state | `crates/kernel/ironclaw_approvals/` |
-| WASM runtime lane and WIT HTTP adapter | `crates/ironclaw_wasm/` |
+| WASM runtime lane and WIT HTTP adapter | `crates/lanes/ironclaw_wasm/` |
 | Script runtime lane and host HTTP adapter | `crates/lanes/ironclaw_sandbox/` (`src/script.rs`) |
 | MCP runtime lane and host-mediated HTTP/fail-closed process policy | `crates/lanes/ironclaw_mcp/` |
 | Replay / recorded-model fixtures | `tests/fixtures/llm_traces/README.md` |

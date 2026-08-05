@@ -39,7 +39,7 @@ For each open PR, determine the primary module it touches by examining the `file
 | **Storage & Memory** | `crates/substrates/ironclaw_filesystem/`, `crates/domains/ironclaw_memory*/`, `crates/substrates/ironclaw_libsql_runtime/`, `migrations/` |
 | **Security** | `crates/substrates/ironclaw_safety/`, `crates/substrates/ironclaw_secrets/`, `crates/kernel/ironclaw_trust/`, `crates/kernel/ironclaw_authorization/`, `crates/kernel/ironclaw_approvals/` |
 | **Config & Setup** | `crates/app/ironclaw_config/` |
-| **Sandbox & Processes** | `crates/lanes/ironclaw_sandbox/`, `crates/kernel/ironclaw_processes/`, `crates/ironclaw_wasm*/` |
+| **Sandbox & Processes** | `crates/lanes/ironclaw_sandbox/`, `crates/kernel/ironclaw_processes/`, `crates/lanes/ironclaw_wasm*/` |
 | **Hooks** | `crates/loop/ironclaw_hooks/` |
 | **Events & Projections** | `crates/events/ironclaw_event_log/`, `crates/events/ironclaw_event_projections/`, `crates/events/ironclaw_event_streams/` |
 | **CI/CD & Docs** | `.github/`, `README.md`, `CLAUDE.md`, `*.md` (no src) |

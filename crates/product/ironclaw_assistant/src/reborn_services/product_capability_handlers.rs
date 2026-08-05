@@ -5,7 +5,9 @@ use crate::LifecycleProductAction;
 pub(super) enum ProductCommandHandler {
     ProductLifecycleCommand,
     ProductModelCommand,
+    ProductNewCommand,
     ProductStatusCommand,
+    ProductStopCommand,
     ProductCommandList,
     ProductCommandExecute,
     CreateThread,
@@ -40,7 +42,9 @@ impl ProductCommandHandler {
         match capability.as_str() {
             PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID => Some(Self::ProductLifecycleCommand),
             PRODUCT_MODEL_COMMAND_OPERATION_ID => Some(Self::ProductModelCommand),
+            PRODUCT_NEW_COMMAND_OPERATION_ID => Some(Self::ProductNewCommand),
             PRODUCT_STATUS_COMMAND_OPERATION_ID => Some(Self::ProductStatusCommand),
+            PRODUCT_STOP_COMMAND_OPERATION_ID => Some(Self::ProductStopCommand),
             PRODUCT_COMMAND_LIST_COMMAND_ID => Some(Self::ProductCommandList),
             PRODUCT_COMMAND_EXECUTE_COMMAND_ID => Some(Self::ProductCommandExecute),
             CREATE_THREAD_COMMAND_ID => Some(Self::CreateThread),
@@ -115,11 +119,27 @@ impl ProductCommandHandler {
                         .await?,
                 )
             }
+            Self::ProductNewCommand => {
+                let request: ProductNewCommandInput = product_command_input(input)?;
+                command_output(
+                    services
+                        .execute_product_new_command(caller, request)
+                        .await?,
+                )
+            }
             Self::ProductStatusCommand => {
                 let request: ProductStatusCommandInput = product_command_input(input)?;
                 command_output(
                     services
                         .execute_product_status_command(caller, request)
+                        .await?,
+                )
+            }
+            Self::ProductStopCommand => {
+                let request: ProductStopCommandInput = product_command_input(input)?;
+                command_output(
+                    services
+                        .execute_product_stop_command(caller, request)
                         .await?,
                 )
             }
@@ -627,8 +647,16 @@ mod tests {
                 ProductCommandHandler::ProductModelCommand,
             ),
             (
+                PRODUCT_NEW_COMMAND_OPERATION_ID,
+                ProductCommandHandler::ProductNewCommand,
+            ),
+            (
                 PRODUCT_STATUS_COMMAND_OPERATION_ID,
                 ProductCommandHandler::ProductStatusCommand,
+            ),
+            (
+                PRODUCT_STOP_COMMAND_OPERATION_ID,
+                ProductCommandHandler::ProductStopCommand,
             ),
             (
                 PRODUCT_COMMAND_LIST_COMMAND_ID,

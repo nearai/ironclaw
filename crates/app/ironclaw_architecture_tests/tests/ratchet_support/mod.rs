@@ -74,8 +74,8 @@ pub fn workspace_root() -> PathBuf {
 //   * a crate directory is the OUTERMOST directory under `crates/` owning a
 //     `Cargo.toml`;
 //   * a manifest declaring its own `[workspace]` table is the root of a
-//     DIFFERENT workspace (`crates/ironclaw_silk_decoder`, the six `wasm-src`
-//     guests) and is not a crate of this one;
+//     DIFFERENT workspace (the six `wasm-src` guests) and is not a crate of
+//     this one;
 //   * `target/` and dotted directories are skipped;
 //   * fewer than `MIN_CRATE_DIRECTORIES` results is a broken checkout, not an
 //     answer — refuse rather than let a gate report success on an empty scan.
@@ -87,7 +87,7 @@ pub fn workspace_root() -> PathBuf {
 // ---------------------------------------------------------------------------
 
 /// Fail-closed floor, mirroring `crate_tree.py`'s. Far below the real count
-/// (65 at the WS0 baseline); a handful of results always means the walk lost
+/// (65 at the WS0 baseline, 64 after WS7 moved the silk decoder to `tools/`); a handful of results always means the walk lost
 /// the tree rather than that the tree shrank.
 pub const MIN_CRATE_DIRECTORIES: usize = 20;
 

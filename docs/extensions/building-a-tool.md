@@ -431,7 +431,7 @@ failure and not a model-visible token prompt.
 
 ## WASM implementation pattern
 
-WASM tools implement `crates/ironclaw_wasm/wit/tool.wit`:
+WASM tools implement `crates/lanes/ironclaw_wasm/wit/tool.wit`:
 
 ```rust
 wit_bindgen::generate!({

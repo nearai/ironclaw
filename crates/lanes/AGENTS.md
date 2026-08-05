@@ -8,13 +8,19 @@ How an already-authorized invocation actually runs: the WASM component lane, the
 | --- | --- | --- |
 | [`ironclaw_mcp`](./ironclaw_mcp) | `runtimes` | the MCP lane (host-mediated HTTP only) |
 | [`ironclaw_sandbox`](./ironclaw_sandbox) | `runtimes` | the sandbox/process lane: plan contract, Docker/broker/CA machinery, Docker script backend |
+| [`ironclaw_wasm`](./ironclaw_wasm) | `runtimes` | the WASM component lane; owns the tool/channel ABI in its crate-local [`wit/`](./ironclaw_wasm/wit) |
 | [`ironclaw_wasm_limiter`](./ironclaw_wasm_limiter) | `runtimes` | the shared wasmtime `ResourceLimiter` |
 
-**Not here yet:** `ironclaw_wasm` (the WASM component lane, `runtimes`) is still at
-`crates/ironclaw_wasm`. Its move carries `wit/` with it, which forces every
-`wasm-src/` guest's `wit-bindgen` path and a rebuild of the committed `.wasm`
-binaries, so it ships as its own PR (WS7 2/2) rather than riding the text-only
-move.
+**`wit/` lives inside `ironclaw_wasm`, and that is load-bearing.** The tool and
+channel ABIs are crate assets (PROPOSAL §6.6.1), so this family directory holds
+no non-crate directory of its own — which is what §11.2.1's no-stray-toplevel
+check exists to require. The cost is paid by the guests instead: every
+`wasm-src/` component reaches the ABI by relative path, so moving this crate
+rewrites nine `wit-bindgen` `path:` args and forces a rebuild of the six
+committed `.wasm` binaries (`scripts/ci/check-wasm-artifact-freshness.py` keys
+each artifact to a digest of its whole `wasm-src/` tree and forbids re-recording
+without rebuilding). That is why the move shipped as its own PR (WS7 2/2), and
+why the next one should not be undertaken casually.
 
 ## Rules that outrank this file
 

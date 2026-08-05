@@ -2,8 +2,9 @@
 
 use ironclaw_assistant::{
     CommandAudience, LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef,
-    LifecycleProductAction, ProductCommand, ProductModelCommand, declared_command_help_text,
-    product_command_descriptors, required_audience, validate_declared_product_command,
+    LifecycleProductAction, ProductCommand, ProductModelCommand, ProductStopInvocation,
+    declared_command_help_text, product_command_descriptors, required_audience,
+    validate_declared_product_command,
 };
 use ironclaw_assistant::{InboundCommandPayload, ProductRejectionKind, ProductTriggerReason};
 
@@ -147,6 +148,39 @@ fn command_payload_maps_all_declared_commands_and_unknown_fallback() {
             command.descriptor().map(|descriptor| descriptor.name),
             expected_descriptor
         );
+    }
+}
+
+#[test]
+fn new_stop_and_interrupt_are_explicit_user_commands() {
+    let cases = [
+        ("new", ProductCommand::New),
+        (
+            "stop",
+            ProductCommand::Stop {
+                invocation: ProductStopInvocation::Stop,
+            },
+        ),
+        (
+            "interrupt",
+            ProductCommand::Stop {
+                invocation: ProductStopInvocation::Interrupt,
+            },
+        ),
+    ];
+
+    for (name, expected) in cases {
+        let payload = InboundCommandPayload::new(name, "", ProductTriggerReason::DirectChat)
+            .expect("valid command payload");
+        let command = ProductCommand::from_payload(&payload).expect("parse control command");
+        assert_eq!(command, expected);
+        assert_eq!(command.name(), name);
+        assert_eq!(required_audience(&command), CommandAudience::User);
+        assert_eq!(
+            command.descriptor().map(|descriptor| descriptor.name),
+            Some(name)
+        );
+        assert!(validate_declared_product_command(name).is_ok());
     }
 }
 
@@ -449,7 +483,7 @@ fn declared_command_help_is_scoped_and_fail_closed() {
 fn listing_audience_is_user_for_model_and_status_and_admin_for_lifecycle() {
     for descriptor in product_command_descriptors() {
         let expected = match descriptor.name {
-            "model" | "status" => CommandAudience::User,
+            "model" | "status" | "new" | "stop" | "interrupt" => CommandAudience::User,
             _ => CommandAudience::Admin, // the lifecycle family
         };
         assert_eq!(

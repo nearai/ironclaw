@@ -2175,13 +2175,13 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                 .as_ref()
                 .expect("slack channel descriptor")
                 .commands,
-            ["model", "status"],
-            "shipping Slack exposes exactly the model and status commands"
+            ["model", "status", "new", "stop", "interrupt"],
+            "shipping Slack exposes exactly the model, status, new, stop, and interrupt commands"
         );
     }
 
     #[test]
-    fn bundled_telegram_package_declares_model_and_status_commands() {
+    fn bundled_telegram_package_declares_the_full_command_roster() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram").unwrap();
@@ -2194,8 +2194,8 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                 .as_ref()
                 .expect("telegram channel descriptor")
                 .commands,
-            ["model", "status"],
-            "shipping Telegram exposes exactly the model and status commands"
+            ["model", "status", "new", "stop", "interrupt"],
+            "shipping Telegram exposes exactly the model, status, new, stop, and interrupt commands"
         );
         assert_eq!(
             package

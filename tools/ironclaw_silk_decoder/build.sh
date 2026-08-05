@@ -4,7 +4,7 @@
 # This crate is intentionally excluded from the IronClaw workspace so the
 # main `cargo build` does not require libclang. It is built separately:
 #
-#     ./crates/ironclaw_silk_decoder/build.sh
+#     ./tools/ironclaw_silk_decoder/build.sh
 #
 # After building, the binary lands in `target/release/ironclaw-silk-decoder`
 # (relative to this crate). Install it next to your `ironclaw` binary, on

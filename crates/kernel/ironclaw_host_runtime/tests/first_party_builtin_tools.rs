@@ -137,6 +137,15 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
     {
         assert_coding_manifest_contract(descriptor);
     }
+    let json = package
+        .capabilities
+        .iter()
+        .find(|descriptor| descriptor.id.as_str() == JSON_CAPABILITY_ID)
+        .expect("JSON manifest");
+    assert_eq!(
+        json.effects,
+        vec![EffectKind::DispatchCapability, EffectKind::ReadFilesystem]
+    );
     let skill_install = package
         .capabilities
         .iter()
@@ -4202,6 +4211,130 @@ async fn builtin_json_parse_query_stringify_and_validate_work() {
 }
 
 #[tokio::test]
+async fn builtin_json_parse_and_stringify_report_actionable_invalid_json() {
+    for (operation, data) in [
+        ("parse", "/workspace/source.json"),
+        ("stringify", "100 * 1.25"),
+    ] {
+        let runtime = runtime();
+        let failure = invoke_failure_with_context(
+            &runtime,
+            JSON_CAPABILITY_ID,
+            json!({"operation": operation, "data": data}),
+            execution_context([JSON_CAPABILITY_ID]),
+        )
+        .await;
+
+        assert_eq!(failure.kind, FailureKind::InputEncode, "{operation}");
+        assert_eq!(
+            failure.message.as_deref(),
+            Some("JSON input is not valid JSON"),
+            "{operation}"
+        );
+        let issue = failure_input_issue(
+            &failure,
+            "data",
+            DispatchInputIssueCode::InvalidValue,
+            operation,
+        );
+        assert_eq!(issue.expected.as_deref(), Some("valid JSON"), "{operation}");
+        assert!(
+            issue
+                .received
+                .as_deref()
+                .is_some_and(|received| received.starts_with("invalid JSON at line ")),
+            "{operation}: expected bounded parser location, got {:?}",
+            issue.received
+        );
+        assert!(
+            issue
+                .received
+                .as_ref()
+                .is_some_and(|received| received.len() < 80),
+            "{operation}: parser diagnostic must remain bounded"
+        );
+    }
+}
+
+#[tokio::test]
+async fn builtin_json_queries_authorized_workspace_file_with_adjacent_indices() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("source.json"),
+        serde_json::to_vec(&json!({
+            "nodes": [null, null, {"data": vec![vec!["value"]; 16]}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let (filesystem, mounts) = mounted_filesystem(root.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+
+    let queried = invoke_with_context(
+        &runtime,
+        JSON_CAPABILITY_ID,
+        json!({
+            "operation": "query",
+            "file_path": "/workspace/source.json",
+            "path": "nodes[2].data[15][0]"
+        }),
+        execution_context_with_mounts([JSON_CAPABILITY_ID], mounts),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(queried, json!("value"));
+}
+
+#[tokio::test]
+async fn builtin_json_file_query_accepts_eight_mib_and_rejects_one_byte_over() {
+    const MAX_JSON_FILE_BYTES: usize = 8 * 1_024 * 1_024;
+    let root = tempfile::tempdir().unwrap();
+    let file_path = root.path().join("source.json");
+    let mut exact_limit_json = br#"{"value":"ok"}"#.to_vec();
+    exact_limit_json.resize(MAX_JSON_FILE_BYTES, b' ');
+    std::fs::write(&file_path, exact_limit_json).unwrap();
+    let (filesystem, mounts) = mounted_filesystem(root.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts([JSON_CAPABILITY_ID], mounts);
+    let input = json!({
+        "operation": "query",
+        "file_path": "/workspace/source.json",
+        "path": "value"
+    });
+
+    let queried = invoke_with_context(&runtime, JSON_CAPABILITY_ID, input.clone(), context.clone())
+        .await
+        .unwrap();
+    assert_eq!(queried, json!("ok"));
+
+    std::fs::write(&file_path, vec![b' '; MAX_JSON_FILE_BYTES + 1]).unwrap();
+    let failure = invoke_failure_with_context(&runtime, JSON_CAPABILITY_ID, input, context).await;
+    assert_eq!(failure.kind, FailureKind::Resource);
+    assert_eq!(
+        failure.safe_summary().as_deref(),
+        Some("JSON query file exceeds the 8388608-byte limit")
+    );
+}
+
+#[tokio::test]
+async fn builtin_json_file_query_denies_unmounted_workspace_path() {
+    let failure = invoke_failure_with_context(
+        &runtime(),
+        JSON_CAPABILITY_ID,
+        json!({
+            "operation": "query",
+            "file_path": "/workspace/source.json",
+            "path": "value"
+        }),
+        execution_context([JSON_CAPABILITY_ID]),
+    )
+    .await;
+
+    assert_eq!(failure.kind, FailureKind::FilesystemDenied);
+}
+
+#[tokio::test]
 async fn builtin_json_stringify_rejects_invalid_json_strings() {
     let error = invoke(
         JSON_CAPABILITY_ID,
@@ -7256,6 +7389,40 @@ async fn read_file_tolerates_stray_nul_and_invalid_utf8_in_text_logs() {
     let content = read["content"].as_str().unwrap();
     assert!(content.contains("Failed password for root"));
     assert!(content.contains("more log line"));
+}
+
+#[tokio::test]
+async fn write_file_overwrites_a_readable_text_log_with_a_stray_nul() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut original = b"Jan  1 00:00:00 host sshd[1]: Failed password for root\n".to_vec();
+    original.push(0u8);
+    original.extend_from_slice(b"Jan  1 00:00:01 host sshd[1]: more log line\n");
+    let log_path = temp.path().join("syslog.log");
+    tokio::fs::write(&log_path, original).await.unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/syslog.log"}),
+        context.clone(),
+    )
+    .await
+    .expect("text log with a stray NUL must be readable");
+
+    invoke_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/syslog.log", "content": "redacted log\n"}),
+        context,
+    )
+    .await
+    .expect("a text log accepted by read_file must remain writable");
+
+    assert_eq!(tokio::fs::read(log_path).await.unwrap(), b"redacted log\n");
 }
 
 #[tokio::test]

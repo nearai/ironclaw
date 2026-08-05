@@ -18,7 +18,7 @@ use ironclaw_conversations::{
     ConditionalUnpairOutcome, ConversationBindingService, ConversationMessageRecord,
     ConversationRouteKind, ExpectedExternalActorOwner, ExternalEventId, InboundConversationService,
     InboundMessageContentRef, InboundTurnError, MessageIdempotencyStatus,
-    RebornFilesystemConversationServices, ResolveConversationRequest,
+    RebornFilesystemConversationServices, ResetConversationRequest, ResolveConversationRequest,
 };
 use ironclaw_extension_contracts::external::{
     ExternalActorBindingEpoch, ExternalActorRef, ExternalConversationRef,
@@ -275,6 +275,55 @@ async fn filesystem_conversation_services_round_trip_persisted_state_on_reopen()
         lookup,
         "AcceptedConversationMessageLookup must survive a durable round trip unchanged"
     );
+}
+
+#[tokio::test]
+async fn filesystem_conversation_services_replay_reset_after_reopen_without_rotating_twice() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_conversations_fs(Arc::clone(&backend), "tenant-a", "alice");
+    let actor = external_actor("telegram-user-reset");
+    let conversation = external_conversation("chat-reset");
+
+    let services = RebornFilesystemConversationServices::new(Arc::clone(&scoped))
+        .await
+        .expect("services");
+    services
+        .pair_external_actor(
+            tenant_id("tenant-a"),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user_id("alice"),
+        )
+        .await
+        .expect("pair actor");
+    let first = services
+        .resolve_or_create_binding(resolve_request(
+            tenant_id("tenant-a"),
+            actor.clone(),
+            conversation.clone(),
+            "event-before-reset",
+        ))
+        .await
+        .expect("initial binding");
+    let reset_request = ResetConversationRequest {
+        resolve_request: resolve_request(tenant_id("tenant-a"), actor, conversation, "event-reset"),
+        expected_thread_id: first.turn_scope.thread_id,
+    };
+    let reset = services
+        .reset_conversation_binding(reset_request.clone())
+        .await
+        .expect("reset binding");
+    drop(services);
+
+    let reopened = RebornFilesystemConversationServices::new(scoped)
+        .await
+        .expect("reopen");
+    let replay = reopened
+        .reset_conversation_binding(reset_request)
+        .await
+        .expect("replay reset");
+    assert_eq!(replay, reset);
 }
 
 #[tokio::test]
