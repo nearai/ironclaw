@@ -545,6 +545,24 @@ fn stale_read_error(operation: &str, scoped_path: &str) -> CodingCapabilityError
 pub(super) async fn list_dir(
     request: &CodingCapabilityRequest<'_>,
 ) -> Result<Value, CodingCapabilityError> {
+    // `list_dir "/"` is an agent asking what the filesystem contains. It used to fail with
+    // `path  is not under an available scoped root` -- blank, because the safe-summary encoder maps
+    // `/` to a space -- when the roots it was asking for were right there in the mount view.
+    if let Some(path) = request.input.get("path").and_then(Value::as_str)
+        && super::paths::is_filesystem_root_request(path)
+    {
+        let mounts = request.mounts.ok_or_else(|| {
+            CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied)
+        })?;
+        let entries = super::paths::root_alias_entries(mounts);
+        let count = entries.len();
+        return Ok(json!({
+            "path": "/",
+            "entries": entries,
+            "count": count,
+            "truncated": false
+        }));
+    }
     let resolved = resolve_optional_path(request, FilesystemOperation::ListDir)?;
     // A missing mount ROOT lists as empty (the grant names it; nothing has
     // been written under it yet), so the sensitive-stat guard tolerates its

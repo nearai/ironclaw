@@ -91,6 +91,30 @@ fn resolve_path(
         ));
     }
     if !operation_allowed(&grant.permissions, operation) {
+        // Name the root, the writable alternatives, and -- only for a skill root -- the tool that
+        // owns writes there. The bare denial said just "the tool was denied filesystem access", so an
+        // agent editing its own skill had no idea what to do and fell back to remove-then-reinstall.
+        //
+        // `/skills` is deliberately read-only for the filesystem tools: writes go through
+        // `skill_install`/`skill_update`, which validate the manifest discovery requires. Suggesting
+        // those tools for a read-only WORKSPACE would be nonsense, which a test caught.
+        if grant.permissions.read && !grant.permissions.write {
+            let writable = writable_roots(mounts);
+            let mut reason = format!("{} does not permit writes", safe_summary_path(path));
+            if !writable.is_empty() {
+                reason.push_str(&format!(" (writable roots: {writable})"));
+            }
+            if is_skill_alias(&grant) {
+                reason.push_str(
+                    ". Skills change through skill_install or skill_update, which validate the \
+                     manifest that discovery requires",
+                );
+            }
+            return Err(CodingCapabilityError::with_safe_summary(
+                RuntimeDispatchErrorKind::FilesystemDenied,
+                reason,
+            ));
+        }
         return Err(CodingCapabilityError::with_safe_summary(
             RuntimeDispatchErrorKind::FilesystemDenied,
             format!(
@@ -116,6 +140,46 @@ fn available_roots(mounts: &ironclaw_host_api::mount::MountView) -> String {
         .collect();
     roots.sort_unstable();
     roots.join(", ")
+}
+
+/// The roots this caller may actually write to, for a denial that tells the agent where to go.
+fn writable_roots(mounts: &ironclaw_host_api::mount::MountView) -> String {
+    let mut roots: Vec<String> = mounts
+        .mounts
+        .iter()
+        .filter(|mount| mount.permissions.write)
+        .map(|mount| safe_summary_path_text(mount.alias.as_str()))
+        .collect();
+    roots.sort_unstable();
+    roots.join(", ")
+}
+
+/// Is this grant one of the skill roots, whose writes belong to the skill capabilities?
+fn is_skill_alias(grant: &ironclaw_host_api::mount::MountGrant) -> bool {
+    grant.alias.as_str().ends_with("skills")
+}
+
+/// The mount aliases an agent may address, as directory entries.
+///
+/// `list_dir "/"` used to fail with `path  is not under an available scoped root` -- the offending
+/// path rendered blank because the safe-summary encoder maps `/` to a space, so the message named
+/// nothing at all. The agent was doing something reasonable: asking what the filesystem contains
+/// before writing to it. The roots are exactly the answer, and they were already being computed for
+/// the error text.
+pub(super) fn root_alias_entries(mounts: &ironclaw_host_api::mount::MountView) -> Vec<String> {
+    let mut roots: Vec<String> = mounts
+        .mounts
+        .iter()
+        .map(|mount| format!("{}/", mount.alias.as_str()))
+        .collect();
+    roots.sort_unstable();
+    roots.dedup();
+    roots
+}
+
+/// Is this an attempt to address the filesystem root itself?
+pub(super) fn is_filesystem_root_request(path: &str) -> bool {
+    matches!(path.trim(), "/" | "//")
 }
 
 fn scoped_path_input(path: &str) -> String {
@@ -421,4 +485,48 @@ pub(super) fn safe_summary_path(scoped_path: &str) -> String {
 
 fn safe_summary_path_text(path: &str) -> String {
     path.trim_start_matches('/').replace(['/', '\\'], " ")
+}
+
+#[cfg(test)]
+mod root_listing_tests {
+    use super::*;
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
+
+    fn view() -> MountView {
+        MountView::new(vec![
+            MountGrant::new(
+                MountAlias::new("/workspace").expect("alias"),
+                VirtualPath::new("/projects/workspace").expect("target"),
+                MountPermissions::read_write(),
+            ),
+            MountGrant::new(
+                MountAlias::new("/skills").expect("alias"),
+                VirtualPath::new("/tenants/t/users/u/skills").expect("target"),
+                MountPermissions::read_only(),
+            ),
+        ])
+        .expect("view")
+    }
+
+    /// `list_dir "/"` must answer with the roots, not an error naming nothing.
+    ///
+    /// The failure read `path  is not under an available scoped root` -- blank, because the
+    /// safe-summary encoder maps `/` to a space. The agent was asking what the filesystem contains
+    /// before writing to it, and the roots were already computed for that very error message.
+    #[test]
+    fn the_filesystem_root_lists_the_available_roots() {
+        assert!(is_filesystem_root_request("/"));
+        assert!(is_filesystem_root_request(" / "));
+        assert!(!is_filesystem_root_request("/workspace"));
+        assert!(!is_filesystem_root_request(""));
+
+        assert_eq!(
+            root_alias_entries(&view()),
+            vec!["/skills/".to_string(), "/workspace/".to_string()],
+            "sorted, one entry per grant, so an agent can see where it may work"
+        );
+    }
 }
