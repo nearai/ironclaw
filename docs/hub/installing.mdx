@@ -73,6 +73,10 @@ ironclaw ironhub install <name> --kind tool --force
 
 Ask your agent to search IronHub, inspect an entry, or install a package. It will fetch the catalog, present matching results, and ask your approval before installing anything.
 
+<Note>
+Approving in chat cannot install a community entry (provenance `New`). The model-facing install path never sets the acknowledgement the gate requires, so the install is refused no matter how you answer. Install those from the CLI with `--acknowledge-unverified`.
+</Note>
+
 ---
 
 ## Where things are installed
