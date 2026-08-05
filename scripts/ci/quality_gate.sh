@@ -48,7 +48,14 @@ run_cargo_ci cargo clippy --locked --all --tests --examples --all-features -- -D
 select_test_runner() {
     case "${IRONCLAW_GATE_TEST_RUNNER:-auto}" in
         cargo) echo "cargo" ;;
-        nextest) echo "nextest" ;;
+        nextest)
+            if command -v cargo-nextest >/dev/null 2>&1; then
+                echo "nextest"
+            else
+                echo "IRONCLAW_GATE_TEST_RUNNER=nextest requires cargo-nextest" >&2
+                return 1
+            fi
+            ;;
         auto)
             if command -v cargo-nextest >/dev/null 2>&1; then
                 echo "nextest"
