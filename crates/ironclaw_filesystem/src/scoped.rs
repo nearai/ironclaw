@@ -247,6 +247,20 @@ where
         view.resolve(path).map_err(FilesystemError::from)
     }
 
+    /// The host path backing `path` for `scope`, if any.
+    ///
+    /// Resolves through this scope's own mount view and then asks the backend, so a caller learns the
+    /// real host location by the same route a read or write would take. `None` means the path is
+    /// database-backed and no process can open it.
+    pub fn host_path_for(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+    ) -> Option<std::path::PathBuf> {
+        let virtual_path = self.resolve(scope, path).ok()?;
+        self.root.host_path_for(&virtual_path)
+    }
+
     /// Return the per-scope [`MountView`] used to authorize ops at this
     /// scope. Each call resolves the view fresh; callers that need to inspect
     /// it repeatedly should cache the returned value.

@@ -324,6 +324,8 @@ fn standalone_selector_config_propagates_regex_activation_disabled() {
         false,
         ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
         super::DEFAULT_SKILL_ACTIVATION,
+        // Execution available: these cases assert selector config, not the no-process note.
+        true,
     );
     assert!(
         !cfg.regex_activation_enabled,
@@ -355,6 +357,8 @@ fn standalone_selector_config_propagates_regex_activation_enabled() {
         true,
         ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
         super::DEFAULT_SKILL_ACTIVATION,
+        // Execution available: these cases assert selector config, not the no-process note.
+        true,
     );
     assert!(
         cfg.regex_activation_enabled,
@@ -368,6 +372,8 @@ fn standalone_selector_config_uses_large_skill_context_budget() {
         true,
         ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
         super::DEFAULT_SKILL_ACTIVATION,
+        // Execution available: these cases assert selector config, not the no-process note.
+        true,
     );
     assert_eq!(
         cfg.max_context_tokens, 6000,
@@ -387,8 +393,12 @@ fn standalone_selector_config_propagates_injection_mode() {
         ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
         ironclaw_first_party_extension_ports::SkillInjectionMode::Full,
     ] {
-        let cfg =
-            super::skill_activation_selector_config(true, mode, super::DEFAULT_SKILL_ACTIVATION);
+        let cfg = super::skill_activation_selector_config(
+            true,
+            mode,
+            super::DEFAULT_SKILL_ACTIVATION,
+            true,
+        );
         assert_eq!(cfg.injection_mode, mode);
     }
 }
@@ -412,6 +422,8 @@ fn reborn_skill_selection_is_model_decided() {
         true,
         ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
         super::DEFAULT_SKILL_ACTIVATION,
+        // Execution available: these cases assert selector config, not the no-process note.
+        true,
     );
     assert_eq!(
         cfg.selection_mode,

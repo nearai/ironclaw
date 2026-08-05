@@ -377,6 +377,9 @@ where
     // at runtime without a restart. Defaults to `true` (auto-activation on).
     auto_activate_learned: Arc<AtomicBool>,
     setup_marker_source: Option<Arc<dyn SetupMarkerSource>>,
+    /// Copies an activated bundle's files where a host process can open them. `None` disables
+    /// staging, which is correct for a deployment with no writable workspace.
+    bundle_stager: Option<Arc<dyn crate::SkillBundleStager>>,
     activation_observer: Mutex<Option<Arc<dyn SkillActivationObserver>>>,
     messages_by_run: Mutex<HashMap<SkillActivationMessageKey, SkillActivationMessage>>,
     activation_cache: Mutex<HashMap<ActivationCandidateCacheKey, CachedActivationCandidate>>,
@@ -406,6 +409,7 @@ where
             config,
             auto_activate_learned: Arc::new(AtomicBool::new(true)),
             setup_marker_source: None,
+            bundle_stager: None,
             activation_observer: Mutex::new(None),
             messages_by_run: Mutex::new(HashMap::new()),
             activation_cache: Mutex::new(HashMap::new()),
@@ -430,6 +434,90 @@ where
     {
         self.setup_marker_source = Some(source);
         self
+    }
+
+    /// Supply a stager so an activated skill's scripts land somewhere the shell can run them.
+    pub(crate) fn with_bundle_stager<T>(mut self, stager: Arc<T>) -> Self
+    where
+        T: crate::SkillBundleStager + 'static,
+    {
+        self.bundle_stager = Some(stager);
+        self
+    }
+
+    /// Stage the activated bundles' files and report what the body renderer needs.
+    ///
+    /// Runs before bodies are rendered because the body has to name the staged path. Every failure
+    /// degrades rather than propagates: no stager, no execution backend, an unreadable bundle, or a
+    /// failed write all mean "no staged path for this skill", and the skill still activates with its
+    /// instructions intact.
+    async fn body_context(
+        &self,
+        run_context: &LoopRunContext,
+        candidates: &[ActivationCandidate],
+    ) -> SkillBodyContext {
+        let mut context = SkillBodyContext {
+            process_execution_available: self.config.process_execution_available,
+            staged_paths: HashMap::new(),
+        };
+        // Nothing can execute here, so a staged copy would be dead weight in the workspace. The body
+        // gets the "cannot execute processes" note instead.
+        if !context.process_execution_available {
+            return context;
+        }
+        let Some(stager) = self.bundle_stager.as_ref() else {
+            return context;
+        };
+        let scope = run_context.scope.to_resource_scope();
+        for candidate in candidates {
+            let bundle_id = candidate.descriptor.id();
+            let files = match self
+                .bundle_source
+                .list_skill_bundle_files(run_context, bundle_id)
+                .await
+            {
+                Ok(files) => files,
+                Err(error) => {
+                    tracing::debug!(
+                        skill = %bundle_id.name(),
+                        ?error,
+                        "could not list a skill bundle's files; skipping staging for it"
+                    );
+                    continue;
+                }
+            };
+            if files.is_empty() {
+                continue;
+            }
+            let mut staged_files = Vec::with_capacity(files.len());
+            for path in files {
+                match self
+                    .bundle_source
+                    .read_skill_bundle_file(run_context, bundle_id, &path)
+                    .await
+                {
+                    Ok(contents) => staged_files.push(crate::StagedBundleFile {
+                        relative_path: path.as_str().to_string(),
+                        contents,
+                    }),
+                    Err(error) => tracing::debug!(
+                        skill = %bundle_id.name(),
+                        file = %path.as_str(),
+                        ?error,
+                        "could not read a skill bundle file; staging the rest"
+                    ),
+                }
+            }
+            if let Some(staged_dir) = stager
+                .stage_bundle(&scope, bundle_id.name(), &staged_files)
+                .await
+            {
+                context
+                    .staged_paths
+                    .insert(bundle_id.name().to_string(), staged_dir);
+            }
+        }
+        context
     }
 
     pub fn record_user_message(
@@ -628,22 +716,16 @@ where
         if self.config.injection_mode == SkillInjectionMode::Full
             && !plan.selection.activations.is_empty()
         {
-            return Ok(context_candidates_for_plan(
-                &plan,
-                candidates,
-                self.config.process_execution_available,
-            ));
+            let body = self.body_context(run_context, &candidates).await;
+            return Ok(context_candidates_for_plan(&plan, candidates, &body));
         }
         // Fall through to the listing when nothing is active -- including in `Full` mode, which
         // previously returned an empty candidate set here. That was survivable only while the
         // scorer auto-activated something; with model-decides it would mean the model is never
         // told a skill exists and so can never activate one. Blinding the agent is a strictly
         // worse failure than showing it a listing it may not need.
-        Ok(listing_context_candidates(
-            &plan,
-            candidates,
-            self.config.process_execution_available,
-        ))
+        let body = self.body_context(run_context, &candidates).await;
+        Ok(listing_context_candidates(&plan, candidates, &body))
     }
 
     async fn active_plan_candidates(
@@ -663,10 +745,13 @@ where
             let candidate_set = self
                 .load_active_plan_candidate_set(run_context, &plan)
                 .await?;
+            let body = self
+                .body_context(run_context, &candidate_set.candidates)
+                .await;
             return Ok(context_candidates_for_plan(
                 &plan,
                 candidate_set.candidates,
-                self.config.process_execution_available,
+                &body,
             ));
         }
         // Listing mode: full bodies only for explicitly-mentioned or
@@ -685,13 +770,13 @@ where
         let (eligible_descriptors, listed_descriptors): (Vec<_>, Vec<_>) = descriptors
             .into_iter()
             .partition(|descriptor| body_eligible.contains(descriptor.id()));
-        let mut candidates: Vec<HostSkillContextCandidate> = self
+        let eligible_candidates = self
             .load_activation_candidates(run_context, &eligible_descriptors)
-            .await?
+            .await?;
+        let body = self.body_context(run_context, &eligible_candidates).await;
+        let mut candidates: Vec<HostSkillContextCandidate> = eligible_candidates
             .into_iter()
-            .map(|candidate| {
-                candidate.into_context_candidate(self.config.process_execution_available)
-            })
+            .map(|candidate| candidate.into_context_candidate(&body))
             .collect();
         let entries = ranked_listing_entries(
             &ranked_bundles,
@@ -1237,6 +1322,30 @@ processes -- there is no shell and no interpreter available to you. Any instruct
 script or command cannot be followed here. Apply the documented method directly from the text of this \
 skill, and do not call an external service to perform the computation.\n";
 
+/// What the body-rendering step needs to know about this deployment and this turn.
+#[derive(Debug, Default)]
+struct SkillBodyContext {
+    process_execution_available: bool,
+    /// Skill name -> workspace-relative directory its files were staged into.
+    staged_paths: HashMap<String, String>,
+}
+
+/// Appended to a staged skill's body so its own commands work verbatim.
+///
+/// The body says `python3 scripts/egfr.py`, which is only meaningful from the skill's own directory.
+/// Without being told where that is, agents guessed: one ran `cd /workspace && python3
+/// scripts/egfr.py` against a path three directories from where its file actually was, and then
+/// re-typed the whole algorithm into `python3 -c` — losing the exact thing the script existed to
+/// preserve. Naming the working directory is not prompt coaching; it is the one fact the body cannot
+/// contain, because it depends on the deployment.
+fn staged_files_note(runnable_dir: &str) -> String {
+    format!(
+        "\n\n---\n\nThis skill's files are available at `{runnable_dir}`. Run its commands with that \
+as the working directory, so the paths in the instructions above resolve as written. The copy under \
+`/skills/` is read-only and cannot be executed.\n"
+    )
+}
+
 /// Does this skill body instruct the model to execute something?
 ///
 /// Deliberately narrow. The note is only useful on a skill that actually promises execution, and
@@ -1252,16 +1361,19 @@ fn skill_body_instructs_execution(skill_md: &str) -> bool {
 }
 
 impl ActivationCandidate {
-    fn into_context_candidate(
-        self,
-        process_execution_available: bool,
-    ) -> HostSkillContextCandidate {
-        let skill_md =
-            if !process_execution_available && skill_body_instructs_execution(&self.skill_md) {
+    fn into_context_candidate(self, body: &SkillBodyContext) -> HostSkillContextCandidate {
+        let name = self.descriptor.id().name();
+        let skill_md = match body.staged_paths.get(name) {
+            // Staged: name the directory its own commands run from, so `python3 scripts/foo.py` in the
+            // body works verbatim instead of being guessed at.
+            Some(runnable_dir) => format!("{}{}", self.skill_md, staged_files_note(runnable_dir)),
+            None if !body.process_execution_available
+                && skill_body_instructs_execution(&self.skill_md) =>
+            {
                 format!("{}{NO_PROCESS_EXECUTION_NOTE}", self.skill_md)
-            } else {
-                self.skill_md
-            };
+            }
+            None => self.skill_md,
+        };
         HostSkillContextCandidate::loaded(
             skill_md,
             self.descriptor.trust().cloned(),
@@ -1284,7 +1396,7 @@ fn activation_plan_for_candidates(selection: SkillActivationSelection) -> SkillA
 fn context_candidates_for_plan(
     plan: &SkillActivationPlan,
     candidates: Vec<ActivationCandidate>,
-    process_execution_available: bool,
+    body: &SkillBodyContext,
 ) -> Vec<HostSkillContextCandidate> {
     if plan.selection.activations.is_empty() {
         return Vec::new();
@@ -1298,7 +1410,7 @@ fn context_candidates_for_plan(
     candidates
         .into_iter()
         .filter(|candidate| active_bundles.contains(candidate.descriptor.id()))
-        .map(|candidate| candidate.into_context_candidate(process_execution_available))
+        .map(|candidate| candidate.into_context_candidate(body))
         .collect()
 }
 
@@ -1438,7 +1550,7 @@ fn ranked_listing_entries<'a>(
 fn listing_context_candidates(
     plan: &SkillActivationPlan,
     candidates: Vec<ActivationCandidate>,
-    process_execution_available: bool,
+    body: &SkillBodyContext,
 ) -> Vec<HostSkillContextCandidate> {
     let body_eligible = body_eligible_bundle_ids(plan);
     let ranked_bundles = criteria_ranked_bundle_ids(plan);
@@ -1447,7 +1559,7 @@ fn listing_context_candidates(
         .partition(|candidate| body_eligible.contains(candidate.descriptor.id()));
     let mut loaded: Vec<HostSkillContextCandidate> = eligible
         .into_iter()
-        .map(|candidate| candidate.into_context_candidate(process_execution_available))
+        .map(|candidate| candidate.into_context_candidate(body))
         .collect();
     let entries = ranked_listing_entries(
         &ranked_bundles,

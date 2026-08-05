@@ -4624,11 +4624,29 @@ fn filesystem_skill_context_source(
         skill_activation_env()?,
         process_execution_available,
     );
-    let selectable_skills = extension.selectable_skill_runtime_with_setup_markers(
-        selector_config,
-        Arc::clone(workspace_filesystem),
-        Arc::clone(skill_auto_activate_learned),
+    // Staging needs a READ-WRITE workspace handle: `workspace_filesystem` beside it is deliberately
+    // read-only (it backs setup-marker reads) and fails closed on write. Same recipe the inbound
+    // attachment lander uses, and the same reason -- under a per-caller policy it addresses the
+    // caller's own subtree rather than the shared root.
+    let staging_filesystem = crate::runtime_mounts::read_write_workspace_filesystem(
+        &runtime.extension_filesystem,
+        &runtime.workspace_mounts,
     );
+    let selectable_skills = match staging_filesystem {
+        Some(staging_filesystem) => extension.selectable_skill_runtime_with_staging(
+            selector_config,
+            Arc::clone(workspace_filesystem),
+            staging_filesystem,
+            Arc::clone(skill_auto_activate_learned),
+        ),
+        // No writable workspace (hosted multi-tenant today) -- skills still activate, and a body that
+        // promises execution gets the "cannot execute processes" note instead of a staged path.
+        None => extension.selectable_skill_runtime_with_setup_markers(
+            selector_config,
+            Arc::clone(workspace_filesystem),
+            Arc::clone(skill_auto_activate_learned),
+        ),
+    };
     let bundle_source = extension.bundle_source();
     Ok(ComposedSkillContextSource {
         source: selectable_skills.host_skill_context_source(),
