@@ -224,8 +224,9 @@ caller's active admin/owner role on every request, resolves the selected user
 within that tenant, and delegates to the existing caller-owned thread/run
 artifact builders under the selected user's read scope. They expose no thread
 mutation, turn submission, retry, gate, or tool-action path. Successful list
-and artifact reads emit identifier-only structured records to
-`ironclaw::thread_scrape_audit`; transcript content is never copied into the
+and artifact reads, plus denied or failed attempts, emit identifier-only
+structured records from the ProductSurface authorization boundary to
+`ironclaw::thread_scrape_audit`; transcript content is never copied into an
 audit message.
 
 **Operator-gating.** LLM config, operator setup/config/service-control, and

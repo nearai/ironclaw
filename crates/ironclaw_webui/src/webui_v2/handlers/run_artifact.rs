@@ -84,7 +84,6 @@ pub async fn admin_list_thread_scrape_threads(
     Query(query): Query<AdminThreadScrapeListQuery>,
 ) -> Result<Json<RebornListThreadsResponse>, WebUiV2HttpError> {
     let user_id = super::parse_admin_user_id(user_id)?;
-    let admin_user_id = caller.user_id.clone();
     let surface = state.bind_services(caller);
     let response = ADMIN_THREAD_SCRAPE_THREADS_VIEW
         .query_on(
@@ -97,13 +96,6 @@ pub async fn admin_list_thread_scrape_threads(
             query.cursor,
         )
         .await?;
-    tracing::info!(
-        target: "ironclaw::thread_scrape_audit",
-        action = "threads_listed",
-        admin_user_id = %admin_user_id,
-        target_user_id = %user_id,
-        "thread scraping"
-    );
     Ok(Json(response))
 }
 
@@ -114,7 +106,6 @@ pub async fn admin_get_thread_scrape_artifact(
     Path(path): Path<AdminThreadScrapeThreadPath>,
 ) -> Result<Json<RebornThreadArtifact>, WebUiV2HttpError> {
     let user_id = super::parse_admin_user_id(path.user_id)?;
-    let admin_user_id = caller.user_id.clone();
     let thread_id = path.thread_id;
     let artifact = query_single(
         &state,
@@ -126,14 +117,6 @@ pub async fn admin_get_thread_scrape_artifact(
         },
     )
     .await?;
-    tracing::info!(
-        target: "ironclaw::thread_scrape_audit",
-        action = "thread_artifact_exported",
-        admin_user_id = %admin_user_id,
-        target_user_id = %user_id,
-        thread_id = %thread_id,
-        "thread scraping"
-    );
     Ok(Json(artifact))
 }
 
@@ -144,7 +127,6 @@ pub async fn admin_get_thread_scrape_run_artifact(
     Path(path): Path<AdminThreadScrapeRunPath>,
 ) -> Result<Json<RebornRunArtifact>, WebUiV2HttpError> {
     let user_id = super::parse_admin_user_id(path.user_id)?;
-    let admin_user_id = caller.user_id.clone();
     let thread_id = path.thread_id;
     let run_id = path.run_id;
     let artifact = query_single(
@@ -158,15 +140,6 @@ pub async fn admin_get_thread_scrape_run_artifact(
         },
     )
     .await?;
-    tracing::info!(
-        target: "ironclaw::thread_scrape_audit",
-        action = "run_artifact_exported",
-        admin_user_id = %admin_user_id,
-        target_user_id = %user_id,
-        thread_id = %thread_id,
-        run_id = %run_id,
-        "thread scraping"
-    );
     Ok(Json(artifact))
 }
 

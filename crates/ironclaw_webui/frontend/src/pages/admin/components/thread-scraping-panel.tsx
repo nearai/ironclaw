@@ -27,19 +27,35 @@ function saveArtifact(artifact, filename) {
 export function ThreadScrapingPanel({ userId }) {
   const t = useT();
   const [threads, setThreads] = React.useState([]);
+  const [nextCursor, setNextCursor] = React.useState(null);
   const [selectedThreadId, setSelectedThreadId] = React.useState("");
   const [artifact, setArtifact] = React.useState(null);
   const [isLoading, setIsLoading] = React.useState(true);
+  const [isLoadingMore, setIsLoadingMore] = React.useState(false);
   const [isLoadingArtifact, setIsLoadingArtifact] = React.useState(false);
   const [downloadingRunId, setDownloadingRunId] = React.useState("");
   const [error, setError] = React.useState("");
+  const artifactRequestRef = React.useRef(0);
+  const loadMoreAbortRef = React.useRef(null);
 
   React.useEffect(() => {
     const controller = new AbortController();
+    artifactRequestRef.current += 1;
+    loadMoreAbortRef.current?.abort();
+    loadMoreAbortRef.current = null;
+    setThreads([]);
+    setNextCursor(null);
+    setSelectedThreadId("");
+    setArtifact(null);
     setIsLoading(true);
+    setIsLoadingMore(false);
+    setIsLoadingArtifact(false);
     setError("");
     fetchThreadScrapeThreads(userId, { limit: 100, signal: controller.signal })
-      .then((response) => setThreads(Array.isArray(response?.threads) ? response.threads : []))
+      .then((response) => {
+        setThreads(Array.isArray(response?.threads) ? response.threads : []);
+        setNextCursor(response?.next_cursor ?? null);
+      })
       .catch((requestError) => {
         if (requestError?.name !== "AbortError") {
           setError(requestError instanceof Error ? requestError.message : t("admin.threadScraping.loadFailed"));
@@ -48,20 +64,62 @@ export function ThreadScrapingPanel({ userId }) {
       .finally(() => {
         if (!controller.signal.aborted) setIsLoading(false);
       });
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      artifactRequestRef.current += 1;
+      loadMoreAbortRef.current?.abort();
+      loadMoreAbortRef.current = null;
+    };
   }, [t, userId]);
 
   const selectThread = async (threadId) => {
+    const requestId = artifactRequestRef.current + 1;
+    artifactRequestRef.current = requestId;
     setSelectedThreadId(threadId);
     setArtifact(null);
     setError("");
     setIsLoadingArtifact(true);
     try {
-      setArtifact(await fetchThreadScrapeArtifact(userId, threadId));
+      const response = await fetchThreadScrapeArtifact(userId, threadId);
+      if (artifactRequestRef.current === requestId) setArtifact(response);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : t("admin.threadScraping.loadFailed"));
+      if (artifactRequestRef.current === requestId) {
+        setError(requestError instanceof Error ? requestError.message : t("admin.threadScraping.loadFailed"));
+      }
     } finally {
-      setIsLoadingArtifact(false);
+      if (artifactRequestRef.current === requestId) setIsLoadingArtifact(false);
+    }
+  };
+
+  const loadMore = async () => {
+    if (!nextCursor || isLoadingMore) return;
+    const cursor = nextCursor;
+    const controller = new AbortController();
+    loadMoreAbortRef.current = controller;
+    setIsLoadingMore(true);
+    setError("");
+    try {
+      const response = await fetchThreadScrapeThreads(userId, {
+        limit: 100,
+        cursor,
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      const page = Array.isArray(response?.threads) ? response.threads : [];
+      setThreads((current) => {
+        const ids = new Set(current.map((thread) => thread.thread_id));
+        return [...current, ...page.filter((thread) => !ids.has(thread.thread_id))];
+      });
+      setNextCursor(response?.next_cursor ?? null);
+    } catch (requestError) {
+      if (requestError?.name !== "AbortError") {
+        setError(requestError instanceof Error ? requestError.message : t("admin.threadScraping.loadFailed"));
+      }
+    } finally {
+      if (loadMoreAbortRef.current === controller) {
+        loadMoreAbortRef.current = null;
+        setIsLoadingMore(false);
+      }
     }
   };
 
@@ -134,6 +192,18 @@ export function ThreadScrapingPanel({ userId }) {
                 </span>
               </button>
             ))}
+            {nextCursor && (
+              <Button
+                className="w-full"
+                size="sm"
+                variant="secondary"
+                disabled={isLoadingMore}
+                data-testid="admin-thread-scraping-load-more"
+                onClick={loadMore}
+              >
+                {isLoadingMore ? t("common.loading") : t("common.loadMore")}
+              </Button>
+            )}
           </div>
 
           <div className="min-w-0">

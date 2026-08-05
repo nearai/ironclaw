@@ -3043,17 +3043,32 @@ where
         caller: ProductSurfaceCaller,
         request: RebornAdminThreadScrapeListRequest,
     ) -> Result<RebornListThreadsResponse, ProductSurfaceError> {
-        let subject = self.thread_scrape_subject(&caller, request.user_id).await?;
-        self.build_threads_view(
-            subject,
-            ProductListThreadsRequest {
-                limit: request.limit,
-                cursor: request.cursor,
-                candidate_thread_id: None,
-                needs_approval: false,
-            },
-        )
-        .await
+        let admin_user_id = caller.user_id.clone();
+        let target_user_id = request.user_id.clone();
+        let result = async {
+            let subject = self.thread_scrape_subject(&caller, request.user_id).await?;
+            self.build_threads_view(
+                subject,
+                ProductListThreadsRequest {
+                    limit: request.limit,
+                    cursor: request.cursor,
+                    candidate_thread_id: None,
+                    needs_approval: false,
+                },
+            )
+            .await
+        }
+        .await;
+        let outcome = if result.is_ok() { "success" } else { "failure" };
+        tracing::info!(
+            target: "ironclaw::thread_scrape_audit",
+            action = "threads_listed",
+            outcome,
+            admin_user_id = %admin_user_id,
+            target_user_id = %target_user_id,
+            "thread scraping"
+        );
+        result
     }
 
     pub async fn build_admin_thread_scrape_artifact(
@@ -3061,14 +3076,31 @@ where
         caller: ProductSurfaceCaller,
         request: RebornAdminThreadScrapeArtifactRequest,
     ) -> Result<RebornThreadArtifact, ProductSurfaceError> {
-        let subject = self.thread_scrape_subject(&caller, request.user_id).await?;
-        self.build_thread_artifact(
-            subject,
-            RebornThreadArtifactRequest {
-                thread_id: request.thread_id,
-            },
-        )
-        .await
+        let admin_user_id = caller.user_id.clone();
+        let target_user_id = request.user_id.clone();
+        let thread_id = request.thread_id.clone();
+        let result = async {
+            let subject = self.thread_scrape_subject(&caller, request.user_id).await?;
+            self.build_thread_artifact(
+                subject,
+                RebornThreadArtifactRequest {
+                    thread_id: request.thread_id,
+                },
+            )
+            .await
+        }
+        .await;
+        let outcome = if result.is_ok() { "success" } else { "failure" };
+        tracing::info!(
+            target: "ironclaw::thread_scrape_audit",
+            action = "thread_artifact_exported",
+            outcome,
+            admin_user_id = %admin_user_id,
+            target_user_id = %target_user_id,
+            thread_id = %thread_id,
+            "thread scraping"
+        );
+        result
     }
 
     pub async fn build_admin_thread_scrape_run_artifact(
@@ -3076,15 +3108,34 @@ where
         caller: ProductSurfaceCaller,
         request: RebornAdminThreadScrapeRunArtifactRequest,
     ) -> Result<RebornRunArtifact, ProductSurfaceError> {
-        let subject = self.thread_scrape_subject(&caller, request.user_id).await?;
-        self.build_run_artifact(
-            subject,
-            RebornRunArtifactRequest {
-                thread_id: request.thread_id,
-                run_id: request.run_id,
-            },
-        )
-        .await
+        let admin_user_id = caller.user_id.clone();
+        let target_user_id = request.user_id.clone();
+        let thread_id = request.thread_id.clone();
+        let run_id = request.run_id.clone();
+        let result = async {
+            let subject = self.thread_scrape_subject(&caller, request.user_id).await?;
+            self.build_run_artifact(
+                subject,
+                RebornRunArtifactRequest {
+                    thread_id: request.thread_id,
+                    run_id: request.run_id,
+                },
+            )
+            .await
+        }
+        .await;
+        let outcome = if result.is_ok() { "success" } else { "failure" };
+        tracing::info!(
+            target: "ironclaw::thread_scrape_audit",
+            action = "run_artifact_exported",
+            outcome,
+            admin_user_id = %admin_user_id,
+            target_user_id = %target_user_id,
+            thread_id = %thread_id,
+            run_id = %run_id,
+            "thread scraping"
+        );
+        result
     }
 
     pub async fn create_admin_user(

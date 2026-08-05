@@ -143,9 +143,9 @@ use ironclaw_product::{
     RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
     RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
     RebornAdminThreadScrapeArtifactRequest, RebornAdminThreadScrapeListRequest,
-    RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest, RebornAdminUserListQuery,
-    RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
-    RebornAdminUserSecretsListResponse,
+    RebornAdminThreadScrapeRunArtifactRequest, RebornAdminUpdateUserProductRequest,
+    RebornAdminUpdateUserRequest, RebornAdminUserListQuery, RebornAdminUserListResponse,
+    RebornAdminUserRequest, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
 };
 use ironclaw_product_contracts::admin_users::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
@@ -15336,7 +15336,7 @@ fn admin_record(user_id: &str, role: AdminUserRole, status: AdminUserStatus) -> 
 
 #[derive(Default)]
 struct FakeAdminUsers {
-    users: Mutex<HashMap<String, AdminUserRecord>>,
+    users: Mutex<HashMap<(String, String), AdminUserRecord>>,
     // Regression counter for item 6 of the PR-2 palette review fix wave:
     // `execute_product_command` must read the admin directory exactly once
     // per request (resolved once at the top and reused), never twice (the
@@ -15347,9 +15347,21 @@ struct FakeAdminUsers {
 
 impl FakeAdminUsers {
     fn with(records: impl IntoIterator<Item = AdminUserRecord>) -> Self {
+        Self::with_tenant("tenant-alpha", records)
+    }
+
+    fn with_tenant(tenant_id: &str, records: impl IntoIterator<Item = AdminUserRecord>) -> Self {
+        Self::with_tenant_records(
+            records
+                .into_iter()
+                .map(|record| (tenant_id.to_string(), record)),
+        )
+    }
+
+    fn with_tenant_records(records: impl IntoIterator<Item = (String, AdminUserRecord)>) -> Self {
         let map = records
             .into_iter()
-            .map(|record| (record.user_id.as_str().to_string(), record))
+            .map(|(tenant_id, record)| ((tenant_id, record.user_id.as_str().to_string()), record))
             .collect();
         Self {
             users: Mutex::new(map),
@@ -15360,13 +15372,17 @@ impl FakeAdminUsers {
     fn get_user_calls(&self) -> usize {
         *self.get_user_calls.lock().unwrap()
     }
+
+    fn key(tenant: &TenantId, user_id: &UserId) -> (String, String) {
+        (tenant.as_str().to_string(), user_id.as_str().to_string())
+    }
 }
 
 #[async_trait]
 impl AdminUserService for FakeAdminUsers {
     async fn list_users(
         &self,
-        _tenant: &TenantId,
+        tenant: &TenantId,
         status: Option<AdminUserStatus>,
         after: Option<&UserId>,
         limit: usize,
@@ -15377,7 +15393,9 @@ impl AdminUserService for FakeAdminUsers {
             .users
             .lock()
             .unwrap()
-            .values()
+            .iter()
+            .filter(|((tenant_id, _), _)| tenant_id == tenant.as_str())
+            .map(|(_, record)| record)
             .filter(|record| status.is_none_or(|want| record.status == want))
             .cloned()
             .collect();
@@ -15392,16 +15410,21 @@ impl AdminUserService for FakeAdminUsers {
 
     async fn get_user(
         &self,
-        _tenant: &TenantId,
+        tenant: &TenantId,
         user_id: &UserId,
     ) -> Result<Option<AdminUserRecord>, AdminUserError> {
         *self.get_user_calls.lock().unwrap() += 1;
-        Ok(self.users.lock().unwrap().get(user_id.as_str()).cloned())
+        Ok(self
+            .users
+            .lock()
+            .unwrap()
+            .get(&Self::key(tenant, user_id))
+            .cloned())
     }
 
     async fn create_user(
         &self,
-        _tenant: &TenantId,
+        tenant: &TenantId,
         _actor: &UserId,
         fields: AdminCreateUserFields,
     ) -> Result<AdminCreatedUser, AdminUserError> {
@@ -15409,7 +15432,7 @@ impl AdminUserService for FakeAdminUsers {
         self.users
             .lock()
             .unwrap()
-            .insert("created-user".to_string(), record.clone());
+            .insert(Self::key(tenant, &record.user_id), record.clone());
         Ok(AdminCreatedUser {
             record,
             api_token: SecretString::from("minted-token"),
@@ -15418,14 +15441,14 @@ impl AdminUserService for FakeAdminUsers {
 
     async fn update_profile(
         &self,
-        _tenant: &TenantId,
+        tenant: &TenantId,
         user_id: &UserId,
         display_name: Option<String>,
         _metadata: Option<std::collections::BTreeMap<String, String>>,
     ) -> Result<AdminUserRecord, AdminUserError> {
         let mut users = self.users.lock().unwrap();
         let record = users
-            .get_mut(user_id.as_str())
+            .get_mut(&Self::key(tenant, user_id))
             .ok_or(AdminUserError::NotFound)?;
         if display_name.is_some() {
             record.display_name = display_name;
@@ -15435,13 +15458,13 @@ impl AdminUserService for FakeAdminUsers {
 
     async fn set_status(
         &self,
-        _tenant: &TenantId,
+        tenant: &TenantId,
         user_id: &UserId,
         status: AdminUserStatus,
     ) -> Result<AdminUserRecord, AdminUserError> {
         let mut users = self.users.lock().unwrap();
         let record = users
-            .get_mut(user_id.as_str())
+            .get_mut(&Self::key(tenant, user_id))
             .ok_or(AdminUserError::NotFound)?;
         record.status = status;
         Ok(record.clone())
@@ -15449,34 +15472,37 @@ impl AdminUserService for FakeAdminUsers {
 
     async fn set_role(
         &self,
-        _tenant: &TenantId,
+        tenant: &TenantId,
         user_id: &UserId,
         role: AdminUserRole,
     ) -> Result<AdminUserRecord, AdminUserError> {
         let mut users = self.users.lock().unwrap();
         let record = users
-            .get_mut(user_id.as_str())
+            .get_mut(&Self::key(tenant, user_id))
             .ok_or(AdminUserError::NotFound)?;
         record.role = role;
         Ok(record.clone())
     }
 
-    async fn delete_user(
-        &self,
-        _tenant: &TenantId,
-        user_id: &UserId,
-    ) -> Result<(), AdminUserError> {
-        self.users.lock().unwrap().remove(user_id.as_str());
+    async fn delete_user(&self, tenant: &TenantId, user_id: &UserId) -> Result<(), AdminUserError> {
+        self.users
+            .lock()
+            .unwrap()
+            .remove(&Self::key(tenant, user_id));
         Ok(())
     }
 
-    async fn count_active_admins(&self, _tenant: &TenantId) -> Result<usize, AdminUserError> {
+    async fn count_active_admins(&self, tenant: &TenantId) -> Result<usize, AdminUserError> {
         Ok(self
             .users
             .lock()
             .unwrap()
-            .values()
-            .filter(|record| record.status == AdminUserStatus::Active && record.role.is_admin())
+            .iter()
+            .filter(|((tenant_id, _), record)| {
+                tenant_id == tenant.as_str()
+                    && record.status == AdminUserStatus::Active
+                    && record.role.is_admin()
+            })
             .count())
     }
 
@@ -15526,13 +15552,31 @@ fn assert_forbidden(err: ProductSurfaceError) {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn admin_thread_scraping_reads_only_the_selected_users_threads() {
-    let services = admin_services(FakeAdminUsers::with([
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_admin_user_service(Arc::new(FakeAdminUsers::with([
         admin_record("user-alpha", AdminUserRole::Admin, AdminUserStatus::Active),
         admin_record("user-beta", AdminUserRole::Member, AdminUserStatus::Active),
-    ]));
+    ])))
+    .with_operator_logs_service(Arc::new(RecordingOperatorLogsService::default()));
     setup_owned_thread(&services, caller(), "thread-admin").await;
-    setup_owned_thread(&services, caller_for_user("user-beta"), "thread-target").await;
+    let target_caller = caller_for_user("user-beta");
+    setup_owned_thread(&services, target_caller.clone(), "thread-target").await;
+    let thread_id = ThreadId::new("thread-target").expect("thread id");
+    let run_id = TurnRunId::parse(&run_id_string()).expect("run id");
+    seed_submitted_message(
+        &thread_service,
+        &thread_scope_for(&target_caller),
+        &thread_id,
+        &run_id,
+        "target trajectory",
+    )
+    .await;
     let target = UserId::new("user-beta").expect("target user");
 
     let threads = services
@@ -15554,16 +15598,42 @@ async fn admin_thread_scraping_reads_only_the_selected_users_threads() {
         .build_admin_thread_scrape_artifact(
             caller(),
             RebornAdminThreadScrapeArtifactRequest {
-                user_id: target,
+                user_id: target.clone(),
                 thread_id: "thread-target".to_string(),
             },
         )
         .await
         .expect("admin thread scrape artifact");
     assert_eq!(artifact.thread_id, "thread-target");
+
+    let run_artifact = services
+        .build_admin_thread_scrape_run_artifact(
+            caller(),
+            RebornAdminThreadScrapeRunArtifactRequest {
+                user_id: target,
+                thread_id: "thread-target".to_string(),
+                run_id: run_id.to_string(),
+            },
+        )
+        .await
+        .expect("admin run scrape artifact");
+    assert_eq!(run_artifact.thread_id, "thread-target");
+    assert_eq!(run_artifact.run.run_id, run_id);
+    assert_eq!(run_artifact.messages.len(), 1);
+    assert_eq!(run_artifact.messages[0].content, "target trajectory");
+    assert!(logs_contain(
+        "action=\"threads_listed\" outcome=\"success\""
+    ));
+    assert!(logs_contain(
+        "action=\"thread_artifact_exported\" outcome=\"success\""
+    ));
+    assert!(logs_contain(
+        "action=\"run_artifact_exported\" outcome=\"success\""
+    ));
 }
 
 #[tokio::test]
+#[traced_test]
 async fn admin_thread_scraping_rejects_a_non_admin_before_reading_threads() {
     let services = admin_services(FakeAdminUsers::with([
         admin_record("user-alpha", AdminUserRole::Member, AdminUserStatus::Active),
@@ -15583,6 +15653,38 @@ async fn admin_thread_scraping_rejects_a_non_admin_before_reading_threads() {
         .expect_err("member must not scrape threads");
 
     assert_forbidden(error);
+    assert!(logs_contain(
+        "action=\"threads_listed\" outcome=\"failure\""
+    ));
+}
+
+#[tokio::test]
+async fn admin_thread_scraping_does_not_match_a_target_from_another_tenant() {
+    let services = admin_services(FakeAdminUsers::with_tenant_records([
+        (
+            "tenant-alpha".to_string(),
+            admin_record("user-alpha", AdminUserRole::Admin, AdminUserStatus::Active),
+        ),
+        (
+            "tenant-beta".to_string(),
+            admin_record("user-beta", AdminUserRole::Member, AdminUserStatus::Active),
+        ),
+    ]));
+
+    let error = services
+        .list_admin_thread_scrape_threads(
+            caller(),
+            RebornAdminThreadScrapeListRequest {
+                user_id: UserId::new("user-beta").expect("target user"),
+                limit: Some(50),
+                cursor: None,
+            },
+        )
+        .await
+        .expect_err("cross-tenant target must not be visible");
+
+    assert_eq!(error.status_code, 404);
+    assert_eq!(error.code, ProductSurfaceErrorCode::NotFound);
 }
 
 #[tokio::test]
