@@ -59,6 +59,7 @@ fn manifest() -> Result<CapabilityManifest, ExtensionError> {
         effects: vec![EffectKind::ExternalWrite],
         default_permission: PermissionMode::Allow,
         visibility: CapabilityVisibility::Api,
+        standard_op: None,
         input_schema_ref: CapabilityProfileSchemaRef::new(
             "schemas/builtin/outbound_preferences_set.input.v1.json",
         )?,

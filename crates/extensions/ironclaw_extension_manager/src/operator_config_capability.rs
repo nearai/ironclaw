@@ -80,6 +80,7 @@ fn manifest() -> Result<CapabilityManifest, ExtensionError> {
         effects: vec![EffectKind::ModifyApproval],
         default_permission: PermissionMode::Allow,
         visibility: CapabilityVisibility::Api,
+        standard_op: None,
         input_schema_ref: CapabilityProfileSchemaRef::new(
             "schemas/builtin/operator_config_set_auto_approve.input.v1.json",
         )?,
@@ -108,6 +109,7 @@ fn tool_permission_manifest() -> Result<CapabilityManifest, ExtensionError> {
         effects: vec![EffectKind::ModifyApproval],
         default_permission: PermissionMode::Allow,
         visibility: CapabilityVisibility::Api,
+        standard_op: None,
         input_schema_ref: CapabilityProfileSchemaRef::new(
             "schemas/builtin/operator_config_set_tool_permission.input.v1.json",
         )?,

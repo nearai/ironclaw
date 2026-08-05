@@ -44,6 +44,269 @@ scopes = ["notes:write"]
 audience = { scheme = "https", host = "api.acme.example" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
+# ---- standardized messaging framework: the 16 core ops ---------------------
+# One `[[tools]]` binding per op (standardized-messaging-framework.md §6):
+# write ops carry `external_write` and the `notes:write` scope; reads/people
+# carry neither and the `notes:read` scope. `standard_op` selects the host's
+# canonical input/output schema (no `input_schema_ref`/`output_schema_ref`
+# here — the host synthesizes `standard:messaging/<op>.v1` refs).
+
+[[tools]]
+standard_op = "send_message"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "acme-messenger.send_message"
+description = "Acme notes: conversation refs look like ACME-C-…."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+
+[[tools.credentials]]
+handle = "acme_user_token"
+vendor = "acme"
+scopes = ["notes:write"]
+audience = { scheme = "https", host = "api.acme.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "edit_message"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "acme-messenger.edit_message"
+description = ""
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+
+[[tools.credentials]]
+handle = "acme_user_token"
+vendor = "acme"
+scopes = ["notes:write"]
+audience = { scheme = "https", host = "api.acme.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "delete_message"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "acme-messenger.delete_message"
+description = ""
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+
+[[tools.credentials]]
+handle = "acme_user_token"
+vendor = "acme"
+scopes = ["notes:write"]
+audience = { scheme = "https", host = "api.acme.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "add_reaction"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "acme-messenger.add_reaction"
+description = ""
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+
+[[tools.credentials]]
+handle = "acme_user_token"
+vendor = "acme"
+scopes = ["notes:write"]
+audience = { scheme = "https", host = "api.acme.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "remove_reaction"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "acme-messenger.remove_reaction"
+description = ""
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+
+[[tools.credentials]]
+handle = "acme_user_token"
+vendor = "acme"
+scopes = ["notes:write"]
+audience = { scheme = "https", host = "api.acme.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "open_dm"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "acme-messenger.open_dm"
+description = ""
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+
+[[tools.credentials]]
+handle = "acme_user_token"
+vendor = "acme"
+scopes = ["notes:write"]
+audience = { scheme = "https", host = "api.acme.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "list_conversations"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "acme-messenger.list_conversations"
+description = ""
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+
+[[tools.credentials]]
+handle = "acme_user_token"
+vendor = "acme"
+scopes = ["notes:read"]
+audience = { scheme = "https", host = "api.acme.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "get_conversation_info"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "acme-messenger.get_conversation_info"
+description = ""
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+
+[[tools.credentials]]
+handle = "acme_user_token"
+vendor = "acme"
+scopes = ["notes:read"]
+audience = { scheme = "https", host = "api.acme.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "get_conversation_history"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "acme-messenger.get_conversation_history"
+description = ""
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+
+[[tools.credentials]]
+handle = "acme_user_token"
+vendor = "acme"
+scopes = ["notes:read"]
+audience = { scheme = "https", host = "api.acme.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "get_thread_replies"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "acme-messenger.get_thread_replies"
+description = ""
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+
+[[tools.credentials]]
+handle = "acme_user_token"
+vendor = "acme"
+scopes = ["notes:read"]
+audience = { scheme = "https", host = "api.acme.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "get_message"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "acme-messenger.get_message"
+description = ""
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+
+[[tools.credentials]]
+handle = "acme_user_token"
+vendor = "acme"
+scopes = ["notes:read"]
+audience = { scheme = "https", host = "api.acme.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "search_messages"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "acme-messenger.search_messages"
+description = ""
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+
+[[tools.credentials]]
+handle = "acme_user_token"
+vendor = "acme"
+scopes = ["notes:read"]
+audience = { scheme = "https", host = "api.acme.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "get_user_info"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "acme-messenger.get_user_info"
+description = ""
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+
+[[tools.credentials]]
+handle = "acme_user_token"
+vendor = "acme"
+scopes = ["notes:read"]
+audience = { scheme = "https", host = "api.acme.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "resolve_user"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "acme-messenger.resolve_user"
+description = ""
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+
+[[tools.credentials]]
+handle = "acme_user_token"
+vendor = "acme"
+scopes = ["notes:read"]
+audience = { scheme = "https", host = "api.acme.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "list_members"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "acme-messenger.list_members"
+description = ""
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+
+[[tools.credentials]]
+handle = "acme_user_token"
+vendor = "acme"
+scopes = ["notes:read"]
+audience = { scheme = "https", host = "api.acme.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+standard_op = "whoami"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "acme-messenger.whoami"
+description = ""
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+
+[[tools.credentials]]
+handle = "acme_user_token"
+vendor = "acme"
+scopes = ["notes:read"]
+audience = { scheme = "https", host = "api.acme.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
 # ---- channel surface (at most one per extension) ---------------------------
 
 [channel]

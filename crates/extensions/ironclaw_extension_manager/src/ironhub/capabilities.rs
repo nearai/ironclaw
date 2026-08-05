@@ -112,6 +112,7 @@ fn capability_manifest(
         effects,
         default_permission,
         visibility: CapabilityVisibility::Model,
+        standard_op: None,
         input_schema_ref: CapabilityProfileSchemaRef::new(format!(
             "schemas/builtin/{schema_name}.input.v1.json"
         ))?,
