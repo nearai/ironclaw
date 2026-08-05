@@ -1,5 +1,15 @@
 # IronClaw Architecture Overview Video
 
+> **⚠️ STALE — describes the pre-Reborn architecture (April 2026).** The
+> scenes cite `ironclaw_engine` and the v1 channel model, both deleted with
+> the v1 monolith; nothing here reflects the current Reborn stack
+> (`webui → ProductSurface → assistant → composition → runtime`, the turn
+> runtime, or the family directory layout). For current architecture docs
+> read `openwiki/`; to bring the video up to date, regenerate the scenes via
+> `.claude/skills/architecture-video/SKILL.md` — do not cite this video's
+> content until that happens. Content last updated in #2365 (2026-04-18);
+> only dependencies and paths have changed since.
+
 A Remotion-based animated video that walks new contributors through IronClaw's
 internals — the five primitives, execution loop, CodeAct, thread state machine,
 skills pipeline, tool dispatcher, channels, extensibility traits, and the LLM
