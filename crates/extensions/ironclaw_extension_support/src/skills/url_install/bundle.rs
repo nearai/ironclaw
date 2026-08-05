@@ -1,11 +1,11 @@
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use ironclaw_host_api::dispatch::RuntimeDispatchErrorKind;
 use ironclaw_skills::normalize_safe_relative_path;
 
 use crate::skills::SkillManagementCapabilityError;
 
-use super::{MAX_TOTAL_UNZIPPED_BYTES, MAX_ZIP_ENTRY_BYTES, SkillUrlPayload, SkillUrlPayloadFile};
+use super::{SkillUrlPayload, SkillUrlPayloadFile, MAX_TOTAL_UNZIPPED_BYTES, MAX_ZIP_ENTRY_BYTES};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SkillBundle {
@@ -138,13 +138,19 @@ mod tests {
     #[test]
     fn normalize_archive_path_rejects_absolute() {
         let result = normalize_archive_path(Path::new("/etc/passwd"));
-        assert_eq!(result.unwrap_err().kind(), RuntimeDispatchErrorKind::InputEncode);
+        assert_eq!(
+            result.unwrap_err().kind(),
+            RuntimeDispatchErrorKind::InputEncode
+        );
     }
 
     #[test]
     fn normalize_archive_path_rejects_upward_traversal() {
         let result = normalize_archive_path(Path::new("../escape"));
-        assert_eq!(result.unwrap_err().kind(), RuntimeDispatchErrorKind::InputEncode);
+        assert_eq!(
+            result.unwrap_err().kind(),
+            RuntimeDispatchErrorKind::InputEncode
+        );
     }
 
     #[test]
@@ -162,13 +168,19 @@ mod tests {
     #[test]
     fn normalize_archive_path_rejects_windows_backslash() {
         let result = normalize_archive_path(Path::new("my-skill\\SKILL.md"));
-        assert_eq!(result.unwrap_err().kind(), RuntimeDispatchErrorKind::InputEncode);
+        assert_eq!(
+            result.unwrap_err().kind(),
+            RuntimeDispatchErrorKind::InputEncode
+        );
     }
 
     #[test]
     fn normalize_archive_path_rejects_empty() {
         let result = normalize_archive_path(Path::new(""));
-        assert_eq!(result.unwrap_err().kind(), RuntimeDispatchErrorKind::InputEncode);
+        assert_eq!(
+            result.unwrap_err().kind(),
+            RuntimeDispatchErrorKind::InputEncode
+        );
     }
 
     #[test]
@@ -179,10 +191,7 @@ mod tests {
 
     #[test]
     fn strip_common_root_two_flat_files_no_strip() {
-        let paths = vec![
-            PathBuf::from("SKILL.md"),
-            PathBuf::from("config.json"),
-        ];
+        let paths = vec![PathBuf::from("SKILL.md"), PathBuf::from("config.json")];
         assert_eq!(strip_common_archive_root(&paths), None);
     }
 
@@ -255,12 +264,16 @@ mod tests {
             .push_file(
                 PathBuf::from("skill/SKILL.md"),
                 b"# Test Skill\n
-## Description\nA test.".to_vec(),
+## Description\nA test."
+                    .to_vec(),
             )
             .unwrap();
         let payload = collector.finish().unwrap();
-        assert_eq!(payload.content, "# Test Skill\n
-## Description\nA test.");
+        assert_eq!(
+            payload.content,
+            "# Test Skill\n
+## Description\nA test."
+        );
         assert!(payload.files.is_empty());
     }
 
@@ -268,16 +281,10 @@ mod tests {
     fn bundle_collector_push_extra_files() {
         let mut collector = BundleCollector::new(PathBuf::from("skill"));
         collector
-            .push_file(
-                PathBuf::from("skill/SKILL.md"),
-                b"content".to_vec(),
-            )
+            .push_file(PathBuf::from("skill/SKILL.md"), b"content".to_vec())
             .unwrap();
         collector
-            .push_file(
-                PathBuf::from("skill/config.json"),
-                b"{}".to_vec(),
-            )
+            .push_file(PathBuf::from("skill/config.json"), b"{}".to_vec())
             .unwrap();
         collector
             .push_file(
@@ -287,8 +294,14 @@ mod tests {
             .unwrap();
         let payload = collector.finish().unwrap();
         assert_eq!(payload.files.len(), 2);
-        assert!(payload.files.iter().any(|f| f.path == PathBuf::from("config.json")));
-        assert!(payload.files.iter().any(|f| f.path == PathBuf::from("scripts/setup.sh")));
+        assert!(payload
+            .files
+            .iter()
+            .any(|f| f.path == PathBuf::from("config.json")));
+        assert!(payload
+            .files
+            .iter()
+            .any(|f| f.path == PathBuf::from("scripts/setup.sh")));
     }
 
     #[test]
@@ -313,10 +326,7 @@ mod tests {
         let mut collector = BundleCollector::new(PathBuf::from("skill"));
         // Push SKILL.md first to avoid finish() error
         collector
-            .push_file(
-                PathBuf::from("skill/SKILL.md"),
-                b"valid".to_vec(),
-            )
+            .push_file(PathBuf::from("skill/SKILL.md"), b"valid".to_vec())
             .unwrap();
         // Push a file that would exceed total
         let big = vec![0u8; (MAX_TOTAL_UNZIPPED_BYTES + 1) as usize];
@@ -342,10 +352,7 @@ mod tests {
     fn bundle_collector_ignore_files_outside_root() {
         let mut collector = BundleCollector::new(PathBuf::from("subdir"));
         collector
-            .push_file(
-                PathBuf::from("subdir/SKILL.md"),
-                b"content".to_vec(),
-            )
+            .push_file(PathBuf::from("subdir/SKILL.md"), b"content".to_vec())
             .unwrap();
         let payload = collector.finish().unwrap();
         assert_eq!(payload.content, "content");
