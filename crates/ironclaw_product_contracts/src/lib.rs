@@ -44,6 +44,7 @@ pub mod descriptors;
 pub mod error;
 pub mod inbound;
 pub mod inbound_requests;
+pub mod inspector;
 pub mod interaction_commands;
 pub mod ironhub;
 pub mod lifecycle_service;

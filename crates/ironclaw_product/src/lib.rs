@@ -51,6 +51,7 @@ mod filesystem_ledger;
 mod gate_state;
 mod in_memory_ledger;
 mod inbound_turn;
+pub mod inspector_store;
 mod ledger;
 mod lifecycle;
 mod outbound_delivery;
