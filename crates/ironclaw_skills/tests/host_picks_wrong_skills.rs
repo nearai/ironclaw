@@ -140,8 +140,14 @@ fn task_prompt(root: &Path, task_id: &str) -> Option<String> {
 #[test]
 fn the_host_keyword_scorer_picks_skills_the_task_does_not_need() {
     let root = bench_root();
-    if !root.join("datasets/pinchbench/v1/routing_catalog/manifest.json").is_file() {
-        eprintln!("benchmarks checkout not found at {}; skipping", root.display());
+    if !root
+        .join("datasets/pinchbench/v1/routing_catalog/manifest.json")
+        .is_file()
+    {
+        eprintln!(
+            "benchmarks checkout not found at {}; skipping",
+            root.display()
+        );
         return;
     }
     let manifest: serde_json::Value = serde_json::from_str(
@@ -210,7 +216,10 @@ fn the_host_keyword_scorer_picks_skills_the_task_does_not_need() {
         worst.push((task_id.clone(), picked.len(), correct, wrong));
     }
 
-    assert!(scored >= 25, "scored only {scored} tasks; prompt lookup broke");
+    assert!(
+        scored >= 25,
+        "scored only {scored} tasks; prompt lookup broke"
+    );
 
     // The finding, pinned. Measured: 83 host picks across 27 tasks, ZERO correct, every task
     // getting at least one wrong skill. It is 0% rather than merely poor because the only skills
@@ -231,7 +240,10 @@ fn the_host_keyword_scorer_picks_skills_the_task_does_not_need() {
         "only {tasks_with_wrong}/{scored} tasks got a wrong host pick; measured 27/27"
     );
 
-    println!("\n=== HOST keyword scorer, {scored} tasks, {} skills ===", catalog.len());
+    println!(
+        "\n=== HOST keyword scorer, {scored} tasks, {} skills ===",
+        catalog.len()
+    );
     println!(
         "  picked {total_picked} skills, {total_correct} correct, {} WRONG",
         total_picked - total_correct

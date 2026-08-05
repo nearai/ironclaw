@@ -2509,9 +2509,7 @@ mod tests {
         // submitted list. Several skills stay reachable by calling again, so this bounds
         // commitment per call, not the total.
         assert!(
-            descriptor
-                .safe_description
-                .contains("one skill per call"),
+            descriptor.safe_description.contains("one skill per call"),
             "skill_activate must ask for one skill per call, as claude-code's Skill tool does"
         );
         assert_eq!(

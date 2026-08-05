@@ -85,11 +85,10 @@ pub use selector::{
     prefilter_skills_with_options, skill_token_cost,
 };
 pub use validation::{
-    lint_skill_routing_metadata, lint_skill_routing_metadata_advisory,
-    lint_skill_routing_metadata_blocking,
-    SafeRelativePathError, escape_skill_content, escape_xml_attr, normalize_line_endings,
-    normalize_safe_relative_path, validate_credential_name, validate_credential_spec,
-    validate_path_pattern, validate_skill_name,
+    SafeRelativePathError, escape_skill_content, escape_xml_attr, lint_skill_routing_metadata,
+    lint_skill_routing_metadata_advisory, lint_skill_routing_metadata_blocking,
+    normalize_line_endings, normalize_safe_relative_path, validate_credential_name,
+    validate_credential_spec, validate_path_pattern, validate_skill_name,
 };
 #[cfg(test)]
 mod replacement_snapshot_public_surface_tests {

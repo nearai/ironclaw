@@ -157,7 +157,6 @@ async fn a_skill_in_the_production_virtual_filesystem_is_activatable_by_name() {
     .await
     .expect("write SKILL.md into the production virtual filesystem");
 
-
     let result = tokio::time::timeout(
         Duration::from_secs(20),
         runtime.execute_skill_message(&conversation, "$tenant-policy-helper"),
@@ -199,8 +198,10 @@ async fn a_skill_in_the_production_virtual_filesystem_is_activatable_by_name() {
 async fn build_production(
     db: Arc<libsql::Database>,
     db_path: &std::path::Path,
-) -> Result<ironclaw_reborn_composition::RebornRuntime, ironclaw_reborn_composition::RebornRuntimeError>
-{
+) -> Result<
+    ironclaw_reborn_composition::RebornRuntime,
+    ironclaw_reborn_composition::RebornRuntimeError,
+> {
     let bindings = ironclaw_reborn_composition::test_support::libsql_host_bindings_for_test(
         RebornCompositionProfile::Production,
         "prod-restart-owner",
@@ -280,7 +281,9 @@ async fn a_skill_in_the_production_store_is_activatable_after_restart() {
     .expect("write SKILL.md into the production virtual filesystem");
 
     // Second build sees a store that already contains the skill.
-    let second = build_production(Arc::clone(&db), &db_path).await.expect("second production build");
+    let second = build_production(Arc::clone(&db), &db_path)
+        .await
+        .expect("second production build");
     let conversation = second
         .new_conversation()
         .await
