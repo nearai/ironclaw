@@ -1529,6 +1529,12 @@ fn select_skill_activations(
             // connects the later shell failure back to the missing binary. Reaching this
             // path without the gate was how a skill declaring `requires.bins` still
             // "activated cleanly".
+            // Same gate as the explicit-mention loop above, and it has to be here too: a
+            // criteria-selected skill is the one the USER never asked for by name, so
+            // activating it with an unmet requirement is the case where nothing at all
+            // connects the later shell failure back to the missing binary. Reaching this
+            // path without the gate was how a skill declaring `requires.bins` still
+            // "activated cleanly".
             if let Some(reason) = unmet_requirements_refusal(candidate) {
                 feedback.push(reason);
                 continue;
@@ -1984,12 +1990,6 @@ fn content_hash(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    /// Config for tests whose SUBJECT is criteria selection.
-    ///
-    /// The library default is now `ExplicitOnly` -- the model decides, the keyword/regex scorer
-    /// does not. These tests exercise the scorer itself, so they opt in explicitly rather than
-    /// inheriting it. That is the point of the new default: nothing gets the scorer by accident.
-
     /// Assert no skill BODY reached the model, allowing the listing.
     ///
     /// These assertions used to read `selected.is_empty()`. That is no longer the right
@@ -2283,6 +2283,11 @@ mod tests {
         );
     }
 
+    /// Config for tests whose SUBJECT is criteria selection.
+    ///
+    /// The library default is now `ExplicitOnly` -- the model decides, the keyword/regex scorer
+    /// does not. These tests exercise the scorer itself, so they opt in explicitly rather than
+    /// inheriting it. That is the point of the new default: nothing gets the scorer by accident.
     fn criteria_config() -> SkillActivationSelectorConfig {
         SkillActivationSelectorConfig::default()
             .set_selection_mode(SkillActivationSelectionMode::ExplicitAndCriteria)
@@ -3450,6 +3455,86 @@ mod tests {
         assert!(
             feedback.contains("ironclaw-absent-binary-for-test"),
             "the refusal must name the missing requirement: {feedback}"
+        );
+    }
+
+    /// The same gate on the path the user never asked for by name.
+    ///
+    /// `unmet_requirements_refusal` was wired into the explicit-mention loop and into
+    /// `select_named_skill_activations`, but NOT into the criteria loop, so a keyword-matching
+    /// skill with an unmet `requires.bins` auto-activated and "activated cleanly". That is the
+    /// worse half of the two: on the explicit path the model at least chose the skill and can
+    /// connect a later shell failure to its own request, while a criteria selection arrives
+    /// unrequested, so nothing links the missing binary to anything.
+    ///
+    /// Asserted through the observer rather than a return value because that is where the
+    /// criteria path's feedback actually goes -- it is the seam the live projection consumes
+    /// (`runtime.rs::set_activation_observer`), so a refusal invisible here is invisible in
+    /// the product.
+    #[tokio::test]
+    async fn an_unmet_requirement_blocks_criteria_activation_too_and_says_which() {
+        #[derive(Debug, Default)]
+        struct RecordingActivationObserver {
+            events: Mutex<Vec<SkillActivationObservedEvent>>,
+        }
+
+        impl SkillActivationObserver for RecordingActivationObserver {
+            fn observe_skill_activation(&self, event: SkillActivationObservedEvent) {
+                self.events.lock().expect("observer lock").push(event);
+            }
+        }
+
+        let manifest = concat!(
+            "---\n",
+            "name: needs-binary\n",
+            "description: Requires a binary that does not exist\n",
+            "activation:\n",
+            "  keywords: [\"transcode\"]\n",
+            "requires:\n",
+            "  bins:\n",
+            "    - ironclaw-absent-binary-for-test\n",
+            "---\n\n",
+            "NEEDS_BINARY_SENTINEL\n",
+        );
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "needs-binary",
+            manifest,
+        )]));
+        let observer = Arc::new(RecordingActivationObserver::default());
+        let selectable = SelectableSkillContextSource::new(source, criteria_config());
+        selectable
+            .set_activation_observer(Arc::clone(&observer) as Arc<dyn SkillActivationObserver>)
+            .expect("observer registers");
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "please transcode this file",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("an unmet requirement is a refusal, not an error");
+
+        assert_no_skill_body_disclosed(&selected, "criteria match with an unmet requirement");
+        let events = observer.events.lock().expect("observer lock");
+        let feedback = events
+            .iter()
+            .flat_map(|event| event.feedback.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            events.iter().all(|event| event.activations.is_empty()),
+            "a skill whose required binary is absent must not activate, however it was selected"
+        );
+        assert!(
+            feedback.contains("requirements are unmet")
+                && feedback.contains("ironclaw-absent-binary-for-test"),
+            "the refusal must reach the observer and name the missing requirement: {feedback}"
         );
     }
 
