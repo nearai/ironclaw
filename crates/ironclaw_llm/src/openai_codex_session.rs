@@ -257,7 +257,11 @@ impl OpenAiCodexSessionManager {
             })
     }
 
-    /// Ensure we have a valid session. Loads from disk, refreshes, or prompts login.
+    /// Ensure we have a valid session without starting an interactive login.
+    ///
+    /// Device authorization is reserved for explicit login flows. Provider
+    /// construction can run during server startup, where waiting for a device
+    /// code would prevent recovery surfaces from becoming available.
     pub async fn ensure_authenticated(&self) -> Result<(), LlmError> {
         // Try loading from disk if we don't have a session
         if !self.has_session().await {
@@ -265,19 +269,13 @@ impl OpenAiCodexSessionManager {
         }
 
         if !self.has_session().await {
-            // No session at all -- need to authenticate
-            return self.device_code_login().await;
+            return Err(LlmError::AuthFailed {
+                provider: "openai_codex".to_string(),
+            });
         }
 
         if self.needs_refresh().await {
-            // Try refresh; if it fails, re-authenticate
-            match self.refresh_tokens().await {
-                Ok(()) => Ok(()),
-                Err(e) => {
-                    tracing::info!("Token refresh failed ({}), re-authenticating...", e);
-                    self.device_code_login().await
-                }
-            }
+            self.refresh_tokens().await
         } else {
             Ok(())
         }
@@ -663,12 +661,11 @@ impl OpenAiCodexSessionManager {
         *guard = Some(session);
     }
 
-    /// Handle a 401 response by refreshing, or re-authenticating.
+    /// Handle a 401 response by refreshing the existing session.
+    ///
+    /// Request-time recovery must not start an interactive device-code flow.
     pub async fn handle_auth_failure(&self) -> Result<(), LlmError> {
-        match self.refresh_tokens().await {
-            Ok(()) => Ok(()),
-            Err(_) => self.device_code_login().await,
-        }
+        self.refresh_tokens().await
     }
 }
 
@@ -724,6 +721,34 @@ mod tests {
         mgr.set_session(session).await;
 
         assert!(mgr.needs_refresh().await);
+    }
+
+    #[tokio::test]
+    async fn ensure_authenticated_without_session_fails_without_device_login() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().join("missing-session.json"));
+        let mgr = OpenAiCodexSessionManager::new(config).unwrap();
+
+        let error = mgr.ensure_authenticated().await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            LlmError::AuthFailed { ref provider } if provider == "openai_codex"
+        ));
+    }
+
+    #[tokio::test]
+    async fn auth_failure_without_session_fails_without_device_login() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().join("missing-session.json"));
+        let mgr = OpenAiCodexSessionManager::new(config).unwrap();
+
+        let error = mgr.handle_auth_failure().await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            LlmError::AuthFailed { ref provider } if provider == "openai_codex"
+        ));
     }
 
     #[test]
