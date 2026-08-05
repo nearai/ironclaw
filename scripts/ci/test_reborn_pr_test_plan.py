@@ -479,6 +479,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
     def test_user_sandbox_worker_change_selects_real_docker_lane(self) -> None:
         for path in (
             "Dockerfile.sandbox-worker",
+            "docker/reborn/entrypoint.sh",
             "crates/ironclaw_sandbox/src/sandbox_process.rs",
             "crates/ironclaw_reborn_composition/src/builtin_capability_policy.rs",
             "crates/ironclaw_reborn_composition/src/deployment.rs",
@@ -493,6 +494,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "crates/ironclaw_runtime_policy/src/resolver.rs",
             "crates/ironclaw_sandbox/tests/user_sandbox_docker_live.rs",
             "tests/integration/reborn_sandbox_shell_turn.rs",
+            "tests/e2e_trace_runtime_policy_serde.rs",
+            "tests/fixtures/llm_traces/runtime_policy/hosted_dev_no_shell.json",
             "tests/integration/support/builder.rs",
             "tests/integration/support/capability_backend.rs",
             "tests/integration/support/docker_gate.rs",

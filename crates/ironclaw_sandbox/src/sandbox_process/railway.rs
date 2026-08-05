@@ -1011,5 +1011,4 @@ where
 }
 
 #[cfg(test)]
-#[path = "railway/tests.rs"]
 mod tests;
