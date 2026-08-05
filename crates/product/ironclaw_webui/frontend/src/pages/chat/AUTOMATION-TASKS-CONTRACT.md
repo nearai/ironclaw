@@ -5,8 +5,12 @@ Status: **design prototype**. The frontend is built and live behind mock data
 **not yet implemented**. This document is the reviewable wiring path — the
 durable events, projection, transport frame, HTTP surface, and facade methods a
 follow-up must add to make the two OOBE concepts real. It follows the Reborn
-rules in `.claude/rules/gateway-events.md`, `.claude/rules/tool-evidence.md`, and
-`.claude/rules/types.md`.
+rules in `.claude/rules/gateway-events.md`, `.claude/rules/lifecycle.md`, and
+`.claude/rules/types.md`. *(Crate names below reflect current `main` after the
+#6918 family-folder reorg: the event log is `ironclaw_event_log`, the durable
+store `ironclaw_event_store`, both under `crates/events/`; the facade
+`RebornServicesApi` lives in `crates/product/ironclaw_assistant`; the routes stay
+in `crates/product/ironclaw_webui/src/webui_v2/`.)*
 
 The two concepts:
 
@@ -52,7 +56,7 @@ model-visible result (`.claude/rules/safety-and-sandbox.md`).
 ## 2. Durable events (source of truth)
 
 New typed variants on the Reborn runtime event enum (owning crate:
-`ironclaw_events`; appended via the durable sink in `ironclaw_reborn_event_store`
+`ironclaw_event_log`; appended via the durable sink in `ironclaw_event_store`
 following the owning domain's ordering contract — never a direct handler
 broadcast):
 
@@ -121,10 +125,10 @@ consume only `RebornServicesApi`; errors go through `WebUiV2HttpError`.
 
 ---
 
-## 6. Facade + effect (`RebornServicesApi` in `ironclaw_product_workflow`)
+## 6. Facade + effect (`RebornServicesApi` in `ironclaw_assistant`)
 
 New facade methods, each returning the **server-confirmed** task record, never an
-optimistic echo (`.claude/rules/tool-evidence.md`):
+optimistic echo (`.claude/rules/gateway-events.md`):
 
 - `list_automation_tasks(caller) -> Vec<AutomationTask>`
 - `approve_automation_task(caller, id) -> AutomationTask`
@@ -134,7 +138,8 @@ optimistic echo (`.claude/rules/tool-evidence.md`):
 
 Approve/Revert are real third-party effects (Gmail send/archive, Calendar
 move/restore) and must run through the mediated capability host + product
-adapters (`ironclaw_product_adapters` via composition) — **never** a second
+adapters (the `ProductAdapter` surface in `ironclaw_host_api`, wired via
+composition) — **never** a second
 outbound HTTP path. Success is admitted only from the provider-issued evidence
 (message id / event id / revision) plus a minimal read-back; the
 `AutomationTaskAutomated` / `AutomationTaskReverted` event carries that evidence.

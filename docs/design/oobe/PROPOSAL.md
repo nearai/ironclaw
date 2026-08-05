@@ -2,7 +2,7 @@
 
 **Status:** Proposal, under review · Companion to [README.md](README.md) (overview), [PLAN.md](PLAN.md) (execution), [CHECKLIST.md](CHECKLIST.md) (definition of done).
 
-This is the evidence-backed specification behind the overview. It states the problem, defines the two-phase model, inventories **what extends shipped code vs. what is net-new** (§3–§4 — the core framing), enumerates every dependency with an implementation approach (§5), maps the work onto the existing codebase and the #6918 target architecture (§6), and records the security model, test strategy, risks, and open decisions. §11 explains how the APDD kit and PR #6918 frameworks are applied.
+This is the evidence-backed specification behind the overview. It states the problem, defines the two-phase model, inventories **what extends shipped code vs. what is net-new** (§3–§4 — the core framing), enumerates every dependency with an implementation approach (§5), maps the work onto the existing codebase and the #6918 family folders — now landed on `main` (§6), and records the security model, test strategy, risks, and open decisions. §11 explains how the APDD kit and PR #6918 frameworks are applied.
 
 ---
 
@@ -10,7 +10,7 @@ This is the evidence-backed specification behind the overview. It states the pro
 
 **Goal:** design and ship the first five minutes for a brand-new IronClaw user landing in WebChat v2 right after their workspace is provisioned.
 
-**Today (on `main`):** the landing view is a hero title, a composer, and three static suggestion chips ([`empty-state.tsx`](../../../crates/ironclaw_webui/frontend/src/pages/chat/components/empty-state.tsx)). The automation surfaces that would give a first moment of value — a "done for you" carousel, inline rich-preview cards, a Plan card, an agent-mode pill — all assume automations *already exist*. A fresh account has none, so the cold-start and the first-automation moments are undesigned. That gap is what this fills.
+**Today (on `main`):** the landing view is a hero title, a composer, and three static suggestion chips ([`empty-state.tsx`](../../../crates/product/ironclaw_webui/frontend/src/pages/chat/components/empty-state.tsx)). The automation surfaces that would give a first moment of value — a "done for you" carousel, inline rich-preview cards, a Plan card, an agent-mode pill — all assume automations *already exist*. A fresh account has none, so the cold-start and the first-automation moments are undesigned. That gap is what this fills.
 
 **Non-goals:** this proposal does not redesign the steady-state chat, the automations management page, or the extension catalog. It adds a first-run layer on top of them and reuses them where they already do the job.
 
@@ -46,7 +46,7 @@ This is the section the review turns on. Each Foundational capability is classif
 
 | # | Capability | Preexisting basis on `main` (verified) | What Foundational adds | Class |
 |---|---|---|---|---|
-| P1 | Landing surface for the cards | [`empty-state.tsx`](../../../crates/ironclaw_webui/frontend/src/pages/chat/components/empty-state.tsx) — hero, composer, suggestion chips | Mount a suggestion drawer above the composer; the hero/composer are untouched | Extend shipped |
+| P1 | Landing surface for the cards | [`empty-state.tsx`](../../../crates/product/ironclaw_webui/frontend/src/pages/chat/components/empty-state.tsx) — hero, composer, suggestion chips | Mount a suggestion drawer above the composer; the hero/composer are untouched | Extend shipped |
 | P2 | Card busy / "Automating…" state | `near-process-indicator.tsx` (branded streaming indicator, #6901) | Render it verbatim inside a running card | Reuse shipped |
 | P3 | Per-card **Connect** CTA + OAuth | extension-authorization path: `lib/extension-pairing-api.ts`, `lib/product-auth-oauth-events.ts`, `lib/channel-connection-events.ts`, `components/telegram-setup-panel.tsx`, `components/pairing-web-code-panel.tsx` | Card's connect action routes into that flow via the shared `extension_name` resolver — **no new auth path** (CLAUDE.md extension/auth invariant) | Reuse shipped |
 | P4 | Agent modes (Suggest / Plan / Auto) | approval-gate system: `resolve_gate`, the `global_auto_approve` feature, `ApprovalCard` | The mode pill is a **new presentation** over these; `auto` is the typed generalization of `global_auto_approve` (§7) | New UI over shipped |
@@ -62,8 +62,8 @@ This is the section the review turns on. Each Foundational capability is classif
 |---|---|---|---|
 | N1 | Suggested-task card + carousel / drawer components | New component family | frontend (prototype exists in #6994, mock data) |
 | N2 | Pills-collapse drawer interaction + section dismiss + in-composer restore | New interaction model | frontend (prototype in #6994) |
-| N3 | `AutomationTask` domain model + 5 durable events + projection | New records/events; the source of truth for cards | `ironclaw_events`, `ironclaw_event_projections` (contract §§1–3) |
-| N4 | 5 HTTP routes + 5 product-surface facade methods | New capability commands | `ironclaw_webui/src/webui_v2/`, `ironclaw_product` (contract §§5–6) |
+| N3 | `AutomationTask` domain model + 5 durable events + projection | New records/events; the source of truth for cards | `ironclaw_event_log`, `ironclaw_event_projections` (contract §§1–3) |
+| N4 | 5 HTTP routes + 5 facade methods | New capability commands | `ironclaw_webui/src/webui_v2/`, `ironclaw_assistant` (contract §§5–6) |
 | N5 | **First-run suggestion producer** | Nothing emits the first proposals for a fresh user — the contract covers *completed* and *inline* tasks, not the *first-run suggestion feed* | new; proposed home `ironclaw_triggers` (§5.2) |
 | N6 | Agent-mode persistence + typed gate wiring | Mode is localStorage-only in the prototype; needs a durable home + real gate behavior | `ironclaw_webui` settings + the gate path (contract §7) |
 
@@ -82,18 +82,18 @@ None of these block Foundational; each is a superset of a Foundational piece.
 
 ## 5. Dependency inventory & implementation approach
 
-Each dependency states *what it needs* and *how to build it*; the PLAN sequences them. Foundational deps are **D-F\***; Vision-only deps are **D-V\***. The frontend data seam ([`lib/automation-tasks-api.ts`](../../../crates/ironclaw_webui/frontend/src/pages/chat/lib/automation-tasks-api.ts)) is already shaped for all of these — wiring is a mock→`fetch` body swap with no component change.
+Each dependency states *what it needs* and *how to build it*; the PLAN sequences them. Foundational deps are **D-F\***; Vision-only deps are **D-V\***. The frontend data seam ([`lib/automation-tasks-api.ts`](../../../crates/product/ironclaw_webui/frontend/src/pages/chat/lib/automation-tasks-api.ts)) is already shaped for all of these — wiring is a mock→`fetch` body swap with no component change.
 
 ### 5.1 D-F1 — Automation-task backend (events · projection · routes · facade)
 
-*Needs:* the durable source of truth the cards read and act on. *Approach* (from [AUTOMATION-TASKS-CONTRACT.md](../../../crates/ironclaw_webui/frontend/src/pages/chat/AUTOMATION-TASKS-CONTRACT.md) §§2–6, reconciled to current crate names):
+*Needs:* the durable source of truth the cards read and act on. *Approach* (from [AUTOMATION-TASKS-CONTRACT.md](../../../crates/product/ironclaw_webui/frontend/src/pages/chat/AUTOMATION-TASKS-CONTRACT.md) §§2–6, reconciled to current crate names):
 
-- **Events** in `ironclaw_events` (`runtime_event.rs`): `AutomationTaskProposed`, `AutomationTaskModified`, `AutomationTaskAutomated`, `AutomationTaskReverted`, `AutomationTaskCancelled` — redacted, replayable, appended via the durable sink (never a direct handler broadcast). Payloads are **sensitive by default** (email bodies, attendee lists) and carry the owning redaction obligation.
+- **Events** in `ironclaw_event_log` (`runtime_event.rs`): `AutomationTaskProposed`, `AutomationTaskModified`, `AutomationTaskAutomated`, `AutomationTaskReverted`, `AutomationTaskCancelled` — redacted, replayable, appended via the durable sink (never a direct handler broadcast). Payloads are **sensitive by default** (email bodies, attendee lists) and carry the owning redaction obligation.
 - **Projection** in `ironclaw_event_projections`: an `AutomationTaskProjection` scope-filtered by `(tenant, user)`, folding the events into `AutomationTaskState`, with a replay cursor. **Cross-user isolation gets a dedicated regression test** (a task for user A must never appear in user B's projection).
 - **Routes** in `ironclaw_webui/src/webui_v2/` (+ matching `webui_v2_routes()` descriptor rows, or the descriptor contract test fails): `list` (GET, ProjectionOnly), `approve` (POST, TurnCoordinator), `modify` (PATCH, ProductWorkflow), `cancel` (POST, ProductWorkflow), `revert` (POST, TurnCoordinator). Authenticated caller-scoped, not operator-gated.
-- **Facade** on the product surface (`ironclaw_product`; the contract's `RebornServicesApi` is today's `ProductSurface`): `list/approve/modify/cancel/revert`, each returning the **server-confirmed** record. Approve/Revert are real third-party effects (Gmail send/archive, Calendar move/restore) and **must run through the mediated capability host + product adapters** — never a second outbound HTTP path. Success is admitted only from provider-issued evidence + a minimal read-back. **Modify branches on state:** a *suggested* task edits the proposal in place; an *automated* task **re-runs** against the provider and returns fresh evidence.
+- **Facade** — the 5 methods land on the existing facade **`RebornServicesApi`** (`crates/product/ironclaw_assistant/src/reborn_services.rs`); the typed capability contract `ProductSurface` and its task DTOs live in `ironclaw_product_contracts`. `list/approve/modify/cancel/revert`, each returning the **server-confirmed** record. Approve/Revert are real third-party effects (Gmail send/archive, Calendar move/restore) and **must run through the mediated capability host + product adapters** — never a second outbound HTTP path. Success is admitted only from provider-issued evidence + a minimal read-back. **Modify branches on state:** a *suggested* task edits the proposal in place; an *automated* task **re-runs** against the provider and returns fresh evidence.
 
-*Where it lands in the #6918 target:* events/projection → `events/`; facade/DTOs → `product/assistant`; routes → `product/webui`.
+*Where it lands (family folders now on `main`):* events/projection → `crates/events/`; facade/DTOs → `crates/product/ironclaw_assistant`; routes → `crates/product/ironclaw_webui`.
 
 ### 5.2 D-F2 — First-run suggestion producer  ⚠ the load-bearing new dependency
 
@@ -102,10 +102,10 @@ Each dependency states *what it needs* and *how to build it*; the PLAN sequences
 *Approach — three candidates, to be decided before Phase F2:*
 
 1. **Deterministic starter set gated on whitelisted/connected extensions** (recommended for Foundational): on first login, the projection seeds a fixed proposal set filtered to the tools the admin whitelisted (e.g. Gmail present → "Triage your inbox"). Simplest, no model call, fully testable; matches the enterprise "admin-whitelisted" posture. Home: a first-login hook that appends `AutomationTaskProposed` via the durable sink.
-2. **`ironclaw_triggers`-hosted onboarding suggester** — a trusted-fire trigger scheduled on account creation that runs a bounded suggestion turn and emits proposals. Reuses the triggers trusted-submit path; more flexible, heavier.
+2. **`ironclaw_triggers`-hosted onboarding suggester** — a trusted-fire trigger scheduled on account creation that runs a bounded suggestion turn and emits proposals. Reuses the triggers trusted-submit path — **which already exists on `main`**: `crates/app/ironclaw_composition/src/automation/{trigger_poller, trigger_poller_trusted_submit, conversation_turn_submitter}` wires exactly this for the shipped scheduled-automations feature. More flexible, heavier.
 3. **Agent-driven suggester in the loop** — the agent proposes during the first turn. Most "alive," least deterministic; likely Vision-tier.
 
-*Recommendation:* ship **(1)** in Foundational (deterministic, safe, testable), design **(2)** as the Vision upgrade path. *Where it lands in the target:* `domains/triggers`.
+*Recommendation:* ship **(1)** in Foundational (deterministic, safe, testable), design **(2)** as the Vision upgrade path. *Where it lands:* `crates/domains/ironclaw_triggers` (+ the composition automation wiring above).
 
 ### 5.3 D-F3 — Connect wiring (reuse, not rebuild)
 
@@ -148,7 +148,7 @@ Each dependency states *what it needs* and *how to build it*; the PLAN sequences
 
 ## 6. Architecture impact — integration into the existing codebase
 
-A WebChat v2 feature crosses five layers (CLAUDE.md): `ironclaw_webui` (SPA + routes) → `ProductSurface` (typed capability contract) → `ironclaw_product` (orchestration + facade) → `ironclaw_reborn_composition` (wiring by profile) → runtime (`ironclaw_events` / `ironclaw_event_projections` / `ironclaw_event_streams`, plus `ironclaw_triggers`). The OOBE work touches each:
+A WebChat v2 feature crosses five layers (CLAUDE.md): `ironclaw_webui` (SPA + routes) → `ProductSurface` (typed capability contract) → `ironclaw_assistant` (orchestration + facade) → `ironclaw_composition` (wiring by profile) → runtime (`ironclaw_event_log` / `ironclaw_event_projections` / `ironclaw_event_streams`, plus `ironclaw_triggers`). The #6918 family-folder reorg has landed on `main`, so these are the current crate homes (`crates/product/`, `crates/app/`, `crates/events/`, `crates/domains/`). The OOBE work touches each:
 
 ```text
  LAYER                         SHIPPED (main)            OOBE ADDS
@@ -160,9 +160,9 @@ A WebChat v2 feature crosses five layers (CLAUDE.md): `ironclaw_webui` (SPA + ro
                                mode-selector (proto)      agent-mode pill                  [P4]
  ironclaw_webui/src/webui_v2   v2 route descriptors      5 task routes + agent-mode       [N4,N6]
  ProductSurface (contracts)    ProductSurface* types     5 task DTOs / commands           [N4]
- ironclaw_product              facade + effects          5 facade methods (mediated)      [N4]
- ironclaw_reborn_composition   profile wiring            wire projection + producer       [N3,N5]
- ironclaw_events               runtime_event.rs          5 AutomationTask* events         [N3]
+ ironclaw_assistant            facade + effects          5 facade methods (mediated)      [N4]
+ ironclaw_composition          profile wiring            wire projection + producer       [N3,N5]
+ ironclaw_event_log            runtime_event.rs          5 AutomationTask* events         [N3]
  ironclaw_event_projections    projections               AutomationTaskProjection         [N3]
  ironclaw_triggers             trusted-fire              first-run suggestion producer     [N5]
  approval-gate system          resolve_gate/global_...   typed auto-approve (per-kind)    [P4,N6]
@@ -196,8 +196,8 @@ Following `.claude/rules/testing.md` (integration-first; test through the caller
 | Mock cards shown to real users (D-F5) | Draft gate on PR #6994; carousel reads real projection or DEV/flag before merge |
 | Suggestion producer (D-F2) scope-creeps into an agent feature | Ship the deterministic starter set first; keep the suggester an explicit Vision upgrade |
 | `auto`/`bypass` over-suppress gates | Typed per-kind consent + gate-suppression tests + audit trail; `bypass` deferred to Vision |
-| Contract drifts from current crate names | This proposal reconciles names (§5.1); the contract's `src/webui_v2/` path is still current (verified) |
-| Backend churns during #6918 refactor | New pieces land in their target families (§6); move-only PRs stay behavior-free |
+| Contract drifts from current crate names | Names reconciled to current `main` (§5.1, F0) after the #6918 reorg; the contract's `src/webui_v2/` path is still current (verified) |
+| Backend churns during the #6918 reorg | The reorg has largely landed on `main`; new pieces go straight into the current family folders (§6); move-only PRs stay behavior-free |
 | Real third-party effects fail silently | Success admitted only from provider evidence + read-back (§7) |
 
 ## 10. Feedback & decisions  *(APDD anchor — leave open until review folds in)*

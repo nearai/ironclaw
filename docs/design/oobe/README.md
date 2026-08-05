@@ -1,6 +1,6 @@
 # IronClaw OOBE & Onboarding — Integration Proposal (Executive Overview)
 
-**Status:** Proposal, under review · **Authored against:** `origin/main` @ post-#6980 (WS1.4 contracts landed) · **Track:** WebChat v2 first-run / onboarding
+**Status:** Proposal, under review · **Reconciled against:** `origin/main` after the #6918 family-folder reorg (crates under `crates/{contracts,events,domains,product,app,…}/`; `ironclaw_events`→`ironclaw_event_log`, `ironclaw_product`→`ironclaw_assistant`) · **Track:** WebChat v2 first-run / onboarding
 **Documents:** this overview · [PROPOSAL.md](PROPOSAL.md) (full spec: phasing, shipped-vs-net-new scope, dependency inventory) · [PLAN.md](PLAN.md) (how to execute — phases, gates, PR sizing) · [CHECKLIST.md](CHECKLIST.md) (definition of done) · [oobe.md](../oobe.md) (design brief) · [mockup.html](mockup.html) (interactive mockup — self-contained, open in any browser)
 
 This is the plan for turning the OOBE prototype (PR #6994, presentational + mock data) into shipped product, **in two phases that match the mockup's two versions** — a near-term **Foundational** track that ships against current `main`, and a north-star **Vision** track that follows. It exists so the onboarding work has a fixed destination and a sequenced path, and so a reviewer can tell at a glance which pieces *extend code that already ships* and which are *net-new*.
@@ -9,7 +9,7 @@ This is the plan for turning the OOBE prototype (PR #6994, presentational + mock
 
 ## What this proposes
 
-The WebChat v2 landing view today is a hero + composer + three static suggestion chips ([`empty-state.tsx`](../../../crates/ironclaw_webui/frontend/src/pages/chat/components/empty-state.tsx)). A brand-new user has no idea what IronClaw can take off their plate, and no first moment of value. The OOBE work fills that gap with **suggested task cards** the agent surfaces on first run — each connects a tool, then becomes an approve / modify / dismiss proposal, then flips to a "done for you" result.
+The WebChat v2 landing view today is a hero + composer + three static suggestion chips ([`empty-state.tsx`](../../../crates/product/ironclaw_webui/frontend/src/pages/chat/components/empty-state.tsx)). A brand-new user has no idea what IronClaw can take off their plate, and no first moment of value. The OOBE work fills that gap with **suggested task cards** the agent surfaces on first run — each connects a tool, then becomes an approve / modify / dismiss proposal, then flips to a "done for you" result.
 
 The proposal splits that into two tracks so the near-term build is decoupled from the north-star:
 
@@ -21,9 +21,9 @@ Both tracks converge on the same card language and the same populated carousel o
 ## Why phase it this way
 
 1. **Foundational rides existing rails.** The connect CTA, the busy/streaming states, the agent-mode semantics, and the "manage what I automated" destination are all **already shipped on `main`** — Foundational reuses them rather than inventing them (see the scope table below and PROPOSAL §3). The genuinely new surface area is small and testable.
-2. **The prototype is already the frontend half of the contract.** PR #6994 ships the components and a typed, endpoint-shaped data seam; making it real is a mock→`fetch` body swap plus the backend the seam expects — no component rewrites (PROPOSAL §5, [AUTOMATION-TASKS-CONTRACT.md](../../../crates/ironclaw_webui/frontend/src/pages/chat/AUTOMATION-TASKS-CONTRACT.md)).
+2. **The prototype is already the frontend half of the contract.** PR #6994 ships the components and a typed, endpoint-shaped data seam; making it real is a mock→`fetch` body swap plus the backend the seam expects — no component rewrites (PROPOSAL §5, [AUTOMATION-TASKS-CONTRACT.md](../../../crates/product/ironclaw_webui/frontend/src/pages/chat/AUTOMATION-TASKS-CONTRACT.md)).
 3. **Vision is additive, not a redo.** Every Vision piece is a superset of a Foundational piece (per-card connect → batched connect; static reveal → animated reveal; plain drawer → docked frame), so nothing built in Foundational is thrown away.
-4. **It lands cleanly in the target architecture.** Each new backend piece has a home in the #6918 target tree (events→`events/`, projection→`events/`, facade/DTOs→`product/`, routes→`product/webui`, the suggestion producer→`domains/triggers`) — this work does not fight the refactor train (PROPOSAL §6).
+4. **It lands cleanly in the family folders already on `main`.** The #6918 reorg has landed, so each new backend piece has an obvious home today — events + projection → `crates/events/`, facade/DTOs → `crates/product/ironclaw_assistant`, routes → `crates/product/ironclaw_webui`, the suggestion producer → `crates/domains/ironclaw_triggers` — and this work does not fight the refactor train (PROPOSAL §6).
 
 ## The two-track map
 
@@ -55,7 +55,7 @@ The single most important framing for review: **how much of Foundational is new.
 
 | Capability | Foundational basis | Classification |
 |---|---|---|
-| Landing surface the cards mount on | [`empty-state.tsx`](../../../crates/ironclaw_webui/frontend/src/pages/chat/components/empty-state.tsx) (hero + composer) | **Extend shipped** |
+| Landing surface the cards mount on | [`empty-state.tsx`](../../../crates/product/ironclaw_webui/frontend/src/pages/chat/components/empty-state.tsx) (hero + composer) | **Extend shipped** |
 | Card busy / "Automating…" state | `NearProcessIndicator` (#6901, on `main`) | **Reuse shipped** |
 | Per-card **Connect** CTA + OAuth | extension-authorization path on `main` (`extension-pairing-api`, `product-auth-oauth-events`, pairing/telegram panels) | **Reuse shipped** |
 | Agent modes (Suggest / Plan / Auto) | approval-gate system on `main` (`resolve_gate`, `global_auto_approve`) | **New UI over shipped** |

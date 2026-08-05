@@ -17,7 +17,7 @@
 *Everything here is independently landable and shrinks every later phase.*
 
 1. **D-F5 carousel gate** ⚠ — the merge blocker. Gate the landing carousel behind DEV / a feature flag (or an empty-projection read) so PR #6994 can leave draft without exposing mock "done for you" cards to real users. Behavior-free for real users. **This is the single prerequisite for merging the prototype.**
-2. **Contract reconciliation** — update [AUTOMATION-TASKS-CONTRACT.md](../../../crates/ironclaw_webui/frontend/src/pages/chat/AUTOMATION-TASKS-CONTRACT.md) to current crate names (`RebornServicesApi`→`ProductSurface`, `ironclaw_product_workflow`→`ironclaw_product`; confirm `src/webui_v2/` still current — it is). Docs-only.
+2. **Contract reconciliation — ✅ done in this PR.** [AUTOMATION-TASKS-CONTRACT.md](../../../crates/product/ironclaw_webui/frontend/src/pages/chat/AUTOMATION-TASKS-CONTRACT.md) now reflects the post-#6918 family-folder names: event log `ironclaw_event_log` + durable store `ironclaw_event_store` under `crates/events/`; facade `RebornServicesApi` in `crates/product/ironclaw_assistant`; routes in `crates/product/ironclaw_webui/src/webui_v2/` (confirmed current). Docs-only.
 3. **Decision round #1** `[decision]` — close PROPOSAL §10 items 2 (suggestion producer), 4 (carousel gating), 5 (DESIGN.md pilot). One thread each.
 4. **(Optional) D-F6 seed** — land a first-draft `DESIGN.md` capturing the v2 token system + card taxonomy, if the pilot is approved. Docs-only, unblocks design review of later phases.
 
@@ -27,7 +27,7 @@
 
 *Creates the durable source of truth. Everything downstream is a body swap once this exists.*
 
-- **Order inside the phase:** `AutomationTask` model + `AutomationTaskId` newtype → the 5 events (one PR per event family is overkill; land them as one typed set with their persistence/replay/redaction/ordering/serialization tests) → `AutomationTaskProjection` + the ⚠ **cross-user isolation test** (PROPOSAL §7) → the 5 routes + `webui_v2_routes()` descriptor rows (or the descriptor contract test fails) → the 5 facade methods on `ProductSurface`, each returning server-confirmed records through the mediated capability host.
+- **Order inside the phase:** `AutomationTask` model + `AutomationTaskId` newtype → the 5 events (one PR per event family is overkill; land them as one typed set with their persistence/replay/redaction/ordering/serialization tests) → `AutomationTaskProjection` + the ⚠ **cross-user isolation test** (PROPOSAL §7) → the 5 routes + `webui_v2_routes()` descriptor rows (or the descriptor contract test fails) → the 5 facade methods on `RebornServicesApi` (`ironclaw_assistant`), each returning server-confirmed records through the mediated capability host.
 - Approve/Revert wire to the existing product adapters (Gmail/Calendar) — **never a second outbound HTTP path**; success admitted from provider evidence + read-back. Modify branches on state (suggested = edit in place; automated = re-run).
 - **Milestone:** `list_automation_tasks` returns real (empty) data; the frontend seam flips mock→`fetch` for `list` with **no component change**; D-F5's gate can become "empty projection" instead of a flag.
 
@@ -75,7 +75,7 @@ Each is additive and a superset of a Foundational piece; none redo Foundational 
 ## Suggested first PRs (concrete, in order)
 
 1. **D-F5 carousel gate** — unblock PR #6994 (feature-flag / DEV gate the landing carousel). Small, behavior-free for users.
-2. **Contract reconciliation** — crate-name refresh in the contract doc (docs-only).
+2. **Contract reconciliation** — crate-name refresh in the contract doc (docs-only). *(✅ already landed in this PR.)*
 3. **D-F1 part 1** — `AutomationTask` model + newtype + the 5 events with their persistence/replay/redaction/ordering/serialization tests.
 4. **D-F1 part 2** — `AutomationTaskProjection` + the cross-user isolation test; flip the `list` seam mock→`fetch`.
 5. **D-F1 part 3** — the 5 routes + descriptor rows + facade methods (mediated), one coherent slice.
@@ -90,6 +90,6 @@ Each is additive and a superset of a Foundational piece; none redo Foundational 
 
 - **PR #6994** (this branch) carries the prototype + this proposal package. It stays **draft** until D-F5 (carousel gate) lands — that is the only thing blocking merge.
 - **Issue #6993** tracks the backend (D-F1, D-F4, and the D-V3 anticipatory states). This plan supersedes its ordering with the phased sequence above; keep #6993 as the tracking issue and tick CHECKLIST boxes in the PRs that land them.
-- **#6918 target architecture** — every new backend piece lands in its target family (PROPOSAL §6): events/projection → `events/`, facade/DTOs → `product/assistant`, routes → `product/webui`, suggestion producer → `domains/triggers`. Coordinate placement with the refactor train so OOBE code doesn't need a second move; keep semantic changes out of move-only PRs.
+- **#6918 family reorg — landed on `main`.** The branch is merged up to date with it (the prototype now lives under `crates/product/ironclaw_webui/`); every new backend piece goes straight into its current family folder (PROPOSAL §6): events/projection → `crates/events/`, facade/DTOs → `crates/product/ironclaw_assistant`, routes → `crates/product/ironclaw_webui`, suggestion producer → `crates/domains/ironclaw_triggers`. Keep semantic changes out of any remaining move-only PRs.
 - **WS1.x contracts** (`ironclaw_product_contracts` / `ironclaw_extension_contracts` / `ironclaw_loop_contracts`, landed) — the new task DTOs/ports belong in `ironclaw_product_contracts`, not inlined into `ironclaw_product`.
 - **Review load:** expect ~8–12 PRs for Foundational at the sizes above; anything past ~400 effective lines of *semantic* change (mock→`fetch` swaps excluded) should split.

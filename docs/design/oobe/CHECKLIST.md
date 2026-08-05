@@ -9,19 +9,20 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done. Every code box imp
 ## F0 — De-risk & unblock
 
 - [ ] **Carousel gate (D-F5)** — landing carousel no longer returns `MOCK_COMPLETED_TASKS` to real users; behind DEV/flag or an empty real projection. PR #6994 is mergeable.
-- [ ] Contract reconciled to current crate names (`ProductSurface`, `ironclaw_product`; `src/webui_v2/` confirmed current).
+- [x] Branch merged up to date with `main` (post-#6918 family-folder reorg); prototype relocated to `crates/product/ironclaw_webui/`.
+- [x] Contract reconciled to the post-#6918 family-folder names (`ironclaw_event_log` + `ironclaw_event_store` under `crates/events/`; facade `RebornServicesApi` in `ironclaw_assistant`; `src/webui_v2/` confirmed current).
 - [ ] Decision round #1 recorded (PROPOSAL §10 items 2, 4, 5).
 - [ ] (If approved) first-draft `DESIGN.md` seeded with v2 tokens + card taxonomy (D-F6).
 
 ## F1 — Automation-task backend (D-F1)
 
 - [ ] `AutomationTask` model + `AutomationTaskId` newtype (validated) mirror the TS shapes field-for-field.
-- [ ] 5 events on `ironclaw_events` (`Proposed`/`Modified`/`Automated`/`Reverted`/`Cancelled`), each redacted, replayable, appended via the durable sink.
+- [ ] 5 events on `ironclaw_event_log` (`Proposed`/`Modified`/`Automated`/`Reverted`/`Cancelled`), each redacted, replayable, appended via the durable sink.
 - [ ] Per-event tests: persistence · replay · projection-visibility · redaction · ordering · transport-serialization.
 - [ ] `AutomationTaskProjection` on `ironclaw_event_projections`, scope-filtered by `(tenant, user)`, with a replay cursor.
 - [ ] ⚠ **Cross-user isolation regression test** — a task for user A never appears in user B's projection.
 - [ ] 5 routes in `src/webui_v2/` **and** matching `webui_v2_routes()` descriptor rows (descriptor contract test passes).
-- [ ] 5 facade methods on `ProductSurface`, each returning the server-confirmed record (no optimistic echo).
+- [ ] 5 facade methods on `RebornServicesApi` (`ironclaw_assistant`), each returning the server-confirmed record (no optimistic echo).
 - [ ] Approve/Revert run through the mediated capability host + product adapters (no second outbound HTTP path); success admitted only from provider evidence + read-back.
 - [ ] Modify branches on state (suggested = edit in place; automated = re-run with fresh evidence) — tested both ways.
 - [ ] `list` seam flipped mock→`fetch` with no component change.
