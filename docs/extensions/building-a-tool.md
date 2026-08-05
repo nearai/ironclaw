@@ -705,3 +705,4 @@ shape before extending it.
 8. Add manifest, packaging, runtime, auth/approval, and integration tests.
 9. Run targeted tests.
 10. Check docs/specs and `FEATURE_PARITY.md` for behavior-status updates.
+11. When your tool is packaged and tested, submit it to IronHub so other agents can discover and install it. See [Contributing](/hub/contributing).

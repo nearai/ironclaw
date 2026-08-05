@@ -332,8 +332,8 @@ Unverified community content is rejected unless a CLI operator supplies
 `--acknowledge-unverified`; the model-facing install capability intentionally
 has no equivalent acknowledgement field. `--force` replaces an existing
 registry install through the normal lifecycle manager and restores the previous
-package or skill if the replacement fails. The command alias `iron-hub` is also
-accepted.
+package or skill if the replacement fails. The command aliases `iron-hub` and
+`hub` are also accepted.
 
 `ironclaw serve` exposes the public `POST /api/ironhub/register` handshake only
 when `IRONHUB_AGENT_SHARED_KEY` is explicitly set to a non-empty value of at
