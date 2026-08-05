@@ -212,23 +212,43 @@ CODE_STYLE_HAS_CODE_EXIT_MARKER = (
 
 
 def validate_code_style_docs_guard_order(text: str) -> list[str]:
-    """Return every way the docs-gate guard could sit past the early exit."""
+    """Return every way the docs-gate guard could sit past the early exit.
 
-    guard = text.find(CODE_STYLE_DOCS_GUARD_MARKER)
-    early_exit = text.find(CODE_STYLE_HAS_CODE_EXIT_MARKER)
-    if guard == -1 or early_exit == -1:
+    Only executable occurrences count: comment lines are stripped first, so a
+    commented-out copy of the guard above the early exit (a refactor
+    leftover) cannot satisfy the pin, and EVERY live guard occurrence must
+    precede the first early-exit occurrence.
+    """
+
+    executable = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+    early_exit = executable.find(CODE_STYLE_HAS_CODE_EXIT_MARKER)
+    guard_positions: list[int] = []
+    cursor = executable.find(CODE_STYLE_DOCS_GUARD_MARKER)
+    while cursor != -1:
+        guard_positions.append(cursor)
+        cursor = executable.find(CODE_STYLE_DOCS_GUARD_MARKER, cursor + 1)
+    if not guard_positions or early_exit == -1:
         # Presence itself is REQUIRED_MARKERS' job; report only what this pin
-        # cannot delegate — a missing anchor makes the order unassertable.
+        # cannot delegate — a missing EXECUTABLE anchor makes the order
+        # unassertable (a comment-only occurrence lands here on purpose).
+        missing = "guard" if not guard_positions else "has_code early-exit"
         return [
-            f"{CODE_STYLE_WORKFLOW}: docs-gate guard order unassertable — "
-            f"missing {'guard' if guard == -1 else 'has_code early-exit'} marker"
+            (
+                f"{CODE_STYLE_WORKFLOW}: docs-gate guard order unassertable — "
+                f"no executable {missing} marker"
+            )
         ]
-    if guard > early_exit:
+    if any(position > early_exit for position in guard_positions):
         return [
-            f"{CODE_STYLE_WORKFLOW}: the docs publication-boundary guard sits "
-            "after the has_code early exit — docs-only PRs (has_code=false) "
-            "exit 0 before the guard runs, so the gate cannot block them. "
-            "Move the guard above the early exit in the roll-up step"
+            (
+                f"{CODE_STYLE_WORKFLOW}: the docs publication-boundary guard "
+                "sits after the has_code early exit — docs-only PRs "
+                "(has_code=false) exit 0 before the guard runs, so the gate "
+                "cannot block them. Move the guard above the early exit in "
+                "the roll-up step"
+            )
         ]
     return []
 

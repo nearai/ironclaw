@@ -430,6 +430,28 @@ class CrateScopeFilterSabotageTests(unittest.TestCase):
             errors,
         )
 
+    def test_a_commented_decoy_guard_does_not_satisfy_the_order_pin(self) -> None:
+        """A raw substring search accepts inert text: commenting out the old
+        guard block above the early exit while the executable guard sits
+        below it (a realistic refactor leftover) must still fail — only
+        executable occurrences count."""
+        text = self.workflows[CODE_STYLE_WORKFLOW]
+        guard = ws12_workflow_contracts.CODE_STYLE_DOCS_GUARD_MARKER
+        early_exit = ws12_workflow_contracts.CODE_STYLE_HAS_CODE_EXIT_MARKER
+        guard_line = next(line for line in text.splitlines() if guard in line)
+        exit_line = next(line for line in text.splitlines() if early_exit in line)
+        decoy = "          # old guard: " + guard_line.strip()
+        sabotaged = copy.deepcopy(self.workflows)
+        sabotaged[CODE_STYLE_WORKFLOW] = (
+            text.replace(guard_line + "\n", "")
+            .replace(exit_line, decoy + "\n" + exit_line + "\n" + guard_line)
+        )
+        errors = validate_workflow_texts(sabotaged, ROOT)
+        self.assertTrue(
+            any("docs" in error and "early exit" in error for error in errors),
+            errors,
+        )
+
     def test_checked_in_docs_guard_order_passes(self) -> None:
         self.assertEqual(
             ws12_workflow_contracts.validate_code_style_docs_guard_order(
