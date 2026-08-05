@@ -111,3 +111,70 @@ test("thread scraping loads every page and ignores stale artifact responses", as
     requests.fetchRunArtifact.mockReset();
   }
 });
+
+test("switching target users discards the previous user's pending artifact", async () => {
+  const pendingArtifact = deferred<Record<string, unknown>>();
+  requests.fetchThreads
+    .mockResolvedValueOnce({
+      threads: [{ thread_id: "thread-one", title: "One" }],
+      next_cursor: null,
+    })
+    .mockResolvedValueOnce({ threads: [], next_cursor: null });
+  requests.fetchArtifact.mockReturnValue(pendingArtifact.promise);
+
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ThreadScrapingPanel userId="user-one" />
+        </I18nProvider>,
+      );
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="admin-thread-scraping-thread"]')
+        ?.click();
+    });
+
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <ThreadScrapingPanel userId="user-two" />
+        </I18nProvider>,
+      );
+    });
+    assert.equal(
+      container.querySelector('[data-testid="admin-thread-scraping-thread"]'),
+      null,
+      "changing targets clears the previous user's thread selection",
+    );
+
+    await act(async () => {
+      pendingArtifact.resolve({
+        thread_id: "thread-one",
+        messages: [
+          {
+            message_id: "message-one",
+            kind: "assistant",
+            content: "previous user transcript",
+          },
+        ],
+      });
+    });
+
+    assert.doesNotMatch(container.textContent ?? "", /previous user transcript/);
+    assert.deepEqual(
+      requests.fetchThreads.mock.calls.map((call) => call[0]),
+      ["user-one", "user-two"],
+    );
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+    requests.fetchThreads.mockReset();
+    requests.fetchArtifact.mockReset();
+    requests.fetchRunArtifact.mockReset();
+  }
+});
