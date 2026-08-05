@@ -327,7 +327,7 @@ mod tests {
         let output = build_activation_output(
             &[],
             &[
-                "trust-probe: found, but its trust is Installed and activation requires Trusted"
+                "trust-probe: found, but its trust is installed and activation requires trusted"
                     .to_string(),
             ],
         );
@@ -336,7 +336,7 @@ mod tests {
             .as_array()
             .expect("a refusal must carry its reason to the model");
         assert_eq!(notes.len(), 1);
-        assert!(notes[0].as_str().unwrap().contains("trust is Installed"));
+        assert!(notes[0].as_str().unwrap().contains("trust is installed"));
     }
 
     /// A clean activation stays exactly as it was: no empty field, no extra noise.
@@ -468,5 +468,237 @@ mod tests {
             .expect_err("internal bugs must stay terminal");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
+    }
+}
+
+/// The payload `skill_activate` actually persists, driven through
+/// [`SkillActivationHandler::invoke`].
+///
+/// The cases above call `build_activation_output` directly, which proves the shape but not that
+/// the handler hands that shape to `write_capability_result`. Nothing between the two was
+/// covered, and the whole defect this contract exists to fix was a payload that was built
+/// correctly and then not delivered — `plan.selection.feedback` was constructed and dropped, so
+/// the model saw `{"activated":[],"count":0}` for a bad name, a trust wall and an unmet
+/// requirement alike. A test that stops at the builder cannot see that class of bug, so these
+/// assert the captured write.
+#[cfg(test)]
+mod invoke_tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use ironclaw_host_api::ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_loop_contracts::SkillVisibility;
+    use ironclaw_loop_contracts::{
+        CapabilityInputRef, CapabilitySurfaceVersion, InMemoryRunProfileResolver, LoopRequest,
+        LoopRunContext, RunProfileResolutionRequest, RunProfileResolver,
+    };
+    use ironclaw_loop_host::{
+        CapabilityResultWrite, CapabilityWriteResult, LoopCapabilityResultWriter, SkillBundleId,
+        SkillBundleSource, SkillBundleSourceError, SkillFilePath, SkillSourceKind,
+        SyntheticCapabilityHandler, SyntheticCapabilityInvocation,
+    };
+    use ironclaw_skills::SkillTrust;
+    use ironclaw_turns::{
+        AcceptedMessageRef, CapabilityActivityId, LoopResultRef, TurnActor, TurnId, TurnRunId,
+        TurnScope,
+    };
+
+    use super::{SKILL_ACTIVATE_CAPABILITY_ID, SkillActivationHandler};
+    use crate::{SelectableSkillContextSource, SkillActivationSelectorConfig};
+    use ironclaw_loop_host::SkillBundleDescriptor;
+
+    /// A bundle source with a fixed catalog, where each entry declares its own trust so a
+    /// refusal can be provoked without any other difference.
+    struct FixedSkillBundleSource {
+        descriptors: Vec<SkillBundleDescriptor>,
+        files: HashMap<String, Vec<u8>>,
+    }
+
+    impl FixedSkillBundleSource {
+        fn new(skills: &[(&str, SkillTrust, &str)]) -> Self {
+            let mut descriptors = Vec::new();
+            let mut files = HashMap::new();
+            for (name, trust, body) in skills {
+                let id = SkillBundleId::new(SkillSourceKind::User, name).expect("bundle id");
+                descriptors.push(SkillBundleDescriptor::new(
+                    id,
+                    Some(*trust),
+                    Some(SkillVisibility::Visible),
+                    format!("{name} description"),
+                ));
+                files.insert((*name).to_string(), body.as_bytes().to_vec());
+            }
+            Self { descriptors, files }
+        }
+    }
+
+    #[async_trait]
+    impl SkillBundleSource for FixedSkillBundleSource {
+        async fn list_skill_bundles(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<Vec<SkillBundleDescriptor>, SkillBundleSourceError> {
+            Ok(self.descriptors.clone())
+        }
+
+        async fn read_skill_bundle_file(
+            &self,
+            _run_context: &LoopRunContext,
+            bundle_id: &SkillBundleId,
+            _path: &SkillFilePath,
+        ) -> Result<Vec<u8>, SkillBundleSourceError> {
+            self.files
+                .get(bundle_id.name())
+                .cloned()
+                .ok_or(SkillBundleSourceError::FileNotFound)
+        }
+    }
+
+    /// Captures the payload the handler writes, which is the thing under test.
+    #[derive(Default)]
+    struct CapturingResultWriter {
+        written: Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl CapturingResultWriter {
+        fn only_write(&self) -> serde_json::Value {
+            let written = self.written.lock().expect("writer lock");
+            assert_eq!(
+                written.len(),
+                1,
+                "the handler must persist exactly one result per invocation"
+            );
+            written[0].clone()
+        }
+    }
+
+    #[async_trait]
+    impl LoopCapabilityResultWriter for CapturingResultWriter {
+        async fn write_capability_result(
+            &self,
+            write: CapabilityResultWrite<'_>,
+        ) -> Result<CapabilityWriteResult, ironclaw_loop_contracts::AgentLoopHostError> {
+            self.written
+                .lock()
+                .expect("writer lock")
+                .push(write.output.clone());
+            Ok(CapabilityWriteResult::without_output_digest(
+                LoopResultRef::new("result:skill-activate-test").expect("result ref"),
+                0,
+            ))
+        }
+    }
+
+    fn skill_md(name: &str, description: &str, keywords: &[&str], body: &str) -> String {
+        format!(
+            "---\nname: {name}\ndescription: {description}\nkeywords: [{}]\n---\n{body}\n",
+            keywords.join(", ")
+        )
+    }
+
+    async fn run_context() -> LoopRunContext {
+        let resolved = InMemoryRunProfileResolver::default()
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("profile resolves");
+        LoopRunContext::new(
+            TurnScope::new(
+                TenantId::new("tenant-activate").expect("tenant id"),
+                Some(AgentId::new("agent-activate").expect("agent id")),
+                Some(ProjectId::new("project-activate").expect("project id")),
+                ThreadId::new("thread-activate").expect("thread id"),
+            ),
+            TurnId::new(),
+            TurnRunId::new(),
+            resolved,
+        )
+        .with_accepted_message_ref(AcceptedMessageRef::new("msg:activate").expect("message ref"))
+        .with_actor(TurnActor::new(
+            UserId::new("user-activate").expect("user id"),
+        ))
+    }
+
+    async fn invoke_activate(
+        skills: &[(&str, SkillTrust, &str)],
+        requested: &str,
+    ) -> serde_json::Value {
+        let source = Arc::new(FixedSkillBundleSource::new(skills));
+        let handler = SkillActivationHandler {
+            skill_activation_source: Arc::new(SelectableSkillContextSource::new(
+                source,
+                SkillActivationSelectorConfig::default(),
+            )),
+        };
+        let writer = Arc::new(CapturingResultWriter::default());
+        let context = run_context().await;
+        handler
+            .invoke(SyntheticCapabilityInvocation {
+                run_context: context,
+                request: LoopRequest {
+                    activity_id: CapabilityActivityId::new(),
+                    surface_version: CapabilitySurfaceVersion::new("v1").expect("surface version"),
+                    capability_id: CapabilityId::new(SKILL_ACTIVATE_CAPABILITY_ID)
+                        .expect("capability id"),
+                    input_ref: CapabilityInputRef::new("input:activate").expect("input ref"),
+                    approval_resume: None,
+                    auth_resume: None,
+                },
+                input: serde_json::json!({ "skill": requested }),
+                result_writer: Arc::clone(&writer) as Arc<dyn LoopCapabilityResultWriter>,
+            })
+            .await
+            .expect("activation must complete, refusals included");
+        writer.only_write()
+    }
+
+    /// A trusted skill activates and the persisted payload names it, with no refusal field.
+    #[tokio::test]
+    async fn a_successful_activation_persists_the_activated_name_and_nothing_else() {
+        let body = skill_md("pdf", "Work with PDF files", &["pdf"], "PDF_SENTINEL");
+        let written = invoke_activate(&[("pdf", SkillTrust::Trusted, &body)], "pdf").await;
+
+        assert_eq!(written["activated"], serde_json::json!(["pdf"]));
+        assert_eq!(written["count"], serde_json::json!(1));
+        assert!(
+            written.get("not_activated").is_none(),
+            "a clean activation must not carry an empty refusal field: {written}"
+        );
+    }
+
+    /// A refusal reaches the model through the persisted payload, not just the live projection.
+    #[tokio::test]
+    async fn a_trust_refusal_persists_its_reason_with_an_empty_activated_list() {
+        let body = skill_md("probe", "A registry skill", &["probe"], "PROBE_SENTINEL");
+        let written = invoke_activate(&[("probe", SkillTrust::Installed, &body)], "probe").await;
+
+        assert_eq!(written["activated"], serde_json::json!([]));
+        assert_eq!(written["count"], serde_json::json!(0));
+        let notes = written["not_activated"]
+            .as_array()
+            .expect("a refusal must be persisted, or the model cannot act on it");
+        assert_eq!(notes.len(), 1, "{written}");
+        let note = notes[0].as_str().expect("refusal is a string");
+        assert!(
+            note.contains("trust is installed") && note.contains("promoted"),
+            "the refusal must name the cause and the way forward: {note}"
+        );
+    }
+
+    /// An unknown name is refused with its own reason, distinguishable from a trust wall.
+    #[tokio::test]
+    async fn an_unknown_name_persists_a_distinct_refusal() {
+        let body = skill_md("pdf", "Work with PDF files", &["pdf"], "PDF_SENTINEL");
+        let written = invoke_activate(&[("pdf", SkillTrust::Trusted, &body)], "xlsx").await;
+
+        assert_eq!(written["count"], serde_json::json!(0));
+        let note = written["not_activated"][0]
+            .as_str()
+            .expect("an unknown name must carry a reason");
+        assert!(
+            note.contains("no skill with that name"),
+            "'bad name' and 'not trusted' need opposite responses from the model, so they must \
+             not share a message: {note}"
+        );
     }
 }

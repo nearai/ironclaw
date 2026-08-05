@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -1281,6 +1281,11 @@ fn single_line_truncated(text: &str, max_chars: usize) -> String {
 /// Compose the one-line available-skills listing as a single discoverable
 /// candidate. Trust is pinned to `Installed` so downstream snapshot
 /// construction can never disclose prompt content through this entry.
+/// Hidden-entry count the truncation warning last reported, so it fires on a change
+/// rather than on every prompt build. See the warning site in
+/// [`skill_listing_candidate`] for why a per-build `warn!` is the wrong shape.
+static LAST_WARNED_HIDDEN_LISTING_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 fn skill_listing_candidate(entries: &[SkillListingEntry]) -> Option<HostSkillContextCandidate> {
     if entries.is_empty() {
         return None;
@@ -1289,7 +1294,10 @@ fn skill_listing_candidate(entries: &[SkillListingEntry]) -> Option<HostSkillCon
     // catalog grows, and only drop entries if even the minimum will not fit.
     let (allowance, listed) = match listing_description_allowance(entries.len()) {
         Some(allowance) => (allowance, entries.len()),
-        None => (MIN_LISTING_DESCRIPTION_CHARS, max_entries_at_min_description()),
+        None => (
+            MIN_LISTING_DESCRIPTION_CHARS,
+            max_entries_at_min_description(),
+        ),
     };
     let mut listing = String::from(SKILL_LISTING_HEADER.trim_end());
     listing.push('\n');
@@ -1313,12 +1321,24 @@ fn skill_listing_candidate(entries: &[SkillListingEntry]) -> Option<HostSkillCon
              listing does not fit its character budget. Activating one by exact name still \
              works if you already know it.)"
         ));
-        tracing::warn!(
-            listed,
-            hidden,
-            total = entries.len(),
-            "skill listing truncated; skills past the budget are invisible to the model"
-        );
+        // Warned once per hidden count, not once per prompt build. This function runs on
+        // every context construction, and a catalog that is over the budget stays over it,
+        // so an unconditional `warn!` would repeat the same line for the rest of the
+        // process and bury everything else. The count changing is the only new
+        // information, and it is what an operator would act on. The model-visible message
+        // above is unconditional -- it must never be rate-limited.
+        if LAST_WARNED_HIDDEN_LISTING_COUNT.swap(hidden, Ordering::Relaxed) != hidden {
+            tracing::warn!(
+                listed,
+                hidden,
+                total = entries.len(),
+                "skill listing truncated; skills past the budget are invisible to the model"
+            );
+        }
+    } else {
+        // Reset so a catalog that drops back under the budget and later exceeds it again
+        // warns rather than being silenced by the stale count.
+        LAST_WARNED_HIDDEN_LISTING_COUNT.store(0, Ordering::Relaxed);
     }
     Some(
         HostSkillContextCandidate::discoverable(
@@ -1503,6 +1523,16 @@ fn select_skill_activations(
 
         for skill in outcome.selected {
             let candidate = candidate_for_loaded_skill(skill, &active_candidates)?;
+            // Same gate as the explicit-mention loop above, and it has to be here too: a
+            // criteria-selected skill is the one the USER never asked for by name, so
+            // activating it with an unmet requirement is the case where nothing at all
+            // connects the later shell failure back to the missing binary. Reaching this
+            // path without the gate was how a skill declaring `requires.bins` still
+            // "activated cleanly".
+            if let Some(reason) = unmet_requirements_refusal(candidate) {
+                feedback.push(reason);
+                continue;
+            }
             let key = (
                 candidate.descriptor.id().source_kind(),
                 candidate.loaded.manifest.name.clone(),
@@ -1578,8 +1608,11 @@ fn refusal_reason(name: &str, eligible: &[&ActivationCandidate]) -> String {
         .iter()
         .find(|candidate| candidate.loaded.manifest.name.eq_ignore_ascii_case(name))
     {
+        // `{}` not `{:?}`: this string goes to the model, so it renders through
+        // `SkillTrust`'s `Display` (`installed`/`trusted`) rather than a debug spelling
+        // that would drift the moment a variant is renamed or gains a field.
         Some(candidate) => format!(
-            "{display}: found, but its trust is {:?} and activation requires Trusted; it must be \
+            "{display}: found, but its trust is {} and activation requires trusted; it must be \
              promoted before it can be used",
             candidate.loaded.trust
         ),
@@ -2921,8 +2954,9 @@ mod tests {
                 "CODE_REVIEW_SENTINEL",
             ),
         )]));
-        // Default mode is ExplicitAndCriteria, but the global master switch is
-        // off: a keyword-matching skill must NOT auto-activate.
+        // `criteria_config()` opts into ExplicitAndCriteria (the config default is
+        // ExplicitOnly), but the global master switch is off: a keyword-matching skill
+        // must NOT auto-activate. The switch has to win over the mode, not the reverse.
         let flag = Arc::new(AtomicBool::new(false));
         let selectable = SelectableSkillContextSource::new(source, criteria_config())
             .with_auto_activate_flag(Arc::clone(&flag));
@@ -3335,8 +3369,8 @@ mod tests {
         assert_eq!(
             plan.selection.feedback,
             vec![
-                "installed-helper: found, but its trust is Installed and activation requires \
-                 Trusted; it must be promoted before it can be used"
+                "installed-helper: found, but its trust is installed and activation requires \
+                 trusted; it must be promoted before it can be used"
             ],
             "a refusal must say WHY: 'not available' is indistinguishable from a bad name, and \
              the two need opposite responses from the model"
