@@ -29,7 +29,7 @@
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_memory`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
 
 ## Agent Notes
 

@@ -1,6 +1,6 @@
 use std::{cmp::Ordering, collections::HashMap};
 
-use ironclaw_events::{
+use ironclaw_event_log::{
     EventLogEntry, RuntimeEvent, RuntimeEventKind, sanitize_error_kind, sanitize_error_summary,
 };
 use ironclaw_host_api::ids::InvocationId;
@@ -127,8 +127,8 @@ fn compare_capability_activities_for_output_window(
 fn compare_projection_order(
     left_updated_at: &ironclaw_host_api::Timestamp,
     right_updated_at: &ironclaw_host_api::Timestamp,
-    left_cursor: ironclaw_events::EventCursor,
-    right_cursor: ironclaw_events::EventCursor,
+    left_cursor: ironclaw_event_log::EventCursor,
+    right_cursor: ironclaw_event_log::EventCursor,
     left_invocation_id: &InvocationId,
     right_invocation_id: &InvocationId,
 ) -> Ordering {
@@ -143,8 +143,8 @@ fn compare_projection_order(
 }
 
 fn compare_projection_order_ascending(
-    left_cursor: ironclaw_events::EventCursor,
-    right_cursor: ironclaw_events::EventCursor,
+    left_cursor: ironclaw_event_log::EventCursor,
+    right_cursor: ironclaw_event_log::EventCursor,
     left_invocation_id: &InvocationId,
     right_invocation_id: &InvocationId,
 ) -> Ordering {

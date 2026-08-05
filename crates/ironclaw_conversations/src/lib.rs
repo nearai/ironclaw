@@ -7,7 +7,7 @@
 //!
 //! It does **not** hold the turn coordinator. The orchestration reaches it
 //! through the one-method [`ConversationTurnSubmitter`] port declared in
-//! [`turn_submission`], which `ironclaw_reborn_composition` implements over the
+//! [`turn_submission`], which `ironclaw_composition` implements over the
 //! real handle — so this crate speaks only `ironclaw_host_api::turn` vocabulary
 //! plus its own types.
 //!

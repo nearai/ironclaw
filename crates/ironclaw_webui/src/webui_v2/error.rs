@@ -27,7 +27,7 @@ impl WebUiV2HttpError {
     pub fn into_response_parts(self) -> (StatusCode, WebUiV2HttpErrorBody) {
         let parts = self.0.into_http_parts();
         let status = StatusCode::from_u16(parts.status_code).unwrap_or_else(|_| {
-            // Defensive: every call site in `ironclaw_product` builds
+            // Defensive: every call site in `ironclaw_assistant` builds
             // status codes from a fixed table (400/401/403/404/409/429/500/503).
             // If a future variant introduces a non-HTTP code, log loudly and
             // fall back to 500 rather than poisoning the response.
@@ -80,7 +80,7 @@ impl IntoResponse for WebUiV2HttpError {
 
 /// Wire shape of an HTTP error returned by a WebChat v2 handler.
 ///
-/// `validation_code` is the typed enum from `ironclaw_product`; it
+/// `validation_code` is the typed enum from `ironclaw_assistant`; it
 /// serializes as snake_case (e.g. `"missing_field"`) via its own `Serialize`
 /// impl, so this struct does not perform any fallible string conversion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

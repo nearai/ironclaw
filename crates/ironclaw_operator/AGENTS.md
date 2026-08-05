@@ -44,7 +44,7 @@
   `ironclaw_product_contracts` and implemented here. Do not add a trait here
   that a product-tier caller must name — that is the inversion the WS5 operator
   row removed.
-- **`ironclaw_product`.** There is no dependency on it, and there must not be:
+- **`ironclaw_assistant`.** There is no dependency on it, and there must not be:
   operator is product's sibling, not its consumer. Enforced twice —
   `reborn_operator_port_inversion.rs` (through `cargo metadata`) and the
   `ironclaw_operator` `BoundaryRule` in `reborn_dependency_boundaries.rs`.
@@ -58,11 +58,11 @@
 
 ## Do Not Move In Here
 
-- Product workflow, admission, delivery, or bindings — `ironclaw_product`.
+- Product workflow, admission, delivery, or bindings — `ironclaw_assistant`.
 - Runtime/lane machinery (host runtime, MCP, wasm, scripts, turns, runner,
   loop host) — the boundary rule forbids all of them.
-- Transports (`ironclaw_webui`, `ironclaw_reborn_openai_compat`) and the
-  assembly root (`ironclaw_reborn_composition`).
+- Transports (`ironclaw_webui`, `ironclaw_openai_compat`) and the
+  assembly root (`ironclaw_composition`).
 - Extension lifecycle or catalog logic — `ironclaw_extension_host`.
 
 ## Known Debt
@@ -70,7 +70,7 @@
 - ~~**Direct `ironclaw_secrets` edge.**~~ **Discharged by CHECKLIST WS3.** The
   key store holds
   `ironclaw_product_contracts::operator_secrets::OperatorSecretValueStore`;
-  `ironclaw_reborn_composition::RuntimeOperatorSecretValueStore` implements it
+  `ironclaw_composition::RuntimeOperatorSecretValueStore` implements it
   over the substrate, and the boundary rule now forbids `ironclaw_secrets` here
   under every normal dependency kind. **What stays in this crate is policy** —
   the `llm_provider_<id>_api_key` handle derivation and the fail-closed
@@ -80,11 +80,11 @@
   string crosses). Two tests travelled with the behaviour rather than being
   faked here — `read_is_repeatable_across_reloads` and the #4673
   production-store reproduction now live with the port's implementor in
-  `ironclaw_reborn_composition`, because a fake asserting its own repeatability
+  `ironclaw_composition`, because a fake asserting its own repeatability
   proves nothing. Adding a secret substrate back to this crate is a boundary
   failure, not a convenience.
 - **`llm_admin/provider_admin.rs` `include_str!`s CLI source** (into
-  `crates/ironclaw_reborn_cli/src/commands/config/init.rs`). Inventoried by
+  `crates/ironclaw_cli/src/commands/config/init.rs`). Inventoried by
   `reborn_cross_crate_include_scan.rs`, which is still report-only; CHECKLIST
   WS2 flips it to enforcing.
 - **`nearai_mcp.rs` is forked.** `ironclaw_extension_host/src/nearai_mcp.rs`

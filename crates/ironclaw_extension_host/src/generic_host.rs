@@ -36,7 +36,7 @@ use ironclaw_extension_contracts::tool_adapter::{
     RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
     ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
 };
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     ExtensionInstallationError, ExtensionInstallationStorePort, ExtensionManifest,
     ExtensionPackage, ResolvedExtensionManifest,
 };
@@ -264,12 +264,12 @@ pub fn effective_resolved_for_package(
     // `rebuild_package_from_resolved` re-derives which constructor to use
     // from whether this map ends up non-empty.
     let captures_dynamic_schemas = package.root_binding
-        == ironclaw_extensions::PackageRootBinding::Virtual
+        == ironclaw_extension_registry::PackageRootBinding::Virtual
         || (matches!(
             package.root_binding,
-            ironclaw_extensions::PackageRootBinding::Materialized(_)
+            ironclaw_extension_registry::PackageRootBinding::Materialized(_)
         ) && package.descriptor_schema_mode
-            == ironclaw_extensions::CapabilityDescriptorSchemaMode::InlineDynamic);
+            == ironclaw_extension_registry::CapabilityDescriptorSchemaMode::InlineDynamic);
     if captures_dynamic_schemas && let Some(mcp) = resolved.mcp.as_mut() {
         mcp.dynamic_input_schemas = package
             .capabilities
@@ -320,9 +320,9 @@ impl ExtensionLoader for CompositionExtensionLoader {
             None => match ctx.resolved.requested_trust {
                 ironclaw_host_api::trust::RequestedTrustClass::FirstPartyRequested
                 | ironclaw_host_api::trust::RequestedTrustClass::SystemRequested => {
-                    ironclaw_extensions::ManifestSource::HostBundled
+                    ironclaw_extension_registry::ManifestSource::HostBundled
                 }
-                _ => ironclaw_extensions::ManifestSource::InstalledLocal,
+                _ => ironclaw_extension_registry::ManifestSource::InstalledLocal,
             },
         };
         let manifest_v2 = ctx
@@ -346,7 +346,7 @@ impl ExtensionLoader for CompositionExtensionLoader {
         // separately, downstream, at the binding-rule check.
         let declares_tools = !ctx.resolved.tools.is_empty();
 
-        if let ironclaw_extensions::ExtensionRuntimeV2::FirstParty { service } =
+        if let ironclaw_extension_registry::ExtensionRuntimeV2::FirstParty { service } =
             &ctx.resolved.runtime
             && let Some(factory) = self.factories.get(service)
         {
@@ -404,7 +404,7 @@ pub(crate) fn rebuild_package_from_resolved(
     resolved: &ResolvedExtensionManifest,
     extension_id: &str,
 ) -> Result<ExtensionPackage, String> {
-    use ironclaw_extensions::PackageRootBinding;
+    use ironclaw_extension_registry::PackageRootBinding;
     match &resolved.root_binding {
         PackageRootBinding::Materialized(root) => {
             // A materialized host-bundled package that persisted discovered
@@ -743,7 +743,7 @@ mod tests {
 
     use ironclaw_authorization::GrantAuthorizer;
     use ironclaw_extension_contracts::extension::ExtensionHostAssemblyConfig;
-    use ironclaw_extensions::{
+    use ironclaw_extension_registry::{
         ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
         ExtensionManifestRecord, ExtensionManifestRef, ExtensionRegistry, MANIFEST_SCHEMA_VERSION,
         ManifestSource,
@@ -820,7 +820,7 @@ input_schema_ref = "schemas/echo.input.json"
             ManifestSource::HostBundled,
             &ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
             None,
-            &ironclaw_extensions::default_host_api_contract_registry().expect("contracts"),
+            &ironclaw_extension_registry::default_host_api_contract_registry().expect("contracts"),
             None,
         )
         .expect("fixture manifest resolves");
@@ -834,7 +834,7 @@ input_schema_ref = "schemas/echo.input.json"
                     ExtensionManifestRef::new(extension_id, None),
                     Vec::new(),
                     chrono::Utc::now(),
-                    ironclaw_extensions::InstallationOwner::Tenant,
+                    ironclaw_extension_registry::InstallationOwner::Tenant,
                 )
                 .expect("installation record"),
             )
@@ -887,7 +887,7 @@ input_schema_ref = "schemas/echo.input.json"
             ManifestSource::HostBundled,
             &ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
             None,
-            &ironclaw_extensions::default_host_api_contract_registry().expect("contracts"),
+            &ironclaw_extension_registry::default_host_api_contract_registry().expect("contracts"),
             None,
         )
         .expect("fixture manifest resolves");
@@ -1046,7 +1046,7 @@ input_schema_ref = "schemas/echo.input.json"
             Arc::new(InMemoryBackend::new()),
             VirtualPath::new("/system/extensions/.installations/test").expect("valid test path"),
             HostPortCatalog::empty(),
-            ironclaw_extensions::default_host_api_contract_registry().expect("contracts"),
+            ironclaw_extension_registry::default_host_api_contract_registry().expect("contracts"),
         )
         .await
         .expect("filesystem extension installation store")
@@ -1224,7 +1224,7 @@ input_schema_ref = "schemas/{id}/web_search.input.v1.json"
             &ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog"),
             None,
             &crate::product_extension_host_api_contract_registry().expect("test contracts"),
-            ironclaw_extensions::PackageRootBinding::Materialized(root.clone()),
+            ironclaw_extension_registry::PackageRootBinding::Materialized(root.clone()),
         )
         .expect("hosted MCP fixture manifest resolves");
         let base_resolved = record.resolved().clone();
@@ -1243,7 +1243,7 @@ input_schema_ref = "schemas/{id}/web_search.input.v1.json"
         let manifest_v2 = base_resolved
             .to_internal(ManifestSource::HostBundled)
             .expect("resolved contract rebuilds to v2");
-        let manifest = ironclaw_extensions::ExtensionManifest::try_from(manifest_v2)
+        let manifest = ironclaw_extension_registry::ExtensionManifest::try_from(manifest_v2)
             .expect("v2 manifest rebuilds to v1");
         let initial_package = ExtensionPackage::from_manifest(manifest, root.clone())
             .expect("pre-discovery package constructs");
@@ -1271,7 +1271,7 @@ input_schema_ref = "schemas/{id}/web_search.input.v1.json"
         .expect("stubbed discovery succeeds");
         assert_eq!(
             discovered.descriptor_schema_mode,
-            ironclaw_extensions::CapabilityDescriptorSchemaMode::InlineDynamic,
+            ironclaw_extension_registry::CapabilityDescriptorSchemaMode::InlineDynamic,
             "a HostBundled hosted-MCP package built from discovery is InlineDynamic, \
              exactly like nearai's `package_with_discovered_hosted_mcp_tools`"
         );
@@ -1299,13 +1299,13 @@ input_schema_ref = "schemas/{id}/web_search.input.v1.json"
             .to_internal(ManifestSource::HostBundled)
             .expect("persisted resolved contract rebuilds to v2");
         let rebuild_manifest =
-            ironclaw_extensions::ExtensionManifest::try_from(rebuild_manifest_v2)
+            ironclaw_extension_registry::ExtensionManifest::try_from(rebuild_manifest_v2)
                 .expect("v2 manifest rebuilds to v1");
         let rebuilt = rebuild_package_from_resolved(rebuild_manifest, &effective, id)
             .expect("rebuild from the durable record alone succeeds");
         assert_eq!(
             rebuilt.descriptor_schema_mode,
-            ironclaw_extensions::CapabilityDescriptorSchemaMode::InlineDynamic,
+            ironclaw_extension_registry::CapabilityDescriptorSchemaMode::InlineDynamic,
             "rebuilding a Materialized package with a persisted discovered-schema map must \
              choose the inline-dynamic constructor, not `from_manifest`'s ManifestRefs"
         );

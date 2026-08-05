@@ -1,4 +1,4 @@
-use ironclaw_extensions::{CapabilityManifest, ExtensionError};
+use ironclaw_extension_registry::{CapabilityManifest, ExtensionError};
 use ironclaw_filesystem::FilesystemError;
 use std::time::Duration;
 

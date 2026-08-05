@@ -5,7 +5,7 @@ implementation remains in the workspace during migration, but it is not part of
 the Reborn release package.
 
 The workspace package and executable are both named `ironclaw`; its source
-directory remains `crates/ironclaw_reborn_cli`.
+directory remains `crates/ironclaw_cli`.
 
 ## Current status
 
@@ -67,7 +67,7 @@ ironclaw status --json
 ```
 
 The `traces` command tree is a contributor-only trace client; see
-`crates/ironclaw_reborn_cli/src/commands/traces/` for its subcommands.
+`crates/ironclaw_cli/src/commands/traces/` for its subcommands.
 
 **`channels`, `hooks`, and `logs` are disabled.** They stay in `--help` and
 shell completions so the eventual real implementation has a stable command
@@ -671,9 +671,9 @@ Run these before changing Reborn CLI behavior:
 ```bash
 cargo fmt --all -- --check
 cargo test -p ironclaw
-cargo test -p ironclaw_reborn_config
-cargo test -p ironclaw_runner model_slots_are_exposed_in_cli_display_order
-cargo test -p ironclaw_architecture reborn
+cargo test -p ironclaw_config
+cargo test -p ironclaw_turn_runner model_slots_are_exposed_in_cli_display_order
+cargo test -p ironclaw_architecture_tests reborn
 cargo clippy -p ironclaw --all-targets -- -D warnings
 cargo run -q -p ironclaw --bin ironclaw -- --help
 # channels/hooks/logs are disabled — these are expected to exit non-zero
@@ -696,12 +696,12 @@ cargo run -q -p ironclaw --bin ironclaw -- skills list
 Future commands should follow the crate-local agent contract in:
 
 ```text
-crates/ironclaw_reborn_cli/AGENTS.md
+crates/ironclaw_cli/AGENTS.md
 ```
 
 Short version:
 
-1. add one command module under `crates/ironclaw_reborn_cli/src/commands/`;
+1. add one command module under `crates/ironclaw_cli/src/commands/`;
 2. register it in `commands::Command`;
 3. resolve and pass `RebornCliContext` from dispatch only when the command needs boot config;
 4. keep pure commands independent from Reborn home resolution;

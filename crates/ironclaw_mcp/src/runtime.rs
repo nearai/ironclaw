@@ -118,9 +118,11 @@ where
 
         let mut usage = output.usage;
         usage.output_bytes = usage.output_bytes.max(output_bytes);
-        if transport == "stdio" {
-            usage.process_count = usage.process_count.max(1);
-        }
+        // No stdio process accounting here: `prepare_client_request` rejects
+        // `stdio` with `ExternalStdioTransportUnsupported` and everything that
+        // is not `http`/`sse` with `UnsupportedTransport`, so this lane spawns
+        // no process and `transport` can only be `http` or `sse` by now. A
+        // `process_count` bump would imply otherwise.
         let receipt = budget.reconcile(reservation.id, usage.clone())?;
         Ok(McpExecutionResult {
             result: CapabilityHostResult {
@@ -290,7 +292,17 @@ fn release_after_failure<Budget>(
 where
     Budget: RuntimeResourceBudget + ?Sized,
 {
-    let _ = budget.release(reservation_id);
+    // silent-ok: budget.release — the execution failure is the caller-facing
+    // error and must not be masked by a release failure. A failed release only
+    // leaks the reservation until the governor reclaims it, so it is traced,
+    // not surfaced. `debug!` deliberately: `info!`/`warn!` corrupt the REPL.
+    if let Err(error) = budget.release(reservation_id) {
+        tracing::debug!(
+            %reservation_id,
+            release_error = %error,
+            "mcp reservation release failed after execution failure"
+        );
+    }
     original
 }
 

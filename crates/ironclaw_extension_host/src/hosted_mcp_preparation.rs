@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use ironclaw_extension_contracts::hosted_mcp::{HostedMcpAuthSelection, RegisterHostedMcpRequest};
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStorePort,
     ExtensionLifecycleService, ExtensionManifestRecord, ExtensionPackage, ManifestSource,
 };

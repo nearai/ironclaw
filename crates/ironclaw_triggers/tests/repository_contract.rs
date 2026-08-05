@@ -1683,7 +1683,7 @@ async fn assert_malformed_row_error(
 /// already carries the same switch for the same reason.
 fn skip_postgres_or_fail<T>(reason: &str) -> Option<T> {
     assert!(
-        std::env::var("IRONCLAW_REQUIRE_POSTGRES").is_err(),
+        !env_flag_present("IRONCLAW_REQUIRE_POSTGRES"),
         "IRONCLAW_REQUIRE_POSTGRES is set but the Postgres trigger repository leg \
          cannot run: {reason}. The libSQL⇄PostgreSQL parity this suite proves (ADR \
          0003) would go unverified, so this is a hard failure rather than a skip."
@@ -1692,13 +1692,67 @@ fn skip_postgres_or_fail<T>(reason: &str) -> Option<T> {
     None
 }
 
+/// Is `name` set in the environment at all?
+///
+/// Presence, not value — and via `var_os`, because `var` reports a *present*
+/// non-UTF-8 value as `Err(NotUnicode)`. Both switches this file reads are
+/// presence flags, and with `var(...).is_err()` a non-UTF-8
+/// `IRONCLAW_REQUIRE_POSTGRES` reads as absent: the hard-failure guard above
+/// silently degrades back to a skip, which is precisely the "a skip must never
+/// masquerade as a green full-matrix run" failure it exists to prevent. The
+/// `IRONCLAW_SKIP_POSTGRES_TESTS` reader has the mirror bug — a non-UTF-8 skip
+/// flag would be ignored and the suite would try to start Docker anyway.
+fn env_flag_present(name: &str) -> bool {
+    std::env::var_os(name).is_some()
+}
+
+/// A present-but-non-UTF-8 value is *present*.
+///
+/// This is the regression for the guard above: with `std::env::var(…)`, the
+/// `OsString` below round-trips to `Err(NotUnicode)` and every presence check
+/// in this file inverts. Pinned rather than argued because the failure is
+/// invisible — the suite still reports success, having proven nothing.
+#[test]
+fn env_flag_presence_survives_a_non_utf8_value() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        const NAME: &str = "IRONCLAW_TRIGGERS_ENV_PRESENCE_FIXTURE";
+
+        // Process env is global: hold the workspace env mutex across the
+        // mutation so parallel tests in this binary cannot race the fixture.
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        assert!(!env_flag_present(NAME), "fixture variable must start unset");
+
+        // Not valid UTF-8.
+        let invalid = std::ffi::OsString::from_vec(vec![0x66, 0x80, 0x6f]);
+        // SAFETY: guarded by `lock_env()` above, over a variable no other
+        // test reads.
+        unsafe { std::env::set_var(NAME, &invalid) };
+        assert!(
+            std::env::var(NAME).is_err(),
+            "the fixture must actually be non-UTF-8, or this test proves nothing"
+        );
+        assert!(
+            env_flag_present(NAME),
+            "a present non-UTF-8 value must count as present; `var(..).is_err()` \
+             reports it as absent and silently disarms the parity guard"
+        );
+
+        // SAFETY: same as above.
+        unsafe { std::env::remove_var(NAME) };
+        assert!(!env_flag_present(NAME), "removal must read as absent");
+    }
+}
+
 async fn postgres_pool_or_skip() -> Option<(
     testcontainers_modules::testcontainers::ContainerAsync<
         testcontainers_modules::postgres::Postgres,
     >,
     deadpool_postgres::Pool,
 )> {
-    if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
+    if env_flag_present("IRONCLAW_SKIP_POSTGRES_TESTS") {
         return skip_postgres_or_fail("IRONCLAW_SKIP_POSTGRES_TESTS is set");
     }
 

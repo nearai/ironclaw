@@ -2,7 +2,7 @@
 //! deployment-first channel resolver (with an active-snapshot compatibility
 //! fallback) and the ingress `reply_context` read half
 //! (ING-11). All delivery semantics live in
-//! `ironclaw_product::DeliveryCoordinator`; this module only
+//! `ironclaw_assistant::DeliveryCoordinator`; this module only
 //! implements its ports over the extension host.
 
 use std::sync::Arc;

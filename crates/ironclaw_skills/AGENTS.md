@@ -32,7 +32,7 @@
 
 - Fast local check: `cargo test -p ironclaw_skills`
 - Feature-shape check after catalog/registry changes: `cargo test -p ironclaw_skills --all-features`
-- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
+- Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture_tests`
 
 ## Agent Notes
 

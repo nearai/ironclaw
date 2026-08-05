@@ -2,8 +2,8 @@
 
 The **WebUI host stack** for Reborn WebChat v2: route surface + SPA bundle +
 gateway assembly/middleware + listener/serve loop + host authentication, all in
-one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
-`ironclaw` binary (`crates/ironclaw_reborn_cli`).
+one `products`-layer crate above `ironclaw_composition`. Driven by the
+`ironclaw` binary (`crates/ironclaw_cli`).
 
 ## Start here
 
@@ -28,7 +28,7 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
    Vite SPA under `frontend/` (built by `build.rs`, served from
    `src/webui_v2/static_assets/`).
 2. **Gateway assembly + middleware** (`src/webui_serve.rs`, `src/webui_*.rs`,
-   folded from `ironclaw_reborn_composition::webui`): `webui_v2_app(bundle,
+   folded from `ironclaw_composition::webui`): `webui_v2_app(bundle,
    config)` composes the full `axum::Router` and layers the fixed middleware
    stack — ws-origin → body limit → bearer auth → rate limit → handler — plus the
    `WebuiAuthenticator` / `WebuiAuthentication` host-auth vocabulary and the
@@ -49,8 +49,8 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 
 - **Product/API business logic.** Handlers consume only `ProductSurface`;
   the facade, projections, and domain services stay behind that seam in
-  `ironclaw_product` / `ironclaw_reborn_composition`.
-- **Product service or domain dependencies.** `ironclaw_product` is allowed here
+  `ironclaw_assistant` / `ironclaw_composition`.
+- **Product service or domain dependencies.** `ironclaw_assistant` is allowed here
   only for wire DTOs and product command/view descriptors. Do not import product
   workflow services, facades, lower substrates, runtime, or DB crates; reach
   execution through `ProductSurface` supplied by host assembly. The architecture
@@ -65,17 +65,17 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 
 `ironclaw_auth` (product-auth service facade and route DTOs),
 `ironclaw_common` (shared hashing primitive used to redact auth-token samples),
-`ironclaw_product` (wire DTOs and product command/view descriptors),
+`ironclaw_assistant` (wire DTOs and product command/view descriptors),
 `ironclaw_host_api` (`ProductSurface`, caller/error vocabulary, identity
 newtypes, and ingress descriptors), `ironclaw_host_ingress` (Axum route-mount
-carriers), `ironclaw_reborn_openai_compat`, and `ironclaw_attachments` (the
+carriers), `ironclaw_openai_compat`, and `ironclaw_attachments` (the
 advertised attachment ceilings only — WS5 gave the size limits one home, so the
 transport reads the same constants the landing routine enforces rather than
 keeping a second copy; PROPOSAL §6.4.9). Plus infra crates: `axum`, `tokio`,
 `tower*`, `tracing`, `thiserror`, `async-trait`, `secrecy`, `subtle`,
 `jsonwebtoken`, etc.
 
-Any other workspace-crate edge requires an `ironclaw_architecture` boundary-test
+Any other workspace-crate edge requires an `ironclaw_architecture_tests` boundary-test
 update (`tests/reborn_dependency_boundaries.rs`) plus explicit PR rationale.
 
 ## Agent notes
@@ -107,5 +107,5 @@ update (`tests/reborn_dependency_boundaries.rs`) plus explicit PR rationale.
 ```bash
 cargo test  -p ironclaw_webui --all-features
 cargo clippy -p ironclaw_webui --all-features --all-targets -- -D warnings
-cargo test  -p ironclaw_architecture reborn_crate_dependency_boundaries_hold
+cargo test  -p ironclaw_architecture_tests reborn_crate_dependency_boundaries_hold
 ```

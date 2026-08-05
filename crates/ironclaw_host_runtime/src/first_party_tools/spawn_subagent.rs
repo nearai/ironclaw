@@ -1,4 +1,4 @@
-use ironclaw_extensions::{CapabilityManifest, ExtensionError};
+use ironclaw_extension_registry::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::capability::{EffectKind, PermissionMode};
 
 pub const SPAWN_SUBAGENT_CAPABILITY_ID: &str = "builtin.spawn_subagent";

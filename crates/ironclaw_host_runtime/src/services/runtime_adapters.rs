@@ -8,7 +8,7 @@ use std::{
 use async_trait::async_trait;
 use futures_util::FutureExt;
 
-use ironclaw_extensions::ExtensionPackage;
+use ironclaw_extension_registry::ExtensionPackage;
 use ironclaw_host_api::{
     capability::CapabilityDescriptor,
     ids::UserId,
@@ -983,7 +983,7 @@ where
         request: RuntimeLaneRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let module_path = match &request.package.manifest.runtime {
-            ExtensionRuntime::Wasm { module } => ironclaw_extensions::resolve_asset_under(
+            ExtensionRuntime::Wasm { module } => ironclaw_extension_registry::resolve_asset_under(
                 module,
                 request
                     .package

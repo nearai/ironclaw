@@ -15,13 +15,13 @@ use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::response::Redirect;
 use axum::routing::get;
+use ironclaw_config::RebornBootConfig;
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
     IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
 use ironclaw_host_api::{action::NetworkMethod, error::HostApiError, ingress::IngressScopeSource};
-use ironclaw_reborn_config::RebornBootConfig;
 use serde::Deserialize;
 
 use crate::LlmReloadTrigger;
@@ -139,8 +139,8 @@ mod tests {
     use async_trait::async_trait;
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
+    use ironclaw_config::{RebornHome, RebornProfile};
     use ironclaw_llm::{SessionConfig, SessionManager};
-    use ironclaw_reborn_config::{RebornHome, RebornProfile};
     use tower::ServiceExt;
 
     use super::*;

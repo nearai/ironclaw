@@ -148,7 +148,7 @@ macro_rules! declare_failure_kinds {
         /// compile error *is* the recoverability review.
         ///
         /// Wire tags are lowercase snake_case ([`as_str`](Self::as_str)) — they must
-        /// pass `ironclaw_events`' `is_safe_error_kind` (first byte lowercase ASCII) or
+        /// pass `ironclaw_event_log`' `is_safe_error_kind` (first byte lowercase ASCII) or
         /// the event layer silently rewrites the tag to `Unclassified`. Historical tags
         /// from the retired coarse vocabularies remain readable via
         /// [`from_tag`](Self::from_tag) aliases.
@@ -888,7 +888,7 @@ impl ModelFailureDiagnostic {
     /// the accessor a renderer wants, so a new text arm cannot be silently
     /// dropped by a call site that only knew about `Diagnostic`.
     pub fn model_visible_text(&self) -> Option<&str> {
-        // pub-api-exempt: consumed by ironclaw_reborn_composition's host_remediation_contract full-path test
+        // pub-api-exempt: consumed by ironclaw_composition's host_remediation_contract full-path test
         match self {
             ModelFailureDiagnostic::Diagnostic { text } => Some(text.as_str()),
             ModelFailureDiagnostic::HostRemediation { text } => Some(text.as_str()),
@@ -1183,9 +1183,9 @@ mod tests {
 
     #[test]
     fn failure_kind_tags_pass_the_event_layer_shape() {
-        // ironclaw_events' `is_safe_error_kind` silently rewrites tags that do
+        // ironclaw_event_log' `is_safe_error_kind` silently rewrites tags that do
         // not start with lowercase ASCII to "Unclassified" — a lossy write.
-        // Pin the shape here (host_api cannot depend on ironclaw_events).
+        // Pin the shape here (host_api cannot depend on ironclaw_event_log).
         for kind in FailureKind::ALL {
             let tag = kind.as_str();
             assert!(

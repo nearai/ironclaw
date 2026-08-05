@@ -30,7 +30,7 @@ and it does not implement the full Unified Extension Runtime migration.
 
 In scope:
 
-1. Move generic channel-delivery behavior out of `ironclaw_reborn_composition`.
+1. Move generic channel-delivery behavior out of `ironclaw_composition`.
 2. Make the Telegram host core concrete and remove same-crate test-seam traits.
 3. Remove Telegram mirror and speculative DTOs.
 4. Replace the Telegram-specific lifecycle slot with a provider-neutral account-setup
@@ -57,7 +57,7 @@ Explicit non-goals:
 
 ### Ownership follows behavior
 
-`ironclaw_reborn_composition` may construct services, supply production dependencies, and
+`ironclaw_composition` may construct services, supply production dependencies, and
 register route fragments or hooks. It may not own delivery algorithms, Telegram revision
 caches, Telegram-specific runtime decorators, or lifecycle policy keyed to the literal
 `telegram` product.
@@ -87,7 +87,7 @@ mediated HTTP boundaries instead of maintaining parallel `InMemory*Store` domain
 
 Create `crates/ironclaw_channel_delivery` as the product-neutral owner of the generic
 delivery engine currently implemented in
-`ironclaw_reborn_composition/src/outbound/channel_delivery.rs`.
+`ironclaw_composition/src/outbound/channel_delivery.rs`.
 
 The crate owns focused modules for:
 
@@ -102,7 +102,7 @@ It consumes existing contract-owner ports such as `ChannelDeliveryProtocol`,
 `OutboundDeliveryTargetProvider`, `ProductAdapter`, `ProtocolHttpEgress`,
 `OutboundDeliverySink`, `SessionThreadService`, `TurnCoordinator`, and outbound stores. It
 does not define channel-specific protocol logic and does not depend on
-`ironclaw_reborn_composition`.
+`ironclaw_composition`.
 
 The auth-prompt projection and blocked-flow cancellation inputs currently declared under
 composition's product-auth API move to the lowest reusable owner that can express them
@@ -217,7 +217,7 @@ resumed run recomputes readiness.
 ### 5. Telegram behavior leaves composition
 
 Move these Telegram-specific behaviors from
-`ironclaw_reborn_composition/src/telegram/telegram_host_beta.rs` into
+`ironclaw_composition/src/telegram/telegram_host_beta.rs` into
 `ironclaw_telegram_extension`:
 
 - dynamic setup-revision workflow construction and caching;
@@ -305,7 +305,7 @@ Required ratchets:
 6. Telegram production files touched by this refactor must remain below the agreed
    1,000-line budget.
 7. `ironclaw_channel_delivery` receives an explicit dependency-boundary rule in
-   `ironclaw_architecture`; it cannot depend on composition, CLI, WebUI, or concrete
+   `ironclaw_architecture_tests`; it cannot depend on composition, CLI, WebUI, or concrete
    channel crates.
 8. Composition's Telegram module has a narrow source budget and may contain assembly
    symbols only; Telegram behavior identifiers are pinned to the Telegram crate.
@@ -395,8 +395,8 @@ cargo test -p ironclaw_channel_delivery
 cargo test -p ironclaw_channel_host --features webhook-serve
 cargo test -p ironclaw_telegram_extension
 cargo test -p ironclaw_telegram_v2_adapter --lib
-cargo test -p ironclaw_reborn_composition --features test-support,webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,libsql --lib
-cargo test -p ironclaw_architecture
+cargo test -p ironclaw_composition --features test-support,webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,libsql --lib
+cargo test -p ironclaw_architecture_tests
 cargo test --test telegram_v2_default_off_integration
 bash scripts/reborn-e2e-rust.sh
 ```
@@ -407,7 +407,7 @@ Clippy and final safety verification:
 cargo clippy -p ironclaw_channel_delivery --all-targets --all-features -- -D warnings
 cargo clippy -p ironclaw_channel_host --all-targets --all-features -- -D warnings
 cargo clippy -p ironclaw_telegram_extension --all-targets --all-features -- -D warnings
-cargo clippy -p ironclaw_reborn_composition --all-targets --all-features -- -D warnings
+cargo clippy -p ironclaw_composition --all-targets --all-features -- -D warnings
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 scripts/pre-commit-safety.sh
 ```

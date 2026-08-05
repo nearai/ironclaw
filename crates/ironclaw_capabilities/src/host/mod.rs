@@ -36,7 +36,7 @@ use ironclaw_approvals::ApprovalRequestStorePort;
 use ironclaw_authorization::{
     CapabilityLease, CapabilityLeaseStorePort, TrustAwareCapabilityDispatchAuthorizer,
 };
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_extension_registry::ExtensionRegistry;
 use ironclaw_host_api::{
     Timestamp,
     approval::InvocationFingerprint,

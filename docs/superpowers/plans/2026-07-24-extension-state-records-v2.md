@@ -64,7 +64,7 @@ aggregate-only binary a safe rollback target after v2 mutations.
 
 **Files:**
 
-- Modify: `crates/ironclaw_extensions/tests/installations_contract.rs`
+- Modify: `crates/ironclaw_extension_registry/tests/installations_contract.rs`
 
 **Step 1: Add failing public store contract tests**
 
@@ -81,7 +81,7 @@ Add tests that use a real `InMemoryBackend` and assert:
 Run:
 
 ```bash
-cargo test -p ironclaw_extensions --test installations_contract normalized_v2
+cargo test -p ironclaw_extension_registry --test installations_contract normalized_v2
 ```
 
 Expected: FAIL because the v2 collections and record kinds do not exist.
@@ -106,7 +106,7 @@ missing behavior.
 
 **Files:**
 
-- Modify: `crates/ironclaw_extensions/src/installations.rs`
+- Modify: `crates/ironclaw_extension_registry/src/installations.rs`
 
 **Step 1: Add private wire types and path/index helpers**
 
@@ -162,9 +162,9 @@ succeeds. Surface partial/corrupt records as typed store errors.
 Run:
 
 ```bash
-cargo test -p ironclaw_extensions --test installations_contract normalized_v2
-cargo test -p ironclaw_extensions --test installations_contract
-cargo test -p ironclaw_extensions
+cargo test -p ironclaw_extension_registry --test installations_contract normalized_v2
+cargo test -p ironclaw_extension_registry --test installations_contract
+cargo test -p ironclaw_extension_registry
 ```
 
 Expected: PASS.
@@ -173,10 +173,10 @@ Expected: PASS.
 
 **Files:**
 
-- Modify: `crates/ironclaw_extensions/src/installations.rs`
-- Modify: `crates/ironclaw_extensions/tests/installations_contract.rs`
+- Modify: `crates/ironclaw_extension_registry/src/installations.rs`
+- Modify: `crates/ironclaw_extension_registry/tests/installations_contract.rs`
 - Modify:
-  `crates/ironclaw_reborn_composition/src/extension_host/extension_lifecycle.rs`
+  `crates/ironclaw_composition/src/extension_host/extension_lifecycle.rs`
 
 **Step 1: Add failing membership mutation tests**
 
@@ -213,7 +213,7 @@ Tests prove:
 Run:
 
 ```bash
-cargo test -p ironclaw_extensions --test installations_contract membership_v2
+cargo test -p ironclaw_extension_registry --test installations_contract membership_v2
 ```
 
 Expected: FAIL before the methods exist.
@@ -243,9 +243,9 @@ implementation must forward the new methods.
 Run:
 
 ```bash
-cargo test -p ironclaw_extensions --test installations_contract membership_v2
-cargo test -p ironclaw_extensions
-cargo test -p ironclaw_reborn_composition extension_lifecycle
+cargo test -p ironclaw_extension_registry --test installations_contract membership_v2
+cargo test -p ironclaw_extension_registry
+cargo test -p ironclaw_composition extension_lifecycle
 ```
 
 Expected: PASS.
@@ -333,12 +333,12 @@ that package bytes or all user data moved to relational tables.
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p ironclaw_extensions --no-fail-fast
-cargo clippy -p ironclaw_extensions --all-targets --all-features -- -D warnings
-cargo test -p ironclaw_reborn_composition extension_lifecycle
-cargo clippy -p ironclaw_reborn_composition --all-targets --all-features -- -D warnings
+cargo test -p ironclaw_extension_registry --no-fail-fast
+cargo clippy -p ironclaw_extension_registry --all-targets --all-features -- -D warnings
+cargo test -p ironclaw_composition extension_lifecycle
+cargo clippy -p ironclaw_composition --all-targets --all-features -- -D warnings
 cargo test --test reborn_integration_extension_user_lifecycle_isolation
-cargo test -p ironclaw_architecture
+cargo test -p ironclaw_architecture_tests
 ```
 
 **Step 2: Run repository safety checks**

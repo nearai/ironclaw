@@ -166,12 +166,109 @@ fn every_source_file_has_exactly_one_sub_owner() {
     );
 }
 
-/// Concatenate every `.rs` file under `src/<module>/`, minus `//`/`//!` comment
-/// lines.
+/// Blank every comment body and string literal in `source`, keeping the code
+/// tokens (and the line count) intact.
 ///
-/// Comments are stripped because both charters *name the other engine in
+/// A line-prefix filter is not enough. Both charters *name the other engine in
 /// prose* — deliberately, since the severance is the thing they document — and
-/// a scan that counted those would be unsatisfiable by construction.
+/// that prose is not always a `//` line: a `/* … */` block, a trailing `// …`
+/// after code, a doc string, or an error message like
+/// `"product_auth::flow is unavailable"` all reach the `engine` / `product_auth`
+/// probes unchanged. Each of those makes a legitimate documentation or
+/// error-message edit fail the charter gate, which is how a guardrail teaches
+/// people to route around it.
+///
+/// Deliberately errs on the side of stripping: the severance is a rule about
+/// *code* naming the other engine, and a mis-lex would show up as the coverage
+/// half of this file failing, not as a silent pass.
+fn strip_comments_and_strings(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = String::with_capacity(source.len());
+    let mut index = 0;
+    while index < chars.len() {
+        let current = chars[index];
+        // Line comment (covers `//`, `///`, `//!`).
+        if current == '/' && chars.get(index + 1) == Some(&'/') {
+            while index < chars.len() && chars[index] != '\n' {
+                index += 1;
+            }
+            continue;
+        }
+        // Block comment; Rust block comments nest.
+        if current == '/' && chars.get(index + 1) == Some(&'*') {
+            let mut depth = 1usize;
+            index += 2;
+            while index < chars.len() && depth > 0 {
+                if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+                    depth += 1;
+                    index += 2;
+                } else if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
+                    depth -= 1;
+                    index += 2;
+                } else {
+                    if chars[index] == '\n' {
+                        out.push('\n');
+                    }
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        // Raw string literal: `r"…"` / `r#"…"#`, optionally `b`/`c` prefixed.
+        if current == 'r'
+            || ((current == 'b' || current == 'c') && chars.get(index + 1) == Some(&'r'))
+        {
+            let hash_start = if current == 'r' { index + 1 } else { index + 2 };
+            let mut cursor = hash_start;
+            while chars.get(cursor) == Some(&'#') {
+                cursor += 1;
+            }
+            if chars.get(cursor) == Some(&'"') {
+                let hashes = cursor - hash_start;
+                let mut scan = cursor + 1;
+                while scan < chars.len() {
+                    if chars[scan] == '"'
+                        && (0..hashes).all(|offset| chars.get(scan + 1 + offset) == Some(&'#'))
+                    {
+                        scan += 1 + hashes;
+                        break;
+                    }
+                    if chars[scan] == '\n' {
+                        out.push('\n');
+                    }
+                    scan += 1;
+                }
+                index = scan;
+                continue;
+            }
+        }
+        // Plain string literal (escapes honoured).
+        if current == '"' {
+            index += 1;
+            while index < chars.len() {
+                if chars[index] == '\\' {
+                    index += 2;
+                    continue;
+                }
+                if chars[index] == '"' {
+                    index += 1;
+                    break;
+                }
+                if chars[index] == '\n' {
+                    out.push('\n');
+                }
+                index += 1;
+            }
+            continue;
+        }
+        out.push(current);
+        index += 1;
+    }
+    out
+}
+
+/// Concatenate every `.rs` file under `src/<module>/`, with comment bodies and
+/// string literals blanked by [`strip_comments_and_strings`].
 fn module_code(module: &str) -> String {
     fn walk(dir: &Path, out: &mut String) {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -185,12 +282,8 @@ fn module_code(module: &str) -> String {
             } else if path.extension().is_some_and(|ext| ext == "rs") {
                 let text = std::fs::read_to_string(&path)
                     .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-                for line in text.lines() {
-                    if !line.trim_start().starts_with("//") {
-                        out.push_str(line);
-                        out.push('\n');
-                    }
-                }
+                out.push_str(&strip_comments_and_strings(&text));
+                out.push('\n');
             }
         }
     }
@@ -209,6 +302,62 @@ fn module_code(module: &str) -> String {
         out.len()
     );
     out
+}
+
+/// The severance scan sees code, and only code.
+///
+/// Every shape here is one a line-prefix filter (`line.starts_with("//")`)
+/// lets through, so each would fail the charter gate on a documentation or
+/// error-message edit that changed nothing about the split. The last case is
+/// the other direction: a real `use` must still be seen, so a stripper that
+/// over-reaches cannot make the gate vacuous.
+#[test]
+fn the_severance_scan_reads_code_not_prose_or_literals() {
+    for (label, source) in [
+        (
+            "trailing line comment",
+            "let x = 1; // crate::engine::foo\n",
+        ),
+        (
+            "block comment",
+            "/* the durable engine calls crate::engine::foo */\nlet x = 1;\n",
+        ),
+        (
+            "nested block comment",
+            "/* outer /* crate::engine::foo */ still comment */\nlet x = 1;\n",
+        ),
+        (
+            "doc comment",
+            "/// See [`crate::engine`] for the vendor half.\nlet x = 1;\n",
+        ),
+        (
+            "string literal",
+            "let reason = \"crate::engine is unavailable\";\n",
+        ),
+        (
+            "raw string literal",
+            "let reason = r#\"engine::Handshake failed\"#;\n",
+        ),
+        (
+            "multi-line string literal",
+            "let doc = \"product_auth::flow\n            spans two lines\";\n",
+        ),
+    ] {
+        let stripped = strip_comments_and_strings(source);
+        for probe in ["crate::engine", "engine::", "product_auth::"] {
+            assert!(
+                !stripped.contains(probe),
+                "{label}: `{probe}` survived stripping — a prose or literal mention \
+                 would fail the severance gate. Stripped to:\n{stripped}"
+            );
+        }
+    }
+
+    let real = strip_comments_and_strings("use crate::engine::handshake::Client;\n");
+    assert!(
+        real.contains("crate::engine"),
+        "a real `use` must survive stripping, or the gate is vacuous; got:\n{real}"
+    );
 }
 
 /// The two engines meet only through the crate root's shared vocabulary.

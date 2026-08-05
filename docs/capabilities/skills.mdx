@@ -11,39 +11,37 @@ IronClaw can search and install skills from the IronHub registry, a community-dr
 
 ---
 
-## What Skills Do
+## What skills do
 
 A skill is a self-contained expertise module. It defines:
 
 - **When to activate** — patterns, keywords, and regex that match incoming messages
 - **What to inject** — a markdown body with instructions, examples, and domain knowledge
-- **What tools to require** — binaries, environment variables, and configuration needed
+- **What prerequisites to declare** — binaries, environment variables, and configuration needed
 - **How much context to use** — a token budget cap per activation
 
 Skills are evaluated on every turn. The agent selects the most relevant skills that fit within the prompt budget and injects them before the LLM reasons about the request.
 
 ---
 
-## Activation Pipeline
+## Activation pipeline
 
 Skills pass through four stages before injection:
 
 <Steps>
   <Step title="Gate">
-    Check that all prerequisites are met: required binaries exist on `PATH`, required environment variables are set, required configuration is present. Skills that fail gating are skipped entirely — they never score or consume budget.
+    Skills with `auto_activate = false` are excluded before scoring. Skills with `auto_activate = true` (the default) proceed to scoring. Explicit `$name` and `/name` mentions bypass this gate entirely — they activate regardless of the `auto_activate` flag.
   </Step>
 
   <Step title="Score">
-    Each gated skill is scored against the current message using a deterministic algorithm: keyword matches, tag overlaps, and regex pattern matches. Higher scores indicate stronger relevance.
+    Each skill is scored against the current message using a deterministic algorithm: keyword matches, tag overlaps, and regex pattern matches. Higher scores indicate stronger relevance.
 
-    Scoring is fully deterministic — no LLM involved. A skill must declare its activation criteria in the frontmatter so the scorer knows what to match. Legacy agent-loop selection can use this score to inject full skill context.
+    Scoring is fully deterministic — no LLM involved. A skill must declare its activation criteria in the frontmatter so the scorer knows what to match.
 
-    Set `SKILLS_REGEX_ACTIVATION_ENABLED=false` to disable regex pattern auto-activation. Keyword/tag activation and explicit skill mentions, such as `$my-skill`, still inject skills.
-
-    Reborn local-dev uses Codex-style selection: `skill_list` exposes a compact catalog, natural-language keyword/tag/pattern matches do not inject full skill bodies, and full `SKILL.md` context is loaded only after an explicit `$skill` mention or a model-selected local-dev `skill_activate` call.
+    Set `regex_activation_enabled = false` under `[skills]` in your config to disable regex pattern auto-activation. Keyword/tag activation and explicit skill mentions, such as `$my-skill` or `/my-skill`, still inject skills.
 
     <Warning>
-    A skill without an `activation` block scores zero on every message and is never injected.
+    A skill without any activation criteria (keywords, tags, or patterns) always scores zero during automatic selection, but can still be activated by explicit `$name` or `/name` mentions.
     </Warning>
 
     ```yaml
@@ -63,6 +61,11 @@ Skills pass through four stages before injection:
       exclude_keywords:
         - dry-run
       max_context_tokens: 2000
+    requires:
+      bins:
+        - docker
+      env:
+        - DOCKER_HOST
     ---
     ```
 
@@ -72,31 +75,39 @@ Skills pass through four stages before injection:
     | `patterns`           | Regex patterns. Each match adds significant weight — use for intent-specific phrases.           |
     | `tags`               | Short labels for broad domain matching (e.g. `blockchain`, `cli`).                             |
     | `exclude_keywords`   | Veto list — if any appear in the message, the skill scores zero regardless of other matches.    |
-    | `max_context_tokens` | Token budget this skill may consume per turn. Omitting it leaves the skill with a 2000-token budget, effectively excluding it. |
+    | `max_context_tokens` | Token budget this skill may consume per turn. Defaults to 2000 if omitted, a conservative cap that limits context usage. |
+    | `auto_activate`      | Set to `false` to prevent keyword/regex auto-activation. The skill must be mentioned explicitly by name or loaded via `skill_activate`. |
+    | `setup_marker`       | One-time setup marker. Excludes this skill from activation after it has been run once. Use for skills that perform initial configuration (e.g., setting up a repo connection). |
+    | `requires.bins`      | Binaries that must exist on `PATH` for the skill to function. Parsed but not enforced during selection. |
+    | `requires.env`       | Environment variables that must be set for the skill to function. Parsed but not enforced during selection. |
 
     <Tip>
     If a skill appears in `ironclaw skills list` but the agent doesn't use it, the most common cause is a missing or empty `activation` block.
     </Tip>
 
+    <Tip title="Local-dev skill selection">
+    Local-dev uses Codex-style selection: `skill_list` exposes a compact catalog, natural-language keyword/tag/pattern matches do not inject full skill bodies, and full `SKILL.md` context is loaded only after an explicit `$skill` mention or a model-selected `skill_activate` call.
+    </Tip>
+
   </Step>
 
   <Step title="Budget">
-    Skills are sorted by score descending. Starting from the highest-scoring skill, each is selected until the `SKILLS_MAX_TOKENS` budget is exhausted. Lower-scoring skills that don't fit are dropped for this turn.
+    Skills are sorted by score descending. Starting from the highest-scoring skill, each is selected until the total token budget is exhausted. Lower-scoring skills that don't fit are dropped for this turn.
   </Step>
 
   <Step title="Attenuate">
-    Trust-based content visibility is applied. Installed skills (from IronHub) expose only their description — the full prompt body is not injected and the agent cannot self-activate them. Trusted skills have full content loaded. See Trust Levels below.
+    Trust-based restrictions are applied. Installed skills (from IronHub) are excluded from model-selected activation — the agent cannot load them via `skill_activate`. Skills in trusted directories retain full activation access. See Trust Levels below.
   </Step>
 </Steps>
 
 ---
 
-## Trust Levels
+## Trust levels
 
-| Trust Level   | Source                                                      | Content visibility                          | Model self-activation |
-|---------------|-------------------------------------------------------------|---------------------------------------------|-----------------------|
-| **Trusted**   | User-placed in `~/.ironclaw/skills/` or workspace `skills/` | Full prompt body available to the model     | Yes                   |
-| **Installed** | Downloaded from IronHub registry via `skill_install`        | Description only — full body not injected   | No                    |
+| Trust Level   | Source                                                      | Activation access                                        |
+|---------------|-------------------------------------------------------------|----------------------------------------------------------|
+| **Trusted**   | User-placed in `~/.ironclaw/skills/` or workspace `skills/` | Model can auto-select via `skill_activate`               |
+| **Installed** | Downloaded from IronHub registry via `ironclaw ironhub install --kind skill` | Excluded from `skill_activate`. Available via explicit `$name` mention. |
 
 <Warning>
 Never place a skill file in the trusted directories unless you have reviewed its contents. A skill in `~/.ironclaw/skills/` has the same tool access as you do.
@@ -104,7 +115,7 @@ Never place a skill file in the trusted directories unless you have reviewed its
 
 ---
 
-## Skill Directories
+## Skill directories
 
 IronClaw discovers skills from three locations, checked in order:
 
@@ -114,7 +125,7 @@ IronClaw discovers skills from three locations, checked in order:
 | `<workspace>/skills/`           | Trusted   | Per-workspace skills, activated in that workspace's context |
 | `~/.ironclaw/installed_skills/` | Installed | Registry-installed skills from IronHub                      |
 
-Skills in trusted directories are loaded as-is. Skills in `installed_skills/` expose only their description — the full prompt body is not injected and the agent cannot self-activate them.
+Skills in trusted directories are loaded as-is. Skills in `installed_skills/` follow the same activation rules as the Trust levels table above.
 
 Each skill lives in its own subdirectory named after the skill:
 
@@ -134,14 +145,6 @@ A correctly installed skill appears with its name, version, and trust level. If 
 
 ---
 
-## Auto-Discovery
+## Auto-discovery
 
-When `SKILLS_AUTO_DISCOVER=true` (the default), IronClaw scans all skill directories at startup and indexes all valid SKILL.md files. New skills added while the agent is running are picked up on the next restart.
-
-```bash
-# Enable auto-discovery (default: true)
-SKILLS_AUTO_DISCOVER=true
-
-# Max tokens injected per turn across all active skills
-SKILLS_MAX_TOKENS=4000
-```
+IronClaw scans all skill directories at startup and indexes all valid SKILL.md files. New skills added while the agent is running are picked up on the next restart.

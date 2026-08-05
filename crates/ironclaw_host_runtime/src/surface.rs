@@ -1,6 +1,6 @@
 use futures_util::{StreamExt, stream};
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     CapabilityVisibility, ExtensionPackage, ExtensionRegistry, ManifestSource,
 };
 use ironclaw_filesystem::RootFilesystem;
@@ -398,7 +398,7 @@ impl<'a> CapabilityCatalog<'a> {
             return Ok(descriptor);
         };
         if package.descriptor_schema_mode
-            == ironclaw_extensions::CapabilityDescriptorSchemaMode::InlineDynamic
+            == ironclaw_extension_registry::CapabilityDescriptorSchemaMode::InlineDynamic
         {
             return Ok(descriptor);
         }
@@ -752,7 +752,7 @@ mod tests {
 
     use crate::SurfaceKind;
     use async_trait::async_trait;
-    use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ManifestSource};
+    use ironclaw_extension_registry::{ExtensionManifest, ExtensionPackage, ManifestSource};
     use ironclaw_filesystem::{
         DirEntry, FileStat, FilesystemError, FilesystemOperation, InMemoryBackend, RootFilesystem,
     };
@@ -797,11 +797,11 @@ visibility = "model"
 input_schema_ref = "schemas/broken.input.json"
 "#;
 
-    fn isolation_test_contracts() -> ironclaw_extensions::HostApiContractRegistry {
-        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    fn isolation_test_contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
+        let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
         contracts
             .register(std::sync::Arc::new(
-                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                     .expect("capability provider contract"),
             ))
             .expect("register capability provider contract");

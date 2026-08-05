@@ -1,6 +1,6 @@
 //! The on/off switch for progressive tool disclosure.
 //!
-//! Moved here from `ironclaw_runner::runtime` with the disclosure decorator it
+//! Moved here from `ironclaw_turn_runner::runtime` with the disclosure decorator it
 //! gates (WS3 runner sheds, PROPOSAL §6.7.3). The mode and the mechanism it
 //! switches now live in one crate: `is_bridged()` is read at exactly one
 //! production site — the runner's capability-port factory, deciding whether to

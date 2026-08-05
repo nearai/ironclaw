@@ -5,7 +5,7 @@
 //! declares immutable setup metadata once, and the crate that hosts that
 //! account answers "is this user connected?" through
 //! [`AccountConnectionStatusSource`]. The declaration registry itself is
-//! product-owned mutable state and stays in `ironclaw_product`; what lives
+//! product-owned mutable state and stays in `ironclaw_assistant`; what lives
 //! here is the descriptor it stores, the sanitized error classes it reports,
 //! the probe port `ironclaw_extension_host` implements over its pairing
 //! service, and — since WS2.5 — [`ExtensionAccountSetupReader`], the registry's
@@ -112,7 +112,7 @@ pub enum ExtensionAccountSetupError {
 ///
 /// The registry itself — single-assignment declarations plus connected status
 /// sources, under a lock — is product-owned mutable state and stays in
-/// `ironclaw_product`, exactly as this module's header says. What the extension
+/// `ironclaw_assistant`, exactly as this module's header says. What the extension
 /// host needs is these two reads, and both speak only `host_api` +
 /// this module's vocabulary, so the port is declarable here and the state is
 /// not. Dependency inversion: declared below, implemented above

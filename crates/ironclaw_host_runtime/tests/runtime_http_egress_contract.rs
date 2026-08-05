@@ -2,7 +2,7 @@
 use ironclaw_capabilities::{
     CapabilityObligationHandler, CapabilityObligationPhase, CapabilityObligationRequest,
 };
-use ironclaw_events::InMemoryAuditSink;
+use ironclaw_event_log::InMemoryAuditSink;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},

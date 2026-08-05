@@ -46,7 +46,7 @@ Use this mental model before touching files:
 ```text
 Extension package
   -> lifecycle/discovery materializes it into the extension registry
-  -> ironclaw_extensions parses manifest v2 host APIs and projects descriptors
+  -> ironclaw_extension_registry parses manifest v2 host APIs and projects descriptors
   -> ironclaw_host_runtime publishes hot model-facing schemas/prompts
   -> model selects a visible capability
   -> ironclaw_capabilities performs authorization, approvals, obligations, run state
@@ -59,7 +59,7 @@ Extension package
 Important ownership rule:
 
 ```text
-ironclaw_extensions knows what can run.
+ironclaw_extension_registry knows what can run.
 runtime crates know how to run it.
 authorization/approvals decide whether it may run.
 host runtime/composition wires the concrete services.
@@ -74,7 +74,7 @@ Pick one lane first. Do not blend lanes to make a tool work.
 | Lane | Use when | Current examples | Main files |
 | --- | --- | --- | --- |
 | WASM capability provider | Provider logic can run in a sandboxed component and use host HTTP egress. This is the default for provider tools. | GitHub, Gmail, Google Calendar, Google Drive, Google Docs, Google Sheets, Google Slides | `crates/extensions/packages/<id>/manifest.toml`, `schemas/`, `prompts/`, optional `wasm-src/` |
-| Hosted HTTP MCP | The provider already exposes an MCP server and the host should lock egress to that endpoint. | Notion hosted MCP | `assets/<id>-mcp/manifest.toml`, schemas/prompts, `crates/ironclaw_reborn_composition/src/mcp.rs` only if adding a new host-bundled MCP policy shape |
+| Hosted HTTP MCP | The provider already exposes an MCP server and the host should lock egress to that endpoint. | Notion hosted MCP | `assets/<id>-mcp/manifest.toml`, schemas/prompts, `crates/ironclaw_composition/src/mcp.rs` only if adding a new host-bundled MCP policy shape |
 | Product adapter | The extension receives external inbound events or product webhooks. This is not just a model-callable tool lane. | Slack/Telegram-style adapters, not the main focus of this guide | `crates/ironclaw_product_adapters`, `crates/ironclaw_product_adapter_registry`, `crates/ironclaw_wasm_product_adapters` |
 | Script | Sandboxed process/CLI capability. Use only when a process boundary is the product requirement. | Project tools / CLI-style tools | `crates/ironclaw_sandbox` script runtime path plus manifest runtime `script` |
 
@@ -92,12 +92,12 @@ Usually touch:
 - `crates/extensions/packages/<extension>/manifest.toml`
 - `crates/extensions/packages/<extension>/schemas/<extension>/*.json`
 - `crates/extensions/packages/<extension>/prompts/<extension>/*.md`
-- `crates/ironclaw_reborn_composition/src/available_extensions.rs` only when adding
+- `crates/ironclaw_composition/src/available_extensions.rs` only when adding
   a host-bundled available extension to the built-in install catalog.
 
 Do not touch for ordinary tools:
 
-- `crates/ironclaw_extensions/src/v2.rs`, unless changing the manifest contract
+- `crates/ironclaw_extension_registry/src/v2.rs`, unless changing the manifest contract
   itself.
 - `crates/ironclaw_host_api/src/*`, unless adding a new shared host API type.
 - `crates/ironclaw_capabilities`, unless changing authorization/approval
@@ -117,7 +117,7 @@ Usually touch:
 - `crates/extensions/packages/<extension>/wasm-src/`
 - `crates/extensions/packages/<extension>/wasm/<tool>.wasm`
 - the extension manifest, schemas, and prompts.
-- `crates/ironclaw_reborn_composition/src/available_extensions.rs` to package
+- `crates/ironclaw_composition/src/available_extensions.rs` to package
   the manifest, schemas, prompts, and WASM bytes if host-bundled.
 
 Use as references:
@@ -137,17 +137,17 @@ Usually touch:
 - `crates/extensions/packages/<provider>-mcp/manifest.toml`
 - `schemas/<provider>/...`
 - `prompts/<provider>/...`
-- `crates/ironclaw_reborn_composition/src/available_extensions.rs` if
+- `crates/ironclaw_composition/src/available_extensions.rs` if
   host-bundled.
 
 Use as references:
 
 - `crates/extensions/packages/notion-mcp/manifest.toml`
-- `crates/ironclaw_reborn_composition/src/mcp.rs`
+- `crates/ironclaw_composition/src/mcp.rs`
 - `crates/ironclaw_auth/src/engine/`
-- composition provider wiring in `crates/ironclaw_reborn_composition/src/factory.rs`
+- composition provider wiring in `crates/ironclaw_composition/src/factory.rs`
 
-Only touch `crates/ironclaw_reborn_composition/src/mcp.rs` if the hosted MCP
+Only touch `crates/ironclaw_composition/src/mcp.rs` if the hosted MCP
 runtime policy needs a new generic rule. Notion already demonstrates the common
 shape: HTTPS-only endpoint, exact host/path match, no URL credentials, no query,
 no fragment, host-mediated egress, staged product-auth token.
@@ -162,7 +162,7 @@ Usually touch only when adding a new product-auth provider:
   exchange behavior.
 - `crates/extensions/packages/<extension>/manifest.toml`
   for bundled first-party provider recipe data.
-- `crates/ironclaw_reborn_composition/src/factory.rs` for composition-time
+- `crates/ironclaw_composition/src/factory.rs` for composition-time
   provider recipe wiring.
 - `crates/ironclaw_webui/src/product_auth/` only for product auth HTTP
   setup/callback route surfaces.
@@ -180,7 +180,7 @@ For a normal extension, do not touch these:
 - `crates/ironclaw_engine/*` V1 runtime paths.
 - `src/tools/*` V1 tools.
 - `crates/ironclaw_host_api` for one provider's fields.
-- `crates/ironclaw_extensions/src/v2.rs` to allow a one-off manifest shortcut.
+- `crates/ironclaw_extension_registry/src/v2.rs` to allow a one-off manifest shortcut.
 - `crates/ironclaw_network` to allow one provider host.
 - `crates/ironclaw_secrets` to fetch one provider token.
 - `crates/ironclaw_approvals` to make one write operation easier.
@@ -344,7 +344,7 @@ Network policy belongs in host/runtime planning:
 - WASM credential injection is derived from manifest descriptors in
   `crates/ironclaw_host_runtime/src/wasm_credentials.rs`.
 - Hosted MCP policy is planned in
-  `crates/ironclaw_reborn_composition/src/mcp.rs`.
+  `crates/ironclaw_composition/src/mcp.rs`.
 - GSuite WASM tools should declare narrow credential audiences and use host
   HTTP egress for Google API hosts.
 - Shared HTTP enforcement and redaction live in
@@ -520,7 +520,7 @@ agent-loop path. Let the MCP runtime and host egress planner own it.
 
 Host-bundled extension packages are included in:
 
-- `crates/ironclaw_reborn_composition/src/available_extensions.rs`
+- `crates/ironclaw_composition/src/available_extensions.rs`
 
 That file:
 
@@ -614,8 +614,8 @@ Minimum tests for a Reborn tool:
 
 Useful existing test areas:
 
-- `crates/ironclaw_extensions/tests/manifest_v2_contract.rs`
-- `crates/ironclaw_reborn_composition/src/available_extensions.rs` tests
+- `crates/ironclaw_extension_registry/tests/manifest_v2_contract.rs`
+- `crates/ironclaw_composition/src/available_extensions.rs` tests
 - `crates/ironclaw_host_runtime/src/capability_catalog.rs` tests
 
 ### Runtime behavior
@@ -682,15 +682,15 @@ shape before extending it.
 - Notion hosted MCP credential/effect semantics:
   `crates/extensions/packages/notion-mcp/manifest.toml`
 - Hosted MCP egress planner:
-  `crates/ironclaw_reborn_composition/src/mcp.rs`
+  `crates/ironclaw_composition/src/mcp.rs`
 - Notion OAuth provider wiring:
-  `crates/ironclaw_reborn_composition/src/factory.rs`
+  `crates/ironclaw_composition/src/factory.rs`
 - Hot capability catalog:
   `crates/ironclaw_host_runtime/src/capability_catalog.rs`
 - Host HTTP egress service:
   `crates/ironclaw_host_runtime/src/egress/`
 - Manifest v2 contract:
-  `crates/ironclaw_extensions/src/v2.rs`
+  `crates/ironclaw_extension_registry/src/v2.rs`
 
 ## Quick implementation checklist
 

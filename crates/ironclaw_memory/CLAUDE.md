@@ -30,4 +30,4 @@ Rules:
 - Validation is fail-closed and stable: invalid scopes, paths, or context
   values must error rather than be silently coerced.
 - Fast local check: `cargo test -p ironclaw_memory`. Boundary check after
-  dependency/API changes: `cargo test -p ironclaw_architecture`.
+  dependency/API changes: `cargo test -p ironclaw_architecture_tests`.

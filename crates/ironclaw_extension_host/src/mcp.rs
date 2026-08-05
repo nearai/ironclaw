@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use ironclaw_extension_contracts::runtime::ExtensionRuntime;
-use ironclaw_extensions::{ExtensionPackage, SharedExtensionRegistry, is_hosted_http_mcp_package};
+use ironclaw_extension_registry::{
+    ExtensionPackage, SharedExtensionRegistry, is_hosted_http_mcp_package,
+};
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     http::{RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeHttpEgress},
@@ -198,7 +200,7 @@ fn hosted_mcp_network_policy_for_endpoint(endpoint: &HostedMcpEgressEndpoint) ->
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ManifestSource};
+    use ironclaw_extension_registry::{ExtensionManifest, ExtensionPackage, ManifestSource};
     use ironclaw_host_api::{
         action::{NetworkMethod, NetworkScheme, NetworkTargetPattern},
         capability::{PermissionMode, RuntimeCredentialRequirementSource},
@@ -493,7 +495,7 @@ mod tests {
         }
     }
 
-    fn registry_with_notion() -> ironclaw_extensions::ExtensionRegistry {
+    fn registry_with_notion() -> ironclaw_extension_registry::ExtensionRegistry {
         registry_with_provider(
             "notion",
             NOTION_MCP_URL,
@@ -507,8 +509,8 @@ mod tests {
         url: &str,
         capability_id: &str,
         credential_handle: &str,
-    ) -> ironclaw_extensions::ExtensionRegistry {
-        let mut registry = ironclaw_extensions::ExtensionRegistry::new();
+    ) -> ironclaw_extension_registry::ExtensionRegistry {
+        let mut registry = ironclaw_extension_registry::ExtensionRegistry::new();
         let host = url::Url::parse(url)
             .unwrap()
             .host_str()
@@ -518,7 +520,8 @@ mod tests {
             .insert(
                 ExtensionPackage::from_manifest(
                     ExtensionManifest {
-                        schema_version: ironclaw_extensions::MANIFEST_SCHEMA_VERSION.to_string(),
+                        schema_version: ironclaw_extension_registry::MANIFEST_SCHEMA_VERSION
+                            .to_string(),
                         id: ExtensionId::new(provider).unwrap(),
                         name: provider.to_string(),
                         version: "0.1.0".to_string(),
@@ -535,7 +538,7 @@ mod tests {
                         host_apis: Vec::new(),
                         host_api_surfaces: Vec::new(),
                         hooks: Vec::new(),
-                        capabilities: vec![ironclaw_extensions::CapabilityManifest {
+                        capabilities: vec![ironclaw_extension_registry::CapabilityManifest {
                             id: CapabilityId::new(capability_id).unwrap(),
                             description: "Search".to_string(),
                             effects: vec![
@@ -544,7 +547,7 @@ mod tests {
                                 ironclaw_host_api::capability::EffectKind::UseSecret,
                             ],
                             default_permission: PermissionMode::Allow,
-                            visibility: ironclaw_extensions::CapabilityVisibility::Model,
+                            visibility: ironclaw_extension_registry::CapabilityVisibility::Model,
                             input_schema_ref: CapabilityProfileSchemaRef::new(
                                 "schemas/notion/notion-search.input.v1.json",
                             )

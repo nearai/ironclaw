@@ -82,17 +82,17 @@ jobs:
           set -euo pipefail
           # The shipped image is the Reborn CLI (`ironclaw`), so the release
           # version is that package's version — NOT the root workspace manifest,
-          # which is the test-only `ironclaw_reborn_integration_tests` package
+          # which is the test-only `ironclaw_integration_tests` package
           # pinned at 0.1.0 since Tier B deleted the v1 monolith.
           #
           # Resolved through the shared crate inventory (scripts/ci/crate-dir.sh)
-          # rather than the flat `crates/ironclaw_reborn_cli` literal, so this
+          # rather than the flat `crates/ironclaw_cli` literal, so this
           # step needs no edit when the crate moves into a family directory
           # (PROPOSAL §5). If resolution ever fails, `set -e` aborts here before
           # `grep` runs against an empty/garbage path — belt-and-suspenders with
           # the version-format guard immediately below, which already catches
           # an empty VERSION either way.
-          reborn_cli_dir="$(bash scripts/ci/crate-dir.sh ironclaw_reborn_cli)"
+          reborn_cli_dir="$(bash scripts/ci/crate-dir.sh ironclaw_cli)"
           VERSION=$(grep '^version' "${reborn_cli_dir}/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Extracted version '${VERSION}' must match MAJOR.MINOR.PATCH[-prerelease] (Docker tags forbid '+')"

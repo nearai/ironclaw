@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use ironclaw_extension_contracts::channel_identity::{
     ChannelConnectionScope, ChannelConnectionScopeSource,
 };
-use ironclaw_extensions::ExtensionInstallationStorePort;
+use ironclaw_extension_registry::ExtensionInstallationStorePort;
 use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_host_api::product_adapter::AdapterInstallationId;
 

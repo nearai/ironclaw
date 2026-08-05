@@ -1,10 +1,10 @@
 ---
 paths:
-  - "crates/ironclaw_events/**"
+  - "crates/ironclaw_event_log/**"
   - "crates/ironclaw_event_projections/**"
   - "crates/ironclaw_event_streams/**"
-  - "crates/ironclaw_reborn_event_store/**"
-  - "crates/ironclaw_product/**"
+  - "crates/ironclaw_event_store/**"
+  - "crates/ironclaw_assistant/**"
   - "crates/ironclaw_webui/**"
 ---
 # Reborn events and transport projections
@@ -20,8 +20,8 @@ Re-derive the current ownership before changing the path:
 
 ```bash
 rg -n "RuntimeEvent|EventLogEntry|Projection|StreamManager|subscribe|replay" \
-  crates/ironclaw_events crates/ironclaw_event_projections \
-  crates/ironclaw_event_streams crates/ironclaw_reborn_event_store
+  crates/ironclaw_event_log crates/ironclaw_event_projections \
+  crates/ironclaw_event_streams crates/ironclaw_event_store
 ```
 
 ## Rules
@@ -72,7 +72,7 @@ There is no annotation that makes a direct broadcast safe. Review the whole
 producer-to-consumer path. Re-derive it with:
 
 ```bash
-rg -n "append|EventSink|EventLog" crates/ironclaw_events crates/ironclaw_reborn_event_store
+rg -n "append|EventSink|EventLog" crates/ironclaw_event_log crates/ironclaw_event_store
 rg -n "ProjectionRequest|ProjectionCursor|snapshot|updates" crates/ironclaw_event_projections
 rg -n "EventStreamManager|subscribe|rebase|lag|redaction" crates/ironclaw_event_streams
 rg -n "Sse|WebSocket|stream" crates/ironclaw_webui

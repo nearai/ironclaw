@@ -16,7 +16,7 @@ use ironclaw_capabilities::{
     CapabilityObligationError, CapabilityObligationFailureKind, CapabilityObligationHandler,
     CapabilityObligationOutcome, CapabilityObligationPhase, CapabilityObligationRequest,
 };
-use ironclaw_events::{
+use ironclaw_event_log::{
     AuditSink, SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision,
 };
 use ironclaw_host_api::{

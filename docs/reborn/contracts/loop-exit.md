@@ -97,10 +97,10 @@ compatibility.
 
 This contract is pinned by
 `turn_runner_worker_persists_checkpoint_rejection_without_running_uncheckpointed_work`
-in `crates/ironclaw_runner/tests/loop_driver_host.rs`:
+in `crates/ironclaw_turn_runner/tests/loop_driver_host.rs`:
 
 ```bash
-cargo test -p ironclaw_runner --test loop_driver_host \
+cargo test -p ironclaw_turn_runner --test loop_driver_host \
   turn_runner_worker_persists_checkpoint_rejection_without_running_uncheckpointed_work
 ```
 

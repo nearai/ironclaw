@@ -59,7 +59,7 @@ pub(crate) fn extension_lifecycle_tools_profile_for_user(
         effect_kinds: standalone_all_effects(),
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
+            Some(ironclaw_composition::standalone_unrestricted_runtime_policy(true)?),
         )
         .with_durable_capability_io()
         .with_seed_extension_credentials()
@@ -210,21 +210,22 @@ output_schema_ref = "schemas/audit.output.json"
 "#;
 
 fn visibility_probe_package() -> HarnessResult<(
-    ironclaw_extensions::ExtensionPackage,
-    ironclaw_extensions::ResolvedExtensionManifest,
+    ironclaw_extension_registry::ExtensionPackage,
+    ironclaw_extension_registry::ResolvedExtensionManifest,
 )> {
     let root = ironclaw_host_api::path::VirtualPath::new("/system/extensions/visprobe")?;
-    let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
+    let record = ironclaw_extension_registry::ExtensionManifestRecord::from_toml(
         VISIBILITY_PROBE_MANIFEST,
-        ironclaw_extensions::ManifestSource::HostBundled,
+        ironclaw_extension_registry::ManifestSource::HostBundled,
         &ironclaw_host_api::host_port::HostPortCatalog::empty(),
         None,
         &capability_provider_contracts(),
         Some(root.clone()),
     )?;
-    let manifest = ironclaw_extensions::ExtensionManifest::try_from(record.manifest().clone())?;
+    let manifest =
+        ironclaw_extension_registry::ExtensionManifest::try_from(record.manifest().clone())?;
     Ok((
-        ironclaw_extensions::ExtensionPackage::from_manifest(manifest, root)?,
+        ironclaw_extension_registry::ExtensionPackage::from_manifest(manifest, root)?,
         record.resolved().clone(),
     ))
 }
@@ -244,7 +245,7 @@ pub(crate) fn extension_visibility_probe_tools_profile() -> HarnessResult<ToolsP
         effect_kinds: standalone_all_effects(),
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
+            Some(ironclaw_composition::standalone_unrestricted_runtime_policy(true)?),
         )
         .with_activated_bundled_extension_resolved(package, resolved),
         network_policy_override: Some(wildcard_test_policy()),
@@ -375,8 +376,8 @@ fn prompt_description_files(
 }
 
 fn verified_prompt_description_package() -> HarnessResult<(
-    ironclaw_extensions::ExtensionPackage,
-    ironclaw_extensions::ResolvedExtensionManifest,
+    ironclaw_extension_registry::ExtensionPackage,
+    ironclaw_extension_registry::ResolvedExtensionManifest,
 )> {
     let available = ironclaw_extension_host::registry_extension_package(
         prompt_description_files(
@@ -392,8 +393,8 @@ fn verified_prompt_description_package() -> HarnessResult<(
 }
 
 fn local_prompt_description_package() -> HarnessResult<(
-    ironclaw_extensions::ExtensionPackage,
-    ironclaw_extensions::ResolvedExtensionManifest,
+    ironclaw_extension_registry::ExtensionPackage,
+    ironclaw_extension_registry::ResolvedExtensionManifest,
 )> {
     let available = ironclaw_extension_host::imported_extension_package(
         prompt_description_files(
@@ -425,7 +426,7 @@ pub(crate) fn extension_prompt_description_trust_probe_tools_profile() -> Harnes
         effect_kinds: standalone_all_effects(),
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
+            Some(ironclaw_composition::standalone_unrestricted_runtime_policy(true)?),
         )
         .with_activated_bundled_extension_resolved(verified_package, verified_resolved)
         .with_activated_bundled_extension_resolved(local_package, local_resolved),
@@ -461,7 +462,7 @@ pub(crate) async fn extension_prompt_description_trust_probe_tools()
 }
 
 pub(crate) async fn seed_extension_lifecycle_credentials(
-    services: &ironclaw_reborn_composition::RebornRuntime,
+    services: &ironclaw_composition::RebornRuntime,
     user_id: &UserId,
 ) -> HarnessResult<()> {
     let product_auth = services.product_auth_for_test();
@@ -569,11 +570,11 @@ fn extension_lifecycle_credential_seeds() -> &'static [ExtensionLifecycleCredent
     ]
 }
 
-fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
-    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+fn capability_provider_contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
+    let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
     contracts
         .register(std::sync::Arc::new(
-            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+            ironclaw_extension_registry::CapabilityProviderHostApiContract::new()
                 .expect("capability provider contract"),
         ))
         .expect("register capability provider contract");
@@ -641,13 +642,13 @@ pub(crate) struct AcmeFixtureChannelAdapter;
 impl ironclaw_extension_contracts::channel_adapter::ChannelAdapter for AcmeFixtureChannelAdapter {
     fn inbound(
         &self,
-        request: ironclaw_product::VerifiedInbound<'_>,
-    ) -> Result<ironclaw_product::InboundOutcome, ironclaw_product::ChannelError> {
-        use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
-        use ironclaw_product::{
+        request: ironclaw_assistant::VerifiedInbound<'_>,
+    ) -> Result<ironclaw_assistant::InboundOutcome, ironclaw_assistant::ChannelError> {
+        use ironclaw_assistant::{
             ChannelError, ExternalActorRef, ExternalConversationRef, ExternalEventId,
             ImmediateResponse, InboundOutcome, ProductTriggerReason,
         };
+        use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
         let parse = |reason: String| ChannelError::Parse { reason };
         let value: serde_json::Value =
             serde_json::from_slice(request.body).map_err(|error| parse(error.to_string()))?;
@@ -699,10 +700,10 @@ impl ironclaw_extension_contracts::channel_adapter::ChannelAdapter for AcmeFixtu
     /// fixture.
     async fn deliver(
         &self,
-        envelope: ironclaw_product::OutboundEnvelope,
+        envelope: ironclaw_assistant::OutboundEnvelope,
         egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
-    ) -> Result<ironclaw_product::DeliveryReport, ironclaw_product::ChannelError> {
-        use ironclaw_product::{ChannelError, OutboundPart, PartDeliveryOutcome};
+    ) -> Result<ironclaw_assistant::DeliveryReport, ironclaw_assistant::ChannelError> {
+        use ironclaw_assistant::{ChannelError, OutboundPart, PartDeliveryOutcome};
         if envelope.parts.is_empty() {
             return Err(ChannelError::Render {
                 reason: "outbound envelope carries no parts".to_string(),
@@ -754,7 +755,7 @@ impl ironclaw_extension_contracts::channel_adapter::ChannelAdapter for AcmeFixtu
                 break;
             }
         }
-        Ok(ironclaw_product::DeliveryReport { parts })
+        Ok(ironclaw_assistant::DeliveryReport { parts })
     }
 }
 
@@ -850,12 +851,12 @@ pub(crate) async fn extension_runtime_acme_tools() -> HarnessResult<HostRuntimeC
 // ── Delivery-proof profile (extension-runtime P5, §5.4 / DEL-10) ───────────
 
 /// The bundled telegram manifest's `runtime.service` id — the same native
-/// binding the binary assembles (`ironclaw_reborn_cli::runtime::native_extensions`).
+/// binding the binary assembles (`ironclaw_cli::runtime::native_extensions`).
 pub(crate) const TELEGRAM_FIXTURE_SERVICE: &str = "telegram.extension/v1";
 
 /// Native factory for the bundled telegram package: binds the REAL
 /// `TelegramChannelAdapter` as its channel surface, exactly like the binary
-/// assembly in `crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs`
+/// assembly in `crates/ironclaw_cli/src/runtime/native_extensions.rs`
 /// (mirrored here because the integration harness composes its own runtime
 /// and cannot depend on the CLI crate).
 struct TelegramFixtureFactory;
@@ -994,15 +995,15 @@ pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> 
 }
 
 /// Slack's channel-adapter binding, mirrored from the binary assembly
-/// (`ironclaw_reborn_cli::runtime::native_extensions::bundled_channel_extension_bindings`)
+/// (`ironclaw_cli::runtime::native_extensions::bundled_channel_extension_bindings`)
 /// the same way [`TelegramFixtureFactory`] mirrors the native factory: the
 /// harness composes its own runtime and cannot depend on the CLI crate.
 /// Slack's WASM-runtime package cannot ride a native factory, so without
 /// this binding composition serves its `[channel]` surface with the
 /// transitional `HostServedChannelBridge`, which rejects every verified
 /// inbound request.
-fn slack_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExtensionBinding {
-    ironclaw_reborn_composition::ChannelExtensionBinding {
+fn slack_channel_extension_binding() -> ironclaw_composition::ChannelExtensionBinding {
+    ironclaw_composition::ChannelExtensionBinding {
         extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
         adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
         preference_target_codec: Some(Arc::new(
@@ -1011,8 +1012,8 @@ fn slack_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExte
     }
 }
 
-fn telegram_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExtensionBinding {
-    ironclaw_reborn_composition::ChannelExtensionBinding {
+fn telegram_channel_extension_binding() -> ironclaw_composition::ChannelExtensionBinding {
+    ironclaw_composition::ChannelExtensionBinding {
         extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("telegram".to_string()),
         adapter: Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default()),
         preference_target_codec: None,

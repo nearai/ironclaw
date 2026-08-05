@@ -44,7 +44,7 @@ pub struct SecretsCrypto {
 /// file, the `SECRETS_MASTER_KEY` env var) use this to fail loud with a
 /// source-naming error instead of the opaque [`SecretError::InvalidMasterKey`]
 /// that surfaces when an already-wrapped key reaches `new` several layers
-/// deep. See `ironclaw_reborn_composition::factory::resolve_standalone_secret_master_key`.
+/// deep. See `ironclaw_composition::factory::resolve_standalone_secret_master_key`.
 pub fn validate_master_key_material(bytes: &[u8]) -> Result<(), SecretError> {
     if bytes.len() < KEY_SIZE {
         return Err(SecretError::InvalidMasterKey);

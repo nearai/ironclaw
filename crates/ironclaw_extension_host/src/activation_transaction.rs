@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_auth::CredentialAccount;
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
     ExtensionManifestRecord, ExtensionPackage, is_hosted_http_mcp_package,
 };
@@ -384,7 +384,7 @@ mod tests {
         AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId, CredentialAccountLabel,
         CredentialAccountStatus, CredentialOwnership, ProviderScope,
     };
-    use ironclaw_extensions::{
+    use ironclaw_extension_registry::{
         ExtensionInstallation, ExtensionManifest, ExtensionManifestRecord, ExtensionManifestRef,
         ExtensionPackage, HostApiContractRegistry, InstallationOwner, ManifestSource,
     };

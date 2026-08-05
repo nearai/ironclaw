@@ -12,9 +12,9 @@ use ironclaw_capabilities::{
     BoundCapabilityAdapter, ResolvedCapability, RuntimeAdapterResult, RuntimeDispatcher,
     ToolResolver,
 };
-use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
+use ironclaw_event_log::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extension_contracts::runtime::ExtensionRuntime;
-use ironclaw_extensions::{
+use ironclaw_extension_registry::{
     CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage,
     HostApiContractRegistry, ManifestSource,
 };
@@ -653,7 +653,7 @@ impl WasmRuntimeAdapter {
         request: LocalLaneRequest<'_>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let module_path = match &request.package.manifest.runtime {
-            ExtensionRuntime::Wasm { module } => ironclaw_extensions::resolve_asset_under(
+            ExtensionRuntime::Wasm { module } => ironclaw_extension_registry::resolve_asset_under(
                 module,
                 request
                     .package
@@ -733,7 +733,7 @@ struct LocalLaneRequest<'a> {
 /// Prebinds every registry capability to the file-local WASM lane adapter,
 /// mirroring the production registry-lane resolver's shape at test scale.
 fn dispatcher_for(
-    registry: &ironclaw_extensions::ExtensionRegistry,
+    registry: &ironclaw_extension_registry::ExtensionRegistry,
     filesystem: Arc<DiskFilesystem>,
     governor: Arc<InMemoryResourceGovernor>,
     adapter: &Arc<WasmRuntimeAdapter>,
@@ -913,8 +913,8 @@ fn has_accountable_effects(usage: &ResourceUsage) -> bool {
         || usage.process_count > 0
 }
 
-fn registry_with_package(manifest: &str) -> ironclaw_extensions::ExtensionRegistry {
-    let mut registry = ironclaw_extensions::ExtensionRegistry::new();
+fn registry_with_package(manifest: &str) -> ironclaw_extension_registry::ExtensionRegistry {
+    let mut registry = ironclaw_extension_registry::ExtensionRegistry::new();
     registry.insert(package_from_manifest(manifest)).unwrap();
     registry
 }

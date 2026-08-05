@@ -750,7 +750,7 @@ impl SanitizedCancelReason {
 /// Monotonic position in a turn's lifecycle event stream. Projections and
 /// delivery handoffs carry it so a reader can resume exactly where it stopped.
 ///
-/// Distinct from `ironclaw_events::EventCursor`, which positions the generic
+/// Distinct from `ironclaw_event_log::EventCursor`, which positions the generic
 /// durable event log rather than one turn's lifecycle stream.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
@@ -1218,7 +1218,7 @@ mod tests {
 
     #[test]
     fn run_origin_adapter_rejection_message_is_the_one_callers_render() {
-        // `ironclaw_product` and `ironclaw_conversations` surface this string
+        // `ironclaw_assistant` and `ironclaw_conversations` surface this string
         // verbatim inside their own submission errors, and `TurnError::
         // InvalidRunOriginAdapter` renders the same wording, so the text is a
         // contract rather than an implementation detail.

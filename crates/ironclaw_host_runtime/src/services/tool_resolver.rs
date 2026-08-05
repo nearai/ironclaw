@@ -17,7 +17,7 @@ use ironclaw_capabilities::{
     BoundCapabilityAdapter, CapabilityDispatchRequest, ResolvedCapability, RuntimeAdapterResult,
     ToolResolver,
 };
-use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
+use ironclaw_extension_registry::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_host_api::{
     capability::CapabilityDescriptor,
     dispatch::DispatchError,

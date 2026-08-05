@@ -44,7 +44,7 @@ boundary. The current rule is codified in
   runs SQL — and it deliberately does **not** implement `Deref` (an implicit
   unwrap would let the driver back into a signature unnoticed) or a derived
   `Debug` (the driver's own `Debug` prints host/user/dbname/port).
-  `crates/ironclaw_architecture/tests/reborn_persistence_driver_boundary.rs`
+  `crates/ironclaw_architecture_tests/tests/reborn_persistence_driver_boundary.rs`
   pins which crates may link the driver at all.
 - Backend containment checks (symlink traversal, mount escape, raw-host
   path prevention).
@@ -139,7 +139,7 @@ boundary. The current rule is codified in
      migration to `cas_update`'s fail-closed semantics is a deferred
      follow-up tracked as a sibling to #5274.
    - `ironclaw_conversations::conversation_state_store::save_state` and
-     `ironclaw_product::filesystem_ledger`
+     `ironclaw_assistant::filesystem_ledger`
      (`begin_or_replay` / `settle` / `release` / `try_acquire_prune_lease`)
      are further pre-existing examples of the same lock-free retry-loop
      pattern, pending the same migration.

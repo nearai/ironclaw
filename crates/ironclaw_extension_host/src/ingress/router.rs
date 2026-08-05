@@ -21,7 +21,7 @@ use ironclaw_extension_contracts::channel_adapter::{
     ChannelError, InboundBatchFragment, InboundOutcome, VerifiedInbound,
 };
 use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
-use ironclaw_extensions::ResolvedExtensionManifest;
+use ironclaw_extension_registry::ResolvedExtensionManifest;
 use ironclaw_host_api::ids::SecretHandle;
 use sha2::{Digest, Sha256};
 

@@ -29,8 +29,8 @@ ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 # of a second, bare `std::env::var` lookup.
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_sandbox = { path = "../ironclaw_sandbox" }
-ironclaw_events = { path = "../ironclaw_events" }
-ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_event_log = { path = "../ironclaw_event_log" }
+ironclaw_extension_registry = { path = "../ironclaw_extension_registry" }
 ironclaw_extractors = { path = "../ironclaw_extractors" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_extension_support = { path = "../extensions/ironclaw_extension_support" }
@@ -44,8 +44,8 @@ ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_prompt_envelope = { path = "../ironclaw_prompt_envelope" }
-ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
-ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces" }
+ironclaw_event_store = { path = "../ironclaw_event_store" }
+ironclaw_trace_commons = { path = "../ironclaw_trace_commons" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
 ironclaw_safety = { path = "../ironclaw_safety" }

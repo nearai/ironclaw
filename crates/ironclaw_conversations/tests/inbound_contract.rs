@@ -3770,7 +3770,7 @@ impl CapacityFailureTurnCoordinator {
 }
 
 /// Mirror of the production port adapter
-/// (`ironclaw_reborn_composition::automation::conversation_turn_submitter`): it
+/// (`ironclaw_composition::automation::conversation_turn_submitter`): it
 /// derives the owner and resolves the classification through the same
 /// `product_context::resolve_inbound` call, producing the same
 /// `SubmitTurnRequest` the real adapter hands the coordinator. The fakes below

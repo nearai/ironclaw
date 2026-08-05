@@ -15,7 +15,7 @@
 //! does not itself enforce anything; it is the policy input consumed by two
 //! things that do: the CONNECT/forward proxy
 //! (`ironclaw_host_runtime::sandbox_process::egress_proxy`), spawned and
-//! bound via `crates/ironclaw_reborn_composition/src/sandbox_egress_proxy_task.rs`
+//! bound via `crates/ironclaw_composition/src/sandbox_egress_proxy_task.rs`
 //! and `sandbox_boot.rs`'s `with_sandbox_network_broker`, and the topological
 //! guardrail that the container's Docker network is pinned `internal: true`
 //! with no default route off the host, so the proxy is the container's only

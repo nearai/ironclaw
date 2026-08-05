@@ -7,7 +7,7 @@
 //!    v1's `~/.ironclaw/providers.json`). Loaded here via
 //!    `ironclaw_llm::ProviderRegistry::load_from_path`.
 //! 2. **Selection** — boot TOML's `[llm.<slot>]` section, parsed by
-//!    `ironclaw_reborn_config::LlmSlotSelection`. "Use provider X
+//!    `ironclaw_config::LlmSlotSelection`. "Use provider X
 //!    for the `default` slot, with model Y."
 //! 3. **Runtime config** — derived here. The resolved `ProviderDefinition`
 //!    plus the selection's overrides becomes an `ironclaw_llm::LlmConfig`
@@ -28,11 +28,9 @@ use std::path::Path;
 
 use thiserror::Error;
 
+use ironclaw_config::{LlmSlotSelection, RebornBootConfig, RebornConfigFile, reject_inline_secret};
 use ironclaw_llm::{
     ProviderRegistry, ProviderResolutionError, ProviderSelection, registry::ProviderDefinition,
-};
-use ironclaw_reborn_config::{
-    LlmSlotSelection, RebornBootConfig, RebornConfigFile, reject_inline_secret,
 };
 
 use crate::llm_admin::ResolvedRebornLlm;

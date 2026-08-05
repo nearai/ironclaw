@@ -1,7 +1,7 @@
 ---
 paths:
   - "crates/ironclaw_skills/**"
-  - "crates/ironclaw_reborn_composition/src/extension_host/bundled_skills.rs"
+  - "crates/ironclaw_composition/src/extension_host/bundled_skills.rs"
   - "skills/**"
 ---
 # Skills System

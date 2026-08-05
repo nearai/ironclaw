@@ -2,14 +2,14 @@
 //!
 //! This crate is a read-model boundary. Upper Reborn layers should consume
 //! these DTOs instead of parsing durable event/audit rows directly. The first
-//! implementation is replay-derived over [`ironclaw_events::DurableEventLog`]
+//! implementation is replay-derived over [`ironclaw_event_log::DurableEventLog`]
 //! so it stays independent of concrete JSONL/PostgreSQL/libSQL adapters.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_events::{
+use ironclaw_event_log::{
     DurableAuditLog, DurableEventLog, EventError, EventLogEntry, EventStreamKey, ReadScope,
     RuntimeEvent, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND, sanitize_error_kind,
     sanitize_recovery_label,
@@ -29,7 +29,7 @@ use ironclaw_host_api::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub use ironclaw_events::EventCursor;
+pub use ironclaw_event_log::EventCursor;
 
 mod runtime_checkpoint_cache;
 mod runtime_projection;
@@ -174,7 +174,7 @@ pub struct ThreadTimeline {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineEntry {
     pub cursor: EventCursor,
-    pub event_id: ironclaw_events::RuntimeEventId,
+    pub event_id: ironclaw_event_log::RuntimeEventId,
     pub timestamp: Timestamp,
     pub kind: TimelineEntryKind,
     pub invocation_id: InvocationId,

@@ -12,7 +12,7 @@ use ironclaw_capabilities::{
     CapabilityObligationFailureKind, CapabilityObligationHandler, CapabilityObligationPhase,
     CapabilityObligationRequest,
 };
-use ironclaw_events::InMemoryAuditSink;
+use ironclaw_event_log::InMemoryAuditSink;
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     capability::CapabilitySet,
@@ -414,7 +414,7 @@ async fn complete_dispatch_extracts_base64_document_into_text() {
 
 #[tokio::test]
 async fn leak_detector_block_records_security_audit_event_through_complete_dispatch() {
-    use ironclaw_events::{
+    use ironclaw_event_log::{
         InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary, SecurityDecision,
     };
     use ironclaw_host_api::{
@@ -511,7 +511,7 @@ async fn leak_detector_block_records_security_audit_event_through_complete_dispa
     // a `String` member on the struct. The check below is therefore a
     // documentation-only assertion: it locks the field set at the
     // value level for future readers, but the real guard is the type
-    // shape in `ironclaw_events::security_audit`.
+    // shape in `ironclaw_event_log::security_audit`.
     //
     //   pub struct SecurityAuditEvent {
     //       pub boundary: SecurityBoundary,

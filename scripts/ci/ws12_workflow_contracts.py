@@ -108,7 +108,7 @@ E2E_SCOPE_PROBES: tuple[tuple[str, bool], ...] = (
     ("crates/ironclaw_webui/src/lib.rs", True),
     # The target-architecture layout. A `crates/ironclaw_[^/]+/` filter misses
     # every one of these.
-    ("crates/substrates/ironclaw_events/src/lib.rs", True),
+    ("crates/substrates/ironclaw_event_log/src/lib.rs", True),
     ("crates/extensions/packages/slack/manifest.toml", True),
     ("docs/reborn/target-architecture/CHECKLIST.md", True),
     ("tests/e2e/scenarios/test_reborn_blackbox_smoke.py", True),
@@ -192,7 +192,7 @@ STRESS_WORKFLOW = ".github/workflows/ironclaw-stress.yml"
 #
 #   * `--lib` is a hard error on a bin-only package ("no library targets found
 #     in package `ironclaw`"), so a PR whose only changed package is
-#     crates/ironclaw_reborn_cli fails the lane on the flag, not on a lint;
+#     crates/ironclaw_cli fails the lane on the flag, not on a lint;
 #   * `--bins` on a lib-only package is "target filter `bins` specified, but no
 #     targets matched; this is a no-op" — the lane reports green having linted
 #     nothing, which is the worse failure of the two;
@@ -213,7 +213,7 @@ STRESS_WORKFLOW = ".github/workflows/ironclaw-stress.yml"
 # catching is a flag added back by hand, not a disguise.
 #
 # Known gap, deliberately unguarded: a package with neither a lib nor a bin
-# target (today only `ironclaw_reborn_integration_tests`) lints nothing and
+# target (today only `ironclaw_integration_tests`) lints nothing and
 # exits 0 without even the `no targets matched` warning. Unreachable while
 # `changed_workspace_packages.py` only selects the root package for a
 # `Cargo.toml`/`Cargo.lock` change — which selects every other package too — so
@@ -366,7 +366,7 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
         kind="regex",
         in_scope=(
             "crates/ironclaw_llm/src/lib.rs",
-            f"crates/{NESTED_FAMILY}/ironclaw_events/src/lib.rs",
+            f"crates/{NESTED_FAMILY}/ironclaw_event_log/src/lib.rs",
             "crates/extensions/packages/slack/manifest.toml",
             "tests/integration/mod.rs",
         ),
@@ -375,16 +375,16 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
     CrateScopeFilter(
         workflow=CODE_STYLE_WORKFLOW,
         name="has_reborn_cli",
-        anchor="ironclaw_reborn_cli",
+        anchor="ironclaw_cli",
         kind="regex",
         crates=(
-            ("ironclaw_runner", "src/lib.rs"),
+            ("ironclaw_turn_runner", "src/lib.rs"),
             # WS3 runner sheds: the model gateway and the tool-disclosure
             # decorator live here now, so the lane must follow them.
             ("ironclaw_loop_host", "src/model_gateway.rs"),
-            ("ironclaw_reborn_cli", "src/main.rs"),
-            ("ironclaw_reborn_config", "src/lib.rs"),
-            ("ironclaw_architecture", "tests/reborn_dependency_boundaries.rs"),
+            ("ironclaw_cli", "src/main.rs"),
+            ("ironclaw_config", "src/lib.rs"),
+            ("ironclaw_architecture_tests", "tests/reborn_dependency_boundaries.rs"),
         ),
         in_scope=("Cargo.toml", "Cargo.lock", "scripts/ci/smoke-release-binary.py"),
         out_of_scope=(
@@ -392,7 +392,7 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
             # and is deliberately NOT triggered by every crate.
             "crates/ironclaw_llm/src/lib.rs",
             f"crates/{NESTED_FAMILY}/ironclaw_llm/src/lib.rs",
-            "crates/ironclaw_architecture/tests/reborn_retired_taxonomy.rs",
+            "crates/ironclaw_architecture_tests/tests/reborn_retired_taxonomy.rs",
             "README.md",
         ),
     ),
@@ -659,7 +659,7 @@ def validate_crate_scope_filters(
 # directly: a `cache-dependency-path:` value (12), a `cd` inside a `run:`
 # block (12), and a `working-directory:` key (4). Two more workflows spelled a
 # single crate's Cargo.toml / source path directly: docker.yml's release
-# VERSION extraction (`ironclaw_reborn_cli`) and nightly-deep-ci.yml's
+# VERSION extraction (`ironclaw_cli`) and nightly-deep-ci.yml's
 # mutation-audit target (`ironclaw_capabilities`). All of these break the
 # moment their crate moves into a family directory (crates/<family>/
 # ironclaw_*, PROPOSAL §5).
@@ -807,7 +807,7 @@ def validate_webui_frontend_sites(
 # once fixed (B1/B2 in #7155); this is the pin that catches the workflow TEXT
 # itself going stale — a rename or deletion the workflow never followed.
 CRATE_NAME_RESIDUE: tuple[tuple[str, str], ...] = (
-    (DOCKER_WORKFLOW, "ironclaw_reborn_cli"),
+    (DOCKER_WORKFLOW, "ironclaw_cli"),
     (NIGHTLY_DEEP_CI_WORKFLOW, "ironclaw_capabilities"),
 )
 
