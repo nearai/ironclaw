@@ -445,6 +445,17 @@ h1,h2,h3,p{margin:0}
 .sugg{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--v2-panel-border);background:var(--v2-surface-soft);border-radius:999px;padding:8px 13px;font-size:13px;color:var(--v2-text-muted);cursor:pointer}
 .sugg:hover{border-color:color-mix(in srgb,var(--v2-accent) 35%,var(--v2-panel-border));color:var(--v2-text-strong)}
 .sugg svg{width:14px;height:14px;color:var(--v2-text-faint)}
+/* Foundational: match the shipped v2 landing (crates/product/ironclaw_webui) —
+   sans hero, full-width suggestion rows with a round leading icon + top divider,
+   20px card-bg composer with round icon buttons. Vision keeps its north-star look. */
+.v-foundational .hero h2{font-family:var(--font-sans);font-weight:640;font-size:clamp(30px,4.4vw,52px);letter-spacing:-.02em;max-width:16ch}
+.v-foundational .suggs{flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:0;margin-top:20px}
+.v-foundational .sugg{justify-content:flex-start;gap:12px;border:0;border-top:1px solid var(--v2-panel-border);border-radius:0;background:transparent;padding:14px 6px;font-size:14px;font-weight:560;color:var(--v2-text-strong)}
+.v-foundational .sugg svg{width:16px;height:16px;box-sizing:content-box;padding:8px;border-radius:999px;border:1px solid var(--v2-panel-border);background:var(--v2-surface-soft);color:var(--v2-text-muted)}
+.v-foundational .sugg:hover{border-top-color:color-mix(in srgb,var(--v2-accent) 35%,var(--v2-panel-border));color:var(--v2-text-strong)}
+.v-foundational .sugg:hover svg{border-color:color-mix(in srgb,var(--v2-accent) 40%,var(--v2-panel-border));color:var(--v2-accent-text)}
+.v-foundational .composer{border-radius:20px;background:var(--v2-card-bg)}
+.v-foundational .composer .iconbtn{border-radius:999px;width:36px;height:36px}
 
 /* ============================================================
    Thread + Plan scenes
