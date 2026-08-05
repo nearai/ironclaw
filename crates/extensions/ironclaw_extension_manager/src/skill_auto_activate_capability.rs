@@ -64,6 +64,7 @@ fn manifest() -> Result<CapabilityManifest, ExtensionError> {
         effects: vec![EffectKind::WriteFilesystem],
         default_permission: PermissionMode::Allow,
         visibility: CapabilityVisibility::Api,
+        standard_op: None,
         input_schema_ref: CapabilityProfileSchemaRef::new(
             "schemas/builtin/skill_auto_activate_learned_set.input.v1.json",
         )?,
@@ -497,6 +498,7 @@ mod tests {
                     max_egress_bytes: capability.max_egress_bytes,
                     resource_profile: capability.resource_profile.clone(),
                     origin_gate_matrix: capability.origin_gate_matrix.clone(),
+                    standard_op: capability.standard_op,
                 },
             )
             .collect();

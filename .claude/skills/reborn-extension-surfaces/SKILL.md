@@ -82,6 +82,11 @@ Re-verify the module list: `grep -n 'ID,' crates/extensions/ironclaw_extension_s
    say the tool is for side effects inside a job, never for delivering the final
    answer (the host delivers final replies on the outbound channel surface —
    overview §5.4). Exemplar: `assets/slack/prompts/slack/send_message.md`.
+4. A **messaging-shaped** tool (send/read/react over a conversation) binds
+   `standard_op = "<op_name>"` instead of declaring its own schemas — a
+   closed, host-owned vocabulary with host-canonical input/output schemas.
+   See `docs/reborn/extension-runtime/standard-operations.md` for the full
+   vocabulary and binding rules.
 
 ## Adding a channel surface
 
@@ -92,9 +97,11 @@ Re-verify the module list: `grep -n 'ID,' crates/extensions/ironclaw_extension_s
    `[channel.ingress]` (route_suffix, method, body limit),
    `[channel.ingress.verification]` (declarative recipe the *host* executes —
    `hmac_sha256` segment list or `shared_secret_header`; signing secrets never
-   reach the adapter), `[channel.connection]` (operator setup fields; host renders
-   the generic form), `[[channel.egress]]` (host allowlist + credential handle),
-   and `[channel.presentation]`.
+   reach the adapter), `[channel.connection]` (connection strategy),
+   `[[channel.egress]]` (host allowlist + credential handle), and
+   `[channel.presentation]`. Operator/deployment setup fields are a separate
+   top-level `[admin_configuration]` section (there is no `[channel.config]`);
+   the host renders the generic form from it.
 2. Direction is the `inbound`/`outbound` bools, which project to
    `channel { inbound, outbound }` on the extensions wire — the agent never gets
    an "outbound delivery" tool; final delivery is the runtime-owned delivery
@@ -115,7 +122,7 @@ Re-verify the module list: `grep -n 'ID,' crates/extensions/ironclaw_extension_s
    parameterized by (vendor, adapter id, actor kind) — not a per-channel
    resolver (the retired-taxonomy gate hunts the old pattern).
 5. Connect affordance is **derived** (overview §6.4): installation state +
-   `[channel.connection]` completeness + the auth account state. The WebUI channels
+   `[admin_configuration]` completeness + the auth account state. The WebUI channels
    tab renders every channel surface with the same generic components — there is
    no channel registry to update (frontend helpers:
    `crates/product/ironclaw_webui/frontend/src/pages/extensions/lib/extensions-schema.ts`,
@@ -162,14 +169,18 @@ tool surface (overview §3.1). Worked example:
 
 - Manifest projection (v3): `crates/extensions/ironclaw_extension_registry/tests/manifest_v3_contract.rs`;
   channel ingestion through the real contract:
-  `crates/product/ironclaw_assistant/tests/adapter_registry_manifest_ingestion.rs`. Extend
+  `crates/product/ironclaw_assistant/tests/adapter_registry_manifest_ingestion.rs`
+  (drives `parse_product_adapter_manifest_record` in
+  `crates/extensions/ironclaw_extension_registry/src/host_api/product_adapter.rs`). Extend
   these rather than adding parallel suites.
 - Adapter behavior: the exported conformance suites — channel in
   `crates/contracts/ironclaw_host_api/src/product_adapter/test_support/conformance.rs`
   (`run_channel_adapter_conformance`, consumed by
-  `crates/ironclaw_{slack,telegram}_extension/tests/channel_conformance.rs`) and
-  auth in `crates/domains/ironclaw_auth/src/test_support/conformance.rs`. There is no
-  tool-adapter conformance suite today. Run by every extension crate + the `acme`
+  `crates/ironclaw_{slack,telegram}_extension/tests/channel_conformance.rs`),
+  standard-messaging schema conformance in
+  `crates/contracts/ironclaw_host_api/src/test_support/messaging_conformance.rs`, and auth
+  in `crates/domains/ironclaw_auth/src/test_support/conformance.rs`. Run by every
+  applicable extension crate + the `acme`
   fixture (`tests/fixtures/extensions/acme-messenger/`). Real extensions add one
   end-to-end integration proof each (`tests/integration/`).
 - Frontend: `pnpm --dir crates/product/ironclaw_webui/frontend test`.

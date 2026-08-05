@@ -183,20 +183,48 @@ fn assert_static_projection_parity(dir: &str) {
             "{dir}/{id}: default_permission"
         );
         assert_eq!(a.visibility, b.visibility, "{dir}/{id}: visibility");
-        assert_eq!(
-            a.input_schema_ref, b.input_schema_ref,
-            "{dir}/{id}: input_schema_ref"
-        );
+        // A `standard_op`-bound tool's schema refs are host-synthesized
+        // (standardized messaging framework, task 9: `standard:messaging/<op>.
+        // {input,output}.v1`), replacing the package-authored refs the frozen
+        // v2 baseline recorded — an intentional divergence from the v2->v3
+        // rewrite this suite otherwise pins byte-for-byte, not a projection
+        // bug. Assert the synthesized shape instead of baseline equality;
+        // every other declared field (effects, permission, visibility,
+        // prompt_doc_ref, credentials) still must match the v2 baseline
+        // exactly, same as any other tool.
+        match b.standard_op {
+            Some(op) => {
+                assert_eq!(
+                    b.input_schema_ref.as_str(),
+                    format!("standard:messaging/{}.input.v1", op.op_name()),
+                    "{dir}/{id}: standard_op input_schema_ref must be host-synthesized"
+                );
+                assert_eq!(
+                    b.output_schema_ref
+                        .as_ref()
+                        .map(|schema_ref| schema_ref.as_str()),
+                    Some(format!("standard:messaging/{}.output.v1", op.op_name()).as_str()),
+                    "{dir}/{id}: standard_op output_schema_ref must be host-synthesized"
+                );
+            }
+            None => {
+                assert_eq!(
+                    a.input_schema_ref, b.input_schema_ref,
+                    "{dir}/{id}: input_schema_ref"
+                );
+                // Most v3 manifests drop `output_schema_ref` (schemas remain
+                // package assets); the dialect regained the field with the
+                // redirect-egress tool port, and a v3 declaration must then
+                // match the v2 baseline.
+                assert!(
+                    b.output_schema_ref.is_none() || a.output_schema_ref == b.output_schema_ref,
+                    "{dir}/{id}: a declared v3 output_schema_ref must match the v2 baseline"
+                );
+            }
+        }
         assert_eq!(
             a.prompt_doc_ref, b.prompt_doc_ref,
             "{dir}/{id}: prompt_doc_ref"
-        );
-        // Most v3 manifests drop `output_schema_ref` (schemas remain package
-        // assets); the dialect regained the field with the redirect-egress
-        // tool port, and a v3 declaration must then match the v2 baseline.
-        assert!(
-            b.output_schema_ref.is_none() || a.output_schema_ref == b.output_schema_ref,
-            "{dir}/{id}: a declared v3 output_schema_ref must match the v2 baseline"
         );
         assert_eq!(
             a.required_host_ports, b.required_host_ports,

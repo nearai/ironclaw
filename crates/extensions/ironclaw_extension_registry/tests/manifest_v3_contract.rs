@@ -13,17 +13,19 @@ use ironclaw_extension_contracts::{
 };
 use ironclaw_extension_registry::{
     CapabilityProviderHostApiContract, CapabilitySurfaceDeclV2, CapabilityVisibility,
-    ExtensionManifestRecord, ExtensionRuntimeV2, HostApiContractRegistry,
-    MANIFEST_SCHEMA_VERSION_V3, ManifestSource,
+    ExtensionManifest, ExtensionManifestRecord, ExtensionPackage, ExtensionRuntimeV2,
+    HostApiContractRegistry, MANIFEST_SCHEMA_VERSION_V3, ManifestSource,
 };
 use ironclaw_host_api::{
     capability::{
-        EffectKind, OriginGatePolicy, PermissionMode, RuntimeCredentialAccountSetup,
-        RuntimeCredentialRequirementSource,
+        CapabilityDescriptor, EffectKind, OriginGatePolicy, PermissionMode,
+        RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource,
     },
     host_port::{
         HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
     },
+    messaging::StandardMessagingOp,
+    path::VirtualPath,
 };
 
 const ACME_MANIFEST: &str =
@@ -77,8 +79,10 @@ fn acme_fixture_parses_through_the_single_entry_point() {
         ExtensionRuntimeV2::FirstParty { service } if service == "acme-messenger.extension/v1"
     ));
 
-    // One declared tool, normalized into the internal capability model.
-    assert_eq!(manifest.capabilities.len(), 1);
+    // send_note plus the 16 core standard messaging ops, normalized into the
+    // internal capability model; send_note stays first (bespoke coexistence
+    // proof — declared before the standard_op entries in the fixture).
+    assert_eq!(manifest.capabilities.len(), 17);
     let tool = &manifest.capabilities[0];
     assert_eq!(tool.id.as_str(), "acme-messenger.send_note");
     assert_eq!(tool.visibility, CapabilityVisibility::Model);
@@ -119,6 +123,18 @@ fn acme_fixture_parses_through_the_single_entry_point() {
         }
         other => panic!("expected product auth account source, got {other:?}"),
     }
+
+    // Standard-op spot check (standardized messaging framework, task 7): the
+    // 16 core ops bind alongside send_note; send_message is representative.
+    let send_message = manifest
+        .capabilities
+        .iter()
+        .find(|capability| capability.id.as_str() == "acme-messenger.send_message")
+        .expect("acme fixture declares send_message");
+    assert_eq!(
+        send_message.standard_op,
+        Some(StandardMessagingOp::SendMessage)
+    );
 }
 
 #[test]
@@ -144,21 +160,20 @@ fn acme_fixture_resolves_channel_and_auth_recipe() {
         "https://auth.acme.example/oauth/authorize"
     );
 
-    // The channel surface participates in the derived surface set.
+    // The channel surface participates in the derived surface set: one Tool
+    // kind per declared capability (send_note plus the 16 standard ops),
+    // then Channel, then Auth.
     let kinds: Vec<CapabilitySurfaceKind> = record
         .manifest()
         .capability_surfaces()
         .iter()
         .map(CapabilitySurfaceDeclV2::kind)
         .collect();
-    assert_eq!(
-        kinds,
-        vec![
-            CapabilitySurfaceKind::Tool,
-            CapabilitySurfaceKind::Channel,
-            CapabilitySurfaceKind::Auth,
-        ]
-    );
+    let mut expected_kinds =
+        vec![CapabilitySurfaceKind::Tool; record.manifest().capabilities.len()];
+    expected_kinds.push(CapabilitySurfaceKind::Channel);
+    expected_kinds.push(CapabilitySurfaceKind::Auth);
+    assert_eq!(kinds, expected_kinds);
 }
 
 #[test]
@@ -690,6 +705,7 @@ fn mcp_static_tools_parse_and_inherit_the_connection_template() {
         "resource_profile = { default_estimate = { wall_clock_ms = 5000 } }",
         "network_targets = [{ scheme = \"https\", host_pattern = \"cdn.zeta.example\" }]",
         "output_schema_ref = \"schemas/zeta/search.output.v1.json\"",
+        "standard_op = \"send_message\"",
     ] {
         let with_divergent_tool = format!(
             "{}\n[[tools]]\nid = \"zeta.search\"\ndescription = \"Search through Zeta.\"\ndefault_permission = \"ask\"\ninput_schema_ref = \"schemas/zeta/search.input.v1.json\"\n{divergent}\n",
@@ -1180,4 +1196,478 @@ fn allowlisted_memory_read_tool_keeps_ungated_loop_run() {
         .as_ref()
         .expect("search tool carries a matrix");
     assert_eq!(matrix.loop_run, OriginGatePolicy::Ungated);
+}
+
+// ---------------------------------------------------------------------------
+// standard_op binding (standardized messaging framework, task 2)
+// ---------------------------------------------------------------------------
+
+/// Baseline v3 manifest with one `[[tools]]` entry bound to the
+/// `send_message` standard op: canonical id shape (`<extension>.<op_name>`),
+/// no declared schema refs (the host synthesizes them), and the
+/// `external_write` effect the write-op rule requires. Individual tests
+/// perturb one axis via `.replace(...)`, mirroring `mcp_manifest()` above.
+fn zeta_standard_op_manifest() -> String {
+    format!(
+        r#"
+schema_version = "{MANIFEST_SCHEMA_VERSION_V3}"
+id = "zeta"
+name = "Zeta"
+version = "0.1.0"
+description = "Zeta standard-op fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/zeta.wasm"
+
+[[tools]]
+standard_op = "send_message"
+id = "zeta.send_message"
+description = "Zeta notes."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+
+[[tools.credentials]]
+handle = "zeta_user_token"
+vendor = "zeta"
+scopes = ["chat:write"]
+audience = {{ scheme = "https", host = "api.zeta.example" }}
+injection = {{ type = "header", name = "authorization", prefix = "Bearer " }}
+
+[auth.zeta]
+method = "oauth2_code"
+display_name = "Zeta account"
+authorization_endpoint = "https://auth.zeta.example/authorize"
+token_endpoint = "https://auth.zeta.example/token"
+scopes = ["chat:write"]
+client_credentials = {{ client_id_handle = "zeta_client_id" }}
+
+[auth.zeta.token_response]
+access_token = "/access_token"
+"#
+    )
+}
+
+#[test]
+fn standard_op_binding_threads_and_synthesizes_canonical_refs() {
+    let record = parse_v3(&zeta_standard_op_manifest()).expect("standard op binding parses");
+    let cap = &record.manifest().capabilities[0];
+    assert_eq!(cap.standard_op, Some(StandardMessagingOp::SendMessage));
+    assert_eq!(
+        cap.input_schema_ref.as_str(),
+        "standard:messaging/send_message.input.v1"
+    );
+    assert_eq!(
+        cap.output_schema_ref.as_ref().map(|r| r.as_str()),
+        Some("standard:messaging/send_message.output.v1")
+    );
+}
+
+#[test]
+fn standard_op_reserved_name_is_rejected() {
+    let toml = zeta_standard_op_manifest().replace(
+        "standard_op = \"send_message\"",
+        "standard_op = \"forward_message\"",
+    );
+    let error = parse_v3(&toml).expect_err("a reserved standard_op must be rejected");
+    assert!(error.contains("reserved"), "{error}");
+}
+
+#[test]
+fn standard_op_unknown_name_fails_serde() {
+    let toml = zeta_standard_op_manifest().replace(
+        "standard_op = \"send_message\"",
+        "standard_op = \"send_msg\"",
+    );
+    let error = parse_v3(&toml).expect_err("an unknown standard_op name must be rejected");
+    assert!(error.contains("unknown variant"), "{error}");
+}
+
+#[test]
+fn standard_op_id_must_match_extension_and_op_name() {
+    let toml =
+        zeta_standard_op_manifest().replace("id = \"zeta.send_message\"", "id = \"zeta.send\"");
+    let error = parse_v3(&toml).expect_err("a mismatched standard_op tool id must be rejected");
+    assert!(error.contains("zeta.send_message"), "{error}");
+}
+
+#[test]
+fn standard_op_rejects_declared_schema_refs() {
+    let toml = zeta_standard_op_manifest().replace(
+        "description = \"Zeta notes.\"",
+        "description = \"Zeta notes.\"\ninput_schema_ref = \"schemas/zeta/custom.input.v1.json\"",
+    );
+    let error = parse_v3(&toml)
+        .expect_err("a standard_op tool declaring its own schema ref must be rejected");
+    assert!(error.contains("canonical"), "{error}");
+
+    let toml = zeta_standard_op_manifest().replace(
+        "description = \"Zeta notes.\"",
+        "description = \"Zeta notes.\"\noutput_schema_ref = \"schemas/zeta/custom.output.v1.json\"",
+    );
+    let error = parse_v3(&toml)
+        .expect_err("a standard_op tool declaring its own output schema ref must be rejected");
+    assert!(error.contains("canonical"), "{error}");
+}
+
+/// The `standard:` schema-ref namespace is reserved to host-synthesized
+/// standard_op bindings. A bespoke tool (no `standard_op`) that hand-writes a
+/// `standard:` ref must fail closed — otherwise it wears a canonical schema
+/// while skipping every binding validation `standard_op` enforces (and,
+/// once later tasks land, canonical output enforcement).
+#[test]
+fn bespoke_tool_declaring_standard_namespace_ref_is_rejected() {
+    let toml = zeta_standard_op_manifest()
+        .replace("standard_op = \"send_message\"\n", "")
+        .replace(
+            "description = \"Zeta notes.\"",
+            "description = \"Zeta notes.\"\ninput_schema_ref = \"standard:messaging/send_message.input.v1\"",
+        );
+    let error = parse_v3(&toml)
+        .expect_err("a bespoke tool declaring a standard: namespace ref must be rejected");
+    assert!(error.contains("reserved"), "{error}");
+
+    let toml = zeta_standard_op_manifest()
+        .replace("standard_op = \"send_message\"\n", "")
+        .replace(
+            "description = \"Zeta notes.\"",
+            "description = \"Zeta notes.\"\ninput_schema_ref = \"schemas/zeta/custom.input.v1.json\"\noutput_schema_ref = \"standard:messaging/send_message.output.v1\"",
+        );
+    let error = parse_v3(&toml)
+        .expect_err("a bespoke tool declaring a standard output namespace ref must be rejected");
+    assert!(error.contains("reserved"), "{error}");
+}
+
+#[test]
+fn standard_op_write_requires_external_write_effect() {
+    let toml = zeta_standard_op_manifest().replace(
+        "effects = [\"network\", \"use_secret\", \"external_write\"]",
+        "effects = [\"network\", \"use_secret\"]",
+    );
+    let error =
+        parse_v3(&toml).expect_err("a write standard_op without external_write must be rejected");
+    assert!(error.contains("external_write"), "{error}");
+}
+
+#[test]
+fn standard_op_duplicate_binding_rejected() {
+    let duplicate_tool = r#"
+[[tools]]
+standard_op = "send_message"
+id = "zeta.send_message"
+description = "Zeta notes, again."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+
+[[tools.credentials]]
+handle = "zeta_user_token"
+vendor = "zeta"
+scopes = ["chat:write"]
+audience = { scheme = "https", host = "api.zeta.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+"#;
+    let toml = format!("{}\n{duplicate_tool}", zeta_standard_op_manifest());
+    let error = parse_v3(&toml).expect_err("binding the same standard_op twice must be rejected");
+    assert!(error.contains("once"), "{error}");
+}
+
+#[test]
+fn standard_op_allows_empty_description_addendum() {
+    let toml =
+        zeta_standard_op_manifest().replace("description = \"Zeta notes.\"", "description = \"\"");
+    let record =
+        parse_v3(&toml).expect("a standard_op tool with an empty description addendum must parse");
+    let cap = &record.manifest().capabilities[0];
+    assert_eq!(cap.standard_op, Some(StandardMessagingOp::SendMessage));
+    assert_eq!(cap.description, "");
+}
+
+/// The inverse of the relaxation above: a bespoke (non-`standard_op`) tool's
+/// empty-description rejection is unconditional and must still fire. Pins
+/// that the relaxation in `CapabilityDeclV2::from_raw` applies only when
+/// `standard_op` is bound, not globally.
+#[test]
+fn bespoke_tool_empty_description_is_still_rejected() {
+    let toml = zeta_standard_op_manifest()
+        .replace("standard_op = \"send_message\"\n", "")
+        .replace(
+            "description = \"Zeta notes.\"",
+            "description = \"\"\ninput_schema_ref = \"schemas/zeta/send_message.input.v1.json\"",
+        );
+    let error = parse_v3(&toml)
+        .expect_err("a bespoke capability with an empty description must still be rejected");
+    assert!(error.contains("description must not be empty"), "{error}");
+}
+
+/// The inverse of the standard_op schema-ref rule: `input_schema_ref` is
+/// optional on the wire (`RawToolV3`) only so a `standard_op` binding can omit
+/// it; a bespoke (non-bound) tool must still declare one.
+#[test]
+fn tool_without_standard_op_requires_input_schema_ref() {
+    let toml = format!(
+        r#"
+schema_version = "{MANIFEST_SCHEMA_VERSION_V3}"
+id = "zephyrite"
+name = "Zephyrite"
+version = "0.1.0"
+description = "test"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/zephyrite_tool.wasm"
+
+[[tools]]
+id = "zephyrite.echo"
+description = "Echoes input"
+effects = []
+default_permission = "ask"
+visibility = "model"
+"#
+    );
+    let error =
+        parse_v3(&toml).expect_err("a bespoke tool without input_schema_ref must be rejected");
+    assert!(
+        error.contains("zephyrite.echo") && error.contains("requires input_schema_ref"),
+        "{error}"
+    );
+}
+
+#[test]
+fn v2_manifest_declaring_standard_op_is_rejected() {
+    let toml = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "zeta"
+name = "Zeta"
+version = "0.1.0"
+description = "test"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/zeta_tool.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "zeta.send_message"
+standard_op = "send_message"
+description = "Zeta notes."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/zeta/send_message.input.v1.json"
+"#;
+    let error = parse_v3(toml).expect_err("a v2 manifest declaring standard_op must be rejected");
+    assert!(error.contains("v3"), "{error}");
+}
+
+// ---------------------------------------------------------------------------
+// standard_op descriptor composition (standardized messaging framework, task 3)
+// ---------------------------------------------------------------------------
+
+/// Project a parsed record's manifest into the `CapabilityDescriptor` values
+/// the host actually builds, via the "package validate path"
+/// (`ExtensionPackage::from_manifest`) — this crate's own decl→descriptor
+/// helper (`capability_descriptors_from_manifest`) is private to `lib.rs` and
+/// not reachable from this external test crate. Mirrors
+/// `extension_contract.rs`'s `package_from_manifest` helper.
+fn descriptors_from_record(
+    record: &ExtensionManifestRecord,
+    extension_id: &str,
+) -> Vec<CapabilityDescriptor> {
+    let manifest: ExtensionManifest = record
+        .manifest()
+        .clone()
+        .try_into()
+        .expect("v2 manifest normalizes into ExtensionManifest");
+    let root = VirtualPath::new(format!("/system/extensions/{extension_id}")).unwrap();
+    ExtensionPackage::from_manifest(manifest, root)
+        .expect("package builds from manifest")
+        .capabilities
+}
+
+#[test]
+fn standard_op_descriptor_carries_binding_and_composed_description() {
+    let record = parse_v3(&zeta_standard_op_manifest()).expect("parses");
+    let descriptors = descriptors_from_record(&record, "zeta");
+    let d = descriptors
+        .iter()
+        .find(|d| d.id.as_str() == "zeta.send_message")
+        .unwrap();
+    assert_eq!(d.standard_op, Some(StandardMessagingOp::SendMessage));
+    let core = StandardMessagingOp::SendMessage
+        .contract()
+        .unwrap()
+        .description_core;
+    assert!(d.description.starts_with(core.trim()));
+    assert!(d.description.ends_with("Zeta notes."));
+}
+
+#[test]
+fn standard_op_descriptor_with_empty_addendum_is_core_only() {
+    let toml =
+        zeta_standard_op_manifest().replace("description = \"Zeta notes.\"", "description = \"\"");
+    let record = parse_v3(&toml).expect("a standard_op tool with an empty addendum parses");
+    let descriptors = descriptors_from_record(&record, "zeta");
+    let d = descriptors
+        .iter()
+        .find(|d| d.id.as_str() == "zeta.send_message")
+        .unwrap();
+    let core = StandardMessagingOp::SendMessage
+        .contract()
+        .unwrap()
+        .description_core;
+    assert_eq!(d.description, core.trim());
+}
+
+/// A bespoke (non-`standard_op`) capability's descriptor description must
+/// come through byte-identical to its manifest declaration — composition only
+/// engages when `standard_op` is bound.
+#[test]
+fn bespoke_descriptor_description_is_untouched() {
+    let record = acme_record();
+    let expected_description = record
+        .manifest()
+        .capabilities
+        .iter()
+        .find(|capability| capability.id.as_str() == "acme-messenger.send_note")
+        .expect("acme fixture declares send_note")
+        .description
+        .clone();
+    let descriptors = descriptors_from_record(&record, "acme-messenger");
+    let d = descriptors
+        .iter()
+        .find(|d| d.id.as_str() == "acme-messenger.send_note")
+        .unwrap();
+    assert_eq!(d.standard_op, None);
+    assert_eq!(d.description, expected_description);
+}
+
+// ---------------------------------------------------------------------------
+// Legacy rehydration: resolved records persisted before `standard_op` existed
+// ---------------------------------------------------------------------------
+
+/// Remove the `standard_op` key from every tool object in a serialized
+/// [`ironclaw_extensions::ResolvedExtensionManifest`], simulating a record
+/// persisted before the field existed. Operates on the live serialized shape
+/// of a *current* record (via `serde_json::Value`) rather than a hand-typed
+/// JSON literal, so the fixture cannot silently drift out of sync as the
+/// struct evolves.
+fn strip_standard_op_from_tools(resolved_json: &mut serde_json::Value) {
+    let tools = resolved_json
+        .get_mut("tools")
+        .and_then(serde_json::Value::as_array_mut)
+        .expect("resolved manifest JSON carries a tools array");
+    assert!(!tools.is_empty(), "fixture must declare at least one tool");
+    for tool in tools {
+        let removed = tool
+            .as_object_mut()
+            .expect("each tool serializes as a JSON object")
+            .remove("standard_op");
+        assert!(
+            removed.is_some(),
+            "tool must currently serialize a standard_op key for this pin to be meaningful"
+        );
+    }
+}
+
+/// Spec deliverable: "rehydration of pre-existing resolved records without
+/// the field" (standardized messaging framework). `CapabilityDeclV2::standard_op`
+/// and `CapabilityDescriptor::standard_op` both carry `#[serde(default)]` so a
+/// resolved record or descriptor persisted before the field existed still
+/// deserializes, with the field defaulting to `None`. Pinned here against a
+/// JSON blob produced by stripping the key from a *current* serialized
+/// record/descriptor, not a hand-typed literal, so neither fixture can go
+/// stale as either struct's other fields evolve.
+///
+/// Note on what actually guards this: both fields are spelled literally as
+/// `Option<StandardMessagingOp>`, and serde's derive macro treats a missing
+/// key on an `Option<_>`-typed field as `None` even without `#[serde(default)]`
+/// (verified directly: temporarily removing the attribute from
+/// `CapabilityDeclV2::standard_op` left this test green). The attribute is
+/// therefore documentation of intent here, not the load-bearing mechanism —
+/// this test's real teeth are against a *type-shape* regression (the field
+/// stops being a literal `Option<_>`, gets wrapped in a newtype, or the
+/// container gains a stricter deserialize contract), which is exactly the
+/// class of change most likely to silently break old rows.
+#[test]
+fn legacy_resolved_record_without_standard_op_rehydrates_to_none() {
+    // The zeta fixture (not acme-messenger) deliberately: acme-messenger
+    // declares `[runtime] kind = "first_party"`, and `RuntimeKind::FirstParty`
+    // carries `#[serde(skip_deserializing)]` (`crates/ironclaw_host_api/src/runtime.rs`)
+    // as an unrelated fail-closed boundary — a descriptor composed from it can
+    // never round-trip through raw JSON at all, which would make this pin fail
+    // for a reason that has nothing to do with `standard_op`. zeta declares
+    // `kind = "wasm"`, so only the field under test varies.
+    let record = parse_v3(&zeta_standard_op_manifest()).expect("zeta standard_op fixture parses");
+
+    // --- ResolvedExtensionManifest: every tool loses its binding -----------
+    let resolved = record.resolved();
+    let bound_before = resolved
+        .tools
+        .iter()
+        .filter(|tool| tool.standard_op.is_some())
+        .count();
+    assert!(
+        bound_before > 0,
+        "zeta fixture must declare at least one standard_op-bound tool for this pin to be \
+         meaningful"
+    );
+
+    let mut legacy_manifest =
+        serde_json::to_value(resolved).expect("serialize current resolved manifest");
+    strip_standard_op_from_tools(&mut legacy_manifest);
+    let rehydrated: ironclaw_extensions::ResolvedExtensionManifest =
+        serde_json::from_value(legacy_manifest)
+            .expect("a resolved manifest without standard_op keys must still deserialize");
+
+    assert_eq!(rehydrated.tools.len(), resolved.tools.len());
+    assert!(
+        rehydrated
+            .tools
+            .iter()
+            .all(|tool| tool.standard_op.is_none()),
+        "every tool rehydrated from a legacy record must default standard_op to None"
+    );
+    let send_message = rehydrated
+        .tools
+        .iter()
+        .find(|tool| tool.id.as_str() == "zeta.send_message")
+        .expect("zeta.send_message survives rehydration");
+    assert_eq!(send_message.standard_op, None);
+
+    // --- CapabilityDescriptor: one descriptor loses its binding ------------
+    let descriptors = descriptors_from_record(&record, "zeta");
+    let descriptor = descriptors
+        .iter()
+        .find(|descriptor| descriptor.id.as_str() == "zeta.send_message")
+        .expect("zeta.send_message descriptor is composed");
+    assert_eq!(
+        descriptor.standard_op,
+        Some(StandardMessagingOp::SendMessage),
+        "descriptor must currently carry a binding for this pin to be meaningful"
+    );
+
+    let mut legacy_descriptor =
+        serde_json::to_value(descriptor).expect("serialize current descriptor");
+    let removed = legacy_descriptor
+        .as_object_mut()
+        .expect("descriptor serializes as a JSON object")
+        .remove("standard_op");
+    assert!(
+        removed.is_some(),
+        "descriptor must currently serialize a standard_op key for this pin to be meaningful"
+    );
+    let rehydrated_descriptor: CapabilityDescriptor = serde_json::from_value(legacy_descriptor)
+        .expect("a descriptor without a standard_op key must still deserialize");
+    assert_eq!(rehydrated_descriptor.standard_op, None);
+    assert_eq!(rehydrated_descriptor.id, descriptor.id);
 }

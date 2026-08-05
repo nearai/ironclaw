@@ -431,9 +431,11 @@ impl HostRuntime for DefaultHostRuntime {
                     &scope,
                     total_started_at,
                 );
-                Ok(RuntimeCapabilityOutcome::Completed(Box::new(
-                    completed_outcome_from(result, capability_id),
-                )))
+                Ok(completed_or_output_violation_outcome(
+                    result,
+                    capability_id,
+                    &registry,
+                ))
             }
             Err(error) => {
                 trace_capability_latency_error(
@@ -450,6 +452,7 @@ impl HostRuntime for DefaultHostRuntime {
                 );
                 let translated = self
                     .translate_invocation_error(
+                        &registry,
                         error,
                         capability_id.clone(),
                         scope.clone(),
@@ -531,8 +534,14 @@ impl HostRuntime for DefaultHostRuntime {
                     error_kind = failure_kind_from(&error).as_str(),
                     "capability spawn failed"
                 );
-                self.translate_invocation_error(error, capability_id, scope, invocation_id)
-                    .await
+                self.translate_invocation_error(
+                    &registry,
+                    error,
+                    capability_id,
+                    scope,
+                    invocation_id,
+                )
+                .await
             }
         }
     }
@@ -564,9 +573,11 @@ impl HostRuntime for DefaultHostRuntime {
             )
             .await
         {
-            Ok(result) => Ok(RuntimeCapabilityOutcome::Completed(Box::new(
-                completed_outcome_from(result, capability_id),
-            ))),
+            Ok(result) => Ok(completed_or_output_violation_outcome(
+                result,
+                capability_id,
+                &registry,
+            )),
             // Resume must not start a second approval loop: if the lower layer ever returns
             // AuthorizationRequiresApproval here, surface it as a failed resume instead of
             // translating it back into RuntimeCapabilityOutcome::ApprovalRequired.
@@ -586,10 +597,14 @@ impl HostRuntime for DefaultHostRuntime {
                         required_secrets,
                         credential_requirements,
                     )),
-                    other => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
-                        other,
-                        capability_id,
-                    ))),
+                    other => {
+                        let is_standard_write =
+                            capability_is_standard_write(&registry, &capability_id);
+                        Ok(RuntimeCapabilityOutcome::Failed(
+                            failure_from(other, capability_id)
+                                .with_is_standard_write(is_standard_write),
+                        ))
+                    }
                 }
             }
         }
@@ -627,9 +642,11 @@ impl HostRuntime for DefaultHostRuntime {
             )
             .await
         {
-            Ok(result) => Ok(RuntimeCapabilityOutcome::Completed(Box::new(
-                completed_outcome_from(result, capability_id),
-            ))),
+            Ok(result) => Ok(completed_or_output_violation_outcome(
+                result,
+                capability_id,
+                &registry,
+            )),
             Err(error) => {
                 tracing::debug!(
                     capability_id = %capability_id,
@@ -646,10 +663,14 @@ impl HostRuntime for DefaultHostRuntime {
                         required_secrets,
                         credential_requirements,
                     )),
-                    other => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
-                        other,
-                        capability_id,
-                    ))),
+                    other => {
+                        let is_standard_write =
+                            capability_is_standard_write(&registry, &capability_id);
+                        Ok(RuntimeCapabilityOutcome::Failed(
+                            failure_from(other, capability_id)
+                                .with_is_standard_write(is_standard_write),
+                        ))
+                    }
                 }
             }
         }
@@ -679,10 +700,12 @@ impl HostRuntime for DefaultHostRuntime {
             Err(CapabilityInvocationError::ResumeStoreMissing { .. }) => Err(
                 HostRuntimeError::unavailable("invocation-state store unavailable"),
             ),
-            Err(error) => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
-                error,
-                capability_id,
-            ))),
+            Err(error) => {
+                let is_standard_write = capability_is_standard_write(&registry, &capability_id);
+                Ok(RuntimeCapabilityOutcome::Failed(
+                    failure_from(error, capability_id).with_is_standard_write(is_standard_write),
+                ))
+            }
         }
     }
 
@@ -746,10 +769,14 @@ impl HostRuntime for DefaultHostRuntime {
                         required_secrets,
                         credential_requirements,
                     )),
-                    other => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
-                        other,
-                        capability_id,
-                    ))),
+                    other => {
+                        let is_standard_write =
+                            capability_is_standard_write(&registry, &capability_id);
+                        Ok(RuntimeCapabilityOutcome::Failed(
+                            failure_from(other, capability_id)
+                                .with_is_standard_write(is_standard_write),
+                        ))
+                    }
                 }
             }
         }
@@ -1000,6 +1027,7 @@ impl DefaultHostRuntime {
 
     async fn translate_invocation_error(
         &self,
+        registry: &ExtensionRegistry,
         error: CapabilityInvocationError,
         capability_id: CapabilityId,
         scope: ResourceScope,
@@ -1051,7 +1079,9 @@ impl DefaultHostRuntime {
             other => {
                 let should_fail_dispatch_run =
                     matches!(other, CapabilityInvocationError::Dispatch { .. });
-                let failure = failure_from(other, capability_id);
+                let is_standard_write = capability_is_standard_write(registry, &capability_id);
+                let failure =
+                    failure_from(other, capability_id).with_is_standard_write(is_standard_write);
                 if should_fail_dispatch_run {
                     self.fail_dispatch_run(&failure, &scope, invocation_id)
                         .await;
@@ -1353,6 +1383,71 @@ fn completed_outcome_from(
         display_preview: result.dispatch.display_preview,
         usage: result.dispatch.usage,
     }
+}
+
+/// Single choke point for every path that turns a successful capability
+/// dispatch into a `Completed` outcome. `completed_outcome_from` above has
+/// exactly three callers — `invoke_capability`, `resume_capability`, and
+/// `auth_resume_capability` (the only resume paths that can complete a
+/// capability rather than suspend or fail it) — and all three call this
+/// function instead so the standard-op output check cannot be skipped on one
+/// entry path while covered on another (see `.claude/rules/review-discipline.md`).
+///
+/// A capability bound to a standard messaging op (`descriptor.standard_op`)
+/// has its dispatch output checked against that op's canonical output schema
+/// before `Completed` is allowed to stick. A violation becomes a
+/// model-visible `Failed` outcome instead, using the same
+/// [`FailureKind::InvalidResult`] kind wasm `InvalidResult` dispatch
+/// errors already produce (`failure_kind_from` /
+/// `RuntimeDispatchErrorKind::InvalidResult` below), so the model can retry
+/// or report rather than the run completing with a shape no downstream
+/// consumer validated. Bespoke capabilities (`standard_op: None`) and an
+/// unknown capability id (descriptor lookup miss — already errors elsewhere)
+/// are returned untouched.
+fn completed_or_output_violation_outcome(
+    result: CapabilityInvocationResult,
+    capability_id: CapabilityId,
+    registry: &ExtensionRegistry,
+) -> RuntimeCapabilityOutcome {
+    let standard_op = registry
+        .get_capability(&capability_id)
+        .and_then(|descriptor| descriptor.standard_op);
+    let completed = completed_outcome_from(result, capability_id.clone());
+
+    if let Some(op) = standard_op
+        && let Some(issues) =
+            crate::standard_op_output::standard_op_output_violations(op, &completed.output)
+    {
+        return RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
+            capability_id,
+            FailureKind::InvalidResult,
+            Some(format!(
+                "standard op output failed validation: {}",
+                issues.join("; ")
+            )),
+        ));
+    }
+
+    RuntimeCapabilityOutcome::Completed(Box::new(completed))
+}
+
+/// Whether `capability_id` resolves (in `registry`) to a capability bound to
+/// a standard messaging WRITE op. Mirrors
+/// [`completed_or_output_violation_outcome`]'s own descriptor lookup just
+/// above (same registry, same `descriptor.standard_op` field) — the retry
+/// carve-out policy (pre-merge amendment W1,
+/// [`crate::capability_failure_disposition`]) needs the same fact that choke
+/// point already resolves for output validation, at the failure-construction
+/// call sites instead of the success-completion one. An unknown capability id
+/// (descriptor lookup miss) resolves to `false`, same as a bespoke tool.
+fn capability_is_standard_write(
+    registry: &ExtensionRegistry,
+    capability_id: &CapabilityId,
+) -> bool {
+    registry
+        .get_capability(capability_id)
+        .and_then(|descriptor| descriptor.standard_op)
+        .is_some_and(|op| op.is_write())
 }
 
 /// Returns the required secrets and OAuth credential requirements declared in
@@ -2508,7 +2603,7 @@ mod tests {
                 _ => ModelVisibleToolError,
             };
             assert_eq!(
-                crate::capability_failure_disposition(kind),
+                crate::capability_failure_disposition(kind, false),
                 expected,
                 "{kind:?}"
             );
@@ -2526,9 +2621,39 @@ mod tests {
             FailureKind::Unavailable,
         ] {
             assert_eq!(
-                crate::capability_failure_disposition(kind),
+                crate::capability_failure_disposition(kind, false),
                 RetrySameCall,
                 "{kind:?}"
+            );
+        }
+    }
+
+    /// W1 (retry carve-out): a Network/Transient-class failure on a standard
+    /// messaging WRITE op must never be dispositioned `RetrySameCall` — the
+    /// same failure kind on a non-write capability (a read op or a bespoke
+    /// tool, both represented by `is_standard_write = false`) keeps today's
+    /// retry. A blind same-call retry after a write dispatch of unknown
+    /// outcome risks a duplicate side effect (e.g. a message sent twice) the
+    /// model cannot see or undo.
+    #[test]
+    fn capability_failure_disposition_never_retries_standard_write_ops() {
+        use crate::CapabilityFailureDisposition::*;
+        for kind in [
+            FailureKind::Backend,
+            FailureKind::Internal,
+            FailureKind::Network,
+            FailureKind::Transient,
+            FailureKind::Unavailable,
+        ] {
+            assert_eq!(
+                crate::capability_failure_disposition(kind, true),
+                ModelVisibleToolError,
+                "{kind:?} must surface model-visibly on a standard write, never retry"
+            );
+            assert_eq!(
+                crate::capability_failure_disposition(kind, false),
+                RetrySameCall,
+                "{kind:?} must keep retrying on a read op / bespoke tool"
             );
         }
     }
@@ -2560,7 +2685,6 @@ mod tests {
             "NetworkDenied must not be in the quiet-retry set"
         );
     }
-
     // ─── capability_credential_requirements unit tests ──────────────────────────
     //
     // These were previously integration tests in host_runtime_services_contract.rs
@@ -2887,5 +3011,162 @@ required = true
             ))
             .expect("register capability provider contract");
         contracts
+    }
+
+    // ─── W1 retry-carve-out: registry-driven `capability_is_standard_write` ──
+    //
+    // `capability_failure_disposition_never_retries_standard_write_ops` above
+    // pins the pure classifier; these tests drive the ACTUAL caller —
+    // `capability_is_standard_write`'s real registry/descriptor lookup — the
+    // same "test through the caller, not just the helper" concern that
+    // motivates `.claude/rules/testing.md`'s rule of that name, since a
+    // wrapper (manifest parse -> resolved record -> descriptor) sits between
+    // the classifier and this fact.
+
+    /// One manifest binding a standard WRITE op (`send_message`, which must
+    /// declare `external_write` per binding rule 4), a standard READ op
+    /// (`get_conversation_history`, no `external_write`), and a bespoke tool
+    /// with no `standard_op` at all — the three shapes W1's carve-out must
+    /// tell apart.
+    const W1_STANDARD_OP_MIX_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "w1fixture"
+name = "W1 Retry Carve-Out Fixture"
+version = "0.1.0"
+description = "Fixture proving the standard-write retry carve-out reads a real descriptor"
+trust = "untrusted"
+
+[runtime]
+kind = "first_party"
+service = "w1fixture.extension/v1"
+
+[[tools]]
+standard_op = "send_message"
+id = "w1fixture.send_message"
+description = ""
+effects = ["network", "external_write"]
+default_permission = "allow"
+visibility = "model"
+
+[[tools]]
+standard_op = "get_conversation_history"
+id = "w1fixture.get_conversation_history"
+description = ""
+effects = ["network"]
+default_permission = "allow"
+visibility = "model"
+
+[[tools]]
+id = "w1fixture.bespoke_tool"
+description = "a bespoke tool with no standard_op binding"
+effects = ["network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/w1fixture/bespoke.input.v1.json"
+output_schema_ref = "schemas/w1fixture/bespoke.output.v1.json"
+"#;
+
+    fn registry_for_w1_standard_op_mix_manifest() -> ExtensionRegistry {
+        // `ExtensionManifest::parse` (used by `build_descriptor_for_manifest`
+        // above) is v2-only; a manifest declaring `standard_op` on `[[tools]]`
+        // needs the schema-version-dispatching entry point instead (mirrors
+        // `registry_with_slack_user_package` in `github_wasm_runtime_contract.rs`).
+        let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
+            W1_STANDARD_OP_MIX_MANIFEST,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+            None,
+            &capability_provider_contracts(),
+            None,
+        )
+        .expect("W1 fixture manifest must parse");
+        let manifest = ExtensionManifest::try_from(record.manifest().clone())
+            .expect("v3-parsed record must convert to ExtensionManifest");
+        let root =
+            VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
+        let package = ExtensionPackage::from_manifest(manifest, root).expect("package must build");
+        let mut registry = ExtensionRegistry::new();
+        registry.insert(package).unwrap();
+        registry
+    }
+
+    #[test]
+    fn capability_is_standard_write_is_true_only_for_a_bound_write_op() {
+        let registry = registry_for_w1_standard_op_mix_manifest();
+        let write_cap = CapabilityId::new("w1fixture.send_message").unwrap();
+        let read_cap = CapabilityId::new("w1fixture.get_conversation_history").unwrap();
+        let bespoke_cap = CapabilityId::new("w1fixture.bespoke_tool").unwrap();
+
+        assert!(
+            capability_is_standard_write(&registry, &write_cap),
+            "a capability bound to a standard messaging WRITE op must read as a standard write"
+        );
+        assert!(
+            !capability_is_standard_write(&registry, &read_cap),
+            "a capability bound to a standard messaging READ op must NOT read as a standard write"
+        );
+        assert!(
+            !capability_is_standard_write(&registry, &bespoke_cap),
+            "a bespoke tool with no standard_op binding must NOT read as a standard write"
+        );
+        assert!(
+            !capability_is_standard_write(
+                &registry,
+                &CapabilityId::new("w1fixture.unknown").unwrap()
+            ),
+            "an unknown capability id must fail closed to false, not panic"
+        );
+    }
+
+    /// End-to-end proof (the actual regression this wave fixes), composed
+    /// exactly as the five `other =>` call sites in this file now are
+    /// (`translate_invocation_error`, `resume_capability`,
+    /// `auth_resume_capability`, `decline_auth_capability`,
+    /// `resume_spawn_capability`): resolve `is_standard_write` from a REAL
+    /// registry built by parsing [`W1_STANDARD_OP_MIX_MANIFEST`], thread it
+    /// through `failure_from(..).with_is_standard_write(..)`, and read
+    /// `.disposition()`. A Dispatch error whose kind maps to a retryable
+    /// retryable [`FailureKind::Network`] must keep
+    /// retrying on the read op / bespoke tool but never retry on the
+    /// standard write op.
+    #[test]
+    fn standard_write_carve_out_composes_correctly_against_a_real_registry() {
+        use crate::CapabilityFailureDisposition::*;
+
+        let registry = registry_for_w1_standard_op_mix_manifest();
+        let network_dispatch_error = || CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Network),
+            safe_summary: None,
+            detail: None,
+        };
+
+        for (capability_id, expect_retry) in [
+            (CapabilityId::new("w1fixture.send_message").unwrap(), false),
+            (
+                CapabilityId::new("w1fixture.get_conversation_history").unwrap(),
+                true,
+            ),
+            (CapabilityId::new("w1fixture.bespoke_tool").unwrap(), true),
+        ] {
+            let is_standard_write = capability_is_standard_write(&registry, &capability_id);
+            let failure = failure_from(network_dispatch_error(), capability_id.clone())
+                .with_is_standard_write(is_standard_write);
+            assert_eq!(failure.kind, FailureKind::Network);
+            let expected_disposition = if expect_retry {
+                RetrySameCall
+            } else {
+                ModelVisibleToolError
+            };
+            assert_eq!(
+                failure.disposition(),
+                expected_disposition,
+                "{capability_id}: a Network-class dispatch failure must {} on this capability",
+                if expect_retry {
+                    "keep retrying"
+                } else {
+                    "never retry (standard write)"
+                }
+            );
+        }
     }
 }

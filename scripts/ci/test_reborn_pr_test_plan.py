@@ -1292,17 +1292,19 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(root_plan["root_partitions"], [0])
         self.assertEqual(integration_plan["integration_lanes"], [0])
 
-    def test_hosted_mcp_support_selects_its_owning_integration_lane(self) -> None:
-        owner = planner.INTEGRATION_SUPPORT_OWNERS[
-            "tests/support/hosted_mcp_registration_server.rs"
-        ]
-        expected_lane = planner._integration_test_lanes()[owner]
+    def test_owned_integration_support_selects_its_exact_lane(self) -> None:
+        for path, owner in planner.INTEGRATION_SUPPORT_OWNERS.items():
+            with self.subTest(path=path):
+                expected_lane = planner._integration_test_lanes()[owner]
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["integration_lanes"], [expected_lane])
 
-        plan = self.plan(
-            "pull_request", ["tests/support/hosted_mcp_registration_server.rs"]
-        )
-
-        self.assertEqual(plan["integration_lanes"], [expected_lane])
+        for prefix, owner in planner.INTEGRATION_SUPPORT_PREFIX_OWNERS.items():
+            path = f"{prefix}fixture.snap"
+            with self.subTest(path=path):
+                expected_lane = planner._integration_test_lanes()[owner]
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["integration_lanes"], [expected_lane])
 
     def test_golden_payload_snapshot_selects_its_owning_integration_lane(self) -> None:
         owner = planner.INTEGRATION_SNAPSHOT_PREFIX_OWNERS[
